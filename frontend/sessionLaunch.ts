@@ -58,9 +58,12 @@ export function createThreadRef(
 
 export function defaultLaunchMode(
   kind: AgentKind,
-  launchToken: number
+  launchToken: number,
+  hasThreadId: boolean
 ): AgentLaunchMode {
-  return isThreadedAgentKind(kind) && launchToken > 0 ? "resume" : "new";
+  return isThreadedAgentKind(kind) && launchToken > 0 && hasThreadId
+    ? "resume"
+    : "new";
 }
 
 function commandArg(value: string) {

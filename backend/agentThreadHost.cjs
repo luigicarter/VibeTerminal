@@ -43,7 +43,13 @@ function collectJsonlFiles(rootDir, limit = 800) {
     entries.forEach((entry) => {
       const entryPath = path.join(current, entry.name);
       if (entry.isDirectory()) {
-        stack.push(entryPath);
+        // Claude writes a `<session-id>/subagents/agent-*.jsonl` tree that
+        // duplicates the parent session's id/cwd. Descending into it only
+        // multiplies I/O and can push the real session file past the file cap,
+        // so skip it — the parent transcript already carries the id we need.
+        if (entry.name !== "subagents") {
+          stack.push(entryPath);
+        }
         return;
       }
 
@@ -56,15 +62,48 @@ function collectJsonlFiles(rootDir, limit = 800) {
   return files;
 }
 
-function findLatestClaudeThread(cwd, after = 0) {
+function toExcludedSet(excludeIds) {
+  return new Set(
+    Array.isArray(excludeIds)
+      ? excludeIds.filter(Boolean).map(String)
+      : []
+  );
+}
+
+// Claude message content is either a string or an array of content blocks
+// (`{ type: "text", text: "..." }`, tool calls, etc.). Joining the array
+// directly would stringify objects into "[object Object]" titles.
+function extractClaudeText(value) {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value
+      .map((part) => {
+        if (typeof part === "string") {
+          return part;
+        }
+
+        return typeof part?.text === "string" ? part.text : "";
+      })
+      .join("")
+      .trim();
+  }
+
+  return "";
+}
+
+function findLatestClaudeThread(cwd, after = 0, excludeIds = []) {
   const claudeHome =
     process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
   const projectsDir = path.join(claudeHome, "projects");
+  const excluded = toExcludedSet(excludeIds);
   const matches = collectJsonlFiles(projectsDir)
     .map((filePath) => {
       try {
         const content = fs.readFileSync(filePath, "utf8");
-        const lines = content.split(/\r?\n/).slice(0, 20);
+        const lines = content.split(/\r?\n/).slice(0, 40);
         let sessionId = "";
         let createdAt = 0;
         let title = "";
@@ -75,24 +114,45 @@ function findLatestClaudeThread(cwd, after = 0) {
             continue;
           }
 
-          const event = JSON.parse(line);
-          sessionId = sessionId || event.sessionId;
-          title = title || event.lastPrompt || event.message?.content;
-          createdAt =
-            createdAt || Date.parse(event.timestamp || event.message?.timestamp || "");
-
-          if (event.cwd && !isSamePath(event.cwd, cwd)) {
-            return null;
+          let event;
+          try {
+            event = JSON.parse(line);
+          } catch {
+            // Tolerate the occasional malformed line instead of discarding the
+            // whole transcript.
+            continue;
           }
 
           if (event.cwd && isSamePath(event.cwd, cwd)) {
             sawMatchingCwd = true;
+          }
+
+          // Only harvest identity from lines that belong to (or don't
+          // contradict) the target cwd, so the id/title/timestamp we claim
+          // provably came from this project — never from a foreign-cwd line
+          // that merely happens to share the file. A single foreign line is
+          // skipped, not treated as a reason to abort the whole transcript.
+          if (event.cwd && !isSamePath(event.cwd, cwd)) {
+            continue;
+          }
+
+          sessionId = sessionId || event.sessionId || "";
+          if (!title) {
+            title =
+              (typeof event.lastPrompt === "string" ? event.lastPrompt : "") ||
+              extractClaudeText(event.message?.content);
+          }
+          if (!createdAt) {
+            createdAt = Date.parse(
+              event.timestamp || event.message?.timestamp || ""
+            );
           }
         }
 
         if (
           !sessionId ||
           !sawMatchingCwd ||
+          excluded.has(sessionId) ||
           !Number.isFinite(createdAt) ||
           createdAt < after
         ) {
@@ -117,7 +177,7 @@ function findLatestClaudeThread(cwd, after = 0) {
   return matches[0] || null;
 }
 
-function findLatestOpenCodeThread(cwd, after = 0) {
+function findLatestOpenCodeThread(cwd, after = 0, excludeIds = []) {
   const result = spawn("opencode", [
     "session",
     "list",
@@ -131,6 +191,8 @@ function findLatestOpenCodeThread(cwd, after = 0) {
     windowsHide: true
   });
 
+  const excluded = toExcludedSet(excludeIds);
+
   return new Promise((resolve) => {
     let stdout = "";
 
@@ -142,11 +204,15 @@ function findLatestOpenCodeThread(cwd, after = 0) {
     result.on("exit", () => {
       try {
         const sessions = JSON.parse(stdout);
+        // `opencode session list --format json` emits flat fields with
+        // millisecond (`Date.now()`) `created`/`updated`, so they compare
+        // directly against the millisecond `after` cutoff.
         const latest =
           sessions
             .filter(
               (session) =>
                 session.id &&
+                !excluded.has(String(session.id)) &&
                 isSamePath(session.directory, cwd) &&
                 Number(session.created || 0) >= after
             )
@@ -187,7 +253,7 @@ async function findLatestAgentThread(payload) {
   }
 
   if (payload.provider === "claude") {
-    const threadRef = findLatestClaudeThread(cwd, after);
+    const threadRef = findLatestClaudeThread(cwd, after, payload.excludeIds);
     return threadRef
       ? { status: "found", threadRef }
       : {
@@ -197,7 +263,11 @@ async function findLatestAgentThread(payload) {
   }
 
   if (payload.provider === "opencode") {
-    const threadRef = await findLatestOpenCodeThread(cwd, after);
+    const threadRef = await findLatestOpenCodeThread(
+      cwd,
+      after,
+      payload.excludeIds
+    );
     return threadRef
       ? { status: "found", threadRef }
       : {
@@ -216,12 +286,7 @@ function emit(event) {
   process.stdout.write(`${JSON.stringify(event)}\n`);
 }
 
-const rl = readline.createInterface({
-  input: process.stdin,
-  crlfDelay: Infinity
-});
-
-rl.on("line", async (line) => {
+async function handleHostLine(line) {
   if (!line.trim()) {
     return;
   }
@@ -265,6 +330,29 @@ rl.on("line", async (line) => {
       message: error.message
     });
   }
-});
+}
 
-emit({ type: "ready" });
+function startHost() {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    crlfDelay: Infinity
+  });
+
+  rl.on("line", handleHostLine);
+
+  emit({ type: "ready" });
+}
+
+if (require.main === module) {
+  startHost();
+}
+
+module.exports = {
+  collectJsonlFiles,
+  extractClaudeText,
+  findLatestAgentThread,
+  findLatestClaudeThread,
+  findLatestOpenCodeThread,
+  isSamePath,
+  normalizePathForCompare
+};

@@ -30,14 +30,27 @@ assert(
 
 assert(
   appSource.includes('className="workspace-remove-button"') &&
-    appSource.includes("aria-label={`Remove ${workspace.name}`}"),
-  "folder rows should expose an accessible remove button"
+    appSource.includes("aria-label={`Close ${workspace.name}`}") &&
+    appSource.includes("onClick={() => requestWorkspaceClose(workspace.id)}"),
+  "folder rows should expose an accessible close button that requests confirmation"
+);
+
+assert(
+  appSource.includes("function requestWorkspaceClose(workspaceId: string)") &&
+    appSource.includes("setWorkspaceClosePendingId(workspaceId)") &&
+    appSource.includes('role="dialog"') &&
+    appSource.includes('aria-modal="true"') &&
+    appSource.includes("confirmWorkspaceClose(workspaceClosePending.id)"),
+  "folder removal should show a confirmation dialog before closing"
 );
 
 assert(
   stylesSource.includes(".workspace-row") &&
-    stylesSource.includes(".workspace-remove-button"),
-  "folder remove controls should be styled"
+    stylesSource.includes(".workspace-remove-button") &&
+    stylesSource.includes(".confirmation-backdrop") &&
+    stylesSource.includes(".confirmation-dialog") &&
+    stylesSource.includes(".confirmation-actions button.danger"),
+  "folder remove controls and confirmation dialog should be styled"
 );
 
 console.log("workspace smoke passed");

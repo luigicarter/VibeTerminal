@@ -13,6 +13,7 @@ import {
   TerminalSquare,
   X
 } from "lucide-react";
+import { reconcileStatus } from "../attention";
 import { buildLaunchCommand, isThreadedAgentKind } from "../sessionLaunch";
 import type {
   AgentProfile,
@@ -24,6 +25,11 @@ import type {
 
 const THREAD_LOOKUP_POLL_MS = 8000;
 const THREAD_LOOKUP_TIMEOUT_MS = 90_000;
+// How long a live pane may produce no output before we treat it as idle and
+// surface "waiting" (the agent/shell is quiet, so it's the user's turn). Longer
+// means fewer false "waiting" flips while an agent pauses mid-task, at the cost
+// of a slower idle signal.
+const IDLE_AFTER_MS = 1500;
 
 interface ThreadLookupPatch {
   threadLookupStartedAt?: number;
@@ -100,6 +106,7 @@ export default function TerminalPane({
     session.threadLookupStartedAt ?? session.createdAt
   );
   const terminalExitedRef = useRef(false);
+  const idleTimerRef = useRef<number | null>(null);
   const lookupInFlightRef = useRef(false);
   const claimedThreadIdsRef = useRef(claimedThreadIds);
 
@@ -149,15 +156,37 @@ export default function TerminalPane({
   }, [isArranging]);
 
   function setStatus(status: SessionStatus) {
-    if (sessionRef.current.status === status) {
+    const nextStatus = reconcileStatus(sessionRef.current.status, status);
+    if (nextStatus === sessionRef.current.status) {
       return;
     }
 
     sessionRef.current = {
       ...sessionRef.current,
-      status
+      status: nextStatus
     };
-    onStatusChangeRef.current(status);
+    onStatusChangeRef.current(nextStatus);
+  }
+
+  function clearIdleTimer() {
+    if (idleTimerRef.current !== null) {
+      window.clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = null;
+    }
+  }
+
+  // Output (or input) just flowed: the pane is working. Re-arm the quiescence
+  // timer so that if it then goes quiet while the process is still alive, the
+  // pill settles to "waiting" instead of being pinned to "working" forever.
+  function markActive() {
+    setStatus("running");
+    clearIdleTimer();
+    idleTimerRef.current = window.setTimeout(() => {
+      idleTimerRef.current = null;
+      if (!terminalExitedRef.current) {
+        setStatus("waiting");
+      }
+    }, IDLE_AFTER_MS);
   }
 
   function scheduleFitAndResize() {
@@ -262,7 +291,7 @@ export default function TerminalPane({
 
       onSelect();
       window.vibe?.terminal.input(session.id, data);
-      setStatus("running");
+      markActive();
     });
 
     const removeListener = window.vibe?.terminal.onEvent((event) => {
@@ -272,7 +301,7 @@ export default function TerminalPane({
 
       if (event.type === "data") {
         terminal.write(event.data);
-        setStatus("running");
+        markActive();
       }
 
       if (event.type === "snapshot") {
@@ -282,12 +311,13 @@ export default function TerminalPane({
         }
 
         if (event.isRunning) {
-          setStatus("running");
+          markActive();
         } else {
           terminal.writeln("");
           terminal.writeln(
             "\x1b[33mProcess exited. Use restart to run it again.\x1b[0m"
           );
+          clearIdleTimer();
           setStatus(event.exitCode === 0 ? "done" : "failed");
         }
       }
@@ -295,6 +325,7 @@ export default function TerminalPane({
       if (event.type === "error") {
         terminal.writeln("");
         terminal.writeln(`\x1b[31m${event.message}\x1b[0m`);
+        clearIdleTimer();
         setStatus("failed");
       }
 
@@ -303,6 +334,7 @@ export default function TerminalPane({
         terminal.writeln("");
         terminal.writeln("\x1b[33mProcess exited. Use restart to run it again.\x1b[0m");
         scheduleThreadLookup(200, true);
+        clearIdleTimer();
         setStatus(event.exitCode === 0 ? "done" : "failed");
       }
     });
@@ -319,6 +351,7 @@ export default function TerminalPane({
         cancelAnimationFrame(fitFrameRef.current);
         fitFrameRef.current = null;
       }
+      clearIdleTimer();
       removeListener?.();
       terminal.dispose();
       terminalRef.current = null;
@@ -327,11 +360,13 @@ export default function TerminalPane({
       lastSentSizeRef.current = null;
     };
   }, [
-    launchCommand,
-    profile.accent,
-    session.cwd,
-    session.id,
-    session.started
+    // Terminal lifecycle is pinned to the session identity. Every mutable
+    // callback the listeners use already flows through refs (sessionRef,
+    // onStatusChangeRef, etc.), and accent/cwd are immutable per session — so
+    // the xterm instance must persist across launchCommand changes (e.g. when a
+    // resume thread id is discovered mid-session). Recreating it here would
+    // blank the pane while the PTY keeps running.
+    session.id
   ]);
 
   useEffect(() => {
@@ -351,6 +386,7 @@ export default function TerminalPane({
     createdRef.current = true;
     terminalExitedRef.current = false;
     terminal.clear();
+    clearIdleTimer();
     setStatus("starting");
     lastSentSizeRef.current = {
       cols: terminal.cols,
@@ -375,8 +411,10 @@ export default function TerminalPane({
     });
     scheduleThreadLookup(5000);
   }, [
-    launchCommand,
-    session.cwd,
+    // launchCommand and cwd are read fresh from the closure at launch time. A
+    // (re)launch only fires on first start or a restart (launchToken bump), at
+    // which point React runs this effect with the current render's command — so
+    // a command-string change alone never relaunches or blanks the terminal.
     session.id,
     session.launchToken,
     session.started

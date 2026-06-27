@@ -172,29 +172,54 @@ function normalizeLayouts(
 
   sanitizedItems.forEach((item) => {
     const rect = layoutToRect(item.layout, innerWidth);
-    let guard = 0;
 
-    while (guard < sanitizedItems.length + 8) {
-      const collisions = placedRects.filter((placed) =>
-        rectsOverlap(rect, placed.rect)
-      );
-
-      if (collisions.length === 0) {
-        break;
+    // Gravity: pull each item up to the lowest hole-free top within its column.
+    // Items are placed in ascending-y order, so every horizontally-overlapping
+    // rect already placed sits at or above this one; a single skyline pass then
+    // yields the minimum non-colliding top (filling any vacated space above).
+    rect.top = placedRects.reduce((top, placed) => {
+      if (horizontalOverlap(rect, placed.rect)) {
+        return Math.max(top, placed.rect.top + placed.rect.height + BOARD_GAP);
       }
 
-      rect.top = Math.max(
-        rect.top,
-        ...collisions.map((collision) => collision.rect.top + collision.rect.height + BOARD_GAP)
-      );
-      guard += 1;
-    }
+      return top;
+    }, BOARD_PADDING);
 
     placedRects.push({ id: item.id, rect });
     normalizedLayouts[item.id] = rectToLayout(rect, innerWidth);
   });
 
   return normalizedLayouts;
+}
+
+// Settle a committed (drag/resize/swap) layout set through the same gravity
+// pass so the released state matches what props re-normalize into, keeping the
+// live preview and persisted layout in lockstep (no snap-then-settle flicker).
+function compactCommittedLayouts(
+  committed: Record<string, LayoutBox>,
+  items: TiledBoardItem[],
+  innerWidth: number,
+  pinnedId?: string
+): Record<string, LayoutBox> {
+  const normalizableItems = items
+    .map((item, index): NormalizableItem | null => {
+      const layout = committed[item.id];
+
+      if (!layout) {
+        return null;
+      }
+
+      return {
+        id: item.id,
+        layout,
+        minW: item.minW,
+        minH: item.minH,
+        index
+      };
+    })
+    .filter((item): item is NormalizableItem => item !== null);
+
+  return normalizeLayouts(normalizableItems, innerWidth, pinnedId);
 }
 
 function rectsOverlap(a: PixelRect, b: PixelRect, gap = BOARD_GAP) {
@@ -204,6 +229,10 @@ function rectsOverlap(a: PixelRect, b: PixelRect, gap = BOARD_GAP) {
     a.top < b.top + b.height + gap &&
     a.top + a.height + gap > b.top
   );
+}
+
+function horizontalOverlap(a: PixelRect, b: PixelRect, gap = BOARD_GAP) {
+  return a.left < b.left + b.width + gap && a.left + a.width + gap > b.left;
 }
 
 function rectArea(rect: PixelRect) {
@@ -1215,6 +1244,12 @@ export default function TiledBoard({
           };
         })();
 
+      const compactedLayouts = compactCommittedLayouts(
+        committedLayouts,
+        items,
+        innerWidth
+      );
+
       try {
         interaction.capturedElement.releasePointerCapture(interaction.pointerId);
       } catch {
@@ -1224,11 +1259,11 @@ export default function TiledBoard({
       cancelScheduledLayouts();
       interactionRef.current = null;
       setLiveLayouts((current) =>
-        layoutsEqual(current, committedLayouts) ? current : committedLayouts
+        layoutsEqual(current, compactedLayouts) ? current : compactedLayouts
       );
       setActiveInteraction(null);
       finishArrangeAfterSettle();
-      onLayoutCommitRef.current(committedLayouts);
+      onLayoutCommitRef.current(compactedLayouts);
     };
 
     window.addEventListener("pointermove", handlePointerMove, {
@@ -1242,7 +1277,7 @@ export default function TiledBoard({
       window.removeEventListener("pointerup", finishInteraction);
       window.removeEventListener("pointercancel", finishInteraction);
     };
-  }, [activeInteraction, innerWidth, itemOptions, metrics.height]);
+  }, [activeInteraction, innerWidth, itemOptions, items, metrics.height]);
 
   function startInteraction(
     event: ReactPointerEvent<HTMLElement>,

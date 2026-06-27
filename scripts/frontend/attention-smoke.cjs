@@ -34,9 +34,11 @@ const {
   attentionFromEvent,
   clearUnreadAttention,
   normalizeAttention,
+  reconcileStatus,
   shouldMarkAttentionUnread,
   shouldShowAttentionDot,
   shouldUseTerminalEventAttention,
+  statusFromAttentionState,
   statusFromTerminalEvent
 } = testModule.exports;
 
@@ -191,12 +193,36 @@ const clearedSession = clearUnreadAttention(unreadSession);
 assert.notStrictEqual(clearedSession, unreadSession);
 assert.strictEqual(clearedSession.attention.unread, false);
 
+// A coding agent runs inside the pane shell, so its lifecycle only surfaces
+// through telemetry attention. Those states must map onto the pill status.
+assert.strictEqual(statusFromAttentionState("waiting"), "waiting");
+assert.strictEqual(statusFromAttentionState("completed"), "done");
+assert.strictEqual(statusFromAttentionState("failed"), "failed");
+assert.strictEqual(statusFromAttentionState("none"), null);
+
+// Idle output and a returning shell prompt must not resurrect a finished pane,
+// but live panes still move freely between working and waiting, and a restart
+// ("starting") always wins.
+assert.strictEqual(reconcileStatus("idle", "running"), "running");
+assert.strictEqual(reconcileStatus("running", "waiting"), "waiting");
+assert.strictEqual(reconcileStatus("waiting", "running"), "running");
+assert.strictEqual(reconcileStatus("done", "running"), "done");
+assert.strictEqual(reconcileStatus("done", "waiting"), "done");
+assert.strictEqual(reconcileStatus("failed", "running"), "failed");
+assert.strictEqual(reconcileStatus("done", "starting"), "starting");
+assert.strictEqual(reconcileStatus("done", "done"), "done");
+
 const appSource = fs.readFileSync(appPath, "utf8");
 assert(
   appSource.includes("statusFromTerminalEvent(event)") &&
     appSource.includes("attentionFromTerminalEvent(event)") &&
     appSource.includes("applyTerminalAttention(event.id, attention)"),
   "app-level terminal listener should monitor process status and attention"
+);
+assert(
+  appSource.includes("statusFromAttentionState(attentionEvent.state)") &&
+    appSource.includes("reconcileStatus("),
+  "agent attention should drive the pill status through reconcileStatus"
 );
 
 const workspaceRowIndex = appSource.indexOf('"workspace-button"');
@@ -213,6 +239,12 @@ const terminalPaneSource = fs.readFileSync(terminalPanePath, "utf8");
 assert(
   !terminalPaneSource.includes("onFocus={onSelect}"),
   "terminal focus should not clear unread attention"
+);
+assert(
+  terminalPaneSource.includes("IDLE_AFTER_MS") &&
+    terminalPaneSource.includes("markActive(") &&
+    terminalPaneSource.includes('setStatus("waiting")'),
+  "terminal pane should fall back to a waiting status when output goes idle"
 );
 
 const stylesSource = fs.readFileSync(stylesPath, "utf8");

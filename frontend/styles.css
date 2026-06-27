@@ -506,6 +506,118 @@ button {
   transition: width 160ms ease;
 }
 
+.confirmation-backdrop {
+  position: fixed;
+  z-index: 220;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(circle at 50% 36%, rgba(242, 201, 76, 0.08), transparent 32%),
+    rgba(7, 9, 8, 0.72);
+  padding: 20px;
+}
+
+.confirmation-dialog {
+  display: grid;
+  width: min(460px, calc(100vw - 32px));
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 14px;
+  border: 1px solid #574b35;
+  border-radius: 8px;
+  background: #191d1a;
+  box-shadow:
+    0 24px 68px rgba(0, 0, 0, 0.54),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  color: #f8f5ed;
+  padding: 18px;
+}
+
+.confirmation-mark {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border: 1px solid #6a5831;
+  border-radius: 8px;
+  background: #2a2417;
+  color: #f2c94c;
+}
+
+.confirmation-copy {
+  min-width: 0;
+}
+
+.confirmation-copy h2 {
+  overflow-wrap: anywhere;
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.25;
+}
+
+.confirmation-copy p {
+  margin: 8px 0 10px;
+  color: #c9ccc5;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.confirmation-copy span {
+  display: block;
+  overflow: hidden;
+  border: 1px solid #30362f;
+  border-radius: 6px;
+  background: #111512;
+  color: #9ba19a;
+  padding: 7px 8px;
+  font-family:
+    "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.confirmation-actions {
+  display: flex;
+  grid-column: 1 / -1;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.confirmation-actions button {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #3b433d;
+  border-radius: 7px;
+  background: #222722;
+  color: #f4f1e8;
+  cursor: pointer;
+  padding: 0 13px;
+  font-size: 13px;
+}
+
+.confirmation-actions button:hover,
+.confirmation-actions button:focus-visible {
+  border-color: #5a6259;
+  background: #2c322d;
+}
+
+.confirmation-actions button.danger {
+  border-color: #703b3d;
+  background: #321d1f;
+  color: #ffb7b9;
+}
+
+.confirmation-actions button.danger:hover,
+.confirmation-actions button.danger:focus-visible {
+  border-color: #9a474c;
+  background: #402124;
+  color: #ffd1d3;
+}
+
 .agent-toolbar {
   display: flex;
   gap: 8px;
@@ -823,6 +935,11 @@ button {
   color: #f2c94c;
 }
 
+.status-waiting {
+  border-color: #2f5560;
+  color: #6bd7db;
+}
+
 .status-done {
   border-color: #315439;
   color: #8fd694;
@@ -831,6 +948,11 @@ button {
 .status-failed {
   border-color: #69383b;
   color: #ff8e95;
+}
+
+.status-idle {
+  border-color: #3a403a;
+  color: #8b918a;
 }
 
 .pane-actions {

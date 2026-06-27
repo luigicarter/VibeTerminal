@@ -27,9 +27,11 @@ import {
   attentionFromTerminalEvent,
   clearUnreadAttention,
   normalizeAttention,
+  reconcileStatus,
   shouldMarkAttentionUnread,
   shouldShowAttentionDot,
   shouldUseTerminalEventAttention,
+  statusFromAttentionState,
   statusFromTerminalEvent
 } from "./attention";
 import TerminalPane from "./components/TerminalPane";
@@ -314,7 +316,11 @@ function restoreSession(session: AgentSession): AgentSession {
     ...session,
     started: shouldAutoStart,
     launchToken,
-    nextLaunchMode: defaultLaunchMode(session.kind, launchToken),
+    nextLaunchMode: defaultLaunchMode(
+      session.kind,
+      launchToken,
+      Boolean(session.threadRef?.id)
+    ),
     threadRef: session.threadRef,
     threadLookupStartedAt: undefined,
     threadLookupStatus: session.threadRef?.id ? "found" : "idle",
@@ -441,6 +447,9 @@ export default function App() {
     null
   );
   const [isArranging, setIsArranging] = useState(false);
+  const [workspaceClosePendingId, setWorkspaceClosePendingId] = useState<
+    string | null
+  >(null);
 
   const activeWorkspace =
     workspaces.find((workspace) => workspace.id === activeWorkspaceId) ??
@@ -466,6 +475,11 @@ export default function App() {
     ...multiSessions,
     ...workspaces.flatMap((workspace) => workspace.sessions)
   ];
+  const workspaceClosePending =
+    workspaces.find((workspace) => workspace.id === workspaceClosePendingId) ??
+    null;
+  const workspaceClosePendingSessionCount =
+    workspaceClosePending?.sessions.length ?? 0;
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(workspaces));
@@ -511,6 +525,23 @@ export default function App() {
       setMaximizedSessionId(null);
     }
   }, [boardSessions, maximizedSessionId]);
+
+  useEffect(() => {
+    if (!workspaceClosePending) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setWorkspaceClosePendingId(null);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [workspaceClosePending]);
 
   useEffect(() => {
     attentionSelectionRef.current = {
@@ -662,9 +693,12 @@ export default function App() {
       return;
     }
 
-    updateAnySession(sessionId, (session) =>
-      session.status === status ? session : { ...session, status }
-    );
+    updateAnySession(sessionId, (session) => {
+      const nextStatus = reconcileStatus(session.status, status);
+      return nextStatus === session.status
+        ? session
+        : { ...session, status: nextStatus };
+    });
   }
 
   function applyAgentAttention(
@@ -672,10 +706,16 @@ export default function App() {
     attentionEvent: AgentAttentionEvent
   ) {
     const selection = attentionSelectionRef.current;
+    const attentionStatus = statusFromAttentionState(attentionEvent.state);
 
     updateAnySession(sessionId, (session) => {
+      const nextStatus = attentionStatus
+        ? reconcileStatus(session.status, attentionStatus)
+        : session.status;
+
       return {
         ...session,
+        status: nextStatus,
         attention: attentionFromEvent(
           attentionEvent,
           shouldMarkAttentionUnread(
@@ -775,6 +815,19 @@ export default function App() {
     }
   }
 
+  function requestWorkspaceClose(workspaceId: string) {
+    setWorkspaceClosePendingId(workspaceId);
+  }
+
+  function cancelWorkspaceClose() {
+    setWorkspaceClosePendingId(null);
+  }
+
+  function confirmWorkspaceClose(workspaceId: string) {
+    setWorkspaceClosePendingId(null);
+    removeWorkspace(workspaceId);
+  }
+
   function removeWorkspace(workspaceId: string) {
     const workspaceIndex = workspaces.findIndex(
       (workspace) => workspace.id === workspaceId
@@ -831,9 +884,10 @@ export default function App() {
                 ...item,
                 started: true,
                 launchToken: item.launchToken + 1,
-                nextLaunchMode: isThreadedAgentKind(item.kind)
-                  ? "resume"
-                  : "new",
+                nextLaunchMode:
+                  isThreadedAgentKind(item.kind) && item.threadRef?.id
+                    ? "resume"
+                    : "new",
                 threadLookupStartedAt: undefined,
                 threadLookupStatus: item.threadRef?.id ? "found" : "idle",
                 threadLookupMessage: undefined,
@@ -854,12 +908,17 @@ export default function App() {
     updateScopeSessions(scope, (sessions) => {
       let changed = false;
       const nextSessions = sessions.map((session) => {
-        if (session.id !== sessionId || session.status === status) {
+        if (session.id !== sessionId) {
+          return session;
+        }
+
+        const nextStatus = reconcileStatus(session.status, status);
+        if (nextStatus === session.status) {
           return session;
         }
 
         changed = true;
-        return { ...session, status };
+        return { ...session, status: nextStatus };
       });
 
       return changed ? nextSessions : sessions;
@@ -1217,9 +1276,9 @@ export default function App() {
                 <button
                   type="button"
                   className="workspace-remove-button"
-                  title={`Remove ${workspace.name}`}
-                  aria-label={`Remove ${workspace.name}`}
-                  onClick={() => removeWorkspace(workspace.id)}
+                  title={`Close ${workspace.name}`}
+                  aria-label={`Close ${workspace.name}`}
+                  onClick={() => requestWorkspaceClose(workspace.id)}
                 >
                   <X size={14} />
                 </button>
@@ -1449,6 +1508,50 @@ export default function App() {
             </>
           )}
         </aside>
+      )}
+
+      {workspaceClosePending && (
+        <div
+          className="confirmation-backdrop"
+          onClick={cancelWorkspaceClose}
+        >
+          <section
+            className="confirmation-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="workspace-close-title"
+            aria-describedby="workspace-close-description"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="confirmation-mark" aria-hidden="true">
+              <Folder size={22} />
+            </div>
+
+            <div className="confirmation-copy">
+              <h2 id="workspace-close-title">
+                Close {workspaceClosePending.name}?
+              </h2>
+              <p id="workspace-close-description">
+                This removes the folder from the sidebar and closes{" "}
+                {formatCount(workspaceClosePendingSessionCount, "terminal pane")}.
+                Your files stay on disk.
+              </p>
+              <span>{workspaceClosePending.path}</span>
+            </div>
+
+            <div className="confirmation-actions">
+              <button onClick={cancelWorkspaceClose} autoFocus>
+                Cancel
+              </button>
+              <button
+                className="danger"
+                onClick={() => confirmWorkspaceClose(workspaceClosePending.id)}
+              >
+                Close Folder
+              </button>
+            </div>
+          </section>
+        </div>
       )}
     </div>
   );

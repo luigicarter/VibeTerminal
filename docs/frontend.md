@@ -14,7 +14,7 @@ The `frontend/` folder contains the Vite React renderer that users see inside th
 
 ## Components
 
-- `frontend/components/TerminalPane.tsx` - Owns the xterm instance for a session, sends terminal input/resize IPC calls, receives PTY events, and polls for agent thread metadata.
+- `frontend/components/TerminalPane.tsx` - Owns the xterm instance for a session (pinned to the session id so it survives launch-command changes), sends terminal input/resize IPC calls, receives PTY events, relaunches the PTY only on a launchToken bump, and polls for agent thread metadata.
 - `frontend/components/TiledBoard.tsx` - Drag/resize layout engine for terminal panes, including collision handling, swaps, adjacent resize behavior, and persisted fluid layouts.
 
 ## Entry Points

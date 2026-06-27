@@ -1,6 +1,7 @@
 import type {
   AgentAttention,
   AgentAttentionEvent,
+  AgentAttentionState,
   AgentSession,
   SessionStatus,
   TerminalEvent
@@ -61,6 +62,48 @@ export function statusFromTerminalEvent(
   }
 
   return null;
+}
+
+// Coding agents run as a child process *inside* the pane's shell, so when the
+// agent finishes the PTY shell stays alive and never emits a terminal "exit".
+// The only signal that the agent itself ended is its telemetry attention
+// event, so map that lifecycle onto the pill status here.
+export function statusFromAttentionState(
+  state: AgentAttentionState
+): SessionStatus | null {
+  switch (state) {
+    case "waiting":
+      return "waiting";
+    case "completed":
+      return "done";
+    case "failed":
+      return "failed";
+    default:
+      return null;
+  }
+}
+
+// Decide the next pill status from the current one and an incoming signal.
+// "done"/"failed" are sticky: once a pane has finished, transient output (the
+// shell prompt that reappears after an agent sub-process exits, a stray byte)
+// must not flip it back to "working"/"waiting". A restart resets the status to
+// "idle"/"starting", which clears the latch.
+export function reconcileStatus(
+  current: SessionStatus,
+  incoming: SessionStatus
+): SessionStatus {
+  if (incoming === current) {
+    return current;
+  }
+
+  if (
+    (current === "done" || current === "failed") &&
+    (incoming === "running" || incoming === "waiting")
+  ) {
+    return current;
+  }
+
+  return incoming;
 }
 
 export function attentionFromTerminalEvent(
