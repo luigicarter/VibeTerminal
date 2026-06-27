@@ -6,17 +6,12 @@ It gives each project its own visual workspace, so shell sessions and agent sess
 
 ## Download
 
-Download the latest Windows installer from GitHub Releases:
+| Platform | Download | Notes |
+| --- | --- | --- |
+| Windows x64 | [vibeTerminal-Setup-0.1.0.exe](https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.0/vibeTerminal-Setup-0.1.0.exe) | Standard installer. Adds vibeTerminal to the Start Menu. |
+| All releases | [GitHub Releases](https://github.com/luigicarter/VibeTerminal/releases) | Older versions, update metadata, and release assets. |
 
-[Download vibeTerminal for Windows](https://github.com/luigicarter/VibeTerminal/releases/latest)
-
-On the release page, download and run:
-
-```text
-vibeTerminal-Setup-*.exe
-```
-
-The installer adds vibeTerminal to the Start Menu and installs it for the current Windows user. You do not need Node.js, npm, Vite, or TypeScript to run the installed app.
+The installer installs vibeTerminal for the current Windows user. You do not need Node.js, npm, Vite, or TypeScript to run the installed app.
 
 ## What It Does
 
