@@ -1119,6 +1119,7 @@ button {
 .terminal-surface {
   min-height: 0;
   flex: 1;
+  overflow: hidden;
   padding: 8px 8px 6px;
 }
 
@@ -1128,6 +1129,12 @@ button {
 
 .terminal-surface .xterm {
   height: 100%;
+  overflow: hidden;
+}
+
+.terminal-surface .xterm-screen {
+  overflow: hidden;
+  contain: paint;
 }
 
 .terminal-surface .xterm-viewport {

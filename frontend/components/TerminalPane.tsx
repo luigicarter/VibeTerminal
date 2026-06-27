@@ -100,6 +100,7 @@ export default function TerminalPane({
   const isArrangingRef = useRef(isArranging);
   const pendingFitRef = useRef(false);
   const fitFrameRef = useRef<number | null>(null);
+  const repaintFrameRef = useRef<number | null>(null);
   const fitAndResizeRef = useRef<(() => void) | null>(null);
   const lastSentSizeRef = useRef<{ cols: number; rows: number } | null>(null);
   const threadLookupTimeoutRef = useRef<number | null>(null);
@@ -206,6 +207,26 @@ export default function TerminalPane({
     });
   }
 
+  function scheduleTerminalRepaint() {
+    if (repaintFrameRef.current !== null) {
+      return;
+    }
+
+    repaintFrameRef.current = requestAnimationFrame(() => {
+      repaintFrameRef.current = null;
+      const terminal = terminalRef.current;
+      if (!terminal || terminal.rows <= 0) {
+        return;
+      }
+
+      try {
+        terminal.refresh(0, terminal.rows - 1);
+      } catch {
+        // A repaint can race with xterm teardown during pane removal.
+      }
+    });
+  }
+
   useEffect(() => {
     if (!containerRef.current || terminalRef.current) {
       return;
@@ -260,6 +281,7 @@ export default function TerminalPane({
     // can't initialize we just fall back to xterm's built-in DOM renderer.
     try {
       terminal.loadAddon(new CanvasAddon());
+      scheduleTerminalRepaint();
     } catch {
       // Canvas context unavailable: xterm keeps using the DOM renderer.
     }
@@ -277,6 +299,7 @@ export default function TerminalPane({
 
       try {
         fitAddon.fit();
+        scheduleTerminalRepaint();
         const size = {
           cols: terminal.cols,
           rows: terminal.rows
@@ -320,14 +343,15 @@ export default function TerminalPane({
       }
 
       if (event.type === "data") {
-        terminal.write(event.data);
+        terminal.write(event.data, scheduleTerminalRepaint);
         markActive();
       }
 
       if (event.type === "snapshot") {
         terminal.reset();
+        scheduleTerminalRepaint();
         if (event.data) {
-          terminal.write(event.data);
+          terminal.write(event.data, scheduleTerminalRepaint);
         }
 
         if (event.isRunning) {
@@ -335,7 +359,8 @@ export default function TerminalPane({
         } else {
           terminal.writeln("");
           terminal.writeln(
-            "\x1b[33mProcess exited. Use restart to run it again.\x1b[0m"
+            "\x1b[33mProcess exited. Use restart to run it again.\x1b[0m",
+            scheduleTerminalRepaint
           );
           clearIdleTimer();
           setStatus(event.exitCode === 0 ? "done" : "failed");
@@ -344,7 +369,7 @@ export default function TerminalPane({
 
       if (event.type === "error") {
         terminal.writeln("");
-        terminal.writeln(`\x1b[31m${event.message}\x1b[0m`);
+        terminal.writeln(`\x1b[31m${event.message}\x1b[0m`, scheduleTerminalRepaint);
         clearIdleTimer();
         setStatus("failed");
       }
@@ -352,7 +377,10 @@ export default function TerminalPane({
       if (event.type === "exit") {
         terminalExitedRef.current = true;
         terminal.writeln("");
-        terminal.writeln("\x1b[33mProcess exited. Use restart to run it again.\x1b[0m");
+        terminal.writeln(
+          "\x1b[33mProcess exited. Use restart to run it again.\x1b[0m",
+          scheduleTerminalRepaint
+        );
         scheduleThreadLookup(200, true);
         clearIdleTimer();
         setStatus(event.exitCode === 0 ? "done" : "failed");
@@ -370,6 +398,10 @@ export default function TerminalPane({
       if (fitFrameRef.current !== null) {
         cancelAnimationFrame(fitFrameRef.current);
         fitFrameRef.current = null;
+      }
+      if (repaintFrameRef.current !== null) {
+        cancelAnimationFrame(repaintFrameRef.current);
+        repaintFrameRef.current = null;
       }
       clearIdleTimer();
       removeListener?.();
@@ -447,6 +479,7 @@ export default function TerminalPane({
     createdRef.current = true;
     terminalExitedRef.current = false;
     terminal.clear();
+    scheduleTerminalRepaint();
     clearIdleTimer();
     setStatus("starting");
     lastSentSizeRef.current = {
