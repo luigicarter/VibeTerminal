@@ -1,6 +1,10 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("vibe", {
+  // The launch command is typed into the platform shell (PowerShell on Windows,
+  // the login shell on POSIX), so the renderer needs the platform to quote args
+  // for the right shell.
+  platform: process.platform,
   app: {
     getCwd: () => ipcRenderer.invoke("app:get-cwd")
   },
@@ -16,7 +20,9 @@ contextBridge.exposeInMainWorld("vibe", {
     }
   },
   workspace: {
-    selectFolder: () => ipcRenderer.invoke("workspace:select-folder")
+    selectFolder: () => ipcRenderer.invoke("workspace:select-folder"),
+    getCodeChanges: (cwd) =>
+      ipcRenderer.invoke("workspace:code-changes", { cwd })
   },
   agentThreads: {
     findLatest: (payload) => ipcRenderer.invoke("agent-thread:latest", payload)

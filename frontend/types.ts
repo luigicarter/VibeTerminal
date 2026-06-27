@@ -80,6 +80,11 @@ export interface AgentThreadLookupPayload {
   cwd: string;
   after?: number;
   excludeIds?: string[];
+  // When set, the host confirms whether this exact pre-assigned id is safe to
+  // resume (Claude) instead of discovering the latest thread. "missing" means
+  // no persisted session exists for the id, so the launcher starts fresh rather
+  // than hard-failing on `--resume`.
+  confirmId?: string;
 }
 
 export type AgentThreadLookupResult =
@@ -88,7 +93,7 @@ export type AgentThreadLookupResult =
       threadRef: AgentThreadRef;
     }
   | {
-      status: "pending" | "failed";
+      status: "pending" | "failed" | "missing";
       message?: string;
     }
   | {
@@ -129,6 +134,27 @@ export interface ProjectWorkspace {
   name: string;
   path: string;
   sessions: AgentSession[];
+}
+
+export type CodeChangeState = "clean" | "dirty" | "not-git" | "unavailable";
+
+export interface CodeChangeSummary {
+  state: CodeChangeState;
+  cwd: string;
+  root?: string;
+  branch?: string;
+  upstream?: string;
+  ahead: number;
+  behind: number;
+  changedFiles: number;
+  staged: number;
+  unstaged: number;
+  untracked: number;
+  conflicts: number;
+  insertions: number;
+  deletions: number;
+  updatedAt: number;
+  message?: string;
 }
 
 export interface TerminalLaunchPayload {

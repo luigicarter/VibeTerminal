@@ -5,7 +5,7 @@ The `frontend/` folder contains the Vite React renderer that users see inside th
 ## Files
 
 - `frontend/main.tsx` - React entry point mounted by `index.html`.
-- `frontend/App.tsx` - Top-level workspace UI, localStorage persistence, project selection, session lifecycle, and agent launcher controls.
+- `frontend/App.tsx` - Top-level workspace UI, localStorage persistence, project selection, code-change line totals, session lifecycle, and agent launcher controls.
 - `frontend/sessionLaunch.ts` - Builds launch/resume commands for Codex, Claude, OpenCode, and plain terminal sessions.
 - `frontend/types.ts` - Shared renderer-side domain types for agents, sessions, layouts, thread lookup results, and terminal events.
 - `frontend/electron.d.ts` - Type declarations for the `window.vibe` preload API used by the renderer.

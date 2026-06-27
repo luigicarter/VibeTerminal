@@ -48,6 +48,7 @@ import type {
   AgentSession,
   AgentThreadRef,
   AgentThreadLookupStatus,
+  CodeChangeSummary,
   LayoutBox,
   ProjectWorkspace,
   UpdateState
@@ -74,6 +75,7 @@ const DEFAULT_SIDEBAR_WIDTH = 292;
 const MIN_SIDEBAR_WIDTH = 220;
 const MAX_SIDEBAR_WIDTH = 520;
 const MIN_WORKSPACE_WIDTH = 360;
+const CODE_CHANGE_REFRESH_MS = 7_500;
 
 type AppView = "multi" | "project";
 
@@ -150,6 +152,22 @@ function formatCount(count: number, label: string) {
 function formatUpdatePercent(state: UpdateState) {
   const percent = state.progress?.percent;
   return Number.isFinite(percent) ? Math.round(percent ?? 0) : 0;
+}
+
+function formatCodeLineSummary(summary?: CodeChangeSummary) {
+  if (!summary) {
+    return "Scanning Git diff totals.";
+  }
+
+  if (summary.state === "not-git") {
+    return "This folder is not a Git repository.";
+  }
+
+  if (summary.state === "unavailable") {
+    return summary.message || "Git changes could not be inspected.";
+  }
+
+  return `${summary.insertions} lines written, ${summary.deletions} lines deleted.`;
 }
 
 function getProfile(kind: AgentKind) {
@@ -443,6 +461,9 @@ export default function App() {
   });
   const [shellMessage, setShellMessage] = useState<string | null>(null);
   const [updateState, setUpdateState] = useState<UpdateState | null>(null);
+  const [workspaceChangeSummaries, setWorkspaceChangeSummaries] = useState<
+    Record<string, CodeChangeSummary>
+  >({});
   const [dismissedUpdateKey, setDismissedUpdateKey] = useState<string | null>(
     null
   );
@@ -471,6 +492,12 @@ export default function App() {
     activeView === "multi"
       ? "Free terminal board"
       : activeWorkspace?.path ?? "Open a folder to start";
+  const workspaceChangeFingerprint = workspaces
+    .map((workspace) => `${workspace.id}:${workspace.path}`)
+    .join("|");
+  const activeWorkspaceChangeSummary = activeWorkspace
+    ? workspaceChangeSummaries[activeWorkspace.id]
+    : undefined;
   const allSessions = [
     ...multiSessions,
     ...workspaces.flatMap((workspace) => workspace.sessions)
@@ -589,6 +616,60 @@ export default function App() {
       unsubscribe?.();
     };
   }, []);
+
+  useEffect(() => {
+    if (workspaces.length === 0 || !window.vibe?.workspace.getCodeChanges) {
+      setWorkspaceChangeSummaries({});
+      return;
+    }
+
+    let disposed = false;
+    let refreshInFlight = false;
+
+    const refreshCodeChanges = async () => {
+      if (refreshInFlight) {
+        return;
+      }
+
+      refreshInFlight = true;
+
+      try {
+        const summaries = await Promise.all(
+          workspaces.map(async (workspace) => {
+            const summary = await window.vibe?.workspace.getCodeChanges(
+              workspace.path
+            );
+            return summary ? ([workspace.id, summary] as const) : null;
+          })
+        );
+
+        if (disposed) {
+          return;
+        }
+
+        const nextSummaries: Record<string, CodeChangeSummary> = {};
+        summaries.forEach((entry) => {
+          if (entry) {
+            nextSummaries[entry[0]] = entry[1];
+          }
+        });
+        setWorkspaceChangeSummaries(nextSummaries);
+      } finally {
+        refreshInFlight = false;
+      }
+    };
+
+    void refreshCodeChanges();
+    const interval = window.setInterval(
+      () => void refreshCodeChanges(),
+      CODE_CHANGE_REFRESH_MS
+    );
+
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
+  }, [workspaceChangeFingerprint]);
 
   function updateWorkspace(
     workspaceId: string,
@@ -1316,7 +1397,7 @@ export default function App() {
 
           <div className="workspace-title">
             <LayoutGrid size={19} />
-            <div>
+            <div className="workspace-title-copy">
               <strong>{boardTitle}</strong>
               <span>{boardSubtitle}</span>
             </div>
@@ -1338,16 +1419,51 @@ export default function App() {
         )}
 
         <section className="agent-toolbar" aria-label="Agent launchers">
-          {agentProfiles.map((profile) => (
-            <button
-              key={profile.kind}
-              onClick={() => addSession(profile.kind)}
-              style={{ "--agent-accent": profile.accent } as React.CSSProperties}
+          <div className="agent-toolbar-actions">
+            {agentProfiles.map((profile) => (
+              <button
+                key={profile.kind}
+                onClick={() => addSession(profile.kind)}
+                style={{ "--agent-accent": profile.accent } as React.CSSProperties}
+              >
+                <Plus size={14} />
+                {profile.label}
+              </button>
+            ))}
+          </div>
+
+          {activeView === "project" && activeWorkspace && (
+            <div
+              className={clsx(
+                "code-line-summary",
+                activeWorkspaceChangeSummary &&
+                  `code-change-${activeWorkspaceChangeSummary.state}`
+              )}
+              title={formatCodeLineSummary(activeWorkspaceChangeSummary)}
+              aria-label={formatCodeLineSummary(activeWorkspaceChangeSummary)}
             >
-              <Plus size={14} />
-              {profile.label}
-            </button>
-          ))}
+              {activeWorkspaceChangeSummary &&
+              activeWorkspaceChangeSummary.state !== "not-git" &&
+              activeWorkspaceChangeSummary.state !== "unavailable" ? (
+                <>
+                  <span className="diff-insertions">
+                    +{activeWorkspaceChangeSummary.insertions} written
+                  </span>
+                  <span className="diff-deletions">
+                    -{activeWorkspaceChangeSummary.deletions} deleted
+                  </span>
+                </>
+              ) : (
+                <span className="diff-muted">
+                  {activeWorkspaceChangeSummary?.state === "not-git"
+                    ? "No Git repo"
+                    : activeWorkspaceChangeSummary?.state === "unavailable"
+                      ? "Git unavailable"
+                      : "Scanning changes"}
+                </span>
+              )}
+            </div>
+          )}
         </section>
 
         <section className="terminal-board">

@@ -94,87 +94,192 @@ function extractClaudeText(value) {
   return "";
 }
 
-function findLatestClaudeThread(cwd, after = 0, excludeIds = []) {
+function claudeProjectsDir() {
   const claudeHome =
     process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
-  const projectsDir = path.join(claudeHome, "projects");
-  const excluded = toExcludedSet(excludeIds);
-  const matches = collectJsonlFiles(projectsDir)
-    .map((filePath) => {
-      try {
-        const content = fs.readFileSync(filePath, "utf8");
-        const lines = content.split(/\r?\n/).slice(0, 40);
-        let sessionId = "";
-        let createdAt = 0;
-        let title = "";
-        let sawMatchingCwd = false;
+  return path.join(claudeHome, "projects");
+}
 
-        for (const line of lines) {
-          if (!line.trim()) {
-            continue;
-          }
+// Parse a single Claude transcript, harvesting the session identity only from
+// lines that belong to (or do not contradict) the target cwd, so the id/title/
+// timestamp we claim provably came from this project — never from a foreign-cwd
+// line that merely shares the file. A single foreign line is skipped, not a
+// reason to abort the whole transcript. Returns null when the file carries no id
+// for this cwd. Shared by latest-thread discovery and the existence check.
+function parseClaudeTranscript(filePath, cwd) {
+  try {
+    const content = fs.readFileSync(filePath, "utf8");
+    const lines = content.split(/\r?\n/).slice(0, 40);
+    let sessionId = "";
+    let createdAt = 0;
+    let title = "";
+    let sawMatchingCwd = false;
 
-          let event;
-          try {
-            event = JSON.parse(line);
-          } catch {
-            // Tolerate the occasional malformed line instead of discarding the
-            // whole transcript.
-            continue;
-          }
-
-          if (event.cwd && isSamePath(event.cwd, cwd)) {
-            sawMatchingCwd = true;
-          }
-
-          // Only harvest identity from lines that belong to (or don't
-          // contradict) the target cwd, so the id/title/timestamp we claim
-          // provably came from this project — never from a foreign-cwd line
-          // that merely happens to share the file. A single foreign line is
-          // skipped, not treated as a reason to abort the whole transcript.
-          if (event.cwd && !isSamePath(event.cwd, cwd)) {
-            continue;
-          }
-
-          sessionId = sessionId || event.sessionId || "";
-          if (!title) {
-            title =
-              (typeof event.lastPrompt === "string" ? event.lastPrompt : "") ||
-              extractClaudeText(event.message?.content);
-          }
-          if (!createdAt) {
-            createdAt = Date.parse(
-              event.timestamp || event.message?.timestamp || ""
-            );
-          }
-        }
-
-        if (
-          !sessionId ||
-          !sawMatchingCwd ||
-          excluded.has(sessionId) ||
-          !Number.isFinite(createdAt) ||
-          createdAt < after
-        ) {
-          return null;
-        }
-
-        const stat = fs.statSync(filePath);
-        return {
-          provider: "claude",
-          id: sessionId,
-          title,
-          createdAt,
-          updatedAt: stat.mtimeMs
-        };
-      } catch {
-        return null;
+    for (const line of lines) {
+      if (!line.trim()) {
+        continue;
       }
-    })
-    .filter(Boolean)
+
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        // Tolerate the occasional malformed line instead of discarding the
+        // whole transcript.
+        continue;
+      }
+
+      if (event.cwd && isSamePath(event.cwd, cwd)) {
+        sawMatchingCwd = true;
+      }
+
+      if (event.cwd && !isSamePath(event.cwd, cwd)) {
+        continue;
+      }
+
+      sessionId = sessionId || event.sessionId || "";
+      if (!title) {
+        title =
+          (typeof event.lastPrompt === "string" ? event.lastPrompt : "") ||
+          extractClaudeText(event.message?.content);
+      }
+      if (!createdAt) {
+        createdAt = Date.parse(
+          event.timestamp || event.message?.timestamp || ""
+        );
+      }
+    }
+
+    if (!sessionId || !sawMatchingCwd) {
+      return null;
+    }
+
+    const stat = fs.statSync(filePath);
+    return {
+      provider: "claude",
+      id: sessionId,
+      title,
+      createdAt: Number.isFinite(createdAt) ? createdAt : 0,
+      updatedAt: stat.mtimeMs
+    };
+  } catch {
+    return null;
+  }
+}
+
+function findLatestClaudeThread(cwd, after = 0, excludeIds = []) {
+  const excluded = toExcludedSet(excludeIds);
+  const matches = collectJsonlFiles(claudeProjectsDir())
+    .map((filePath) => parseClaudeTranscript(filePath, cwd))
+    .filter(
+      (ref) =>
+        ref &&
+        ref.id &&
+        !excluded.has(String(ref.id)) &&
+        Number.isFinite(ref.createdAt) &&
+        ref.createdAt >= after
+    )
     .sort((a, b) => b.updatedAt - a.updatedAt);
 
   return matches[0] || null;
+}
+
+function placeholderClaudeRef(id) {
+  return {
+    provider: "claude",
+    id,
+    title: "",
+    createdAt: 0,
+    updatedAt: 0
+  };
+}
+
+// Locate the transcript file for a specific Claude session id without reading
+// any file contents. Claude stores each session as `<sessionId>.jsonl`, so we
+// match by name and short-circuit on the first hit. `complete` is false when a
+// directory could not be read (so the target may live in an unreadable subtree)
+// or a pathological-tree backstop tripped — meaning absence could NOT be proven,
+// and callers must treat that as "unknown" rather than "missing".
+function locateClaudeTranscriptFile(id) {
+  const target = `${id}.jsonl`;
+  const root = claudeProjectsDir();
+  if (!fs.existsSync(root)) {
+    return { path: null, complete: true };
+  }
+
+  const stack = [root];
+  const visitCap = 200000;
+  let visited = 0;
+  let complete = true;
+
+  while (stack.length > 0) {
+    if (visited >= visitCap) {
+      complete = false;
+      break;
+    }
+    visited += 1;
+
+    const current = stack.pop();
+    let entries = [];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      // The unreadable directory might be the one holding the transcript, so we
+      // can no longer prove the id is absent.
+      complete = false;
+      continue;
+    }
+
+    for (const entry of entries) {
+      const entryPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        // Claude's `<id>/subagents/agent-*.jsonl` tree only duplicates the
+        // parent id; skip it (matches collectJsonlFiles).
+        if (entry.name !== "subagents") {
+          stack.push(entryPath);
+        }
+      } else if (entry.isFile() && entry.name === target) {
+        return { path: entryPath, complete: true };
+      }
+    }
+  }
+
+  return { path: null, complete };
+}
+
+// Claude pre-assigns its session id (`--session-id <uuid>`) and later resumes
+// with `claude --resume <uuid>`. That id only becomes resumable once Claude has
+// persisted a transcript — i.e. after at least one exchanged message. Resuming a
+// never-persisted id hard-fails with "No conversation found", which in a live
+// shell pane strands the user at a bare prompt where their session should be.
+//
+// confirmClaudeThread answers "is this exact id safe to `--resume`?" so the
+// launcher can start a clean session instead of hard-failing. If a file for the
+// id exists we report it "found" (re-pinning the id with a fresh `--session-id`
+// would collide), even across a cwd change. We report "missing" only when we can
+// prove no such file exists; if the directory walk was incomplete we stay
+// conservative and resume.
+function confirmClaudeThread(cwd, id) {
+  const target = String(id || "");
+  if (!target) {
+    return { status: "missing" };
+  }
+
+  const located = locateClaudeTranscriptFile(target);
+
+  if (located.path) {
+    const threadRef =
+      parseClaudeTranscript(located.path, cwd) || placeholderClaudeRef(target);
+    return { status: "found", threadRef };
+  }
+
+  if (!located.complete) {
+    // Could not prove the id is absent (unreadable dir or pathological tree);
+    // resume rather than risk a duplicate-id collision on a fresh launch.
+    return { status: "found", threadRef: placeholderClaudeRef(target) };
+  }
+
+  return { status: "missing" };
 }
 
 function findLatestOpenCodeThread(cwd, after = 0, excludeIds = []) {
@@ -253,6 +358,13 @@ async function findLatestAgentThread(payload) {
   }
 
   if (payload.provider === "claude") {
+    // A confirm request asks whether a specific pre-assigned id is safe to
+    // resume, so the launcher can self-heal instead of running a doomed
+    // `claude --resume <id>`.
+    if (payload.confirmId) {
+      return confirmClaudeThread(cwd, payload.confirmId);
+    }
+
     const threadRef = findLatestClaudeThread(cwd, after, payload.excludeIds);
     return threadRef
       ? { status: "found", threadRef }
@@ -349,10 +461,12 @@ if (require.main === module) {
 
 module.exports = {
   collectJsonlFiles,
+  confirmClaudeThread,
   extractClaudeText,
   findLatestAgentThread,
   findLatestClaudeThread,
   findLatestOpenCodeThread,
   isSamePath,
-  normalizePathForCompare
+  normalizePathForCompare,
+  parseClaudeTranscript
 };

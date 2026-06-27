@@ -2,6 +2,7 @@ import type {
   AgentThreadLookupPayload,
   AgentThreadLookupResult,
   AgentThreadRef,
+  CodeChangeSummary,
   TerminalEvent,
   TerminalLaunchPayload,
   UpdateActionResult,
@@ -11,6 +12,7 @@ import type {
 declare global {
   interface Window {
     vibe?: {
+      platform: string;
       app: {
         getCwd: () => Promise<string>;
       };
@@ -23,6 +25,7 @@ declare global {
       };
       workspace: {
         selectFolder: () => Promise<string | null>;
+        getCodeChanges: (cwd: string) => Promise<CodeChangeSummary>;
       };
       agentThreads: {
         findLatest: (

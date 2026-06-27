@@ -79,19 +79,32 @@ function createSession(payload) {
 
   if (sessions.has(payload.id)) {
     const existingSession = sessions.get(payload.id);
+    const incomingToken = Number(payload.launchToken || 0);
+    const existingToken = Number(existingSession?.launchToken || 0);
 
-    if (existingSession?.terminal && (payload.cols || payload.rows)) {
-      existingSession.terminal.resize(
-        Math.max(20, Number(payload.cols || 100)),
-        Math.max(6, Number(payload.rows || 28))
-      );
+    // A newer launch token means the renderer asked for a restart/relaunch. If a
+    // stale create() for the previous launch raced in and re-spawned first, the
+    // dedup-to-snapshot path below would otherwise swallow the restart and leave
+    // the pane running the pre-restart command. Supersede it: kill the old shell
+    // and fall through to spawn the new one. (The old terminal's onExit is
+    // suppressed once the new session replaces it in the map.)
+    if (existingSession?.terminal && incomingToken > existingToken) {
+      existingSession.terminal.kill();
+      sessions.delete(payload.id);
+    } else {
+      if (existingSession?.terminal && (payload.cols || payload.rows)) {
+        existingSession.terminal.resize(
+          Math.max(20, Number(payload.cols || 100)),
+          Math.max(6, Number(payload.rows || 28))
+        );
+      }
+
+      if (existingSession) {
+        emitSnapshot(payload.id, existingSession);
+      }
+
+      return;
     }
-
-    if (existingSession) {
-      emitSnapshot(payload.id, existingSession);
-    }
-
-    return;
   }
 
   const shell = shellForPlatform();

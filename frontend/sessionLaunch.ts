@@ -66,26 +66,50 @@ export function defaultLaunchMode(
     : "new";
 }
 
-function commandArg(value: string) {
+function commandArg(value: string, platform?: string) {
   if (/^[A-Za-z0-9_./:@-]+$/.test(value)) {
     return value;
   }
 
-  return `"${value.replace(/["\\]/g, "\\$&")}"`;
+  // The command is typed into an interactive shell, so single-quote wrapping is
+  // the safest encoding: single quotes are literal in both PowerShell and POSIX
+  // shells (no variable or backtick expansion). Only the embedded-quote escape
+  // differs. PowerShell treats the ASCII apostrophe AND the typographic single
+  // quotes (U+2018/U+2019/U+201A/U+201B — common from autocorrect or paste) as
+  // string delimiters, so each must be doubled or it would prematurely terminate
+  // the argument and break (or inject into) the launch line. POSIX shells only
+  // treat the ASCII apostrophe specially, closing/escaping/reopening it.
+  const escaped =
+    platform === "win32"
+      ? value.replace(/['‘’‚‛]/g, (quote) => `${quote}${quote}`)
+      : value.replace(/'/g, "'\\''");
+  return `'${escaped}'`;
 }
 
 function resumeArg(session: AgentSession) {
   return session.threadRef?.id || "";
 }
 
-export function buildLaunchCommand(session: AgentSession) {
-  const mode = session.nextLaunchMode ?? "new";
+export interface LaunchCommandOptions {
+  // Override the session's nextLaunchMode (used by the self-healing launcher to
+  // fall back to a fresh launch when a resume id is not actually resumable).
+  mode?: AgentLaunchMode;
+  // Target shell platform for argument quoting (defaults to POSIX quoting).
+  platform?: string;
+}
+
+export function buildLaunchCommand(
+  session: AgentSession,
+  options: LaunchCommandOptions = {}
+) {
+  const mode = options.mode ?? session.nextLaunchMode ?? "new";
+  const { platform } = options;
 
   if (session.kind === "codex") {
     if (mode === "resume") {
       const ref = resumeArg(session);
       if (ref) {
-        return `codex resume ${commandArg(ref)}`;
+        return `codex resume ${commandArg(ref, platform)}`;
       }
     }
 
@@ -96,14 +120,14 @@ export function buildLaunchCommand(session: AgentSession) {
     if (mode === "resume") {
       const ref = resumeArg(session);
       if (ref) {
-        return `claude --resume ${commandArg(ref)}`;
+        return `claude --resume ${commandArg(ref, platform)}`;
       }
     }
 
     const title = session.threadRef?.title || session.name;
-    const namePart = title ? ` --name ${commandArg(title)}` : "";
+    const namePart = title ? ` --name ${commandArg(title, platform)}` : "";
     const idPart = session.threadRef?.id
-      ? ` --session-id ${commandArg(session.threadRef.id)}`
+      ? ` --session-id ${commandArg(session.threadRef.id, platform)}`
       : "";
     return `claude${idPart}${namePart}`;
   }
@@ -112,7 +136,7 @@ export function buildLaunchCommand(session: AgentSession) {
     if (mode === "resume") {
       const ref = resumeArg(session);
       if (ref) {
-        return `opencode --session ${commandArg(ref)}`;
+        return `opencode --session ${commandArg(ref, platform)}`;
       }
     }
 

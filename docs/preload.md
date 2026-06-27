@@ -15,6 +15,7 @@ The `preload/` folder contains the context-isolated bridge between the renderer 
 - `window.vibe.updates.restart()` - Restarts and installs a downloaded update.
 - `window.vibe.updates.onEvent(callback)` - Subscribes to update state changes.
 - `window.vibe.workspace.selectFolder()` - Opens the native folder picker.
+- `window.vibe.workspace.getCodeChanges(cwd)` - Returns a read-only Git code-change summary for a workspace folder.
 - `window.vibe.agentThreads.findLatest(payload)` - Asks the backend to discover a matching local agent thread.
 - `window.vibe.terminal.create(payload)` - Creates or restores a PTY-backed session.
 - `window.vibe.terminal.input(id, data)` - Sends user terminal input to the PTY host.

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
+import { CanvasAddon } from "@xterm/addon-canvas";
 import {
   CopyPlus,
   GripVertical,
@@ -110,7 +111,12 @@ export default function TerminalPane({
   const lookupInFlightRef = useRef(false);
   const claimedThreadIdsRef = useRef(claimedThreadIds);
 
-  const launchCommand = useMemo(() => buildLaunchCommand(session), [session]);
+  const platform = window.vibe?.platform;
+
+  const launchCommand = useMemo(
+    () => buildLaunchCommand(session, { platform }),
+    [session, platform]
+  );
 
   useEffect(() => {
     sessionRef.current = session;
@@ -244,6 +250,20 @@ export default function TerminalPane({
     terminal.loadAddon(fitAddon);
     terminal.loadAddon(new WebLinksAddon());
     terminal.open(containerRef.current);
+
+    // Drive xterm with the canvas renderer instead of the default DOM renderer.
+    // The DOM renderer reuses row elements and leaves stale glyphs behind when
+    // the buffer scrolls (most visibly in the leftmost columns); the canvas
+    // renderer repaints the whole surface each frame, so those ghosts can't
+    // accumulate. Canvas (not WebGL) keeps this safe for a tiled board with many
+    // panes, since 2D contexts have no per-page count limit. If the renderer
+    // can't initialize we just fall back to xterm's built-in DOM renderer.
+    try {
+      terminal.loadAddon(new CanvasAddon());
+    } catch {
+      // Canvas context unavailable: xterm keeps using the DOM renderer.
+    }
+
     terminal.focus();
 
     terminalRef.current = terminal;
@@ -369,6 +389,46 @@ export default function TerminalPane({
     session.id
   ]);
 
+  // Claude pre-assigns its session id and resumes via `claude --resume <id>`,
+  // but that id only becomes resumable once Claude has persisted a transcript
+  // (i.e. after at least one exchanged message). A pane that was opened but never
+  // messaged has no transcript, so a blind resume hard-fails with "No
+  // conversation found" and strands the pane at a bare shell prompt. Confirm the
+  // id actually exists before resuming; if it does not, start a clean session
+  // reusing the still-unused pre-assigned id instead of failing.
+  async function resolveLaunchCommand(
+    currentSession: AgentSession,
+    defaultCommand: string
+  ): Promise<string> {
+    if (
+      currentSession.kind === "claude" &&
+      currentSession.nextLaunchMode === "resume" &&
+      currentSession.threadRef?.id &&
+      window.vibe?.agentThreads
+    ) {
+      try {
+        const result = await window.vibe.agentThreads.findLatest({
+          provider: "claude",
+          cwd: currentSession.cwd,
+          confirmId: currentSession.threadRef.id
+        });
+
+        if (result?.status === "missing") {
+          return buildLaunchCommand(currentSession, {
+            mode: "new",
+            platform: window.vibe?.platform
+          });
+        }
+      } catch {
+        // Confirmation unavailable (host down/timeout): fall through to the
+        // resume command rather than risk a duplicate `--session-id` collision
+        // on a session that may well exist.
+      }
+    }
+
+    return defaultCommand;
+  }
+
   useEffect(() => {
     const terminal = terminalRef.current;
     if (!session.started || !terminal) {
@@ -382,7 +442,8 @@ export default function TerminalPane({
       return;
     }
 
-    lastLaunchTokenRef.current = session.launchToken;
+    const launchToken = session.launchToken;
+    lastLaunchTokenRef.current = launchToken;
     createdRef.current = true;
     terminalExitedRef.current = false;
     terminal.clear();
@@ -401,15 +462,37 @@ export default function TerminalPane({
         threadLookupMessage: `Waiting for ${profile.label} to create local thread metadata.`
       });
     }
-    window.vibe?.terminal.create({
-      id: session.id,
-      cwd: session.cwd,
-      command: launchCommand,
-      launchToken: session.launchToken,
-      cols: terminal.cols,
-      rows: terminal.rows
-    });
-    scheduleThreadLookup(5000);
+
+    let cancelled = false;
+
+    void (async () => {
+      const command = await resolveLaunchCommand(session, launchCommand);
+
+      // Confirming resumability is async, so the pane may have been restarted
+      // (new token), closed, or torn down meanwhile — never launch into a stale
+      // terminal.
+      if (
+        cancelled ||
+        lastLaunchTokenRef.current !== launchToken ||
+        !terminalRef.current
+      ) {
+        return;
+      }
+
+      window.vibe?.terminal.create({
+        id: session.id,
+        cwd: session.cwd,
+        command,
+        launchToken,
+        cols: terminalRef.current.cols,
+        rows: terminalRef.current.rows
+      });
+      scheduleThreadLookup(5000);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [
     // launchCommand and cwd are read fresh from the closure at launch time. A
     // (re)launch only fires on first start or a restart (launchToken bump), at

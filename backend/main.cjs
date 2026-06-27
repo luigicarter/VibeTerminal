@@ -4,6 +4,7 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const { createAgentTelemetryManager } = require("./agentTelemetry.cjs");
+const { getCodeChangeSummary } = require("./codeChanges.cjs");
 
 const isScreenshotMode =
   process.env.VIBE_SCREENSHOT_MODE === "1" || Boolean(process.env.VIBE_SCREENSHOT_PATH);
@@ -740,6 +741,10 @@ ipcMain.handle("workspace:select-folder", async () => {
 
   return result.filePaths[0];
 });
+
+ipcMain.handle("workspace:code-changes", (_event, payload) =>
+  getCodeChangeSummary(payload?.cwd)
+);
 
 ipcMain.handle("agent-thread:latest", (_event, payload) =>
   findLatestAgentThread(payload)

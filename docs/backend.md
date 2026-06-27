@@ -5,6 +5,7 @@ The `backend/` folder contains Electron main-process code and Node-side terminal
 ## Files
 
 - `backend/main.cjs` - Electron app entry point from `package.json`; creates the BrowserWindow, starts child hosts, owns IPC handlers, handles folder selection, and brokers latest-agent-thread lookups.
+- `backend/codeChanges.cjs` - Runs and parses read-only Git status and diff checks for workspace code-change tracking.
 - `backend/ptyHost.cjs` - Child process that owns `node-pty` terminal sessions, buffers scrollback, forwards terminal data, resizes sessions, kills sessions, and emits JSONL events to the main process.
 - `backend/agentTelemetry.cjs` - Creates vibeTerminal-owned per-pane agent shims, starts the local telemetry callback server, maps agent lifecycle events to pane attention events, and removes stale owned shim directories.
 - `backend/agentThreadHost.cjs` - Child process that performs Codex, Claude, and OpenCode thread metadata discovery so filesystem scans and CLI lookups do not block Electron main or terminal IPC.

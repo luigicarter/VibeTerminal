@@ -11,10 +11,20 @@ const windowsReleasePath = path.join(
   "docs",
   "windows-release.md"
 );
+const packagePath = path.join(__dirname, "..", "..", "package.json");
+const installerNshPath = path.join(
+  __dirname,
+  "..",
+  "..",
+  "build",
+  "installer.nsh"
+);
 
 const mainSource = fs.readFileSync(mainPath, "utf8");
 const readmeSource = fs.readFileSync(readmePath, "utf8");
 const windowsReleaseSource = fs.readFileSync(windowsReleasePath, "utf8");
+const packageSource = fs.readFileSync(packagePath, "utf8");
+const installerNshSource = fs.readFileSync(installerNshPath, "utf8");
 
 assert(
   mainSource.includes("updater.autoDownload = false") &&
@@ -33,6 +43,17 @@ assert(
     windowsReleaseSource.includes("quitAndInstall(true, true)") &&
     windowsReleaseSource.includes("installer UI should not appear"),
   "update documentation should describe silent Windows install behavior"
+);
+
+assert(
+  /\$\{if\}\s*\$\{isUpdated\}/.test(installerNshSource) &&
+    /SetSilent\s+silent/.test(installerNshSource),
+  "NSIS installer should force silent mode for updates while keeping the first-install wizard"
+);
+
+assert(
+  packageSource.includes('"include": "build/installer.nsh"'),
+  "electron-builder NSIS config should wire up the custom installer hook"
 );
 
 console.log("update smoke passed");

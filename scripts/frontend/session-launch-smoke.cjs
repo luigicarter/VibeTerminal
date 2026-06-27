@@ -87,6 +87,88 @@ assert.strictEqual(
   "claude --session-id uuid-2 --name Chat1",
   "claude new with an id should pin the session id and name"
 );
+
+// A mode override forces a fresh launch even when the session is set to resume —
+// this is how the self-healing launcher recovers from a non-resumable id (no
+// persisted transcript) by reusing the still-unused pre-assigned id.
+assert.strictEqual(
+  buildLaunchCommand(
+    session({
+      kind: "claude",
+      command: "claude",
+      name: "Chat1",
+      nextLaunchMode: "resume",
+      threadRef: { id: "uuid-2", title: "Chat1" }
+    }),
+    { mode: "new" }
+  ),
+  "claude --session-id uuid-2 --name Chat1",
+  "a mode override should force a fresh claude launch even when resume is set"
+);
+
+// The command is typed into the platform shell, so argument quoting must match
+// the shell. Single-quote wrapping is literal in both; only the embedded-quote
+// escape differs (PowerShell doubles '', POSIX closes/escapes/reopens '\'').
+assert.strictEqual(
+  buildLaunchCommand(
+    session({
+      kind: "claude",
+      command: "claude",
+      name: "My Project",
+      nextLaunchMode: "new",
+      threadRef: { id: "uuid-3" }
+    }),
+    { platform: "win32" }
+  ),
+  "claude --session-id uuid-3 --name 'My Project'",
+  "a title with spaces should be single-quoted"
+);
+assert.strictEqual(
+  buildLaunchCommand(
+    session({
+      kind: "claude",
+      command: "claude",
+      name: "It's mine",
+      nextLaunchMode: "new",
+      threadRef: { id: "uuid-4" }
+    }),
+    { platform: "win32" }
+  ),
+  "claude --session-id uuid-4 --name 'It''s mine'",
+  "embedded single quotes should be doubled for PowerShell"
+);
+assert.strictEqual(
+  buildLaunchCommand(
+    session({
+      kind: "claude",
+      command: "claude",
+      name: "It's mine",
+      nextLaunchMode: "new",
+      threadRef: { id: "uuid-5" }
+    }),
+    { platform: "linux" }
+  ),
+  "claude --session-id uuid-5 --name 'It'\\''s mine'",
+  "embedded single quotes should be backslash-escaped for POSIX shells"
+);
+
+// PowerShell also treats the typographic single quotes (U+2018/U+2019/U+201A/
+// U+201B, common from autocorrect/paste) as string delimiters, so they must be
+// doubled too — otherwise they terminate the argument and break the launch line.
+assert.strictEqual(
+  buildLaunchCommand(
+    session({
+      kind: "claude",
+      command: "claude",
+      name: "Mike’s App",
+      nextLaunchMode: "new",
+      threadRef: { id: "uuid-6" }
+    }),
+    { platform: "win32" }
+  ),
+  "claude --session-id uuid-6 --name 'Mike’’s App'",
+  "typographic single quotes should be doubled for PowerShell"
+);
 assert.strictEqual(
   buildLaunchCommand(
     session({
@@ -125,19 +207,34 @@ assert.strictEqual(defaultLaunchMode("opencode", 3, false), "new");
 assert.strictEqual(defaultLaunchMode("terminal", 1, true), "new");
 assert.strictEqual(defaultLaunchMode("gemini", 5, true), "new");
 
-// Regression tripwire: the xterm-creation effect must NOT depend on the command
-// string, or a resume id discovered mid-session would tear down and blank the
-// live pane (see scripts/frontend plan + TerminalPane Effect 1).
+// Regression tripwire: the xterm-lifecycle effect (the one that disposes the
+// terminal) must depend ONLY on session.id. If launchCommand leaks into its
+// deps, a resume id discovered mid-session tears down and blanks the live pane.
 const terminalPaneSource = fs.readFileSync(terminalPanePath, "utf8");
 assert(
   terminalPaneSource.includes("launchCommand"),
   "TerminalPane should still build a launch command"
 );
+
+const lifecycleIdx = terminalPaneSource.indexOf("terminal.dispose()");
 assert(
-  !terminalPaneSource.includes(
-    "launchCommand,\n    profile.accent,\n    session.cwd,"
-  ),
-  "the terminal-creation effect must not list launchCommand in its dependencies"
+  lifecycleIdx !== -1,
+  "expected a terminal-lifecycle effect that disposes the xterm instance"
+);
+const depsStart = terminalPaneSource.indexOf("}, [", lifecycleIdx);
+const depsEnd = terminalPaneSource.indexOf("]);", depsStart);
+assert(
+  depsStart !== -1 && depsEnd !== -1,
+  "expected the terminal-lifecycle effect to have a dependency array"
+);
+// Strip line comments (the deps comment legitimately mentions launchCommand) so
+// the check only sees the actual dependency identifiers.
+const lifecycleDeps = terminalPaneSource
+  .slice(depsStart, depsEnd)
+  .replace(/\/\/[^\n]*\n/g, "");
+assert(
+  !lifecycleDeps.includes("launchCommand"),
+  "the terminal-lifecycle effect must not depend on launchCommand (it would blank the live pane on a mid-session resume id)"
 );
 
 console.log("session launch smoke passed");

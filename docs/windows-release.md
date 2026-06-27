@@ -4,10 +4,10 @@ vibeTerminal ships to Windows users as an Electron Builder NSIS installer hosted
 
 ## Current Public Release
 
-The current public Windows release is `v0.1.3`:
+The current public Windows release is `v0.1.4`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.3`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.3/vibeTerminal-Setup-0.1.3.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.4`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.4/vibeTerminal-Setup-0.1.4.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -55,8 +55,13 @@ Use these commands before publishing a release:
 npm ci
 npm run typecheck
 npm run smoke:backend:codex-discovery
+npm run smoke:backend:claude-discovery
 npm run smoke:backend:agent-telemetry
+npm run smoke:backend:code-changes
+npm run smoke:backend:updates
 npm run smoke:frontend:attention
+npm run smoke:frontend:workspace
+npm run smoke:frontend:session-launch
 npm run dist:win -- --publish never
 ```
 
@@ -101,8 +106,13 @@ When a `v*` tag is pushed, the workflow runs:
 npm ci
 npm run typecheck
 npm run smoke:backend:codex-discovery
+npm run smoke:backend:claude-discovery
 npm run smoke:backend:agent-telemetry
+npm run smoke:backend:code-changes
+npm run smoke:backend:updates
 npm run smoke:frontend:attention
+npm run smoke:frontend:workspace
+npm run smoke:frontend:session-launch
 npm run dist:win -- --publish always
 ```
 
@@ -123,6 +133,13 @@ If a newer release exists:
 5. The app calls `quitAndInstall(true, true)` so the NSIS updater runs silently and relaunches the app.
 
 The app does not auto-download, auto-restart, or interrupt running terminal sessions. The installer UI should not appear during the restart/apply step.
+
+Silent updates are enforced at two layers:
+
+1. The main process passes `quitAndInstall(true, true)`, which launches the installer with the `/S` silent flag.
+2. The NSIS installer itself forces silent mode whenever it is run for an update. `build/installer.nsh` defines a `customInit` hook that calls `SetSilent silent` when `${isUpdated}` is true. electron-updater always launches the installer with `--updated` for an auto-update and never for a first-time install, so a fresh install still shows the normal wizard while updates apply invisibly.
+
+The second layer matters because the silent flag is decided by the *currently installed* build. A user updating away from a build released before the silent fix (v0.1.1 or earlier) would otherwise see the installer window once; the `customInit` hook makes the new installer silence itself regardless of how the old build launched it.
 
 ## Signing Status
 

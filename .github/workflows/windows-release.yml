@@ -34,10 +34,13 @@ jobs:
         shell: pwsh
         run: |
           npm run smoke:backend:codex-discovery
+          npm run smoke:backend:claude-discovery
           npm run smoke:backend:agent-telemetry
+          npm run smoke:backend:code-changes
           npm run smoke:backend:updates
           npm run smoke:frontend:attention
           npm run smoke:frontend:workspace
+          npm run smoke:frontend:session-launch
 
       - name: Build installer for release tag
         if: startsWith(github.ref, 'refs/tags/v')
