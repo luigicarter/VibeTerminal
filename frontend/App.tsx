@@ -1429,7 +1429,7 @@ export default function App() {
 
           {updateState.status === "downloaded" && (
             <>
-              <p>Restart when your terminals are in a good place.</p>
+              <p>Restart when your terminals are in a good place. The update installs silently.</p>
               <div className="update-overlay-actions">
                 <button onClick={dismissUpdateOverlay}>Later</button>
                 <button className="primary" onClick={restartToUpdate}>

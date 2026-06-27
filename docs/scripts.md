@@ -10,6 +10,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 
 - `scripts/backend/codex-discovery-smoke.cjs` - Creates temporary fake Codex session metadata and validates `backend/agentThreads.cjs` behavior for pending, found, excluded, different-cwd, ambiguous, and remaining-candidate cases.
 - `scripts/backend/agent-telemetry-smoke.cjs` - Creates temporary fake provider commands, validates per-pane shim PATH injection, telemetry token rejection, lifecycle attention events, and stale owned shim cleanup.
+- `scripts/backend/update-smoke.cjs` - Validates packaged update policy, silent Windows update apply behavior, and matching user-facing docs.
 
 ## Frontend Scripts
 
@@ -32,6 +33,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `npm run screenshot` - Visual QA screenshot pass.
 - `npm run smoke:backend:codex-discovery` - Backend smoke test for Codex thread discovery.
 - `npm run smoke:backend:agent-telemetry` - Backend smoke test for vibeTerminal-owned agent telemetry shims.
+- `npm run smoke:backend:updates` - Backend smoke test for update policy and silent Windows update apply behavior.
 - `npm run smoke:frontend:attention` - Frontend smoke test for terminal attention helper behavior.
 - `npm run smoke:frontend:workspace` - Frontend smoke test for workspace startup and project folder removal behavior.
 - `npm run smoke:codex-discovery` - Compatibility alias for the backend smoke test.

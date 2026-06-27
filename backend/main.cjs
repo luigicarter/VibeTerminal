@@ -341,7 +341,7 @@ function restartAndInstallUpdate() {
   }
 
   setImmediate(() => {
-    getAutoUpdater().quitAndInstall(false, true);
+    getAutoUpdater().quitAndInstall(true, true);
   });
   return true;
 }

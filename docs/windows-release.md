@@ -4,10 +4,10 @@ vibeTerminal ships to Windows users as an Electron Builder NSIS installer hosted
 
 ## Current Public Release
 
-The current public Windows release is `v0.1.1`:
+The current public Windows release is `v0.1.2`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.1`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.1/vibeTerminal-Setup-0.1.1.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.2`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.2/vibeTerminal-Setup-0.1.2.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -120,9 +120,9 @@ If a newer release exists:
 2. Renderer shows a small non-blocking overlay.
 3. User clicks `Update` to download.
 4. User clicks `Restart` after download finishes.
-5. The app calls `quitAndInstall`.
+5. The app calls `quitAndInstall(true, true)` so the NSIS updater runs silently and relaunches the app.
 
-The app does not auto-download, auto-restart, or interrupt running terminal sessions.
+The app does not auto-download, auto-restart, or interrupt running terminal sessions. The installer UI should not appear during the restart/apply step.
 
 ## Signing Status
 

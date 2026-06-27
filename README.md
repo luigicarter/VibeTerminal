@@ -8,7 +8,7 @@ It gives each project its own visual workspace, so shell sessions and agent sess
 
 | Platform | Download | Notes |
 | --- | --- | --- |
-| Windows x64 | [vibeTerminal-Setup-0.1.1.exe](https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.1/vibeTerminal-Setup-0.1.1.exe) | Standard installer. Adds vibeTerminal to the Start Menu. |
+| Windows x64 | [vibeTerminal-Setup-0.1.2.exe](https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.2/vibeTerminal-Setup-0.1.2.exe) | Standard installer. Adds vibeTerminal to the Start Menu. |
 | All releases | [GitHub Releases](https://github.com/luigicarter/VibeTerminal/releases) | Older versions, update metadata, and release assets. |
 
 The installer installs vibeTerminal for the current Windows user. You do not need Node.js, npm, Vite, or TypeScript to run the installed app.
@@ -42,7 +42,7 @@ Plain PowerShell terminals work without those agent tools.
 
 vibeTerminal checks for updates once when it launches. You can also use `Check for update` in the top bar after launch. If a newer GitHub Release is available, the app shows a small overlay with `Update` and `Later`.
 
-Updates are downloaded only after you accept, and the app restarts only when you choose `Restart`.
+Updates are downloaded only after you accept, and the app restarts only when you choose `Restart`. On Windows, the update installer runs silently during that restart.
 
 ## Development
 

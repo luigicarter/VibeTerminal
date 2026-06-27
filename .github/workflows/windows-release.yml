@@ -35,6 +35,7 @@ jobs:
         run: |
           npm run smoke:backend:codex-discovery
           npm run smoke:backend:agent-telemetry
+          npm run smoke:backend:updates
           npm run smoke:frontend:attention
           npm run smoke:frontend:workspace
 
