@@ -16,6 +16,7 @@ declare global {
       };
       updates: {
         getState: () => Promise<UpdateState>;
+        check: () => Promise<UpdateActionResult>;
         download: () => Promise<UpdateActionResult>;
         restart: () => Promise<boolean>;
         onEvent: (callback: (state: UpdateState) => void) => () => void;

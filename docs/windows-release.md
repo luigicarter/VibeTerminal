@@ -112,7 +112,7 @@ Manual `workflow_dispatch` runs build the installer and upload it as a workflow 
 
 ## Update Behavior
 
-Packaged builds check GitHub Releases once after launch. There is no polling.
+Packaged builds check GitHub Releases once after launch. Users can also run a manual check from `Check for update` in the top bar. There is no polling.
 
 If a newer release exists:
 

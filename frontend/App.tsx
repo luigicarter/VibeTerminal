@@ -7,20 +7,16 @@ import {
   type PointerEvent as ReactPointerEvent
 } from "react";
 import {
-  Bot,
-  Braces,
   ChevronRight,
   Download,
   Folder,
   FolderOpen,
   LayoutGrid,
-  MessageSquarePlus,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
   Play,
   RefreshCw,
-  TerminalSquare,
   X
 } from "lucide-react";
 import clsx from "clsx";
@@ -372,7 +368,11 @@ function loadActiveWorkspaceId(workspaces: ProjectWorkspace[]) {
   return workspaces[0]?.id ?? null;
 }
 
-function loadActiveView(): AppView {
+function loadActiveView(workspaces: ProjectWorkspace[]): AppView {
+  if (workspaces.length === 0) {
+    return "multi";
+  }
+
   return localStorage.getItem(ACTIVE_VIEW_STORAGE_KEY) === "multi"
     ? "multi"
     : "project";
@@ -406,7 +406,7 @@ export default function App() {
       workspaces: initialWorkspaces,
       activeWorkspaceId: loadActiveWorkspaceId(initialWorkspaces),
       multiSessions: loadMultiSessions(),
-      activeView: loadActiveView(),
+      activeView: loadActiveView(initialWorkspaces),
       sidebarWidth: loadSidebarWidth()
     };
   });
@@ -468,18 +468,6 @@ export default function App() {
   ];
 
   useEffect(() => {
-    if (workspaces.length > 0) {
-      return;
-    }
-
-    window.vibe?.app.getCwd().then((cwd) => {
-      const workspace = starterWorkspace(cwd);
-      setWorkspaces([workspace]);
-      setActiveWorkspaceId(workspace.id);
-    });
-  }, [workspaces.length]);
-
-  useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(workspaces));
   }, [workspaces]);
 
@@ -490,7 +478,10 @@ export default function App() {
   useEffect(() => {
     if (activeWorkspaceId) {
       localStorage.setItem(ACTIVE_WORKSPACE_STORAGE_KEY, activeWorkspaceId);
+      return;
     }
+
+    localStorage.removeItem(ACTIVE_WORKSPACE_STORAGE_KEY);
   }, [activeWorkspaceId]);
 
   useEffect(() => {
@@ -784,6 +775,53 @@ export default function App() {
     }
   }
 
+  function removeWorkspace(workspaceId: string) {
+    const workspaceIndex = workspaces.findIndex(
+      (workspace) => workspace.id === workspaceId
+    );
+    const workspace = workspaces[workspaceIndex];
+
+    if (!workspace) {
+      return;
+    }
+
+    const removedSessionIds = new Set(
+      workspace.sessions.map((session) => session.id)
+    );
+    workspace.sessions.forEach((session) => {
+      window.vibe?.terminal.kill(session.id);
+    });
+
+    const nextWorkspaces = workspaces.filter(
+      (item) => item.id !== workspaceId
+    );
+
+    setWorkspaces(nextWorkspaces);
+
+    if (
+      activeWorkspaceId === workspaceId ||
+      !nextWorkspaces.some((item) => item.id === activeWorkspaceId)
+    ) {
+      const nextActiveWorkspace =
+        nextWorkspaces[Math.min(workspaceIndex, nextWorkspaces.length - 1)] ??
+        null;
+
+      setActiveWorkspaceId(nextActiveWorkspace?.id ?? null);
+
+      if (!nextActiveWorkspace && activeView === "project") {
+        setActiveView("multi");
+      }
+    }
+
+    if (maximizedSessionId && removedSessionIds.has(maximizedSessionId)) {
+      setMaximizedSessionId(null);
+    }
+
+    if (selectedSessionId && removedSessionIds.has(selectedSessionId)) {
+      setSelectedSessionId(null);
+    }
+  }
+
   function restartSession(scope: SessionScope, session: AgentSession) {
     window.vibe?.terminal.kill(session.id).then(() => {
       updateScopeSessions(scope, (sessions) =>
@@ -1051,9 +1089,35 @@ export default function App() {
     ? `v${updateState.info.version}`
     : "a new version";
   const updatePercent = updateState ? formatUpdatePercent(updateState) : 0;
+  const updateCheckLabel =
+    updateState?.status === "checking"
+      ? "Checking..."
+      : updateState?.status === "downloaded"
+        ? "Update ready"
+        : updateState?.status === "available"
+          ? "Update available"
+          : updateState?.status === "downloading"
+            ? "Downloading..."
+            : "Check for update";
+  const updateCheckDisabled =
+    updateState?.status === "checking" || updateState?.status === "downloading";
 
   function dismissUpdateOverlay() {
     setDismissedUpdateKey(updateNoticeKey);
+  }
+
+  async function checkForUpdates() {
+    setDismissedUpdateKey(null);
+
+    const result = await window.vibe?.updates.check();
+    if (!result) {
+      setShellMessage("Update checks are unavailable in this window.");
+      return;
+    }
+
+    if (!result.ok || result.message) {
+      setShellMessage(result.message || "Update check failed.");
+    }
   }
 
   async function downloadUpdate() {
@@ -1123,32 +1187,43 @@ export default function App() {
             const hasUnreadAttention = workspaceHasUnreadAttention(workspace);
 
             return (
-              <button
-                key={workspace.id}
-                className={clsx(
-                  "workspace-button",
-                  activeView === "project" &&
-                    workspace.id === activeWorkspace?.id &&
-                    "active",
-                  hasUnreadAttention && "has-attention"
-                )}
-                onClick={() => {
-                  setSelectedSessionId(null);
-                  setActiveWorkspaceId(workspace.id);
-                  setActiveView("project");
-                }}
-              >
-                <span
+              <div className="workspace-row" key={workspace.id}>
+                <button
+                  type="button"
                   className={clsx(
-                    "attention-dot",
-                    !hasUnreadAttention && "attention-dot-empty"
+                    "workspace-button",
+                    activeView === "project" &&
+                      workspace.id === activeWorkspace?.id &&
+                      "active",
+                    hasUnreadAttention && "has-attention"
                   )}
-                  aria-hidden="true"
-                />
-                <Folder size={16} />
-                <span>{workspace.name}</span>
-                <ChevronRight size={15} />
-              </button>
+                  onClick={() => {
+                    setSelectedSessionId(null);
+                    setActiveWorkspaceId(workspace.id);
+                    setActiveView("project");
+                  }}
+                >
+                  <span
+                    className={clsx(
+                      "attention-dot",
+                      !hasUnreadAttention && "attention-dot-empty"
+                    )}
+                    aria-hidden="true"
+                  />
+                  <Folder size={16} />
+                  <span>{workspace.name}</span>
+                  <ChevronRight size={15} />
+                </button>
+                <button
+                  type="button"
+                  className="workspace-remove-button"
+                  title={`Remove ${workspace.name}`}
+                  aria-label={`Remove ${workspace.name}`}
+                  onClick={() => removeWorkspace(workspace.id)}
+                >
+                  <X size={14} />
+                </button>
+              </div>
             );
           })}
         </div>
@@ -1189,21 +1264,9 @@ export default function App() {
           </div>
 
           <div className="quick-actions">
-            <button onClick={() => addSession("terminal")}>
-              <TerminalSquare size={16} />
-              Terminal
-            </button>
-            <button onClick={() => addSession("codex")}>
-              <Bot size={16} />
-              Codex
-            </button>
-            <button onClick={() => addSession("claude")}>
-              <Braces size={16} />
-              Claude
-            </button>
-            <button onClick={() => addSession("gemini")}>
-              <MessageSquarePlus size={16} />
-              Agent
+            <button onClick={checkForUpdates} disabled={updateCheckDisabled}>
+              <RefreshCw size={16} />
+              {updateCheckLabel}
             </button>
           </div>
         </header>

@@ -40,7 +40,7 @@ Plain PowerShell terminals work without those agent tools.
 
 ## Updates
 
-vibeTerminal checks for updates once when it launches. If a newer GitHub Release is available, the app shows a small overlay with `Update` and `Later`.
+vibeTerminal checks for updates once when it launches. You can also use `Check for update` in the top bar after launch. If a newer GitHub Release is available, the app shows a small overlay with `Update` and `Later`.
 
 Updates are downloaded only after you accept, and the app restarts only when you choose `Restart`.
 

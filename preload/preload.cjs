@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld("vibe", {
   },
   updates: {
     getState: () => ipcRenderer.invoke("updates:get-state"),
+    check: () => ipcRenderer.invoke("updates:check"),
     download: () => ipcRenderer.invoke("updates:download"),
     restart: () => ipcRenderer.invoke("updates:restart"),
     onEvent: (callback) => {

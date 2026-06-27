@@ -16,6 +16,15 @@ const rendererArgs = isWindows ? [] : ["run", "dev:frontend"];
 const electronCommand = isWindows ? `"${electronBin}" .` : electronBin;
 const electronArgs = isWindows ? [] : ["."];
 
+function electronAppEnv(extra = {}) {
+  const env = {
+    ...process.env,
+    ...extra
+  };
+  delete env.ELECTRON_RUN_AS_NODE;
+  return env;
+}
+
 function killTree(child) {
   if (!child || child.killed) {
     return;
@@ -78,10 +87,9 @@ async function main() {
   const app = spawn(electronCommand, electronArgs, {
     cwd: rootDir,
     stdio: "inherit",
-    env: {
-      ...process.env,
+    env: electronAppEnv({
       VITE_DEV_SERVER_URL: "http://127.0.0.1:5173"
-    },
+    }),
     shell: isWindows
   });
 

@@ -3,7 +3,6 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
-const { autoUpdater } = require("electron-updater");
 const { createAgentTelemetryManager } = require("./agentTelemetry.cjs");
 
 const isScreenshotMode =
@@ -29,13 +28,23 @@ let agentThreadHostReady = false;
 let nextAgentThreadRequestId = 1;
 const pendingAgentThreadRequests = new Map();
 let agentTelemetry = null;
+let autoUpdater = null;
 let autoUpdaterConfigured = false;
 let checkedForUpdatesOnLaunch = false;
 let updateDownloadRequested = false;
+let manualUpdateCheckRequested = false;
 let updateState = {
   status: app.isPackaged ? "idle" : "disabled",
   updatedAt: Date.now()
 };
+
+function getAutoUpdater() {
+  if (!autoUpdater) {
+    ({ autoUpdater } = require("electron-updater"));
+  }
+
+  return autoUpdater;
+}
 
 function getPtyHostPath() {
   return getHelperHostPath("ptyHost.cjs");
@@ -126,14 +135,15 @@ function setupAutoUpdater() {
   }
 
   autoUpdaterConfigured = true;
-  autoUpdater.autoDownload = false;
-  autoUpdater.autoInstallOnAppQuit = false;
+  const updater = getAutoUpdater();
+  updater.autoDownload = false;
+  updater.autoInstallOnAppQuit = false;
 
-  autoUpdater.on("checking-for-update", () => {
+  updater.on("checking-for-update", () => {
     publishUpdateState({ status: "checking" });
   });
 
-  autoUpdater.on("update-available", (info) => {
+  updater.on("update-available", (info) => {
     publishUpdateState({
       status: "available",
       info: serializeUpdateInfo(info),
@@ -142,7 +152,7 @@ function setupAutoUpdater() {
     });
   });
 
-  autoUpdater.on("update-not-available", (info) => {
+  updater.on("update-not-available", (info) => {
     publishUpdateState({
       status: "not-available",
       info: serializeUpdateInfo(info),
@@ -151,7 +161,7 @@ function setupAutoUpdater() {
     });
   });
 
-  autoUpdater.on("download-progress", (progress) => {
+  updater.on("download-progress", (progress) => {
     publishUpdateState({
       status: "downloading",
       progress: {
@@ -163,7 +173,7 @@ function setupAutoUpdater() {
     });
   });
 
-  autoUpdater.on("update-downloaded", (info) => {
+  updater.on("update-downloaded", (info) => {
     publishUpdateState({
       status: "downloaded",
       info: serializeUpdateInfo(info),
@@ -172,8 +182,8 @@ function setupAutoUpdater() {
     });
   });
 
-  autoUpdater.on("error", (error) => {
-    if (updateDownloadRequested) {
+  updater.on("error", (error) => {
+    if (updateDownloadRequested || manualUpdateCheckRequested) {
       publishUpdateState({
         status: "error",
         errorMessage: error.message || "Update failed.",
@@ -191,24 +201,96 @@ function setupAutoUpdater() {
   });
 }
 
+async function checkForAppUpdates(options = {}) {
+  const silent = Boolean(options.silent);
+
+  if (!app.isPackaged) {
+    publishUpdateState({
+      status: "disabled",
+      errorMessage: undefined,
+      progress: undefined
+    });
+
+    return {
+      ok: false,
+      message: "Updates are only available in packaged builds."
+    };
+  }
+
+  if (updateState.status === "checking") {
+    return {
+      ok: false,
+      message: "An update check is already running."
+    };
+  }
+
+  if (updateState.status === "downloading") {
+    return {
+      ok: false,
+      message: "An update is already downloading."
+    };
+  }
+
+  if (updateState.status === "downloaded") {
+    return {
+      ok: true,
+      message: "An update is ready to install."
+    };
+  }
+
+  setupAutoUpdater();
+
+  if (!silent) {
+    manualUpdateCheckRequested = true;
+  }
+
+  try {
+    await getAutoUpdater().checkForUpdates();
+
+    if (updateState.status === "not-available") {
+      return {
+        ok: true,
+        message: "vibeTerminal is up to date."
+      };
+    }
+
+    return { ok: true };
+  } catch (error) {
+    const message = error.message || "Update check failed.";
+
+    if (silent) {
+      console.error(`[updates] launch check failed: ${message}`);
+      publishUpdateState({
+        status: "idle",
+        errorMessage: undefined,
+        progress: undefined
+      });
+    } else {
+      publishUpdateState({
+        status: "error",
+        errorMessage: message,
+        progress: undefined
+      });
+    }
+
+    return {
+      ok: false,
+      message
+    };
+  } finally {
+    if (!silent) {
+      manualUpdateCheckRequested = false;
+    }
+  }
+}
+
 async function checkForUpdatesOnLaunch() {
   if (!app.isPackaged || checkedForUpdatesOnLaunch) {
     return;
   }
 
   checkedForUpdatesOnLaunch = true;
-  setupAutoUpdater();
-
-  try {
-    await autoUpdater.checkForUpdates();
-  } catch (error) {
-    console.error(`[updates] launch check failed: ${error.message}`);
-    publishUpdateState({
-      status: "idle",
-      errorMessage: undefined,
-      progress: undefined
-    });
-  }
+  await checkForAppUpdates({ silent: true });
 }
 
 async function downloadAppUpdate() {
@@ -238,7 +320,7 @@ async function downloadAppUpdate() {
       status: "downloading",
       errorMessage: undefined
     });
-    await autoUpdater.downloadUpdate();
+    await getAutoUpdater().downloadUpdate();
     return { ok: true };
   } catch (error) {
     publishUpdateState({
@@ -259,7 +341,7 @@ function restartAndInstallUpdate() {
   }
 
   setImmediate(() => {
-    autoUpdater.quitAndInstall(false, true);
+    getAutoUpdater().quitAndInstall(false, true);
   });
   return true;
 }
@@ -639,6 +721,8 @@ app.on("window-all-closed", () => {
 ipcMain.handle("app:get-cwd", () => getDefaultRuntimeCwd());
 
 ipcMain.handle("updates:get-state", () => updateState);
+
+ipcMain.handle("updates:check", () => checkForAppUpdates());
 
 ipcMain.handle("updates:download", () => downloadAppUpdate());
 

@@ -14,6 +14,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 ## Frontend Scripts
 
 - `scripts/frontend/attention-smoke.cjs` - Validates the shared terminal attention helpers used to decide whether sidebar workspace dots should appear and when unread attention is cleared.
+- `scripts/frontend/workspace-smoke.cjs` - Validates empty-install workspace startup, project folder removal wiring, and sidebar remove control styling.
 
 ## QA Scripts
 
@@ -32,4 +33,5 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `npm run smoke:backend:codex-discovery` - Backend smoke test for Codex thread discovery.
 - `npm run smoke:backend:agent-telemetry` - Backend smoke test for vibeTerminal-owned agent telemetry shims.
 - `npm run smoke:frontend:attention` - Frontend smoke test for terminal attention helper behavior.
+- `npm run smoke:frontend:workspace` - Frontend smoke test for workspace startup and project folder removal behavior.
 - `npm run smoke:codex-discovery` - Compatibility alias for the backend smoke test.

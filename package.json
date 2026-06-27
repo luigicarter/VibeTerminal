@@ -20,6 +20,7 @@
     "smoke:backend:agent-telemetry": "node scripts/backend/agent-telemetry-smoke.cjs",
     "smoke:backend:codex-discovery": "node scripts/backend/codex-discovery-smoke.cjs",
     "smoke:frontend:attention": "node scripts/frontend/attention-smoke.cjs",
+    "smoke:frontend:workspace": "node scripts/frontend/workspace-smoke.cjs",
     "smoke:codex-discovery": "npm run smoke:backend:codex-discovery",
     "typecheck": "tsc --noEmit",
     "pack:win": "npm run build && electron-builder --win --dir",

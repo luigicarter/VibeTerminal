@@ -33,6 +33,15 @@ const screenshotTimeoutMs = 30000;
 const screenshotDelayMs = 4500;
 const shimBaseDir = path.join(rootDir, ".tmp", "vibe-agent-shims");
 
+function electronAppEnv(extra = {}) {
+  const env = {
+    ...process.env,
+    ...extra
+  };
+  delete env.ELECTRON_RUN_AS_NODE;
+  return env;
+}
+
 function cleanupDeadShimRuns() {
   cleanupStaleShimDirs({ baseDir: shimBaseDir });
 }
@@ -202,8 +211,7 @@ async function main() {
     app = spawn(electronCommand, electronArgs, {
       cwd: rootDir,
       stdio: "inherit",
-      env: {
-        ...process.env,
+      env: electronAppEnv({
         VITE_DEV_SERVER_URL: "http://127.0.0.1:5173",
         VIBE_INTERNAL_SCREENSHOT: isWindows ? "0" : "1",
         VIBE_SCREENSHOT_MODE: "1",
@@ -211,7 +219,7 @@ async function main() {
         VIBE_SCREENSHOT_USER_DATA: screenshotUserData,
         VIBE_AGENT_SHIM_BASE_DIR: screenshotShimBase,
         VIBE_SCREENSHOT_DELAY_MS: String(screenshotDelayMs)
-      },
+      }),
       shell: isWindows
     });
 

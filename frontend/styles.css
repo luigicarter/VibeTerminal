@@ -235,6 +235,13 @@ button {
   max-height: 220px;
 }
 
+.workspace-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  align-items: center;
+  gap: 4px;
+}
+
 .workspace-button {
   display: grid;
   width: 100%;
@@ -279,6 +286,36 @@ button {
   border-color: #454c45;
   background: #20241f;
   color: #ffffff;
+}
+
+.workspace-remove-button {
+  display: inline-grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #858a84;
+  cursor: pointer;
+  opacity: 0.72;
+  transition:
+    border-color 120ms ease,
+    background 120ms ease,
+    color 120ms ease,
+    opacity 120ms ease;
+}
+
+.workspace-row:hover .workspace-remove-button,
+.workspace-remove-button:focus-visible {
+  opacity: 1;
+}
+
+.workspace-remove-button:hover,
+.workspace-remove-button:focus-visible {
+  border-color: #614141;
+  background: #2b2020;
+  color: #ffb8b8;
 }
 
 .workspace {
@@ -347,9 +384,20 @@ button {
 }
 
 .quick-actions button {
+  min-width: 142px;
   min-height: 34px;
   padding: 0 11px;
   font-size: 13px;
+}
+
+.quick-actions button:disabled {
+  cursor: progress;
+  opacity: 0.72;
+}
+
+.quick-actions button:disabled:hover {
+  border-color: #3a403b;
+  background: #222722;
 }
 
 .host-message {
