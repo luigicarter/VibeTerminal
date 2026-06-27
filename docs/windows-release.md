@@ -4,10 +4,10 @@ vibeTerminal ships to Windows users as an Electron Builder NSIS installer hosted
 
 ## Current Public Release
 
-The current public Windows release is `v0.1.4`:
+The current public Windows release is `v0.1.5`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.4`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.4/vibeTerminal-Setup-0.1.4.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.5`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.5/vibeTerminal-Setup-0.1.5.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -113,10 +113,10 @@ npm run smoke:backend:updates
 npm run smoke:frontend:attention
 npm run smoke:frontend:workspace
 npm run smoke:frontend:session-launch
-npm run dist:win -- --publish always
+npm run dist:win -- --publish never
 ```
 
-The workflow uses GitHub's built-in `${{ secrets.GITHUB_TOKEN }}` through `GH_TOKEN`. Do not add a personal token to the repo, workflow file, `.env`, package config, or docs.
+The workflow verifies `release/latest.yml`, the installer, and the installer blockmap, then publishes them with GitHub CLI using GitHub's built-in `${{ secrets.GITHUB_TOKEN }}` through `GH_TOKEN`. Do not add a personal token to the repo, workflow file, `.env`, package config, or docs.
 
 Manual `workflow_dispatch` runs build the installer and upload it as a workflow artifact, but they do not publish a GitHub Release.
 

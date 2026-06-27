@@ -44,10 +44,37 @@ jobs:
 
       - name: Build installer for release tag
         if: startsWith(github.ref, 'refs/tags/v')
-        run: npm run dist:win -- --publish always
+        run: npm run dist:win -- --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Publish release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = $env:GITHUB_REF_NAME
+          $repo = $env:GITHUB_REPOSITORY
+          $version = $tag.TrimStart("v")
+          $files = @(
+            "release/vibeTerminal-Setup-$version.exe",
+            "release/vibeTerminal-Setup-$version.exe.blockmap",
+            "release/latest.yml"
+          )
+
+          foreach ($file in $files) {
+            if (-not (Test-Path -LiteralPath $file)) {
+              throw "Missing release asset: $file"
+            }
+          }
+
+          if (gh release view $tag --repo $repo *> $null) {
+            gh release upload $tag @files --repo $repo --clobber
+          } else {
+            gh release create $tag @files --repo $repo --title $version --latest --generate-notes
+          }
 
       - name: Build installer artifact
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
