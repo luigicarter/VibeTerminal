@@ -1,0 +1,39 @@
+{
+  "name": "vibe-terminal",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A tiled local workspace for running multiple coding agents side by side.",
+  "main": "backend/main.cjs",
+  "scripts": {
+    "dev": "node scripts/app/dev.cjs",
+    "dev:frontend": "vite --host 127.0.0.1",
+    "dev:renderer": "npm run dev:frontend",
+    "build": "tsc --noEmit && vite build",
+    "start": "npm run build && electron .",
+    "screenshot": "node scripts/qa/screenshot.cjs",
+    "smoke:backend:agent-telemetry": "node scripts/backend/agent-telemetry-smoke.cjs",
+    "smoke:backend:codex-discovery": "node scripts/backend/codex-discovery-smoke.cjs",
+    "smoke:frontend:attention": "node scripts/frontend/attention-smoke.cjs",
+    "smoke:codex-discovery": "npm run smoke:backend:codex-discovery",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-web-links": "^0.11.0",
+    "@xterm/xterm": "^5.5.0",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.468.0",
+    "node-pty": "^1.1.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.17",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^42.5.0",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5"
+  }
+}

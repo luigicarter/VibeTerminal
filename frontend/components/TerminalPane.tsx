@@ -1,0 +1,560 @@
+import { useEffect, useMemo, useRef } from "react";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import { WebLinksAddon } from "@xterm/addon-web-links";
+import {
+  CopyPlus,
+  GripVertical,
+  Maximize2,
+  Minimize2,
+  Plus,
+  Play,
+  RefreshCcw,
+  TerminalSquare,
+  X
+} from "lucide-react";
+import { buildLaunchCommand, isThreadedAgentKind } from "../sessionLaunch";
+import type {
+  AgentProfile,
+  AgentSession,
+  AgentThreadRef,
+  AgentThreadLookupStatus,
+  SessionStatus
+} from "../types";
+
+const THREAD_LOOKUP_POLL_MS = 8000;
+const THREAD_LOOKUP_TIMEOUT_MS = 90_000;
+
+interface ThreadLookupPatch {
+  threadLookupStartedAt?: number;
+  threadLookupStatus: AgentThreadLookupStatus;
+  threadLookupMessage?: string;
+}
+
+interface TerminalPaneProps {
+  session: AgentSession;
+  profile: AgentProfile;
+  claimedThreadIds: string[];
+  isMaximized: boolean;
+  isArranging: boolean;
+  onClose: () => void;
+  onDuplicate: () => void;
+  onRestart: () => void;
+  onAdd: () => void;
+  onSelect: () => void;
+  onMaximize: () => void;
+  onThreadRefChange: (threadRef: AgentThreadRef) => void;
+  onThreadLookupChange: (patch: ThreadLookupPatch) => void;
+  onStatusChange: (status: SessionStatus) => void;
+}
+
+function statusLabel(status: SessionStatus) {
+  switch (status) {
+    case "starting":
+      return "starting";
+    case "running":
+      return "working";
+    case "waiting":
+      return "waiting";
+    case "done":
+      return "done";
+    case "failed":
+      return "failed";
+    default:
+      return "idle";
+  }
+}
+
+export default function TerminalPane({
+  session,
+  profile,
+  claimedThreadIds,
+  isMaximized,
+  isArranging,
+  onAdd,
+  onClose,
+  onDuplicate,
+  onMaximize,
+  onRestart,
+  onSelect,
+  onThreadRefChange,
+  onThreadLookupChange,
+  onStatusChange
+}: TerminalPaneProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const terminalRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
+  const sessionRef = useRef(session);
+  const createdRef = useRef(false);
+  const lastLaunchTokenRef = useRef(0);
+  const onStatusChangeRef = useRef(onStatusChange);
+  const onThreadRefChangeRef = useRef(onThreadRefChange);
+  const onThreadLookupChangeRef = useRef(onThreadLookupChange);
+  const isArrangingRef = useRef(isArranging);
+  const pendingFitRef = useRef(false);
+  const fitFrameRef = useRef<number | null>(null);
+  const fitAndResizeRef = useRef<(() => void) | null>(null);
+  const lastSentSizeRef = useRef<{ cols: number; rows: number } | null>(null);
+  const threadLookupTimeoutRef = useRef<number | null>(null);
+  const threadLookupAfterRef = useRef(
+    session.threadLookupStartedAt ?? session.createdAt
+  );
+  const terminalExitedRef = useRef(false);
+  const lookupInFlightRef = useRef(false);
+  const claimedThreadIdsRef = useRef(claimedThreadIds);
+
+  const launchCommand = useMemo(() => buildLaunchCommand(session), [session]);
+
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
+
+  useEffect(() => {
+    onStatusChangeRef.current = onStatusChange;
+  }, [onStatusChange]);
+
+  useEffect(() => {
+    onThreadRefChangeRef.current = onThreadRefChange;
+  }, [onThreadRefChange]);
+
+  useEffect(() => {
+    onThreadLookupChangeRef.current = onThreadLookupChange;
+  }, [onThreadLookupChange]);
+
+  useEffect(() => {
+    claimedThreadIdsRef.current = claimedThreadIds;
+  }, [claimedThreadIds]);
+
+  useEffect(() => {
+    if (session.threadLookupStartedAt) {
+      threadLookupAfterRef.current = session.threadLookupStartedAt;
+    }
+  }, [session.threadLookupStartedAt]);
+
+  useEffect(() => {
+    return () => {
+      if (threadLookupTimeoutRef.current) {
+        window.clearTimeout(threadLookupTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    isArrangingRef.current = isArranging;
+
+    if (!isArranging && pendingFitRef.current) {
+      pendingFitRef.current = false;
+      scheduleFitAndResize();
+    }
+  }, [isArranging]);
+
+  function setStatus(status: SessionStatus) {
+    if (sessionRef.current.status === status) {
+      return;
+    }
+
+    sessionRef.current = {
+      ...sessionRef.current,
+      status
+    };
+    onStatusChangeRef.current(status);
+  }
+
+  function scheduleFitAndResize() {
+    if (fitFrameRef.current !== null) {
+      return;
+    }
+
+    fitFrameRef.current = requestAnimationFrame(() => {
+      fitFrameRef.current = null;
+      fitAndResizeRef.current?.();
+    });
+  }
+
+  useEffect(() => {
+    if (!containerRef.current || terminalRef.current) {
+      return;
+    }
+
+    const terminal = new Terminal({
+      cursorBlink: true,
+      convertEol: true,
+      fontFamily:
+        'Cascadia Mono, "Cascadia Code", "JetBrains Mono", Consolas, monospace',
+      fontSize: 13,
+      fontWeight: 500,
+      lineHeight: 1.18,
+      letterSpacing: 0,
+      scrollback: 5000,
+      theme: {
+        background: "#181b19",
+        foreground: "#efeee7",
+        cursor: profile.accent,
+        cursorAccent: "#141615",
+        selectionBackground: "#3f4a44",
+        black: "#101211",
+        red: "#ff6b6b",
+        green: "#87d37c",
+        yellow: "#f2c94c",
+        blue: "#70a8ff",
+        magenta: "#c78bff",
+        cyan: "#6bd7db",
+        white: "#f2f0e8",
+        brightBlack: "#636a64",
+        brightRed: "#ff8585",
+        brightGreen: "#9be28e",
+        brightYellow: "#f8d56a",
+        brightBlue: "#9ac3ff",
+        brightMagenta: "#d8a8ff",
+        brightCyan: "#91eef2",
+        brightWhite: "#ffffff"
+      }
+    });
+
+    const fitAddon = new FitAddon();
+    terminal.loadAddon(fitAddon);
+    terminal.loadAddon(new WebLinksAddon());
+    terminal.open(containerRef.current);
+    terminal.focus();
+
+    terminalRef.current = terminal;
+    fitRef.current = fitAddon;
+
+    const fitAndResize = () => {
+      if (isArrangingRef.current) {
+        pendingFitRef.current = true;
+        return;
+      }
+
+      try {
+        fitAddon.fit();
+        const size = {
+          cols: terminal.cols,
+          rows: terminal.rows
+        };
+
+        if (
+          lastSentSizeRef.current?.cols === size.cols &&
+          lastSentSizeRef.current?.rows === size.rows
+        ) {
+          return;
+        }
+
+        lastSentSizeRef.current = size;
+        window.vibe?.terminal.resize(session.id, size.cols, size.rows);
+      } catch {
+        // Fit can throw while the pane is between layout states.
+      }
+    };
+    fitAndResizeRef.current = fitAndResize;
+
+    scheduleFitAndResize();
+
+    const resizeObserver = new ResizeObserver(() => {
+      scheduleFitAndResize();
+    });
+    resizeObserver.observe(containerRef.current);
+
+    terminal.onData((data) => {
+      if (!createdRef.current) {
+        return;
+      }
+
+      onSelect();
+      window.vibe?.terminal.input(session.id, data);
+      setStatus("running");
+    });
+
+    const removeListener = window.vibe?.terminal.onEvent((event) => {
+      if (!("id" in event) || event.id !== session.id) {
+        return;
+      }
+
+      if (event.type === "data") {
+        terminal.write(event.data);
+        setStatus("running");
+      }
+
+      if (event.type === "snapshot") {
+        terminal.reset();
+        if (event.data) {
+          terminal.write(event.data);
+        }
+
+        if (event.isRunning) {
+          setStatus("running");
+        } else {
+          terminal.writeln("");
+          terminal.writeln(
+            "\x1b[33mProcess exited. Use restart to run it again.\x1b[0m"
+          );
+          setStatus(event.exitCode === 0 ? "done" : "failed");
+        }
+      }
+
+      if (event.type === "error") {
+        terminal.writeln("");
+        terminal.writeln(`\x1b[31m${event.message}\x1b[0m`);
+        setStatus("failed");
+      }
+
+      if (event.type === "exit") {
+        terminalExitedRef.current = true;
+        terminal.writeln("");
+        terminal.writeln("\x1b[33mProcess exited. Use restart to run it again.\x1b[0m");
+        scheduleThreadLookup(200, true);
+        setStatus(event.exitCode === 0 ? "done" : "failed");
+      }
+    });
+
+    if (!session.started) {
+      terminal.writeln(
+        "\x1b[90mSession is paused. Use the play button to start it.\x1b[0m"
+      );
+    }
+
+    return () => {
+      resizeObserver.disconnect();
+      if (fitFrameRef.current !== null) {
+        cancelAnimationFrame(fitFrameRef.current);
+        fitFrameRef.current = null;
+      }
+      removeListener?.();
+      terminal.dispose();
+      terminalRef.current = null;
+      fitRef.current = null;
+      fitAndResizeRef.current = null;
+      lastSentSizeRef.current = null;
+    };
+  }, [
+    launchCommand,
+    profile.accent,
+    session.cwd,
+    session.id,
+    session.started
+  ]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (!session.started || !terminal) {
+      return;
+    }
+
+    if (
+      createdRef.current &&
+      lastLaunchTokenRef.current === session.launchToken
+    ) {
+      return;
+    }
+
+    lastLaunchTokenRef.current = session.launchToken;
+    createdRef.current = true;
+    terminalExitedRef.current = false;
+    terminal.clear();
+    setStatus("starting");
+    lastSentSizeRef.current = {
+      cols: terminal.cols,
+      rows: terminal.rows
+    };
+    const lookupStartedAt = Date.now();
+    threadLookupAfterRef.current = lookupStartedAt;
+    if (isThreadedAgentKind(session.kind) && !session.threadRef?.id) {
+      onThreadLookupChangeRef.current({
+        threadLookupStartedAt: lookupStartedAt,
+        threadLookupStatus: "pending",
+        threadLookupMessage: `Waiting for ${profile.label} to create local thread metadata.`
+      });
+    }
+    window.vibe?.terminal.create({
+      id: session.id,
+      cwd: session.cwd,
+      command: launchCommand,
+      launchToken: session.launchToken,
+      cols: terminal.cols,
+      rows: terminal.rows
+    });
+    scheduleThreadLookup(5000);
+  }, [
+    launchCommand,
+    session.cwd,
+    session.id,
+    session.launchToken,
+    session.started
+  ]);
+
+  function scheduleThreadLookup(delayMs: number, finalAttempt = false) {
+    const currentSession = sessionRef.current;
+    const provider = currentSession.kind;
+
+    if (
+      currentSession.threadRef?.id ||
+      !isThreadedAgentKind(provider) ||
+      !window.vibe?.agentThreads ||
+      (!finalAttempt && terminalExitedRef.current) ||
+      (!finalAttempt &&
+        (currentSession.threadLookupStatus === "ambiguous" ||
+          currentSession.threadLookupStatus === "failed"))
+    ) {
+      return;
+    }
+
+    if (threadLookupTimeoutRef.current) {
+      window.clearTimeout(threadLookupTimeoutRef.current);
+    }
+
+    threadLookupTimeoutRef.current = window.setTimeout(
+      () => runThreadLookup(finalAttempt),
+      delayMs
+    );
+  }
+
+  async function runThreadLookup(finalAttempt: boolean) {
+    const currentSession = sessionRef.current;
+    const provider = currentSession.kind;
+
+    threadLookupTimeoutRef.current = null;
+
+    if (
+      lookupInFlightRef.current ||
+      currentSession.threadRef?.id ||
+      !isThreadedAgentKind(provider) ||
+      !window.vibe?.agentThreads
+    ) {
+      return;
+    }
+
+    const lookupStartedAt =
+      threadLookupAfterRef.current ||
+      currentSession.threadLookupStartedAt ||
+      currentSession.createdAt;
+
+    if (
+      !finalAttempt &&
+      Date.now() - lookupStartedAt > THREAD_LOOKUP_TIMEOUT_MS
+    ) {
+      onThreadLookupChangeRef.current({
+        threadLookupStartedAt: lookupStartedAt,
+        threadLookupStatus: "failed",
+        threadLookupMessage: `Timed out waiting for ${profile.label} local thread metadata.`
+      });
+      return;
+    }
+
+    lookupInFlightRef.current = true;
+
+    try {
+      if (sessionRef.current.threadRef?.id) {
+        return;
+      }
+
+      const result = await window.vibe?.agentThreads.findLatest({
+        provider,
+        cwd: currentSession.cwd,
+        after: lookupStartedAt,
+        excludeIds: claimedThreadIdsRef.current
+      });
+
+      if (result?.status === "found") {
+        onThreadRefChangeRef.current(result.threadRef);
+        onThreadLookupChangeRef.current({
+          threadLookupStartedAt: lookupStartedAt,
+          threadLookupStatus: "found",
+          threadLookupMessage: undefined
+        });
+        return;
+      }
+
+      if (result?.status === "ambiguous") {
+        onThreadLookupChangeRef.current({
+          threadLookupStartedAt: lookupStartedAt,
+          threadLookupStatus: "ambiguous",
+          threadLookupMessage:
+            result.message ??
+            `Found multiple ${profile.label} threads; not guessing.`
+        });
+        return;
+      }
+
+      if (result?.status === "failed") {
+        onThreadLookupChangeRef.current({
+          threadLookupStartedAt: lookupStartedAt,
+          threadLookupStatus: "failed",
+          threadLookupMessage:
+            result.message ?? `Could not discover ${profile.label} thread metadata.`
+        });
+        return;
+      }
+
+      if (finalAttempt) {
+        onThreadLookupChangeRef.current({
+          threadLookupStartedAt: lookupStartedAt,
+          threadLookupStatus: "failed",
+          threadLookupMessage: `${profile.label} exited before a thread id was captured.`
+        });
+        return;
+      }
+
+      onThreadLookupChangeRef.current({
+        threadLookupStartedAt: lookupStartedAt,
+        threadLookupStatus: "pending",
+        threadLookupMessage:
+          result?.message ??
+          `Waiting for ${profile.label} to create local thread metadata.`
+      });
+      scheduleThreadLookup(THREAD_LOOKUP_POLL_MS);
+    } finally {
+      lookupInFlightRef.current = false;
+    }
+  }
+
+  return (
+    <article
+      className={`terminal-pane ${isArranging ? "terminal-pane-arranging" : ""}`}
+      style={{ "--pane-accent": profile.accent } as React.CSSProperties}
+      onPointerDown={onSelect}
+    >
+      <header className="pane-header pane-drag-zone" title="Drag header to move pane">
+        <div className="pane-title">
+          <GripVertical className="drag-grip" size={15} />
+          <TerminalSquare size={15} />
+          <span>{session.name}</span>
+          <small>{profile.label}</small>
+        </div>
+
+        <div className="pane-status">
+          <span className={`status-pill status-${session.status}`}>
+            {statusLabel(session.status)}
+          </span>
+        </div>
+
+        <div className="pane-actions">
+          <button title="Add matching pane" onClick={onAdd}>
+            <Plus size={14} />
+          </button>
+          <button title="Duplicate pane" onClick={onDuplicate}>
+            <CopyPlus size={14} />
+          </button>
+          <button
+            title={session.started ? "Restart terminal" : "Start terminal"}
+            onClick={onRestart}
+          >
+            {session.started ? <RefreshCcw size={14} /> : <Play size={14} />}
+          </button>
+          <button title={isMaximized ? "Restore pane" : "Maximize pane"} onClick={onMaximize}>
+            {isMaximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+          </button>
+          <button className="danger" title="Close pane" onClick={onClose}>
+            <X size={15} />
+          </button>
+        </div>
+      </header>
+
+      <div className="terminal-command-strip">
+        <span>{launchCommand || "shell"}</span>
+        <span>{session.cwd}</span>
+      </div>
+
+      <div ref={containerRef} className="terminal-surface" />
+    </article>
+  );
+}
