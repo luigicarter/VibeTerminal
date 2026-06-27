@@ -30,11 +30,14 @@ testModule.paths = Module._nodeModulePaths(path.dirname(attentionPath));
 testModule._compile(compiled, attentionPath);
 
 const {
+  attentionFromTerminalEvent,
   attentionFromEvent,
   clearUnreadAttention,
   normalizeAttention,
   shouldMarkAttentionUnread,
-  shouldShowAttentionDot
+  shouldShowAttentionDot,
+  shouldUseTerminalEventAttention,
+  statusFromTerminalEvent
 } = testModule.exports;
 
 const completed = {
@@ -60,11 +63,88 @@ const none = {
   source: "process",
   updatedAt: 103
 };
+const terminalData = {
+  id: "terminal-one",
+  type: "data",
+  data: "working"
+};
+const terminalRunningSnapshot = {
+  id: "terminal-one",
+  type: "snapshot",
+  data: "",
+  isRunning: true
+};
+const terminalCompletedSnapshot = {
+  id: "terminal-one",
+  type: "snapshot",
+  data: "",
+  isRunning: false,
+  exitCode: 0
+};
+const terminalCompletedExit = {
+  id: "terminal-one",
+  type: "exit",
+  exitCode: 0
+};
+const terminalFailedExit = {
+  id: "terminal-one",
+  type: "exit",
+  exitCode: 1
+};
+const terminalError = {
+  id: "terminal-one",
+  type: "error",
+  message: "spawn failed"
+};
 
 assert.strictEqual(normalizeAttention(undefined).state, "none");
 assert.strictEqual(attentionFromEvent(completed, true).unread, true);
 assert.strictEqual(attentionFromEvent(completed, false).unread, false);
 assert.strictEqual(attentionFromEvent(none, true).unread, false);
+assert.strictEqual(statusFromTerminalEvent(terminalData), "running");
+assert.strictEqual(statusFromTerminalEvent(terminalRunningSnapshot), "running");
+assert.strictEqual(statusFromTerminalEvent(terminalCompletedSnapshot), "done");
+assert.strictEqual(statusFromTerminalEvent(terminalFailedExit), "failed");
+assert.strictEqual(
+  attentionFromTerminalEvent(terminalCompletedExit, 200).state,
+  "completed"
+);
+assert.strictEqual(
+  attentionFromTerminalEvent(terminalCompletedExit, 200).reason,
+  "done"
+);
+assert.strictEqual(
+  attentionFromTerminalEvent(terminalFailedExit, 201).state,
+  "failed"
+);
+assert.strictEqual(
+  attentionFromTerminalEvent(terminalFailedExit, 201).reason,
+  "exit"
+);
+assert.strictEqual(
+  attentionFromTerminalEvent(terminalError, 202).message,
+  "spawn failed"
+);
+assert.strictEqual(
+  shouldUseTerminalEventAttention({ id: "plain", kind: "terminal" }),
+  true
+);
+assert.strictEqual(
+  shouldUseTerminalEventAttention({ id: "gemini", kind: "gemini" }),
+  true
+);
+assert.strictEqual(
+  shouldUseTerminalEventAttention({ id: "codex", kind: "codex" }),
+  false
+);
+assert.strictEqual(
+  shouldUseTerminalEventAttention({ id: "claude", kind: "claude" }),
+  false
+);
+assert.strictEqual(
+  shouldUseTerminalEventAttention({ id: "opencode", kind: "opencode" }),
+  false
+);
 assert.strictEqual(
   shouldMarkAttentionUnread("one", "one", ["one"], completed),
   false
@@ -112,6 +192,13 @@ assert.notStrictEqual(clearedSession, unreadSession);
 assert.strictEqual(clearedSession.attention.unread, false);
 
 const appSource = fs.readFileSync(appPath, "utf8");
+assert(
+  appSource.includes("statusFromTerminalEvent(event)") &&
+    appSource.includes("attentionFromTerminalEvent(event)") &&
+    appSource.includes("applyTerminalAttention(event.id, attention)"),
+  "app-level terminal listener should monitor process status and attention"
+);
+
 const workspaceRowIndex = appSource.indexOf('"workspace-button"');
 const workspaceDotIndex = appSource.indexOf('"attention-dot"', workspaceRowIndex);
 const workspaceFolderIndex = appSource.indexOf("<Folder", workspaceRowIndex);

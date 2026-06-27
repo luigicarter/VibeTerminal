@@ -51,8 +51,8 @@ push.
   update policy very explicitly.
 - Public screenshots must be curated. `artifacts/` is ignored, but screenshots
   can contain local project paths and terminal output.
-- There is no packaged release path yet. Users can run from source, but there is
-  no installer, signing, update channel, or release artifact story.
+- The Windows packaged release path now exists in `docs/windows-release.md`.
+  Code signing is still the main release-trust gap before a wider public launch.
 
 ## Hardening Before Announcement
 
@@ -85,8 +85,8 @@ push.
    commands, contribution rules, and issue templates.
 4. Runtime robustness: provider detection, IPC validation, PTY smoke tests, and
    clearer user-facing errors.
-5. Release path: decide whether the first public launch is source-only or
-   packaged; if packaged, add signing/build tooling and a release checklist.
+5. Release path: use the Windows installer and GitHub Releases flow in
+   `docs/windows-release.md`; add trusted code signing before wider distribution.
 6. Extensibility: turn agent providers into a small adapter layer so contributors
    can add provider commands and thread discovery without touching core UI code.
 

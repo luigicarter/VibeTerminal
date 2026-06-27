@@ -26,6 +26,8 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `npm run dev:renderer` - Compatibility alias for `dev:frontend`.
 - `npm run typecheck` - TypeScript check with no emit.
 - `npm run build` - TypeScript check plus Vite production build.
+- `npm run pack:win` - Builds the renderer and creates an unpacked Windows app in `release/win-unpacked`.
+- `npm run dist:win` - Builds the renderer and creates the Windows NSIS installer plus update metadata in `release/`.
 - `npm run screenshot` - Visual QA screenshot pass.
 - `npm run smoke:backend:codex-discovery` - Backend smoke test for Codex thread discovery.
 - `npm run smoke:backend:agent-telemetry` - Backend smoke test for vibeTerminal-owned agent telemetry shims.

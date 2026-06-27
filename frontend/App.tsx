@@ -10,6 +10,7 @@ import {
   Bot,
   Braces,
   ChevronRight,
+  Download,
   Folder,
   FolderOpen,
   LayoutGrid,
@@ -18,17 +19,22 @@ import {
   PanelLeftOpen,
   Plus,
   Play,
-  Sparkles,
-  TerminalSquare
+  RefreshCw,
+  TerminalSquare,
+  X
 } from "lucide-react";
 import clsx from "clsx";
+import vibeTerminalLogo from "./assets/vibeterminal-logo.png";
 import {
   EMPTY_ATTENTION,
   attentionFromEvent,
+  attentionFromTerminalEvent,
   clearUnreadAttention,
   normalizeAttention,
   shouldMarkAttentionUnread,
-  shouldShowAttentionDot
+  shouldShowAttentionDot,
+  shouldUseTerminalEventAttention,
+  statusFromTerminalEvent
 } from "./attention";
 import TerminalPane from "./components/TerminalPane";
 import TiledBoard from "./components/TiledBoard";
@@ -45,7 +51,8 @@ import type {
   AgentThreadRef,
   AgentThreadLookupStatus,
   LayoutBox,
-  ProjectWorkspace
+  ProjectWorkspace,
+  UpdateState
 } from "./types";
 
 const STORAGE_KEY = "vibe-terminal:workspaces:v2";
@@ -140,6 +147,11 @@ function normalizeWorkspacePath(path: string) {
 
 function formatCount(count: number, label: string) {
   return `${count} ${label}${count === 1 ? "" : "s"}`;
+}
+
+function formatUpdatePercent(state: UpdateState) {
+  const percent = state.progress?.percent;
+  return Number.isFinite(percent) ? Math.round(percent ?? 0) : 0;
 }
 
 function getProfile(kind: AgentKind) {
@@ -424,6 +436,10 @@ export default function App() {
     visibleSessionIds: []
   });
   const [shellMessage, setShellMessage] = useState<string | null>(null);
+  const [updateState, setUpdateState] = useState<UpdateState | null>(null);
+  const [dismissedUpdateKey, setDismissedUpdateKey] = useState<string | null>(
+    null
+  );
   const [isArranging, setIsArranging] = useState(false);
 
   const activeWorkspace =
@@ -521,7 +537,35 @@ export default function App() {
       if (event.type === "agent-attention") {
         applyAgentAttention(event.id, event.attention);
       }
+
+      if ("id" in event) {
+        applyTerminalStatus(event.id, statusFromTerminalEvent(event));
+
+        const attention = attentionFromTerminalEvent(event);
+        if (attention) {
+          applyTerminalAttention(event.id, attention);
+        }
+      }
     });
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+
+    window.vibe?.updates.getState().then((state) => {
+      if (!disposed) {
+        setUpdateState(state);
+      }
+    });
+
+    const unsubscribe = window.vibe?.updates.onEvent((state) => {
+      setUpdateState(state);
+    });
+
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
   }, []);
 
   function updateWorkspace(
@@ -619,6 +663,19 @@ export default function App() {
     });
   }
 
+  function applyTerminalStatus(
+    sessionId: string,
+    status: AgentSession["status"] | null
+  ) {
+    if (!status) {
+      return;
+    }
+
+    updateAnySession(sessionId, (session) =>
+      session.status === status ? session : { ...session, status }
+    );
+  }
+
   function applyAgentAttention(
     sessionId: string,
     attentionEvent: AgentAttentionEvent
@@ -626,6 +683,32 @@ export default function App() {
     const selection = attentionSelectionRef.current;
 
     updateAnySession(sessionId, (session) => {
+      return {
+        ...session,
+        attention: attentionFromEvent(
+          attentionEvent,
+          shouldMarkAttentionUnread(
+            sessionId,
+            selection.selectedSessionId,
+            selection.visibleSessionIds,
+            attentionEvent
+          )
+        )
+      };
+    });
+  }
+
+  function applyTerminalAttention(
+    sessionId: string,
+    attentionEvent: AgentAttentionEvent
+  ) {
+    const selection = attentionSelectionRef.current;
+
+    updateAnySession(sessionId, (session) => {
+      if (!shouldUseTerminalEventAttention(session)) {
+        return session;
+      }
+
       return {
         ...session,
         attention: attentionFromEvent(
@@ -953,6 +1036,41 @@ export default function App() {
     boardSessions.filter(
       (session) => !maximizedSessionId || session.id === maximizedSessionId
     );
+  const updateNoticeKey = updateState
+    ? [
+        updateState.status,
+        updateState.info?.version ?? "",
+        updateState.errorMessage ?? ""
+      ].join(":")
+    : "";
+  const shouldShowUpdateOverlay =
+    updateState !== null &&
+    ["available", "downloading", "downloaded", "error"].includes(updateState.status) &&
+    dismissedUpdateKey !== updateNoticeKey;
+  const updateVersion = updateState?.info?.version
+    ? `v${updateState.info.version}`
+    : "a new version";
+  const updatePercent = updateState ? formatUpdatePercent(updateState) : 0;
+
+  function dismissUpdateOverlay() {
+    setDismissedUpdateKey(updateNoticeKey);
+  }
+
+  async function downloadUpdate() {
+    const result = await window.vibe?.updates.download();
+    if (result && !result.ok) {
+      setUpdateState((current) => ({
+        status: "error",
+        updatedAt: Date.now(),
+        info: current?.info,
+        errorMessage: result.message || "Update failed."
+      }));
+    }
+  }
+
+  async function restartToUpdate() {
+    await window.vibe?.updates.restart();
+  }
 
   return (
     <div
@@ -962,7 +1080,7 @@ export default function App() {
       <aside className="sidebar" aria-label="Projects and chats">
         <div className="brand">
           <div className="brand-mark">
-            <Sparkles size={18} />
+            <img src={vibeTerminalLogo} alt="" aria-hidden="true" />
           </div>
           <div>
             <h1>vibeTerminal</h1>
@@ -1199,6 +1317,76 @@ export default function App() {
           )}
         </section>
       </main>
+
+      {shouldShowUpdateOverlay && updateState && (
+        <aside className="update-overlay" aria-live="polite">
+          <div className="update-overlay-heading">
+            <strong>
+              {updateState.status === "downloaded"
+                ? "Update ready"
+                : updateState.status === "error"
+                  ? "Update failed"
+                  : "Update available"}
+            </strong>
+            {updateState.status !== "downloading" && (
+              <button
+                className="update-overlay-dismiss"
+                aria-label="Dismiss update notice"
+                onClick={dismissUpdateOverlay}
+              >
+                <X size={13} />
+              </button>
+            )}
+          </div>
+
+          {updateState.status === "available" && (
+            <>
+              <p>vibeTerminal {updateVersion} is ready to download.</p>
+              <div className="update-overlay-actions">
+                <button onClick={dismissUpdateOverlay}>Later</button>
+                <button className="primary" onClick={downloadUpdate}>
+                  <Download size={15} />
+                  Update
+                </button>
+              </div>
+            </>
+          )}
+
+          {updateState.status === "downloading" && (
+            <>
+              <p>Downloading vibeTerminal {updateVersion}.</p>
+              <div
+                className="update-progress"
+                aria-label={`Update download ${updatePercent}%`}
+              >
+                <span style={{ width: `${updatePercent}%` }} />
+              </div>
+            </>
+          )}
+
+          {updateState.status === "downloaded" && (
+            <>
+              <p>Restart when your terminals are in a good place.</p>
+              <div className="update-overlay-actions">
+                <button onClick={dismissUpdateOverlay}>Later</button>
+                <button className="primary" onClick={restartToUpdate}>
+                  <RefreshCw size={15} />
+                  Restart
+                </button>
+              </div>
+            </>
+          )}
+
+          {updateState.status === "error" && (
+            <>
+              <p>{updateState.errorMessage || "The update could not be installed."}</p>
+              <div className="update-overlay-actions">
+                <button onClick={dismissUpdateOverlay}>Dismiss</button>
+              </div>
+            </>
+          )}
+        </aside>
+      )}
     </div>
   );
 }

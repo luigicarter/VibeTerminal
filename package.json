@@ -3,6 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "description": "A tiled local workspace for running multiple coding agents side by side.",
+  "author": "vibeTerminal contributors",
+  "homepage": "https://github.com/luigicarter/VibeTerminal#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/luigicarter/VibeTerminal.git"
+  },
   "main": "backend/main.cjs",
   "scripts": {
     "dev": "node scripts/app/dev.cjs",
@@ -15,13 +21,16 @@
     "smoke:backend:codex-discovery": "node scripts/backend/codex-discovery-smoke.cjs",
     "smoke:frontend:attention": "node scripts/frontend/attention-smoke.cjs",
     "smoke:codex-discovery": "npm run smoke:backend:codex-discovery",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "pack:win": "npm run build && electron-builder --win --dir",
+    "dist:win": "npm run build && electron-builder --win nsis"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",
     "clsx": "^2.1.1",
+    "electron-updater": "^6.8.9",
     "lucide-react": "^0.468.0",
     "node-pty": "^1.1.0",
     "react": "^18.3.1",
@@ -33,7 +42,65 @@
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^42.5.0",
+    "electron-builder": "^26.15.3",
     "typescript": "^5.7.2",
     "vite": "^6.0.5"
+  },
+  "build": {
+    "appId": "com.vibeterminal.app",
+    "productName": "vibeTerminal",
+    "artifactName": "vibeTerminal-Setup-${version}.${ext}",
+    "directories": {
+      "output": "release"
+    },
+    "asar": true,
+    "asarUnpack": [
+      "backend/**/*.cjs",
+      "node_modules/node-pty/**"
+    ],
+    "npmRebuild": false,
+    "files": [
+      "backend/**",
+      "dist/**",
+      "frontend/assets/**",
+      "node_modules/**",
+      "package.json",
+      "preload/**",
+      "!**/.tmp/**",
+      "!**/artifacts/**",
+      "!**/docs/**",
+      "!**/scripts/**",
+      "!**/vendor/**",
+      "!**/*.map"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "frontend/assets/vibeterminal-logo.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "vibeTerminal",
+      "uninstallDisplayName": "vibeTerminal"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "luigicarter",
+        "repo": "VibeTerminal",
+        "releaseType": "release"
+      }
+    ]
   }
 }

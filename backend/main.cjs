@@ -1,7 +1,9 @@
 const { app, BrowserWindow, dialog, ipcMain, screen } = require("electron");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
+const { autoUpdater } = require("electron-updater");
 const { createAgentTelemetryManager } = require("./agentTelemetry.cjs");
 
 const isScreenshotMode =
@@ -27,18 +29,64 @@ let agentThreadHostReady = false;
 let nextAgentThreadRequestId = 1;
 const pendingAgentThreadRequests = new Map();
 let agentTelemetry = null;
+let autoUpdaterConfigured = false;
+let checkedForUpdatesOnLaunch = false;
+let updateDownloadRequested = false;
+let updateState = {
+  status: app.isPackaged ? "idle" : "disabled",
+  updatedAt: Date.now()
+};
 
 function getPtyHostPath() {
-  return path.join(__dirname, "ptyHost.cjs");
+  return getHelperHostPath("ptyHost.cjs");
 }
 
 function getAgentThreadHostPath() {
-  return path.join(__dirname, "agentThreadHost.cjs");
+  return getHelperHostPath("agentThreadHost.cjs");
+}
+
+function getAppIconPath() {
+  return path.join(__dirname, "..", "frontend", "assets", "vibeterminal-logo.ico");
+}
+
+function getDefaultRuntimeCwd() {
+  return app.isPackaged ? os.homedir() : process.cwd();
+}
+
+function getHelperHostPath(fileName) {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, "app.asar.unpacked", "backend", fileName);
+  }
+
+  return path.join(__dirname, fileName);
+}
+
+function getNodeHostCommand() {
+  return app.isPackaged ? process.execPath : process.env.VIBE_NODE_PATH || "node";
+}
+
+function getNodeHostEnv() {
+  if (!app.isPackaged) {
+    return process.env;
+  }
+
+  return {
+    ...process.env,
+    ELECTRON_RUN_AS_NODE: "1"
+  };
+}
+
+function getAgentShimBaseDir() {
+  return (
+    process.env.VIBE_AGENT_SHIM_BASE_DIR ||
+    path.join(app.getPath("userData"), "agent-shims")
+  );
 }
 
 function getAgentTelemetry() {
   if (!agentTelemetry) {
     agentTelemetry = createAgentTelemetryManager({
+      baseDir: getAgentShimBaseDir(),
       emit: broadcastTerminalEvent
     });
     agentTelemetry.ready.catch((error) => {
@@ -50,6 +98,170 @@ function getAgentTelemetry() {
   }
 
   return agentTelemetry;
+}
+
+function serializeUpdateInfo(info = {}) {
+  return {
+    version: info.version,
+    releaseName: info.releaseName,
+    releaseDate: info.releaseDate
+  };
+}
+
+function publishUpdateState(nextState) {
+  updateState = {
+    ...updateState,
+    ...nextState,
+    updatedAt: Date.now()
+  };
+
+  BrowserWindow.getAllWindows().forEach((window) => {
+    window.webContents.send("updates:event", updateState);
+  });
+}
+
+function setupAutoUpdater() {
+  if (!app.isPackaged || autoUpdaterConfigured) {
+    return;
+  }
+
+  autoUpdaterConfigured = true;
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
+
+  autoUpdater.on("checking-for-update", () => {
+    publishUpdateState({ status: "checking" });
+  });
+
+  autoUpdater.on("update-available", (info) => {
+    publishUpdateState({
+      status: "available",
+      info: serializeUpdateInfo(info),
+      errorMessage: undefined,
+      progress: undefined
+    });
+  });
+
+  autoUpdater.on("update-not-available", (info) => {
+    publishUpdateState({
+      status: "not-available",
+      info: serializeUpdateInfo(info),
+      errorMessage: undefined,
+      progress: undefined
+    });
+  });
+
+  autoUpdater.on("download-progress", (progress) => {
+    publishUpdateState({
+      status: "downloading",
+      progress: {
+        percent: progress.percent,
+        transferred: progress.transferred,
+        total: progress.total
+      },
+      errorMessage: undefined
+    });
+  });
+
+  autoUpdater.on("update-downloaded", (info) => {
+    publishUpdateState({
+      status: "downloaded",
+      info: serializeUpdateInfo(info),
+      progress: undefined,
+      errorMessage: undefined
+    });
+  });
+
+  autoUpdater.on("error", (error) => {
+    if (updateDownloadRequested) {
+      publishUpdateState({
+        status: "error",
+        errorMessage: error.message || "Update failed.",
+        progress: undefined
+      });
+      return;
+    }
+
+    console.error(`[updates] launch check failed: ${error.message}`);
+    publishUpdateState({
+      status: "idle",
+      errorMessage: undefined,
+      progress: undefined
+    });
+  });
+}
+
+async function checkForUpdatesOnLaunch() {
+  if (!app.isPackaged || checkedForUpdatesOnLaunch) {
+    return;
+  }
+
+  checkedForUpdatesOnLaunch = true;
+  setupAutoUpdater();
+
+  try {
+    await autoUpdater.checkForUpdates();
+  } catch (error) {
+    console.error(`[updates] launch check failed: ${error.message}`);
+    publishUpdateState({
+      status: "idle",
+      errorMessage: undefined,
+      progress: undefined
+    });
+  }
+}
+
+async function downloadAppUpdate() {
+  if (!app.isPackaged) {
+    return {
+      ok: false,
+      message: "Updates are only available in packaged builds."
+    };
+  }
+
+  if (updateState.status === "downloaded") {
+    return { ok: true };
+  }
+
+  if (!["available", "error"].includes(updateState.status)) {
+    return {
+      ok: false,
+      message: "No downloaded update is waiting."
+    };
+  }
+
+  setupAutoUpdater();
+  updateDownloadRequested = true;
+
+  try {
+    publishUpdateState({
+      status: "downloading",
+      errorMessage: undefined
+    });
+    await autoUpdater.downloadUpdate();
+    return { ok: true };
+  } catch (error) {
+    publishUpdateState({
+      status: "error",
+      errorMessage: error.message || "Update failed.",
+      progress: undefined
+    });
+    return {
+      ok: false,
+      message: error.message || "Update failed."
+    };
+  }
+}
+
+function restartAndInstallUpdate() {
+  if (!app.isPackaged || updateState.status !== "downloaded") {
+    return false;
+  }
+
+  setImmediate(() => {
+    autoUpdater.quitAndInstall(false, true);
+  });
+  return true;
 }
 
 async function findLatestAgentThread(payload) {
@@ -146,10 +358,10 @@ function startPtyHost() {
     return;
   }
 
-  const nodeBinary = process.env.VIBE_NODE_PATH || "node";
+  const nodeBinary = getNodeHostCommand();
   ptyHost = spawn(nodeBinary, [getPtyHostPath()], {
-    cwd: process.cwd(),
-    env: process.env,
+    cwd: getDefaultRuntimeCwd(),
+    env: getNodeHostEnv(),
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true
   });
@@ -248,10 +460,10 @@ function startAgentThreadHost() {
     return;
   }
 
-  const nodeBinary = process.env.VIBE_NODE_PATH || "node";
+  const nodeBinary = getNodeHostCommand();
   agentThreadHost = spawn(nodeBinary, [getAgentThreadHostPath()], {
-    cwd: process.cwd(),
-    env: process.env,
+    cwd: getDefaultRuntimeCwd(),
+    env: getNodeHostEnv(),
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true
   });
@@ -356,6 +568,7 @@ function createMainWindow() {
     minWidth: 960,
     minHeight: 640,
     backgroundColor: "#111312",
+    icon: getAppIconPath(),
     title: "vibeTerminal",
     show: isScreenshotMode,
     autoHideMenuBar: true,
@@ -393,6 +606,7 @@ app.whenReady().then(() => {
   startPtyHost();
   startAgentThreadHost();
   createMainWindow();
+  setTimeout(checkForUpdatesOnLaunch, 1500);
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -422,7 +636,13 @@ app.on("window-all-closed", () => {
   }
 });
 
-ipcMain.handle("app:get-cwd", () => process.cwd());
+ipcMain.handle("app:get-cwd", () => getDefaultRuntimeCwd());
+
+ipcMain.handle("updates:get-state", () => updateState);
+
+ipcMain.handle("updates:download", () => downloadAppUpdate());
+
+ipcMain.handle("updates:restart", () => restartAndInstallUpdate());
 
 ipcMain.handle("workspace:select-folder", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {

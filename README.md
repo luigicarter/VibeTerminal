@@ -1,48 +1,65 @@
 # vibeTerminal
 
-A cut-down BridgeSpace-style workspace for local coding agents.
+vibeTerminal is a Windows desktop app for running local terminals and coding agents side by side.
 
-The app is organized as a small Electron workspace with a clear split between
-frontend React code, backend Electron/PTY code, preload IPC, scripts, docs, and
-external reference material.
+It gives each project its own visual workspace, so shell sessions and agent sessions stay organized instead of getting buried across separate terminal windows. Open a folder, add the terminal or agent panes you need, and arrange them on a tiled board that matches how you work.
 
-## Tree
+## Download
 
-- `frontend/` - React UI, terminal panes, layout board, renderer types, and CSS.
-- `backend/` - Electron main process, PTY host, and local agent thread discovery.
-- `preload/` - Context-isolated bridge exposed as `window.vibe`.
-- `scripts/` - App launch, backend smoke checks, and visual QA helpers.
-- `docs/` - Navigation docs for each project section.
-- `vendor/` - External reference code that is not active app source.
+Download the latest Windows installer from GitHub Releases:
 
-## Run
+[Download vibeTerminal for Windows](https://github.com/luigicarter/VibeTerminal/releases/latest)
+
+On the release page, download and run:
+
+```text
+vibeTerminal-Setup-*.exe
+```
+
+The installer adds vibeTerminal to the Start Menu and installs it for the current Windows user. You do not need Node.js, npm, Vite, or TypeScript to run the installed app.
+
+## What It Does
+
+- Runs multiple terminal panes in one desktop window.
+- Keeps sessions grouped by project folder.
+- Supports local coding-agent commands such as Codex, Claude, Gemini, OpenCode, and Aider.
+- Lets you resize, move, duplicate, restart, and maximize terminal panes.
+- Shows attention/status indicators when agent or terminal sessions need focus.
+- Includes a multi-project board for sessions that do not belong to one folder.
+
+## Requirements
+
+vibeTerminal includes its own Electron runtime and terminal support.
+
+External coding-agent CLIs are separate tools. Install the providers you want to use, such as:
+
+```text
+codex
+claude
+gemini
+opencode
+aider
+```
+
+Plain PowerShell terminals work without those agent tools.
+
+## Updates
+
+vibeTerminal checks for updates once when it launches. If a newer GitHub Release is available, the app shows a small overlay with `Update` and `Later`.
+
+Updates are downloaded only after you accept, and the app restarts only when you choose `Restart`.
+
+## Development
 
 ```powershell
 npm install
 npm run dev
 ```
 
-## Checks
+Build a local Windows installer:
 
 ```powershell
-npm run typecheck
-npm run build
-npm run smoke:backend:codex-discovery
-npm run smoke:backend:agent-telemetry
-npm run smoke:frontend:attention
+npm run dist:win
 ```
 
-## Visual QA
-
-```powershell
-npm run screenshot
-```
-
-The screenshot is written to `artifacts/vibe-terminal-screenshot.png`.
-
-## Open Source
-
-See `docs/open-source-readiness.md` for the current product-quality and
-open-source readiness audit.
-
-See `AGENTS.md` and `docs/` for the project navigation index.
+See `docs/windows-release.md` for the installer layout, GitHub Releases deployment flow, updater behavior, and signing status.

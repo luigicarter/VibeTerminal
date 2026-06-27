@@ -3,7 +3,9 @@ import type {
   AgentThreadLookupResult,
   AgentThreadRef,
   TerminalEvent,
-  TerminalLaunchPayload
+  TerminalLaunchPayload,
+  UpdateActionResult,
+  UpdateState
 } from "./types";
 
 declare global {
@@ -11,6 +13,12 @@ declare global {
     vibe?: {
       app: {
         getCwd: () => Promise<string>;
+      };
+      updates: {
+        getState: () => Promise<UpdateState>;
+        download: () => Promise<UpdateActionResult>;
+        restart: () => Promise<boolean>;
+        onEvent: (callback: (state: UpdateState) => void) => () => void;
       };
       workspace: {
         selectFolder: () => Promise<string | null>;

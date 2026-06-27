@@ -140,6 +140,41 @@ export interface TerminalLaunchPayload {
   rows?: number;
 }
 
+export type UpdateStatus =
+  | "disabled"
+  | "idle"
+  | "checking"
+  | "not-available"
+  | "available"
+  | "downloading"
+  | "downloaded"
+  | "error";
+
+export interface UpdateInfo {
+  version?: string;
+  releaseName?: string;
+  releaseDate?: string;
+}
+
+export interface UpdateProgress {
+  percent?: number;
+  transferred?: number;
+  total?: number;
+}
+
+export interface UpdateState {
+  status: UpdateStatus;
+  updatedAt: number;
+  info?: UpdateInfo;
+  progress?: UpdateProgress;
+  errorMessage?: string;
+}
+
+export interface UpdateActionResult {
+  ok: boolean;
+  message?: string;
+}
+
 export type TerminalEvent =
   | { type: "ready" }
   | { type: "host-error"; message: string }

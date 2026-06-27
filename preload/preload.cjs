@@ -4,6 +4,16 @@ contextBridge.exposeInMainWorld("vibe", {
   app: {
     getCwd: () => ipcRenderer.invoke("app:get-cwd")
   },
+  updates: {
+    getState: () => ipcRenderer.invoke("updates:get-state"),
+    download: () => ipcRenderer.invoke("updates:download"),
+    restart: () => ipcRenderer.invoke("updates:restart"),
+    onEvent: (callback) => {
+      const listener = (_event, payload) => callback(payload);
+      ipcRenderer.on("updates:event", listener);
+      return () => ipcRenderer.removeListener("updates:event", listener);
+    }
+  },
   workspace: {
     selectFolder: () => ipcRenderer.invoke("workspace:select-folder")
   },
