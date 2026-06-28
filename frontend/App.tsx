@@ -167,6 +167,10 @@ function formatCodeLineSummary(summary?: CodeChangeSummary) {
     return summary.message || "Git changes could not be inspected.";
   }
 
+  if (summary.state === "clean") {
+    return "Nothing new since the last commit.";
+  }
+
   return `${summary.insertions} lines written, ${summary.deletions} lines deleted.`;
 }
 
@@ -1442,9 +1446,7 @@ export default function App() {
               title={formatCodeLineSummary(activeWorkspaceChangeSummary)}
               aria-label={formatCodeLineSummary(activeWorkspaceChangeSummary)}
             >
-              {activeWorkspaceChangeSummary &&
-              activeWorkspaceChangeSummary.state !== "not-git" &&
-              activeWorkspaceChangeSummary.state !== "unavailable" ? (
+              {activeWorkspaceChangeSummary?.state === "dirty" ? (
                 <>
                   <span className="diff-insertions">
                     +{activeWorkspaceChangeSummary.insertions} written
@@ -1459,7 +1461,9 @@ export default function App() {
                     ? "No Git repo"
                     : activeWorkspaceChangeSummary?.state === "unavailable"
                       ? "Git unavailable"
-                      : "Scanning changes"}
+                      : activeWorkspaceChangeSummary?.state === "clean"
+                        ? "Nothing new"
+                        : "Scanning changes"}
                 </span>
               )}
             </div>

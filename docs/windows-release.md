@@ -4,10 +4,10 @@ vibeTerminal ships to Windows users as an Electron Builder NSIS installer hosted
 
 ## Current Public Release
 
-The current public Windows release is `v0.1.9`:
+The current public Windows release is `v0.1.10`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.9`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.9/vibeTerminal-Setup-0.1.9.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.10`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.10/vibeTerminal-Setup-0.1.10.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -91,6 +91,14 @@ Production downloads and update metadata live in the public GitHub repository:
 `https://github.com/luigicarter/VibeTerminal/releases`
 
 The GitHub Actions workflow `.github/workflows/windows-release.yml` builds on `windows-latest`.
+
+Treat the `main` branch as production. If this repository is ever referred to as
+`master`, the same rule applies: any change merged or pushed there that should
+reach installed users must be released, not just committed. That means the merge
+must include a package version bump, matching README/docs release links, a pushed
+`v<version>` tag, and a successful Windows release workflow that publishes the
+installer plus `latest.yml`. Installed apps discover updates from GitHub Releases
+and `latest.yml`, so pushing code to `main` alone does not update users.
 
 To publish:
 
