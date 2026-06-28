@@ -3,6 +3,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type DragEvent as ReactDragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent
 } from "react";
@@ -38,7 +39,6 @@ import TerminalPane from "./components/TerminalPane";
 import TiledBoard from "./components/TiledBoard";
 import {
   createThreadRef,
-  defaultLaunchMode,
   isThreadedAgentKind
 } from "./sessionLaunch";
 import type {
@@ -82,6 +82,13 @@ type AppView = "multi" | "project";
 type SessionScope =
   | { type: "multi" }
   | { type: "workspace"; workspaceId: string };
+
+type WorkspaceDropPosition = "before" | "after";
+
+interface WorkspaceDropTarget {
+  workspaceId: string;
+  position: WorkspaceDropPosition;
+}
 
 interface ThreadLookupPatch {
   threadLookupStartedAt?: number;
@@ -338,18 +345,35 @@ function restoreSession(session: AgentSession): AgentSession {
     previousStatus !== "done" &&
     previousStatus !== "failed";
 
+  // Reopening the app restores each pane as a FRESH terminal, never an
+  // auto-resumed chat. The previously running thread is preserved as `resumeRef`
+  // so the user can deliberately resume it from the pane (the Resume button),
+  // while the pane itself launches a brand-new session. This deliberately
+  // decouples "restore my workspace/layout" from "resume my conversation",
+  // which used to be welded together. Applies to all threaded agents:
+  // - claude needs a freshly minted id here — relaunching `--session-id <old>`
+  //   would collide with the existing transcript — so createThreadRef hands out
+  //   a new uuid for the fresh chat.
+  // - codex/opencode get no id (createThreadRef returns it undefined) and so
+  //   launch their plain command, letting discovery bind the new session.
+  // The most recent resumable thread wins; if the pane had no thread yet we keep
+  // whatever resumeRef was already stored.
+  const resumeRef = session.threadRef?.id
+    ? session.threadRef
+    : session.resumeRef;
+
   return {
     ...session,
     started: shouldAutoStart,
     launchToken,
-    nextLaunchMode: defaultLaunchMode(
+    nextLaunchMode: "new",
+    threadRef: createThreadRef(
       session.kind,
-      launchToken,
-      Boolean(session.threadRef?.id)
+      session.threadRef?.title ?? session.name
     ),
-    threadRef: session.threadRef,
+    resumeRef,
     threadLookupStartedAt: undefined,
-    threadLookupStatus: session.threadRef?.id ? "found" : "idle",
+    threadLookupStatus: "idle",
     threadLookupMessage: undefined,
     status: shouldAutoStart ? "idle" : previousStatus,
     attention: normalizeAttention(session.attention),
@@ -431,6 +455,56 @@ function loadSidebarWidth() {
   return clampSidebarWidth(DEFAULT_SIDEBAR_WIDTH);
 }
 
+function getWorkspaceDropPosition(
+  element: HTMLElement,
+  clientY: number
+): WorkspaceDropPosition {
+  const rect = element.getBoundingClientRect();
+  return clientY < rect.top + rect.height / 2 ? "before" : "after";
+}
+
+function moveWorkspace(
+  workspaces: ProjectWorkspace[],
+  draggedWorkspaceId: string,
+  targetWorkspaceId: string,
+  position: WorkspaceDropPosition
+) {
+  if (draggedWorkspaceId === targetWorkspaceId) {
+    return workspaces;
+  }
+
+  const draggedIndex = workspaces.findIndex(
+    (workspace) => workspace.id === draggedWorkspaceId
+  );
+  const targetIndex = workspaces.findIndex(
+    (workspace) => workspace.id === targetWorkspaceId
+  );
+
+  if (draggedIndex === -1 || targetIndex === -1) {
+    return workspaces;
+  }
+
+  const nextWorkspaces = [...workspaces];
+  const [draggedWorkspace] = nextWorkspaces.splice(draggedIndex, 1);
+  const adjustedTargetIndex = nextWorkspaces.findIndex(
+    (workspace) => workspace.id === targetWorkspaceId
+  );
+
+  if (!draggedWorkspace || adjustedTargetIndex === -1) {
+    return workspaces;
+  }
+
+  const insertIndex =
+    position === "after" ? adjustedTargetIndex + 1 : adjustedTargetIndex;
+  nextWorkspaces.splice(insertIndex, 0, draggedWorkspace);
+
+  const orderChanged = nextWorkspaces.some(
+    (workspace, index) => workspace.id !== workspaces[index]?.id
+  );
+
+  return orderChanged ? nextWorkspaces : workspaces;
+}
+
 export default function App() {
   const [initialState] = useState(() => {
     const initialWorkspaces = loadWorkspaces();
@@ -479,6 +553,11 @@ export default function App() {
   const [workspaceClosePendingId, setWorkspaceClosePendingId] = useState<
     string | null
   >(null);
+  const [draggingWorkspaceId, setDraggingWorkspaceId] = useState<string | null>(
+    null
+  );
+  const [workspaceDropTarget, setWorkspaceDropTarget] =
+    useState<WorkspaceDropTarget | null>(null);
 
   const activeWorkspace =
     workspaces.find((workspace) => workspace.id === activeWorkspaceId) ??
@@ -879,12 +958,19 @@ export default function App() {
   }
 
   function duplicateSession(scope: SessionScope, session: AgentSession) {
+    // A duplicate is a fresh pane (two panes must never resume the same id), but
+    // it inherits the source's conversation as `resumeRef` so the copy can offer
+    // "Resume last chat" to continue where the original left off.
+    const sourceThread = session.threadRef?.id
+      ? session.threadRef
+      : session.resumeRef;
     updateScopeSessions(scope, (sessions) => [
       ...sessions,
       {
         ...createSession(session.kind, session.cwd, sessions),
         name: `${session.name} copy`,
-        command: session.command
+        command: session.command,
+        resumeRef: sourceThread
       }
     ]);
   }
@@ -979,6 +1065,40 @@ export default function App() {
                     : "new",
                 threadLookupStartedAt: undefined,
                 threadLookupStatus: item.threadRef?.id ? "found" : "idle",
+                threadLookupMessage: undefined,
+                status: "idle",
+                attention: EMPTY_ATTENTION
+              }
+            : item
+        )
+      );
+    });
+  }
+
+  // Deliberately resume the pane's previous conversation. Mirrors restartSession
+  // but forces nextLaunchMode "resume" against the stashed resumeRef, then clears
+  // resumeRef (the resumed thread becomes the pane's active threadRef). For
+  // claude the launch is still safety-checked by resolveLaunchCommand, which
+  // falls back to a fresh start if the transcript no longer exists.
+  function resumeSession(scope: SessionScope, session: AgentSession) {
+    const resumeRef = session.resumeRef;
+    if (!resumeRef?.id) {
+      return;
+    }
+
+    window.vibe?.terminal.kill(session.id).then(() => {
+      updateScopeSessions(scope, (sessions) =>
+        sessions.map((item) =>
+          item.id === session.id
+            ? {
+                ...item,
+                started: true,
+                launchToken: item.launchToken + 1,
+                nextLaunchMode: "resume",
+                threadRef: resumeRef,
+                resumeRef: undefined,
+                threadLookupStartedAt: undefined,
+                threadLookupStatus: "found",
                 threadLookupMessage: undefined,
                 status: "idle",
                 attention: EMPTY_ATTENTION
@@ -1195,6 +1315,85 @@ export default function App() {
     }
   }
 
+  function updateWorkspaceDropTarget(nextTarget: WorkspaceDropTarget | null) {
+    setWorkspaceDropTarget((currentTarget) => {
+      if (
+        currentTarget?.workspaceId === nextTarget?.workspaceId &&
+        currentTarget?.position === nextTarget?.position
+      ) {
+        return currentTarget;
+      }
+
+      return nextTarget;
+    });
+  }
+
+  function handleWorkspaceDragStart(
+    event: ReactDragEvent<HTMLButtonElement>,
+    workspaceId: string
+  ) {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", workspaceId);
+    setDraggingWorkspaceId(workspaceId);
+    updateWorkspaceDropTarget(null);
+  }
+
+  function handleWorkspaceDragOver(
+    event: ReactDragEvent<HTMLDivElement>,
+    targetWorkspaceId: string
+  ) {
+    if (!draggingWorkspaceId || draggingWorkspaceId === targetWorkspaceId) {
+      updateWorkspaceDropTarget(null);
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    updateWorkspaceDropTarget({
+      workspaceId: targetWorkspaceId,
+      position: getWorkspaceDropPosition(event.currentTarget, event.clientY)
+    });
+  }
+
+  function handleWorkspaceDrop(
+    event: ReactDragEvent<HTMLDivElement>,
+    targetWorkspaceId: string
+  ) {
+    const draggedWorkspaceId =
+      draggingWorkspaceId || event.dataTransfer.getData("text/plain");
+    const position =
+      workspaceDropTarget?.workspaceId === targetWorkspaceId
+        ? workspaceDropTarget.position
+        : getWorkspaceDropPosition(event.currentTarget, event.clientY);
+
+    event.preventDefault();
+    setDraggingWorkspaceId(null);
+    updateWorkspaceDropTarget(null);
+
+    if (!draggedWorkspaceId) {
+      return;
+    }
+
+    setWorkspaces((current) =>
+      moveWorkspace(current, draggedWorkspaceId, targetWorkspaceId, position)
+    );
+  }
+
+  function handleWorkspaceDragEnd() {
+    setDraggingWorkspaceId(null);
+    updateWorkspaceDropTarget(null);
+  }
+
+  function handleWorkspaceListDragLeave(event: ReactDragEvent<HTMLDivElement>) {
+    const nextTarget = event.relatedTarget;
+    if (
+      !(nextTarget instanceof Node) ||
+      !event.currentTarget.contains(nextTarget)
+    ) {
+      updateWorkspaceDropTarget(null);
+    }
+  }
+
   async function openFolder() {
     const path = await window.vibe?.workspace.selectFolder();
     if (!path) {
@@ -1330,12 +1529,33 @@ export default function App() {
         </button>
 
         <div className="sidebar-section-title">Folders</div>
-        <div className="workspace-list">
+        <div
+          className="workspace-list"
+          onDragLeave={handleWorkspaceListDragLeave}
+        >
           {workspaces.map((workspace) => {
             const hasUnreadAttention = workspaceHasUnreadAttention(workspace);
+            const isDropTarget =
+              workspaceDropTarget?.workspaceId === workspace.id;
 
             return (
-              <div className="workspace-row" key={workspace.id}>
+              <div
+                className={clsx(
+                  "workspace-row",
+                  draggingWorkspaceId === workspace.id && "dragging",
+                  isDropTarget &&
+                    workspaceDropTarget?.position === "before" &&
+                    "drop-before",
+                  isDropTarget &&
+                    workspaceDropTarget?.position === "after" &&
+                    "drop-after"
+                )}
+                key={workspace.id}
+                onDragOver={(event) =>
+                  handleWorkspaceDragOver(event, workspace.id)
+                }
+                onDrop={(event) => handleWorkspaceDrop(event, workspace.id)}
+              >
                 <button
                   type="button"
                   className={clsx(
@@ -1345,6 +1565,11 @@ export default function App() {
                       "active",
                     hasUnreadAttention && "has-attention"
                   )}
+                  draggable={workspaces.length > 1}
+                  onDragStart={(event) =>
+                    handleWorkspaceDragStart(event, workspace.id)
+                  }
+                  onDragEnd={handleWorkspaceDragEnd}
                   onClick={() => {
                     setSelectedSessionId(null);
                     setActiveWorkspaceId(workspace.id);
@@ -1510,6 +1735,7 @@ export default function App() {
                     onClose={() => closeSession(activeScope, session.id)}
                     onDuplicate={() => duplicateSession(activeScope, session)}
                     onRestart={() => restartSession(activeScope, session)}
+                    onResume={() => resumeSession(activeScope, session)}
                     onAdd={() =>
                       addSessionForCwd(activeScope, session.kind, session.cwd)
                     }

@@ -118,6 +118,11 @@ export interface AgentSession {
   cwd: string;
   createdAt: number;
   threadRef?: AgentThreadRef;
+  // The previous conversation this pane can deliberately resume. Set when a pane
+  // is restored on app reopen (its prior threadRef is moved here so the pane
+  // itself launches fresh) or when the user starts a fresh chat over a running
+  // one. Undefined means there is nothing to resume.
+  resumeRef?: AgentThreadRef;
   threadLookupStartedAt?: number;
   threadLookupStatus?: AgentThreadLookupStatus;
   threadLookupMessage?: string;

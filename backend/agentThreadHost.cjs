@@ -3,7 +3,7 @@ const os = require("os");
 const path = require("path");
 const readline = require("readline");
 const { spawn } = require("child_process");
-const { findCodexThread } = require("./agentThreads.cjs");
+const { findCodexThread, confirmCodexThread } = require("./agentThreads.cjs");
 
 function normalizePathForCompare(value) {
   if (!value) {
@@ -342,6 +342,77 @@ function findLatestOpenCodeThread(cwd, after = 0, excludeIds = []) {
   });
 }
 
+function placeholderOpenCodeRef(id) {
+  return { provider: "opencode", id, title: "", createdAt: 0, updatedAt: 0 };
+}
+
+// OpenCode resumes with `opencode --session <id>` against a session the CLI still
+// knows about. confirmOpenCodeThread answers "does this id still exist?" so the
+// launcher can self-heal to a fresh session instead of erroring in the live shell.
+// Mirrors confirmClaudeThread's conservative contract: report "missing" only when
+// the CLI succeeds and the id is absent; on any spawn/parse failure stay "found"
+// (let the resume try) rather than discard a session that may well exist.
+function confirmOpenCodeThread(cwd, id) {
+  const target = String(id || "");
+  if (!target) {
+    return Promise.resolve({ status: "missing" });
+  }
+
+  const result = spawn("opencode", [
+    "session",
+    "list",
+    "--format",
+    "json",
+    "--max-count",
+    "100"
+  ], {
+    cwd,
+    shell: process.platform === "win32",
+    windowsHide: true
+  });
+
+  return new Promise((resolve) => {
+    let stdout = "";
+
+    result.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+
+    result.on("error", () =>
+      resolve({ status: "found", threadRef: placeholderOpenCodeRef(target) })
+    );
+    result.on("exit", () => {
+      try {
+        const sessions = JSON.parse(stdout);
+        const match = Array.isArray(sessions)
+          ? sessions.find(
+              (session) => session.id && String(session.id) === target
+            )
+          : null;
+
+        if (match) {
+          resolve({
+            status: "found",
+            threadRef: {
+              provider: "opencode",
+              id: match.id,
+              title: match.title,
+              createdAt: Number(match.created || 0),
+              updatedAt: Number(match.updated || 0)
+            }
+          });
+          return;
+        }
+
+        resolve({ status: "missing" });
+      } catch {
+        // Unparseable output — cannot prove the id is gone, so resume.
+        resolve({ status: "found", threadRef: placeholderOpenCodeRef(target) });
+      }
+    });
+  });
+}
+
 async function findLatestAgentThread(payload) {
   const cwd = payload?.cwd;
   const after = Number(payload?.after || 0);
@@ -354,6 +425,12 @@ async function findLatestAgentThread(payload) {
   }
 
   if (payload.provider === "codex") {
+    // Confirm whether a specific rollout id is still resumable so the launcher
+    // can self-heal instead of running a doomed `codex resume <id>`.
+    if (payload.confirmId) {
+      return confirmCodexThread(cwd, payload.confirmId);
+    }
+
     return findCodexThread(payload);
   }
 
@@ -375,6 +452,12 @@ async function findLatestAgentThread(payload) {
   }
 
   if (payload.provider === "opencode") {
+    // Confirm whether a specific session id is still resumable so the launcher
+    // can self-heal instead of running a doomed `opencode --session <id>`.
+    if (payload.confirmId) {
+      return confirmOpenCodeThread(cwd, payload.confirmId);
+    }
+
     const threadRef = await findLatestOpenCodeThread(
       cwd,
       after,
@@ -462,6 +545,7 @@ if (require.main === module) {
 module.exports = {
   collectJsonlFiles,
   confirmClaudeThread,
+  confirmOpenCodeThread,
   extractClaudeText,
   findLatestAgentThread,
   findLatestClaudeThread,

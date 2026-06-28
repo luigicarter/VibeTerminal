@@ -306,9 +306,32 @@ button {
 
 .workspace-row {
   display: grid;
+  position: relative;
   grid-template-columns: minmax(0, 1fr) 28px;
   align-items: center;
   gap: 4px;
+}
+
+.workspace-row.drop-before::before,
+.workspace-row.drop-after::after {
+  content: "";
+  position: absolute;
+  right: 4px;
+  left: 4px;
+  z-index: 1;
+  height: 2px;
+  border-radius: 999px;
+  background: #f4cf5a;
+  box-shadow: 0 0 0 3px rgba(244, 207, 90, 0.14);
+  pointer-events: none;
+}
+
+.workspace-row.drop-before::before {
+  top: 0;
+}
+
+.workspace-row.drop-after::after {
+  bottom: 0;
 }
 
 .workspace-button {
@@ -328,6 +351,15 @@ button {
   gap: 8px;
   min-height: 36px;
   padding: 0 9px;
+}
+
+.workspace-button[draggable="true"] {
+  cursor: grab;
+}
+
+.workspace-row.dragging .workspace-button {
+  cursor: grabbing;
+  opacity: 0.52;
 }
 
 .workspace-button > span:not(.attention-dot) {

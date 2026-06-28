@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const {
+  confirmCodexThread,
   findCodexThread
 } = require("../../backend/agentThreads.cjs");
 
@@ -90,6 +91,27 @@ try {
   assert(
     result.status === "found" && result.threadRef.id === "two",
     "excluding an already-claimed id should allow the remaining candidate"
+  );
+
+  // confirmCodexThread: a rollout on disk for the exact id is resumable (matched
+  // by the `-<id>.jsonl` filename suffix, no contents read); an unknown id is
+  // missing so the launcher can self-heal to a fresh session.
+  const confirmFound = confirmCodexThread(cwd, "one", { codexHome });
+  assert(
+    confirmFound.status === "found" && confirmFound.threadRef.id === "one",
+    "an existing rollout id should confirm found"
+  );
+
+  const confirmOtherCwd = confirmCodexThread(cwd, "other-cwd", { codexHome });
+  assert(
+    confirmOtherCwd.status === "found",
+    "confirm matches by id regardless of the rollout's cwd"
+  );
+
+  const confirmMissing = confirmCodexThread(cwd, "does-not-exist", { codexHome });
+  assert(
+    confirmMissing.status === "missing",
+    "an absent rollout id should confirm missing so the launcher starts fresh"
   );
 
   console.log("Codex discovery smoke passed");

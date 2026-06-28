@@ -11,6 +11,7 @@ import {
   Plus,
   Play,
   RefreshCcw,
+  RotateCcw,
   TerminalSquare,
   X
 } from "lucide-react";
@@ -54,6 +55,7 @@ interface TerminalPaneProps {
   onClose: () => void;
   onDuplicate: () => void;
   onRestart: () => void;
+  onResume: () => void;
   onAdd: () => void;
   onSelect: () => void;
   onMaximize: () => void;
@@ -90,6 +92,7 @@ export default function TerminalPane({
   onDuplicate,
   onMaximize,
   onRestart,
+  onResume,
   onSelect,
   onThreadRefChange,
   onThreadLookupChange,
@@ -547,26 +550,27 @@ export default function TerminalPane({
     session.id
   ]);
 
-  // Claude pre-assigns its session id and resumes via `claude --resume <id>`,
-  // but that id only becomes resumable once Claude has persisted a transcript
-  // (i.e. after at least one exchanged message). A pane that was opened but never
-  // messaged has no transcript, so a blind resume hard-fails with "No
-  // conversation found" and strands the pane at a bare shell prompt. Confirm the
-  // id actually exists before resuming; if it does not, start a clean session
-  // reusing the still-unused pre-assigned id instead of failing.
+  // A resume only succeeds once the agent has persisted its session locally:
+  // claude needs a transcript (`claude --resume <id>`), codex a rollout file
+  // (`codex resume <id>`), opencode a known session (`opencode --session <id>`).
+  // Resuming an id the agent no longer has hard-fails in the live shell pane
+  // (e.g. claude's "No conversation found") and strands the user at a bare
+  // prompt. So before resuming any threaded agent, confirm the id still exists;
+  // if it does not, start a clean session instead. (For claude the fresh launch
+  // reuses the still-unused pre-assigned id; codex/opencode just launch plain.)
   async function resolveLaunchCommand(
     currentSession: AgentSession,
     defaultCommand: string
   ): Promise<string> {
     if (
-      currentSession.kind === "claude" &&
+      isThreadedAgentKind(currentSession.kind) &&
       currentSession.nextLaunchMode === "resume" &&
       currentSession.threadRef?.id &&
       window.vibe?.agentThreads
     ) {
       try {
         const result = await window.vibe.agentThreads.findLatest({
-          provider: "claude",
+          provider: currentSession.kind,
           cwd: currentSession.cwd,
           confirmId: currentSession.threadRef.id
         });
@@ -579,8 +583,8 @@ export default function TerminalPane({
         }
       } catch {
         // Confirmation unavailable (host down/timeout): fall through to the
-        // resume command rather than risk a duplicate `--session-id` collision
-        // on a session that may well exist.
+        // resume command rather than risk a duplicate-session collision on a
+        // session that may well exist.
       }
     }
 
@@ -832,6 +836,14 @@ export default function TerminalPane({
           >
             {session.started ? <RefreshCcw size={14} /> : <Play size={14} />}
           </button>
+          {session.resumeRef?.id && (
+            <button
+              title={`Resume last ${profile.label} chat`}
+              onClick={onResume}
+            >
+              <RotateCcw size={14} />
+            </button>
+          )}
           <button title={isMaximized ? "Restore pane" : "Maximize pane"} onClick={onMaximize}>
             {isMaximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
           </button>

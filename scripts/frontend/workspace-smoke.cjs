@@ -36,6 +36,19 @@ assert(
 );
 
 assert(
+  appSource.includes("function moveWorkspace(") &&
+    appSource.includes("function handleWorkspaceDragStart(") &&
+    appSource.includes("function handleWorkspaceDrop(") &&
+    appSource.includes("draggable={workspaces.length > 1}") &&
+    appSource.includes("setWorkspaces((current) =>") &&
+    appSource.includes("moveWorkspace(current, draggedWorkspaceId, targetWorkspaceId, position)") &&
+    stylesSource.includes(".workspace-row.drop-before::before") &&
+    stylesSource.includes(".workspace-row.drop-after::after") &&
+    stylesSource.includes('.workspace-button[draggable="true"]'),
+  "folder rows should support drag reordering with visible drop targets"
+);
+
+assert(
   appSource.includes("function requestWorkspaceClose(workspaceId: string)") &&
     appSource.includes("setWorkspaceClosePendingId(workspaceId)") &&
     appSource.includes('role="dialog"') &&

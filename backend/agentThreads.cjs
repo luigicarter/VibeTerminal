@@ -154,10 +154,103 @@ function findCodexThread(payload = {}, options = {}) {
   };
 }
 
+// Locate a Codex rollout file for a specific session id without reading file
+// contents. Codex names each rollout `rollout-<timestamp>-<id>.jsonl`, so the id
+// is the trailing filename component — match by suffix and short-circuit on the
+// first hit. `complete` is false when a directory could not be read or a
+// pathological-tree backstop tripped, meaning absence could NOT be proven and the
+// caller must treat it as "unknown" rather than "missing".
+function locateCodexRollout(sessionsDir, id) {
+  if (!fs.existsSync(sessionsDir)) {
+    return { path: null, complete: true };
+  }
+
+  const suffix = `-${id}.jsonl`;
+  const stack = [sessionsDir];
+  const visitCap = 200000;
+  let visited = 0;
+  let complete = true;
+
+  while (stack.length > 0) {
+    if (visited >= visitCap) {
+      complete = false;
+      break;
+    }
+    visited += 1;
+
+    const current = stack.pop();
+    let entries = [];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      // The unreadable directory might hold the rollout, so absence is no longer
+      // provable.
+      complete = false;
+      continue;
+    }
+
+    for (const entry of entries) {
+      const entryPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(entryPath);
+      } else if (
+        entry.isFile() &&
+        entry.name.startsWith("rollout-") &&
+        entry.name.endsWith(suffix)
+      ) {
+        return { path: entryPath, complete: true };
+      }
+    }
+  }
+
+  return { path: null, complete };
+}
+
+// Codex resumes with `codex resume <id>` against a rollout file on disk; if that
+// rollout was deleted the resume errors in the live shell pane. confirmCodexThread
+// answers "does a rollout for this exact id still exist?" so the launcher can
+// self-heal to a fresh session. Mirrors confirmClaudeThread's conservative
+// contract: report "missing" only when the tree was fully walked with no match;
+// if the walk was incomplete, stay "found" and let the resume try.
+function confirmCodexThread(cwd, id, options = {}) {
+  const target = String(id || "");
+  if (!target) {
+    return { status: "missing" };
+  }
+
+  const sessionsDir = path.join(codexHome(options), "sessions");
+  const located = locateCodexRollout(sessionsDir, target);
+
+  if (located.path) {
+    const meta = parseCodexSessionMeta(located.path);
+    return {
+      status: "found",
+      threadRef: {
+        provider: "codex",
+        id: target,
+        title: meta?.title,
+        createdAt: meta?.createdAt ?? 0,
+        updatedAt: meta?.updatedAt ?? 0
+      }
+    };
+  }
+
+  if (!located.complete) {
+    return {
+      status: "found",
+      threadRef: { provider: "codex", id: target, title: undefined, createdAt: 0, updatedAt: 0 }
+    };
+  }
+
+  return { status: "missing" };
+}
+
 module.exports = {
   collectJsonlFiles,
+  confirmCodexThread,
   findCodexThread,
   isSamePath,
+  locateCodexRollout,
   normalizePathForCompare,
   parseCodexSessionMeta
 };

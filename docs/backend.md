@@ -8,8 +8,8 @@ The `backend/` folder contains Electron main-process code and Node-side terminal
 - `backend/codeChanges.cjs` - Runs and parses read-only Git status and diff checks for workspace code-change tracking.
 - `backend/ptyHost.cjs` - Child process that owns `node-pty` terminal sessions, buffers scrollback, forwards terminal data, resizes sessions, kills sessions, and emits JSONL events to the main process.
 - `backend/agentTelemetry.cjs` - Creates vibeTerminal-owned per-pane agent shims, starts the local telemetry callback server, installs per-turn notification hooks for the threaded agents, maps agent lifecycle events to pane attention events, and removes stale owned shim directories.
-- `backend/agentThreadHost.cjs` - Child process that performs Codex, Claude, and OpenCode thread metadata discovery so filesystem scans and CLI lookups do not block Electron main or terminal IPC.
-- `backend/agentThreads.cjs` - Codex thread discovery utilities used by the discovery host and smoke tests; reads local Codex session metadata and returns pending, found, ambiguous, or failed lookup results.
+- `backend/agentThreadHost.cjs` - Child process that performs Codex, Claude, and OpenCode thread metadata discovery so filesystem scans and CLI lookups do not block Electron main or terminal IPC. A `confirmId` lookup payload asks whether one specific id is still resumable (returns `found`/`missing`) so the renderer can self-heal a doomed resume into a fresh launch; this is now supported for all three providers (`confirmClaudeThread`, `confirmCodexThread`, `confirmOpenCodeThread`).
+- `backend/agentThreads.cjs` - Codex thread discovery utilities used by the discovery host and smoke tests; reads local Codex session metadata and returns pending, found, ambiguous, or failed lookup results. Also exposes `confirmCodexThread`, which checks whether a specific rollout id still exists by the `rollout-<ts>-<id>.jsonl` filename (no contents read) and returns `found`/`missing`.
 
 ## Runtime Flow
 
