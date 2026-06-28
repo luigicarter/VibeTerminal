@@ -258,13 +258,21 @@ function windowsPowerShellShimSource(provider) {
     "  return 'powershell.exe'",
     "}",
     "",
-    "Send-VibeEvent 'agent.process.started' $null",
     "$Command = Resolve-RealCommand $Provider",
     "if (-not $Command) {",
     "  $message = 'vibeTerminal: could not find real ' + $Provider + ' executable on the original PATH.'",
     "  Send-VibeEvent 'agent.process.exited' @{ exitCode = 127; error = $message }",
     "  [Console]::Error.WriteLine($message)",
     "  exit 127",
+    "}",
+    "",
+    "# Inject per-turn notification hooks for the threaded agents (see agentTelemetry.cjs).",
+    "if ($Provider -eq 'claude' -and -not [string]::IsNullOrEmpty($env:VIBE_TERMINAL_CLAUDE_SETTINGS)) {",
+    "  $ProviderArgs = @($ProviderArgs) + @('--settings', $env:VIBE_TERMINAL_CLAUDE_SETTINGS)",
+    "}",
+    "elseif ($Provider -eq 'codex' -and -not [string]::IsNullOrEmpty($env:VIBE_TERMINAL_NOTIFY_PROGRAM)) {",
+    "  $notifyValue = \"notify=['powershell','-NoProfile','-ExecutionPolicy','Bypass','-File','$($env:VIBE_TERMINAL_NOTIFY_PROGRAM)','agent.completed']\"",
+    "  $ProviderArgs = @($ProviderArgs) + @('-c', $notifyValue)",
     "}",
     "",
     "$env:Path = $env:VIBE_TERMINAL_ORIGINAL_PATH",
@@ -356,7 +364,7 @@ const path = require("path");
 const { spawn } = require("child_process");
 
 const provider = process.argv[2];
-const args = process.argv.slice(3);
+let args = process.argv.slice(3);
 const callbackUrl = process.env.VIBE_TERMINAL_CALLBACK_URL;
 const token = process.env.VIBE_TERMINAL_TELEMETRY_TOKEN;
 const sessionId = process.env.VIBE_TERMINAL_SESSION_ID;
@@ -469,8 +477,6 @@ function powershellCommand() {
   const env = { ...process.env };
   env[pathKey(env)] = originalPath;
 
-  await post({ type: "agent.process.started" });
-
   const command = resolveRealCommand(provider);
   if (!command) {
     await post({
@@ -480,6 +486,16 @@ function powershellCommand() {
     });
     process.stderr.write("vibeTerminal: could not find real " + provider + " executable on the original PATH.\n");
     process.exit(127);
+  }
+
+  // Inject per-turn notification hooks for the threaded agents (see agentTelemetry.cjs).
+  if (provider === "claude" && process.env.VIBE_TERMINAL_CLAUDE_SETTINGS) {
+    args = args.concat(["--settings", process.env.VIBE_TERMINAL_CLAUDE_SETTINGS]);
+  } else if (provider === "codex" && process.env.VIBE_TERMINAL_NOTIFY_PROGRAM) {
+    args = args.concat([
+      "-c",
+      "notify=['" + process.env.VIBE_TERMINAL_NOTIFY_PROGRAM + "','agent.completed']"
+    ]);
   }
 
   const isWindowsCommandScript =
@@ -536,6 +552,219 @@ function powershellCommand() {
     process.exit(code ?? 0);
   });
 })();`;
+}
+
+// Tiny Node script (POSIX) that POSTs a single attention event to the local
+// telemetry callback. Invoked by the per-provider hooks as
+// `node notify-hook.cjs <agent.completed|agent.waiting|agent.failed>`. It reads
+// the pane id and callback details from the env the shim injected, ignores any
+// extra args (codex appends a JSON payload) and stdin (claude pipes hook JSON),
+// and exits quietly when run outside vibeTerminal.
+function notifyHookSource() {
+  return String.raw`const http = require("http");
+
+const type = process.argv[2];
+const callbackUrl = process.env.VIBE_TERMINAL_CALLBACK_URL;
+const token = process.env.VIBE_TERMINAL_TELEMETRY_TOKEN;
+const sessionId = process.env.VIBE_TERMINAL_SESSION_ID;
+
+if (!type || !callbackUrl || !token || !sessionId) {
+  process.exit(0);
+}
+
+const body = JSON.stringify({ type, sessionId, timestamp: Date.now() });
+
+let url;
+try {
+  url = new URL(callbackUrl);
+} catch {
+  process.exit(0);
+}
+
+const request = http.request(
+  {
+    hostname: url.hostname,
+    port: url.port,
+    path: url.pathname,
+    method: "POST",
+    timeout: 1000,
+    headers: {
+      "content-type": "application/json",
+      "content-length": Buffer.byteLength(body),
+      "x-vibe-telemetry-token": token
+    }
+  },
+  (response) => {
+    response.resume();
+    response.on("end", () => process.exit(0));
+  }
+);
+
+request.on("error", () => process.exit(0));
+request.on("timeout", () => {
+  request.destroy();
+  process.exit(0);
+});
+request.end(body);
+`;
+}
+
+// Windows notify program body (PowerShell). Same contract as notifyHookSource
+// but implemented without Node so it works regardless of whether the user has
+// `node` on PATH. `$args[0]` is the attention type.
+function windowsNotifyPs1Source() {
+  return [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    "$Type = $args[0]",
+    "if ([string]::IsNullOrEmpty($Type) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_CALLBACK_URL) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_TELEMETRY_TOKEN) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_SESSION_ID)) {",
+    "  exit 0",
+    "}",
+    "try {",
+    "  $payload = [ordered]@{",
+    "    type = $Type",
+    "    sessionId = $env:VIBE_TERMINAL_SESSION_ID",
+    "    timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()",
+    "  }",
+    "  $body = $payload | ConvertTo-Json -Compress",
+    "  $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)",
+    "  $request = [System.Net.WebRequest]::Create($env:VIBE_TERMINAL_CALLBACK_URL)",
+    "  $request.Method = 'POST'",
+    "  $request.Timeout = 1000",
+    "  $request.ContentType = 'application/json'",
+    "  $request.ContentLength = $bytes.Length",
+    "  $request.Headers.Set('x-vibe-telemetry-token', $env:VIBE_TERMINAL_TELEMETRY_TOKEN)",
+    "  $stream = $request.GetRequestStream()",
+    "  try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }",
+    "  $response = $request.GetResponse()",
+    "  if ($response) { $response.Dispose() }",
+    "} catch {",
+    "  exit 0",
+    "}",
+    "exit 0"
+  ].join(os.EOL);
+}
+
+// POSIX notify program: a shell wrapper that runs the Node hook. Forces
+// ELECTRON_RUN_AS_NODE so the bundled Electron binary behaves as Node when it
+// is used as the runtime (a no-op for a real `node`).
+function posixNotifyShSource(nodePath, notifyHookPath) {
+  return [
+    "#!/usr/bin/env sh",
+    `ELECTRON_RUN_AS_NODE=1 exec ${JSON.stringify(nodePath)} ${JSON.stringify(
+      notifyHookPath
+    )} "$@"`
+  ].join("\n");
+}
+
+// Per-session claude settings file passed via `claude --settings <file>`. Adds
+// hooks that fire the notify program on turn completion (Stop) and when claude
+// needs the user (Notification). `--settings` merges over the user's own
+// settings without mutating ~/.claude.
+function buildClaudeSettingsJson(scriptPath, isWin) {
+  const hook = (type) => {
+    // Keep the command shell-agnostic so it works whatever shell claude runs
+    // hooks under: on Windows invoke powershell explicitly against the .ps1
+    // (forward slashes dodge backslash-escaping in any shell); on POSIX run the
+    // executable notify wrapper directly.
+    const command = isWin
+      ? `powershell -NoProfile -ExecutionPolicy Bypass -File "${scriptPath.replace(
+          /\\/g,
+          "/"
+        )}" ${type}`
+      : `'${scriptPath}' '${type}'`;
+    return { type: "command", command, timeout: 5 };
+  };
+
+  const settings = {
+    hooks: {
+      Stop: [{ matcher: "*", hooks: [hook("agent.completed")] }],
+      Notification: [
+        {
+          matcher: "permission_prompt|idle_prompt",
+          hooks: [hook("agent.waiting")]
+        }
+      ]
+    }
+  };
+
+  return `${JSON.stringify(settings, null, 2)}\n`;
+}
+
+const OPENCODE_PLUGIN_VERSION = "vibeterminal-notify-1";
+
+// opencode cannot take a per-invocation hook, so we install one small plugin in
+// the user's opencode config. It is guarded: it only POSTs when the
+// VIBE_TERMINAL_* env vars are present, so a plain `opencode` run does nothing.
+function openCodePluginSource() {
+  return [
+    `// vibeterminal-notify (${OPENCODE_PLUGIN_VERSION}) - auto-generated by vibeTerminal.`,
+    "// Safe no-op outside vibeTerminal: only POSTs when VIBE_TERMINAL_* env vars are set.",
+    "export const VibeTerminalNotify = async () => ({",
+    "  event: async ({ event }) => {",
+    "    const url = process.env.VIBE_TERMINAL_CALLBACK_URL;",
+    "    const token = process.env.VIBE_TERMINAL_TELEMETRY_TOKEN;",
+    "    const sessionId = process.env.VIBE_TERMINAL_SESSION_ID;",
+    '    if (!url || !token || !sessionId || !event || typeof event.type !== "string") {',
+    "      return;",
+    "    }",
+    "    const map = {",
+    '      "session.idle": "agent.completed",',
+    '      "permission.asked": "agent.waiting",',
+    '      "permission.updated": "agent.waiting",',
+    '      "session.error": "agent.failed"',
+    "    };",
+    "    const type = map[event.type];",
+    "    if (!type) {",
+    "      return;",
+    "    }",
+    "    try {",
+    "      await fetch(url, {",
+    '        method: "POST",',
+    "        headers: {",
+    '          "content-type": "application/json",',
+    '          "x-vibe-telemetry-token": token',
+    "        },",
+    '        body: JSON.stringify({ type, sessionId, provider: "opencode", timestamp: Date.now() })',
+    "      });",
+    "    } catch (_error) {",
+    "      // Telemetry is best-effort; ignore delivery failures.",
+    "    }",
+    "  }",
+    "});",
+    ""
+  ].join("\n");
+}
+
+function installOpenCodePlugin(homeDir = os.homedir()) {
+  try {
+    const base = path.join(homeDir, ".config", "opencode");
+    if (!fs.existsSync(base)) {
+      // User has no opencode config yet; install lazily on a later launch.
+      return;
+    }
+
+    const source = openCodePluginSource();
+    // opencode has used both "plugin" and "plugins" for its local-plugin dir
+    // across versions; write to both so discovery does not depend on the spelling.
+    for (const dirName of ["plugin", "plugins"]) {
+      const file = path.join(base, dirName, "vibeterminal-notify.js");
+      try {
+        if (fs.readFileSync(file, "utf8").includes(OPENCODE_PLUGIN_VERSION)) {
+          continue;
+        }
+      } catch {
+        // Not present or unreadable: fall through and (re)write it.
+      }
+      try {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, source);
+      } catch {
+        // Best-effort; never let plugin install break telemetry startup.
+      }
+    }
+  } catch {
+    // Never let opencode plugin install break the telemetry manager.
+  }
 }
 
 function mapTelemetryToAttention(event) {
@@ -596,6 +825,14 @@ function createAgentTelemetryManager(options = {}) {
   const nodePath = options.nodePath || process.execPath;
   const runDir = path.join(baseDir, runId);
   const runnerPath = path.join(runDir, "shim-runner.cjs");
+  const isWin = process.platform === "win32";
+  const notifyHookPath = path.join(runDir, "notify-hook.cjs");
+  const notifyPs1Path = path.join(runDir, "notify.ps1");
+  const notifyShPath = path.join(runDir, "notify.sh");
+  const claudeSettingsPath = path.join(runDir, "claude-settings.json");
+  // The single "notify program" each agent invokes with the attention type as
+  // its first argument: the PowerShell body on Windows, the sh wrapper on POSIX.
+  const notifyProgramPath = isWin ? notifyPs1Path : notifyShPath;
   const sessions = new Map();
   let server = null;
   let callbackUrl = null;
@@ -606,6 +843,22 @@ function createAgentTelemetryManager(options = {}) {
       cleanupStaleShimDirs({ baseDir, currentRunId: runId });
       writeMarker(runDir, { runId, type: "run" });
       fs.writeFileSync(runnerPath, shimRunnerSource());
+
+      // Per-turn notification assets: the notify program (PowerShell on Windows,
+      // Node-via-sh on POSIX) plus the claude --settings hook file. codex points
+      // its `notify` at the same program; opencode uses a guarded global plugin.
+      if (isWin) {
+        fs.writeFileSync(notifyPs1Path, windowsNotifyPs1Source());
+      } else {
+        fs.writeFileSync(notifyHookPath, notifyHookSource());
+        fs.writeFileSync(notifyShPath, posixNotifyShSource(nodePath, notifyHookPath));
+        fs.chmodSync(notifyShPath, 0o755);
+      }
+      fs.writeFileSync(
+        claudeSettingsPath,
+        buildClaudeSettingsJson(notifyProgramPath, isWin)
+      );
+      installOpenCodePlugin(options.openCodeHome);
 
       server = http.createServer((request, response) => {
         if (request.method !== "POST" || request.url !== "/agent-event") {
@@ -636,13 +889,6 @@ function createAgentTelemetryManager(options = {}) {
               response.end();
               return;
             }
-
-            emit({
-              id: event.sessionId,
-              type: "agent-telemetry",
-              provider: event.provider,
-              event
-            });
 
             const attention = mapTelemetryToAttention(event);
             if (attention) {
@@ -708,7 +954,9 @@ function createAgentTelemetryManager(options = {}) {
         VIBE_TERMINAL_CALLBACK_URL: callbackUrl,
         VIBE_TERMINAL_TELEMETRY_TOKEN: token,
         VIBE_TERMINAL_ORIGINAL_PATH: originalPath,
-        VIBE_TERMINAL_SHIM_DIR: shimDir
+        VIBE_TERMINAL_SHIM_DIR: shimDir,
+        VIBE_TERMINAL_CLAUDE_SETTINGS: claudeSettingsPath,
+        VIBE_TERMINAL_NOTIFY_PROGRAM: notifyProgramPath
       }
     };
 
@@ -757,9 +1005,12 @@ function createAgentTelemetryManager(options = {}) {
 }
 
 module.exports = {
+  buildClaudeSettingsJson,
   cleanupStaleShimDirs,
   createAgentTelemetryManager,
+  installOpenCodePlugin,
   mapTelemetryToAttention,
-  pathEnvKey,
+  notifyHookSource,
+  openCodePluginSource,
   safeRemoveDir
 };

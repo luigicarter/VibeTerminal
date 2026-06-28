@@ -3,9 +3,12 @@ const http = require("http");
 const path = require("path");
 const { spawn } = require("child_process");
 const {
+  buildClaudeSettingsJson,
   cleanupStaleShimDirs,
   createAgentTelemetryManager,
-  mapTelemetryToAttention
+  installOpenCodePlugin,
+  mapTelemetryToAttention,
+  openCodePluginSource
 } = require("../../backend/agentTelemetry.cjs");
 
 const rootDir = path.join(__dirname, "..", "..");
@@ -276,14 +279,51 @@ function postWithBadToken(callbackUrl) {
     assert(fs.existsSync(currentRun), "current run dir should not be removed");
     assert(fs.existsSync(unmarkedRun), "unmarked dir should not be removed");
 
+    // Isolate the opencode global-plugin install to a fake home so the smoke
+    // test never touches the developer's real ~/.config/opencode.
+    const openCodeHome = path.join(root, "ocfake");
+    fs.mkdirSync(path.join(openCodeHome, ".config", "opencode"), {
+      recursive: true
+    });
+
     manager = createAgentTelemetryManager({
       baseDir: shimBase,
       emit: (event) => events.push(event),
       runId: "current-run",
       token: "test-token",
-      nodePath: process.execPath
+      nodePath: process.execPath,
+      openCodeHome
     });
     await manager.ready;
+
+    // Notification assets are written for the run.
+    const notifyProgram =
+      process.platform === "win32"
+        ? path.join(manager.runDir, "notify.ps1")
+        : path.join(manager.runDir, "notify.sh");
+    assert(fs.existsSync(notifyProgram), "notify program should be written");
+    const claudeSettings = JSON.parse(
+      fs.readFileSync(path.join(manager.runDir, "claude-settings.json"), "utf8")
+    );
+    assert(
+      Array.isArray(claudeSettings?.hooks?.Stop) &&
+        Array.isArray(claudeSettings?.hooks?.Notification),
+      "claude settings should declare Stop and Notification hooks"
+    );
+
+    // The guarded opencode plugin lands in the (fake) opencode config dir.
+    const openCodePlugin = path.join(
+      openCodeHome,
+      ".config",
+      "opencode",
+      "plugin",
+      "vibeterminal-notify.js"
+    );
+    assert(
+      fs.existsSync(openCodePlugin) &&
+        fs.readFileSync(openCodePlugin, "utf8").includes("agent.completed"),
+      "opencode notify plugin should be installed into the opencode config dir"
+    );
 
     const instrumentation = await manager.prepareSession("pane-one");
     const traversalInstrumentation = await manager.prepareSession("..\\..\\backend");
@@ -301,8 +341,16 @@ function postWithBadToken(callbackUrl) {
       instrumentation.env.VIBE_TERMINAL_ORIGINAL_PATH === fakeBin,
       "original PATH should be captured"
     );
+    // instrumentation.env is a plain object, so look up the PATH key with the
+    // same case-insensitive rule the shim uses (Windows may spell it "PATH").
+    const instrumentationPathKey =
+      Object.keys(instrumentation.env).find(
+        (envKey) => envKey.toLowerCase() === "path"
+      ) || pathKey;
     assert(
-      (instrumentation.env[pathKey] || "").startsWith(instrumentation.shimDir),
+      (instrumentation.env[instrumentationPathKey] || "").startsWith(
+        instrumentation.shimDir
+      ),
       "shim dir should be prepended to PATH"
     );
     assert(
@@ -359,10 +407,18 @@ function postWithBadToken(callbackUrl) {
     );
     if (process.platform === "win32") {
       const providerArgs = JSON.parse(fs.readFileSync(providerArgsPath, "utf8"));
+      const baseArgs = ["--hello", "a&b", literalArg, spacedArg];
       assert(
-        JSON.stringify(providerArgs) ===
-          JSON.stringify(["--hello", "a&b", literalArg, spacedArg]),
+        JSON.stringify(providerArgs.slice(0, baseArgs.length)) ===
+          JSON.stringify(baseArgs),
         `PowerShell shim should preserve provider argv; got ${JSON.stringify(providerArgs)}`
+      );
+      assert(
+        providerArgs.includes("-c") &&
+          providerArgs.some(
+            (arg) => typeof arg === "string" && arg.startsWith("notify=[")
+          ),
+        `codex shim should inject the notify config; got ${JSON.stringify(providerArgs)}`
       );
 
       const ptyResult = await runInWindowsPty("codex --tty-smoke", {
@@ -419,8 +475,8 @@ function postWithBadToken(callbackUrl) {
 
     const eventTypes = events.map((event) => event.type);
     assert(
-      eventTypes.includes("agent-telemetry"),
-      "telemetry event should be emitted"
+      !eventTypes.includes("agent-telemetry"),
+      "raw agent-telemetry event channel should no longer be emitted"
     );
     assert(
       events.some(
@@ -430,6 +486,73 @@ function postWithBadToken(callbackUrl) {
           event.attention.state === "completed"
       ),
       "completed attention event should be emitted"
+    );
+
+    // The notify program (used by the claude/codex hooks) POSTs a per-turn
+    // attention event straight to the live callback server.
+    const notifyEnv = {
+      ...process.env,
+      VIBE_TERMINAL_CALLBACK_URL: manager.callbackUrl(),
+      VIBE_TERMINAL_TELEMETRY_TOKEN: "test-token",
+      VIBE_TERMINAL_SESSION_ID: "pane-notify"
+    };
+    const notifyResult =
+      process.platform === "win32"
+        ? await run(
+            powershellCommand(),
+            [
+              "-NoProfile",
+              "-ExecutionPolicy",
+              "Bypass",
+              "-File",
+              notifyProgram,
+              "agent.waiting"
+            ],
+            { cwd: root, env: notifyEnv }
+          )
+        : await run(notifyProgram, ["agent.waiting"], {
+            cwd: root,
+            env: notifyEnv
+          });
+    assert(
+      notifyResult.code === 0,
+      `notify program should exit 0, got ${notifyResult.code}; stderr=${notifyResult.stderr}`
+    );
+    assert(
+      events.some(
+        (event) =>
+          event.type === "agent-attention" &&
+          event.id === "pane-notify" &&
+          event.attention.state === "waiting"
+      ),
+      "notify program should produce a waiting attention event"
+    );
+
+    // The opencode plugin source maps the documented opencode events.
+    const pluginSource = openCodePluginSource();
+    assert(
+      pluginSource.includes("session.idle") &&
+        pluginSource.includes("permission.asked") &&
+        pluginSource.includes("session.error"),
+      "opencode plugin should map opencode lifecycle events"
+    );
+
+    // The claude settings builder targets the notify program on both platforms.
+    const winCmd = JSON.parse(
+      buildClaudeSettingsJson("C:\\x\\notify.ps1", true)
+    ).hooks.Stop[0].hooks[0].command;
+    assert(
+      winCmd.includes("powershell") &&
+        winCmd.includes("C:/x/notify.ps1") &&
+        winCmd.includes("agent.completed"),
+      `windows claude hook should invoke the notify ps1 via powershell; got ${winCmd}`
+    );
+    const posixCmd = JSON.parse(
+      buildClaudeSettingsJson("/x/notify.sh", false)
+    ).hooks.Notification[0].hooks[0].command;
+    assert(
+      posixCmd.includes("/x/notify.sh") && posixCmd.includes("agent.waiting"),
+      `posix claude hook should invoke the notify wrapper; got ${posixCmd}`
     );
     const signaledAttention = mapTelemetryToAttention({
       type: "agent.process.exited",

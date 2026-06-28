@@ -221,11 +221,5 @@ export type TerminalEvent =
       provider?: string;
       attention: AgentAttentionEvent;
     }
-  | {
-      id: string;
-      type: "agent-telemetry";
-      provider?: string;
-      event: Record<string, unknown>;
-    }
   | { id: string; type: "error"; message: string }
   | { id: string; type: "exit"; exitCode?: number; signal?: number };
