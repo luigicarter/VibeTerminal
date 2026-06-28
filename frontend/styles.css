@@ -990,6 +990,54 @@ button {
     0 16px 34px rgba(0, 0, 0, 0.38);
 }
 
+/* "Done working" glow: pulse the pane border so you can tell at a glance which
+   terminal finished. Keyed to the unread attention flag (shouldShowAttentionDot),
+   so it clears the moment you focus the pane. Colors match the status pills:
+   completed = green (default), waiting = cyan (your turn), failed = red. */
+.terminal-pane-attention {
+  --pane-glow: #8fd694;
+  border-color: var(--pane-glow);
+  animation: pane-attention-pulse 1.4s ease-in-out infinite;
+}
+
+.terminal-pane-attention-waiting {
+  --pane-glow: #6bd7db;
+}
+
+.terminal-pane-attention-failed {
+  --pane-glow: #ff8e95;
+}
+
+@keyframes pane-attention-pulse {
+  0%,
+  100% {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.05),
+      0 0 0 1px var(--pane-glow),
+      0 0 9px color-mix(in srgb, var(--pane-glow) 35%, transparent),
+      0 16px 34px rgba(0, 0, 0, 0.38);
+  }
+  50% {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.05),
+      0 0 0 2px var(--pane-glow),
+      0 0 22px color-mix(in srgb, var(--pane-glow) 68%, transparent),
+      0 16px 34px rgba(0, 0, 0, 0.38);
+  }
+}
+
+/* Respect reduced-motion: hold a steady glow instead of pulsing. */
+@media (prefers-reduced-motion: reduce) {
+  .terminal-pane-attention {
+    animation: none;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.05),
+      0 0 0 2px var(--pane-glow),
+      0 0 16px color-mix(in srgb, var(--pane-glow) 55%, transparent),
+      0 16px 34px rgba(0, 0, 0, 0.38);
+  }
+}
+
 .pane-header {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;

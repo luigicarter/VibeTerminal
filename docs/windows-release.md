@@ -4,10 +4,10 @@ vibeTerminal ships to Windows users as an Electron Builder NSIS installer hosted
 
 ## Current Public Release
 
-The current public Windows release is `v0.1.13`:
+The current public Windows release is `v0.1.14`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.13`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.13/vibeTerminal-Setup-0.1.13.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.14`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.14/vibeTerminal-Setup-0.1.14.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -62,6 +62,7 @@ npm run smoke:backend:updates
 npm run smoke:frontend:attention
 npm run smoke:frontend:workspace
 npm run smoke:frontend:session-launch
+npm run smoke:frontend:tiled-resize
 npm run dist:win -- --publish never
 ```
 
@@ -121,6 +122,7 @@ npm run smoke:backend:updates
 npm run smoke:frontend:attention
 npm run smoke:frontend:workspace
 npm run smoke:frontend:session-launch
+npm run smoke:frontend:tiled-resize
 npm run dist:win -- --publish never
 ```
 

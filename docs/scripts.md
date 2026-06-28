@@ -19,6 +19,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `scripts/frontend/attention-smoke.cjs` - Validates the shared terminal attention helpers used to decide whether sidebar workspace dots should appear and when unread attention is cleared.
 - `scripts/frontend/workspace-smoke.cjs` - Validates empty-install workspace startup, project folder removal wiring, and sidebar remove control styling.
 - `scripts/frontend/session-launch-smoke.cjs` - Validates launch/resume command construction and launch-mode gating, and guards that the terminal-creation effect stays decoupled from the command string so a resume id discovered mid-session cannot blank a live pane.
+- `scripts/frontend/tiled-board-resize-smoke.cjs` - Validates tiled-board resize geometry so adjacent panes stop at blocking panes instead of sweeping over them and burying untouched panes on release.
 
 ## QA Scripts
 
@@ -42,4 +43,5 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `npm run smoke:frontend:attention` - Frontend smoke test for terminal attention helper behavior.
 - `npm run smoke:frontend:workspace` - Frontend smoke test for workspace startup and project folder removal behavior.
 - `npm run smoke:frontend:session-launch` - Frontend smoke test for launch/resume command building and terminal-pane launch decoupling.
+- `npm run smoke:frontend:tiled-resize` - Frontend smoke test for tiled-board resize geometry and no-overlap release behavior.
 - `npm run smoke:codex-discovery` - Compatibility alias for the backend smoke test.

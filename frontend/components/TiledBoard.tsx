@@ -521,6 +521,16 @@ function buildAdjacentResizeLayouts(
     innerWidth
   );
 
+  // A neighbor follows the active pane's freed edge, but it must not sweep across
+  // a *third* pane that overlaps its perpendicular span. If it did, the
+  // commit-time gravity pass would see the overlap and bury that third pane under
+  // the now-overgrown neighbor ("snapped under everything"). Clamp every follow
+  // to the nearest blocker so the neighbor stops at it instead.
+  const blockersFor = (neighborId: string) =>
+    neighborEntries
+      .filter((entry) => entry.id !== neighborId)
+      .map((entry) => entry.rect);
+
   if (axis?.includes("e")) {
     const rightNeighbors = neighborEntries.filter(({ rect }) =>
       isRightResizeNeighbor(startRect, activeRect, rect)
@@ -534,7 +544,15 @@ function buildAdjacentResizeLayouts(
 
     activeRect.width = Math.max(activeMinWidth, activeRight - activeRect.left);
     rightNeighbors.forEach(({ id, rect }) => {
-      const nextLeft = rectRight(activeRect) + BOARD_GAP;
+      const blockedLeft = blockersFor(id).reduce(
+        (limit, blocker) =>
+          rangesOverlap(rect.top, rectBottom(rect), blocker.top, rectBottom(blocker)) &&
+          blocker.left < rectRight(rect)
+            ? Math.max(limit, rectRight(blocker) + BOARD_GAP)
+            : limit,
+        -Infinity
+      );
+      const nextLeft = Math.max(rectRight(activeRect) + BOARD_GAP, blockedLeft);
       const current = neighborRects.get(id);
 
       if (!current) {
@@ -560,13 +578,22 @@ function buildAdjacentResizeLayouts(
     activeRect.left = Math.min(Math.max(activeRect.left, leftLimit), activeRight - activeMinWidth);
     activeRect.width = activeRight - activeRect.left;
     leftNeighbors.forEach(({ id, rect }) => {
+      const blockedRight = blockersFor(id).reduce(
+        (limit, blocker) =>
+          rangesOverlap(rect.top, rectBottom(rect), blocker.top, rectBottom(blocker)) &&
+          rectRight(blocker) > rect.left
+            ? Math.min(limit, blocker.left - BOARD_GAP)
+            : limit,
+        Infinity
+      );
+      const nextRight = Math.min(activeRect.left - BOARD_GAP, blockedRight);
       const current = neighborRects.get(id);
 
       if (!current) {
         return;
       }
 
-      current.width = activeRect.left - BOARD_GAP - rect.left;
+      current.width = nextRight - rect.left;
     });
   }
 
@@ -583,7 +610,15 @@ function buildAdjacentResizeLayouts(
 
     activeRect.height = Math.max(activeOption.minH, activeBottom - activeRect.top);
     belowNeighbors.forEach(({ id, rect }) => {
-      const nextTop = rectBottom(activeRect) + BOARD_GAP;
+      const blockedTop = blockersFor(id).reduce(
+        (limit, blocker) =>
+          rangesOverlap(rect.left, rectRight(rect), blocker.left, rectRight(blocker)) &&
+          blocker.top < rectBottom(rect)
+            ? Math.max(limit, rectBottom(blocker) + BOARD_GAP)
+            : limit,
+        -Infinity
+      );
+      const nextTop = Math.max(rectBottom(activeRect) + BOARD_GAP, blockedTop);
       const current = neighborRects.get(id);
 
       if (!current) {
@@ -609,13 +644,22 @@ function buildAdjacentResizeLayouts(
     activeRect.top = Math.min(Math.max(activeRect.top, topLimit), activeBottom - activeOption.minH);
     activeRect.height = activeBottom - activeRect.top;
     aboveNeighbors.forEach(({ id, rect }) => {
+      const blockedBottom = blockersFor(id).reduce(
+        (limit, blocker) =>
+          rangesOverlap(rect.left, rectRight(rect), blocker.left, rectRight(blocker)) &&
+          rectBottom(blocker) > rect.top
+            ? Math.min(limit, blocker.top - BOARD_GAP)
+            : limit,
+        Infinity
+      );
+      const nextBottom = Math.min(activeRect.top - BOARD_GAP, blockedBottom);
       const current = neighborRects.get(id);
 
       if (!current) {
         return;
       }
 
-      current.height = activeRect.top - BOARD_GAP - rect.top;
+      current.height = nextBottom - rect.top;
     });
   }
 

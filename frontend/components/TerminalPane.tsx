@@ -14,7 +14,8 @@ import {
   TerminalSquare,
   X
 } from "lucide-react";
-import { reconcileStatus } from "../attention";
+import clsx from "clsx";
+import { reconcileStatus, shouldShowAttentionDot } from "../attention";
 import { buildLaunchCommand, isThreadedAgentKind } from "../sessionLaunch";
 import {
   isTerminalCopyShortcut,
@@ -786,9 +787,21 @@ export default function TerminalPane({
     }
   }
 
+  // Glow the pane border when this terminal has finished a turn but hasn't been
+  // looked at yet (same unread rule as the sidebar folder dot). Selecting or
+  // typing into the pane clears the unread flag, which drops the glow.
+  const showAttention = shouldShowAttentionDot(session);
+
   return (
     <article
-      className={`terminal-pane ${isArranging ? "terminal-pane-arranging" : ""}`}
+      className={clsx(
+        "terminal-pane",
+        isArranging && "terminal-pane-arranging",
+        showAttention && "terminal-pane-attention",
+        showAttention &&
+          session.attention &&
+          `terminal-pane-attention-${session.attention.state}`
+      )}
       style={{ "--pane-accent": profile.accent } as React.CSSProperties}
       onPointerDown={handlePanePointerDown}
     >
