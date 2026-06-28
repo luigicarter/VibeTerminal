@@ -34,9 +34,9 @@ push.
   directories and does not need a hosted backend for the core workflow.
 - The board model is immediately understandable: open a folder, add terminal or
   agent panes, and keep all activity visible in one workspace.
-- The provider idea is already present. Codex, Claude, OpenCode, Gemini, Aider,
-  and plain terminals are represented in the UI, with deeper thread lookup for
-  threaded providers.
+- The provider idea is already present. Codex, Claude, OpenCode, and plain
+  terminals are represented in the UI, with deeper thread lookup for threaded
+  providers. Other CLIs can be run from regular terminal panes.
 
 ## Publish Blockers
 
@@ -59,8 +59,8 @@ push.
 - Add a first-run trust note in the README: vibeTerminal launches real local
   shells and writes provider commands into those shells.
 - Add provider availability checks before launching a pane. If `codex`,
-  `claude`, `opencode`, `gemini`, or `aider` is missing from `PATH`, show a
-  clear inline error instead of opening a shell that immediately fails.
+  `claude`, or `opencode` is missing from `PATH`, show a clear inline error
+  instead of opening a shell that immediately fails.
 - Validate IPC payloads in the main process. The preload bridge is narrow, but
   `terminal:create`, `terminal:input`, `terminal:resize`, `terminal:kill`, and
   `agent-thread:latest` should still reject malformed payloads.

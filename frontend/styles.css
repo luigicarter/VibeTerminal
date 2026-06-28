@@ -3,15 +3,15 @@
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
-  background: #111312;
+  background: #0d0f0e;
   color: #f3f0e7;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   --sidebar-width: 292px;
-  --scrollbar-thumb: #556059;
+  --scrollbar-thumb: #5b6660;
   --scrollbar-thumb-hover: #737d72;
-  --scrollbar-thumb-active: #f2c94c;
+  --scrollbar-thumb-active: #f4cf5a;
 }
 
 * {
@@ -39,7 +39,7 @@ button {
   height: 100%;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 28%),
-    #111312;
+    #0d0f0e;
 }
 
 .app-shell.sidebar-collapsed {
@@ -52,8 +52,8 @@ button {
   flex-direction: column;
   gap: 12px;
   overflow: hidden;
-  border-right: 1px solid #2a2f2b;
-  background: #171a18;
+  border-right: 1px solid #363d36;
+  background: #1b1f1c;
   padding: 16px 14px;
 }
 
@@ -90,7 +90,7 @@ button {
 
 .sidebar-resize-handle:hover::after,
 .sidebar-resize-handle:focus-visible::after {
-  background: #f2c94c;
+  background: #f4cf5a;
   opacity: 1;
 }
 
@@ -135,9 +135,9 @@ button {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  border: 1px solid #3a403b;
+  border: 1px solid #3f463f;
   border-radius: 7px;
-  background: #222722;
+  background: #262c25;
   color: #f4f1e8;
   cursor: pointer;
   transition:
@@ -150,8 +150,20 @@ button {
 .empty-state button:hover,
 .quick-actions button:hover,
 .agent-toolbar button:hover {
-  border-color: #6a5831;
-  background: #2a2f29;
+  border-color: #7a6638;
+  background: #2f352e;
+}
+
+.open-folder-button:hover {
+  box-shadow:
+    0 0 0 1px rgba(244, 207, 90, 0.18),
+    0 10px 24px rgba(244, 207, 90, 0.08);
+}
+
+.agent-toolbar button:hover {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--agent-accent) 44%, transparent),
+    0 8px 20px color-mix(in srgb, var(--agent-accent) 18%, transparent);
 }
 
 .open-folder-button {
@@ -164,9 +176,9 @@ button {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 9px;
-  border: 1px solid #343b35;
+  border: 1px solid #3a423b;
   border-radius: 8px;
-  background: #1c211d;
+  background: #1f241f;
   color: #f6f2e9;
   cursor: pointer;
   padding: 10px;
@@ -178,8 +190,12 @@ button {
 
 .multi-mode-card:hover,
 .multi-mode-card.active {
-  border-color: #585f55;
-  background: #20261f;
+  border-color: #636b61;
+  background: #242a23;
+}
+
+.multi-mode-card.active {
+  box-shadow: inset 2px 0 0 #f4cf5a;
 }
 
 .multi-mode-card.has-attention,
@@ -197,7 +213,7 @@ button {
 }
 
 .multi-mode-heading svg {
-  color: #f2c94c;
+  color: #f4cf5a;
 }
 
 .multi-mode-heading span {
@@ -208,9 +224,9 @@ button {
 
 .multi-mode-subtitle {
   overflow: hidden;
-  border: 1px solid #30362f;
+  border: 1px solid #363d36;
   border-radius: 999px;
-  background: #151916;
+  background: #131713;
   color: #b8bcb4;
   padding: 3px 8px;
   font-size: 11px;
@@ -336,9 +352,13 @@ button {
 
 .workspace-button:hover,
 .workspace-button.active {
-  border-color: #454c45;
-  background: #20241f;
+  border-color: #4d554d;
+  background: #242a22;
   color: #ffffff;
+}
+
+.workspace-button.active {
+  box-shadow: inset 2px 0 0 #f4cf5a;
 }
 
 .workspace-remove-button {
@@ -366,8 +386,8 @@ button {
 
 .workspace-remove-button:hover,
 .workspace-remove-button:focus-visible {
-  border-color: #614141;
-  background: #2b2020;
+  border-color: #6b4747;
+  background: #2f2222;
   color: #ffb8b8;
 }
 
@@ -383,8 +403,8 @@ button {
   align-items: center;
   gap: 10px;
   min-height: 60px;
-  border-bottom: 1px solid #2a2f2b;
-  background: #151816;
+  border-bottom: 1px solid #363d36;
+  background: #141813;
   padding: 10px 14px;
 }
 
@@ -392,9 +412,9 @@ button {
 .pane-actions button {
   display: inline-grid;
   place-items: center;
-  border: 1px solid #343a35;
+  border: 1px solid #3a413b;
   border-radius: 6px;
-  background: #20241f;
+  background: #242a22;
   color: #dddcd5;
   cursor: pointer;
 }
@@ -454,8 +474,8 @@ button {
 }
 
 .quick-actions button:disabled:hover {
-  border-color: #3a403b;
-  background: #222722;
+  border-color: #3f463f;
+  background: #262c25;
 }
 
 .host-message {
@@ -463,8 +483,8 @@ button {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  border-bottom: 1px solid #533a22;
-  background: #251c13;
+  border-bottom: 1px solid #5c4126;
+  background: #2b2014;
   color: #ffd59a;
   padding: 8px 14px;
   font-size: 12px;
@@ -473,7 +493,7 @@ button {
 .host-message button {
   border: 0;
   background: transparent;
-  color: #f2c94c;
+  color: #f4cf5a;
   cursor: pointer;
 }
 
@@ -483,9 +503,9 @@ button {
   bottom: 18px;
   z-index: 100;
   width: min(340px, calc(100vw - 28px));
-  border: 1px solid #485048;
+  border: 1px solid #4e564e;
   border-radius: 8px;
-  background: #1b201d;
+  background: #1e241f;
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.34);
   color: #f8f5ed;
   padding: 13px;
@@ -507,9 +527,9 @@ button {
   width: 24px;
   height: 24px;
   place-items: center;
-  border: 1px solid #39413a;
+  border: 1px solid #40483f;
   border-radius: 6px;
-  background: #20261f;
+  background: #242a23;
   color: #c7cbc3;
   cursor: pointer;
   line-height: 1;
@@ -534,9 +554,9 @@ button {
   justify-content: center;
   gap: 7px;
   min-height: 30px;
-  border: 1px solid #3b433d;
+  border: 1px solid #424a42;
   border-radius: 7px;
-  background: #222722;
+  background: #262c25;
   color: #f4f1e8;
   cursor: pointer;
   padding: 0 11px;
@@ -544,8 +564,8 @@ button {
 }
 
 .update-overlay-actions button.primary {
-  border-color: #6a5831;
-  background: #312916;
+  border-color: #7a6638;
+  background: #3a3017;
   color: #ffe2a1;
 }
 
@@ -553,14 +573,14 @@ button {
   overflow: hidden;
   height: 7px;
   border-radius: 999px;
-  background: #101411;
+  background: #0b0e0c;
 }
 
 .update-progress span {
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: #f2c94c;
+  background: #f4cf5a;
   transition: width 160ms ease;
 }
 
@@ -571,7 +591,7 @@ button {
   display: grid;
   place-items: center;
   background:
-    radial-gradient(circle at 50% 36%, rgba(242, 201, 76, 0.08), transparent 32%),
+    radial-gradient(circle at 50% 36%, rgba(244, 207, 90, 0.1), transparent 32%),
     rgba(7, 9, 8, 0.72);
   padding: 20px;
 }
@@ -581,9 +601,9 @@ button {
   width: min(460px, calc(100vw - 32px));
   grid-template-columns: auto minmax(0, 1fr);
   gap: 14px;
-  border: 1px solid #574b35;
+  border: 1px solid #5f5238;
   border-radius: 8px;
-  background: #191d1a;
+  background: #1c211d;
   box-shadow:
     0 24px 68px rgba(0, 0, 0, 0.54),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
@@ -596,10 +616,10 @@ button {
   width: 44px;
   height: 44px;
   place-items: center;
-  border: 1px solid #6a5831;
+  border: 1px solid #7a6638;
   border-radius: 8px;
-  background: #2a2417;
-  color: #f2c94c;
+  background: #2e2718;
+  color: #f4cf5a;
 }
 
 .confirmation-copy {
@@ -623,9 +643,9 @@ button {
 .confirmation-copy span {
   display: block;
   overflow: hidden;
-  border: 1px solid #30362f;
+  border: 1px solid #363d36;
   border-radius: 6px;
-  background: #111512;
+  background: #0e110f;
   color: #9ba19a;
   padding: 7px 8px;
   font-family:
@@ -648,9 +668,9 @@ button {
   min-height: 34px;
   align-items: center;
   justify-content: center;
-  border: 1px solid #3b433d;
+  border: 1px solid #424a42;
   border-radius: 7px;
-  background: #222722;
+  background: #262c25;
   color: #f4f1e8;
   cursor: pointer;
   padding: 0 13px;
@@ -659,20 +679,20 @@ button {
 
 .confirmation-actions button:hover,
 .confirmation-actions button:focus-visible {
-  border-color: #5a6259;
+  border-color: #636b62;
   background: #2c322d;
 }
 
 .confirmation-actions button.danger {
-  border-color: #703b3d;
-  background: #321d1f;
+  border-color: #7a4144;
+  background: #371f22;
   color: #ffb7b9;
 }
 
 .confirmation-actions button.danger:hover,
 .confirmation-actions button.danger:focus-visible {
-  border-color: #9a474c;
-  background: #402124;
+  border-color: #a64f54;
+  background: #46252a;
   color: #ffd1d3;
 }
 
@@ -681,8 +701,8 @@ button {
   align-items: center;
   gap: 8px;
   overflow: hidden;
-  border-bottom: 1px solid #252a26;
-  background: #121512;
+  border-bottom: 1px solid #2e342e;
+  background: #111510;
   padding: 9px 14px;
 }
 
@@ -697,7 +717,7 @@ button {
 .agent-toolbar button {
   flex: 0 0 auto;
   min-height: 30px;
-  border-color: color-mix(in srgb, var(--agent-accent) 36%, #323833);
+  border-color: color-mix(in srgb, var(--agent-accent) 36%, #3d443d);
   padding: 0 10px;
   color: #f8f5ed;
   font-size: 12px;
@@ -716,9 +736,9 @@ button {
   justify-content: center;
   gap: 12px;
   margin-left: auto;
-  border: 1px solid #30362f;
+  border: 1px solid #363d36;
   border-radius: 7px;
-  background: #181d1a;
+  background: #1b211c;
   padding: 0 11px;
   font-family:
     "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
@@ -743,8 +763,8 @@ button {
 }
 
 .code-line-summary.code-change-unavailable {
-  border-color: #674040;
-  background: #2a1d1d;
+  border-color: #714646;
+  background: #2f2020;
 }
 
 .code-line-summary.code-change-unavailable .diff-muted {
@@ -815,7 +835,7 @@ button {
 .pane-resize-edge::after {
   position: absolute;
   content: "";
-  border-color: color-mix(in srgb, var(--pane-accent, #f2c94c) 74%, #ffffff);
+  border-color: color-mix(in srgb, var(--pane-accent, #f4cf5a) 74%, #ffffff);
   border-style: solid;
   opacity: 0.95;
 }
@@ -828,7 +848,7 @@ button {
 
 .pane-resize-edge:hover,
 .pane-resize-edge-active {
-  background: color-mix(in srgb, var(--pane-accent, #f2c94c) 15%, transparent);
+  background: color-mix(in srgb, var(--pane-accent, #f4cf5a) 15%, transparent);
 }
 
 .pane-resize-edge-n {
@@ -962,12 +982,12 @@ button {
   min-height: 0;
   flex-direction: column;
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--pane-accent) 52%, #353b35);
+  border: 1px solid color-mix(in srgb, var(--pane-accent) 52%, #3d443d);
   border-radius: 8px;
-  background: #181b19;
+  background: #1b1f1c;
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.04),
-    0 14px 28px rgba(0, 0, 0, 0.24);
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 16px 34px rgba(0, 0, 0, 0.38);
 }
 
 .pane-header {
@@ -976,8 +996,8 @@ button {
   align-items: center;
   gap: 8px;
   min-height: 35px;
-  border-bottom: 1px solid #30362f;
-  background: #232722;
+  border-bottom: 1px solid #363d36;
+  background: #262b25;
   padding: 0 7px 0 9px;
   cursor: default;
 }
@@ -1032,7 +1052,7 @@ button {
 
 .status-pill {
   display: inline-block;
-  border: 1px solid #444b44;
+  border: 1px solid #4a514a;
   border-radius: 999px;
   padding: 2px 7px;
   color: #bfc4bd;
@@ -1043,8 +1063,8 @@ button {
 
 .status-running,
 .status-starting {
-  border-color: #5d471d;
-  color: #f2c94c;
+  border-color: #66501f;
+  color: #f4cf5a;
 }
 
 .status-waiting {
@@ -1063,7 +1083,7 @@ button {
 }
 
 .status-idle {
-  border-color: #3a403a;
+  border-color: #414841;
   color: #8b918a;
 }
 
@@ -1079,13 +1099,13 @@ button {
 
 .pane-actions button:hover,
 .icon-button:hover {
-  border-color: #5a6259;
+  border-color: #636b62;
   background: #2c322d;
 }
 
 .pane-actions button.danger:hover {
-  border-color: #7d373d;
-  background: #3a2022;
+  border-color: #8a4046;
+  background: #40252a;
   color: #ff9aa0;
 }
 
@@ -1095,8 +1115,8 @@ button {
   justify-content: space-between;
   gap: 10px;
   min-height: 23px;
-  border-bottom: 1px solid #272d28;
-  background: #151816;
+  border-bottom: 1px solid #2e342e;
+  background: #141813;
   padding: 0 9px;
   color: #aeb4ac;
   font-family:
@@ -1172,16 +1192,16 @@ button {
   align-items: center;
   justify-content: center;
   flex-direction: column;
-  border: 1px dashed #3c443d;
+  border: 1px dashed #444c44;
   border-radius: 8px;
-  background: #171a18;
+  background: #1b1f1c;
   color: #d8d9d2;
   text-align: center;
   padding: 24px;
 }
 
 .empty-state svg {
-  color: #f2c94c;
+  color: #f4cf5a;
 }
 
 .empty-state h2 {

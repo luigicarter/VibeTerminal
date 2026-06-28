@@ -322,7 +322,7 @@ export default function TerminalPane({
       letterSpacing: 0,
       scrollback: 5000,
       theme: {
-        background: "#181b19",
+        background: "#1b1f1c",
         foreground: "#efeee7",
         cursor: profile.accent,
         cursorAccent: "#141615",

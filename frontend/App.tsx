@@ -94,7 +94,7 @@ const agentProfiles: AgentProfile[] = [
     kind: "terminal",
     label: "Terminal",
     command: "",
-    accent: "#f2c94c"
+    accent: "#f4cf5a"
   },
   {
     kind: "codex",
@@ -127,6 +127,10 @@ const agentProfiles: AgentProfile[] = [
     accent: "#ff6b8a"
   }
 ];
+
+const launcherAgentProfiles = agentProfiles.filter(
+  (profile) => profile.kind !== "gemini" && profile.kind !== "aider"
+);
 
 function createId(prefix: string) {
   return `${prefix}_${Math.random().toString(36).slice(2, 9)}_${Date.now().toString(36)}`;
@@ -1424,7 +1428,7 @@ export default function App() {
 
         <section className="agent-toolbar" aria-label="Agent launchers">
           <div className="agent-toolbar-actions">
-            {agentProfiles.map((profile) => (
+            {launcherAgentProfiles.map((profile) => (
               <button
                 key={profile.kind}
                 onClick={() => addSession(profile.kind)}
@@ -1539,7 +1543,7 @@ export default function App() {
               </p>
               {activeScope ? (
                 <div className="empty-actions">
-                  {agentProfiles.map((profile) => (
+                  {launcherAgentProfiles.map((profile) => (
                     <button
                       key={profile.kind}
                       onClick={() => addSession(profile.kind)}

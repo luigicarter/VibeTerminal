@@ -12,7 +12,7 @@ to which task.
 
 | Platform | Download | Notes |
 | --- | --- | --- |
-| Windows x64 | [vibeTerminal-Setup-0.1.12.exe](https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.12/vibeTerminal-Setup-0.1.12.exe) | Standard Windows installer. |
+| Windows x64 | [vibeTerminal-Setup-0.1.13.exe](https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.13/vibeTerminal-Setup-0.1.13.exe) | Standard Windows installer. |
 | All releases | [GitHub Releases](https://github.com/luigicarter/VibeTerminal/releases) | Older versions and release assets. |
 
 Install the app, then launch `vibeTerminal` from the Start Menu or desktop
@@ -24,7 +24,7 @@ shortcut. No separate developer setup is required to use the installed app.
 - Open project folders and keep each folder's sessions grouped together.
 - Use Multi mode for a free board of terminals and agents from different
   folders.
-- Launch panes for Terminal, Codex, Claude, Gemini, OpenCode, and Aider.
+- Launch panes for Terminal, Codex, Claude, and OpenCode.
 - Drag, resize, maximize, duplicate, restart, and close panes.
 - See status pills for running, waiting, done, and failed sessions.
 - Use sidebar attention dots when an agent finishes, waits for input, or fails.
@@ -69,12 +69,12 @@ command works in PowerShell:
 
 - `codex`
 - `claude`
-- `gemini`
 - `opencode`
-- `aider`
 
 If a tool is not installed or is not on your PATH, the pane will open but the
 shell will report that the command was not found.
+
+Other CLIs can be run from a regular terminal pane.
 
 ## Updates
 
