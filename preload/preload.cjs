@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { clipboard, contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("vibe", {
   // The launch command is typed into the platform shell (PowerShell on Windows,
@@ -7,6 +7,10 @@ contextBridge.exposeInMainWorld("vibe", {
   platform: process.platform,
   app: {
     getCwd: () => ipcRenderer.invoke("app:get-cwd")
+  },
+  clipboard: {
+    readText: () => clipboard.readText(),
+    writeText: (text) => clipboard.writeText(String(text ?? ""))
   },
   updates: {
     getState: () => ipcRenderer.invoke("updates:get-state"),
@@ -33,6 +37,14 @@ contextBridge.exposeInMainWorld("vibe", {
     resize: (id, cols, rows) =>
       ipcRenderer.send("terminal:resize", { id, cols, rows }),
     kill: (id) => ipcRenderer.invoke("terminal:kill", { id }),
+    showContextMenu: (payload) =>
+      ipcRenderer.invoke("terminal:show-context-menu", payload),
+    onContextMenuPaste: (callback) => {
+      const listener = (_event, payload) => callback(payload);
+      ipcRenderer.on("terminal:context-menu-paste", listener);
+      return () =>
+        ipcRenderer.removeListener("terminal:context-menu-paste", listener);
+    },
     onEvent: (callback) => {
       const listener = (_event, payload) => callback(payload);
       ipcRenderer.on("terminal:event", listener);

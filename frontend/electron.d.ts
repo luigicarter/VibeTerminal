@@ -16,6 +16,10 @@ declare global {
       app: {
         getCwd: () => Promise<string>;
       };
+      clipboard: {
+        readText: () => string;
+        writeText: (text: string) => void;
+      };
       updates: {
         getState: () => Promise<UpdateState>;
         check: () => Promise<UpdateActionResult>;
@@ -37,6 +41,13 @@ declare global {
         input: (id: string, data: string) => void;
         resize: (id: string, cols: number, rows: number) => void;
         kill: (id: string) => Promise<boolean>;
+        showContextMenu: (payload: {
+          id: string;
+          selectionText?: string;
+        }) => Promise<boolean>;
+        onContextMenuPaste: (
+          callback: (payload: { id: string; text: string }) => void
+        ) => () => void;
         onEvent: (callback: (event: TerminalEvent) => void) => () => void;
       };
     };

@@ -16,6 +16,10 @@ import {
 } from "lucide-react";
 import { reconcileStatus } from "../attention";
 import { buildLaunchCommand, isThreadedAgentKind } from "../sessionLaunch";
+import {
+  isTerminalCopyShortcut,
+  isTerminalPasteShortcut
+} from "../terminalClipboard";
 import type {
   AgentProfile,
   AgentSession,
@@ -26,6 +30,8 @@ import type {
 
 const THREAD_LOOKUP_POLL_MS = 8000;
 const THREAD_LOOKUP_TIMEOUT_MS = 90_000;
+const NON_TERMINAL_FOCUS_TARGET =
+  ".pane-actions, .pane-actions *, button, input, textarea, select, a";
 // How long a live pane may produce no output before we treat it as idle and
 // surface "waiting" (the agent/shell is quiet, so it's the user's turn). Longer
 // means fewer false "waiting" flips while an agent pauses mid-task, at the cost
@@ -227,6 +233,73 @@ export default function TerminalPane({
     });
   }
 
+  function focusTerminal() {
+    if (!isArrangingRef.current) {
+      terminalRef.current?.focus();
+    }
+  }
+
+  function copySelectionToClipboard() {
+    const selection = terminalRef.current?.getSelection() ?? "";
+    const clipboard = window.vibe?.clipboard;
+    if (!selection || !clipboard) {
+      return false;
+    }
+
+    clipboard.writeText(selection);
+    return true;
+  }
+
+  function pasteText(text: string) {
+    if (!text || terminalExitedRef.current || !createdRef.current) {
+      return false;
+    }
+
+    const terminal = terminalRef.current;
+    if (!terminal) {
+      return false;
+    }
+
+    focusTerminal();
+    terminal.paste(text);
+    return true;
+  }
+
+  function pasteClipboardText() {
+    const text = window.vibe?.clipboard?.readText() ?? "";
+    return pasteText(text);
+  }
+
+  function handlePanePointerDown(event: React.PointerEvent<HTMLElement>) {
+    onSelect();
+
+    const target = event.target;
+    if (
+      target instanceof HTMLElement &&
+      target.closest(NON_TERMINAL_FOCUS_TARGET)
+    ) {
+      return;
+    }
+
+    focusTerminal();
+  }
+
+  function handleTerminalContextMenu(event: React.MouseEvent<HTMLDivElement>) {
+    const terminal = terminalRef.current;
+    if (!terminal || !window.vibe?.terminal.showContextMenu) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    onSelect();
+    focusTerminal();
+    void window.vibe.terminal.showContextMenu({
+      id: session.id,
+      selectionText: terminal.getSelection()
+    });
+  }
+
   useEffect(() => {
     if (!containerRef.current || terminalRef.current) {
       return;
@@ -234,7 +307,13 @@ export default function TerminalPane({
 
     const terminal = new Terminal({
       cursorBlink: true,
-      convertEol: true,
+      // PTY-backed terminals (node-pty/ConPTY) already emit CRLF and absolute
+      // cursor control, so xterm must render the bytes raw. convertEol:true
+      // makes xterm force the cursor to column 0 on every '\n' (core lineFeed()
+      // sets activeBuffer.x = 0), which desyncs column tracking from full-screen
+      // TUIs (e.g. Claude Code): a later column-relative erase clears the wrong
+      // span and strands stale glyphs in the leftmost column. Must stay false.
+      convertEol: false,
       fontFamily:
         'Cascadia Mono, "Cascadia Code", "JetBrains Mono", Consolas, monospace',
       fontSize: 13,
@@ -272,13 +351,14 @@ export default function TerminalPane({
     terminal.loadAddon(new WebLinksAddon());
     terminal.open(containerRef.current);
 
-    // Drive xterm with the canvas renderer instead of the default DOM renderer.
-    // The DOM renderer reuses row elements and leaves stale glyphs behind when
-    // the buffer scrolls (most visibly in the leftmost columns); the canvas
-    // renderer repaints the whole surface each frame, so those ghosts can't
-    // accumulate. Canvas (not WebGL) keeps this safe for a tiled board with many
-    // panes, since 2D contexts have no per-page count limit. If the renderer
-    // can't initialize we just fall back to xterm's built-in DOM renderer.
+    // Use xterm's canvas (2D) renderer rather than WebGL. WebGL allocates one
+    // GL context per terminal and Chromium caps concurrent contexts (~16,
+    // evicting the oldest -> context loss), which breaks a tiled board of many
+    // panes; the 2D canvas renderer has no per-page context limit. Note it
+    // repaints only the rows xterm marks dirty (not the whole surface), so it
+    // cannot mask buffer-level corruption -- left-column glyph bleed is fixed by
+    // keeping convertEol false above, not here. If the renderer can't initialize
+    // we fall back to xterm's built-in DOM renderer.
     try {
       terminal.loadAddon(new CanvasAddon());
       scheduleTerminalRepaint();
@@ -287,6 +367,43 @@ export default function TerminalPane({
     }
 
     terminal.focus();
+    terminal.attachCustomKeyEventHandler((event) => {
+      if (event.type !== "keydown") {
+        return true;
+      }
+
+      if (isTerminalCopyShortcut(event, platform)) {
+        if (terminal.hasSelection()) {
+          if (copySelectionToClipboard()) {
+            event.preventDefault();
+            return false;
+          }
+
+          return true;
+        }
+
+        // Keep Ctrl+C as interrupt, but make Ctrl+Shift+C/Cmd+C a copy-only
+        // shortcut instead of forwarding an accidental control character.
+        if (event.shiftKey || platform === "darwin") {
+          event.preventDefault();
+          return false;
+        }
+
+        return true;
+      }
+
+      if (isTerminalPasteShortcut(event, platform)) {
+        if (!window.vibe?.clipboard) {
+          return true;
+        }
+
+        event.preventDefault();
+        pasteClipboardText();
+        return false;
+      }
+
+      return true;
+    });
 
     terminalRef.current = terminal;
     fitRef.current = fitAddon;
@@ -357,6 +474,7 @@ export default function TerminalPane({
         if (event.isRunning) {
           markActive();
         } else {
+          terminalExitedRef.current = true;
           terminal.writeln("");
           terminal.writeln(
             "\x1b[33mProcess exited. Use restart to run it again.\x1b[0m",
@@ -386,6 +504,12 @@ export default function TerminalPane({
         setStatus(event.exitCode === 0 ? "done" : "failed");
       }
     });
+    const removeContextMenuPasteListener =
+      window.vibe?.terminal.onContextMenuPaste?.((payload) => {
+        if (payload.id === session.id) {
+          pasteText(payload.text);
+        }
+      });
 
     if (!session.started) {
       terminal.writeln(
@@ -405,6 +529,7 @@ export default function TerminalPane({
       }
       clearIdleTimer();
       removeListener?.();
+      removeContextMenuPasteListener?.();
       terminal.dispose();
       terminalRef.current = null;
       fitRef.current = null;
@@ -665,7 +790,7 @@ export default function TerminalPane({
     <article
       className={`terminal-pane ${isArranging ? "terminal-pane-arranging" : ""}`}
       style={{ "--pane-accent": profile.accent } as React.CSSProperties}
-      onPointerDown={onSelect}
+      onPointerDown={handlePanePointerDown}
     >
       <header className="pane-header pane-drag-zone" title="Drag header to move pane">
         <div className="pane-title">
@@ -708,7 +833,11 @@ export default function TerminalPane({
         <span>{session.cwd}</span>
       </div>
 
-      <div ref={containerRef} className="terminal-surface" />
+      <div
+        ref={containerRef}
+        className="terminal-surface"
+        onContextMenu={handleTerminalContextMenu}
+      />
     </article>
   );
 }

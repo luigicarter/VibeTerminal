@@ -1,4 +1,12 @@
-const { app, BrowserWindow, dialog, ipcMain, screen } = require("electron");
+const {
+  app,
+  BrowserWindow,
+  Menu,
+  clipboard,
+  dialog,
+  ipcMain,
+  screen
+} = require("electron");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -760,6 +768,42 @@ ipcMain.handle("terminal:create", async (_event, payload) => {
       instrumentation
     }
   });
+  return true;
+});
+
+ipcMain.handle("terminal:show-context-menu", (event, payload = {}) => {
+  const sessionId = typeof payload.id === "string" ? payload.id : null;
+  const selectionText =
+    typeof payload.selectionText === "string" ? payload.selectionText : "";
+  const hasSelection = selectionText.length > 0;
+  const hasClipboardText = clipboard.readText().length > 0;
+
+  const menu = Menu.buildFromTemplate([
+    {
+      label: "Copy",
+      enabled: hasSelection,
+      click: () => {
+        clipboard.writeText(selectionText);
+      }
+    },
+    {
+      label: "Paste",
+      enabled: Boolean(sessionId && hasClipboardText),
+      click: () => {
+        if (!sessionId) {
+          return;
+        }
+
+        event.sender.send("terminal:context-menu-paste", {
+          id: sessionId,
+          text: clipboard.readText()
+        });
+      }
+    }
+  ]);
+
+  const browserWindow = BrowserWindow.fromWebContents(event.sender);
+  menu.popup(browserWindow ? { window: browserWindow } : {});
   return true;
 });
 

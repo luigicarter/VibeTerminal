@@ -1141,6 +1141,21 @@ button {
   background: transparent !important;
 }
 
+/* Tint the terminal scrollbar thumb with the pane accent. The shared scrollbar
+   block above (.terminal-surface .xterm-viewport::-webkit-scrollbar-thumb) already
+   paints the thumb from these --scrollbar-thumb* vars inside the pseudo-element;
+   we just redefine them per-pane from --pane-accent so each agent's scrollbar
+   matches its color. Widened slightly so it's easy to grab in a dense terminal. */
+.terminal-surface {
+  --scrollbar-thumb: color-mix(in srgb, var(--pane-accent) 72%, transparent);
+  --scrollbar-thumb-hover: color-mix(in srgb, var(--pane-accent) 88%, transparent);
+  --scrollbar-thumb-active: var(--pane-accent);
+}
+
+.terminal-surface .xterm-viewport::-webkit-scrollbar {
+  width: 12px;
+}
+
 .empty-state {
   display: flex;
   width: min(560px, calc(100% - 40px));
