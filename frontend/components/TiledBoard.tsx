@@ -70,6 +70,12 @@ const DEFAULT_MIN_H = 170;
 const SWAP_OVERLAP_RATIO = 0.22;
 const ARRANGE_SETTLE_MS = 180;
 const ADJACENT_RESIZE_TOLERANCE = 32;
+// Layouts store x/w as percentages but collide in pixels, so every rect makes a
+// percent->px->percent round-trip that is not bit-exact. Two panes separated by
+// exactly BOARD_GAP can come back ~1e-13px apart and read as overlapping, which
+// makes the gravity pass stack a correctly-placed neighbor underneath. Treat
+// sub-pixel differences as "not overlapping" / "in bounds".
+const OVERLAP_EPSILON = 0.5;
 const RESIZE_AXES: ResizeAxis[] = ["n", "e", "s", "w", "ne", "se", "sw", "nw"];
 
 function clamp(value: number, min: number, max: number) {
@@ -223,16 +229,18 @@ function compactCommittedLayouts(
 }
 
 function rectsOverlap(a: PixelRect, b: PixelRect, gap = BOARD_GAP) {
+  const g = gap - OVERLAP_EPSILON;
   return (
-    a.left < b.left + b.width + gap &&
-    a.left + a.width + gap > b.left &&
-    a.top < b.top + b.height + gap &&
-    a.top + a.height + gap > b.top
+    a.left < b.left + b.width + g &&
+    a.left + a.width + g > b.left &&
+    a.top < b.top + b.height + g &&
+    a.top + a.height + g > b.top
   );
 }
 
 function horizontalOverlap(a: PixelRect, b: PixelRect, gap = BOARD_GAP) {
-  return a.left < b.left + b.width + gap && a.left + a.width + gap > b.left;
+  const g = gap - OVERLAP_EPSILON;
+  return a.left < b.left + b.width + g && a.left + a.width + g > b.left;
 }
 
 function rectArea(rect: PixelRect) {
@@ -321,11 +329,11 @@ function isLayoutWithinBounds(
 ) {
   const rect = layoutToRect(candidate, innerWidth);
   return (
-    rect.left >= 0 &&
-    rect.top >= BOARD_PADDING &&
-    rect.width >= Math.min(minW, innerWidth) &&
-    rect.height >= minH &&
-    rect.left + rect.width <= innerWidth
+    rect.left >= -OVERLAP_EPSILON &&
+    rect.top >= BOARD_PADDING - OVERLAP_EPSILON &&
+    rect.width >= Math.min(minW, innerWidth) - OVERLAP_EPSILON &&
+    rect.height >= minH - OVERLAP_EPSILON &&
+    rect.left + rect.width <= innerWidth + OVERLAP_EPSILON
   );
 }
 
@@ -404,6 +412,12 @@ function buildSwapCommitLayouts(
   };
 }
 
+// Adjacency is tested against the perpendicular span of the *resized* rect, not
+// the start rect. For a single-edge drag the perpendicular span is unchanged, so
+// behavior matches before. For a corner drag the grown rect now spans far enough
+// to reach the diagonal pane on both axes, so it is detected as both a side and a
+// stacked neighbor and absorbs the resize in both directions instead of being
+// left to collide and reflow.
 function isRightResizeNeighbor(
   startRect: PixelRect,
   activeRect: PixelRect,
@@ -414,7 +428,7 @@ function isRightResizeNeighbor(
   const initialGap = neighborRect.left - startRight;
 
   return (
-    rangesOverlap(startRect.top, rectBottom(startRect), neighborRect.top, rectBottom(neighborRect)) &&
+    rangesOverlap(activeRect.top, rectBottom(activeRect), neighborRect.top, rectBottom(neighborRect)) &&
     neighborRect.left >= startRight - ADJACENT_RESIZE_TOLERANCE &&
     (initialGap <= ADJACENT_RESIZE_TOLERANCE ||
       activeRight + BOARD_GAP > neighborRect.left)
@@ -430,7 +444,7 @@ function isLeftResizeNeighbor(
   const initialGap = startRect.left - neighborRight;
 
   return (
-    rangesOverlap(startRect.top, rectBottom(startRect), neighborRect.top, rectBottom(neighborRect)) &&
+    rangesOverlap(activeRect.top, rectBottom(activeRect), neighborRect.top, rectBottom(neighborRect)) &&
     neighborRight <= startRect.left + ADJACENT_RESIZE_TOLERANCE &&
     (initialGap <= ADJACENT_RESIZE_TOLERANCE ||
       activeRect.left < neighborRight + BOARD_GAP)
@@ -447,7 +461,7 @@ function isBelowResizeNeighbor(
   const initialGap = neighborRect.top - startBottom;
 
   return (
-    rangesOverlap(startRect.left, rectRight(startRect), neighborRect.left, rectRight(neighborRect)) &&
+    rangesOverlap(activeRect.left, rectRight(activeRect), neighborRect.left, rectRight(neighborRect)) &&
     neighborRect.top >= startBottom - ADJACENT_RESIZE_TOLERANCE &&
     (initialGap <= ADJACENT_RESIZE_TOLERANCE ||
       activeBottom + BOARD_GAP > neighborRect.top)
@@ -463,7 +477,7 @@ function isAboveResizeNeighbor(
   const initialGap = startRect.top - neighborBottom;
 
   return (
-    rangesOverlap(startRect.left, rectRight(startRect), neighborRect.left, rectRight(neighborRect)) &&
+    rangesOverlap(activeRect.left, rectRight(activeRect), neighborRect.left, rectRight(neighborRect)) &&
     neighborBottom <= startRect.top + ADJACENT_RESIZE_TOLERANCE &&
     (initialGap <= ADJACENT_RESIZE_TOLERANCE ||
       activeRect.top < neighborBottom + BOARD_GAP)

@@ -834,10 +834,11 @@ export default function TerminalPane({
       </div>
 
       <div
-        ref={containerRef}
         className="terminal-surface"
         onContextMenu={handleTerminalContextMenu}
-      />
+      >
+        <div ref={containerRef} className="terminal-fit-host" />
+      </div>
     </article>
   );
 }
