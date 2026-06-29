@@ -3,7 +3,8 @@
 //
 //   Opus  ──stdio MCP──▶  this adapter  ──stdio JSON-RPC──▶  codex app-server (child)
 //
-// North side: a hand-rolled MCP stdio server exposing two tools to Opus:
+// North side: a hand-rolled MCP stdio server exposing tools to Opus:
+//   - codex_goal_set/get/clear: use Codex's native per-thread goal store.
 //   - codex_implement(task): run a Codex turn; returns {status:"completed",...}
 //     OR {status:"needs_decision", pendingId, ...} OR {status:"failed",...}.
 //   - codex_respond(pendingId, decision, note?): answer a parked approval/
@@ -40,6 +41,16 @@ const PARKED_REQUEST_METHODS = new Set([
 ]);
 const VERDICT_MARKER = "FUSION_VERDICT_JSON:";
 const NEXT_ACTIONS = new Set(["continue", "ask_human", "done"]);
+const GOAL_STATUSES = new Set([
+  "active",
+  "paused",
+  "blocked",
+  "usageLimited",
+  "budgetLimited",
+  "complete"
+]);
+const PRESERVED_GOAL_STATUSES = new Set(["blocked", "usageLimited", "budgetLimited"]);
+const MAX_GOAL_OBJECTIVE_CHARS = 4000;
 
 function normalizeStringList(value) {
   if (!Array.isArray(value)) return [];
@@ -141,6 +152,72 @@ function buildCodexVerifierTask(task) {
   ].join("\n");
 }
 
+function normalizeGoalStatus(value, fallback = "active") {
+  const status = value == null ? "" : String(value).trim();
+  return GOAL_STATUSES.has(status) ? status : fallback;
+}
+
+function truncateGoalObjective(value) {
+  const chars = String(value || "").trim().split("");
+  return chars.slice(0, MAX_GOAL_OBJECTIVE_CHARS).join("");
+}
+
+function normalizeGoal(goal) {
+  if (!goal || typeof goal !== "object") return null;
+  return {
+    threadId: goal.threadId || goal.thread_id || "",
+    objective: String(goal.objective || ""),
+    status: normalizeGoalStatus(goal.status),
+    tokenBudget:
+      goal.tokenBudget == null && goal.token_budget == null
+        ? null
+        : Number(goal.tokenBudget == null ? goal.token_budget : goal.tokenBudget),
+    tokensUsed: Number(goal.tokensUsed == null ? goal.tokens_used || 0 : goal.tokensUsed),
+    timeUsedSeconds: Number(
+      goal.timeUsedSeconds == null ? goal.time_used_seconds || 0 : goal.timeUsedSeconds
+    ),
+    createdAt: Number(goal.createdAt == null ? goal.created_at || 0 : goal.createdAt),
+    updatedAt: Number(goal.updatedAt == null ? goal.updated_at || 0 : goal.updatedAt)
+  };
+}
+
+function goalText(goal) {
+  if (!goal) return "No Codex goal is set.";
+  return `${goal.status}: ${goal.objective}`;
+}
+
+function goalStatusForVerdict(verdict) {
+  if (!verdict || typeof verdict !== "object") return null;
+  if (verdict.goalReached && verdict.nextAction === "done") return "complete";
+  return null;
+}
+
+function shouldReplaceGoalForTask(goal) {
+  return !goal || goal.status === "complete";
+}
+
+function shouldAutoSyncGoalStatus(goal, status) {
+  return Boolean(goal && status && !PRESERVED_GOAL_STATUSES.has(goal.status));
+}
+
+function goalsUnavailableResult(error) {
+  goalFeatureAvailable = false;
+  return {
+    status: "failed",
+    goalFeatureAvailable: false,
+    error: error && error.message ? error.message : String(error || "Codex goals unavailable")
+  };
+}
+
+function goalsSkippedResult(reason, goal = currentGoal) {
+  return {
+    status: "skipped",
+    goalFeatureAvailable,
+    reason,
+    goal
+  };
+}
+
 function logErr(message) {
   try {
     process.stderr.write(`[fusion-adapter] ${message}\n`);
@@ -191,6 +268,8 @@ const parked = new Map(); // pendingId -> {rpcId, method, params}
 let currentTurn = null; // {resolve} — fulfilled by turn/completed | turn/failed | an approval request
 let turnSummary = [];
 let turnFiles = [];
+let currentGoal = null;
+let goalFeatureAvailable = null;
 
 // Spawn this pane's dedicated `codex app-server` (stdio transport). The boot
 // smoke proved newline-delimited JSON-RPC over stdio works on every platform.
@@ -363,6 +442,18 @@ function handleSouth(msg) {
 function handleNotification(msg) {
   const method = msg.method;
   const params = msg.params || {};
+  if (method === "thread/goal/updated" && params.goal) {
+    goalFeatureAvailable = true;
+    currentGoal = normalizeGoal(params.goal);
+    relay({ role: "codex", kind: "goal", text: goalText(currentGoal) });
+    return;
+  }
+  if (method === "thread/goal/cleared") {
+    goalFeatureAvailable = true;
+    currentGoal = null;
+    relay({ role: "codex", kind: "goal", text: "Codex goal cleared." });
+    return;
+  }
   if (method === "item/completed" && params.item) {
     relayItem(params.item);
     accumulate(params.item);
@@ -527,7 +618,8 @@ async function ensureThread() {
     cwd: CWD,
     sandbox: "workspace-write",
     approvalPolicy: "on-request",
-    approvalsReviewer: "user"
+    approvalsReviewer: "user",
+    config: { "features.goals": true }
   };
   if (MODEL) params.model = MODEL;
   const res = await rpc("thread/start", params);
@@ -542,9 +634,88 @@ function awaitTurn() {
   });
 }
 
+async function codexGoalSet(options = {}) {
+  await ensureThread();
+  const params = { threadId };
+  const objective = truncateGoalObjective(options.objective);
+  if (objective) params.objective = objective;
+  if (options.status != null) params.status = normalizeGoalStatus(options.status);
+  if (options.tokenBudget != null && options.tokenBudget !== "") {
+    const tokenBudget = Number(options.tokenBudget);
+    if (Number.isFinite(tokenBudget) && tokenBudget > 0) {
+      params.tokenBudget = Math.floor(tokenBudget);
+    }
+  }
+  if (!params.objective && params.status == null && params.tokenBudget == null) {
+    return {
+      status: "error",
+      error: "objective, status, or tokenBudget is required"
+    };
+  }
+
+  try {
+    const response = await rpc("thread/goal/set", params);
+    goalFeatureAvailable = true;
+    currentGoal = normalizeGoal(response && response.goal);
+    relay({ role: "codex", kind: "goal", text: goalText(currentGoal) });
+    return { status: "ok", goal: currentGoal };
+  } catch (error) {
+    return goalsUnavailableResult(error);
+  }
+}
+
+async function codexGoalGet() {
+  await ensureThread();
+  try {
+    const response = await rpc("thread/goal/get", { threadId });
+    goalFeatureAvailable = true;
+    currentGoal = normalizeGoal(response && response.goal);
+    return { status: "ok", goal: currentGoal };
+  } catch (error) {
+    return goalsUnavailableResult(error);
+  }
+}
+
+async function codexGoalClear() {
+  await ensureThread();
+  try {
+    const response = await rpc("thread/goal/clear", { threadId });
+    goalFeatureAvailable = true;
+    currentGoal = null;
+    relay({ role: "codex", kind: "goal", text: "Codex goal cleared." });
+    return { status: "ok", cleared: Boolean(response && response.cleared) };
+  } catch (error) {
+    return goalsUnavailableResult(error);
+  }
+}
+
+async function ensureGoalForTask(task) {
+  if (!shouldReplaceGoalForTask(currentGoal)) {
+    return { status: "ok", goal: currentGoal, created: false };
+  }
+  const objective = truncateGoalObjective(task);
+  if (!objective) return { status: "skipped", goal: null, created: false };
+  const result = await codexGoalSet({ objective, status: "active" });
+  return { ...result, created: result.status === "ok" };
+}
+
+async function syncGoalAfterTurn(result) {
+  if (!result || result.status !== "completed" || !currentGoal) return result;
+  const goalStatus = goalStatusForVerdict(result.verifierVerdict);
+  if (!shouldAutoSyncGoalStatus(currentGoal, goalStatus)) {
+    return { ...result, goal: currentGoal };
+  }
+  const goalResult = await codexGoalSet({ status: goalStatus });
+  if (goalResult.status === "ok") {
+    return { ...result, goal: goalResult.goal };
+  }
+  return { ...result, goalSync: goalResult };
+}
+
 async function codexImplement(task) {
   if (!task) return { status: "error", error: "task is required" };
   await ensureThread();
+  const goalSetup = await ensureGoalForTask(task);
   turnSummary = [];
   turnFiles = [];
   relay({ role: "opus", kind: "delegate", text: task });
@@ -555,7 +726,12 @@ async function codexImplement(task) {
     approvalPolicy: "on-request",
     approvalsReviewer: "user"
   }).catch((error) => resolveTurn({ status: "failed", error: error.message }));
-  return done;
+  const result = await done;
+  const withGoal = await syncGoalAfterTurn(result);
+  if (goalSetup.status === "failed" && withGoal.status === "completed") {
+    return { ...withGoal, goalSetup };
+  }
+  return withGoal;
 }
 
 function buildDecisionResult(method, params, decision, note) {
@@ -591,15 +767,57 @@ async function codexRespond(pendingId, decision, note) {
   if (!codexSend({ id: item.rpcId, result })) {
     resolveTurn({ status: "failed", error: "Codex app-server stdin is not writable" });
   }
-  return done;
+  const resumed = await done;
+  return syncGoalAfterTurn(resumed);
 }
 
 // ---- north side: MCP stdio server ----
 const TOOLS = [
   {
+    name: "codex_goal_set",
+    description:
+      "Create or update the native Codex per-thread goal for this Fusion pane. Use this at the start of substantial work so Codex tracks the user's top-level objective, usage, and status. Status may be active, paused, blocked, usageLimited, budgetLimited, or complete. Returns {status:'ok', goal} or {status:'failed', goalFeatureAvailable:false, error}.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        objective: {
+          type: "string",
+          description:
+            "Top-level user objective or updated objective. Keep it concise; Codex enforces a 4000-character limit."
+        },
+        status: {
+          type: "string",
+          enum: ["active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"]
+        },
+        tokenBudget: {
+          type: "number",
+          description: "Optional native Codex token budget for the goal."
+        }
+      }
+    }
+  },
+  {
+    name: "codex_goal_get",
+    description:
+      "Read the native Codex per-thread goal for this Fusion pane. Use it before deciding whether to continue, pause, or finish a long-running request. Returns {status:'ok', goal:null|ThreadGoal} or a failed goalFeatureAvailable:false result.",
+    inputSchema: {
+      type: "object",
+      properties: {}
+    }
+  },
+  {
+    name: "codex_goal_clear",
+    description:
+      "Clear the native Codex per-thread goal for this Fusion pane after the human explicitly abandons the objective or starts a separate unrelated objective.",
+    inputSchema: {
+      type: "object",
+      properties: {}
+    }
+  },
+  {
     name: "codex_implement",
     description:
-      "Delegate implementation, testing, compile/runtime fixing, refactors, repo navigation, bug review, or goal-completion verification to embedded Codex GPT-5.5. Opus 4.8 drives architecture, strategy, UX/UI build-out when appropriate, human-facing orchestration, and guidance for Codex on constraints, UI intent, debugging direction, and follow-up corrections. Codex follows that guidance while independently verifying bugs and goal completion. Returns one of: {status:'completed', summary, files, goalReached, bugsFound, missingRequirements, nextAction, verifierVerdict}; {status:'needs_decision', pendingId, kind, detail} - answer it with codex_respond; or {status:'failed', error}. If goalReached is false or nextAction is 'continue', continue/redelegate unless the human or an explicit Opus override says otherwise.",
+      "Delegate implementation, testing, compile/runtime fixing, refactors, repo navigation, bug review, or goal-completion verification to embedded Codex GPT-5.5. Opus 4.8 drives architecture, strategy, UX/UI build-out when appropriate, human-facing orchestration, and guidance for Codex on constraints, UI intent, debugging direction, and follow-up corrections. Codex follows that guidance while independently verifying bugs and goal completion. Use codex_goal_set first for substantial top-level work; codex_implement will create a fallback native Codex goal if none exists and will sync goal status from the verifier verdict. Returns one of: {status:'completed', summary, files, goalReached, bugsFound, missingRequirements, nextAction, verifierVerdict, goal}; {status:'needs_decision', pendingId, kind, detail} - answer it with codex_respond; or {status:'failed', error}. If goalReached is false or nextAction is 'continue', continue/redelegate unless the human or an explicit Opus override says otherwise.",
     inputSchema: {
       type: "object",
       properties: {
@@ -640,7 +858,17 @@ async function handleToolCall(id, params) {
   const args = (params && params.arguments) || {};
   try {
     let result;
-    if (name === "codex_implement") {
+    if (name === "codex_goal_set") {
+      result = await codexGoalSet({
+        objective: args.objective != null ? String(args.objective) : "",
+        status: args.status != null ? String(args.status) : undefined,
+        tokenBudget: args.tokenBudget
+      });
+    } else if (name === "codex_goal_get") {
+      result = await codexGoalGet();
+    } else if (name === "codex_goal_clear") {
+      result = await codexGoalClear();
+    } else if (name === "codex_implement") {
       result = await codexImplement(String(args.task || ""));
     } else if (name === "codex_respond") {
       result = await codexRespond(
@@ -735,7 +963,12 @@ module.exports = {
   VERDICT_MARKER,
   buildCodexVerifierTask,
   extractVerifierVerdict,
+  goalStatusForVerdict,
+  normalizeGoal,
+  normalizeGoalStatus,
   normalizeVerifierVerdict,
+  shouldAutoSyncGoalStatus,
+  shouldReplaceGoalForTask,
   stripVerifierVerdictFromSummary
 };
 

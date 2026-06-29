@@ -2,7 +2,7 @@
 //
 // Spawns backend/fusion-adapter.cjs and drives its north (MCP stdio) side the
 // way Claude Code would: `initialize` then `tools/list`. Asserts the hand-rolled
-// MCP server identifies itself and exposes the two Fusion tools. This guards the
+// MCP server identifies itself and exposes the Fusion tools. This guards the
 // riskiest hand-written piece without needing codex auth or a model turn (the
 // full app-server turn round-trip is covered by the end-to-end check).
 
@@ -15,6 +15,11 @@ const {
   VERDICT_MARKER,
   buildCodexVerifierTask,
   extractVerifierVerdict,
+  goalStatusForVerdict,
+  normalizeGoal,
+  normalizeGoalStatus,
+  shouldAutoSyncGoalStatus,
+  shouldReplaceGoalForTask,
   stripVerifierVerdictFromSummary
 } = require(adapterPath);
 
@@ -87,8 +92,16 @@ function main() {
             const list = responses.get(2);
             const tools = list.result && list.result.tools ? list.result.tools : [];
             const names = tools.map((t) => t.name);
+            assert(names.includes("codex_goal_set"), "tools/list missing codex_goal_set");
+            assert(names.includes("codex_goal_get"), "tools/list missing codex_goal_get");
+            assert(names.includes("codex_goal_clear"), "tools/list missing codex_goal_clear");
             assert(names.includes("codex_implement"), "tools/list missing codex_implement");
             assert(names.includes("codex_respond"), "tools/list missing codex_respond");
+            const goalTool = tools.find((t) => t.name === "codex_goal_set");
+            assert(
+              goalTool && /native Codex per-thread goal/i.test(goalTool.description),
+              "codex_goal_set description missing native-goal contract"
+            );
             const implementTool = tools.find((t) => t.name === "codex_implement");
             assert(
               implementTool &&
@@ -102,6 +115,13 @@ function main() {
             assert(source.includes('method === "currentTime/read"'), "adapter does not handle currentTime/read");
             assert(source.includes("unsupportedServerRequest"), "adapter does not fail unsupported server requests explicitly");
             assert(source.includes("goalReached"), "adapter does not return the structured verifier fields");
+            assert(
+              source.includes('config: { "features.goals": true }'),
+              "adapter does not enable native Codex goals with the verified feature override"
+            );
+            assert(source.includes('rpc("thread/goal/set"'), "adapter does not call native goal set");
+            assert(source.includes('rpc("thread/goal/get"'), "adapter does not call native goal get");
+            assert(source.includes('rpc("thread/goal/clear"'), "adapter does not call native goal clear");
             assert(source.includes("buildCodexVerifierTask(task)"), "adapter does not wrap Codex tasks with the verifier contract");
             cleanup();
             resolve();
@@ -128,6 +148,23 @@ function main() {
     );
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" })}\n`);
   });
+}
+
+function assertGoalSchema() {
+  const rootDir = path.join(__dirname, "..", "..");
+  const clientSchema = fs.readFileSync(
+    path.join(rootDir, "vendor", "codex-appserver", "0.142.3", "schema", "ClientRequest.json"),
+    "utf8"
+  );
+  const serverSchema = fs.readFileSync(
+    path.join(rootDir, "vendor", "codex-appserver", "0.142.3", "schema", "ServerNotification.json"),
+    "utf8"
+  );
+  for (const method of ["thread/goal/set", "thread/goal/get", "thread/goal/clear"]) {
+    assert(clientSchema.includes(method), `generated client schema missing ${method}`);
+  }
+  assert(serverSchema.includes("thread/goal/updated"), "generated server schema missing goal update notification");
+  assert(serverSchema.includes("thread/goal/cleared"), "generated server schema missing goal clear notification");
 }
 
 function assertVerifierHelpers() {
@@ -173,10 +210,57 @@ function assertVerifierHelpers() {
   const malformed = extractVerifierVerdict(`${VERDICT_MARKER} {"goalReached":`);
   assert(malformed.goalReached === false, "malformed verdict should fail closed");
   assert(malformed.verdictSource === "malformed", "malformed verdict should report source");
+
+  assert(normalizeGoalStatus("complete") === "complete", "valid goal status should pass through");
+  assert(normalizeGoalStatus("bogus") === "active", "invalid goal status should fall back to active");
+  const normalizedGoal = normalizeGoal({
+    threadId: "thread-1",
+    objective: "ship it",
+    status: "paused",
+    tokenBudget: 100,
+    tokensUsed: 7,
+    timeUsedSeconds: 3,
+    createdAt: 1,
+    updatedAt: 2
+  });
+  assert(normalizedGoal.status === "paused", "goal status should normalize");
+  assert(normalizedGoal.tokensUsed === 7, "goal usage should normalize");
+  assert(goalStatusForVerdict(doneVerdict) === "complete", "done verdict should complete native goal");
+  assert(goalStatusForVerdict(verdict) === null, "continue verdict should not overwrite native goal");
+  assert(
+    goalStatusForVerdict({ goalReached: false, nextAction: "ask_human" }) === null,
+    "ask_human verdict should not overwrite native goal"
+  );
+  assert(shouldReplaceGoalForTask(null), "missing goal should create fallback goal");
+  assert(
+    shouldReplaceGoalForTask({ status: "complete" }),
+    "complete goal should be replaced for fallback work"
+  );
+  assert(
+    !shouldReplaceGoalForTask({ status: "active" }),
+    "active goal should not be replaced for fallback work"
+  );
+  assert(
+    shouldAutoSyncGoalStatus({ status: "active" }, "complete"),
+    "active goal should sync to complete"
+  );
+  assert(
+    !shouldAutoSyncGoalStatus({ status: "budgetLimited" }, "complete"),
+    "budget-limited goal should not be auto-overwritten"
+  );
+  assert(
+    !shouldAutoSyncGoalStatus({ status: "usageLimited" }, "complete"),
+    "usage-limited goal should not be auto-overwritten"
+  );
+  assert(
+    !shouldAutoSyncGoalStatus({ status: "blocked" }, "complete"),
+    "blocked goal should not be auto-overwritten"
+  );
 }
 
 main()
   .then(() => {
+    assertGoalSchema();
     assertVerifierHelpers();
     console.log("Fusion adapter smoke passed");
   })

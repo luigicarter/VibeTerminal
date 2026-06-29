@@ -18,8 +18,9 @@
 
 Goal: a **Fusion** terminal that fuses the *capabilities* of two coding agents
 behind one surface — Claude (Opus 4.8) as the orchestrator/architect/designer and
-Codex (GPT-5.5) as implementer, tester, bug reviewer, and completion verifier —
-so the user talks to one terminal and the right model handles each sub-task. Think "OpenRouter, but for **complementary
+long-horizon coding controller using Codex native goals, and Codex (GPT-5.5) as
+executor, tester, bug reviewer, and completion verifier — so the user talks to
+one terminal and the right model handles each sub-task. Think "OpenRouter, but for **complementary
 specialists** rather than interchangeable models": the router doesn't pick one
 engine for the whole prompt, it **decomposes** the task and routes sub-tasks by
 specialty. The routing intelligence is Claude itself (an LLM that decides when to
@@ -108,9 +109,21 @@ The **only substantial custom component** is the per-pane MCP↔app-server adapt
 **dual-protocol**: MCP server to Claude (north), app-server JSON-RPC client to its
 own embedded Codex child (south). It exposes a small tool surface:
 
+- `codex_goal_set(objective, status?, tokenBudget?)` — create/update Codex's
+  native per-thread goal for the pane.
+- `codex_goal_get()` — read Codex's native goal state, including usage and
+  status.
+- `codex_goal_clear()` — clear the native goal when the human abandons or
+  replaces the objective.
 - `codex_implement(plan)` — run the approved plan on the pane's thread (edit, run
-  tests, fix), streaming progress.
+  tests, fix, verify), streaming progress.
 - `codex_respond(pendingId, decision)` — answer a parked approval or question.
+
+Fusion starts the app-server thread with `config: { "features.goals": true }`,
+the verified app-server override for enabling goals on that pane without
+mutating the user's global Codex config. If a future/older/managed Codex build
+rejects native goals, the goal tools return
+`goalFeatureAvailable:false` instead of pretending goal state was stored.
 
 ## Approval / review loop (route to Opus, escalate to human rarely)
 
@@ -121,8 +134,10 @@ auto-deciding or depending on MCP sampling (unverified in Claude Code), the adap
 is **turn-based**:
 
 ```
+Claude → codex_goal_set({ objective: top-level user goal, status: "active" })
+   adapter → app-server: thread/start with goals enabled if needed, then thread/goal/set
 Claude → codex_implement(plan)
-   adapter → app-server: thread/start (or resume), send turn, stream items
+   adapter → app-server: thread/start with goals enabled (or reuse thread), send turn, stream items
    ...Codex edits / runs tests in the workspace...
    app-server → adapter: fileChange requestApproval        ← Codex pauses here
    adapter PARKS the request, returns to Claude:
@@ -131,7 +146,7 @@ Opus decides and calls:
    codex_respond(pendingId, "accept" | "acceptForSession" | "decline" | "cancel")
    adapter → sends the parked response → Codex resumes
    ...loops until { status: "completed", summary, files, goalReached,
-                    bugsFound, missingRequirements, nextAction, verifierVerdict }
+                    bugsFound, missingRequirements, nextAction, verifierVerdict, goal }
 ```
 
 This makes "route to Opus" structurally true — Opus is literally the one calling
@@ -150,6 +165,24 @@ parses that into `goalReached`, `bugsFound`, `missingRequirements`,
 verifier JSON fails closed as `goalReached:false` / `nextAction:"continue"`.
 Claude must continue/redelegate unless the human says otherwise or Claude makes
 an explicit override visible in the transcript.
+
+Native Codex goals complement that verifier gate; they do not replace it. Claude
+uses the native goal as the long-horizon coding objective, then delegates concrete
+execution to Codex. The adapter creates a fallback goal from the first delegated
+task if Claude did not call `codex_goal_set`, replaces completed fallback goals
+for later unrelated work, and only auto-syncs the native goal to `complete` after
+a true done verifier verdict. It does not auto-reactivate Codex-managed
+`blocked`, `usageLimited`, or `budgetLimited` states.
+
+Codex subagents are different from goals. In Codex 0.142.3 the native goal API is
+an app-server client RPC, but multi-agent/subagent control is primarily exposed
+as tools inside Codex turns, and Fusion currently rejects generic dynamic
+`item/tool/call` requests from the embedded app-server. Fusion therefore does not
+directly spawn or supervise Codex subagents yet; any internal Codex subagent
+availability depends on Codex's own configured tool surface. The external
+Claude-facing bridge stays at the goal/delegate/approval/verifier layer until
+there is a stable app-server client method for spawning and supervising subagents
+directly.
 
 ## Isolation — capability scoping among the same user's panes
 

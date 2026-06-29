@@ -40,9 +40,13 @@ async function main() {
     );
     const prompt = fs.readFileSync(files.systemPromptFile, "utf8");
     assert(/architect/i.test(prompt), "system prompt missing the architect role");
+    assert(/long-horizon coding controller/i.test(prompt), "system prompt missing Claude long-horizon role");
     assert(/goal-completion verifier/i.test(prompt), "system prompt missing Codex verifier role");
     assert(/Guiding Codex/i.test(prompt), "system prompt missing Claude-guides-Codex rule");
     assert(/Following Claude's guidance/i.test(prompt), "system prompt missing Codex-guidance scope");
+    assert(/Codex native goals/i.test(prompt), "system prompt missing native Codex goals section");
+    assert(/codex_goal_set/.test(prompt), "system prompt missing codex_goal_set");
+    assert(/codex_goal_get/.test(prompt), "system prompt missing codex_goal_get");
     assert(/codex_implement/.test(prompt), "system prompt missing codex_implement");
     assert(/goalReached:false/.test(prompt), "system prompt missing goalReached continuation gate");
     assert(/Codex verifier override/.test(prompt), "system prompt missing explicit override rule");
@@ -72,6 +76,10 @@ async function main() {
     assert(
       buildFusionSystemPrompt().includes("goalReached"),
       "buildFusionSystemPrompt is missing the structured verifier fields"
+    );
+    assert(
+      buildFusionSystemPrompt().includes("Codex-managed blocked"),
+      "buildFusionSystemPrompt is missing protected native goal status behavior"
     );
     const mainSource = fs.readFileSync(path.join(rootDir, "backend", "main.cjs"), "utf8");
     assert(

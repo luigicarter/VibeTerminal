@@ -2,16 +2,17 @@
 //
 // Validates that the Codex `app-server` JSON-RPC protocol that Terminal Fusion
 // drives (see docs/fusion-terminal.md) still speaks the handshake we build
-// against. It spawns `codex app-server` (stdio transport), sends a single
-// `initialize` request, and asserts a well-formed JSON-RPC response comes back —
-// no model turn, no auth, no network. If the bundled/pinned Codex bumps to a
-// version whose protocol drifts, this fails CI instead of users.
+// against. It spawns `codex app-server` (stdio transport), validates the
+// initialize response, then exercises native thread goals without a model turn,
+// auth, or network. If the bundled/pinned Codex bumps to a version whose
+// protocol drifts, this fails CI instead of users.
 //
 // Skips cleanly when codex is not installed (dev machines without it; Fusion
 // itself ships its own bundled binary).
 
 const { spawn, execFileSync } = require("child_process");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
 const isWin = process.platform === "win32";
@@ -87,14 +88,15 @@ function codexAvailable() {
   }
 }
 
-function spawnAppServer() {
+function spawnAppServer(env = {}) {
   // Prefer the EMBEDDED binary (exactly what a Fusion pane spawns); fall back to
   // a PATH `codex` via the shell (npm `.cmd`/`.ps1` wrappers on Windows).
   const embedded = embeddedCodex();
   if (embedded) {
     return spawn(embedded, ["app-server"], {
       stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true
+      windowsHide: true,
+      env: { ...process.env, ...env }
     });
   }
   if (requireEmbedded) {
@@ -106,8 +108,142 @@ function spawnAppServer() {
     : ["-c", "codex app-server"];
   return spawn(shell, args, {
     stdio: ["pipe", "pipe", "pipe"],
-    windowsHide: true
+    windowsHide: true,
+    env: { ...process.env, ...env }
   });
+}
+
+function killProcessTree(child) {
+  try {
+    child.stdin.end();
+  } catch {
+    // ignore
+  }
+  try {
+    child.kill();
+  } catch {
+    // ignore
+  }
+  if (isWin && child.pid) {
+    try {
+      execFileSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+        stdio: "ignore"
+      });
+    } catch {
+      // best-effort
+    }
+  }
+}
+
+async function withAppServer(env, run) {
+  const child = spawnAppServer(env);
+  let nextId = 1;
+  let stdout = "";
+  let stderr = "";
+  const pending = new Map();
+
+  const timer = setTimeout(() => {
+    for (const { reject, method } of pending.values()) {
+      reject(new Error(`Timed out waiting for ${method}.\nstderr: ${stderr.slice(0, 500)}`));
+    }
+    pending.clear();
+  }, TIMEOUT_MS);
+
+  function rpc(method, params) {
+    const id = nextId++;
+    child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
+    return new Promise((resolve, reject) => {
+      pending.set(id, { resolve, reject, method });
+    });
+  }
+
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk.toString("utf8");
+    let index;
+    while ((index = stdout.indexOf("\n")) !== -1) {
+      const line = stdout.slice(0, index).trim();
+      stdout = stdout.slice(index + 1);
+      if (!line) continue;
+      let message;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (!message || message.id === undefined || !pending.has(message.id)) continue;
+      const pendingRequest = pending.get(message.id);
+      pending.delete(message.id);
+      if (message.error) {
+        pendingRequest.reject(new Error(`${pendingRequest.method}: ${message.error.message}`));
+      } else {
+        pendingRequest.resolve(message.result);
+      }
+    }
+  });
+
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk.toString("utf8");
+  });
+
+  try {
+    return await run({ rpc, stderr: () => stderr });
+  } finally {
+    clearTimeout(timer);
+    pending.clear();
+    killProcessTree(child);
+  }
+}
+
+async function smokeGoalProtocol() {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-goal-home-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-goal-cwd-"));
+  try {
+    await withAppServer({ CODEX_HOME: codexHome }, async ({ rpc }) => {
+      await rpc("initialize", {
+        clientInfo: { name: "vibeTerminal-fusion-goal-smoke", version: "0.0.0" },
+        capabilities: { experimentalApi: true }
+      });
+      const start = await rpc("thread/start", {
+        cwd,
+        sandbox: "workspace-write",
+        approvalPolicy: "on-request",
+        approvalsReviewer: "user",
+        config: { "features.goals": true }
+      });
+      const threadId = start && start.thread && start.thread.id;
+      assert(threadId, `thread/start returned no thread id: ${JSON.stringify(start)}`);
+
+      const set = await rpc("thread/goal/set", {
+        threadId,
+        objective: "verify Fusion native goal protocol",
+        status: "active"
+      });
+      assert(
+        set && set.goal && set.goal.objective === "verify Fusion native goal protocol",
+        `thread/goal/set returned unexpected result: ${JSON.stringify(set)}`
+      );
+
+      const get = await rpc("thread/goal/get", { threadId });
+      assert(
+        get && get.goal && get.goal.status === "active",
+        `thread/goal/get returned unexpected result: ${JSON.stringify(get)}`
+      );
+
+      const clear = await rpc("thread/goal/clear", { threadId });
+      assert(clear && clear.cleared === true, `thread/goal/clear failed: ${JSON.stringify(clear)}`);
+    });
+  } finally {
+    try {
+      fs.rmSync(codexHome, { recursive: true, force: true });
+    } catch {
+      // best-effort
+    }
+    try {
+      fs.rmSync(cwd, { recursive: true, force: true });
+    } catch {
+      // best-effort
+    }
+  }
 }
 
 async function main() {
@@ -134,26 +270,7 @@ async function main() {
   let settled = false;
 
   const cleanup = () => {
-    try {
-      child.stdin.end();
-    } catch {
-      // ignore
-    }
-    try {
-      child.kill();
-    } catch {
-      // ignore
-    }
-    if (isWin && child.pid) {
-      // The shell wraps codex; kill the whole tree so app-server never lingers.
-      try {
-        execFileSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
-          stdio: "ignore"
-        });
-      } catch {
-        // best-effort
-      }
-    }
+    killProcessTree(child);
   };
 
   const result = await new Promise((resolve, reject) => {
@@ -242,7 +359,9 @@ async function main() {
     `initialize response missing a result object: ${JSON.stringify(result)}`
   );
 
-  console.log("PASS fusion-appserver-smoke: app-server initialize handshake OK.");
+  await smokeGoalProtocol();
+
+  console.log("PASS fusion-appserver-smoke: app-server initialize and goal protocol OK.");
 }
 
 main().catch((error) => {

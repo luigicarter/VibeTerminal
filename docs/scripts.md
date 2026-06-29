@@ -16,7 +16,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `scripts/backend/fusion-launch-smoke.cjs` - Validates Fusion per-pane prompt/MCP file generation and confirms the adapter receives the embedded Codex binary path.
 - `scripts/backend/fusion-adapter-smoke.cjs` - Validates the Fusion adapter MCP surface exposed to Claude.
 - `scripts/backend/fusion-chat-parse-smoke.cjs` - Validates headless Claude stream-json normalization used by the Fusion chat host.
-- `scripts/backend/fusion-appserver-smoke.cjs` - Boots Codex `app-server` over stdio and validates the initialize handshake; `--require-embedded` requires `vendor/codex-bin` and is used by release checks.
+- `scripts/backend/fusion-appserver-smoke.cjs` - Boots Codex `app-server` over stdio, validates the initialize handshake, and exercises native `thread/goal/set|get|clear`; `--require-embedded` requires `vendor/codex-bin` and is used by release checks.
 
 ## Frontend Scripts
 
