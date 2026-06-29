@@ -3,6 +3,7 @@ import type {
   AgentThreadLookupResult,
   AgentThreadRef,
   CodeChangeSummary,
+  FusionChatEvent,
   TerminalEvent,
   TerminalLaunchPayload,
   UpdateActionResult,
@@ -49,6 +50,17 @@ declare global {
           callback: (payload: { id: string; text: string }) => void
         ) => () => void;
         onEvent: (callback: (event: TerminalEvent) => void) => () => void;
+      };
+      fusionChat: {
+        start: (payload: {
+          id: string;
+          cwd: string;
+          resumeId?: string;
+          model?: string;
+        }) => Promise<{ ok: boolean; error?: string }>;
+        sendUserTurn: (id: string, text: string) => void;
+        stop: (id: string) => Promise<boolean>;
+        onEvent: (callback: (event: FusionChatEvent) => void) => () => void;
       };
     };
   }

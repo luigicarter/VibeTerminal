@@ -9,5 +9,6 @@ vibeTerminal is an Electron + React desktop workspace for running local terminal
 - `docs/preload.md` - Context bridge and IPC surface exposed to the renderer.
 - `docs/scripts.md` - Development, smoke test, and screenshot helper scripts.
 - `docs/windows-release.md` - Windows installer, GitHub Releases deployment, update behavior, and signing status.
+- `docs/voice-dictation.md` - Proposed speech-to-text design sketch (not implemented): provider-agnostic mic→text→inject feature, engine options, open questions.
 - `docs/vendor.md` - External reference material kept outside active app source.
 - `docs/runtime-artifacts.md` - Generated folders, outputs, and cleanup expectations.

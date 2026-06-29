@@ -413,6 +413,222 @@ function confirmOpenCodeThread(cwd, id) {
   });
 }
 
+function cursorProjectsDir() {
+  return path.join(os.homedir(), ".cursor", "projects");
+}
+
+// Cursor names each project directory after its absolute cwd with the drive
+// colon dropped, path separators turned into "-", and repeated separators
+// collapsed (verified from a live stop-hook `transcript_path`). e.g.
+// C:\Users\me\app -> "C-Users-me-app".
+function encodeCursorProjectDir(cwd) {
+  return path
+    .resolve(cwd)
+    .replace(/:/g, "")
+    .replace(/[\\/]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+// Resolve cwd to its on-disk Cursor project directory. The drive-letter case is
+// whatever the user first opened the folder as, so match case-insensitively on
+// Windows rather than trusting the exact spelling.
+function findCursorProjectDir(cwd) {
+  const root = cursorProjectsDir();
+  const encoded = encodeCursorProjectDir(cwd);
+  const direct = path.join(root, encoded);
+  if (fs.existsSync(direct)) {
+    return direct;
+  }
+
+  let entries = [];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  const wanted =
+    process.platform === "win32" ? encoded.toLowerCase() : encoded;
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const name =
+      process.platform === "win32" ? entry.name.toLowerCase() : entry.name;
+    if (name === wanted) {
+      return path.join(root, entry.name);
+    }
+  }
+  return null;
+}
+
+// The opening user turn is line 1 of the transcript, so a bounded head read is
+// enough — never slurp a multi-MB transcript just to title a thread.
+function readFileHead(filePath, maxBytes = 16384) {
+  let fd;
+  try {
+    fd = fs.openSync(filePath, "r");
+    const buffer = Buffer.alloc(maxBytes);
+    const bytesRead = fs.readSync(fd, buffer, 0, maxBytes, 0);
+    return buffer.toString("utf8", 0, bytesRead);
+  } catch {
+    return "";
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Already closed / never opened.
+      }
+    }
+  }
+}
+
+// The first transcript line is the opening user turn; harvest its text for a
+// human-readable thread title, unwrapping the <user_query> tags Cursor adds.
+function parseCursorTranscriptTitle(jsonlPath) {
+  const content = readFileHead(jsonlPath);
+  if (!content) {
+    return "";
+  }
+  // The head read may truncate the final line mid-JSON; only the early lines
+  // matter for the title, and each is parsed independently.
+  const lines = content.split(/\r?\n/).slice(0, 10);
+  for (const line of lines) {
+    if (!line.trim()) {
+      continue;
+    }
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (event.role !== "user") {
+      continue;
+    }
+    const text = extractClaudeText(event.message?.content);
+    if (text) {
+      return text
+        .replace(/<\/?user_query>/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+  }
+  return "";
+}
+
+// Cursor stores each chat as
+// ~/.cursor/projects/<encoded-cwd>/agent-transcripts/<chatId>/<chatId>.jsonl, so
+// the latest resumable chat for a cwd is the most recently modified transcript
+// dir. Mirrors findLatestClaudeThread; resume launches `cursor-agent --resume`.
+function findLatestCursorThread(cwd, after = 0, excludeIds = []) {
+  const projectDir = findCursorProjectDir(cwd);
+  if (!projectDir) {
+    return null;
+  }
+
+  const transcriptsDir = path.join(projectDir, "agent-transcripts");
+  let entries = [];
+  try {
+    entries = fs.readdirSync(transcriptsDir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  const excluded = toExcludedSet(excludeIds);
+  const matches = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || excluded.has(String(entry.name))) {
+      continue;
+    }
+    const id = entry.name;
+    const jsonlPath = path.join(transcriptsDir, id, `${id}.jsonl`);
+    let stat;
+    try {
+      stat = fs.statSync(jsonlPath);
+    } catch {
+      // No transcript file yet (chat created but never persisted a turn) — not
+      // resumable, so skip it.
+      continue;
+    }
+
+    // birthtime/ctime can be 0 on some filesystems; fall back to mtime so a real
+    // chat is never wrongly excluded by the `after` cutoff.
+    const createdAt = stat.birthtimeMs || stat.ctimeMs || stat.mtimeMs || 0;
+    if (createdAt < after) {
+      continue;
+    }
+    // Defer the (bounded) title read to the winner only, so a project with many
+    // chats does not pay a file read per candidate.
+    matches.push({ id, jsonlPath, createdAt, updatedAt: stat.mtimeMs });
+  }
+
+  if (matches.length === 0) {
+    return null;
+  }
+
+  matches.sort((a, b) => b.updatedAt - a.updatedAt);
+  const latest = matches[0];
+  return {
+    provider: "cursor",
+    id: latest.id,
+    title: parseCursorTranscriptTitle(latest.jsonlPath),
+    createdAt: latest.createdAt,
+    updatedAt: latest.updatedAt
+  };
+}
+
+function placeholderCursorRef(id) {
+  return { provider: "cursor", id, title: "", createdAt: 0, updatedAt: 0 };
+}
+
+// Cursor resumes with `cursor-agent --resume <chatId>`. confirmCursorThread
+// answers "does this chat still exist?" so the launcher can self-heal to a fresh
+// session instead of erroring in the live shell. Mirrors confirmClaudeThread's
+// conservative contract: report "missing" only when the projects tree is
+// readable and the chat dir is absent; otherwise stay "found" and let resume try.
+function confirmCursorThread(cwd, id) {
+  const target = String(id || "");
+  if (!target) {
+    return { status: "missing" };
+  }
+
+  const projectDir = findCursorProjectDir(cwd);
+  if (!projectDir) {
+    // Cannot prove absence (the project dir may not have been scanned yet);
+    // resume rather than discard a chat that may exist.
+    return { status: "found", threadRef: placeholderCursorRef(target) };
+  }
+
+  const chatDir = path.join(projectDir, "agent-transcripts", target);
+  if (fs.existsSync(chatDir)) {
+    const jsonlPath = path.join(chatDir, `${target}.jsonl`);
+    let updatedAt = 0;
+    let createdAt = 0;
+    try {
+      const stat = fs.statSync(jsonlPath);
+      updatedAt = stat.mtimeMs;
+      createdAt = stat.birthtimeMs || stat.ctimeMs || stat.mtimeMs || 0;
+    } catch {
+      // Dir exists without a transcript file; still treat as resumable.
+    }
+    return {
+      status: "found",
+      threadRef: {
+        provider: "cursor",
+        id: target,
+        title: updatedAt ? parseCursorTranscriptTitle(jsonlPath) : "",
+        createdAt,
+        updatedAt
+      }
+    };
+  }
+
+  return { status: "missing" };
+}
+
 async function findLatestAgentThread(payload) {
   const cwd = payload?.cwd;
   const after = Number(payload?.after || 0);
@@ -468,6 +684,22 @@ async function findLatestAgentThread(payload) {
       : {
           status: "pending",
           message: "Waiting for OpenCode to create its local session metadata."
+        };
+  }
+
+  if (payload.provider === "cursor") {
+    // Confirm whether a specific chat id is still resumable so the launcher can
+    // self-heal instead of running a doomed `cursor-agent --resume <id>`.
+    if (payload.confirmId) {
+      return confirmCursorThread(cwd, payload.confirmId);
+    }
+
+    const threadRef = findLatestCursorThread(cwd, after, payload.excludeIds);
+    return threadRef
+      ? { status: "found", threadRef }
+      : {
+          status: "pending",
+          message: "Waiting for Cursor to create its local session metadata."
         };
   }
 
@@ -545,12 +777,16 @@ if (require.main === module) {
 module.exports = {
   collectJsonlFiles,
   confirmClaudeThread,
+  confirmCursorThread,
   confirmOpenCodeThread,
+  encodeCursorProjectDir,
   extractClaudeText,
   findLatestAgentThread,
   findLatestClaudeThread,
+  findLatestCursorThread,
   findLatestOpenCodeThread,
   isSamePath,
   normalizePathForCompare,
-  parseClaudeTranscript
+  parseClaudeTranscript,
+  parseCursorTranscriptTitle
 };

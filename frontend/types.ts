@@ -2,11 +2,17 @@ export type AgentKind =
   | "terminal"
   | "codex"
   | "claude"
+  | "cursor"
   | "gemini"
   | "opencode"
-  | "aider";
+  | "aider"
+  // Selection-only kind for the ribbon: a Fusion launch creates a real
+  // `kind: "claude"` session with `fusion: true`, so all claude behavior
+  // (telemetry, resume, working-state) applies unchanged. No session is ever
+  // persisted with kind "fusion".
+  | "fusion";
 
-export type AgentThreadProvider = "codex" | "claude" | "opencode";
+export type AgentThreadProvider = "codex" | "claude" | "opencode" | "cursor";
 
 export type AgentLaunchMode = "new" | "resume";
 
@@ -65,6 +71,8 @@ export interface AgentProfile {
   label: string;
   command: string;
   accent: string;
+  // Marks the ribbon's Fusion launcher (Opus architect + Codex executor).
+  fusion?: boolean;
 }
 
 export interface AgentThreadRef {
@@ -115,6 +123,9 @@ export interface AgentSession {
   name: string;
   kind: AgentKind;
   command: string;
+  // A Fusion pane: a claude session that delegates execution to Codex. Always
+  // paired with kind === "claude".
+  fusion?: boolean;
   cwd: string;
   createdAt: number;
   threadRef?: AgentThreadRef;
@@ -169,6 +180,9 @@ export interface TerminalLaunchPayload {
   launchToken?: number;
   cols?: number;
   rows?: number;
+  // When true, the main process provisions Fusion instrumentation for this pane
+  // (architect system prompt + Codex delegation). See backend/agentTelemetry.cjs.
+  fusion?: boolean;
 }
 
 export type UpdateStatus =
@@ -226,5 +240,54 @@ export type TerminalEvent =
       provider?: string;
       attention: AgentAttentionEvent;
     }
+  | { id: string; type: "agent-running"; provider?: string }
+  | {
+      id: string;
+      type: "fusion-activity";
+      role: "opus" | "codex";
+      kind: string;
+      text?: string;
+      ts?: number;
+    }
   | { id: string; type: "error"; message: string }
   | { id: string; type: "exit"; exitCode?: number; signal?: number };
+
+// One read-only entry in a Fusion pane's role-tagged activity log (Opus
+// delegations + Codex's streamed work). Ephemeral per launch; never persisted.
+export interface FusionLogEntry {
+  role: "opus" | "codex";
+  kind: string;
+  text: string;
+  ts: number;
+}
+
+// Normalized events from the headless Claude chat host (backend/fusionChatHost.cjs),
+// broadcast on the "fusion-chat:event" channel. All carry the pane id except
+// host-error (broadcast to all windows).
+export type FusionChatEvent =
+  | { id: string; type: "session"; sessionId: string }
+  | { id: string; type: "turn-start" }
+  | { id: string; type: "assistant-text"; delta: string }
+  | { id: string; type: "thinking"; delta: string }
+  | { id: string; type: "tool-call"; toolId: string; name: string; input: unknown }
+  | { id: string; type: "tool-result"; toolId: string; text: string }
+  | { id: string; type: "turn-end" }
+  | { id: string; type: "result"; subtype?: string; costUsd?: number }
+  | { id: string; type: "stderr"; text: string }
+  | { id: string; type: "error"; message: string }
+  | { id: string; type: "closed"; code?: number }
+  | { type: "host-error"; message: string };
+
+export type ChatRole = "user" | "opus" | "codex";
+
+// One rendered entry in a Fusion pane's chat transcript (ephemeral view-model
+// built from the merged Opus stream + Codex activity).
+export interface ChatMessage {
+  key: string;
+  role: ChatRole;
+  kind: "text" | "tool-call" | "tool-result" | "thinking" | "activity" | "result" | "error";
+  text: string;
+  toolId?: string;
+  ts: number;
+  streaming?: boolean;
+}

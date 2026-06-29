@@ -190,6 +190,25 @@ assert.strictEqual(
 );
 assert.strictEqual(
   buildLaunchCommand(
+    session({
+      kind: "cursor",
+      command: "cursor-agent",
+      nextLaunchMode: "resume",
+      threadRef: { id: "chat-7" }
+    })
+  ),
+  "cursor-agent --resume chat-7",
+  "cursor resume with an id should build a resume command"
+);
+assert.strictEqual(
+  buildLaunchCommand(
+    session({ kind: "cursor", command: "cursor-agent", nextLaunchMode: "resume" })
+  ),
+  "cursor-agent",
+  "cursor resume without an id should fall back to a plain launch"
+);
+assert.strictEqual(
+  buildLaunchCommand(
     session({ kind: "terminal", command: "ls -la", nextLaunchMode: "new" })
   ),
   "ls -la",
@@ -203,6 +222,8 @@ assert.strictEqual(defaultLaunchMode("codex", 1, true), "resume");
 assert.strictEqual(defaultLaunchMode("codex", 1, false), "new");
 assert.strictEqual(defaultLaunchMode("codex", 0, true), "new");
 assert.strictEqual(defaultLaunchMode("claude", 2, true), "resume");
+assert.strictEqual(defaultLaunchMode("cursor", 2, true), "resume");
+assert.strictEqual(defaultLaunchMode("cursor", 1, false), "new");
 assert.strictEqual(defaultLaunchMode("opencode", 3, false), "new");
 assert.strictEqual(defaultLaunchMode("terminal", 1, true), "new");
 assert.strictEqual(defaultLaunchMode("gemini", 5, true), "new");

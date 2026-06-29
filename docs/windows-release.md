@@ -4,10 +4,10 @@ vibeTerminal ships to Windows users as an Electron Builder NSIS installer hosted
 
 ## Current Public Release
 
-The current public Windows release is `v0.1.15`:
+The current public Windows release is `v0.1.16`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.15`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.15/vibeTerminal-Setup-0.1.15.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.16`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.16/vibeTerminal-Setup-0.1.16.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -31,6 +31,8 @@ The packaged app keeps only runtime files needed by Electron:
 - `preload/` - Context bridge IPC surface.
 - `dist/` - Compiled renderer UI produced by Vite.
 - `frontend/assets/` - Runtime app icons and logo assets.
+- `resources/codex-bin/win32-x64/codex.exe` - Embedded private Codex CLI used
+  only by Fusion panes.
 - production `node_modules/` dependencies.
 - unpacked `node-pty` native files.
 
@@ -53,12 +55,19 @@ Use these commands before publishing a release:
 
 ```powershell
 npm ci
+$codexVersion = (Get-ChildItem vendor/codex-appserver -Directory | Where-Object Name -match '^\d+\.\d+\.\d+$').Name
+npm install -g "@openai/codex@$codexVersion"
+npm run prepare:codex-bin:required
 npm run typecheck
 npm run smoke:backend:codex-discovery
 npm run smoke:backend:claude-discovery
 npm run smoke:backend:agent-telemetry
 npm run smoke:backend:code-changes
 npm run smoke:backend:updates
+npm run smoke:backend:fusion-launch
+npm run smoke:backend:fusion-adapter
+npm run smoke:backend:fusion-chat-parse
+npm run smoke:backend:fusion-appserver:embedded
 npm run smoke:frontend:attention
 npm run smoke:frontend:workspace
 npm run smoke:frontend:session-launch
@@ -82,8 +91,11 @@ After `npm run dist:win -- --publish never`, verify:
 1. `release/vibeTerminal-Setup-<version>.exe` exists.
 2. `release/latest.yml` points at the installer for the same version.
 3. `release/win-unpacked/vibeTerminal.exe` launches.
-4. A packaged PTY can start PowerShell and run a command.
-5. The packaged UI loads from `dist/index.html`, not a Vite dev server.
+4. `release/win-unpacked/resources/codex-bin/win32-x64/codex.exe` exists.
+5. A packaged PTY can start PowerShell and run a command.
+6. A packaged Fusion pane does not fall back to the user's global `codex` if the
+   embedded binary is removed; it should fail start with a clear Fusion error.
+7. The packaged UI loads from `dist/index.html`, not a Vite dev server.
 
 ## GitHub Release Deployment
 
@@ -113,12 +125,19 @@ When a `v*` tag is pushed, the workflow runs:
 
 ```powershell
 npm ci
+$codexVersion = (Get-ChildItem vendor/codex-appserver -Directory | Where-Object Name -match '^\d+\.\d+\.\d+$').Name
+npm install -g "@openai/codex@$codexVersion"
+npm run prepare:codex-bin:required
 npm run typecheck
 npm run smoke:backend:codex-discovery
 npm run smoke:backend:claude-discovery
 npm run smoke:backend:agent-telemetry
 npm run smoke:backend:code-changes
 npm run smoke:backend:updates
+npm run smoke:backend:fusion-launch
+npm run smoke:backend:fusion-adapter
+npm run smoke:backend:fusion-chat-parse
+npm run smoke:backend:fusion-appserver:embedded
 npm run smoke:frontend:attention
 npm run smoke:frontend:workspace
 npm run smoke:frontend:session-launch

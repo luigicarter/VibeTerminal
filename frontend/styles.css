@@ -203,6 +203,11 @@ button {
   border-color: rgba(77, 163, 255, 0.55);
 }
 
+.multi-mode-card.has-working,
+.workspace-button.has-working {
+  border-color: rgba(244, 207, 90, 0.45);
+}
+
 .multi-mode-heading {
   display: flex;
   min-width: 0;
@@ -380,6 +385,34 @@ button {
 
 .attention-dot-empty {
   visibility: hidden;
+}
+
+/* "Working" indicator: an amber spinner ring (matching the amber "working"
+   status pill) shown in the same slot as the blue attention dot while a pane is
+   actively running a turn. */
+.attention-dot-working {
+  box-sizing: border-box;
+  width: 9px;
+  height: 9px;
+  background: transparent;
+  border: 2px solid rgba(244, 207, 90, 0.25);
+  border-top-color: #f4cf5a;
+  box-shadow: none;
+  animation: working-dot-spin 0.7s linear infinite;
+}
+
+@keyframes working-dot-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .attention-dot-working {
+    animation: none;
+    border-color: rgba(244, 207, 90, 0.35);
+    border-top-color: #f4cf5a;
+  }
 }
 
 .workspace-button:hover,
@@ -1330,3 +1363,133 @@ button {
     display: none;
   }
 }
+
+/* Fusion pane: faithful Claude-Code-style headless chat UI. */
+.fusion-pane .pane-title .fusion-chip {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid #ffffff1a;
+  font-weight: 600;
+}
+.fusion-chip-opus { color: #b98bff; border-color: #b98bff55; }
+.fusion-chip-codex { color: #ff9f43; border-color: #ff9f4355; }
+
+.fusion-chat {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #1b1f1c;
+  font-family: "Cascadia Mono", "Consolas", ui-monospace, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.fusion-chat-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.fusion-chat-empty {
+  margin: auto;
+  text-align: center;
+  color: #9aa39a;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.fusion-chat-empty .muted { color: #6f766f; }
+.fusion-chat-empty p { margin: 0; }
+
+.chat-msg {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+.chat-gutter {
+  color: var(--pane-accent);
+  font-size: 12px;
+  text-align: center;
+}
+.chat-body { min-width: 0; }
+.chat-author {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.chat-opus .chat-author { color: #b98bff; }
+.chat-codex .chat-author { color: #ff9f43; }
+.chat-kind {
+  margin-left: 6px;
+  color: #7f867f;
+  font-weight: 600;
+  font-variant: small-caps;
+}
+.chat-text {
+  color: #e6ebe6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.chat-user .chat-text { color: #cfe6ff; }
+.chat-user .chat-gutter { color: #6bd7db; }
+.chat-kind-tool-call .chat-text,
+.chat-kind-tool-result .chat-text,
+.chat-kind-activity .chat-text { color: #9aa39a; }
+.chat-kind-thinking .chat-text { color: #7f867f; font-style: italic; }
+.chat-kind-error .chat-text { color: #ff8e95; }
+
+.chat-caret { color: var(--pane-accent); animation: chat-blink 1s step-end infinite; }
+@keyframes chat-blink { 50% { opacity: 0; } }
+.chat-spinner { display: inline-block; animation: chat-spin 1.2s linear infinite; }
+@keyframes chat-spin { to { transform: rotate(360deg); } }
+
+/* Claude-Code-style rounded composer */
+.fusion-composer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  margin: 8px 10px 10px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--pane-accent) 45%, #3a403a);
+  border-radius: 12px;
+  background: #15181599;
+}
+.fusion-composer textarea {
+  flex: 1;
+  resize: none;
+  max-height: 120px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: #e6ebe6;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+}
+.fusion-composer textarea::placeholder { color: #6f766f; }
+.fusion-send {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid #ffffff1a;
+  background: color-mix(in srgb, var(--pane-accent) 22%, #1b1f1c);
+  color: #e6ebe6;
+  cursor: pointer;
+}
+.fusion-send:disabled { opacity: 0.4; cursor: default; }

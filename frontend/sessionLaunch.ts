@@ -9,7 +9,8 @@ import type {
 const THREADED_AGENT_KINDS: AgentThreadProvider[] = [
   "codex",
   "claude",
-  "opencode"
+  "opencode",
+  "cursor"
 ];
 
 export function isThreadedAgentKind(
@@ -141,6 +142,17 @@ export function buildLaunchCommand(
     }
 
     return session.command.trim() || "opencode";
+  }
+
+  if (session.kind === "cursor") {
+    if (mode === "resume") {
+      const ref = resumeArg(session);
+      if (ref) {
+        return `cursor-agent --resume ${commandArg(ref, platform)}`;
+      }
+    }
+
+    return session.command.trim() || "cursor-agent";
   }
 
   return session.command.trim();

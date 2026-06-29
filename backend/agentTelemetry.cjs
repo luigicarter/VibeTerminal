@@ -10,7 +10,7 @@ const SHIM_BASE_DIR =
 const OWNER_MARKER = ".vibe-agent-shims.json";
 const MAX_EVENT_BYTES = 64 * 1024;
 const MAX_SESSION_ID_BYTES = 512;
-const PROVIDERS = ["codex", "claude", "opencode"];
+const PROVIDERS = ["codex", "claude", "opencode", "cursor-agent"];
 
 function pathEnvKey(env = process.env, platform = process.platform) {
   if (platform !== "win32") {
@@ -274,6 +274,13 @@ function windowsPowerShellShimSource(provider) {
     "  $notifyValue = \"notify=['powershell','-NoProfile','-ExecutionPolicy','Bypass','-File','$($env:VIBE_TERMINAL_NOTIFY_PROGRAM)','agent.completed']\"",
     "  $ProviderArgs = @($ProviderArgs) + @('-c', $notifyValue)",
     "}",
+    "# Fusion panes: run claude as the Opus architect with the Codex MCP bridge + delegation prompt.",
+    "if ($Provider -eq 'claude' -and -not [string]::IsNullOrEmpty($env:VIBE_TERMINAL_FUSION_MCP)) {",
+    "  $ProviderArgs = @($ProviderArgs) + @('--mcp-config', $env:VIBE_TERMINAL_FUSION_MCP, '--model', 'opus')",
+    "  if (-not [string]::IsNullOrEmpty($env:VIBE_TERMINAL_FUSION_PROMPT_FILE)) {",
+    "    $ProviderArgs = @($ProviderArgs) + @('--append-system-prompt-file', $env:VIBE_TERMINAL_FUSION_PROMPT_FILE)",
+    "  }",
+    "}",
     "",
     "$env:Path = $env:VIBE_TERMINAL_ORIGINAL_PATH",
     "$ExitCode = 0",
@@ -498,6 +505,23 @@ function powershellCommand() {
     ]);
   }
 
+  // Fusion panes: run claude as the Opus architect, wire the per-pane Codex MCP
+  // adapter (--mcp-config), and inject the delegation system prompt.
+  if (provider === "claude" && process.env.VIBE_TERMINAL_FUSION_MCP) {
+    args = args.concat([
+      "--mcp-config",
+      process.env.VIBE_TERMINAL_FUSION_MCP,
+      "--model",
+      "opus"
+    ]);
+    if (process.env.VIBE_TERMINAL_FUSION_PROMPT_FILE) {
+      args = args.concat([
+        "--append-system-prompt-file",
+        process.env.VIBE_TERMINAL_FUSION_PROMPT_FILE
+      ]);
+    }
+  }
+
   const isWindowsCommandScript =
     process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
   const isWindowsPowerShellScript =
@@ -656,6 +680,324 @@ function posixNotifyShSource(nodePath, notifyHookPath) {
   ].join("\n");
 }
 
+// One env-guarded notify program backs every Cursor hook (verified to fire only
+// in the interactive CLI). Two shapes:
+//   * turn START (beforeSubmitPrompt) passes the type as an argument
+//     (`... agent.running`) so we never have to parse the prompt payload;
+//   * turn END (stop) passes no argument, and the type is derived from the
+//     `status` (completed|aborted|error) the hook pipes on stdin, so a single
+//     `stop` reports both done and failed.
+// stdin is always drained (even when the type comes from the argument) so Cursor
+// never blocks writing a large hook payload to a program that isn't reading it.
+// The env guard makes the project hook inert for plain `cursor-agent` runs and
+// the Cursor IDE, which carry no VIBE_TERMINAL_* env.
+const CURSOR_HOOK_MARKER = "vibeterminal-cursor-notify";
+const CURSOR_RUNNING_TYPE = "agent.running";
+// The only types the notify program is ever allowed to POST. A bad/unknown
+// argument or unparseable stdin therefore stays silent instead of POSTing junk.
+const CURSOR_KNOWN_TYPES = ["agent.running", "agent.completed", "agent.failed"];
+
+function cursorTypeFromStatus(status) {
+  return String(status || "") === "error" ? "agent.failed" : "agent.completed";
+}
+
+// Windows notify program (PowerShell). Type comes from the first argument (turn
+// start) or, absent that, from the stdin JSON `status` (turn end); POSTs it.
+function windowsCursorNotifyPs1Source() {
+  const knownTypeGuard = CURSOR_KNOWN_TYPES.map(
+    (type) => `$type -ne '${type}'`
+  ).join(" -and ");
+  return [
+    `# ${CURSOR_HOOK_MARKER}`,
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    "if ([string]::IsNullOrEmpty($env:VIBE_TERMINAL_CALLBACK_URL) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_TELEMETRY_TOKEN) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_SESSION_ID)) {",
+    "  exit 0",
+    "}",
+    "$raw = ''",
+    "try { $raw = [Console]::In.ReadToEnd() } catch { $raw = '' }",
+    "if ($args.Count -ge 1 -and -not [string]::IsNullOrEmpty([string]$args[0])) {",
+    "  $type = [string]$args[0]",
+    "} else {",
+    "  $status = ''",
+    "  try { $status = [string]((($raw | ConvertFrom-Json)).status) } catch { $status = '' }",
+    "  $type = if ($status -eq 'error') { 'agent.failed' } else { 'agent.completed' }",
+    "}",
+    `if (${knownTypeGuard}) { exit 0 }`,
+    "try {",
+    "  $payload = [ordered]@{",
+    "    type = $type",
+    "    sessionId = $env:VIBE_TERMINAL_SESSION_ID",
+    "    provider = 'cursor'",
+    "    timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()",
+    "  }",
+    "  $body = $payload | ConvertTo-Json -Compress",
+    "  $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)",
+    "  $request = [System.Net.WebRequest]::Create($env:VIBE_TERMINAL_CALLBACK_URL)",
+    "  $request.Method = 'POST'",
+    "  $request.Timeout = 1000",
+    "  $request.ContentType = 'application/json'",
+    "  $request.ContentLength = $bytes.Length",
+    "  $request.Headers.Set('x-vibe-telemetry-token', $env:VIBE_TERMINAL_TELEMETRY_TOKEN)",
+    "  $stream = $request.GetRequestStream()",
+    "  try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }",
+    "  $response = $request.GetResponse()",
+    "  if ($response) { $response.Dispose() }",
+    "} catch {",
+    "  exit 0",
+    "}",
+    "exit 0"
+  ].join(os.EOL);
+}
+
+// POSIX notify program (Node). Same contract as the PowerShell body: the type is
+// the first argument (turn start) or derived from the stdin JSON `status` (turn
+// end). A safety timer guarantees it proceeds even if stdin never closes, so the
+// hook can never hang the agent.
+function cursorNotifyHookSource() {
+  return String.raw`const http = require("http");
+
+const KNOWN_TYPES = new Set(${JSON.stringify(CURSOR_KNOWN_TYPES)});
+const callbackUrl = process.env.VIBE_TERMINAL_CALLBACK_URL;
+const token = process.env.VIBE_TERMINAL_TELEMETRY_TOKEN;
+const sessionId = process.env.VIBE_TERMINAL_SESSION_ID;
+const argType = process.argv[2] || "";
+
+if (!callbackUrl || !token || !sessionId) {
+  process.exit(0);
+}
+
+let raw = "";
+let settled = false;
+
+function finish() {
+  if (settled) return;
+  settled = true;
+
+  let type = argType;
+  if (!type) {
+    let status = "";
+    try {
+      status = String(JSON.parse(raw).status || "");
+    } catch {
+      status = "";
+    }
+    type = status === "error" ? "agent.failed" : "agent.completed";
+  }
+  if (!KNOWN_TYPES.has(type)) {
+    process.exit(0);
+    return;
+  }
+
+  const body = JSON.stringify({ type, sessionId, provider: "cursor", timestamp: Date.now() });
+
+  let url;
+  try {
+    url = new URL(callbackUrl);
+  } catch {
+    process.exit(0);
+    return;
+  }
+
+  const request = http.request(
+    {
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname,
+      method: "POST",
+      timeout: 1000,
+      headers: {
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(body),
+        "x-vibe-telemetry-token": token
+      }
+    },
+    (response) => {
+      response.resume();
+      response.on("end", () => process.exit(0));
+    }
+  );
+
+  request.on("error", () => process.exit(0));
+  request.on("timeout", () => {
+    request.destroy();
+    process.exit(0);
+  });
+  request.end(body);
+}
+
+process.stdin.on("data", (chunk) => {
+  raw += chunk.toString("utf8");
+});
+process.stdin.on("error", finish);
+process.stdin.on("end", finish);
+// Never hang if stdin is not piped/closed for some reason.
+setTimeout(finish, 1500);
+`;
+}
+
+function posixCursorNotifyShSource(nodePath, cursorNotifyHookPath) {
+  return [
+    "#!/usr/bin/env sh",
+    `ELECTRON_RUN_AS_NODE=1 exec ${JSON.stringify(nodePath)} ${JSON.stringify(
+      cursorNotifyHookPath
+    )} "$@"`
+  ].join("\n");
+}
+
+// Reject non-plain-object inputs (arrays, null) so a malformed hooks.json never
+// gets spread into a corrupt shape.
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isOurCursorEntry(entry) {
+  return Boolean(
+    entry &&
+      typeof entry.command === "string" &&
+      entry.command.includes(CURSOR_HOOK_MARKER)
+  );
+}
+
+// The shell command Cursor runs for one of our hooks: invoke the notify program,
+// passing the attention type as an argument for the running hooks and nothing for
+// the stop hook (which derives it from stdin). Forward slashes in the Windows
+// path dodge backslash escaping inside the JSON command string.
+function cursorHookCommand(cursorNotifyProgramPath, isWin, type) {
+  const arg = type ? ` ${type}` : "";
+  return isWin
+    ? `powershell -NoProfile -ExecutionPolicy Bypass -File "${cursorNotifyProgramPath.replace(
+        /\\/g,
+        "/"
+      )}"${arg}`
+    : `'${cursorNotifyProgramPath}'${arg}`;
+}
+
+// The set of project hooks vibeTerminal installs: turn-start "running" and
+// turn-end completed/failed. Returns `{ event, command }` entries for merging.
+function cursorHookEntries(cursorNotifyProgramPath, isWin) {
+  return [
+    {
+      event: "beforeSubmitPrompt",
+      command: cursorHookCommand(
+        cursorNotifyProgramPath,
+        isWin,
+        CURSOR_RUNNING_TYPE
+      )
+    },
+    {
+      event: "stop",
+      command: cursorHookCommand(cursorNotifyProgramPath, isWin)
+    }
+  ];
+}
+
+// Merge our env-guarded hooks into a Cursor `hooks.json` object without disturbing
+// the user's own hooks. Idempotent: every prior vibeTerminal entry (identified by
+// the marker the notify command carries) is dropped from EVERY event array before
+// the current set is appended, so repeated launches never accumulate duplicates,
+// a per-run notify path is always refreshed, and dropping an event we no longer
+// register leaves no orphan. `entries` is `[{ event, command }]`.
+function mergeCursorHooks(existing, entries) {
+  const base = isPlainObject(existing) ? { ...existing } : {};
+  base.version = base.version || 1;
+  const hooks = isPlainObject(base.hooks) ? { ...base.hooks } : {};
+
+  for (const key of Object.keys(hooks)) {
+    if (Array.isArray(hooks[key])) {
+      hooks[key] = hooks[key].filter((entry) => !isOurCursorEntry(entry));
+    }
+  }
+
+  for (const { event, command } of entries) {
+    const list = Array.isArray(hooks[event]) ? hooks[event] : [];
+    hooks[event] = [...list, { command }];
+  }
+
+  // Drop any event array our filtering emptied (e.g. an event we used to
+  // register but no longer do) so we never leave a bare `"event": []`.
+  for (const key of Object.keys(hooks)) {
+    if (Array.isArray(hooks[key]) && hooks[key].length === 0) {
+      delete hooks[key];
+    }
+  }
+
+  base.hooks = hooks;
+  return base;
+}
+
+// Strip our entries from every event array in a Cursor hooks object (used on
+// cleanup). Returns the trimmed object plus whether anything other than our own
+// contribution remains, so the caller can delete a file vibeTerminal created.
+function stripCursorHooks(existing) {
+  const base = isPlainObject(existing) ? { ...existing } : {};
+  const hooks = isPlainObject(base.hooks) ? { ...base.hooks } : {};
+
+  for (const key of Object.keys(hooks)) {
+    if (!Array.isArray(hooks[key])) {
+      continue;
+    }
+    const filtered = hooks[key].filter((entry) => !isOurCursorEntry(entry));
+    if (filtered.length > 0) {
+      hooks[key] = filtered;
+    } else {
+      delete hooks[key];
+    }
+  }
+  base.hooks = hooks;
+
+  const hasOtherContent =
+    Object.keys(hooks).length > 0 ||
+    Object.keys(base).some((key) => key !== "version" && key !== "hooks");
+  return { trimmed: base, hasOtherContent };
+}
+
+// The architect system prompt a Fusion pane's claude is launched with
+// (`claude --append-system-prompt-file <file>`). Opus is the architect /
+// reviewer / designer that delegates ALL execution to Codex; the two roles do
+// not overlap. v1 delegates to the user's installed `codex exec`; the bundled
+// app-server bridge is a later upgrade (see docs/fusion-terminal.md).
+function buildFusionSystemPrompt() {
+  return [
+    "# Terminal Fusion — you are the architect (Opus 4.8)",
+    "",
+    "You are running inside a **Fusion terminal**. You are the ARCHITECT,",
+    "REVIEWER, and DESIGNER. Your counterpart, **Codex (the executor)**, does the",
+    "hands-on coding. These two roles do not overlap.",
+    "",
+    "## You do (and only you)",
+    "- Architecture and design decisions; UI design.",
+    "- Planning the work and splitting it into precise, self-contained tasks.",
+    "- Threat-modeling and debugging *strategy* (what to investigate and why).",
+    "- Reviewing Codex's work: run `git diff` / `git status` yourself to inspect",
+    "  changes. This diff-check is YOUR job, never Codex's.",
+    '- "What are we missing?" analysis and tradeoff reasoning.',
+    "",
+    "## You do NOT",
+    "You do NOT edit files, run tests, fix compile/runtime errors, refactor, or",
+    "make repo changes yourself. You delegate ALL of that to Codex.",
+    "",
+    "## How to delegate to Codex",
+    "Use the **codex_implement** tool (NOT your shell, NOT `codex` directly) with",
+    "complete, self-contained instructions — Codex does not share your context, so",
+    "give it the files, intent, constraints, and acceptance criteria. Codex edits",
+    "files and runs tests in the workspace. codex_implement returns one of:",
+    "",
+    '- `{status:"completed", summary, files}` — then run `git diff` / `git status`',
+    "  and REVIEW it (correctness + design). If wrong, call codex_implement again",
+    "  with a precise correction. Iterate until the diff is right.",
+    '- `{status:"needs_decision", pendingId, kind, detail}` — Codex needs approval',
+    "  (a command or patch) or is asking a question. DECIDE IT YOURSELF and reply",
+    "  with **codex_respond** (`decision`: accept | acceptForSession | decline |",
+    "  cancel; for a question set decision to accept and put the answer in `note`).",
+    "  Only ask the human when you genuinely cannot decide.",
+    '- `{status:"failed", error}` — diagnose; if Codex is unavailable / not',
+    "  authenticated, tell the user to run `codex login`.",
+    "",
+    "Stay in your lane: you decide and review; Codex implements.",
+    ""
+  ].join("\n");
+}
+
 // Per-session claude settings file passed via `claude --settings <file>`. Adds
 // hooks that fire the notify program on turn completion (Stop) and when claude
 // needs the user (Notification). `--settings` merges over the user's own
@@ -677,6 +1019,13 @@ function buildClaudeSettingsJson(scriptPath, isWin) {
 
   const settings = {
     hooks: {
+      // Turn START: the user submitted a prompt, or the agent is running a tool
+      // (PreToolUse/PostToolUse also re-assert "working" right after a permission
+      // approval). This is the interaction-proof signal behind the sidebar
+      // "working" spinner, so typing or clicking the pane never reads as working.
+      UserPromptSubmit: [{ matcher: "*", hooks: [hook("agent.running")] }],
+      PreToolUse: [{ matcher: "*", hooks: [hook("agent.running")] }],
+      PostToolUse: [{ matcher: "*", hooks: [hook("agent.running")] }],
       Stop: [{ matcher: "*", hooks: [hook("agent.completed")] }],
       Notification: [
         {
@@ -690,47 +1039,71 @@ function buildClaudeSettingsJson(scriptPath, isWin) {
   return `${JSON.stringify(settings, null, 2)}\n`;
 }
 
-const OPENCODE_PLUGIN_VERSION = "vibeterminal-notify-1";
+const OPENCODE_PLUGIN_VERSION = "vibeterminal-notify-2";
 
 // opencode cannot take a per-invocation hook, so we install one small plugin in
 // the user's opencode config. It is guarded: it only POSTs when the
 // VIBE_TERMINAL_* env vars are present, so a plain `opencode` run does nothing.
+//
+// Turn START (`agent.running`, the sidebar "working" spinner) is inferred from
+// message-stream events: while the assistant is generating, opencode emits a
+// burst of `message.*` events, so the FIRST one after idle reports "working" and
+// the rest are throttled by the per-turn `busy` latch (reset on idle/error).
+// NOTE: the exact `message.*` event names are LIVE-VERIFY pending; if they differ
+// in a given opencode version the spinner simply won't show (no false positive),
+// while done/waiting still flow from session.idle/permission events.
 function openCodePluginSource() {
   return [
     `// vibeterminal-notify (${OPENCODE_PLUGIN_VERSION}) - auto-generated by vibeTerminal.`,
     "// Safe no-op outside vibeTerminal: only POSTs when VIBE_TERMINAL_* env vars are set.",
-    "export const VibeTerminalNotify = async () => ({",
-    "  event: async ({ event }) => {",
-    "    const url = process.env.VIBE_TERMINAL_CALLBACK_URL;",
-    "    const token = process.env.VIBE_TERMINAL_TELEMETRY_TOKEN;",
-    "    const sessionId = process.env.VIBE_TERMINAL_SESSION_ID;",
-    '    if (!url || !token || !sessionId || !event || typeof event.type !== "string") {',
-    "      return;",
+    "export const VibeTerminalNotify = async () => {",
+    "  let busy = false;",
+    "  return {",
+    "    event: async ({ event }) => {",
+    "      const url = process.env.VIBE_TERMINAL_CALLBACK_URL;",
+    "      const token = process.env.VIBE_TERMINAL_TELEMETRY_TOKEN;",
+    "      const sessionId = process.env.VIBE_TERMINAL_SESSION_ID;",
+    '      if (!url || !token || !sessionId || !event || typeof event.type !== "string") {',
+    "        return;",
+    "      }",
+    "      const send = async (type) => {",
+    "        try {",
+    "          await fetch(url, {",
+    '            method: "POST",',
+    "            headers: {",
+    '              "content-type": "application/json",',
+    '              "x-vibe-telemetry-token": token',
+    "            },",
+    '            body: JSON.stringify({ type, sessionId, provider: "opencode", timestamp: Date.now() })',
+    "          });",
+    "        } catch (_error) {",
+    "          // Telemetry is best-effort; ignore delivery failures.",
+    "        }",
+    "      };",
+    '      if (event.type.startsWith("message.")) {',
+    "        if (!busy) {",
+    "          busy = true;",
+    '          await send("agent.running");',
+    "        }",
+    "        return;",
+    "      }",
+    "      const map = {",
+    '        "session.idle": "agent.completed",',
+    '        "permission.asked": "agent.waiting",',
+    '        "permission.updated": "agent.waiting",',
+    '        "session.error": "agent.failed"',
+    "      };",
+    "      const type = map[event.type];",
+    "      if (!type) {",
+    "        return;",
+    "      }",
+    '      if (event.type === "session.idle" || event.type === "session.error") {',
+    "        busy = false;",
+    "      }",
+    "      await send(type);",
     "    }",
-    "    const map = {",
-    '      "session.idle": "agent.completed",',
-    '      "permission.asked": "agent.waiting",',
-    '      "permission.updated": "agent.waiting",',
-    '      "session.error": "agent.failed"',
-    "    };",
-    "    const type = map[event.type];",
-    "    if (!type) {",
-    "      return;",
-    "    }",
-    "    try {",
-    "      await fetch(url, {",
-    '        method: "POST",',
-    "        headers: {",
-    '          "content-type": "application/json",',
-    '          "x-vibe-telemetry-token": token',
-    "        },",
-    '        body: JSON.stringify({ type, sessionId, provider: "opencode", timestamp: Date.now() })',
-    "      });",
-    "    } catch (_error) {",
-    "      // Telemetry is best-effort; ignore delivery failures.",
-    "    }",
-    "  }",
-    "});",
+    "  };",
+    "};",
     ""
   ].join("\n");
 }
@@ -833,6 +1206,18 @@ function createAgentTelemetryManager(options = {}) {
   // The single "notify program" each agent invokes with the attention type as
   // its first argument: the PowerShell body on Windows, the sh wrapper on POSIX.
   const notifyProgramPath = isWin ? notifyPs1Path : notifyShPath;
+  // Cursor's stop hook derives the attention type from the JSON it pipes on
+  // stdin, so it gets its own notify program. The filename carries the marker so
+  // mergeCursorHooks can recognise (and refresh) our entry inside the user's
+  // project hooks.json across runs.
+  const cursorNotifyPs1Path = path.join(runDir, `${CURSOR_HOOK_MARKER}.ps1`);
+  const cursorNotifyHookPath = path.join(runDir, `${CURSOR_HOOK_MARKER}.cjs`);
+  const cursorNotifyShPath = path.join(runDir, `${CURSOR_HOOK_MARKER}.sh`);
+  const cursorNotifyProgramPath = isWin ? cursorNotifyPs1Path : cursorNotifyShPath;
+  // Project hooks.json files we have touched this run, mapped to whether the
+  // file pre-existed, so cleanup can strip our entry (or delete a file we
+  // created) without disturbing the user's own hooks.
+  const cursorHookFiles = new Map();
   const sessions = new Map();
   let server = null;
   let callbackUrl = null;
@@ -849,10 +1234,17 @@ function createAgentTelemetryManager(options = {}) {
       // its `notify` at the same program; opencode uses a guarded global plugin.
       if (isWin) {
         fs.writeFileSync(notifyPs1Path, windowsNotifyPs1Source());
+        fs.writeFileSync(cursorNotifyPs1Path, windowsCursorNotifyPs1Source());
       } else {
         fs.writeFileSync(notifyHookPath, notifyHookSource());
         fs.writeFileSync(notifyShPath, posixNotifyShSource(nodePath, notifyHookPath));
         fs.chmodSync(notifyShPath, 0o755);
+        fs.writeFileSync(cursorNotifyHookPath, cursorNotifyHookSource());
+        fs.writeFileSync(
+          cursorNotifyShPath,
+          posixCursorNotifyShSource(nodePath, cursorNotifyHookPath)
+        );
+        fs.chmodSync(cursorNotifyShPath, 0o755);
       }
       fs.writeFileSync(
         claudeSettingsPath,
@@ -890,14 +1282,36 @@ function createAgentTelemetryManager(options = {}) {
               return;
             }
 
-            const attention = mapTelemetryToAttention(event);
-            if (attention) {
+            if (event.type === "fusion.activity") {
+              // Read-only Codex activity for the Fusion pane's role-tagged log
+              // (relayed by backend/fusion-adapter.cjs). Not an attention signal.
               emit({
                 id: event.sessionId,
-                type: "agent-attention",
-                provider: event.provider,
-                attention
+                type: "fusion-activity",
+                role: event.role,
+                kind: event.kind,
+                text: event.text,
+                ts: event.ts
               });
+            } else if (event.type === "agent.running") {
+              // A turn started (claude UserPromptSubmit/tool use, opencode busy
+              // event). This drives the pane's "working" state only; it is not an
+              // attention/unread signal, so it rides a dedicated event.
+              emit({
+                id: event.sessionId,
+                type: "agent-running",
+                provider: event.provider
+              });
+            } else {
+              const attention = mapTelemetryToAttention(event);
+              if (attention) {
+                emit({
+                  id: event.sessionId,
+                  type: "agent-attention",
+                  provider: event.provider,
+                  attention
+                });
+              }
             }
 
             response.writeHead(204);
@@ -920,7 +1334,7 @@ function createAgentTelemetryManager(options = {}) {
     }
   });
 
-  async function prepareSession(sessionId) {
+  async function prepareSession(sessionId, options = {}) {
     await ready;
     const normalizedSessionId = normalizeSessionId(sessionId);
     if (!normalizedSessionId) {
@@ -967,6 +1381,51 @@ function createAgentTelemetryManager(options = {}) {
     return instrumentation;
   }
 
+  // Generate the per-pane Fusion files (Codex MCP adapter config + architect
+  // system prompt) for the HEADLESS chat path (backend/fusionChatHost.cjs spawns
+  // `claude` with these as explicit argv). Independent of the PTY shim. Returns
+  // { systemPromptFile, mcpConfig } absolute paths.
+  async function prepareFusionFiles(sessionId, opts = {}) {
+    await ready;
+    const normalizedSessionId = normalizeSessionId(sessionId);
+    if (!normalizedSessionId) {
+      return null;
+    }
+
+    const sessionDir = path.join(runDir, sessionDirName(normalizedSessionId));
+    fs.mkdirSync(sessionDir, { recursive: true });
+
+    const systemPromptFile = path.join(sessionDir, "fusion-system-prompt.md");
+    fs.writeFileSync(systemPromptFile, buildFusionSystemPrompt());
+
+    const adapterPath = path.join(__dirname, "fusion-adapter.cjs");
+    const mcpConfigObj = {
+      mcpServers: {
+        "fusion-codex": {
+          command: nodePath,
+          args: [adapterPath],
+          env: {
+            ELECTRON_RUN_AS_NODE: "1",
+            VIBE_FUSION_CODEX_BIN: opts.codexBin || "codex",
+            // Pin the user's Codex home so the EMBEDDED binary uses their existing
+            // ChatGPT/Codex login (auth.json) with zero re-auth — even if the MCP
+            // spawn chain doesn't inherit HOME/USERPROFILE.
+            CODEX_HOME: process.env.CODEX_HOME || path.join(os.homedir(), ".codex"),
+            VIBE_TERMINAL_FUSION_CWD: opts.cwd || "",
+            VIBE_TERMINAL_SESSION_ID: normalizedSessionId,
+            VIBE_TERMINAL_CALLBACK_URL: callbackUrl,
+            VIBE_TERMINAL_TELEMETRY_TOKEN: token,
+            ...(opts.codexModel ? { VIBE_FUSION_CODEX_MODEL: opts.codexModel } : {})
+          }
+        }
+      }
+    };
+    const mcpConfig = path.join(sessionDir, "fusion-mcp.json");
+    fs.writeFileSync(mcpConfig, `${JSON.stringify(mcpConfigObj, null, 2)}\n`);
+
+    return { systemPromptFile, mcpConfig };
+  }
+
   function releaseSession(sessionId) {
     const normalizedSessionId = normalizeSessionId(sessionId);
     if (!normalizedSessionId) {
@@ -980,10 +1439,87 @@ function createAgentTelemetryManager(options = {}) {
     }
   }
 
+  // Cursor has no per-invocation hook flag, so its hooks are registered in the
+  // project's `.cursor/hooks.json`: `beforeSubmitPrompt` -> running and `stop` ->
+  // completed/failed. This runs at launch (the cwd is known then) to merge our
+  // env-guarded entries in, refreshing the per-run notify path. Best-effort and
+  // idempotent; never throws so it cannot break a terminal launch. The user's own
+  // Cursor hooks are preserved.
+  async function ensureCursorProjectHooks(cwd) {
+    try {
+      await ready;
+      if (!cwd || typeof cwd !== "string") {
+        return;
+      }
+
+      const dir = path.join(cwd, ".cursor");
+      const file = path.join(dir, "hooks.json");
+
+      let raw = null;
+      try {
+        raw = fs.readFileSync(file, "utf8");
+      } catch {
+        raw = null;
+      }
+
+      let existing = null;
+      if (raw !== null) {
+        try {
+          existing = JSON.parse(raw);
+        } catch {
+          // The file exists but is not valid JSON. Do not clobber it — the user
+          // may be mid-edit or using a format we do not understand.
+          return;
+        }
+      }
+
+      const merged = mergeCursorHooks(
+        existing,
+        cursorHookEntries(cursorNotifyProgramPath, isWin)
+      );
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(file, `${JSON.stringify(merged, null, 2)}\n`);
+      if (!cursorHookFiles.has(file)) {
+        cursorHookFiles.set(file, { createdByUs: raw === null });
+      }
+    } catch {
+      // Best-effort; never let cursor hook install break a terminal launch.
+    }
+  }
+
+  function cleanupCursorHooks() {
+    for (const [file, info] of cursorHookFiles) {
+      try {
+        const raw = fs.readFileSync(file, "utf8");
+        const parsed = JSON.parse(raw);
+        const { trimmed, hasOtherContent } = stripCursorHooks(parsed);
+        if (info.createdByUs && !hasOtherContent) {
+          // We created this file purely for our hook; remove it (and the
+          // .cursor dir if it is now empty) rather than leave a dangling entry.
+          fs.rmSync(file, { force: true });
+          const dir = path.dirname(file);
+          try {
+            if (fs.readdirSync(dir).length === 0) {
+              fs.rmdirSync(dir);
+            }
+          } catch {
+            // Directory not empty or unreadable — leave it.
+          }
+        } else {
+          fs.writeFileSync(file, `${JSON.stringify(trimmed, null, 2)}\n`);
+        }
+      } catch {
+        // File gone, unreadable, or malformed — nothing safe to do.
+      }
+    }
+    cursorHookFiles.clear();
+  }
+
   function cleanup() {
     for (const sessionId of Array.from(sessions.keys())) {
       releaseSession(sessionId);
     }
+    cleanupCursorHooks();
     if (server) {
       server.close();
       server = null;
@@ -995,7 +1531,9 @@ function createAgentTelemetryManager(options = {}) {
     baseDir,
     callbackUrl: () => callbackUrl,
     cleanup,
+    ensureCursorProjectHooks,
     prepareSession,
+    prepareFusionFiles,
     ready,
     releaseSession,
     runDir,
@@ -1006,11 +1544,17 @@ function createAgentTelemetryManager(options = {}) {
 
 module.exports = {
   buildClaudeSettingsJson,
+  buildFusionSystemPrompt,
   cleanupStaleShimDirs,
   createAgentTelemetryManager,
+  cursorHookEntries,
+  cursorNotifyHookSource,
+  cursorTypeFromStatus,
   installOpenCodePlugin,
   mapTelemetryToAttention,
+  mergeCursorHooks,
   notifyHookSource,
   openCodePluginSource,
-  safeRemoveDir
+  safeRemoveDir,
+  stripCursorHooks
 };

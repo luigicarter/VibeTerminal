@@ -16,7 +16,11 @@ import {
   X
 } from "lucide-react";
 import clsx from "clsx";
-import { reconcileStatus, shouldShowAttentionDot } from "../attention";
+import {
+  isTurnTelemetryKind,
+  reconcileStatus,
+  shouldShowAttentionDot
+} from "../attention";
 import { buildLaunchCommand, isThreadedAgentKind } from "../sessionLaunch";
 import {
   isTerminalCopyShortcut,
@@ -39,6 +43,12 @@ const NON_TERMINAL_FOCUS_TARGET =
 // means fewer false "waiting" flips while an agent pauses mid-task, at the cost
 // of a slower idle signal.
 const IDLE_AFTER_MS = 1500;
+// After the user interacts with a pane (keystroke, paste, or a mouse/focus
+// report a full-screen TUI requests), the bytes that echo straight back — the
+// typed character, the prompt redraw, the focus/mouse ack — are NOT the agent
+// working. Ignore output this soon after the last input so typing in or clicking
+// a pane never reads as "working".
+const INPUT_GRACE_MS = 450;
 
 interface ThreadLookupPatch {
   threadLookupStartedAt?: number;
@@ -119,6 +129,7 @@ export default function TerminalPane({
   );
   const terminalExitedRef = useRef(false);
   const idleTimerRef = useRef<number | null>(null);
+  const lastInputAtRef = useRef(0);
   const lookupInFlightRef = useRef(false);
   const claimedThreadIdsRef = useRef(claimedThreadIds);
 
@@ -192,9 +203,9 @@ export default function TerminalPane({
     }
   }
 
-  // Output (or input) just flowed: the pane is working. Re-arm the quiescence
-  // timer so that if it then goes quiet while the process is still alive, the
-  // pill settles to "waiting" instead of being pinned to "working" forever.
+  // Output just flowed: the pane is working. Re-arm the quiescence timer so that
+  // if it then goes quiet while the process is still alive, the pill settles to
+  // "waiting" instead of being pinned to "working" forever.
   function markActive() {
     setStatus("running");
     clearIdleTimer();
@@ -204,6 +215,40 @@ export default function TerminalPane({
         setStatus("waiting");
       }
     }, IDLE_AFTER_MS);
+  }
+
+  // Decide whether a chunk of PTY output should read as the agent "working".
+  function markActiveFromOutput() {
+    // claude/opencode own their working state through turn telemetry
+    // (UserPromptSubmit / busy events), so their output never sets "running" —
+    // otherwise a focus/click redraw or a keystroke echo would look like work.
+    // The first quiet gap after boot still settles the "starting" pill to
+    // "waiting" so a freshly launched agent doesn't read as starting forever.
+    if (isTurnTelemetryKind(sessionRef.current.kind)) {
+      if (sessionRef.current.status !== "starting") {
+        return;
+      }
+      clearIdleTimer();
+      idleTimerRef.current = window.setTimeout(() => {
+        idleTimerRef.current = null;
+        if (
+          !terminalExitedRef.current &&
+          sessionRef.current.status === "starting"
+        ) {
+          setStatus("waiting");
+        }
+      }, IDLE_AFTER_MS);
+      return;
+    }
+
+    // codex / plain terminals / others: output is "working" unless it lands
+    // inside the input grace window, where it is just the echo of, or the TUI's
+    // response to, the user's own keystroke/click.
+    if (Date.now() - lastInputAtRef.current < INPUT_GRACE_MS) {
+      return;
+    }
+
+    markActive();
   }
 
   function scheduleFitAndResize() {
@@ -455,7 +500,10 @@ export default function TerminalPane({
 
       onSelect();
       window.vibe?.terminal.input(session.id, data);
-      markActive();
+      // User interaction (keys, paste, mouse/focus reports) is not the agent
+      // working, so it must not mark the pane active. Record when it happened so
+      // the echo/redraw that follows can be told apart from real output.
+      lastInputAtRef.current = Date.now();
     });
 
     const removeListener = window.vibe?.terminal.onEvent((event) => {
@@ -465,7 +513,7 @@ export default function TerminalPane({
 
       if (event.type === "data") {
         terminal.write(event.data, scheduleTerminalRepaint);
-        markActive();
+        markActiveFromOutput();
       }
 
       if (event.type === "snapshot") {
@@ -476,7 +524,7 @@ export default function TerminalPane({
         }
 
         if (event.isRunning) {
-          markActive();
+          markActiveFromOutput();
         } else {
           terminalExitedRef.current = true;
           terminal.writeln("");
@@ -507,6 +555,7 @@ export default function TerminalPane({
         clearIdleTimer();
         setStatus(event.exitCode === 0 ? "done" : "failed");
       }
+
     });
     const removeContextMenuPasteListener =
       window.vibe?.terminal.onContextMenuPaste?.((payload) => {
@@ -647,6 +696,7 @@ export default function TerminalPane({
         cwd: session.cwd,
         command,
         launchToken,
+        fusion: session.fusion,
         cols: terminalRef.current.cols,
         rows: terminalRef.current.rows
       });

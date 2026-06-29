@@ -27,6 +27,8 @@ import {
   attentionFromEvent,
   attentionFromTerminalEvent,
   clearUnreadAttention,
+  isSessionWorking,
+  isTurnTelemetryKind,
   normalizeAttention,
   reconcileStatus,
   shouldMarkAttentionUnread,
@@ -36,6 +38,7 @@ import {
   statusFromTerminalEvent
 } from "./attention";
 import TerminalPane from "./components/TerminalPane";
+import FusionChatPane from "./components/FusionChatPane";
 import TiledBoard from "./components/TiledBoard";
 import {
   createThreadRef,
@@ -114,6 +117,19 @@ const agentProfiles: AgentProfile[] = [
     label: "Claude",
     command: "claude",
     accent: "#8fd694"
+  },
+  {
+    kind: "fusion",
+    label: "Fusion",
+    command: "claude",
+    accent: "#b98bff",
+    fusion: true
+  },
+  {
+    kind: "cursor",
+    label: "Cursor",
+    command: "cursor-agent",
+    accent: "#46c2c9"
   },
   {
     kind: "gemini",
@@ -308,16 +324,22 @@ function createSession(
   name?: string
 ): AgentSession {
   const profile = getProfile(kind);
+  // "fusion" is a selection-only kind: persist a real claude session flagged
+  // `fusion` so every existing claude path (telemetry, resume, working-state,
+  // thread discovery) applies unchanged; only the launch gets Fusion wiring.
+  const isFusion = profile.fusion === true;
+  const effectiveKind: AgentKind = isFusion ? "claude" : kind;
   const sessionName = name ?? `${profile.label} ${existingSessions.length + 1}`;
 
   return {
     id: createId("session"),
     name: sessionName,
-    kind,
+    kind: effectiveKind,
+    fusion: isFusion || undefined,
     command: profile.command,
     cwd,
     createdAt: Date.now(),
-    threadRef: createThreadRef(kind, sessionName),
+    threadRef: createThreadRef(effectiveKind, sessionName),
     threadLookupStatus: "idle",
     nextLaunchMode: "new",
     started: true,
@@ -674,8 +696,19 @@ export default function App() {
         applyAgentAttention(event.id, event.attention);
       }
 
+      if (event.type === "agent-running") {
+        applyAgentRunning(event.id);
+      }
+
       if ("id" in event) {
-        applyTerminalStatus(event.id, statusFromTerminalEvent(event));
+        // Output ("data") no longer drives the working/idle pill from here: a
+        // pane's working state comes from turn telemetry (claude/opencode) or
+        // the mounted pane's input-aware heuristic (codex/plain terminals), so a
+        // user's own keystroke echo can never read as "working". snapshot/exit/
+        // error still settle status centrally for every pane.
+        if (event.type !== "data") {
+          applyTerminalStatus(event.id, statusFromTerminalEvent(event));
+        }
 
         const attention = attentionFromTerminalEvent(event);
         if (attention) {
@@ -862,10 +895,39 @@ export default function App() {
     }
 
     updateAnySession(sessionId, (session) => {
+      // claude/opencode "working" is telemetry-driven, so never let raw terminal
+      // output (a snapshot replay on reconnect, a focus/click redraw) flip them
+      // to "running" — that is the typing/selecting false positive we are fixing.
+      if (status === "running" && isTurnTelemetryKind(session.kind)) {
+        return session;
+      }
+
       const nextStatus = reconcileStatus(session.status, status);
       return nextStatus === session.status
         ? session
         : { ...session, status: nextStatus };
+    });
+  }
+
+  // A claude/opencode turn actually started (UserPromptSubmit / busy event), so
+  // force the pane to "running" even past the done/failed stickiness — a new turn
+  // legitimately supersedes the previous result — and drop any stale unread dot.
+  function applyAgentRunning(sessionId: string) {
+    updateAnySession(sessionId, (session) => {
+      if (session.status === "running" && !session.attention?.unread) {
+        return session;
+      }
+
+      return {
+        ...session,
+        status: "running",
+        attention: {
+          state: "none",
+          unread: false,
+          updatedAt: Date.now(),
+          source: "provider"
+        }
+      };
     });
   }
 
@@ -939,6 +1001,10 @@ export default function App() {
     ]);
   }
 
+  function sessionCreationKind(session: AgentSession): AgentKind {
+    return session.fusion ? "fusion" : session.kind;
+  }
+
   async function addSession(kind: AgentKind) {
     if (!activeScope) {
       return;
@@ -967,7 +1033,7 @@ export default function App() {
     updateScopeSessions(scope, (sessions) => [
       ...sessions,
       {
-        ...createSession(session.kind, session.cwd, sessions),
+        ...createSession(sessionCreationKind(session), session.cwd, sessions),
         name: `${session.name} copy`,
         command: session.command,
         resumeRef: sourceThread
@@ -1230,8 +1296,14 @@ export default function App() {
     return workspace.sessions.some(shouldShowAttentionDot);
   }
 
+  function workspaceHasWorking(workspace: ProjectWorkspace) {
+    return workspace.sessions.some(isSessionWorking);
+  }
+
   const multiModeHasUnreadAttention =
     multiSessions.some(shouldShowAttentionDot);
+
+  const multiModeHasWorking = multiSessions.some(isSessionWorking);
 
   function handleSidebarResizePointerDown(
     event: ReactPointerEvent<HTMLDivElement>
@@ -1508,7 +1580,10 @@ export default function App() {
           className={clsx(
             "multi-mode-card",
             activeView === "multi" && "active",
-            multiModeHasUnreadAttention && "has-attention"
+            multiModeHasUnreadAttention && "has-attention",
+            !multiModeHasUnreadAttention &&
+              multiModeHasWorking &&
+              "has-working"
           )}
           aria-label="Multi mode"
           onClick={() => {
@@ -1519,9 +1594,14 @@ export default function App() {
           <div className="multi-mode-heading">
             <LayoutGrid size={15} />
             <span>Multi mode</span>
-            {multiModeHasUnreadAttention && (
+            {multiModeHasUnreadAttention ? (
               <span className="attention-dot" aria-hidden="true" />
-            )}
+            ) : multiModeHasWorking ? (
+              <span
+                className="attention-dot attention-dot-working"
+                aria-hidden="true"
+              />
+            ) : null}
           </div>
           <span className="multi-mode-subtitle">
             {formatCount(multiSessions.length, "terminal")}
@@ -1535,6 +1615,8 @@ export default function App() {
         >
           {workspaces.map((workspace) => {
             const hasUnreadAttention = workspaceHasUnreadAttention(workspace);
+            const hasWorking =
+              !hasUnreadAttention && workspaceHasWorking(workspace);
             const isDropTarget =
               workspaceDropTarget?.workspaceId === workspace.id;
 
@@ -1563,7 +1645,8 @@ export default function App() {
                     activeView === "project" &&
                       workspace.id === activeWorkspace?.id &&
                       "active",
-                    hasUnreadAttention && "has-attention"
+                    hasUnreadAttention && "has-attention",
+                    hasWorking && "has-working"
                   )}
                   draggable={workspaces.length > 1}
                   onDragStart={(event) =>
@@ -1579,7 +1662,10 @@ export default function App() {
                   <span
                     className={clsx(
                       "attention-dot",
-                      !hasUnreadAttention && "attention-dot-empty"
+                      hasWorking && "attention-dot-working",
+                      !hasUnreadAttention &&
+                        !hasWorking &&
+                        "attention-dot-empty"
                     )}
                     aria-hidden="true"
                   />
@@ -1725,10 +1811,40 @@ export default function App() {
                         unit: "fluid"
                       }
                     : session.layout,
-                content: (
+                content: session.fusion ? (
+                  <FusionChatPane
+                    session={session}
+                    profile={getProfile("fusion")}
+                    isMaximized={session.id === maximizedSessionId}
+                    onClose={() => closeSession(activeScope, session.id)}
+                    onDuplicate={() => duplicateSession(activeScope, session)}
+                    onRestart={() => restartSession(activeScope, session)}
+                    onResume={() => resumeSession(activeScope, session)}
+                    onAdd={() =>
+                      addSessionForCwd(activeScope, sessionCreationKind(session), session.cwd)
+                    }
+                    onSelect={() => selectSession(session.id)}
+                    onMaximize={() =>
+                      setMaximizedSessionId((current) =>
+                        current === session.id ? null : session.id
+                      )
+                    }
+                    onThreadRefChange={(threadRef) =>
+                      updateSessionThreadRef(activeScope, session.id, threadRef)
+                    }
+                    onStatusChange={(status) =>
+                      updateSessionStatus(activeScope, session.id, status)
+                    }
+                    onAttention={(attention) =>
+                      applyAgentAttention(session.id, attention)
+                    }
+                  />
+                ) : (
                   <TerminalPane
                     session={session}
-                    profile={getProfile(session.kind)}
+                    profile={
+                      session.fusion ? getProfile("fusion") : getProfile(session.kind)
+                    }
                     claimedThreadIds={claimedThreadIds(session.id)}
                     isMaximized={session.id === maximizedSessionId}
                     isArranging={isArranging}
@@ -1737,7 +1853,7 @@ export default function App() {
                     onRestart={() => restartSession(activeScope, session)}
                     onResume={() => resumeSession(activeScope, session)}
                     onAdd={() =>
-                      addSessionForCwd(activeScope, session.kind, session.cwd)
+                      addSessionForCwd(activeScope, sessionCreationKind(session), session.cwd)
                     }
                     onSelect={() => selectSession(session.id)}
                     onMaximize={() =>

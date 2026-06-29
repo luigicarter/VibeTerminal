@@ -4,3 +4,6 @@ dist/
 artifacts/
 release/
 npm-debug.log*
+# Embedded Codex binary (~300 MB) — populated by `npm run prepare:codex-bin`,
+# bundled into the installer via electron-builder extraResources.
+vendor/codex-bin/

@@ -14,6 +14,14 @@ const terminalPanePath = path.join(
   "components",
   "TerminalPane.tsx"
 );
+const fusionChatPanePath = path.join(
+  __dirname,
+  "..",
+  "..",
+  "frontend",
+  "components",
+  "FusionChatPane.tsx"
+);
 const stylesPath = path.join(__dirname, "..", "..", "frontend", "styles.css");
 const source = fs.readFileSync(attentionPath, "utf8");
 const compiled = ts.transpileModule(source, {
@@ -33,6 +41,8 @@ const {
   attentionFromTerminalEvent,
   attentionFromEvent,
   clearUnreadAttention,
+  isSessionWorking,
+  isTurnTelemetryKind,
   normalizeAttention,
   reconcileStatus,
   shouldMarkAttentionUnread,
@@ -148,6 +158,10 @@ assert.strictEqual(
   false
 );
 assert.strictEqual(
+  shouldUseTerminalEventAttention({ id: "cursor", kind: "cursor" }),
+  false
+);
+assert.strictEqual(
   shouldMarkAttentionUnread("one", "one", ["one"], completed),
   false
 );
@@ -193,6 +207,23 @@ const clearedSession = clearUnreadAttention(unreadSession);
 assert.notStrictEqual(clearedSession, unreadSession);
 assert.strictEqual(clearedSession.attention.unread, false);
 
+// The sidebar "working" spinner only lights for an actively running pane, never
+// for a booting ("starting"), idle, or waiting one.
+assert.strictEqual(isSessionWorking({ status: "running" }), true);
+assert.strictEqual(isSessionWorking({ status: "starting" }), false);
+assert.strictEqual(isSessionWorking({ status: "waiting" }), false);
+assert.strictEqual(isSessionWorking({ status: "done" }), false);
+assert.strictEqual(isSessionWorking({ status: "idle" }), false);
+
+// claude/opencode/cursor have a turn-start signal (cursor's beforeSubmitPrompt
+// hook), so they suppress the output-flow working heuristic. codex and plain
+// terminals fall back to it.
+assert.strictEqual(isTurnTelemetryKind("claude"), true);
+assert.strictEqual(isTurnTelemetryKind("opencode"), true);
+assert.strictEqual(isTurnTelemetryKind("cursor"), true);
+assert.strictEqual(isTurnTelemetryKind("codex"), false);
+assert.strictEqual(isTurnTelemetryKind("terminal"), false);
+
 // A coding agent runs inside the pane shell, so its lifecycle only surfaces
 // through telemetry attention. Those states must map onto the pill status.
 assert.strictEqual(statusFromAttentionState("waiting"), "waiting");
@@ -224,6 +255,27 @@ assert(
     appSource.includes("reconcileStatus("),
   "agent attention should drive the pill status through reconcileStatus"
 );
+assert(
+  appSource.includes("function sessionCreationKind") &&
+    appSource.includes('session.fusion ? "fusion" : session.kind') &&
+    appSource.includes("applyAgentAttention(session.id, attention)"),
+  "Fusion add/duplicate and completion attention should use the app attention path"
+);
+assert(
+  appSource.includes('event.type === "agent-running"') &&
+    appSource.includes("applyAgentRunning("),
+  "app should turn agent-running telemetry into a forced running status"
+);
+assert(
+  appSource.includes('event.type !== "data"'),
+  "app-level listener should no longer derive running status from raw output"
+);
+assert(
+  appSource.includes("workspaceHasWorking(") &&
+    appSource.includes("isSessionWorking") &&
+    appSource.includes("attention-dot-working"),
+  "sidebar should render a working spinner driven by isSessionWorking"
+);
 
 const workspaceRowIndex = appSource.indexOf('"workspace-button"');
 const workspaceDotIndex = appSource.indexOf('"attention-dot"', workspaceRowIndex);
@@ -245,6 +297,15 @@ assert(
     terminalPaneSource.includes("markActive(") &&
     terminalPaneSource.includes('setStatus("waiting")'),
   "terminal pane should fall back to a waiting status when output goes idle"
+);
+
+const fusionChatPaneSource = fs.readFileSync(fusionChatPanePath, "utf8");
+assert(
+  fusionChatPaneSource.includes("onAttention") &&
+    fusionChatPaneSource.includes('emitAttention("completed", "done")') &&
+    fusionChatPaneSource.includes('emitAttention("failed", "error"') &&
+    fusionChatPaneSource.includes('emitAttention("failed", "exit"'),
+  "FusionChatPane should emit completed/failed attention events"
 );
 
 const stylesSource = fs.readFileSync(stylesPath, "utf8");

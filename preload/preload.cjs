@@ -50,5 +50,18 @@ contextBridge.exposeInMainWorld("vibe", {
       ipcRenderer.on("terminal:event", listener);
       return () => ipcRenderer.removeListener("terminal:event", listener);
     }
+  },
+  // Headless Claude chat for Fusion panes (no PTY). `start` spawns a per-pane
+  // headless `claude`; `sendUserTurn` writes a user message to its stdin;
+  // `onEvent` streams normalized chat events; `stop` ends it.
+  fusionChat: {
+    start: (payload) => ipcRenderer.invoke("fusion-chat:start", payload),
+    sendUserTurn: (id, text) => ipcRenderer.send("fusion-chat:input", { id, text }),
+    stop: (id) => ipcRenderer.invoke("fusion-chat:stop", { id }),
+    onEvent: (callback) => {
+      const listener = (_event, payload) => callback(payload);
+      ipcRenderer.on("fusion-chat:event", listener);
+      return () => ipcRenderer.removeListener("fusion-chat:event", listener);
+    }
   }
 });

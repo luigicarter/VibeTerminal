@@ -37,6 +37,8 @@ let agentThreadHostReady = false;
 let nextAgentThreadRequestId = 1;
 const pendingAgentThreadRequests = new Map();
 let agentTelemetry = null;
+let fusionChatHost = null;
+let fusionChatHostBuffer = "";
 let autoUpdater = null;
 let autoUpdaterConfigured = false;
 let checkedForUpdatesOnLaunch = false;
@@ -61,6 +63,36 @@ function getPtyHostPath() {
 
 function getAgentThreadHostPath() {
   return getHelperHostPath("agentThreadHost.cjs");
+}
+
+function getFusionChatHostPath() {
+  return getHelperHostPath("fusionChatHost.cjs");
+}
+
+// Resolve the embedded Codex binary each Fusion pane spawns its own instance of:
+// packaged builds must use resources/codex-bin and fail closed if it is absent.
+// Dev builds use vendor/codex-bin when prepared, with PATH `codex` as a local
+// convenience only. See scripts/dev/prepare-codex-bin.cjs.
+function resolveCodexBin() {
+  const exe = process.platform === "win32" ? "codex.exe" : "codex";
+  const platDir = `${process.platform}-${process.arch}`;
+  const bundled = app.isPackaged
+    ? path.join(process.resourcesPath, "codex-bin", platDir, exe)
+    : path.join(__dirname, "..", "vendor", "codex-bin", platDir, exe);
+  try {
+    if (fs.existsSync(bundled)) {
+      return bundled;
+    }
+  } catch {
+    // handled below
+  }
+  if (app.isPackaged) {
+    throw new Error(
+      `Fusion is missing its embedded Codex binary at ${bundled}. ` +
+        "Rebuild the release after running npm run prepare:codex-bin:required."
+    );
+  }
+  return "codex";
 }
 
 function getAppIconPath() {
@@ -494,6 +526,67 @@ function startPtyHost() {
   });
 }
 
+function broadcastFusionChatEvent(event) {
+  BrowserWindow.getAllWindows().forEach((window) => {
+    window.webContents.send("fusion-chat:event", event);
+  });
+}
+
+function parseFusionChatHostOutput(chunk) {
+  fusionChatHostBuffer += chunk.toString("utf8");
+  let newlineIndex = fusionChatHostBuffer.indexOf("\n");
+  while (newlineIndex !== -1) {
+    const line = fusionChatHostBuffer.slice(0, newlineIndex).trim();
+    fusionChatHostBuffer = fusionChatHostBuffer.slice(newlineIndex + 1);
+    if (line) {
+      try {
+        const message = JSON.parse(line);
+        if (message.type === "event") {
+          broadcastFusionChatEvent({ id: message.id, ...message.event });
+        } else if (message.type === "closed") {
+          broadcastFusionChatEvent({ id: message.id, type: "closed", code: message.code });
+        }
+      } catch {
+        // Ignore non-JSON host noise.
+      }
+    }
+    newlineIndex = fusionChatHostBuffer.indexOf("\n");
+  }
+}
+
+function startFusionChatHost() {
+  if (fusionChatHost) {
+    return;
+  }
+  const nodeBinary = getNodeHostCommand();
+  fusionChatHost = spawn(nodeBinary, [getFusionChatHostPath()], {
+    cwd: getDefaultRuntimeCwd(),
+    env: getNodeHostEnv(),
+    stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true
+  });
+  fusionChatHost.stdout.on("data", parseFusionChatHostOutput);
+  fusionChatHost.stderr.on("data", () => {});
+  fusionChatHost.on("error", (error) => {
+    broadcastFusionChatEvent({
+      type: "host-error",
+      message: `Fusion chat host failed: ${error.message}`
+    });
+  });
+  fusionChatHost.on("exit", () => {
+    fusionChatHost = null;
+    fusionChatHostBuffer = "";
+  });
+}
+
+function sendToFusionChatHost(message) {
+  if (!fusionChatHost || !fusionChatHost.stdin.writable) {
+    return false;
+  }
+  fusionChatHost.stdin.write(`${JSON.stringify(message)}\n`);
+  return true;
+}
+
 function resolveAgentThreadRequest(requestId, result) {
   const pending = pendingAgentThreadRequests.get(requestId);
   if (!pending) {
@@ -722,6 +815,11 @@ app.on("window-all-closed", () => {
     agentThreadHost.kill();
   }
 
+  if (fusionChatHost && !fusionChatHost.killed) {
+    sendToFusionChatHost({ type: "shutdown" });
+    fusionChatHost.kill();
+  }
+
   if (process.platform !== "darwin") {
     app.quit();
   }
@@ -760,7 +858,20 @@ ipcMain.handle("agent-thread:latest", (_event, payload) =>
 
 ipcMain.handle("terminal:create", async (_event, payload) => {
   startPtyHost();
-  const instrumentation = await getAgentTelemetry().prepareSession(payload?.id);
+  const telemetry = getAgentTelemetry();
+  // Fusion panes do NOT use the PTY path — they run headless via fusion-chat:start.
+  const instrumentation = await telemetry.prepareSession(payload?.id);
+
+  // Cursor's stop hook lives in the project's .cursor/hooks.json, so install it
+  // (idempotently) whenever a cursor-agent pane launches and the cwd is known.
+  if (
+    payload?.cwd &&
+    typeof payload.command === "string" &&
+    /\bcursor-agent\b/.test(payload.command)
+  ) {
+    telemetry.ensureCursorProjectHooks(payload.cwd).catch(() => {});
+  }
+
   sendToPtyHost({
     type: "create",
     payload: {
@@ -769,6 +880,55 @@ ipcMain.handle("terminal:create", async (_event, payload) => {
     }
   });
   return true;
+});
+
+ipcMain.handle("fusion-chat:start", async (_event, payload) => {
+  const id = payload?.id;
+  if (!id) {
+    return { ok: false, error: "missing session id" };
+  }
+  try {
+    const codexBin = resolveCodexBin();
+    startFusionChatHost();
+    const telemetry = getAgentTelemetry();
+    const files = await telemetry.prepareFusionFiles(id, {
+      cwd: payload.cwd,
+      codexBin,
+      codexModel: process.env.VIBE_FUSION_CODEX_MODEL || undefined
+    });
+    if (!files) {
+      return { ok: false, error: "could not prepare Fusion files" };
+    }
+    sendToFusionChatHost({
+      type: "start",
+      payload: {
+        id,
+        cwd: payload.cwd,
+        mcpConfig: files.mcpConfig,
+        systemPromptFile: files.systemPromptFile,
+        model: payload.model || "opus",
+        allowedTools:
+          "mcp__fusion-codex__codex_implement,mcp__fusion-codex__codex_respond,Bash,Read,Glob,Grep",
+        resumeId: payload.resumeId || undefined
+      }
+    });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+});
+
+ipcMain.handle("fusion-chat:stop", (_event, payload) => {
+  if (payload?.id) {
+    sendToFusionChatHost({ type: "stop", payload: { id: payload.id } });
+  }
+  return true;
+});
+
+ipcMain.on("fusion-chat:input", (_event, payload) => {
+  if (payload?.id && typeof payload.text === "string") {
+    sendToFusionChatHost({ type: "input", payload: { id: payload.id, text: payload.text } });
+  }
 });
 
 ipcMain.handle("terminal:show-context-menu", (event, payload = {}) => {

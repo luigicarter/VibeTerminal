@@ -27,6 +27,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Prepare embedded Codex binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $versions = @(Get-ChildItem -LiteralPath "vendor/codex-appserver" -Directory | Where-Object { $_.Name -match '^\d+\.\d+\.\d+$' })
+          if ($versions.Count -ne 1) {
+            throw "Expected exactly one vendored Codex app-server version, found $($versions.Count)."
+          }
+          $version = $versions[0].Name
+          npm install -g "@openai/codex@$version"
+          npm run prepare:codex-bin:required
+
       - name: Typecheck
         run: npm run typecheck
 
@@ -38,6 +50,10 @@ jobs:
           npm run smoke:backend:agent-telemetry
           npm run smoke:backend:code-changes
           npm run smoke:backend:updates
+          npm run smoke:backend:fusion-launch
+          npm run smoke:backend:fusion-adapter
+          npm run smoke:backend:fusion-chat-parse
+          npm run smoke:backend:fusion-appserver:embedded
           npm run smoke:frontend:attention
           npm run smoke:frontend:workspace
           npm run smoke:frontend:session-launch
@@ -48,6 +64,15 @@ jobs:
         run: npm run dist:win -- --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Verify embedded Codex was packaged
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $codex = "release/win-unpacked/resources/codex-bin/win32-x64/codex.exe"
+          if (-not (Test-Path -LiteralPath $codex)) {
+            throw "Missing packaged embedded Codex binary: $codex"
+          }
 
       - name: Publish release assets
         if: startsWith(github.ref, 'refs/tags/v')
@@ -82,6 +107,15 @@ jobs:
         run: npm run dist:win -- --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Verify embedded Codex was packaged for artifact
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        shell: pwsh
+        run: |
+          $codex = "release/win-unpacked/resources/codex-bin/win32-x64/codex.exe"
+          if (-not (Test-Path -LiteralPath $codex)) {
+            throw "Missing packaged embedded Codex binary: $codex"
+          }
 
       - name: Upload installer artifact
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}

@@ -6,10 +6,16 @@ const {
   buildClaudeSettingsJson,
   cleanupStaleShimDirs,
   createAgentTelemetryManager,
+  cursorHookEntries,
+  cursorTypeFromStatus,
   installOpenCodePlugin,
   mapTelemetryToAttention,
-  openCodePluginSource
+  mergeCursorHooks,
+  openCodePluginSource,
+  stripCursorHooks
 } = require("../../backend/agentTelemetry.cjs");
+
+const CURSOR_HOOK_MARKER = "vibeterminal-cursor-notify";
 
 const rootDir = path.join(__dirname, "..", "..");
 const root = path.join(
@@ -310,6 +316,13 @@ function postWithBadToken(callbackUrl) {
         Array.isArray(claudeSettings?.hooks?.Notification),
       "claude settings should declare Stop and Notification hooks"
     );
+    assert(
+      Array.isArray(claudeSettings?.hooks?.UserPromptSubmit) &&
+        JSON.stringify(claudeSettings.hooks.UserPromptSubmit).includes(
+          "agent.running"
+        ),
+      "claude settings should fire agent.running on turn start (UserPromptSubmit)"
+    );
 
     // The guarded opencode plugin lands in the (fake) opencode config dir.
     const openCodePlugin = path.join(
@@ -528,13 +541,297 @@ function postWithBadToken(callbackUrl) {
       "notify program should produce a waiting attention event"
     );
 
-    // The opencode plugin source maps the documented opencode events.
+    // A turn-start hook (claude UserPromptSubmit/tool use) posts agent.running,
+    // which the server turns into a dedicated agent-running event (the working
+    // spinner), NOT an attention/unread signal. Use a fresh pane id so no earlier
+    // attention event for it can mask the "no attention" assertion.
+    const runningEnv = {
+      ...notifyEnv,
+      VIBE_TERMINAL_SESSION_ID: "pane-running"
+    };
+    const runningResult =
+      process.platform === "win32"
+        ? await run(
+            powershellCommand(),
+            [
+              "-NoProfile",
+              "-ExecutionPolicy",
+              "Bypass",
+              "-File",
+              notifyProgram,
+              "agent.running"
+            ],
+            { cwd: root, env: runningEnv }
+          )
+        : await run(notifyProgram, ["agent.running"], {
+            cwd: root,
+            env: runningEnv
+          });
+    assert(
+      runningResult.code === 0,
+      `notify program should exit 0 for agent.running, got ${runningResult.code}; stderr=${runningResult.stderr}`
+    );
+    assert(
+      events.some(
+        (event) =>
+          event.type === "agent-running" && event.id === "pane-running"
+      ),
+      "agent.running should produce a dedicated agent-running event"
+    );
+    assert(
+      !events.some(
+        (event) =>
+          event.type === "agent-attention" && event.id === "pane-running"
+      ),
+      "agent.running must not raise an attention/unread event"
+    );
+
+    // --- Cursor: one notify program backs both hooks. The running hook passes
+    // the type as an argument; the stop hook passes none and derives it from the
+    // JSON status piped on stdin. Both POST to the live callback. ---
+    const cursorNotifyProgram =
+      process.platform === "win32"
+        ? path.join(manager.runDir, `${CURSOR_HOOK_MARKER}.ps1`)
+        : path.join(manager.runDir, `${CURSOR_HOOK_MARKER}.sh`);
+    assert(
+      fs.existsSync(cursorNotifyProgram),
+      "cursor notify program should be written for the run"
+    );
+
+    const runCursorNotify = (sessionId, { args = [], stdin = "" } = {}) =>
+      new Promise((resolve, reject) => {
+        const cursorEnv = {
+          ...process.env,
+          VIBE_TERMINAL_CALLBACK_URL: manager.callbackUrl(),
+          VIBE_TERMINAL_TELEMETRY_TOKEN: "test-token",
+          VIBE_TERMINAL_SESSION_ID: sessionId
+        };
+        const child =
+          process.platform === "win32"
+            ? spawn(
+                powershellCommand(),
+                [
+                  "-NoProfile",
+                  "-ExecutionPolicy",
+                  "Bypass",
+                  "-File",
+                  cursorNotifyProgram,
+                  ...args
+                ],
+                { cwd: root, env: cursorEnv, stdio: ["pipe", "ignore", "pipe"] }
+              )
+            : spawn(cursorNotifyProgram, args, {
+                cwd: root,
+                env: cursorEnv,
+                stdio: ["pipe", "ignore", "pipe"]
+              });
+        child.on("error", reject);
+        child.on("exit", () => resolve());
+        child.stdin.write(stdin);
+        child.stdin.end();
+      });
+
+    // Turn START: type from the argument, stdin (the prompt payload) drained and
+    // ignored. Produces a dedicated agent-running event, not an attention/unread.
+    await runCursorNotify("pane-cursor-run", {
+      args: ["agent.running"],
+      stdin: JSON.stringify({ hook_event_name: "beforeSubmitPrompt", prompt: "hi" })
+    });
+    // Turn END: no argument, type derived from the stdin status.
+    await runCursorNotify("pane-cursor-done", {
+      stdin: JSON.stringify({ hook_event_name: "stop", status: "completed" })
+    });
+    await runCursorNotify("pane-cursor-fail", {
+      stdin: JSON.stringify({ hook_event_name: "stop", status: "error" })
+    });
+    // The notify program POSTs and waits for the response, so the events have
+    // landed by the time the child exits; a small grace window covers slack.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert(
+      events.some(
+        (event) =>
+          event.type === "agent-running" && event.id === "pane-cursor-run"
+      ),
+      "cursor beforeSubmitPrompt (agent.running arg) should produce an agent-running event"
+    );
+    assert(
+      !events.some(
+        (event) =>
+          event.type === "agent-attention" && event.id === "pane-cursor-run"
+      ),
+      "cursor agent.running must not raise an attention/unread event"
+    );
+    assert(
+      events.some(
+        (event) =>
+          event.type === "agent-attention" &&
+          event.id === "pane-cursor-done" &&
+          event.provider === "cursor" &&
+          event.attention.state === "completed"
+      ),
+      "cursor stop status=completed should map to a completed attention event"
+    );
+    assert(
+      events.some(
+        (event) =>
+          event.type === "agent-attention" &&
+          event.id === "pane-cursor-fail" &&
+          event.provider === "cursor" &&
+          event.attention.state === "failed"
+      ),
+      "cursor stop status=error should map to a failed attention event"
+    );
+
+    // The status->type mapping helper backs the stop behaviour.
+    assert(
+      cursorTypeFromStatus("completed") === "agent.completed" &&
+        cursorTypeFromStatus("aborted") === "agent.completed" &&
+        cursorTypeFromStatus(undefined) === "agent.completed" &&
+        cursorTypeFromStatus("error") === "agent.failed",
+      "cursorTypeFromStatus should only treat error as a failure"
+    );
+
+    // ensureCursorProjectHooks merges our env-guarded running + stop hooks into
+    // the project .cursor/hooks.json idempotently, preserving the user's hooks.
+    const cursorCwd = path.join(root, "cursor-proj");
+    fs.mkdirSync(path.join(cursorCwd, ".cursor"), { recursive: true });
+    fs.writeFileSync(
+      path.join(cursorCwd, ".cursor", "hooks.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          hooks: {
+            stop: [{ command: "user-own-stop-hook" }],
+            beforeSubmitPrompt: [{ command: "user-bsp-hook" }],
+            afterFileEdit: [{ command: "user-afe-hook" }]
+          }
+        },
+        null,
+        2
+      )
+    );
+    await manager.ensureCursorProjectHooks(cursorCwd);
+    await manager.ensureCursorProjectHooks(cursorCwd);
+    const mergedHooks = JSON.parse(
+      fs.readFileSync(path.join(cursorCwd, ".cursor", "hooks.json"), "utf8")
+    );
+    const ourStop = mergedHooks.hooks.stop.filter((entry) =>
+      entry.command.includes(CURSOR_HOOK_MARKER)
+    );
+    const ourRunning = mergedHooks.hooks.beforeSubmitPrompt.filter((entry) =>
+      entry.command.includes(CURSOR_HOOK_MARKER)
+    );
+    assert(
+      ourStop.length === 1 && ourRunning.length === 1,
+      "cursor hook install should be idempotent (exactly one entry per event)"
+    );
+    assert(
+      ourRunning[0].command.includes("agent.running") &&
+        !ourStop[0].command.includes("agent.running"),
+      "the running hook should carry the agent.running arg and the stop hook should not"
+    );
+    assert(
+      mergedHooks.hooks.stop.some(
+        (entry) => entry.command === "user-own-stop-hook"
+      ) &&
+        mergedHooks.hooks.beforeSubmitPrompt.some(
+          (entry) => entry.command === "user-bsp-hook"
+        ) &&
+        mergedHooks.hooks.afterFileEdit?.[0]?.command === "user-afe-hook",
+      "ensureCursorProjectHooks must preserve the user's existing hooks (incl. unrelated events)"
+    );
+
+    // A .cursor/hooks.json we create from scratch is removed on cleanup so we do
+    // not leave a dangling entry pointing at a deleted run dir in the repo.
+    const cursorFreshCwd = path.join(root, "cursor-proj-fresh");
+    fs.mkdirSync(cursorFreshCwd, { recursive: true });
+    await manager.ensureCursorProjectHooks(cursorFreshCwd);
+    const cursorFreshFile = path.join(cursorFreshCwd, ".cursor", "hooks.json");
+    assert(
+      fs.existsSync(cursorFreshFile),
+      "ensureCursorProjectHooks should create a hooks.json when none exists"
+    );
+
+    // A pre-existing but malformed hooks.json must NOT be clobbered.
+    const cursorBadCwd = path.join(root, "cursor-proj-bad");
+    fs.mkdirSync(path.join(cursorBadCwd, ".cursor"), { recursive: true });
+    const badContent = "{ not valid json";
+    fs.writeFileSync(
+      path.join(cursorBadCwd, ".cursor", "hooks.json"),
+      badContent
+    );
+    await manager.ensureCursorProjectHooks(cursorBadCwd);
+    assert(
+      fs.readFileSync(
+        path.join(cursorBadCwd, ".cursor", "hooks.json"),
+        "utf8"
+      ) === badContent,
+      "ensureCursorProjectHooks must not clobber an unparseable hooks.json"
+    );
+
+    // mergeCursorHooks / stripCursorHooks unit behaviour with the real entry set.
+    const entries = cursorHookEntries(
+      "/run/vibeterminal-cursor-notify.sh",
+      false
+    );
+    const mergedUnit = mergeCursorHooks(
+      {
+        version: 1,
+        hooks: {
+          stop: [{ command: "keep" }],
+          afterFileEdit: [{ command: "user-afe" }]
+        }
+      },
+      entries
+    );
+    assert(
+      mergedUnit.hooks.stop.length === 2 &&
+        mergedUnit.hooks.stop.some((entry) => entry.command === "keep") &&
+        mergedUnit.hooks.beforeSubmitPrompt.length === 1 &&
+        mergedUnit.hooks.afterFileEdit[0].command === "user-afe",
+      "mergeCursorHooks should append our entries and preserve unrelated arrays"
+    );
+    const reMerged = mergeCursorHooks(mergedUnit, entries);
+    assert(
+      reMerged.hooks.stop.filter((entry) =>
+        entry.command.includes(CURSOR_HOOK_MARKER)
+      ).length === 1 &&
+        reMerged.hooks.beforeSubmitPrompt.filter((entry) =>
+          entry.command.includes(CURSOR_HOOK_MARKER)
+        ).length === 1,
+      "mergeCursorHooks should replace prior entries in every event array, not stack them"
+    );
+    // A malformed (array) hooks value must not crash or corrupt the merge.
+    const mergedFromArray = mergeCursorHooks({ hooks: [] }, entries);
+    assert(
+      Array.isArray(mergedFromArray.hooks.stop) &&
+        mergedFromArray.hooks.stop.length === 1,
+      "mergeCursorHooks should recover from a non-object hooks value"
+    );
+    const stripped = stripCursorHooks(reMerged);
+    assert(
+      stripped.hasOtherContent === true &&
+        !Object.values(stripped.trimmed.hooks)
+          .flat()
+          .some((entry) => entry.command.includes(CURSOR_HOOK_MARKER)) &&
+        stripped.trimmed.hooks.stop.some((entry) => entry.command === "keep"),
+      "stripCursorHooks should drop our entries from all arrays and keep user content"
+    );
+
+    // The opencode plugin source maps the documented opencode events, and infers
+    // turn-start "working" from the message stream (throttled by a busy latch).
     const pluginSource = openCodePluginSource();
     assert(
       pluginSource.includes("session.idle") &&
         pluginSource.includes("permission.asked") &&
         pluginSource.includes("session.error"),
       "opencode plugin should map opencode lifecycle events"
+    );
+    assert(
+      pluginSource.includes("agent.running") &&
+        pluginSource.includes('startsWith("message.")') &&
+        pluginSource.includes("busy"),
+      "opencode plugin should infer agent.running from the throttled message stream"
     );
 
     // The claude settings builder targets the notify program on both platforms.
@@ -553,6 +850,13 @@ function postWithBadToken(callbackUrl) {
     assert(
       posixCmd.includes("/x/notify.sh") && posixCmd.includes("agent.waiting"),
       `posix claude hook should invoke the notify wrapper; got ${posixCmd}`
+    );
+    const runningCmd = JSON.parse(
+      buildClaudeSettingsJson("/x/notify.sh", false)
+    ).hooks.UserPromptSubmit[0].hooks[0].command;
+    assert(
+      runningCmd.includes("/x/notify.sh") && runningCmd.includes("agent.running"),
+      `claude turn-start hook should fire agent.running; got ${runningCmd}`
     );
     const signaledAttention = mapTelemetryToAttention({
       type: "agent.process.exited",

@@ -2,6 +2,7 @@ import type {
   AgentAttention,
   AgentAttentionEvent,
   AgentAttentionState,
+  AgentKind,
   AgentSession,
   SessionStatus,
   TerminalEvent
@@ -26,6 +27,25 @@ export function shouldShowAttentionDot(session: AgentSession) {
         attention.state === "completed" ||
         attention.state === "failed")
   );
+}
+
+// The pane is actively working when its status is "running". This is the signal
+// behind the sidebar "working" spinner. It is deliberately narrow: "starting"
+// (a booting agent that hasn't been given a turn yet) and "waiting" do not count
+// as working, so an idle pane never spins.
+export function isSessionWorking(session: AgentSession) {
+  return session.status === "running";
+}
+
+// claude, opencode, and cursor expose a turn-START signal (claude's
+// UserPromptSubmit hook, opencode's busy plugin event, cursor's beforeSubmitPrompt
+// hook), so their "working" state is driven purely by telemetry and is NEVER
+// inferred from terminal output. That is what stops a keystroke, its echo, or a
+// focus/click redraw from reading as "working". codex has no turn-start signal,
+// so it (and plain terminals) fall back to the output-flow heuristic in
+// TerminalPane.
+export function isTurnTelemetryKind(kind: AgentKind) {
+  return kind === "claude" || kind === "opencode" || kind === "cursor";
 }
 
 export function attentionFromEvent(
@@ -141,7 +161,8 @@ export function shouldUseTerminalEventAttention(session: AgentSession) {
   return !(
     session.kind === "codex" ||
     session.kind === "claude" ||
-    session.kind === "opencode"
+    session.kind === "opencode" ||
+    session.kind === "cursor"
   );
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "vibe-terminal",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "private": true,
   "description": "A tiled local workspace for running multiple coding agents side by side.",
   "author": "vibeTerminal contributors",
@@ -22,14 +22,22 @@
     "smoke:backend:codex-discovery": "node scripts/backend/codex-discovery-smoke.cjs",
     "smoke:backend:claude-discovery": "node scripts/backend/claude-discovery-smoke.cjs",
     "smoke:backend:updates": "node scripts/backend/update-smoke.cjs",
+    "smoke:backend:fusion-appserver": "node scripts/backend/fusion-appserver-smoke.cjs",
+    "smoke:backend:fusion-launch": "node scripts/backend/fusion-launch-smoke.cjs",
+    "smoke:backend:fusion-chat-parse": "node scripts/backend/fusion-chat-parse-smoke.cjs",
+    "smoke:backend:fusion-adapter": "node scripts/backend/fusion-adapter-smoke.cjs",
     "smoke:frontend:attention": "node scripts/frontend/attention-smoke.cjs",
     "smoke:frontend:workspace": "node scripts/frontend/workspace-smoke.cjs",
     "smoke:frontend:session-launch": "node scripts/frontend/session-launch-smoke.cjs",
     "smoke:frontend:tiled-resize": "node scripts/frontend/tiled-board-resize-smoke.cjs",
     "smoke:codex-discovery": "npm run smoke:backend:codex-discovery",
     "typecheck": "tsc --noEmit",
-    "pack:win": "npm run build && electron-builder --win --dir",
-    "dist:win": "npm run build && electron-builder --win nsis"
+    "gen:codex-bindings": "node scripts/dev/gen-codex-bindings.cjs",
+    "prepare:codex-bin": "node scripts/dev/prepare-codex-bin.cjs",
+    "prepare:codex-bin:required": "node scripts/dev/prepare-codex-bin.cjs --required",
+    "smoke:backend:fusion-appserver:embedded": "node scripts/backend/fusion-appserver-smoke.cjs --require-embedded",
+    "pack:win": "npm run prepare:codex-bin:required && npm run build && electron-builder --win --dir",
+    "dist:win": "npm run prepare:codex-bin:required && npm run build && electron-builder --win nsis"
   },
   "dependencies": {
     "@xterm/addon-canvas": "^0.7.0",
@@ -66,6 +74,12 @@
       "node_modules/node-pty/**"
     ],
     "npmRebuild": false,
+    "extraResources": [
+      {
+        "from": "vendor/codex-bin",
+        "to": "codex-bin"
+      }
+    ],
     "files": [
       "backend/**",
       "dist/**",
