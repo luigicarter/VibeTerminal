@@ -11,6 +11,12 @@ const fs = require("fs");
 const path = require("path");
 
 const adapterPath = path.join(__dirname, "..", "..", "backend", "fusion-adapter.cjs");
+const {
+  VERDICT_MARKER,
+  buildCodexVerifierTask,
+  extractVerifierVerdict,
+  stripVerifierVerdictFromSummary
+} = require(adapterPath);
 
 function assert(condition, message) {
   if (!condition) {
@@ -79,16 +85,24 @@ function main() {
               "initialize did not advertise tools capability"
             );
             const list = responses.get(2);
-            const names = (list.result && list.result.tools ? list.result.tools : []).map(
-              (t) => t.name
-            );
+            const tools = list.result && list.result.tools ? list.result.tools : [];
+            const names = tools.map((t) => t.name);
             assert(names.includes("codex_implement"), "tools/list missing codex_implement");
             assert(names.includes("codex_respond"), "tools/list missing codex_respond");
+            const implementTool = tools.find((t) => t.name === "codex_implement");
+            assert(
+              implementTool &&
+                /guidance for Codex/i.test(implementTool.description) &&
+                /independently verifying/i.test(implementTool.description),
+              "codex_implement description missing Claude-guides-Codex contract"
+            );
             const source = fs.readFileSync(adapterPath, "utf8");
             assert(source.includes('notify("initialized")'), "adapter does not send initialized notification");
             assert(source.includes("PARKED_REQUEST_METHODS"), "adapter does not allowlist parked request methods");
             assert(source.includes('method === "currentTime/read"'), "adapter does not handle currentTime/read");
             assert(source.includes("unsupportedServerRequest"), "adapter does not fail unsupported server requests explicitly");
+            assert(source.includes("goalReached"), "adapter does not return the structured verifier fields");
+            assert(source.includes("buildCodexVerifierTask(task)"), "adapter does not wrap Codex tasks with the verifier contract");
             cleanup();
             resolve();
           } catch (error) {
@@ -116,8 +130,54 @@ function main() {
   });
 }
 
+function assertVerifierHelpers() {
+  const wrapped = buildCodexVerifierTask("implement the thing");
+  assert(wrapped.includes(VERDICT_MARKER), "wrapped task missing verdict marker");
+  assert(wrapped.includes("goalReached"), "wrapped task missing goalReached schema");
+  assert(
+    wrapped.includes("follow that guidance while still independently checking"),
+    "wrapped task missing Claude-guides-Codex rule"
+  );
+
+  const summary =
+    "Implemented and tested.\n" +
+    `${VERDICT_MARKER} {"goalReached":false,"bugsFound":["button overflows"],"missingRequirements":["mobile layout"],"nextAction":"continue","summary":"Not done yet."}`;
+  const verdict = extractVerifierVerdict(summary);
+  assert(verdict.goalReached === false, "verdict goalReached should parse false");
+  assert(verdict.nextAction === "continue", "verdict nextAction should parse continue");
+  assert(verdict.bugsFound[0] === "button overflows", "verdict bugs should parse");
+  assert(verdict.missingRequirements[0] === "mobile layout", "verdict requirements should parse");
+  assert(
+    stripVerifierVerdictFromSummary(summary) === "Implemented and tested.",
+    "verdict marker should be stripped from display summary"
+  );
+
+  const doneVerdict = extractVerifierVerdict(
+    `${VERDICT_MARKER} {"goalReached":true,"bugsFound":[],"missingRequirements":[],"nextAction":"done","summary":"Complete."}`
+  );
+  assert(doneVerdict.goalReached === true, "done verdict should parse goalReached true");
+  assert(doneVerdict.nextAction === "done", "done verdict should parse nextAction done");
+
+  const contradictory = extractVerifierVerdict(
+    `${VERDICT_MARKER} {"goalReached":true,"bugsFound":["regression remains"],"missingRequirements":["tests not run"],"nextAction":"done","summary":"Complete."}`
+  );
+  assert(contradictory.goalReached === false, "blockers should force goalReached false");
+  assert(contradictory.nextAction === "continue", "blockers should force continue");
+  assert(contradictory.bugsFound[0] === "regression remains", "blocker bug should remain visible");
+
+  const missing = extractVerifierVerdict("No marker here.");
+  assert(missing.goalReached === false, "missing verdict should fail closed");
+  assert(missing.nextAction === "continue", "missing verdict should force continue");
+  assert(missing.verdictSource === "missing", "missing verdict should report source");
+
+  const malformed = extractVerifierVerdict(`${VERDICT_MARKER} {"goalReached":`);
+  assert(malformed.goalReached === false, "malformed verdict should fail closed");
+  assert(malformed.verdictSource === "malformed", "malformed verdict should report source");
+}
+
 main()
   .then(() => {
+    assertVerifierHelpers();
     console.log("Fusion adapter smoke passed");
   })
   .catch((error) => {

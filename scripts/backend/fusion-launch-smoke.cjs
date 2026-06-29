@@ -40,7 +40,12 @@ async function main() {
     );
     const prompt = fs.readFileSync(files.systemPromptFile, "utf8");
     assert(/architect/i.test(prompt), "system prompt missing the architect role");
+    assert(/goal-completion verifier/i.test(prompt), "system prompt missing Codex verifier role");
+    assert(/Guiding Codex/i.test(prompt), "system prompt missing Claude-guides-Codex rule");
+    assert(/Following Claude's guidance/i.test(prompt), "system prompt missing Codex-guidance scope");
     assert(/codex_implement/.test(prompt), "system prompt missing codex_implement");
+    assert(/goalReached:false/.test(prompt), "system prompt missing goalReached continuation gate");
+    assert(/Codex verifier override/.test(prompt), "system prompt missing explicit override rule");
 
     assert(files.mcpConfig && fs.existsSync(files.mcpConfig), "missing mcp config");
     const mcp = JSON.parse(fs.readFileSync(files.mcpConfig, "utf8"));
@@ -63,6 +68,15 @@ async function main() {
     assert(
       buildFusionSystemPrompt().includes("codex_implement"),
       "buildFusionSystemPrompt is missing the delegation instructions"
+    );
+    assert(
+      buildFusionSystemPrompt().includes("goalReached"),
+      "buildFusionSystemPrompt is missing the structured verifier fields"
+    );
+    const mainSource = fs.readFileSync(path.join(rootDir, "backend", "main.cjs"), "utf8");
+    assert(
+      /Edit,MultiEdit,Write/.test(mainSource),
+      "Fusion Claude allowlist is missing direct-edit tools for exceptional/UI edits"
     );
 
     console.log("Fusion launch smoke passed");

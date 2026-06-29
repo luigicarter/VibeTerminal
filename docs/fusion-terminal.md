@@ -2,8 +2,9 @@
 
 > **Status: implemented (M2 engine + M3 headless chat UI + M4 embedded per-pane Codex).**
 > A Fusion pane is a custom **Claude-Code-style chat UI**: Claude runs HEADLESS
-> (stream-json) as **Opus 4.8** the architect and delegates execution to Codex
-> (**GPT-5.5**) via a per-pane MCP adapter; approvals route back to Opus. Each
+> (stream-json) as **Opus 4.8** the orchestrator/architect and delegates
+> implementation plus verification to Codex (**GPT-5.5**) via a per-pane MCP
+> adapter; approvals route back to Opus. Each
 > Fusion terminal spawns its **OWN embedded** Codex `app-server` over **stdio**
 > (the bundled binary, `vendor/codex-bin/<plat>` → `resources/` via
 > `extraResources`; `resolveCodexBin()` permits a PATH fallback only in dev) — no
@@ -16,20 +17,22 @@
 > via `claude --resume`); per-platform binaries + code-signing for release.
 
 Goal: a **Fusion** terminal that fuses the *capabilities* of two coding agents
-behind one surface — Claude (Opus 4.8) as the architect/reviewer/designer and
-Codex (GPT-5.5) as the executor — so the user talks to one terminal and the right
-model handles each sub-task. Think "OpenRouter, but for **complementary
+behind one surface — Claude (Opus 4.8) as the orchestrator/architect/designer and
+Codex (GPT-5.5) as implementer, tester, bug reviewer, and completion verifier —
+so the user talks to one terminal and the right model handles each sub-task. Think "OpenRouter, but for **complementary
 specialists** rather than interchangeable models": the router doesn't pick one
 engine for the whole prompt, it **decomposes** the task and routes sub-tasks by
 specialty. The routing intelligence is Claude itself (an LLM that decides when to
 delegate), not a static rule table.
 
-## Roles — strictly non-overlapping
+## Roles and completion authority
 
-The two models **cannot do each other's jobs** ("they cannot be fitting each
-other"). Clean separation is a design invariant, not a guideline:
+The two models have different default scopes, but this is not a brittle
+"never cross lanes" rule. Claude may edit when that is the right tool, especially
+for UI build-out or exceptional orchestration cases. Codex remains the hard
+verifier for bugs and whether the goal is reached.
 
-| Opus 4.8 (the Claude pane — thinker/reviewer/designer) | Codex GPT-5.5 (the executor — driven via the bridge) |
+| Opus 4.8 (Claude - orchestrator/architect/designer) | Codex GPT-5.5 (implementer/reviewer/verifier) |
 |---|---|
 | Architecture decisions | Editing files |
 | Debugging strategy | Running tests |
@@ -37,18 +40,22 @@ other"). Clean separation is a design invariant, not a guideline:
 | Reviewing a Codex plan before it touches a large repo | Refactors |
 | "What are we missing?" analysis | Repo navigation |
 | Tradeoff reasoning | Implementing from an approved plan |
-| | Iterative debugging loops |
+| UI build-out or exceptional direct edits when needed | Iterative debugging loops |
+| Guiding Codex with constraints, UI intent, debugging direction, and corrections | Following Claude guidance while independently checking the result |
+| Human-facing override decisions | Bug review and goal-completion verification |
 
-Opus **never** edits files or does hands-on debugging in Fusion mode. Codex
-**never** does the judgment review/diff-check — `codex review` is *not* used as a
-review pass; the authoritative review is Opus's. (Codex still *runs* tests —
-mechanical execution — which doesn't overlap with Opus *reading and judging* the
-diff.)
+Codex's structured verifier verdict gates completion. Claude can continue, ask
+the human, or explicitly override, but it should not present the task as done
+when Codex reports `goalReached:false`, blocking bugs, missing requirements, or
+`nextAction:"continue"`. Claude guidance is direction and context for Codex,
+not a substitute for Codex's independent verifier verdict.
 
 **The loop:** Opus plans/designs → Codex implements + runs tests + fixes → produces
-a diff → Opus reviews the result and decides the next strategy → Codex fixes.
-Future worktree isolation is a hardening option; the current implementation runs
-Codex in the pane's workspace with `workspace-write` and on-request approvals.
+a diff and structured verifier verdict → if Codex says not done, Opus continues
+or redelegates with more guidance → Codex fixes and verifies again. If Opus
+directly edits, it must send Codex a review-only verification pass before final completion. Future
+worktree isolation is a hardening option; the current implementation runs Codex
+in the pane's workspace with `workspace-write` and on-request approvals.
 
 ## Key finding: Codex 0.142.3 ships the app-server stack natively
 
@@ -120,10 +127,11 @@ Claude → codex_implement(plan)
    app-server → adapter: fileChange requestApproval        ← Codex pauses here
    adapter PARKS the request, returns to Claude:
         { status: "needs_decision", pendingId, kind, detail, diff }
-Opus diff-checks it (its job), decides, and calls:
+Opus decides and calls:
    codex_respond(pendingId, "accept" | "acceptForSession" | "decline" | "cancel")
    adapter → sends the parked response → Codex resumes
-   ...loops until { status: "completed", diff, testResults }
+   ...loops until { status: "completed", summary, files, goalReached,
+                    bugsFound, missingRequirements, nextAction, verifierVerdict }
 ```
 
 This makes "route to Opus" structurally true — Opus is literally the one calling
@@ -134,6 +142,14 @@ port, no polling channel needed. `acceptForSession` lets Opus pre-approve a clas
 to cut round-trips. Codex threads launch with `-a on-request --sandbox
 workspace-write` so Codex self-filters trivia and only escalates meaningful
 decisions.
+
+Completion is not free-form text only. The adapter wraps each Codex task with a
+verifier contract requiring a final `FUSION_VERDICT_JSON` line. The adapter
+parses that into `goalReached`, `bugsFound`, `missingRequirements`,
+`nextAction`, and `verifierVerdict`. Missing, malformed, or contradictory
+verifier JSON fails closed as `goalReached:false` / `nextAction:"continue"`.
+Claude must continue/redelegate unless the human says otherwise or Claude makes
+an explicit override visible in the transcript.
 
 ## Isolation — capability scoping among the same user's panes
 

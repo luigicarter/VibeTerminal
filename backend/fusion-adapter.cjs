@@ -38,6 +38,108 @@ const PARKED_REQUEST_METHODS = new Set([
   "execCommandApproval",
   "applyPatchApproval"
 ]);
+const VERDICT_MARKER = "FUSION_VERDICT_JSON:";
+const NEXT_ACTIONS = new Set(["continue", "ask_human", "done"]);
+
+function normalizeStringList(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => (item == null ? "" : String(item).trim()))
+    .filter(Boolean);
+}
+
+function normalizeVerifierVerdict(raw, source = "parsed") {
+  const bugsFound = normalizeStringList(raw && raw.bugsFound);
+  const missingRequirements = normalizeStringList(raw && raw.missingRequirements);
+  const hasBlockers = bugsFound.length > 0 || missingRequirements.length > 0;
+  const rawGoalReached = raw && raw.goalReached === true;
+  const requestedAction = raw && typeof raw.nextAction === "string" ? raw.nextAction : "";
+  let nextAction = NEXT_ACTIONS.has(requestedAction)
+    ? requestedAction
+    : rawGoalReached && !hasBlockers
+      ? "done"
+      : "continue";
+  if ((hasBlockers || !rawGoalReached) && nextAction === "done") {
+    nextAction = "continue";
+  }
+  const goalReached = rawGoalReached && !hasBlockers && nextAction === "done";
+  return {
+    goalReached,
+    bugsFound,
+    missingRequirements,
+    nextAction,
+    summary: raw && raw.summary != null ? String(raw.summary).trim() : "",
+    verdictSource: source
+  };
+}
+
+function missingVerifierVerdict() {
+  return normalizeVerifierVerdict(
+    {
+      goalReached: false,
+      bugsFound: [],
+      missingRequirements: ["Codex did not provide the required structured Fusion verifier verdict."],
+      nextAction: "continue",
+      summary: "Missing structured verifier verdict."
+    },
+    "missing"
+  );
+}
+
+function extractVerifierVerdict(summary) {
+  const lines = String(summary || "").split(/\r?\n/);
+  for (let index = lines.length - 1; index >= 0; index--) {
+    const line = lines[index];
+    const markerIndex = line.indexOf(VERDICT_MARKER);
+    if (markerIndex === -1) continue;
+    const jsonText = line.slice(markerIndex + VERDICT_MARKER.length).trim();
+    try {
+      return normalizeVerifierVerdict(JSON.parse(jsonText), "parsed");
+    } catch {
+      return normalizeVerifierVerdict(
+        {
+          goalReached: false,
+          bugsFound: ["Codex returned malformed Fusion verifier JSON."],
+          missingRequirements: ["Retry or ask Codex to produce valid verifier JSON."],
+          nextAction: "continue",
+          summary: "Malformed structured verifier verdict."
+        },
+        "malformed"
+      );
+    }
+  }
+  return missingVerifierVerdict();
+}
+
+function stripVerifierVerdictFromSummary(summary) {
+  return String(summary || "")
+    .split(/\r?\n/)
+    .filter((line) => !line.includes(VERDICT_MARKER))
+    .join("\n")
+    .trim();
+}
+
+function buildCodexVerifierTask(task) {
+  return [
+    task,
+    "",
+    "## Fusion verifier contract",
+    "You are Codex GPT-5.5 inside Terminal Fusion. You implement, run tests, debug, and verify whether the user's goal is actually reached.",
+    "Claude/Opus may provide strategy, constraints, UI intent, debugging direction, and follow-up corrections; follow that guidance while still independently checking the result.",
+    "Before your final answer, review the implementation for bugs, compile/runtime failures, missing requirements, and whether the original goal is complete.",
+    "Your final answer MUST end with exactly one single-line JSON verdict prefixed by this marker:",
+    `${VERDICT_MARKER} {"goalReached":false,"bugsFound":[],"missingRequirements":[],"nextAction":"continue","summary":""}`,
+    "",
+    "Verdict schema:",
+    '- `goalReached`: true only when the requested goal is complete and no blocking bug remains.',
+    '- `bugsFound`: concrete bugs or regressions still present.',
+    '- `missingRequirements`: requested behavior or acceptance criteria still missing.',
+    '- `nextAction`: "done" when complete, "continue" when Claude should redelegate/fix more, or "ask_human" when human input is required.',
+    "- `summary`: one concise sentence explaining the verdict.",
+    "",
+    'If you are not sure the goal is complete, set `goalReached:false` and `nextAction:"continue"`.'
+  ].join("\n");
+}
 
 function logErr(message) {
   try {
@@ -267,10 +369,19 @@ function handleNotification(msg) {
     return;
   }
   if (method === "turn/completed") {
+    const rawSummary = turnSummary.join("\n").trim();
+    const verifierVerdict = extractVerifierVerdict(rawSummary);
+    const displaySummary = stripVerifierVerdictFromSummary(rawSummary);
     resolveTurn({
       status: "completed",
-      summary: turnSummary.join("\n").trim() || "(Codex returned no message.)",
-      files: Array.from(new Set(turnFiles.filter(Boolean)))
+      summary: displaySummary || verifierVerdict.summary || "(Codex returned no message.)",
+      files: Array.from(new Set(turnFiles.filter(Boolean))),
+      goalReached: verifierVerdict.goalReached,
+      bugsFound: verifierVerdict.bugsFound,
+      missingRequirements: verifierVerdict.missingRequirements,
+      nextAction: verifierVerdict.nextAction,
+      verifierSummary: verifierVerdict.summary,
+      verifierVerdict
     });
     return;
   }
@@ -440,7 +551,7 @@ async function codexImplement(task) {
   const done = awaitTurn();
   rpc("turn/start", {
     threadId,
-    input: [{ type: "text", text: task, text_elements: [] }],
+    input: [{ type: "text", text: buildCodexVerifierTask(task), text_elements: [] }],
     approvalPolicy: "on-request",
     approvalsReviewer: "user"
   }).catch((error) => resolveTurn({ status: "failed", error: error.message }));
@@ -488,14 +599,14 @@ const TOOLS = [
   {
     name: "codex_implement",
     description:
-      "Delegate editing, testing, compile/runtime fixing, refactors, repo navigation, approved-plan implementation, or iterative debugging to embedded Codex GPT-5.5. Opus 4.8 remains responsible for architecture decisions, debugging strategy, threat-modeling, plan review, missing-risk analysis, and tradeoff reasoning. Returns one of: {status:'completed', summary, files}; {status:'needs_decision', pendingId, kind, detail} - review and answer it with codex_respond; or {status:'failed', error}.",
+      "Delegate implementation, testing, compile/runtime fixing, refactors, repo navigation, bug review, or goal-completion verification to embedded Codex GPT-5.5. Opus 4.8 drives architecture, strategy, UX/UI build-out when appropriate, human-facing orchestration, and guidance for Codex on constraints, UI intent, debugging direction, and follow-up corrections. Codex follows that guidance while independently verifying bugs and goal completion. Returns one of: {status:'completed', summary, files, goalReached, bugsFound, missingRequirements, nextAction, verifierVerdict}; {status:'needs_decision', pendingId, kind, detail} - answer it with codex_respond; or {status:'failed', error}. If goalReached is false or nextAction is 'continue', continue/redelegate unless the human or an explicit Opus override says otherwise.",
     inputSchema: {
       type: "object",
       properties: {
         task: {
           type: "string",
           description:
-            "Complete, self-contained instructions for Codex: the files, the intent, constraints, and acceptance criteria. Codex does not share your context."
+            "Complete, self-contained instructions for Codex: the files, the intent, constraints, acceptance criteria, and what to verify. Codex does not share your context."
         }
       },
       required: ["task"]
@@ -600,20 +711,34 @@ function handleMcpLine(line) {
   }
 }
 
-let stdinBuffer = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => {
-  stdinBuffer += chunk;
-  let index;
-  while ((index = stdinBuffer.indexOf("\n")) !== -1) {
-    const line = stdinBuffer.slice(0, index).trim();
-    stdinBuffer = stdinBuffer.slice(index + 1);
-    if (line) handleMcpLine(line);
-  }
-});
-process.stdin.on("end", () => {
-  killCodex();
-  process.exit(0);
-});
+function startMcpServer() {
+  let stdinBuffer = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => {
+    stdinBuffer += chunk;
+    let index;
+    while ((index = stdinBuffer.indexOf("\n")) !== -1) {
+      const line = stdinBuffer.slice(0, index).trim();
+      stdinBuffer = stdinBuffer.slice(index + 1);
+      if (line) handleMcpLine(line);
+    }
+  });
+  process.stdin.on("end", () => {
+    killCodex();
+    process.exit(0);
+  });
 
-logErr(`started (codex=${CODEX_BIN}, session=${SESSION_ID || "?"})`);
+  logErr(`started (codex=${CODEX_BIN}, session=${SESSION_ID || "?"})`);
+}
+
+module.exports = {
+  VERDICT_MARKER,
+  buildCodexVerifierTask,
+  extractVerifierVerdict,
+  normalizeVerifierVerdict,
+  stripVerifierVerdictFromSummary
+};
+
+if (require.main === module) {
+  startMcpServer();
+}

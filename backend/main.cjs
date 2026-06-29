@@ -908,7 +908,7 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
         systemPromptFile: files.systemPromptFile,
         model: payload.model || "opus",
         allowedTools:
-          "mcp__fusion-codex__codex_implement,mcp__fusion-codex__codex_respond,Bash,Read,Glob,Grep",
+          "mcp__fusion-codex__codex_implement,mcp__fusion-codex__codex_respond,Bash,Read,Glob,Grep,Edit,MultiEdit,Write",
         resumeId: payload.resumeId || undefined
       }
     });
