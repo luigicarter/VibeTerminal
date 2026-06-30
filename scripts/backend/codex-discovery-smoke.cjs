@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const {
+  collectJsonlFiles,
   confirmCodexThread,
   findCodexThread
 } = require("../../backend/agentThreads.cjs");
@@ -112,6 +113,21 @@ try {
   assert(
     confirmMissing.status === "missing",
     "an absent rollout id should confirm missing so the launcher starts fresh"
+  );
+
+  const limitedFiles = collectJsonlFiles(path.join(codexHome, "sessions"), 2);
+  assert(limitedFiles.length === 2, "transcript collection should honor the file cap");
+
+  const source = fs.readFileSync(
+    path.join(rootDir, "backend", "agentThreads.cjs"),
+    "utf8"
+  );
+  assert(
+    source.includes("MAX_DISCOVERY_VISITS") &&
+      source.includes("addRecentFile(") &&
+      source.includes("readFileHead(filePath, MAX_TRANSCRIPT_HEAD_BYTES)") &&
+      !source.includes('fs.readFileSync(filePath, "utf8")'),
+    "Codex discovery should bound traversal, candidate storage, and transcript reads"
   );
 
   console.log("Codex discovery smoke passed");

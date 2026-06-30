@@ -213,7 +213,7 @@ async function main() {
       stdio: "inherit",
       env: electronAppEnv({
         VITE_DEV_SERVER_URL: "http://127.0.0.1:5173",
-        VIBE_INTERNAL_SCREENSHOT: isWindows ? "0" : "1",
+        VIBE_INTERNAL_SCREENSHOT: "1",
         VIBE_SCREENSHOT_MODE: "1",
         VIBE_SCREENSHOT_PATH: screenshotPath,
         VIBE_SCREENSHOT_USER_DATA: screenshotUserData,
@@ -223,44 +223,20 @@ async function main() {
       shell: isWindows
     });
 
-    if (isWindows) {
-      await new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          killTree(app);
-          reject(new Error("Timed out waiting for Electron screenshot capture."));
-        }, screenshotTimeoutMs);
-        const ready = setTimeout(() => {
-          clearTimeout(timeout);
-          app.off("exit", onEarlyExit);
-          resolve();
-        }, screenshotDelayMs);
+    const exitCode = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        killTree(app);
+        reject(new Error("Timed out waiting for Electron screenshot capture."));
+      }, screenshotTimeoutMs);
 
-        function onEarlyExit(code) {
-          clearTimeout(timeout);
-          clearTimeout(ready);
-          reject(new Error(`Electron exited before screenshot capture with code ${code ?? 0}`));
-        }
-
-        app.on("exit", onEarlyExit);
+      app.on("exit", (code) => {
+        clearTimeout(timeout);
+        resolve(code ?? 0);
       });
+    });
 
-      captureWindowToFile(screenshotPath);
-    } else {
-      const exitCode = await new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          killTree(app);
-          reject(new Error("Timed out waiting for Electron screenshot capture."));
-        }, screenshotTimeoutMs);
-
-        app.on("exit", (code) => {
-          clearTimeout(timeout);
-          resolve(code ?? 0);
-        });
-      });
-
-      if (exitCode !== 0) {
-        throw new Error(`Electron screenshot run exited with code ${exitCode}`);
-      }
+    if (exitCode !== 0) {
+      throw new Error(`Electron screenshot run exited with code ${exitCode}`);
     }
 
     if (!fs.existsSync(screenshotPath)) {

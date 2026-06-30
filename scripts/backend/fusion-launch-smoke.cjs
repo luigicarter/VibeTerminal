@@ -30,7 +30,9 @@ async function main() {
   try {
     const files = await manager.prepareFusionFiles("fusion-session", {
       cwd: process.cwd(),
-      codexBin
+      codexBin,
+      codexModel: "gpt-5.5",
+      codexEffort: "xhigh"
     });
     assert(files, "prepareFusionFiles returned null");
 
@@ -68,6 +70,14 @@ async function main() {
       adapter.env.CODEX_HOME && adapter.env.CODEX_HOME.endsWith(".codex"),
       "adapter env missing CODEX_HOME (needed so the embedded binary reuses the user's login)"
     );
+    assert(
+      adapter.env.VIBE_FUSION_CODEX_MODEL === "gpt-5.5",
+      "adapter env missing the selected Codex model"
+    );
+    assert(
+      adapter.env.VIBE_FUSION_CODEX_EFFORT === "xhigh",
+      "adapter env missing the selected Codex effort"
+    );
 
     assert(
       buildFusionSystemPrompt().includes("codex_implement"),
@@ -85,6 +95,18 @@ async function main() {
     assert(
       /Edit,MultiEdit,Write/.test(mainSource),
       "Fusion Claude allowlist is missing direct-edit tools for exceptional/UI edits"
+    );
+    assert(
+      /normalizeFusionModel/.test(mainSource) &&
+        /normalizeFusionCodexModel/.test(mainSource) &&
+        /normalizeFusionEffort/.test(mainSource),
+      "Fusion launch should normalize Claude model, Codex model, and effort controls"
+    );
+    assert(
+      /payloadCodexModel/.test(mainSource) &&
+        /payloadCodexModel\.toLowerCase\(\) !== "auto"/.test(mainSource) &&
+        /process\.env\.VIBE_FUSION_CODEX_MODEL/.test(mainSource),
+      "Fusion Codex auto/default should fall back to VIBE_FUSION_CODEX_MODEL"
     );
 
     console.log("Fusion launch smoke passed");

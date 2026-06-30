@@ -5,6 +5,10 @@ const readline = require("readline");
 const { spawn } = require("child_process");
 const { findCodexThread, confirmCodexThread } = require("./agentThreads.cjs");
 
+const MAX_TRANSCRIPT_HEAD_BYTES = 256 * 1024;
+const DEFAULT_TRANSCRIPT_LIMIT = 5000;
+const MAX_DISCOVERY_VISITS = 20000;
+
 function normalizePathForCompare(value) {
   if (!value) {
     return "";
@@ -22,16 +26,34 @@ function isSamePath(a, b) {
   return normalizePathForCompare(a) === normalizePathForCompare(b);
 }
 
-function collectJsonlFiles(rootDir, limit = 800) {
+function statMtimeMs(filePath) {
+  try {
+    return fs.statSync(filePath).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+function addRecentFile(files, file, limit) {
+  files.push(file);
+  if (files.length > limit * 2) {
+    files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    files.length = limit;
+  }
+}
+
+function collectJsonlFiles(rootDir, limit = DEFAULT_TRANSCRIPT_LIMIT) {
   if (!fs.existsSync(rootDir)) {
     return [];
   }
 
   const stack = [rootDir];
   const files = [];
+  let visited = 0;
 
-  while (stack.length > 0 && files.length < limit) {
+  while (stack.length > 0 && visited < MAX_DISCOVERY_VISITS) {
     const current = stack.pop();
+    visited += 1;
     let entries = [];
 
     try {
@@ -39,6 +61,8 @@ function collectJsonlFiles(rootDir, limit = 800) {
     } catch {
       continue;
     }
+
+    const dirs = [];
 
     entries.forEach((entry) => {
       const entryPath = path.join(current, entry.name);
@@ -48,18 +72,46 @@ function collectJsonlFiles(rootDir, limit = 800) {
         // multiplies I/O and can push the real session file past the file cap,
         // so skip it — the parent transcript already carries the id we need.
         if (entry.name !== "subagents") {
-          stack.push(entryPath);
+          dirs.push(entryPath);
         }
         return;
       }
 
       if (entry.isFile() && entry.name.endsWith(".jsonl")) {
-        files.push(entryPath);
+        addRecentFile(
+          files,
+          { path: entryPath, mtimeMs: statMtimeMs(entryPath) },
+          limit
+        );
       }
     });
+
+    dirs
+      .sort((a, b) => statMtimeMs(a) - statMtimeMs(b))
+      .forEach((dirPath) => stack.push(dirPath));
   }
 
-  return files;
+  return files
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .slice(0, limit)
+    .map((file) => file.path);
+}
+
+function readTranscriptHead(filePath, maxBytes) {
+  const fd = fs.openSync(filePath, "r");
+  try {
+    const buffer = Buffer.allocUnsafe(maxBytes);
+    const bytesRead = fs.readSync(fd, buffer, 0, maxBytes, 0);
+    return buffer.toString("utf8", 0, bytesRead);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function readHeadLines(filePath, maxLines) {
+  return readTranscriptHead(filePath, MAX_TRANSCRIPT_HEAD_BYTES)
+    .split(/\r?\n/)
+    .slice(0, maxLines);
 }
 
 function toExcludedSet(excludeIds) {
@@ -108,8 +160,7 @@ function claudeProjectsDir() {
 // for this cwd. Shared by latest-thread discovery and the existence check.
 function parseClaudeTranscript(filePath, cwd) {
   try {
-    const content = fs.readFileSync(filePath, "utf8");
-    const lines = content.split(/\r?\n/).slice(0, 40);
+    const lines = readHeadLines(filePath, 40);
     let sessionId = "";
     let createdAt = 0;
     let title = "";

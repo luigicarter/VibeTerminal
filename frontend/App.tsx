@@ -52,6 +52,10 @@ import type {
   AgentThreadRef,
   AgentThreadLookupStatus,
   CodeChangeSummary,
+  FusionClaudeModel,
+  FusionCodexModel,
+  FusionEffort,
+  FusionSettings,
   LayoutBox,
   ProjectWorkspace,
   UpdateState
@@ -79,6 +83,17 @@ const MIN_SIDEBAR_WIDTH = 220;
 const MAX_SIDEBAR_WIDTH = 520;
 const MIN_WORKSPACE_WIDTH = 360;
 const CODE_CHANGE_REFRESH_MS = 7_500;
+const FUSION_MODEL_ID_PATTERN = /^[A-Za-z0-9._:/@+-]+$/;
+const DEFAULT_FUSION_CLAUDE_MODEL: FusionClaudeModel = "opus";
+const DEFAULT_FUSION_CODEX_MODEL: FusionCodexModel = "auto";
+const FUSION_EFFORT_VALUES: FusionEffort[] = [
+  "auto",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max"
+];
 
 type AppView = "multi" | "project";
 
@@ -205,6 +220,24 @@ function getProfile(kind: AgentKind) {
   return agentProfiles.find((profile) => profile.kind === kind) ?? agentProfiles[0];
 }
 
+function hasClaudeThreadId(threadRef?: AgentThreadRef): threadRef is AgentThreadRef {
+  return threadRef?.provider === "claude" && Boolean(threadRef.id);
+}
+
+function canResumeSessionThread(session: AgentSession) {
+  return session.fusion
+    ? hasClaudeThreadId(session.threadRef)
+    : isThreadedAgentKind(session.kind) && Boolean(session.threadRef?.id);
+}
+
+function sessionResumeRef(session: AgentSession) {
+  return session.fusion
+    ? hasClaudeThreadId(session.resumeRef)
+      ? session.resumeRef
+      : undefined
+    : session.resumeRef;
+}
+
 function rectanglesOverlap(a: LayoutBox, b: LayoutBox) {
   const horizontalGap = DEFAULT_COLUMN_GAP_PERCENT;
   const verticalGap = LEGACY_BOARD_GAP;
@@ -229,6 +262,73 @@ function layoutsMatch(a: LayoutBox, b: LayoutBox) {
 
 function isClose(value: number, target: number, tolerance = 0.001) {
   return Math.abs(value - target) <= tolerance;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object");
+}
+
+function finiteNumber(value: unknown, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function normalizeFusionModelId(value: unknown, fallback: string) {
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  if (
+    !trimmed ||
+    trimmed.length > 96 ||
+    !FUSION_MODEL_ID_PATTERN.test(trimmed)
+  ) {
+    return fallback;
+  }
+
+  return trimmed;
+}
+
+function normalizeFusionModel(value: unknown): FusionClaudeModel {
+  const model = normalizeFusionModelId(value, DEFAULT_FUSION_CLAUDE_MODEL);
+  const lower = model.toLowerCase();
+  if (lower === "fast") {
+    return "sonnet";
+  }
+
+  if (lower === "opus" || lower === "sonnet") {
+    return lower;
+  }
+
+  return model;
+}
+
+function normalizeFusionCodexModel(value: unknown): FusionCodexModel {
+  const model = normalizeFusionModelId(value, DEFAULT_FUSION_CODEX_MODEL);
+  const lower = model.toLowerCase();
+  if (lower === "default" || lower === "auto") {
+    return DEFAULT_FUSION_CODEX_MODEL;
+  }
+
+  return model;
+}
+
+function normalizeFusionEffort(value: unknown): FusionEffort {
+  return FUSION_EFFORT_VALUES.includes(value as FusionEffort)
+    ? (value as FusionEffort)
+    : "auto";
+}
+
+function normalizeSessionStatus(value: unknown) {
+  return ["idle", "starting", "running", "waiting", "done", "failed"].includes(
+    value as string
+  )
+    ? (value as AgentSession["status"])
+    : "idle";
+}
+
+function normalizeLaunchMode(value: unknown) {
+  return value === "resume" ? "resume" : "new";
+}
+
+function isAgentKind(value: unknown): value is AgentKind {
+  return agentProfiles.some((profile) => profile.kind === value);
 }
 
 function tightenDefaultFluidGutters(layout: LayoutBox): LayoutBox {
@@ -257,9 +357,31 @@ function tightenDefaultFluidGutters(layout: LayoutBox): LayoutBox {
   return next;
 }
 
-function migrateLayout(layout: LayoutBox): LayoutBox {
-  if (layout.unit === "fluid") {
-    const tightenedLayout = tightenDefaultFluidGutters(layout);
+function defaultFluidLayout(): LayoutBox {
+  return {
+    x: 0,
+    y: LEGACY_BOARD_PADDING,
+    w: DEFAULT_PANE_WIDTH_PERCENT,
+    h: DEFAULT_PANE_HEIGHT,
+    unit: "fluid"
+  };
+}
+
+function migrateLayout(layout: LayoutBox | null | undefined): LayoutBox {
+  if (!isRecord(layout)) {
+    return defaultFluidLayout();
+  }
+
+  const normalizedLayout: LayoutBox = {
+    x: finiteNumber(layout.x, 0),
+    y: finiteNumber(layout.y, LEGACY_BOARD_PADDING),
+    w: finiteNumber(layout.w, DEFAULT_PANE_WIDTH_PERCENT),
+    h: finiteNumber(layout.h, DEFAULT_PANE_HEIGHT),
+    unit: layout.unit === "fluid" ? "fluid" : undefined
+  };
+
+  if (normalizedLayout.unit === "fluid") {
+    const tightenedLayout = tightenDefaultFluidGutters(normalizedLayout);
 
     return {
       x: Math.max(0, Math.min(tightenedLayout.x, 100)),
@@ -271,12 +393,14 @@ function migrateLayout(layout: LayoutBox): LayoutBox {
   }
 
   return {
-    x: (layout.x / LEGACY_GRID_COLS) * 100,
-    y: LEGACY_BOARD_PADDING + layout.y * (LEGACY_ROW_HEIGHT + LEGACY_BOARD_GAP),
-    w: (layout.w / LEGACY_GRID_COLS) * 100,
+    x: (normalizedLayout.x / LEGACY_GRID_COLS) * 100,
+    y:
+      LEGACY_BOARD_PADDING +
+      normalizedLayout.y * (LEGACY_ROW_HEIGHT + LEGACY_BOARD_GAP),
+    w: (normalizedLayout.w / LEGACY_GRID_COLS) * 100,
     h:
-      layout.h * LEGACY_ROW_HEIGHT +
-      Math.max(0, layout.h - 1) * LEGACY_BOARD_GAP,
+      normalizedLayout.h * LEGACY_ROW_HEIGHT +
+      Math.max(0, normalizedLayout.h - 1) * LEGACY_BOARD_GAP,
     unit: "fluid"
   };
 }
@@ -336,10 +460,13 @@ function createSession(
     name: sessionName,
     kind: effectiveKind,
     fusion: isFusion || undefined,
+    fusionModel: isFusion ? DEFAULT_FUSION_CLAUDE_MODEL : undefined,
+    fusionCodexModel: isFusion ? DEFAULT_FUSION_CODEX_MODEL : undefined,
+    fusionEffort: isFusion ? "auto" : undefined,
     command: profile.command,
     cwd,
     createdAt: Date.now(),
-    threadRef: createThreadRef(effectiveKind, sessionName),
+    threadRef: isFusion ? undefined : createThreadRef(effectiveKind, sessionName),
     threadLookupStatus: "idle",
     nextLaunchMode: "new",
     started: true,
@@ -359,9 +486,23 @@ function starterWorkspace(path: string): ProjectWorkspace {
   };
 }
 
+function isStoredSession(value: unknown): value is AgentSession {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.name === "string" &&
+    isAgentKind(value.kind) &&
+    typeof value.cwd === "string"
+  );
+}
+
 function restoreSession(session: AgentSession): AgentSession {
-  const launchToken = session.launchToken ?? 0;
-  const previousStatus = session.status ?? "idle";
+  const launchToken = finiteNumber(session.launchToken, 0);
+  const previousStatus = normalizeSessionStatus(session.status);
+  const isFusion = session.fusion === true || session.kind === "fusion";
+  const restoredKind: AgentKind = isFusion ? "claude" : session.kind;
+  const profile = getProfile(isFusion ? "fusion" : restoredKind);
+  const createdAt = finiteNumber(session.createdAt, Date.now());
   const shouldAutoStart =
     session.started === true &&
     previousStatus !== "done" &&
@@ -380,26 +521,83 @@ function restoreSession(session: AgentSession): AgentSession {
   //   launch their plain command, letting discovery bind the new session.
   // The most recent resumable thread wins; if the pane had no thread yet we keep
   // whatever resumeRef was already stored.
-  const resumeRef = session.threadRef?.id
-    ? session.threadRef
-    : session.resumeRef;
+  const activeThreadRef =
+    isFusion && !hasClaudeThreadId(session.threadRef)
+      ? undefined
+      : session.threadRef;
+  const resumeRef = activeThreadRef?.id
+    ? activeThreadRef
+    : isFusion
+      ? hasClaudeThreadId(session.resumeRef)
+        ? session.resumeRef
+        : undefined
+      : session.resumeRef;
 
   return {
     ...session,
+    name: session.name || profile.label,
+    kind: restoredKind,
+    command: typeof session.command === "string" ? session.command : profile.command,
+    fusion: isFusion || undefined,
+    createdAt,
     started: shouldAutoStart,
     launchToken,
-    nextLaunchMode: "new",
-    threadRef: createThreadRef(
-      session.kind,
-      session.threadRef?.title ?? session.name
-    ),
+    nextLaunchMode: normalizeLaunchMode("new"),
+    threadRef: isFusion
+      ? undefined
+      : createThreadRef(restoredKind, session.threadRef?.title ?? session.name),
     resumeRef,
+    fusionModel: isFusion
+      ? normalizeFusionModel(session.fusionModel)
+      : session.fusionModel,
+    fusionCodexModel: isFusion
+      ? normalizeFusionCodexModel(session.fusionCodexModel)
+      : session.fusionCodexModel,
+    fusionEffort: isFusion
+      ? normalizeFusionEffort(session.fusionEffort)
+      : session.fusionEffort,
     threadLookupStartedAt: undefined,
     threadLookupStatus: "idle",
     threadLookupMessage: undefined,
     status: shouldAutoStart ? "idle" : previousStatus,
     attention: normalizeAttention(session.attention),
     layout: migrateLayout(session.layout)
+  };
+}
+
+function restoreStoredSession(value: unknown): AgentSession | null {
+  if (!isStoredSession(value)) {
+    return null;
+  }
+
+  try {
+    return restoreSession(value);
+  } catch {
+    return null;
+  }
+}
+
+function restoreStoredWorkspace(value: unknown): ProjectWorkspace | null {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    typeof value.name !== "string" ||
+    typeof value.path !== "string"
+  ) {
+    return null;
+  }
+
+  const sessions = Array.isArray(value.sessions)
+    ? value.sessions
+        .map(restoreStoredSession)
+        .filter((session): session is AgentSession => Boolean(session))
+    : [];
+
+  return {
+    id: value.id,
+    name: value.name,
+    path: value.path,
+    sessions
   };
 }
 
@@ -411,10 +609,11 @@ function loadWorkspaces(): ProjectWorkspace[] {
     }
 
     const parsed = JSON.parse(raw) as ProjectWorkspace[];
-    return parsed.map((workspace) => ({
-      ...workspace,
-      sessions: workspace.sessions.map(restoreSession)
-    }));
+    return Array.isArray(parsed)
+      ? parsed
+          .map(restoreStoredWorkspace)
+          .filter((workspace): workspace is ProjectWorkspace => Boolean(workspace))
+      : [];
   } catch {
     return [];
   }
@@ -428,7 +627,11 @@ function loadMultiSessions(): AgentSession[] {
     }
 
     const parsed = JSON.parse(raw) as AgentSession[];
-    return parsed.map(restoreSession);
+    return Array.isArray(parsed)
+      ? parsed
+          .map(restoreStoredSession)
+          .filter((session): session is AgentSession => Boolean(session))
+      : [];
   } catch {
     return [];
   }
@@ -700,7 +903,7 @@ export default function App() {
         applyAgentRunning(event.id);
       }
 
-      if ("id" in event) {
+      if ("id" in event && typeof event.id === "string") {
         // Output ("data") no longer drives the working/idle pill from here: a
         // pane's working state comes from turn telemetry (claude/opencode) or
         // the mounted pane's input-aware heuristic (codex/plain terminals), so a
@@ -1041,8 +1244,17 @@ export default function App() {
     ]);
   }
 
-  function closeSession(scope: SessionScope, sessionId: string) {
-    window.vibe?.terminal.kill(sessionId);
+  function stopSessionProcess(session: AgentSession): Promise<boolean> {
+    if (session.fusion) {
+      return window.vibe?.fusionChat?.stop(session.id) ?? Promise.resolve(false);
+    }
+
+    return window.vibe?.terminal.kill(session.id) ?? Promise.resolve(false);
+  }
+
+  function closeSession(scope: SessionScope, session: AgentSession) {
+    void stopSessionProcess(session);
+    const sessionId = session.id;
     updateScopeSessions(scope, (sessions) =>
       sessions.filter((session) => session.id !== sessionId)
     );
@@ -1083,7 +1295,7 @@ export default function App() {
       workspace.sessions.map((session) => session.id)
     );
     workspace.sessions.forEach((session) => {
-      window.vibe?.terminal.kill(session.id);
+      void stopSessionProcess(session);
     });
 
     const nextWorkspaces = workspaces.filter(
@@ -1117,26 +1329,36 @@ export default function App() {
   }
 
   function restartSession(scope: SessionScope, session: AgentSession) {
-    window.vibe?.terminal.kill(session.id).then(() => {
+    stopSessionProcess(session).then(() => {
       updateScopeSessions(scope, (sessions) =>
-        sessions.map((item) =>
-          item.id === session.id
-            ? {
-                ...item,
-                started: true,
-                launchToken: item.launchToken + 1,
-                nextLaunchMode:
-                  isThreadedAgentKind(item.kind) && item.threadRef?.id
-                    ? "resume"
-                    : "new",
-                threadLookupStartedAt: undefined,
-                threadLookupStatus: item.threadRef?.id ? "found" : "idle",
-                threadLookupMessage: undefined,
-                status: "idle",
-                attention: EMPTY_ATTENTION
-              }
-            : item
-        )
+        sessions.map((item) => {
+          if (item.id !== session.id) {
+            return item;
+          }
+
+          const currentClaudeRef = hasClaudeThreadId(item.threadRef)
+            ? item.threadRef
+            : undefined;
+          const previousClaudeRef = sessionResumeRef(item);
+          const canResume = !item.fusion && canResumeSessionThread(item);
+          return {
+            ...item,
+            ...(item.fusion
+              ? {
+                  threadRef: undefined,
+                  resumeRef: currentClaudeRef ?? previousClaudeRef
+                }
+              : {}),
+            started: true,
+            launchToken: item.launchToken + 1,
+            nextLaunchMode: canResume ? "resume" : "new",
+            threadLookupStartedAt: undefined,
+            threadLookupStatus: canResume ? "found" : "idle",
+            threadLookupMessage: undefined,
+            status: "idle",
+            attention: EMPTY_ATTENTION
+          };
+        })
       );
     });
   }
@@ -1147,12 +1369,12 @@ export default function App() {
   // claude the launch is still safety-checked by resolveLaunchCommand, which
   // falls back to a fresh start if the transcript no longer exists.
   function resumeSession(scope: SessionScope, session: AgentSession) {
-    const resumeRef = session.resumeRef;
+    const resumeRef = sessionResumeRef(session);
     if (!resumeRef?.id) {
       return;
     }
 
-    window.vibe?.terminal.kill(session.id).then(() => {
+    stopSessionProcess(session).then(() => {
       updateScopeSessions(scope, (sessions) =>
         sessions.map((item) =>
           item.id === session.id
@@ -1173,6 +1395,100 @@ export default function App() {
         )
       );
     });
+  }
+
+  function clearFusionSession(scope: SessionScope, session: AgentSession) {
+    if (!session.fusion) {
+      return;
+    }
+
+    stopSessionProcess(session).then(() => {
+      updateScopeSessions(scope, (sessions) =>
+        sessions.map((item) => {
+          if (item.id !== session.id) {
+            return item;
+          }
+
+          const currentClaudeRef = hasClaudeThreadId(item.threadRef)
+            ? item.threadRef
+            : undefined;
+          const previousClaudeRef = sessionResumeRef(item);
+
+          return {
+            ...item,
+            started: true,
+            launchToken: item.launchToken + 1,
+            nextLaunchMode: "new",
+            threadRef: undefined,
+            resumeRef: currentClaudeRef ?? previousClaudeRef,
+            threadLookupStartedAt: undefined,
+            threadLookupStatus: "idle",
+            threadLookupMessage: undefined,
+            status: "idle",
+            attention: EMPTY_ATTENTION
+          };
+        })
+      );
+    });
+  }
+
+  function updateFusionSettings(
+    scope: SessionScope,
+    session: AgentSession,
+    settings: FusionSettings
+  ) {
+    if (!session.fusion) {
+      return;
+    }
+
+    const applySettings = () => {
+      updateScopeSessions(scope, (sessions) =>
+        sessions.map((item) => {
+          if (item.id !== session.id) {
+            return item;
+          }
+
+          const currentClaudeRef = hasClaudeThreadId(item.threadRef)
+            ? item.threadRef
+            : undefined;
+          const previousClaudeRef = sessionResumeRef(item);
+          const canResume = !item.fusion && canResumeSessionThread(item);
+          const fusionModel = normalizeFusionModel(settings.model);
+          const fusionCodexModel = normalizeFusionCodexModel(settings.codexModel);
+          const fusionEffort = normalizeFusionEffort(settings.effort);
+          return {
+            ...item,
+            fusionModel,
+            fusionCodexModel,
+            fusionEffort,
+            ...(item.fusion
+              ? {
+                  threadRef: undefined,
+                  resumeRef: currentClaudeRef ?? previousClaudeRef
+                }
+              : {}),
+            ...(item.started
+              ? {
+                  started: true,
+                  launchToken: item.launchToken + 1,
+                  nextLaunchMode: canResume ? "resume" : "new",
+                  threadLookupStartedAt: undefined,
+                  threadLookupStatus: canResume ? "found" : "idle",
+                  threadLookupMessage: undefined,
+                  status: "idle" as const,
+                  attention: EMPTY_ATTENTION
+                }
+              : {})
+          };
+        })
+      );
+    };
+
+    if (session.started) {
+      stopSessionProcess(session).then(applySettings);
+    } else {
+      applySettings();
+    }
   }
 
   function updateSessionStatus(
@@ -1816,10 +2132,14 @@ export default function App() {
                     session={session}
                     profile={getProfile("fusion")}
                     isMaximized={session.id === maximizedSessionId}
-                    onClose={() => closeSession(activeScope, session.id)}
+                    onClose={() => closeSession(activeScope, session)}
                     onDuplicate={() => duplicateSession(activeScope, session)}
                     onRestart={() => restartSession(activeScope, session)}
                     onResume={() => resumeSession(activeScope, session)}
+                    onClear={() => clearFusionSession(activeScope, session)}
+                    onSettingsChange={(settings) =>
+                      updateFusionSettings(activeScope, session, settings)
+                    }
                     onAdd={() =>
                       addSessionForCwd(activeScope, sessionCreationKind(session), session.cwd)
                     }
@@ -1848,7 +2168,7 @@ export default function App() {
                     claimedThreadIds={claimedThreadIds(session.id)}
                     isMaximized={session.id === maximizedSessionId}
                     isArranging={isArranging}
-                    onClose={() => closeSession(activeScope, session.id)}
+                    onClose={() => closeSession(activeScope, session)}
                     onDuplicate={() => duplicateSession(activeScope, session)}
                     onRestart={() => restartSession(activeScope, session)}
                     onResume={() => resumeSession(activeScope, session)}

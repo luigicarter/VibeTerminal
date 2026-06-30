@@ -16,6 +16,18 @@ export type AgentThreadProvider = "codex" | "claude" | "opencode" | "cursor";
 
 export type AgentLaunchMode = "new" | "resume";
 
+export type FusionClaudeModel = string;
+
+export type FusionCodexModel = string;
+
+export type FusionEffort = "auto" | "low" | "medium" | "high" | "xhigh" | "max";
+
+export interface FusionSettings {
+  model: FusionClaudeModel;
+  codexModel: FusionCodexModel;
+  effort: FusionEffort;
+}
+
 export type AgentThreadLookupStatus =
   | "idle"
   | "pending"
@@ -126,6 +138,9 @@ export interface AgentSession {
   // A Fusion pane: a claude session that delegates execution to Codex. Always
   // paired with kind === "claude".
   fusion?: boolean;
+  fusionModel?: FusionClaudeModel;
+  fusionCodexModel?: FusionCodexModel;
+  fusionEffort?: FusionEffort;
   cwd: string;
   createdAt: number;
   threadRef?: AgentThreadRef;
@@ -222,7 +237,7 @@ export interface UpdateActionResult {
 
 export type TerminalEvent =
   | { type: "ready" }
-  | { type: "host-error"; message: string }
+  | { type: "host-error"; id?: string; message: string }
   | { type: "host-exit"; message: string }
   | {
       id: string;
@@ -266,11 +281,13 @@ export interface FusionLogEntry {
 // host-error (broadcast to all windows).
 export type FusionChatEvent =
   | { id: string; type: "session"; sessionId: string }
+  | { id: string; type: "user"; text: string }
   | { id: string; type: "turn-start" }
   | { id: string; type: "assistant-text"; delta: string }
   | { id: string; type: "thinking"; delta: string }
   | { id: string; type: "tool-call"; toolId: string; name: string; input: unknown }
   | { id: string; type: "tool-result"; toolId: string; text: string }
+  | { id: string; type: "activity"; role: "opus" | "codex"; kind: string; text?: string }
   | { id: string; type: "turn-end" }
   | { id: string; type: "result"; subtype?: string; costUsd?: number }
   | { id: string; type: "stderr"; text: string }

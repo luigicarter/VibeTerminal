@@ -174,6 +174,23 @@ try {
     !collected.some((file) => file.includes(`${path.sep}subagents${path.sep}`)),
     "subagents transcripts should be skipped by the walk"
   );
+  const limitedCollected = collectJsonlFiles(projectsDir, 2);
+  assert(
+    limitedCollected.length === 2,
+    "Claude transcript collection should honor the file cap"
+  );
+
+  const source = fs.readFileSync(
+    path.join(rootDir, "backend", "agentThreadHost.cjs"),
+    "utf8"
+  );
+  assert(
+    source.includes("MAX_DISCOVERY_VISITS") &&
+      source.includes("addRecentFile(") &&
+      source.includes("readTranscriptHead(filePath, MAX_TRANSCRIPT_HEAD_BYTES)") &&
+      !source.includes('fs.readFileSync(filePath, "utf8")'),
+    "Claude discovery should bound traversal, candidate storage, and transcript reads"
+  );
 
   console.log("Claude discovery smoke passed");
 } finally {

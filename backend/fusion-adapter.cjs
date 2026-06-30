@@ -31,6 +31,7 @@ const SESSION_ID = process.env.VIBE_TERMINAL_SESSION_ID;
 const CALLBACK_URL = process.env.VIBE_TERMINAL_CALLBACK_URL;
 const TOKEN = process.env.VIBE_TERMINAL_TELEMETRY_TOKEN;
 const MODEL = process.env.VIBE_FUSION_CODEX_MODEL || null;
+const EFFORT = process.env.VIBE_FUSION_CODEX_EFFORT || null;
 const REQUEST_TIMEOUT_MS = Number(process.env.VIBE_FUSION_RPC_TIMEOUT_MS || 30000);
 const PARKED_REQUEST_METHODS = new Set([
   "item/commandExecution/requestApproval",
@@ -720,12 +721,16 @@ async function codexImplement(task) {
   turnFiles = [];
   relay({ role: "opus", kind: "delegate", text: task });
   const done = awaitTurn();
-  rpc("turn/start", {
+  const params = {
     threadId,
     input: [{ type: "text", text: buildCodexVerifierTask(task), text_elements: [] }],
     approvalPolicy: "on-request",
     approvalsReviewer: "user"
-  }).catch((error) => resolveTurn({ status: "failed", error: error.message }));
+  };
+  if (EFFORT) params.effort = EFFORT;
+  rpc("turn/start", params).catch((error) =>
+    resolveTurn({ status: "failed", error: error.message })
+  );
   const result = await done;
   const withGoal = await syncGoalAfterTurn(result);
   if (goalSetup.status === "failed" && withGoal.status === "completed") {

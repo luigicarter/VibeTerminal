@@ -1377,6 +1377,105 @@ button {
 .fusion-chip-opus { color: #b98bff; border-color: #b98bff55; }
 .fusion-chip-codex { color: #ff9f43; border-color: #ff9f4355; }
 
+.fusion-control-strip {
+  display: flex;
+  min-height: 29px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid #2e342e;
+  background: #141813;
+  padding: 3px 9px;
+}
+
+.fusion-control-path {
+  min-width: 0;
+  overflow: hidden;
+  color: #8f968e;
+  font-family: "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fusion-controls {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.fusion-select,
+.fusion-model-field {
+  display: inline-flex;
+  height: 22px;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid #343b34;
+  border-radius: 6px;
+  background: #20251f;
+  color: #d8d9d2;
+  padding: 0 5px;
+}
+
+.fusion-select svg,
+.fusion-model-field svg {
+  flex: 0 0 auto;
+  color: var(--pane-accent);
+}
+
+.fusion-model-field span {
+  flex: 0 0 auto;
+  color: #8f968e;
+  font-size: 9px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.fusion-select select,
+.fusion-model-field input {
+  min-width: 64px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.fusion-model-field input {
+  width: 86px;
+  min-width: 0;
+  text-transform: none;
+}
+
+.fusion-verbose-toggle {
+  display: inline-flex;
+  height: 22px;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid #343b34;
+  border-radius: 6px;
+  background: #20251f;
+  color: #9aa39a;
+  padding: 0 7px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+.fusion-verbose-toggle svg { flex: 0 0 auto; }
+.fusion-verbose-toggle.is-on {
+  color: #e6ebe6;
+  border-color: var(--pane-accent);
+}
+
 .fusion-chat {
   flex: 1;
   min-height: 0;
@@ -1423,6 +1522,8 @@ button {
 }
 .chat-body { min-width: 0; }
 .chat-author {
+  display: block;
+  margin-bottom: 3px;
   font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
@@ -1430,6 +1531,35 @@ button {
 }
 .chat-opus .chat-author { color: #b98bff; }
 .chat-codex .chat-author { color: #ff9f43; }
+
+/* Tool activity renders as one compact, collapsible chip — not a wall of
+   line-numbered output. Full text shows on click or via the Details toggle. */
+.chat-tool { display: flex; gap: 8px; align-items: baseline; }
+.chat-tool-expandable { cursor: pointer; }
+.chat-tool-expandable:hover .chat-tool-text { color: #c3ccc3; }
+.chat-tool-author {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.chat-opus .chat-tool-author { color: #b98bff; }
+.chat-codex .chat-tool-author { color: #ff9f43; }
+.chat-tool-kind {
+  flex: 0 0 auto;
+  color: #7f867f;
+  font-variant: small-caps;
+}
+.chat-tool-caret { flex: 0 0 auto; color: #6f766f; }
+.chat-tool-text {
+  min-width: 0;
+  color: #9aa39a;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.chat-kind-tool-result .chat-tool-text { color: #7f867f; }
+.chat-kind-thinking .chat-tool-text { color: #7f867f; font-style: italic; }
 .chat-kind {
   margin-left: 6px;
   color: #7f867f;

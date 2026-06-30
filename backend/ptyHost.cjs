@@ -136,6 +136,10 @@ function createSession(payload) {
     sessions.set(payload.id, session);
 
     terminal.onData((data) => {
+      if (sessions.get(payload.id) !== session) {
+        return;
+      }
+
       appendSessionBuffer(session, data);
       emit({
         id: payload.id,
@@ -164,7 +168,7 @@ function createSession(payload) {
     if (payload.command) {
       const lineEnding = process.platform === "win32" ? "\r" : "\n";
       setTimeout(() => {
-        if (sessions.has(payload.id)) {
+        if (sessions.get(payload.id) === session && session.terminal === terminal) {
           terminal.write(`${payload.command}${lineEnding}`);
         }
       }, 250);

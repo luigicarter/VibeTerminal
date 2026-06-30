@@ -262,6 +262,21 @@ assert(
   "Fusion add/duplicate and completion attention should use the app attention path"
 );
 assert(
+  appSource.includes("function stopSessionProcess(session") &&
+    appSource.includes("window.vibe?.fusionChat?.stop(session.id)") &&
+    appSource.includes("window.vibe?.terminal.kill(session.id)") &&
+    appSource.includes("void stopSessionProcess(session)") &&
+    appSource.includes("stopSessionProcess(session).then("),
+  "Fusion should stop only through explicit close/restart/resume actions"
+);
+assert(
+  appSource.includes("function clearFusionSession(") &&
+    appSource.includes("threadRef: undefined") &&
+    appSource.includes("resumeRef: currentClaudeRef ?? previousClaudeRef") &&
+    appSource.includes("function updateFusionSettings("),
+  "Fusion clear/settings should restart Claude-backed Fusion sessions without fabricating thread ids"
+);
+assert(
   appSource.includes('event.type === "agent-running"') &&
     appSource.includes("applyAgentRunning("),
   "app should turn agent-running telemetry into a forced running status"
@@ -298,6 +313,12 @@ assert(
     terminalPaneSource.includes('setStatus("waiting")'),
   "terminal pane should fall back to a waiting status when output goes idle"
 );
+assert(
+  terminalPaneSource.includes('event.type === "host-error" || event.type === "host-exit"') &&
+    terminalPaneSource.includes('event.id && event.id !== session.id') &&
+    terminalPaneSource.includes('setStatus("failed")'),
+  "terminal pane should render host-level PTY failures instead of ignoring id-less events"
+);
 
 const fusionChatPaneSource = fs.readFileSync(fusionChatPanePath, "utf8");
 assert(
@@ -306,6 +327,36 @@ assert(
     fusionChatPaneSource.includes('emitAttention("failed", "error"') &&
     fusionChatPaneSource.includes('emitAttention("failed", "exit"'),
   "FusionChatPane should emit completed/failed attention events"
+);
+assert(
+  !fusionChatPaneSource.includes("fusionChat.stop(session.id)") &&
+    fusionChatPaneSource.includes('case "user"') &&
+    fusionChatPaneSource.includes('case "activity"'),
+  "FusionChatPane unmount should preserve host sessions and rebuild from replayed events"
+);
+assert(
+  fusionChatPaneSource.includes('normalized === "/clear"') &&
+    fusionChatPaneSource.includes('normalized === "/resume"') &&
+    fusionChatPaneSource.includes('normalized === "/fast"') &&
+    fusionChatPaneSource.includes('raw.match(/^\\/(?:claude|model\\s+claude)\\s+(.+)$/i)') &&
+    fusionChatPaneSource.includes('raw.match(/^\\/(?:codex|model\\s+codex)\\s+(.+)$/i)') &&
+    fusionChatPaneSource.includes('aria-label="Fusion Codex model"') &&
+    fusionChatPaneSource.includes('aria-label="Fusion effort level"') &&
+    fusionChatPaneSource.includes("const startPayload =") &&
+    fusionChatPaneSource.includes('model: fusionModel') &&
+    fusionChatPaneSource.includes(
+      'fusionCodexModel === "auto" ? {} : { codexModel: fusionCodexModel }'
+    ) &&
+    fusionChatPaneSource.includes(
+      'fusionEffort === "auto" ? {} : { effort: fusionEffort }'
+    ),
+  "FusionChatPane should expose Claude/Codex model controls, effort controls, and local clear/resume commands"
+);
+assert(
+  fusionChatPaneSource.includes("function normalizeFusionModel(value: unknown)") &&
+    fusionChatPaneSource.includes('case "stderr"') &&
+    fusionChatPaneSource.includes("busy && !inputIsSlashCommand"),
+  "FusionChatPane should normalize restored settings, show stderr, and allow slash commands while busy"
 );
 
 const stylesSource = fs.readFileSync(stylesPath, "utf8");

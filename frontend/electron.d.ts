@@ -3,7 +3,10 @@ import type {
   AgentThreadLookupResult,
   AgentThreadRef,
   CodeChangeSummary,
+  FusionCodexModel,
+  FusionEffort,
   FusionChatEvent,
+  FusionClaudeModel,
   TerminalEvent,
   TerminalLaunchPayload,
   UpdateActionResult,
@@ -56,7 +59,9 @@ declare global {
           id: string;
           cwd: string;
           resumeId?: string;
-          model?: string;
+          model?: FusionClaudeModel | string;
+          codexModel?: FusionCodexModel | string;
+          effort?: Exclude<FusionEffort, "auto"> | string;
         }) => Promise<{ ok: boolean; error?: string }>;
         sendUserTurn: (id: string, text: string) => void;
         stop: (id: string) => Promise<boolean>;

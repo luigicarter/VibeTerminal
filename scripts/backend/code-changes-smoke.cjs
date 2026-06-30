@@ -72,6 +72,35 @@ async function main() {
 
   if (gitVersion.status === 0) {
     assert(noRepo.state === "not-git", "non-repo folders should be explicit");
+
+    const noHeadRepo = path.join(root, "no-head");
+    fs.mkdirSync(noHeadRepo, { recursive: true });
+    spawnSync("git", ["init", "-q"], {
+      cwd: noHeadRepo,
+      windowsHide: true,
+      encoding: "utf8"
+    });
+    fs.writeFileSync(path.join(noHeadRepo, "untracked.txt"), "one\ntwo\n", "utf8");
+
+    const noHeadUntracked = await getCodeChangeSummary(noHeadRepo);
+    assert(noHeadUntracked.state === "dirty", "no-HEAD repo should be dirty");
+    assert(noHeadUntracked.untracked === 1, "no-HEAD untracked file should be counted");
+    assert(
+      noHeadUntracked.insertions === 2,
+      "no-HEAD untracked file lines should count as insertions"
+    );
+
+    spawnSync("git", ["add", "untracked.txt"], {
+      cwd: noHeadRepo,
+      windowsHide: true,
+      encoding: "utf8"
+    });
+    const noHeadStaged = await getCodeChangeSummary(noHeadRepo);
+    assert(noHeadStaged.staged === 1, "no-HEAD staged file should be counted");
+    assert(
+      noHeadStaged.insertions === 2,
+      "no-HEAD staged file lines should count as insertions"
+    );
   } else {
     assert(
       noRepo.state === "unavailable",

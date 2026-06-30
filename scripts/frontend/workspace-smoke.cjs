@@ -21,6 +21,18 @@ assert(
 );
 
 assert(
+  appSource.includes("function restoreStoredSession(value: unknown)") &&
+    appSource.includes("function restoreStoredWorkspace(value: unknown)") &&
+    appSource.includes(".map(restoreStoredWorkspace)") &&
+    appSource.includes(".map(restoreStoredSession)") &&
+    appSource.includes("threadRef: isFusion") &&
+    appSource.includes("normalizeFusionModel(session.fusionModel)") &&
+    appSource.includes("normalizeFusionCodexModel(session.fusionCodexModel)") &&
+    appSource.includes("normalizeFusionEffort(session.fusionEffort)"),
+  "workspace restore should skip corrupt saved entries and normalize Fusion settings"
+);
+
+assert(
   appSource.includes("function removeWorkspace(workspaceId: string)") &&
     appSource.includes("window.vibe?.terminal.kill(session.id)") &&
     appSource.includes("setWorkspaces(nextWorkspaces)") &&

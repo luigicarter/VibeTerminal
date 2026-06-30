@@ -6,6 +6,9 @@
 // produces the right high-level chat events. No Claude, no auth, no cost — this
 // guards the parsing the FusionChatPane renders.
 
+const fs = require("fs");
+const path = require("path");
+
 const {
   buildClaudeArgs,
   buildClaudeSpawn,
@@ -23,6 +26,9 @@ const fixture = [
   { type: "stream_event", event: { type: "content_block_start", content_block: { type: "text" } } },
   { type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "Hello " } } },
   { type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "world" } } },
+  { type: "stream_event", event: { type: "content_block_stop" } },
+  { type: "stream_event", event: { type: "content_block_start", content_block: { type: "thinking" } } },
+  { type: "stream_event", event: { type: "content_block_delta", delta: { type: "thinking_delta", thinking: "Let me plan." } } },
   { type: "stream_event", event: { type: "content_block_stop" } },
   {
     type: "stream_event",
@@ -55,6 +61,9 @@ function main() {
   const text = events.filter((e) => e.type === "assistant-text").map((e) => e.delta).join("");
   assert(text === "Hello world", `assistant text mismatch: "${text}"`);
 
+  const thinking = events.filter((e) => e.type === "thinking").map((e) => e.delta).join("");
+  assert(thinking === "Let me plan.", `thinking text mismatch: "${thinking}"`);
+
   const tool = events.find((e) => e.type === "tool-call");
   assert(tool, "missing tool-call event");
   assert(tool.toolId === "tool-1", "tool-call id mismatch");
@@ -77,6 +86,7 @@ function main() {
     mcpConfig: "C:\\cfg dir\\fusion|mcp.json",
     systemPromptFile: "C:\\prompt dir\\system\"prompt.md",
     model: "opus",
+    effort: "high",
     allowedTools: "mcp__fusion-codex__codex_implement",
     resumeId: "resume & id"
   });
@@ -90,6 +100,7 @@ function main() {
     claudeArgs.includes("C:\\prompt dir\\system\"prompt.md"),
     "system prompt path should remain one raw argv value"
   );
+  assert(claudeArgs.includes("--effort") && claudeArgs.includes("high"), "effort should be passed to claude");
 
   const escaped = windowsCmdArg("C:\\repo dir\\a&b|\"quoted\"");
   assert(escaped.startsWith('"') && escaped.endsWith('"'), "Windows special args should be quoted");
@@ -103,6 +114,22 @@ function main() {
     assert(spawnPlan.command === "claude", "POSIX should spawn global claude directly");
     assert(spawnPlan.args.includes("C:\\repo dir\\a&b"), "POSIX spawn plan should keep cwd as argv");
   }
+
+  const hostSource = fs.readFileSync(
+    path.join(__dirname, "..", "..", "backend", "fusionChatHost.cjs"),
+    "utf8"
+  );
+  assert(
+    hostSource.includes("function replaySession") &&
+      hostSource.includes("replaySession(id, existingState);") &&
+      hostSource.includes("emitSessionEvent(id, state, event)") &&
+      hostSource.includes("emitDirectSessionEvent(id,") &&
+      hostSource.includes("sessions.get(id) !== state") &&
+      hostSource.includes("Fusion process is closed. Restart Fusion to continue.") &&
+      hostSource.includes('if (effort) args.push("--effort", String(effort));') &&
+      hostSource.includes('else if (msg.type === "activity") activity(msg.payload)'),
+    "Fusion host should replay live sessions, reject stale process events, and report closed-session input"
+  );
 
   console.log("Fusion chat parse smoke passed");
 }

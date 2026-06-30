@@ -1445,7 +1445,8 @@ function createAgentTelemetryManager(options = {}) {
             VIBE_TERMINAL_SESSION_ID: normalizedSessionId,
             VIBE_TERMINAL_CALLBACK_URL: callbackUrl,
             VIBE_TERMINAL_TELEMETRY_TOKEN: token,
-            ...(opts.codexModel ? { VIBE_FUSION_CODEX_MODEL: opts.codexModel } : {})
+            ...(opts.codexModel ? { VIBE_FUSION_CODEX_MODEL: opts.codexModel } : {}),
+            ...(opts.codexEffort ? { VIBE_FUSION_CODEX_EFFORT: opts.codexEffort } : {})
           }
         }
       }

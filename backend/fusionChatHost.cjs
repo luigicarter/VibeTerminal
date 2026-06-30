@@ -7,12 +7,12 @@
 // and speaks a JSONL control protocol with main over its own stdin/stdout.
 //
 // Control IN (from main, one JSON per line on stdin):
-//   {type:"start",  payload:{id, cwd, mcpConfig, systemPromptFile, model, allowedTools, resumeId?}}
+//   {type:"start",  payload:{id, cwd, mcpConfig, systemPromptFile, model, effort?, allowedTools, resumeId?}}
 //   {type:"input",  payload:{id, text}}
 //   {type:"stop",   payload:{id}}
 //   {type:"shutdown"}
 // Events OUT (to main, one JSON per line on stdout): {type:"event", id, event}
-//   plus {type:"ready"} on boot and {type:"closed", id, code} per session exit.
+//   plus {type:"ready"} on boot. Session exits are event.type === "closed".
 //
 // The stream-json normalizer is exported (createStreamNormalizer) so the parser
 // smoke can test it with a recorded fixture — no Claude, no auth, no cost.
@@ -21,6 +21,7 @@ const { spawn, execFileSync } = require("child_process");
 
 const isWin = process.platform === "win32";
 const CLAUDE_BIN = process.env.VIBE_CLAUDE_BIN || "claude";
+const MAX_HISTORY_EVENTS = 20_000;
 
 // ---- stream-json normalizer (pure, per-session state) ----
 // Turns the raw Anthropic stream-json line objects into high-level chat events.
@@ -90,12 +91,13 @@ function createStreamNormalizer() {
       }
       case "content_block_delta": {
         const d = ev.delta || {};
+        // Thinking blocks stream `thinking_delta` (with a `thinking` field), not
+        // `text_delta` — handling only text_delta silently dropped Opus's whole
+        // planning stream. Key each delta off its own type.
         if (d.type === "text_delta") {
-          if (block && block.kind === "thinking") {
-            events.push({ type: "thinking", delta: d.text || "" });
-          } else {
-            events.push({ type: "assistant-text", delta: d.text || "" });
-          }
+          events.push({ type: "assistant-text", delta: d.text || "" });
+        } else if (d.type === "thinking_delta") {
+          events.push({ type: "thinking", delta: d.thinking || "" });
         } else if (d.type === "input_json_delta" && block && block.kind === "tool_use") {
           block.jsonBuf += d.partial_json || "";
         }
@@ -131,7 +133,7 @@ function createStreamNormalizer() {
 
 // ---- the host (only runs when executed as a process, not when required) ----
 function runHost() {
-  const sessions = new Map(); // id -> { child, normalizer, buffer }
+  const sessions = new Map(); // id -> { child, normalizer, buffer, history }
 
   function emit(obj) {
     process.stdout.write(`${JSON.stringify(obj)}\n`);
@@ -154,10 +156,43 @@ function runHost() {
     }
   }
 
+  function cloneEvent(event) {
+    try {
+      return JSON.parse(JSON.stringify(event));
+    } catch {
+      return event;
+    }
+  }
+
+  function emitSessionEvent(id, state, event) {
+    state.history.push(cloneEvent(event));
+    if (state.history.length > MAX_HISTORY_EVENTS) {
+      state.history.splice(0, state.history.length - MAX_HISTORY_EVENTS);
+    }
+    emit({ type: "event", id, event });
+  }
+
+  function emitDirectSessionEvent(id, event) {
+    if (id) {
+      emit({ type: "event", id, event });
+    }
+  }
+
+  function replaySession(id, state) {
+    for (const event of state.history) {
+      emit({ type: "event", id, event });
+    }
+  }
+
   function start(payload) {
-    const { id, cwd, mcpConfig, systemPromptFile, model, allowedTools, resumeId } = payload;
+    const { id, cwd, mcpConfig, systemPromptFile, model, effort, allowedTools, resumeId } = payload;
     if (sessions.has(id)) {
-      killChild(sessions.get(id).child);
+      const existingState = sessions.get(id);
+      if (existingState?.child) {
+        replaySession(id, existingState);
+        return;
+      }
+
       sessions.delete(id);
     }
 
@@ -169,10 +204,14 @@ function runHost() {
     });
 
     const normalizer = createStreamNormalizer();
-    const state = { child, normalizer, buffer: "" };
+    const state = { child, normalizer, buffer: "", history: [] };
     sessions.set(id, state);
 
     child.stdout.on("data", (chunk) => {
+      if (sessions.get(id) !== state) {
+        return;
+      }
+
       state.buffer += chunk.toString("utf8");
       let index;
       while ((index = state.buffer.indexOf("\n")) !== -1) {
@@ -180,32 +219,76 @@ function runHost() {
         state.buffer = state.buffer.slice(index + 1);
         if (!line) continue;
         for (const event of normalizer(line)) {
-          emit({ type: "event", id, event });
+          emitSessionEvent(id, state, event);
         }
       }
     });
     child.stderr.on("data", (chunk) => {
-      emit({ type: "event", id, event: { type: "stderr", text: chunk.toString("utf8") } });
+      if (sessions.get(id) !== state) {
+        return;
+      }
+
+      emitSessionEvent(id, state, { type: "stderr", text: chunk.toString("utf8") });
     });
     child.on("error", (error) => {
-      emit({ type: "event", id, event: { type: "error", message: error.message } });
+      if (sessions.get(id) !== state) {
+        return;
+      }
+
+      emitSessionEvent(id, state, { type: "error", message: error.message });
     });
     child.on("exit", (code) => {
-      sessions.delete(id);
-      emit({ type: "closed", id, code });
+      if (sessions.get(id) !== state) {
+        return;
+      }
+      state.child = null;
+      emitSessionEvent(id, state, { type: "closed", code });
     });
   }
 
   function input(payload) {
-    const state = sessions.get(payload.id);
-    if (!state) return;
-    try {
-      state.child.stdin.write(
-        JSON.stringify({ type: "user", message: { role: "user", content: payload.text } }) + "\n"
-      );
-    } catch {
-      // child gone
+    const id = payload?.id;
+    const text = String(payload?.text ?? "");
+    const state = sessions.get(id);
+    if (!state) {
+      emitDirectSessionEvent(id, {
+        type: "error",
+        message: "Fusion session is not running. Restart Fusion to continue."
+      });
+      return;
     }
+
+    if (!state.child) {
+      emitSessionEvent(id, state, {
+        type: "error",
+        message: "Fusion process is closed. Restart Fusion to continue."
+      });
+      return;
+    }
+
+    try {
+      emitSessionEvent(id, state, { type: "user", text });
+      state.child.stdin.write(
+        JSON.stringify({ type: "user", message: { role: "user", content: text } }) + "\n"
+      );
+    } catch (error) {
+      emitSessionEvent(id, state, {
+        type: "error",
+        message: `Could not send Fusion turn: ${error.message || "child process is gone"}`
+      });
+    }
+  }
+
+  function activity(payload) {
+    const id = payload?.id;
+    const state = sessions.get(id);
+    if (!state) return;
+    emitSessionEvent(id, state, {
+      type: "activity",
+      role: payload.role === "opus" ? "opus" : "codex",
+      kind: String(payload.kind || "activity"),
+      text: payload.text == null ? "" : String(payload.text)
+    });
   }
 
   function stop(payload) {
@@ -239,6 +322,7 @@ function runHost() {
       }
       if (msg.type === "start") start(msg.payload);
       else if (msg.type === "input") input(msg.payload);
+      else if (msg.type === "activity") activity(msg.payload);
       else if (msg.type === "stop") stop(msg.payload);
       else if (msg.type === "shutdown") shutdown();
     }
@@ -249,7 +333,7 @@ function runHost() {
 }
 
 function buildClaudeArgs(payload = {}) {
-  const { cwd, mcpConfig, systemPromptFile, model, allowedTools, resumeId } = payload;
+  const { cwd, mcpConfig, systemPromptFile, model, effort, allowedTools, resumeId } = payload;
   const args = [
     "--print",
     "--input-format",
@@ -262,6 +346,7 @@ function buildClaudeArgs(payload = {}) {
     "acceptEdits"
   ];
   if (model) args.push("--model", String(model));
+  if (effort) args.push("--effort", String(effort));
   if (allowedTools) args.push("--allowedTools", String(allowedTools));
   if (mcpConfig) args.push("--mcp-config", String(mcpConfig));
   if (systemPromptFile) args.push("--append-system-prompt-file", String(systemPromptFile));

@@ -4,6 +4,7 @@ const { spawn } = require("child_process");
 
 const GIT_STATUS_TIMEOUT_MS = 5_000;
 const MAX_GIT_OUTPUT_BYTES = 1024 * 1024;
+const MAX_UNTRACKED_LINE_COUNT_BYTES = 2 * 1024 * 1024;
 
 function emptyCounts() {
   return {
@@ -83,6 +84,66 @@ function parseDiffNumstat(stdout) {
   }
 
   return stats;
+}
+
+function mergeDiffStats(...stats) {
+  return stats.reduce(
+    (merged, stat) => ({
+      insertions: merged.insertions + Number(stat?.insertions || 0),
+      deletions: merged.deletions + Number(stat?.deletions || 0)
+    }),
+    { insertions: 0, deletions: 0 }
+  );
+}
+
+function parseNullSeparatedPaths(stdout) {
+  return stdout.split("\0").filter(Boolean);
+}
+
+function countTextFileLines(filePath) {
+  let stat;
+  try {
+    stat = fs.statSync(filePath);
+  } catch {
+    return 0;
+  }
+
+  if (!stat.isFile() || stat.size > MAX_UNTRACKED_LINE_COUNT_BYTES) {
+    return 0;
+  }
+
+  try {
+    const buffer = fs.readFileSync(filePath);
+    if (buffer.includes(0)) {
+      return 0;
+    }
+
+    if (buffer.length === 0) {
+      return 0;
+    }
+
+    let lines = 0;
+    for (const byte of buffer) {
+      if (byte === 10) {
+        lines += 1;
+      }
+    }
+
+    return buffer[buffer.length - 1] === 10 ? lines : lines + 1;
+  } catch {
+    return 0;
+  }
+}
+
+function countUntrackedInsertions(root, stdout) {
+  if (!root) {
+    return 0;
+  }
+
+  return parseNullSeparatedPaths(stdout).reduce((total, relativePath) => {
+    const filePath = path.join(root, relativePath);
+    return total + countTextFileLines(filePath);
+  }, 0);
 }
 
 function parseCodeChangeStatus(stdout, options = {}) {
@@ -263,10 +324,34 @@ async function getCodeChangeSummary(cwd) {
 
   const rootResult = await runGit(["rev-parse", "--show-toplevel"], resolvedCwd);
   const root = rootResult.ok ? rootResult.stdout.trim() : undefined;
-  const diffResult = await runGit(["diff", "--numstat", "HEAD", "--"], resolvedCwd);
-  const diffStats = diffResult.ok
+  const headResult = await runGit(["rev-parse", "--verify", "HEAD"], resolvedCwd);
+  const diffResult = headResult.ok
+    ? await runGit(["diff", "--numstat", "HEAD", "--"], resolvedCwd)
+    : await runGit(["diff", "--numstat", "--cached", "--"], resolvedCwd);
+  const worktreeDiffResult = headResult.ok
+    ? null
+    : await runGit(["diff", "--numstat", "--"], resolvedCwd);
+  const untrackedResult = await runGit(
+    ["ls-files", "--others", "--exclude-standard", "--full-name", "-z"],
+    resolvedCwd
+  );
+  const trackedDiffStats = diffResult.ok
     ? parseDiffNumstat(diffResult.stdout)
     : { insertions: 0, deletions: 0 };
+  const worktreeDiffStats = worktreeDiffResult?.ok
+    ? parseDiffNumstat(worktreeDiffResult.stdout)
+    : { insertions: 0, deletions: 0 };
+  const untrackedDiffStats = {
+    insertions: untrackedResult.ok
+      ? countUntrackedInsertions(root || resolvedCwd, untrackedResult.stdout)
+      : 0,
+    deletions: 0
+  };
+  const diffStats = mergeDiffStats(
+    trackedDiffStats,
+    worktreeDiffStats,
+    untrackedDiffStats
+  );
 
   return parseCodeChangeStatus(statusResult.stdout, {
     cwd: resolvedCwd,
@@ -276,8 +361,10 @@ async function getCodeChangeSummary(cwd) {
 }
 
 module.exports = {
+  countTextFileLines,
   getCodeChangeSummary,
   parseBranchLine,
   parseCodeChangeStatus,
-  parseDiffNumstat
+  parseDiffNumstat,
+  parseNullSeparatedPaths
 };

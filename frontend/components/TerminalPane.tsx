@@ -507,6 +507,18 @@ export default function TerminalPane({
     });
 
     const removeListener = window.vibe?.terminal.onEvent((event) => {
+      if (event.type === "host-error" || event.type === "host-exit") {
+        if ("id" in event && event.id && event.id !== session.id) {
+          return;
+        }
+
+        terminal.writeln("");
+        terminal.writeln(`\x1b[31m${event.message}\x1b[0m`, scheduleTerminalRepaint);
+        clearIdleTimer();
+        setStatus("failed");
+        return;
+      }
+
       if (!("id" in event) || event.id !== session.id) {
         return;
       }

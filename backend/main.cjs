@@ -48,6 +48,7 @@ let updateState = {
   status: app.isPackaged ? "idle" : "disabled",
   updatedAt: Date.now()
 };
+const FUSION_MODEL_ID_PATTERN = /^[A-Za-z0-9._:/@+-]+$/;
 
 function getAutoUpdater() {
   if (!autoUpdater) {
@@ -392,6 +393,15 @@ async function findLatestAgentThread(payload) {
 }
 
 function broadcastTerminalEvent(event) {
+  if (
+    event?.type === "fusion-activity" &&
+    event.id &&
+    fusionChatHost &&
+    fusionChatHost.stdin.writable
+  ) {
+    sendToFusionChatHost({ type: "activity", payload: event });
+  }
+
   BrowserWindow.getAllWindows().forEach((window) => {
     window.webContents.send("terminal:event", event);
   });
@@ -401,12 +411,14 @@ function sendToPtyHost(message) {
   if (!ptyHost || !ptyHost.stdin.writable) {
     broadcastTerminalEvent({
       type: "host-error",
+      id: message?.payload?.id,
       message: "PTY host is not running."
     });
-    return;
+    return false;
   }
 
   ptyHost.stdin.write(`${JSON.stringify(message)}\n`);
+  return true;
 }
 
 function sendResizeToPtyHost(payload) {
@@ -566,16 +578,28 @@ function startFusionChatHost() {
     windowsHide: true
   });
   fusionChatHost.stdout.on("data", parseFusionChatHostOutput);
-  fusionChatHost.stderr.on("data", () => {});
+  fusionChatHost.stderr.on("data", (chunk) => {
+    const message = chunk.toString("utf8").trim();
+    if (message) {
+      broadcastFusionChatEvent({
+        type: "host-error",
+        message: `Fusion chat host error: ${message}`
+      });
+    }
+  });
   fusionChatHost.on("error", (error) => {
     broadcastFusionChatEvent({
       type: "host-error",
       message: `Fusion chat host failed: ${error.message}`
     });
   });
-  fusionChatHost.on("exit", () => {
+  fusionChatHost.on("exit", (code, signal) => {
     fusionChatHost = null;
     fusionChatHostBuffer = "";
+    broadcastFusionChatEvent({
+      type: "host-error",
+      message: `Fusion chat host exited (${code ?? signal ?? "unknown"}).`
+    });
   });
 }
 
@@ -585,6 +609,39 @@ function sendToFusionChatHost(message) {
   }
   fusionChatHost.stdin.write(`${JSON.stringify(message)}\n`);
   return true;
+}
+
+function normalizeFusionString(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function normalizeFusionModelId(value, fallback) {
+  const model = normalizeFusionString(value);
+  if (!model || model.length > 96 || !FUSION_MODEL_ID_PATTERN.test(model)) {
+    return fallback;
+  }
+  return model;
+}
+
+function normalizeFusionModel(value) {
+  const model = normalizeFusionModelId(value, "opus");
+  const lower = model.toLowerCase();
+  if (lower === "sonnet" || lower === "fast") return "sonnet";
+  if (lower === "opus") return "opus";
+  return model;
+}
+
+function normalizeFusionCodexModel(value) {
+  const model = normalizeFusionModelId(value, "auto");
+  const lower = model.toLowerCase();
+  return lower === "auto" || lower === "default" ? undefined : model;
+}
+
+function normalizeFusionEffort(value) {
+  const effort = normalizeFusionString(value)?.toLowerCase();
+  return ["low", "medium", "high", "xhigh", "max"].includes(effort)
+    ? effort
+    : undefined;
 }
 
 function resolveAgentThreadRequest(requestId, result) {
@@ -872,14 +929,13 @@ ipcMain.handle("terminal:create", async (_event, payload) => {
     telemetry.ensureCursorProjectHooks(payload.cwd).catch(() => {});
   }
 
-  sendToPtyHost({
+  return sendToPtyHost({
     type: "create",
     payload: {
       ...payload,
       instrumentation
     }
   });
-  return true;
 });
 
 ipcMain.handle("fusion-chat:start", async (_event, payload) => {
@@ -890,28 +946,44 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
   try {
     const codexBin = resolveCodexBin();
     startFusionChatHost();
+    const fusionModel = normalizeFusionModel(payload.model);
+    const payloadCodexModel =
+      typeof payload.codexModel === "string" ? payload.codexModel.trim() : "";
+    const rawCodexModel =
+      payloadCodexModel &&
+      payloadCodexModel.toLowerCase() !== "auto" &&
+      payloadCodexModel.toLowerCase() !== "default"
+        ? payloadCodexModel
+        : process.env.VIBE_FUSION_CODEX_MODEL;
+    const fusionCodexModel = normalizeFusionCodexModel(rawCodexModel);
+    const fusionEffort = normalizeFusionEffort(payload.effort);
     const telemetry = getAgentTelemetry();
     const files = await telemetry.prepareFusionFiles(id, {
       cwd: payload.cwd,
       codexBin,
-      codexModel: process.env.VIBE_FUSION_CODEX_MODEL || undefined
+      codexModel: fusionCodexModel,
+      codexEffort: fusionEffort
     });
     if (!files) {
       return { ok: false, error: "could not prepare Fusion files" };
     }
-    sendToFusionChatHost({
+    const sent = sendToFusionChatHost({
       type: "start",
       payload: {
         id,
         cwd: payload.cwd,
         mcpConfig: files.mcpConfig,
         systemPromptFile: files.systemPromptFile,
-        model: payload.model || "opus",
+        model: fusionModel,
+        effort: fusionEffort,
         allowedTools:
           "mcp__fusion-codex__codex_implement,mcp__fusion-codex__codex_respond,Bash,Read,Glob,Grep,Edit,MultiEdit,Write",
         resumeId: payload.resumeId || undefined
       }
     });
+    if (!sent) {
+      return { ok: false, error: "Fusion chat host is not running." };
+    }
     return { ok: true };
   } catch (error) {
     return { ok: false, error: error.message };
@@ -927,7 +999,17 @@ ipcMain.handle("fusion-chat:stop", (_event, payload) => {
 
 ipcMain.on("fusion-chat:input", (_event, payload) => {
   if (payload?.id && typeof payload.text === "string") {
-    sendToFusionChatHost({ type: "input", payload: { id: payload.id, text: payload.text } });
+    const sent = sendToFusionChatHost({
+      type: "input",
+      payload: { id: payload.id, text: payload.text }
+    });
+    if (!sent) {
+      broadcastFusionChatEvent({
+        id: payload.id,
+        type: "error",
+        message: "Fusion chat host is not running. Restart Fusion to continue."
+      });
+    }
   }
 });
 
