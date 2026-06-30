@@ -46,6 +46,7 @@ import {
 } from "./sessionLaunch";
 import type {
   AgentAttentionEvent,
+  AgentBackgroundActivity,
   AgentKind,
   AgentProfile,
   AgentSession,
@@ -55,6 +56,7 @@ import type {
   FusionClaudeModel,
   FusionCodexModel,
   FusionEffort,
+  FusionRunMode,
   FusionChatEvent,
   FusionSettings,
   LayoutBox,
@@ -87,6 +89,7 @@ const CODE_CHANGE_REFRESH_MS = 7_500;
 const FUSION_MODEL_ID_PATTERN = /^[A-Za-z0-9._:/@+-]+$/;
 const DEFAULT_FUSION_CLAUDE_MODEL: FusionClaudeModel = "opus";
 const DEFAULT_FUSION_CODEX_MODEL: FusionCodexModel = "auto";
+const DEFAULT_FUSION_RUN_MODE: FusionRunMode = "auto";
 const FUSION_EFFORT_VALUES: FusionEffort[] = [
   "auto",
   "low",
@@ -335,6 +338,31 @@ function normalizeFusionEffort(value: unknown): FusionEffort {
     : "auto";
 }
 
+function normalizeFusionRunMode(value: unknown): FusionRunMode {
+  return String(value || "").trim().toLowerCase() === "plan" ? "plan" : DEFAULT_FUSION_RUN_MODE;
+}
+
+function normalizeBackgroundActivity(
+  activity?: AgentBackgroundActivity
+): AgentBackgroundActivity | undefined {
+  const active = activity?.active === true;
+  const count = Math.max(
+    0,
+    Math.floor(finiteNumber(activity?.count, active ? 1 : 0))
+  );
+  if (!active || count <= 0) {
+    return undefined;
+  }
+
+  return {
+    ...activity,
+    active: true,
+    count,
+    updatedAt: finiteNumber(activity?.updatedAt, Date.now()),
+    items: Array.isArray(activity.items) ? activity.items : []
+  };
+}
+
 function normalizeSessionStatus(value: unknown) {
   return ["idle", "starting", "running", "waiting", "done", "failed"].includes(
     value as string
@@ -484,6 +512,7 @@ function createSession(
     fusionCodexModel: isFusion ? DEFAULT_FUSION_CODEX_MODEL : undefined,
     fusionClaudeEffort: isFusion ? "auto" : undefined,
     fusionCodexEffort: isFusion ? "auto" : undefined,
+    fusionRunMode: isFusion ? DEFAULT_FUSION_RUN_MODE : undefined,
     fusionEffort: undefined,
     command: profile.command,
     cwd,
@@ -583,6 +612,9 @@ function restoreSession(session: AgentSession): AgentSession {
     fusionCodexEffort: isFusion
       ? normalizeFusionEffort(session.fusionCodexEffort ?? session.fusionEffort)
       : session.fusionCodexEffort,
+    fusionRunMode: isFusion
+      ? normalizeFusionRunMode(session.fusionRunMode)
+      : session.fusionRunMode,
     fusionEffort: isFusion
       ? undefined
       : session.fusionEffort,
@@ -591,6 +623,7 @@ function restoreSession(session: AgentSession): AgentSession {
     threadLookupMessage: undefined,
     status: shouldAutoStart ? "idle" : previousStatus,
     attention: normalizeAttention(session.attention),
+    backgroundActivity: undefined,
     layout: migrateLayout(session.layout)
   };
 }
@@ -934,6 +967,11 @@ export default function App() {
         applyAgentRunning(event.id);
       }
 
+      if (event.type === "agent-background-activity") {
+        applyAgentBackgroundActivity(event.id, event.backgroundActivity);
+        return;
+      }
+
       if ("id" in event && typeof event.id === "string") {
         // Output ("data") no longer drives the working/idle pill from here: a
         // pane's working state comes from turn telemetry (claude/opencode) or
@@ -1159,19 +1197,37 @@ export default function App() {
   // legitimately supersedes the previous result — and drop any stale unread dot.
   function applyAgentRunning(sessionId: string) {
     updateAnySession(sessionId, (session) => {
-      if (session.status === "running" && !session.attention?.unread) {
+      if (session.status === "running" && !session.attention?.unread && !session.backgroundActivity) {
         return session;
       }
 
       return {
         ...session,
         status: "running",
+        backgroundActivity: undefined,
         attention: {
           state: "none",
           unread: false,
           updatedAt: Date.now(),
           source: "provider"
         }
+      };
+    });
+  }
+
+  function applyAgentBackgroundActivity(
+    sessionId: string,
+    activity: AgentBackgroundActivity
+  ) {
+    const backgroundActivity = normalizeBackgroundActivity(activity);
+    updateAnySession(sessionId, (session) => {
+      if (!backgroundActivity && !session.backgroundActivity) {
+        return session;
+      }
+
+      return {
+        ...session,
+        backgroundActivity
       };
     });
   }
@@ -1396,7 +1452,8 @@ export default function App() {
             threadLookupStatus: canResume ? "found" : "idle",
             threadLookupMessage: undefined,
             status: "idle",
-            attention: EMPTY_ATTENTION
+            attention: EMPTY_ATTENTION,
+            backgroundActivity: undefined
           };
         })
       );
@@ -1417,7 +1474,8 @@ export default function App() {
         return {
           ...session,
           status: "running",
-          attention: EMPTY_ATTENTION
+          attention: EMPTY_ATTENTION,
+          backgroundActivity: undefined
         };
       });
       return;
@@ -1437,7 +1495,7 @@ export default function App() {
     if (event.type === "tool-call") {
       fusionBridgeToolRef.current.set(
         `${event.id}:${event.toolId}`,
-        /codex_implement|codex_respond/.test(event.name)
+        /codex_investigate|codex_implement|codex_respond/.test(event.name)
       );
       return;
     }
@@ -1475,7 +1533,7 @@ export default function App() {
       } else if (parsed) {
         updateAnySession(event.id, (session) =>
           session.fusion && session.status === "waiting"
-            ? { ...session, status: "running", attention: EMPTY_ATTENTION }
+            ? { ...session, status: "running", attention: EMPTY_ATTENTION, backgroundActivity: undefined }
             : session
         );
       }
@@ -1484,8 +1542,14 @@ export default function App() {
 
     if (event.type === "result") {
       updateAnySession(event.id, (session) => {
-        if (!session.fusion || session.status === "waiting") {
+        if (!session.fusion) {
           return session;
+        }
+
+        if (session.status === "waiting") {
+          return session.backgroundActivity
+            ? { ...session, backgroundActivity: undefined }
+            : session;
         }
 
         const attentionEvent: AgentAttentionEvent = {
@@ -1498,6 +1562,7 @@ export default function App() {
         return {
           ...session,
           status: reconcileStatus(session.status, "done"),
+          backgroundActivity: undefined,
           attention: attentionFromEvent(
             attentionEvent,
             shouldMarkFusionAttentionUnread(event.id, attentionEvent)
@@ -1509,7 +1574,7 @@ export default function App() {
 
     if (event.type === "interrupted") {
       updateAnySession(event.id, (session) =>
-        session.fusion ? { ...session, status: "waiting" } : session
+        session.fusion ? { ...session, status: "waiting", backgroundActivity: undefined } : session
       );
       return;
     }
@@ -1527,8 +1592,14 @@ export default function App() {
 
     if (event.type === "closed") {
       updateAnySession(event.id, (session) => {
-        if (!session.fusion || session.status !== "running") {
+        if (!session.fusion) {
           return session;
+        }
+
+        if (session.status !== "running") {
+          return session.backgroundActivity
+            ? { ...session, backgroundActivity: undefined }
+            : session;
         }
 
         const message =
@@ -1546,6 +1617,7 @@ export default function App() {
         return {
           ...session,
           status: "failed",
+          backgroundActivity: undefined,
           attention: attentionFromEvent(
             attentionEvent,
             shouldMarkFusionAttentionUnread(event.id, attentionEvent)
@@ -1594,6 +1666,10 @@ export default function App() {
         status: attentionStatus
           ? reconcileStatus(session.status, attentionStatus)
           : session.status,
+        backgroundActivity:
+          attentionEvent.state === "completed" || attentionEvent.state === "failed"
+            ? undefined
+            : session.backgroundActivity,
         attention: attentionFromEvent(
           attentionEvent,
           shouldMarkFusionAttentionUnread(sessionId, attentionEvent)
@@ -1658,7 +1734,8 @@ export default function App() {
             threadLookupStatus: "found",
             threadLookupMessage: undefined,
             status: "idle",
-            attention: EMPTY_ATTENTION
+            attention: EMPTY_ATTENTION,
+            backgroundActivity: undefined
           };
         })
       );
@@ -1693,7 +1770,8 @@ export default function App() {
             threadLookupStatus: "idle",
             threadLookupMessage: undefined,
             status: "idle",
-            attention: EMPTY_ATTENTION
+            attention: EMPTY_ATTENTION,
+            backgroundActivity: undefined
           };
         })
       );
@@ -1709,6 +1787,35 @@ export default function App() {
       return;
     }
 
+    const nextFusionModel = normalizeFusionModel(settings.model);
+    const nextFusionCodexModel = normalizeFusionCodexModel(settings.codexModel);
+    const nextFusionClaudeEffort = normalizeFusionEffort(settings.claudeEffort);
+    const nextFusionCodexEffort = normalizeFusionEffort(settings.codexEffort);
+    const nextFusionRunMode = normalizeFusionRunMode(settings.mode);
+    const currentFusionModel = normalizeFusionModel(session.fusionModel);
+    const currentFusionCodexModel = normalizeFusionCodexModel(session.fusionCodexModel);
+    const currentFusionClaudeEffort = normalizeFusionEffort(
+      session.fusionClaudeEffort ?? session.fusionEffort
+    );
+    const currentFusionCodexEffort = normalizeFusionEffort(
+      session.fusionCodexEffort ?? session.fusionEffort
+    );
+    const requiresRestart =
+      nextFusionModel !== currentFusionModel ||
+      nextFusionClaudeEffort !== currentFusionClaudeEffort;
+    const codexSettingsChanged =
+      nextFusionCodexModel !== currentFusionCodexModel ||
+      nextFusionCodexEffort !== currentFusionCodexEffort;
+
+    if (session.started && !requiresRestart && codexSettingsChanged) {
+      window.vibe?.fusionChat
+        ?.updateSettings(session.id, {
+          codexModel: nextFusionCodexModel,
+          codexEffort: nextFusionCodexEffort
+        })
+        .catch(() => {});
+    }
+
     const applySettings = () => {
       updateScopeSessions(scope, (sessions) =>
         sessions.map((item) => {
@@ -1720,30 +1827,28 @@ export default function App() {
             ? item.threadRef
             : undefined;
           const previousClaudeRef = sessionResumeRef(item);
-          const fusionModel = normalizeFusionModel(settings.model);
-          const fusionCodexModel = normalizeFusionCodexModel(settings.codexModel);
-          const fusionClaudeEffort = normalizeFusionEffort(settings.claudeEffort);
-          const fusionCodexEffort = normalizeFusionEffort(settings.codexEffort);
+          const relaunchResumeRef = currentClaudeRef ?? previousClaudeRef;
           return {
             ...item,
-            fusionModel,
-            fusionCodexModel,
-            fusionClaudeEffort,
-            fusionCodexEffort,
+            fusionModel: nextFusionModel,
+            fusionCodexModel: nextFusionCodexModel,
+            fusionClaudeEffort: nextFusionClaudeEffort,
+            fusionCodexEffort: nextFusionCodexEffort,
+            fusionRunMode: nextFusionRunMode,
             fusionEffort: undefined,
-            ...(item.fusion
+            ...(requiresRestart && item.fusion
               ? {
-                  threadRef: undefined,
-                  resumeRef: currentClaudeRef ?? previousClaudeRef
+                  threadRef: relaunchResumeRef,
+                  resumeRef: currentClaudeRef ? previousClaudeRef : undefined
                 }
               : {}),
-            ...(item.started
+            ...(requiresRestart && item.started
               ? {
                   started: true,
                   launchToken: item.launchToken + 1,
-                  nextLaunchMode: "new",
+                  nextLaunchMode: relaunchResumeRef?.id ? "resume" : "new",
                   threadLookupStartedAt: undefined,
-                  threadLookupStatus: "idle",
+                  threadLookupStatus: relaunchResumeRef?.id ? "found" : "idle",
                   threadLookupMessage: undefined,
                   status: "idle" as const,
                   attention: EMPTY_ATTENTION
@@ -1754,7 +1859,7 @@ export default function App() {
       );
     };
 
-    if (session.started) {
+    if (session.started && requiresRestart) {
       stopSessionProcess(session).then(applySettings);
     } else {
       applySettings();

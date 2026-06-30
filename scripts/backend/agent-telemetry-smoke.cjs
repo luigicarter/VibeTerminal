@@ -244,6 +244,33 @@ function postWithBadToken(callbackUrl) {
   });
 }
 
+function postTelemetry(callbackUrl, token, payload) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(callbackUrl);
+    const body = JSON.stringify(payload);
+    const request = http.request(
+      {
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(body),
+          "x-vibe-telemetry-token": token
+        }
+      },
+      (response) => {
+        response.resume();
+        response.on("end", () => resolve(response.statusCode));
+      }
+    );
+
+    request.on("error", reject);
+    request.end(body);
+  });
+}
+
 (async () => {
   let manager = null;
   const previousPath = process.env.Path ?? process.env.PATH ?? "";
@@ -584,6 +611,29 @@ function postWithBadToken(callbackUrl) {
           event.type === "agent-attention" && event.id === "pane-running"
       ),
       "agent.running must not raise an attention/unread event"
+    );
+
+    const backgroundStatus = await postTelemetry(manager.callbackUrl(), "test-token", {
+      type: "agent.backgroundActivity",
+      sessionId: "pane-background",
+      provider: "claude",
+      backgroundActivity: {
+        active: true,
+        count: 2,
+        source: "opus",
+        items: [{ id: "agent-1", label: "Review API", source: "opus" }],
+        updatedAt: 123
+      }
+    });
+    assert(backgroundStatus === 204, "background activity telemetry should be accepted");
+    assert(
+      events.some(
+        (event) =>
+          event.type === "agent-background-activity" &&
+          event.id === "pane-background" &&
+          event.backgroundActivity.count === 2
+      ),
+      "agent.backgroundActivity should produce a background activity status event"
     );
 
     // --- Cursor: one notify program backs both hooks. The running hook passes

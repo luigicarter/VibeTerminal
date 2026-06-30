@@ -32,7 +32,8 @@ async function main() {
       cwd: process.cwd(),
       codexBin,
       codexModel: "gpt-5.5",
-      codexEffort: "xhigh"
+      codexEffort: "xhigh",
+      runMode: "plan"
     });
     assert(files, "prepareFusionFiles returned null");
 
@@ -54,8 +55,13 @@ async function main() {
     assert(/Codex verifier override/.test(prompt), "system prompt missing explicit override rule");
     assert(/Picture\/image generation/i.test(prompt), "system prompt must route image generation to Codex");
     assert(/browser navigation\/control\/automation/i.test(prompt), "system prompt must route browser control to Codex");
-    assert(/READ-ONLY tools/i.test(prompt), "system prompt must declare Opus read-only so it delegates implementation");
-    assert(/MUST go through/i.test(prompt), "system prompt must require routing every code change through codex_implement");
+    assert(/Edit, Write/i.test(prompt), "system prompt must allow Claude direct UI/frontend writes");
+    assert(/Full-file replacement is still valid/i.test(prompt), "system prompt must allow justified full-file replacements through Codex");
+    assert(/Speed and exploration routing/i.test(prompt), "system prompt must include Codex-fed exploration guidance");
+    assert(/exploratory work, file fetching, large searches/i.test(prompt), "system prompt must route broad exploration through Codex");
+    assert(/Bash is blocked/i.test(prompt), "system prompt must state Bash is blocked for Claude");
+    assert(/ALL execution work goes through Codex/i.test(prompt), "system prompt must route execution through Codex");
+    assert(/Read\/Grep\/Glob/i.test(prompt), "system prompt must keep read-only review through Read/Grep/Glob");
 
     assert(files.mcpConfig && fs.existsSync(files.mcpConfig), "missing mcp config");
     const mcp = JSON.parse(fs.readFileSync(files.mcpConfig, "utf8"));
@@ -78,18 +84,36 @@ async function main() {
       adapter.env.CODEX_HOME && adapter.env.CODEX_HOME.endsWith(".codex"),
       "adapter env missing CODEX_HOME (needed so the embedded binary reuses the user's login)"
     );
+    assert(files.settingsFile && fs.existsSync(files.settingsFile), "missing Fusion Codex settings file");
+    const fusionSettings = JSON.parse(fs.readFileSync(files.settingsFile, "utf8"));
+    assert(fusionSettings.codexModel === "gpt-5.5", "settings file missing the selected Codex model");
+    assert(fusionSettings.codexEffort === "xhigh", "settings file missing the selected Codex effort");
     assert(
-      adapter.env.VIBE_FUSION_CODEX_MODEL === "gpt-5.5",
-      "adapter env missing the selected Codex model"
+      adapter.env.VIBE_FUSION_CODEX_SETTINGS === files.settingsFile,
+      "adapter env should pass the live Codex settings file path"
     );
     assert(
-      adapter.env.VIBE_FUSION_CODEX_EFFORT === "xhigh",
-      "adapter env missing the selected Codex effort"
+      !Object.prototype.hasOwnProperty.call(adapter.env, "VIBE_FUSION_CODEX_MODEL") &&
+        !Object.prototype.hasOwnProperty.call(adapter.env, "VIBE_FUSION_CODEX_EFFORT"),
+      "adapter env must not freeze Codex model/effort at process launch"
+    );
+    assert(
+      adapter.env.VIBE_FUSION_RUN_MODE === "plan",
+      "adapter env missing the selected Fusion run mode"
+    );
+    assert(
+      adapter.env.VIBE_FUSION_RUN_MODE_FILE &&
+        fs.readFileSync(adapter.env.VIBE_FUSION_RUN_MODE_FILE, "utf8").trim() === "plan",
+      "adapter env missing the persisted Fusion run mode file"
     );
 
     assert(
-      buildFusionSystemPrompt().includes("codex_implement"),
-      "buildFusionSystemPrompt is missing the delegation instructions"
+      buildFusionSystemPrompt().includes("File edit decision policy") &&
+        buildFusionSystemPrompt().includes("Speed and exploration routing") &&
+        buildFusionSystemPrompt().includes("codex_implement") &&
+        buildFusionSystemPrompt().includes("Bash is blocked") &&
+        buildFusionSystemPrompt().includes("Edit, Write"),
+      "buildFusionSystemPrompt is missing the UI-write/speed routing instructions"
     );
     assert(
       buildFusionSystemPrompt().includes("goalReached"),
@@ -100,16 +124,27 @@ async function main() {
       "buildFusionSystemPrompt is missing protected native goal status behavior"
     );
     const mainSource = fs.readFileSync(path.join(rootDir, "backend", "main.cjs"), "utf8");
-    const allowMatch = mainSource.match(/allowedTools:\s*\n?\s*"([^"]+)"/);
-    assert(allowMatch, "Fusion allowedTools string not found in main.cjs");
-    const allowList = allowMatch[1].split(",").map((tool) => tool.trim());
+    assert(/function fusionClaudeAllowedTools/.test(mainSource), "Fusion allowed tools helper not found in main.cjs");
+    assert(/function fusionClaudeTools/.test(mainSource), "Fusion --tools helper not found in main.cjs");
+    function extractStringArrayConst(source, constName) {
+      const match = source.match(new RegExp(`const\\s+${constName}\\s*=\\s*\\[([\\s\\S]*?)\\];`));
+      assert(match, `${constName} not found in main.cjs`);
+      return [...match[1].matchAll(/"([^"]+)"/g)].map((item) => item[1]);
+    }
+    const bridgeTools = extractStringArrayConst(mainSource, "FUSION_CODEX_BRIDGE_TOOLS");
+    const uiWriteTools = extractStringArrayConst(mainSource, "FUSION_CLAUDE_UI_WRITE_TOOLS");
+    const allowList = ["Read", "Glob", "Grep", ...uiWriteTools, ...bridgeTools];
     assert(
-      !allowList.some((tool) => /^(Edit|MultiEdit|Write|NotebookEdit|Bash)$/.test(tool)),
-      "Fusion Claude allowlist must NOT grant direct edit/shell tools (implementation routes through Codex)"
+      ["Edit", "Write"].every((tool) => allowList.includes(tool)) && !allowList.includes("Bash"),
+      "Fusion Claude allowlist should grant UI write tools while keeping Bash out"
     );
     assert(
       !allowList.some((tool) => /(?:image|picture|browser|chrome|webfetch|websearch)/i.test(tool)),
       "Fusion Claude allowlist must NOT grant direct image-generation or browser-control tools"
+    );
+    assert(
+      ["Read", "Glob", "Grep"].every((tool) => allowList.includes(tool)),
+      "Fusion allowlist should expose Read/Glob/Grep for read-only investigation"
     );
     assert(
       ["codex_goal_set", "codex_goal_get", "codex_goal_clear"].every((tool) =>
@@ -118,18 +153,23 @@ async function main() {
       "Fusion allowlist should expose the codex_goal_* native-goal tools so the prompt's goal instructions work"
     );
     assert(
-      /disallowedTools:\s*"Edit,Write,Bash"/.test(mainSource),
-      "Fusion Claude must hard-block stable direct edit/shell tools via --disallowedTools"
+      allowList.some((entry) => entry.includes("codex_investigate")),
+      "Fusion allowlist should expose codex_investigate for Codex-fed exploration"
     );
     assert(
-      !/disallowedTools:\s*"[^"]*(?:MultiEdit|NotebookEdit)/.test(mainSource),
-      "Fusion disallowedTools should avoid optional tool names that some Claude builds warn about"
+      /disallowedTools:\s*"Bash"/.test(mainSource),
+      "Fusion Claude must hard-block Bash via --disallowedTools"
+    );
+    assert(
+      /tools:\s*fusionClaudeTools\(\)/.test(mainSource) && /strictMcpConfig:\s*true/.test(mainSource),
+      "Fusion launch should restrict Claude built-ins with --tools and isolate MCP with --strict-mcp-config"
     );
     assert(
       /normalizeFusionModel/.test(mainSource) &&
         /normalizeFusionCodexModel/.test(mainSource) &&
-        /normalizeFusionEffort/.test(mainSource),
-      "Fusion launch should normalize Claude model, Codex model, and effort controls"
+        /normalizeFusionEffort/.test(mainSource) &&
+        /normalizeFusionRunMode/.test(mainSource),
+      "Fusion launch should normalize Claude model, Codex model, effort controls, and run mode"
     );
     assert(
       /payload\.codexEffort \?\? payload\.effort/.test(mainSource) &&
@@ -139,9 +179,27 @@ async function main() {
     );
     assert(
       /steerFusionSession\(payload\.id, payload\.text\)/.test(mainSource) &&
-        /interruptFusionSession\(payload\.id\)/.test(mainSource),
-      "Fusion main process should route steer/interrupt to the terminal-scoped adapter control path"
+        /interruptFusionSession\(payload\.id\)/.test(mainSource) &&
+        /setFusionSessionMode\(payload\.id, mode\)/.test(mainSource) &&
+        /fusion-chat:update-settings/.test(mainSource) &&
+        /updateFusionSettings\(payload\.id/.test(mainSource),
+      "Fusion main process should route steer/interrupt/mode/live settings to the terminal-scoped adapter control path"
     );
+    const agentTelemetrySource = fs.readFileSync(path.join(rootDir, "backend", "agentTelemetry.cjs"), "utf8");
+    assert(
+      /VIBE_FUSION_RUN_MODE: runMode/.test(agentTelemetrySource) &&
+        /VIBE_FUSION_RUN_MODE_FILE: runModeFile/.test(agentTelemetrySource) &&
+        /setFusionSessionMode/.test(agentTelemetrySource),
+      "Fusion telemetry should persist and update per-session run mode"
+    );
+    const hostSource = fs.readFileSync(path.join(rootDir, "backend", "fusionChatHost.cjs"), "utf8");
+    assert(
+      /FUSION PLAN MODE IS ACTIVE/.test(hostSource) &&
+        /msg\.type === "mode"/.test(hostSource) &&
+        /buildFusionInputContent\(text, normalizeFusionRunMode\(state\.mode\), steer\)/.test(hostSource),
+      "Fusion chat host should apply the Plan mode read-only turn directive"
+    );
+
     assert(
       /payloadCodexModel/.test(mainSource) &&
         /payloadCodexModel\.toLowerCase\(\) !== "auto"/.test(mainSource) &&

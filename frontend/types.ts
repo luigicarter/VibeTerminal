@@ -22,7 +22,10 @@ export type FusionCodexModel = string;
 
 export type FusionEffort = "auto" | "low" | "medium" | "high" | "xhigh" | "max";
 
+export type FusionRunMode = "auto" | "plan";
+
 export interface FusionSettings {
+  mode: FusionRunMode;
   model: FusionClaudeModel;
   codexModel: FusionCodexModel;
   claudeEffort: FusionEffort;
@@ -77,6 +80,23 @@ export interface AgentAttentionEvent {
   updatedAt: number;
   source: AgentAttentionSource;
   message?: string;
+}
+
+export type AgentBackgroundActivitySource = "opus" | "codex";
+
+export interface AgentBackgroundActivityItem {
+  id: string;
+  label: string;
+  detail?: string;
+  source?: AgentBackgroundActivitySource;
+}
+
+export interface AgentBackgroundActivity {
+  active: boolean;
+  count: number;
+  updatedAt: number;
+  source?: AgentBackgroundActivitySource;
+  items?: AgentBackgroundActivityItem[];
 }
 
 export interface AgentProfile {
@@ -143,6 +163,7 @@ export interface AgentSession {
   fusionCodexModel?: FusionCodexModel;
   fusionClaudeEffort?: FusionEffort;
   fusionCodexEffort?: FusionEffort;
+  fusionRunMode?: FusionRunMode;
   // Legacy shared effort field from older saved Fusion panes. New panes store
   // separate Opus/Codex effort values but keep this readable for migration.
   fusionEffort?: FusionEffort;
@@ -162,6 +183,7 @@ export interface AgentSession {
   launchToken: number;
   status: SessionStatus;
   attention?: AgentAttention;
+  backgroundActivity?: AgentBackgroundActivity;
   layout: LayoutBox;
 }
 
@@ -264,6 +286,12 @@ export type TerminalEvent =
   | { id: string; type: "agent-running"; provider?: string }
   | {
       id: string;
+      type: "agent-background-activity";
+      provider?: string;
+      backgroundActivity: AgentBackgroundActivity;
+    }
+  | {
+      id: string;
       type: "fusion-activity";
       role: "opus" | "codex";
       kind: string;
@@ -294,6 +322,7 @@ export type FusionChatEvent =
   | { id: string; type: "tool-call"; toolId: string; name: string; input: unknown }
   | { id: string; type: "tool-result"; toolId: string; text: string }
   | { id: string; type: "activity"; role: "opus" | "codex"; kind: string; text?: string }
+  | { id: string; type: "background-activity"; backgroundActivity: AgentBackgroundActivity }
   | { id: string; type: "turn-end" }
   | { id: string; type: "result"; subtype?: string; costUsd?: number }
   | { id: string; type: "interrupted" }

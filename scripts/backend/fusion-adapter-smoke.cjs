@@ -15,6 +15,7 @@ const adapterPath = path.join(__dirname, "..", "..", "backend", "fusion-adapter.
 const isWin = process.platform === "win32";
 const {
   VERDICT_MARKER,
+  buildCodexInvestigationTask,
   buildCodexVerifierTask,
   extractVerifierVerdict,
   goalStatusForVerdict,
@@ -22,6 +23,7 @@ const {
   normalizeGoalStatus,
   shouldAutoSyncGoalStatus,
   shouldReplaceGoalForTask,
+  summarizeAgentMessageForDisplay,
   stripVerifierVerdictFromSummary,
   turnErrorMessage
 } = require(adapterPath);
@@ -74,6 +76,11 @@ function main() {
           // best-effort
         }
       }
+      try {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      } catch {
+        // best-effort
+      }
     }
 
     child.on("error", (error) => {
@@ -95,7 +102,7 @@ function main() {
           continue;
         }
         if (msg.id !== undefined) responses.set(msg.id, msg);
-        if (responses.has(1) && responses.has(2)) {
+        if (responses.has(1) && responses.has(2) && responses.has(3)) {
           try {
             const init = responses.get(1);
             assert(
@@ -112,6 +119,7 @@ function main() {
             assert(names.includes("codex_goal_set"), "tools/list missing codex_goal_set");
             assert(names.includes("codex_goal_get"), "tools/list missing codex_goal_get");
             assert(names.includes("codex_goal_clear"), "tools/list missing codex_goal_clear");
+            assert(names.includes("codex_investigate"), "tools/list missing codex_investigate");
             assert(names.includes("codex_implement"), "tools/list missing codex_implement");
             assert(names.includes("codex_respond"), "tools/list missing codex_respond");
             assert(names.includes("codex_cancel"), "tools/list missing codex_cancel");
@@ -151,10 +159,32 @@ function main() {
               source.includes('config: { "features.goals": true }'),
               "adapter does not enable native Codex goals with the verified feature override"
             );
+            assert(
+              source.includes('sandbox: "danger-full-access"') &&
+                source.includes('approvalPolicy: "never"') &&
+                source.includes('sandboxPolicy: { type: "dangerFullAccess" }'),
+              "adapter should run Fusion Codex with full access and no routine approval prompts"
+            );
+            assert(
+              source.includes('sandboxPolicy: { type: "readOnly" }'),
+              "codex_investigate should use a read-only turn sandbox"
+            );
+            assert(
+              source.includes("function resetCodexProcessState") &&
+                source.includes("codexInitialized = false"),
+              "adapter should reset initialization state when replacing the Codex worker"
+            );
+            assert(
+              source.includes('const PLAN_MODE_ALLOWED_TOOLS = new Set(["codex_goal_get", "codex_investigate", "codex_cancel"])'),
+              "Plan mode should only allow read-only investigation, goal reads, and cancellation"
+            );
             assert(source.includes('rpc("thread/goal/set"'), "adapter does not call native goal set");
             assert(source.includes('rpc("thread/goal/get"'), "adapter does not call native goal get");
             assert(source.includes('rpc("thread/goal/clear"'), "adapter does not call native goal clear");
             assert(source.includes("buildCodexVerifierTask(task)"), "adapter does not wrap Codex tasks with the verifier contract");
+            const cancelResponseText = responses.get(3).result.content[0].text;
+            const cancelResponse = JSON.parse(cancelResponseText);
+            assert(cancelResponse.status === "cancelled", `codex_cancel call should succeed: ${cancelResponseText}`);
             assert(
               source.includes("VIBE_FUSION_EAGER_BOOT") &&
                 source.includes("warmupCodexThread") &&
@@ -223,6 +253,17 @@ function main() {
       })}\n`
     );
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" })}\n`);
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: {
+          name: "codex_cancel",
+          arguments: {}
+        }
+      })}\n`
+    );
   });
 }
 
@@ -604,6 +645,112 @@ function callAdapterToolWithFakeAppServer() {
   });
 }
 
+function callAdapterPlanModeRejectsImplement() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-adapter-plan-"));
+  const modeFile = path.join(tempDir, "run-mode.txt");
+  fs.writeFileSync(modeFile, "plan\n");
+  const child = spawn(process.execPath, [adapterPath], {
+    stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      VIBE_TERMINAL_SESSION_ID: "fusion-adapter-plan",
+      VIBE_FUSION_RUN_MODE: "auto",
+      VIBE_FUSION_RUN_MODE_FILE: modeFile
+    }
+  });
+
+  const responses = new Map();
+  let buffer = "";
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("timed out waiting for Plan mode refusal"));
+    }, 10000);
+
+    function cleanup() {
+      clearTimeout(timer);
+      try {
+        child.stdin.end();
+      } catch {
+        // ignore
+      }
+      try {
+        child.kill();
+      } catch {
+        // ignore
+      }
+      if (isWin && child.pid) {
+        try {
+          execFileSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+            stdio: "ignore"
+          });
+        } catch {
+          // best-effort
+        }
+      }
+      try {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      } catch {
+        // best-effort
+      }
+    }
+
+    child.on("error", (error) => {
+      cleanup();
+      reject(error);
+    });
+
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      let index;
+      while ((index = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, index).trim();
+        buffer = buffer.slice(index + 1);
+        if (!line) continue;
+        const msg = JSON.parse(line);
+        if (msg.id !== undefined) responses.set(msg.id, msg);
+        if (responses.has(2)) {
+          clearTimeout(timer);
+          try {
+            const response = responses.get(2);
+            const text = response.result.content[0].text;
+            const parsed = JSON.parse(text);
+            assert(parsed.status === "failed", "Plan mode should fail codex_implement: " + text);
+            assert(parsed.mode === "plan", "Plan mode refusal should report mode: " + text);
+            assert(/Plan mode is active/i.test(parsed.error), "Plan mode refusal should explain the gate: " + text);
+            cleanup();
+            resolve();
+          } catch (error) {
+            cleanup();
+            reject(error);
+          }
+        }
+      }
+    });
+
+    child.stdin.write(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "fusion-plan", version: "0.0.0" }
+        }
+      }) + "\n"
+    );
+    child.stdin.write(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "codex_implement", arguments: { task: "edit a file" } }
+      }) + "\n"
+    );
+  });
+}
 function writeApprovalResumeFakeAppServer(dir, options = {}) {
   const completeBeforeApprovalResponse = options.completeBeforeApprovalResponse === true;
   const queueSecondApproval = options.queueSecondApproval === true;
@@ -1515,12 +1662,12 @@ function assertAdapterRunsHostFree() {
             );
             const tools = responses.get(2).result && responses.get(2).result.tools ? responses.get(2).result.tools : [];
             const names = tools.map((t) => t.name);
-            for (const tool of ["codex_goal_set", "codex_goal_get", "codex_goal_clear", "codex_implement", "codex_respond", "codex_cancel"]) {
+            for (const tool of ["codex_goal_set", "codex_goal_get", "codex_goal_clear", "codex_investigate", "codex_implement", "codex_respond", "codex_cancel"]) {
               assert(names.includes(tool), `host-free tools/list missing ${tool}`);
             }
             const callText = responses.get(3).result.content[0].text;
             const parsed = JSON.parse(callText);
-            assert(parsed.status === "ok", `host-free tools/call round-trip should succeed: ${callText}`);
+            assert(parsed.status === "cancelled", `host-free tools/call round-trip should succeed: ${callText}`);
             cleanup();
             resolve();
           } catch (error) {
@@ -1549,7 +1696,7 @@ function assertAdapterRunsHostFree() {
         jsonrpc: "2.0",
         id: 3,
         method: "tools/call",
-        params: { name: "codex_goal_get", arguments: {} }
+        params: { name: "codex_cancel", arguments: {} }
       })}\n`
     );
   });
@@ -1595,6 +1742,11 @@ function assertGoalSchema() {
 }
 
 function assertVerifierHelpers() {
+  const investigation = buildCodexInvestigationTask("find relevant files");
+  assert(investigation.includes("read-only scouting pass"), "investigation task should be read-only");
+  assert(investigation.includes("Findings"), "investigation task should request findings");
+  assert(!investigation.includes(VERDICT_MARKER), "investigation task should not use verifier verdicts");
+
   const wrapped = buildCodexVerifierTask("implement the thing");
   assert(wrapped.includes(VERDICT_MARKER), "wrapped task missing verdict marker");
   assert(wrapped.includes("goalReached"), "wrapped task missing goalReached schema");
@@ -1701,6 +1853,20 @@ function assertVerifierHelpers() {
     turnErrorMessage({ error: null }, "fallback") === "fallback",
     "turnErrorMessage should fall back when the turn has no error payload"
   );
+  const codeDump =
+    "Writing generated code to frontend/src/components/Header.tsx\n" +
+    "```tsx\n" +
+    "import { Logo } from './Logo';\n" +
+    Array.from({ length: 90 }, (_, index) => `export const Row${index} = () => <div className="row-${index}" />;`).join("\n") +
+    "\n```";
+  assert(
+    summarizeAgentMessageForDisplay(codeDump) === "writing frontend/src/components/Header.tsx",
+    "large code-like agent messages should summarize to the target file"
+  );
+  assert(
+    summarizeAgentMessageForDisplay("Short status update.") === "Short status update.",
+    "short agent messages should pass through"
+  );
 }
 
 main()
@@ -1711,6 +1877,7 @@ main()
     await assertEagerBootStartsThread();
     await callAdapterToolDuringEagerBootUsesOneThreadStart();
     await callAdapterToolWithFakeAppServer();
+    await callAdapterPlanModeRejectsImplement();
     await assertAdapterRunsHostFree();
     await callAdapterApprovalResumeWithFakeAppServer();
     await callAdapterApprovalResumeWithFakeAppServer({ completeBeforeApprovalResponse: true });

@@ -12,6 +12,10 @@ const MAX_EVENT_BYTES = 64 * 1024;
 const MAX_SESSION_ID_BYTES = 512;
 const PROVIDERS = ["codex", "claude", "opencode", "cursor-agent"];
 
+function normalizeFusionRunMode(value) {
+  return String(value || "").trim().toLowerCase() === "plan" ? "plan" : "auto";
+}
+
 function pathEnvKey(env = process.env, platform = process.platform) {
   if (platform !== "win32") {
     return "PATH";
@@ -927,12 +931,12 @@ function stripCursorHooks(existing) {
 }
 
 // The architect system prompt a Fusion pane's claude is launched with
-// (`claude --append-system-prompt-file <file>`). Opus orchestrates with
-// READ-ONLY tools (Read/Grep/Glob) + the Codex bridge; it has no edit/shell
-// tools, so Codex implements and verifies everything through the app-server.
+// (`claude --append-system-prompt-file <file>`). Claude orchestrates and may
+// write UI/design/frontend code directly; Codex owns all execution and remains
+// the bug + goal-completion verifier.
 function buildFusionSystemPrompt() {
   return [
-    "# Terminal Fusion - you are the Claude/Opus orchestrator",
+    "# Terminal Fusion - you are the Claude orchestrator (Opus or Sonnet 5)",
     "",
     "You are running inside a **Fusion terminal**. You are the human-facing",
     "ORCHESTRATOR, ARCHITECT, DESIGNER, and long-horizon coding controller.",
@@ -940,37 +944,74 @@ function buildFusionSystemPrompt() {
     "and goal-completion verifier.",
     "",
     "## Tooling (read this first)",
-    "You have READ-ONLY tools for investigation — **Read, Grep, Glob** — plus the",
-    "Codex bridge tools. The tool allowlist does not expose direct editing or",
-    "shell execution to you. Therefore EVERY file change, command, and test run",
-    "MUST go through **codex_implement** — there is no path where you edit the",
-    "repo yourself. Investigate and review with Read/Grep/Glob; implement only",
-    "by delegating to Codex. If a request needs any code change, your first",
-    "substantive action is a codex_implement call, not an attempt to edit.",
-    "For read-only deep dives, use your own Read/Grep/Glob first; delegate to",
-    "Codex when the next step needs edits, commands/tests, browser/image work,",
-    "or an independent verifier pass.",
-    "Picture/image generation and browser navigation/control/automation are",
-    "also Codex-owned execution work in Fusion. If the user asks to create or",
-    "edit pictures, generate image assets, inspect a web UI in a browser,",
-    "navigate/click/type in a browser, or otherwise control a browser, delegate",
-    "that work through codex_implement. Do not attempt those actions directly",
-    "or through any non-Codex tool.",
+    "You have investigation tools (**Read, Grep, Glob**), direct file-edit tools",
+    "for UI/design/frontend work (**Edit, Write**), and the Codex bridge tools.",
+    "Use direct edits only for frontend UI/design code, renderer components,",
+    "styling, and closely related user-facing copy.",
+    "Path enforcement via `VIBE_FUSION_UI_WRITE_GLOBS` is deferred and not active",
+    "in this build; keep direct edits to frontend/UI/design files by role discipline.",
+    "",
+    "## File edit decision policy",
+    "Make the same editing decision a careful human engineer would make. For a",
+    "local change, read the file and use **Edit** to replace the smallest coherent",
+    "existing block that expresses the change. Do not rewrite whole files for",
+    "routine line/function/style tweaks.",
+    "Full-file replacement is still valid when creating or regenerating a file,",
+    "replacing a generated/tiny artifact, or when a cohesive rewrite is genuinely",
+    "safer than many fragile local edits. When you use **Write**, make that",
+    "decision explicit to yourself and preserve unrelated content.",
+    "",
+    "## Speed and exploration routing",
+    "Do not spend expensive Claude turns doing broad repo spelunking. For",
+    "exploratory work, file fetching, large searches, dependency tracing, or",
+    "multi-file context collection, delegate to **codex_investigate** with a request",
+    "to investigate and return concise findings plus the relevant file paths or",
+    "snippets. Use those findings to do the architecture/design thinking yourself.",
+    "For UI/design/frontend work, you write the UI code directly when practical;",
+    "then send Codex a verification/debugging pass with the files changed and what",
+    "to test, including screenshots or browser checks when needed.",
+    "",
+    "You do NOT have shell execution. **Bash is blocked.** Do not run commands,",
+    "builds, tests, debug scripts, package installs, screenshots, browser control,",
+    "or image generation yourself. ALL execution work goes through Codex via",
+    "**codex_implement**. Browser navigation/control/automation and picture/image",
+    "generation are also Codex-owned execution work in Fusion.",
+    "",
+    "Use Read/Grep/Glob for pure read-only investigation yourself. Before",
+    "delegating backend/core work, broad refactors, or execution-heavy work, do",
+    "the cheap read-only triage that identifies files, constraints, existing",
+    "patterns, and likely implementation shape. Do not round-trip pure reads,",
+    "file discovery, or text search through Codex unless you need an independent",
+    "verifier pass or a command/test/browser/image result.",
+    "",
+    "When the task is frontend/UI/design implementation, use Codex for broad",
+    "exploration/debugging/verification, but keep Claude responsible for the UI",
+    "design and code-writing decisions. Edit or Write UI files directly when that",
+    "is the best engineering move, then delegate execution and verification to Codex.",
+    "When the task needs backend/core changes, broad refactors, generated assets,",
+    "runtime debugging, or any command output, delegate that work to Codex instead",
+    "of trying to do it yourself.",
+    "",
+    "## Plan mode",
+    "If the user switches Fusion to Plan mode, follow the per-turn Plan directive:",
+    "investigate read-only and present a plan. Do not call Codex bridge execution",
+    "tools until Auto mode is restored.",
     "",
     "## Your scope",
     "- Architecture and design decisions.",
     "- Long-horizon coding control through Codex's native goal state.",
-    "- Decomposing the work and routing every concrete implementation step to Codex.",
+    "- Direct UI/design/frontend edits when they do not require command execution.",
     "- Planning the work and splitting it into precise, self-contained tasks.",
     "- Guiding Codex with strategy, constraints, UI intent, debugging direction, and follow-up corrections.",
     "- Threat-modeling and debugging *strategy* (what to investigate and why).",
     "- Human-facing tradeoff reasoning and override decisions.",
-    "- Reviewing Codex's diffs and verifier verdict via read-only inspection (Read/Grep/Glob).",
+    "- Reviewing diffs and verifier verdicts with Read/Grep/Glob.",
     '- "What are we missing?" analysis and tradeoff reasoning.',
     "",
     "## Codex's scope",
-    "- Editing files, running tests/commands, fixing compile/runtime errors, and refactors.",
-    "- Picture/image generation and browser navigation/control/automation.",
+    "- ALL execution: builds, test runs, app launches, debug commands, package installs, and command output collection.",
+    "- Screenshots, browser navigation/control/automation, and picture/image generation.",
+    "- Backend/core implementation, broad refactors, exploratory file gathering, debugging, and any frontend verification work you delegate.",
     "- Following Claude's guidance while independently checking the implementation.",
     "- Reviewing for bugs, missed requirements, and whether the user's goal is actually reached.",
     "- Tracking the active objective in Codex's native per-thread goal state.",
@@ -990,36 +1031,47 @@ function buildFusionSystemPrompt() {
     "usage/budget-limited goal states.",
     "",
     "## How to delegate to Codex",
+    "Use **codex_investigate** for read-only repo scouting, file fetching, large",
+    "searches, and findings that should feed Claude's thinking. Ask for concise",
+    "findings, relevant file paths, and short snippets. This does not create a",
+    "goal and does not run the implementation verifier.",
     "Use the **codex_implement** tool (NOT your shell, NOT `codex` directly) with",
-    "complete, self-contained instructions — Codex does not share your context, so",
+    "complete, self-contained instructions - Codex does not share your context, so",
     "give it the files, intent, constraints, acceptance criteria, and what to verify.",
+    "Delegate in fewer, larger chunks after your read-only triage. A good",
+    "handoff bundles the relevant files and findings, the intended behavior,",
+    "implementation constraints, likely touch points, acceptance criteria, and",
+    "verification expectations into one coherent task. Do not split work into",
+    "many small Codex calls for individual reads, single-file edits, or obvious",
+    "follow-up checks when one self-contained implementation/review pass can",
+    "cover them without losing accuracy. Larger chunks must carry more context,",
+    "not vaguer instructions.",
+    "If you edited frontend files directly, tell Codex what changed and ask it to",
+    "review the diff, run the needed checks, debug failures, and verify completion.",
     "For picture/image generation include the visual intent, style, dimensions,",
     "asset paths, and acceptance criteria. For browser control include the URL,",
     "viewport or target environment, interaction steps, and what to verify.",
-    "Codex edits files, runs tests, generates images, controls browsers, reviews",
-    "bugs, and verifies goal completion.",
+    "Codex runs tests/commands, generates images, controls browsers, fixes bugs,",
+    "and verifies goal completion.",
+    "Fusion Codex runs with full workspace access and does not prompt for routine",
+    "command approvals; you may still see `needs_decision` for genuine questions",
+    "or exceptional permission requests.",
     "codex_implement returns one of:",
     "",
     '- `{status:"completed", summary, files, goalReached, bugsFound,',
-    '  missingRequirements, nextAction, verifierVerdict, goal}` — inspect the result.',
+    '  missingRequirements, nextAction, verifierVerdict, goal}` - inspect the result.',
     '  If `goalReached:false`, `nextAction:"continue"`, bugs are listed, or',
     "  requirements are missing, you MUST continue or redelegate with precise",
     "  instructions. Do not tell the user the task is done.",
     '  If `nextAction:"ask_human"`, ask the human for the missing decision.',
     '  If `goalReached:true` and `nextAction:"done"`, you may finish.',
-    '- `{status:"needs_decision", pendingId, kind, detail}` — Codex needs approval',
-    "  (a command or patch) or is asking a question. DECIDE IT YOURSELF and reply",
+    '- `{status:"needs_decision", pendingId, kind, detail}` - Codex is asking a',
+    "  question or surfaced an exceptional permission request. DECIDE IT YOURSELF and reply",
     "  with **codex_respond** (`decision`: accept | acceptForSession | decline |",
     "  cancel; for a question set decision to accept and put the answer in `note`).",
-    "  For routine read-only inspection commands (for example `Get-Location`,",
-    "  `Get-ChildItem`, `rg --files`, `git status --short`, or similar project",
-    "  discovery), approve them yourself unless the command/path is suspicious.",
-    "  If the same safe inspection pattern repeats, consider `acceptForSession`",
-    "  after checking the exact command and path details; do not use session",
-    "  approval for writes, installs, network/credential access, or unclear commands.",
     "  Only ask the human when you genuinely cannot decide, especially for",
-    "  destructive writes, credential/network risk, installs, or unclear intent.",
-    '- `{status:"failed", error}` — diagnose; if Codex is unavailable / not',
+    "  credential risk, external account access, destructive intent, or unclear intent.",
+    '- `{status:"failed", error}` - diagnose; if Codex is unavailable / not',
     "  authenticated, tell the user to run `codex login`.",
     "",
     "## Completion gate",
@@ -1027,19 +1079,18 @@ function buildFusionSystemPrompt() {
     "goal is not reached, continue unless the human explicitly tells you to stop",
     "or you make an explicit higher-level override. If you override Codex, state",
     "`Codex verifier override:` followed by the reason in the transcript.",
-    "You cannot edit the repo yourself, so there are never unverified Claude edits",
-    "to reconcile — always let Codex's verifier verdict gate completion.",
+    "Direct Claude frontend edits are not complete until Codex has reviewed and",
+    "verified them. Always let Codex's verifier verdict gate completion.",
     "",
     "## User-facing style",
     "Present yourself as one Fusion agent. Do not narrate internal bridge mechanics",
     "such as goal tool calls, pending ids, raw JSON tool results, or tool-name",
     "availability warnings unless the user explicitly asks for implementation",
-    "details. Summarize delegated work in human terms: what you are checking, what",
-    "changed, what passed, and what still needs a decision.",
+    "details. Summarize work in human terms: what you are checking, what changed,",
+    "what passed, and what still needs a decision.",
     ""
   ].join("\n");
 }
-
 // Per-session claude settings file passed via `claude --settings <file>`. Adds
 // hooks that fire the notify program on turn completion (Stop) and when claude
 // needs the user (Notification). `--settings` merges over the user's own
@@ -1262,6 +1313,7 @@ function createAgentTelemetryManager(options = {}) {
   const cursorHookFiles = new Map();
   const sessions = new Map();
   const fusionAdapterControls = new Map();
+  const fusionAdapterModes = new Map();
   let server = null;
   let callbackUrl = null;
 
@@ -1346,6 +1398,11 @@ function createAgentTelemetryManager(options = {}) {
               if (normalizedSessionId && controlUrl) {
                 fusionAdapterControls.set(normalizedSessionId, controlUrl);
               }
+              if (normalizedSessionId && controlUrl) {
+                void postFusionAdapterControl(normalizedSessionId, "/mode", {
+                  mode: fusionAdapterModes.get(normalizedSessionId) || "auto"
+                });
+              }
             } else if (event.type === "fusion.activity") {
               // Read-only Codex activity for the Fusion pane's role-tagged log
               // (relayed by backend/fusion-adapter.cjs). Not an attention signal.
@@ -1356,6 +1413,22 @@ function createAgentTelemetryManager(options = {}) {
                 kind: event.kind,
                 text: event.text,
                 ts: event.ts
+              });
+            } else if (event.type === "agent.backgroundActivity") {
+              const activity = event.backgroundActivity && typeof event.backgroundActivity === "object"
+                ? event.backgroundActivity
+                : {
+                    active: Boolean(event.active),
+                    count: Number(event.count) || 0,
+                    source: event.source,
+                    items: Array.isArray(event.items) ? event.items : [],
+                    updatedAt: Number(event.updatedAt) || Date.now()
+                  };
+              emit({
+                id: event.sessionId,
+                type: "agent-background-activity",
+                provider: event.provider,
+                backgroundActivity: activity
               });
             } else if (event.type === "agent.running") {
               // A turn started (claude UserPromptSubmit/tool use, opencode busy
@@ -1445,10 +1518,56 @@ function createAgentTelemetryManager(options = {}) {
     return instrumentation;
   }
 
+  function fusionRunModePathForSession(normalizedSessionId) {
+    return path.join(runDir, sessionDirName(normalizedSessionId), "fusion-run-mode.txt");
+  }
+
+  function writeFusionRunModeFile(normalizedSessionId, mode) {
+    const runMode = normalizeFusionRunMode(mode);
+    const modeFile = fusionRunModePathForSession(normalizedSessionId);
+    fs.mkdirSync(path.dirname(modeFile), { recursive: true });
+    fs.writeFileSync(modeFile, `${runMode}\n`);
+    return modeFile;
+  }
+
+  function fusionSettingsPathForSession(normalizedSessionId) {
+    return path.join(runDir, sessionDirName(normalizedSessionId), "fusion-settings.json");
+  }
+
+  function fusionSettingsFileContents(opts = {}) {
+    return {
+      codexModel: opts.codexModel || null,
+      codexEffort: opts.codexEffort || null,
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  function writeFusionSettingsFile(normalizedSessionId, opts = {}) {
+    const settingsFile = fusionSettingsPathForSession(normalizedSessionId);
+    fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
+    const settings = fusionSettingsFileContents(opts);
+    fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + "\n");
+    return { settingsFile, settings };
+  }
+
+  async function updateFusionSettings(sessionId, opts = {}) {
+    await ready;
+    const normalizedSessionId = normalizeSessionId(sessionId);
+    if (!normalizedSessionId) {
+      return { status: "failed", error: "missing session id" };
+    }
+    try {
+      const result = writeFusionSettingsFile(normalizedSessionId, opts);
+      return { status: "ok", ...result };
+    } catch (error) {
+      return { status: "failed", error: error?.message || String(error) };
+    }
+  }
+
   // Generate the per-pane Fusion files (Codex MCP adapter config + architect
   // system prompt) for the HEADLESS chat path (backend/fusionChatHost.cjs spawns
   // `claude` with these as explicit argv). Independent of the PTY shim. Returns
-  // { systemPromptFile, mcpConfig } absolute paths.
+  // { systemPromptFile, mcpConfig, settingsFile } absolute paths.
   async function prepareFusionFiles(sessionId, opts = {}) {
     await ready;
     const normalizedSessionId = normalizeSessionId(sessionId);
@@ -1458,6 +1577,11 @@ function createAgentTelemetryManager(options = {}) {
 
     const sessionDir = path.join(runDir, sessionDirName(normalizedSessionId));
     fs.mkdirSync(sessionDir, { recursive: true });
+
+    const runMode = normalizeFusionRunMode(opts.runMode);
+    fusionAdapterModes.set(normalizedSessionId, runMode);
+    const runModeFile = writeFusionRunModeFile(normalizedSessionId, runMode);
+    const { settingsFile } = writeFusionSettingsFile(normalizedSessionId, opts);
 
     const systemPromptFile = path.join(sessionDir, "fusion-system-prompt.md");
     fs.writeFileSync(systemPromptFile, buildFusionSystemPrompt());
@@ -1480,8 +1604,9 @@ function createAgentTelemetryManager(options = {}) {
             VIBE_TERMINAL_CALLBACK_URL: callbackUrl,
             VIBE_TERMINAL_TELEMETRY_TOKEN: token,
             VIBE_FUSION_EAGER_BOOT: "1",
-            ...(opts.codexModel ? { VIBE_FUSION_CODEX_MODEL: opts.codexModel } : {}),
-            ...(opts.codexEffort ? { VIBE_FUSION_CODEX_EFFORT: opts.codexEffort } : {})
+            VIBE_FUSION_RUN_MODE: runMode,
+            VIBE_FUSION_RUN_MODE_FILE: runModeFile,
+            VIBE_FUSION_CODEX_SETTINGS: settingsFile
           }
         }
       }
@@ -1489,7 +1614,7 @@ function createAgentTelemetryManager(options = {}) {
     const mcpConfig = path.join(sessionDir, "fusion-mcp.json");
     fs.writeFileSync(mcpConfig, `${JSON.stringify(mcpConfigObj, null, 2)}\n`);
 
-    return { systemPromptFile, mcpConfig };
+    return { systemPromptFile, mcpConfig, settingsFile };
   }
 
   function releaseSession(sessionId) {
@@ -1499,6 +1624,7 @@ function createAgentTelemetryManager(options = {}) {
     }
 
     fusionAdapterControls.delete(normalizedSessionId);
+    fusionAdapterModes.delete(normalizedSessionId);
     const session = sessions.get(normalizedSessionId);
     sessions.delete(normalizedSessionId);
     if (session) {
@@ -1571,6 +1697,21 @@ function createAgentTelemetryManager(options = {}) {
 
   function steerFusionSession(sessionId, text) {
     return postFusionAdapterControl(sessionId, "/steer", { text });
+  }
+
+  function setFusionSessionMode(sessionId, mode) {
+    const normalizedSessionId = normalizeSessionId(sessionId);
+    if (!normalizedSessionId) {
+      return Promise.resolve({ status: "skipped", reason: "invalid_session" });
+    }
+    const runMode = normalizeFusionRunMode(mode);
+    fusionAdapterModes.set(normalizedSessionId, runMode);
+    try {
+      writeFusionRunModeFile(normalizedSessionId, runMode);
+    } catch (error) {
+      return Promise.resolve({ status: "failed", error: error.message || "could not write Fusion mode" });
+    }
+    return postFusionAdapterControl(normalizedSessionId, "/mode", { mode: runMode });
   }
 
   function interruptFusionSession(sessionId) {
@@ -1686,10 +1827,12 @@ function createAgentTelemetryManager(options = {}) {
     ensureCursorProjectHooks,
     prepareSession,
     prepareFusionFiles,
+    updateFusionSettings,
     ready,
     releaseSession,
     steerFusionSession,
     interruptFusionSession,
+    setFusionSessionMode,
     stopFusionSession,
     runDir,
     runId,

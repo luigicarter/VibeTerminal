@@ -1393,6 +1393,53 @@ button {
   font-weight: 600;
 }
 
+.fusion-pane .pane-title .fusion-background-activity {
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 8px;
+  height: 14px;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  overflow: visible;
+  color: #7f887d;
+}
+
+.fusion-pane .pane-title .fusion-background-dot {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #95a08f;
+  opacity: 0.38;
+  box-shadow: 0 0 0 0 #95a08f33;
+  animation: fusion-background-breathe 1.9s ease-in-out infinite;
+}
+
+.fusion-pane .pane-title .fusion-background-count {
+  flex: 0 0 auto;
+  overflow: visible;
+  color: #7f887d;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+@keyframes fusion-background-breathe {
+  0%, 100% {
+    opacity: 0.3;
+    transform: scale(0.82);
+    box-shadow: 0 0 0 0 #95a08f22;
+  }
+  50% {
+    opacity: 0.68;
+    transform: scale(1);
+    box-shadow: 0 0 0 3px #95a08f12;
+  }
+}
+
 .fusion-control-strip {
   display: flex;
   min-height: 29px;
@@ -1696,12 +1743,32 @@ button {
 }
 .fusion-input-settings {
   min-height: 14px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
   color: #8f968e;
   font-size: 10px;
   line-height: 1.25;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
+}
+.fusion-mode-indicator {
+  flex: 0 0 auto;
+  color: #dce6d8;
+  font-weight: 650;
+}
+.fusion-mode-indicator.is-plan {
+  color: #f3c96d;
+}
+.fusion-mode-shortcut {
+  flex: 0 0 auto;
+  color: #727b72;
+}
+.fusion-settings-detail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Slash-command palette under the input: model/speed/effort choices remain

@@ -92,7 +92,10 @@ contextBridge.exposeInMainWorld("vibe", {
   // `onEvent` streams normalized chat events; `stop` ends it.
   fusionChat: {
     start: (payload) => ipcRenderer.invoke("fusion-chat:start", payload),
+    updateSettings: (id, settings) =>
+      ipcRenderer.invoke("fusion-chat:update-settings", { id, ...settings }),
     sendUserTurn: (id, text) => ipcRenderer.send("fusion-chat:input", { id, text }),
+    setMode: (id, mode) => ipcRenderer.invoke("fusion-chat:set-mode", { id, mode }),
     steer: (id, text) => ipcRenderer.send("fusion-chat:steer", { id, text }),
     interrupt: (id) => ipcRenderer.invoke("fusion-chat:interrupt", { id }),
     stop: (id) => ipcRenderer.invoke("fusion-chat:stop", { id }),

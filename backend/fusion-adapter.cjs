@@ -17,6 +17,7 @@
 // stdout is the MCP channel: NOTHING but MCP JSON-RPC may be written there;
 // all diagnostics go to stderr.
 
+const fs = require("fs");
 const http = require("http");
 const { spawn } = require("child_process");
 
@@ -30,8 +31,12 @@ const CWD = process.env.VIBE_TERMINAL_FUSION_CWD || process.cwd();
 const SESSION_ID = process.env.VIBE_TERMINAL_SESSION_ID;
 const CALLBACK_URL = process.env.VIBE_TERMINAL_CALLBACK_URL;
 const TOKEN = process.env.VIBE_TERMINAL_TELEMETRY_TOKEN;
-const MODEL = process.env.VIBE_FUSION_CODEX_MODEL || null;
-const EFFORT = process.env.VIBE_FUSION_CODEX_EFFORT || null;
+const SETTINGS_FILE = process.env.VIBE_FUSION_CODEX_SETTINGS || null;
+const ENV_CODEX_MODEL = process.env.VIBE_FUSION_CODEX_MODEL || null;
+const ENV_CODEX_EFFORT = process.env.VIBE_FUSION_CODEX_EFFORT || null;
+const RUN_MODE_FILE = process.env.VIBE_FUSION_RUN_MODE_FILE || null;
+let runMode = normalizeFusionRunMode(process.env.VIBE_FUSION_RUN_MODE);
+
 const EAGER_BOOT = process.env.VIBE_FUSION_EAGER_BOOT === "1";
 const REQUEST_TIMEOUT_MS = Number(process.env.VIBE_FUSION_RPC_TIMEOUT_MS || 30000);
 const TURN_IDLE_TIMEOUT_MS = (() => {
@@ -72,7 +77,6 @@ const GOAL_STATUSES = new Set([
 ]);
 const PRESERVED_GOAL_STATUSES = new Set(["blocked", "usageLimited", "budgetLimited"]);
 const MAX_GOAL_OBJECTIVE_CHARS = 4000;
-
 function normalizeStringList(value) {
   if (!Array.isArray(value)) return [];
   return value
@@ -174,6 +178,24 @@ function buildCodexVerifierTask(task) {
   ].join("\n");
 }
 
+function buildCodexInvestigationTask(task) {
+  return [
+    task,
+    "",
+    "## Fusion investigation contract",
+    "You are Codex GPT-5.5 doing a read-only scouting pass for Terminal Fusion.",
+    "Gather the repo context Claude needs for architecture, UI/design decisions, or implementation planning.",
+    "Prefer fast file discovery, targeted reads, and concise summaries over broad narration.",
+    "Do not edit files, install packages, launch apps, or make irreversible changes.",
+    "",
+    "Return a concise report with:",
+    "- Findings: concrete facts and constraints.",
+    "- Files: relevant file paths and why they matter.",
+    "- Snippets: short quoted or paraphrased code snippets only when they are essential.",
+    "- Suggested next step: what Claude should decide or edit next."
+  ].join("\n");
+}
+
 function normalizeGoalStatus(value, fallback = "active") {
   const status = value == null ? "" : String(value).trim();
   return GOAL_STATUSES.has(status) ? status : fallback;
@@ -248,6 +270,76 @@ function logErr(message) {
   }
 }
 
+function cleanCodexSetting(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  const normalized = text.toLowerCase();
+  return normalized === "auto" || normalized === "default" ? null : text;
+}
+
+function readCodexSettings() {
+  const fallback = {
+    model: cleanCodexSetting(ENV_CODEX_MODEL),
+    effort: cleanCodexSetting(ENV_CODEX_EFFORT),
+    source: "env"
+  };
+  if (!SETTINGS_FILE) return fallback;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8"));
+    return {
+      model: cleanCodexSetting(parsed?.codexModel),
+      effort: cleanCodexSetting(parsed?.codexEffort),
+      source: "file"
+    };
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      logErr("could not read Fusion Codex settings file: " + error.message);
+    }
+    return fallback;
+  }
+}
+
+function applyCodexModelSetting(params, settings = readCodexSettings()) {
+  if (settings.model) params.model = settings.model;
+  return settings;
+}
+
+function applyCodexTurnSettings(params, settings = readCodexSettings()) {
+  if (settings.effort) {
+    params.effort = settings.effort;
+  } else if (settings.source === "file") {
+    params.effort = null;
+  }
+  return settings;
+}
+
+function resetCodexThreadForModelChange(nextModel) {
+  if (!threadId || nextModel === activeThreadModel) return false;
+  threadId = null;
+  threadReady = null;
+  currentGoal = null;
+  goalFeatureAvailable = null;
+  activeThreadModel = null;
+  relay({ role: "codex", kind: "activity", text: "execution model updated; starting a fresh Codex thread" });
+  return true;
+}
+
+function normalizeFusionRunMode(value) {
+  return String(value || "").trim().toLowerCase() === "plan" ? "plan" : "auto";
+}
+
+function currentRunMode() {
+  if (!RUN_MODE_FILE) return runMode;
+  try {
+    runMode = normalizeFusionRunMode(fs.readFileSync(RUN_MODE_FILE, "utf8"));
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      logErr(`could not read Fusion mode file: ${error.message}`);
+    }
+  }
+  return runMode;
+}
+
 // ---- read-only activity relay to the renderer (best-effort) ----
 function postTelemetry(entry, timeout = 1000) {
   if (!CALLBACK_URL || !TOKEN || !SESSION_ID) return;
@@ -292,10 +384,13 @@ let codexBuffer = "";
 let nextId = 1;
 let threadId = null;
 let threadReady = null;
+let codexInitialized = false;
+let activeThreadModel = null;
 const pendingReq = new Map(); // app-server request id -> {resolve, reject}
 const parked = new Map(); // pendingId -> {rpcId, method, params}
 let currentTurn = null; // {resolve, idleTimer, commandTimer} - fulfilled by turn/completed | turn/failed | an approval request
 let activeTurnId = null;
+let activeTurnKind = null;
 let latchedTurnResult = null;
 let turnSummary = [];
 let turnFiles = [];
@@ -438,23 +533,36 @@ function resetTurnBuffers() {
   agentMessageDeltas = new Map();
 }
 
+function resetCodexProcessState(options = {}) {
+  const { clearChild = true } = options;
+  if (clearChild) {
+    codexChild = null;
+    codexReady = null;
+    codexBuffer = "";
+  }
+  threadId = null;
+  threadReady = null;
+  codexInitialized = false;
+  activeThreadModel = null;
+  activeTurnId = null;
+  activeTurnKind = null;
+  currentGoal = null;
+  goalFeatureAvailable = null;
+}
+
 function resetHarness(reason = "Fusion stopped.") {
   parked.clear();
   failAll(new Error(reason));
   killCodex();
-  threadId = null;
-  threadReady = null;
-  activeTurnId = null;
+  resetCodexProcessState();
   latchedTurnResult = null;
   resetTurnBuffers();
-  currentGoal = null;
-  goalFeatureAvailable = null;
 }
 
 function startControlServer() {
   if (controlServer || !TOKEN || !SESSION_ID) return;
   controlServer = http.createServer((request, response) => {
-    if (request.method !== "POST" || !["/steer", "/interrupt", "/stop"].includes(request.url)) {
+    if (request.method !== "POST" || !["/steer", "/interrupt", "/stop", "/mode"].includes(request.url)) {
       response.writeHead(404);
       response.end();
       return;
@@ -486,6 +594,9 @@ function startControlServer() {
         } else if (request.url === "/stop") {
           resetHarness("Fusion stopped.");
           result = { status: "stopped" };
+        } else if (request.url === "/mode") {
+          runMode = normalizeFusionRunMode(parsed.mode);
+          result = { status: "ok", mode: runMode };
         } else {
           result = await codexSteer(parsed.text);
         }
@@ -555,10 +666,7 @@ function connect() {
         reject(error);
       }
       if (isCurrentCodexChild(child)) {
-        codexChild = null;
-        codexReady = null;
-        threadId = null;
-        threadReady = null;
+        resetCodexProcessState();
         failAll(error);
       }
     });
@@ -584,10 +692,7 @@ function connect() {
       if (!isCurrentCodexChild(child)) {
         return;
       }
-      codexChild = null;
-      codexReady = null;
-      threadId = null;
-      threadReady = null;
+      resetCodexProcessState();
       failAll(new Error("Fusion execution worker exited"));
     });
   });
@@ -617,9 +722,7 @@ function killCodex() {
         ["/pid", String(codexChild.pid), "/t", "/f"],
         { stdio: "ignore" }
       );
-      codexChild = null;
-      codexReady = null;
-      threadId = null;
+      resetCodexProcessState();
       return;
     } catch {
       // fall through
@@ -630,9 +733,7 @@ function killCodex() {
   } catch {
     // ignore
   }
-  codexChild = null;
-  codexReady = null;
-  threadId = null;
+  resetCodexProcessState();
 }
 
 function failAll(error) {
@@ -641,6 +742,7 @@ function failAll(error) {
   pendingReq.clear();
   parked.clear();
   activeTurnId = null;
+  activeTurnKind = null;
   latchedTurnResult = null;
   currentGoal = null;
   goalFeatureAvailable = null;
@@ -686,6 +788,7 @@ function resolveTurn(result) {
   currentTurn = null;
   if (!result || result.status !== "needs_decision") {
     activeTurnId = null;
+    activeTurnKind = null;
   }
   clearCurrentTurnTimers(turn);
   turn.resolve(result);
@@ -698,6 +801,7 @@ function resolveOrLatchTurn(result) {
   }
   latchedTurnResult = result;
   activeTurnId = null;
+  activeTurnKind = null;
 }
 
 function drainLatchedTurnResult() {
@@ -758,6 +862,34 @@ function completedTurnResult() {
   };
 }
 
+function extractReferencedFiles(text) {
+  const files = new Set();
+  const source = String(text || "");
+  const pathRegex = /(?:^|[\s(["'`])((?:[A-Za-z]:)?(?:[A-Za-z0-9_.-]+[\\/])+[A-Za-z0-9_.@() -]+\.[A-Za-z0-9]+)(?=$|[\s)"'`,:;])/g;
+  let match;
+  while ((match = pathRegex.exec(source))) {
+    const file = stripCommandPath(match[1]);
+    if (file) files.add(file);
+  }
+  return Array.from(files).slice(0, 32);
+}
+
+function completedInvestigationResult() {
+  const streamedText = Array.from(agentMessageDeltas.values()).join("").trim();
+  const findings = (turnSummary.join("\n").trim() || streamedText).trim();
+  const files = Array.from(
+    new Set([
+      ...turnFiles.filter(Boolean),
+      ...extractReferencedFiles(findings)
+    ])
+  );
+  return {
+    status: "completed",
+    findings: findings || "(No findings returned.)",
+    files
+  };
+}
+
 function accumulateTurnItem(item, options = {}) {
   if (!item || typeof item !== "object") return;
   const itemId = typeof item.id === "string" ? item.id : "";
@@ -798,7 +930,9 @@ function resolveCompletedTurn(turn) {
     resolveOrLatchTurn({ status: "failed", error: "Fusion turn was interrupted." });
     return;
   }
-  resolveOrLatchTurn(completedTurnResult());
+  resolveOrLatchTurn(
+    activeTurnKind === "investigate" ? completedInvestigationResult() : completedTurnResult()
+  );
 }
 
 function handleTurnStartResponse(response) {
@@ -906,7 +1040,7 @@ function handleNotification(msg) {
   if (method === "item/completed" && params.item) {
     accumulateTurnItem(params.item);
     if (params.item.type === "commandExecution" && params.item.exitCode != null) {
-      startTurnAfterCommandTimer(params.item.command || "command");
+      startTurnAfterCommandTimer(summarizeCommandExecution(params.item));
     }
     return;
   }
@@ -1019,16 +1153,378 @@ function approvalDetail(method, params) {
     : "";
   const command = params.command || commandActions || (params.command_actions && "command") || "a command";
   const reason = params.reason ? ` — ${params.reason}` : "";
-  return `Run ${command}?${reason}`;
+  const commandSummary = summarizeCommandExecution({ command });
+  return `Run ${commandSummary}?${reason}`;
+}
+
+const COMMAND_DISPLAY_MAX_CHARS = 160;
+
+function compactCommandDisplay(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function clippedCommandPreview(value) {
+  const compact = compactCommandDisplay(value);
+  if (!compact) return "command";
+  if (compact.length <= COMMAND_DISPLAY_MAX_CHARS) return compact;
+  return `${compact.slice(0, COMMAND_DISPLAY_MAX_CHARS - 1).trimEnd()}…`;
+}
+
+function stripCommandPath(value) {
+  let path = String(value || "").trim();
+  for (let index = 0; index < 3; index += 1) {
+    path = path.replace(/[;,)]+$/g, "").trim();
+    if (path.length >= 2) {
+      const first = path[0];
+      const last = path[path.length - 1];
+      if (
+        (first === `"` && last === `"`) ||
+        (first === `'` && last === `'`) ||
+        (first === "`" && last === "`")
+      ) {
+        path = path.slice(1, -1).trim();
+      }
+    }
+  }
+  return path.replace(/\\/g, "/");
+}
+
+function usableLiteralPath(value) {
+  const path = stripCommandPath(value);
+  if (!path) return "";
+  if (path.startsWith("-") || path.startsWith("$") || path.startsWith("@")) return "";
+  if (path === "/dev/null" || path === "&1") return "";
+  return path;
+}
+
+function tokenizeCommandLine(value) {
+  const tokens = [];
+  let token = "";
+  let quote = "";
+  let escaped = false;
+  const pushToken = () => {
+    if (token) {
+      tokens.push(token);
+      token = "";
+    }
+  };
+
+  for (const ch of String(value || "")) {
+    if (escaped) {
+      token += ch;
+      escaped = false;
+      continue;
+    }
+    if (quote) {
+      if (ch === "\\" && quote !== "'") {
+        escaped = true;
+        continue;
+      }
+      if (ch === quote) {
+        quote = "";
+        continue;
+      }
+      token += ch;
+      continue;
+    }
+    if (ch === `"` || ch === `'` || ch === "`") {
+      quote = ch;
+      continue;
+    }
+    if (/\s/.test(ch) || ch === ";" || ch === "," || ch === ")") {
+      pushToken();
+      continue;
+    }
+    token += ch;
+  }
+  pushToken();
+  return tokens;
+}
+
+function readLeadingStringLiteral(value) {
+  const text = String(value || "");
+  const offset = text.match(/^\s*/)[0].length;
+  const quote = text[offset];
+  if (quote !== `"` && quote !== `'` && quote !== "`") return null;
+
+  let literal = "";
+  let escaped = false;
+  for (let index = offset + 1; index < text.length; index += 1) {
+    const ch = text[index];
+    if (escaped) {
+      literal += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote === "`" && ch === "$" && text[index + 1] === "{") {
+      return null;
+    }
+    if (ch === quote) {
+      return { value: literal, endIndex: index + 1 };
+    }
+    literal += ch;
+  }
+  return null;
+}
+
+function extractPowerShellNamedPath(commandTail) {
+  const pathArgRegex = /-(?:LiteralPath|Path|FilePath)\s+(?:"([^"]+)"|'([^']+)'|`([^`]+)`|([^\s\r\n;,)]+))/gi;
+  let match;
+  while ((match = pathArgRegex.exec(commandTail))) {
+    const path = usableLiteralPath(match[1] || match[2] || match[3] || match[4]);
+    if (path) return path;
+  }
+  return "";
+}
+
+function extractPowerShellPositionalPath(commandTail) {
+  const tokens = tokenizeCommandLine(commandTail);
+  const pathOptions = new Set(["-literalpath", "-path", "-filepath"]);
+  const optionsWithValues = new Set([
+    "-encoding",
+    "-inputobject",
+    "-itemtype",
+    "-name",
+    "-stream",
+    "-type",
+    "-value",
+    "-width"
+  ]);
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    const lower = token.toLowerCase();
+    if (pathOptions.has(lower)) {
+      const path = usableLiteralPath(tokens[index + 1]);
+      if (path) return path;
+      index += 1;
+      continue;
+    }
+    if (lower.startsWith("-")) {
+      if (optionsWithValues.has(lower)) index += 1;
+      continue;
+    }
+    const path = usableLiteralPath(token);
+    if (path) return path;
+  }
+  return "";
+}
+
+function extractPowerShellWritePath(command) {
+  const commandRegex = /\b(?:Set-Content|Add-Content|Out-File|Tee-Object|New-Item)\b/gi;
+  let match;
+  while ((match = commandRegex.exec(command))) {
+    const commandTail = command.slice(match.index + match[0].length);
+    const namedPath = extractPowerShellNamedPath(commandTail);
+    if (namedPath) return namedPath;
+    const positionalPath = extractPowerShellPositionalPath(commandTail);
+    if (positionalPath) return positionalPath;
+  }
+  return "";
+}
+
+function extractFirstStringArgumentPath(command, callRegex) {
+  let match;
+  while ((match = callRegex.exec(command))) {
+    const literal = readLeadingStringLiteral(command.slice(match.index + match[0].length));
+    if (!literal) continue;
+    const path = usableLiteralPath(literal.value);
+    if (path) return path;
+  }
+  return "";
+}
+
+function extractDotNetFileWritePath(command) {
+  return extractFirstStringArgumentPath(
+    command,
+    /\[System\.IO\.File\]::(?:WriteAllText|WriteAllLines|AppendAllText|AppendAllLines)\s*\(\s*/gi
+  );
+}
+
+function extractNodeFileWritePath(command) {
+  return extractFirstStringArgumentPath(
+    command,
+    /\bfs\.(?:writeFileSync|writeFile|appendFileSync|appendFile)\s*\(\s*/gi
+  );
+}
+
+function extractPythonOpenWritePath(command) {
+  const openRegex = /\bopen\s*\(\s*/gi;
+  let match;
+  while ((match = openRegex.exec(command))) {
+    const argumentText = command.slice(match.index + match[0].length);
+    const pathLiteral = readLeadingStringLiteral(argumentText);
+    if (!pathLiteral) continue;
+    const modeText = argumentText.slice(pathLiteral.endIndex).trimStart();
+    if (!modeText.startsWith(",")) continue;
+    const modeLiteral = readLeadingStringLiteral(modeText.slice(1));
+    if (!modeLiteral || !/^[wax]/i.test(modeLiteral.value)) continue;
+    const path = usableLiteralPath(pathLiteral.value);
+    if (path) return path;
+  }
+  return "";
+}
+
+function shellRedirectTargets(command) {
+  const targets = [];
+  let quote = "";
+  let escaped = false;
+
+  for (let index = 0; index < command.length; index += 1) {
+    const ch = command[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (quote) {
+      if (ch === "\\" && quote !== "'") {
+        escaped = true;
+        continue;
+      }
+      if (ch === quote) quote = "";
+      continue;
+    }
+    if (ch === `"` || ch === `'` || ch === "`") {
+      quote = ch;
+      continue;
+    }
+    if (ch !== ">") continue;
+
+    const previous = command[index - 1] || "";
+    if (previous && !/[\s|;&(]/.test(previous)) continue;
+    let targetStart = index + 1;
+    if (command[targetStart] === ">") targetStart += 1;
+    while (/\s/.test(command[targetStart] || "")) targetStart += 1;
+    if (command[targetStart] === "&") {
+      targets.push("&1");
+      continue;
+    }
+    const quoteChar = command[targetStart];
+    if (quoteChar === `"` || quoteChar === `'` || quoteChar === "`") {
+      let target = "";
+      for (let cursor = targetStart + 1; cursor < command.length; cursor += 1) {
+        if (command[cursor] === quoteChar) {
+          targets.push(target);
+          index = cursor;
+          break;
+        }
+        target += command[cursor];
+      }
+      continue;
+    }
+    let targetEnd = targetStart;
+    while (
+      targetEnd < command.length &&
+      !/\s/.test(command[targetEnd]) &&
+      ![";", ",", ")"].includes(command[targetEnd])
+    ) {
+      targetEnd += 1;
+    }
+    targets.push(command.slice(targetStart, targetEnd));
+    index = targetEnd;
+  }
+  return targets;
+}
+
+function extractShellRedirectionPath(command) {
+  for (const target of shellRedirectTargets(command)) {
+    const path = usableLiteralPath(target);
+    if (path) return path;
+  }
+  return "";
+}
+
+function extractShellTeePath(command) {
+  const teeRegex = /(?:^|[\s|;&])tee\b(?!-)([^\r\n]*)/gi;
+  let match;
+  while ((match = teeRegex.exec(command))) {
+    const tokens = tokenizeCommandLine(match[1]);
+    for (const token of tokens) {
+      if (token === "--" || token.startsWith("-")) continue;
+      const path = usableLiteralPath(token);
+      if (path) return path;
+    }
+  }
+  return "";
+}
+
+function extractCommandWritePath(command) {
+  return (
+    extractPowerShellWritePath(command) ||
+    extractDotNetFileWritePath(command) ||
+    extractNodeFileWritePath(command) ||
+    extractPythonOpenWritePath(command) ||
+    extractShellRedirectionPath(command) ||
+    extractShellTeePath(command)
+  );
+}
+
+function looksLikeContentWriteCommand(command) {
+  return (
+    /\b(?:Set-Content|Add-Content|Out-File|Tee-Object|New-Item)\b/i.test(command) ||
+    /\[System\.IO\.File\]::(?:WriteAllText|WriteAllLines|AppendAllText|AppendAllLines)\s*\(/i.test(
+      command
+    ) ||
+    /\bfs\.(?:writeFileSync|writeFile|appendFileSync|appendFile)\s*\(/i.test(command) ||
+    /\bopen\s*\([^)]*,\s*["'`][wax]/i.test(command) ||
+    shellRedirectTargets(command).length > 0 ||
+    /(?:^|[\s|;&])tee\b(?!-)/i.test(command)
+  );
+}
+
+function summarizeCommandExecution(item) {
+  const command = String((item && item.command) || "");
+  const writePath = extractCommandWritePath(command);
+  if (writePath) return `write ${writePath}`;
+  if (looksLikeContentWriteCommand(command)) return "write files";
+  return clippedCommandPreview(command);
+}
+
+function commandExecutionDisplayText(item) {
+  const summary = summarizeCommandExecution(item);
+  if (item && item.exitCode != null) return `${summary} (exit ${item.exitCode})`;
+  const status = item && item.status;
+  if (status && status !== "completed") return `${summary} (${status})`;
+  return summary;
+}
+
+function looksLikeInlineCodeDump(text) {
+  const source = String(text || "");
+  if (source.length < 1200) return false;
+  const codeSignals = [
+    /```/,
+    /\b(?:import|export|const|let|function|class|interface|type)\s+[A-Za-z0-9_$]/,
+    /className=["']/,
+    /=>\s*[\({]/,
+    /@\s*["']/,
+    /Set-Content\b/i,
+    /\bfs\.writeFile/i
+  ];
+  return codeSignals.some((pattern) => pattern.test(source));
+}
+
+function summarizeAgentMessageForDisplay(text) {
+  const source = String(text || "");
+  if (!looksLikeInlineCodeDump(source)) return source;
+  const files = extractReferencedFiles(source);
+  if (files.length > 0) {
+    const visible = files.slice(0, 3).join(", ");
+    const suffix = files.length > 3 ? `, +${files.length - 3} more` : "";
+    return `writing ${visible}${suffix}`;
+  }
+  return "working with generated code";
 }
 
 function relayItem(item) {
   const type = item.type;
   if (type === "agentMessage" && item.text) {
-    relay({ role: "codex", kind: "message", text: item.text });
+    relay({ role: "codex", kind: "message", text: summarizeAgentMessageForDisplay(item.text) });
   } else if (type === "commandExecution") {
-    const exit = item.exitCode != null ? ` (exit ${item.exitCode})` : "";
-    relay({ role: "codex", kind: "command", text: `${item.command || "command"}${exit}` });
+    relay({ role: "codex", kind: "command", text: commandExecutionDisplayText(item) });
   } else if (type === "fileChange") {
     const files = (item.changes || [])
       .map((c) => `${c.type || "edit"} ${c.path || c.move_path || ""}`.trim())
@@ -1047,33 +1543,49 @@ function accumulate(item) {
 }
 
 async function ensureThread() {
+  const settings = readCodexSettings();
+  const requestedModel = settings.model || null;
+  resetCodexThreadForModelChange(requestedModel);
   if (threadId) return threadId;
   if (!threadReady) {
     threadReady = (async () => {
       await connect();
-      await rpc("initialize", {
-        clientInfo: { name: "vibeTerminal-fusion-adapter", version: "0.1.0" },
-        capabilities: { experimentalApi: true }
-      });
-      notify("initialized");
+      if (!codexInitialized) {
+        await rpc("initialize", {
+          clientInfo: { name: "vibeTerminal-fusion-adapter", version: "0.1.0" },
+          capabilities: { experimentalApi: true }
+        });
+        notify("initialized");
+        codexInitialized = true;
+      }
       const params = {
         cwd: CWD,
-        sandbox: "workspace-write",
-        approvalPolicy: "on-request",
-        approvalsReviewer: "user",
+        sandbox: "danger-full-access",
+        approvalPolicy: "never",
         config: { "features.goals": true }
       };
-      if (MODEL) params.model = MODEL;
+      applyCodexModelSetting(params, settings);
       const res = await rpc("thread/start", params);
       const nextThreadId = res && res.thread && res.thread.id;
       if (!nextThreadId) throw new Error("thread/start returned no thread id");
       threadId = nextThreadId;
+      activeThreadModel = requestedModel;
       return threadId;
     })();
   }
 
   try {
-    return await threadReady;
+    const readyThreadId = await threadReady;
+    const latestModel = readCodexSettings().model || null;
+    if (readyThreadId && latestModel !== activeThreadModel) {
+      threadId = null;
+      threadReady = null;
+      currentGoal = null;
+      goalFeatureAvailable = null;
+      activeThreadModel = null;
+      return ensureThread();
+    }
+    return readyThreadId;
   } catch (error) {
     threadReady = null;
     throw error;
@@ -1083,7 +1595,6 @@ async function ensureThread() {
     }
   }
 }
-
 async function warmupCodexThread() {
   try {
     await ensureThread();
@@ -1095,10 +1606,11 @@ async function warmupCodexThread() {
   }
 }
 
-function awaitTurn() {
+function awaitTurn(kind = "implement") {
   if (currentTurn) {
     throw new Error("Fusion bridge already has a pending turn waiter.");
   }
+  activeTurnKind = kind;
   return new Promise((resolve) => {
     clearCurrentTurnTimers();
     currentTurn = { resolve, idleTimer: null, commandTimer: null, hardTimer: null };
@@ -1186,6 +1698,7 @@ function codexCancel() {
   latchedTurnResult = null;
   resolveTurn({ status: "cancelled", error: "Fusion turn cancelled by the orchestrator." });
   activeTurnId = null;
+  activeTurnKind = null;
   relay({ role: "opus", kind: "cancel", text: "turn cancelled" });
   return { status: "cancelled", hadActiveTurn, clearedDecisions };
 }
@@ -1215,6 +1728,14 @@ async function syncGoalAfterTurn(result) {
 
 async function codexImplement(task) {
   if (!task) return { status: "error", error: "task is required" };
+  const mode = currentRunMode();
+  if (mode === "plan") {
+    return {
+      status: "failed",
+      mode,
+      error: "Fusion Plan mode is active. codex_implement is disabled until this pane is switched back to Auto mode; investigate read-only and present an implementation plan instead."
+    };
+  }
   const pendingDecision = pendingDecisionResult({
     warning: "Fusion already has a pending decision; answer it before starting another task."
   });
@@ -1236,10 +1757,10 @@ async function codexImplement(task) {
   const params = {
     threadId,
     input: [{ type: "text", text: buildCodexVerifierTask(task), text_elements: [] }],
-    approvalPolicy: "on-request",
-    approvalsReviewer: "user"
+    approvalPolicy: "never",
+    sandboxPolicy: { type: "dangerFullAccess" }
   };
-  if (EFFORT) params.effort = EFFORT;
+  applyCodexTurnSettings(params);
   rpc("turn/start", params)
     .then(handleTurnStartResponse)
     .catch((error) => resolveTurn({ status: "failed", error: error.message }));
@@ -1249,6 +1770,38 @@ async function codexImplement(task) {
     return { ...withGoal, goalSetup };
   }
   return withGoal;
+}
+
+async function codexInvestigate(task) {
+  if (!task) return { status: "error", error: "task is required" };
+  const pendingDecision = pendingDecisionResult({
+    warning: "Fusion already has a pending decision; answer it before starting another task."
+  });
+  if (pendingDecision) {
+    return pendingDecision;
+  }
+  if (currentTurn) {
+    return {
+      status: "error",
+      error: "Fusion turn already in progress; wait for the active turn to surface a decision or complete."
+    };
+  }
+  await ensureThread();
+  resetTurnBuffers();
+  latchedTurnResult = null;
+  relay({ role: "opus", kind: "delegate", text: `investigate: ${task}` });
+  const done = awaitTurn("investigate");
+  const params = {
+    threadId,
+    input: [{ type: "text", text: buildCodexInvestigationTask(task), text_elements: [] }],
+    approvalPolicy: "never",
+    sandboxPolicy: { type: "readOnly" }
+  };
+  applyCodexTurnSettings(params);
+  rpc("turn/start", params)
+    .then(handleTurnStartResponse)
+    .catch((error) => resolveTurn({ status: "failed", error: error.message }));
+  return done;
 }
 
 function buildDecisionResult(method, params, decision, note) {
@@ -1366,9 +1919,25 @@ const TOOLS = [
     }
   },
   {
+    name: "codex_investigate",
+    description:
+      "Ask embedded Codex GPT-5.5 to do a read-only scouting pass: file discovery, targeted reads, repo navigation, dependency tracing, or concise context gathering for Claude. Use this to feed Claude findings/files/snippets before Claude does architecture or UI design thinking. Does not create or sync native goals and does not use the implementation verifier contract. Returns {status:'completed', findings, files} or {status:'failed', error}.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task: {
+          type: "string",
+          description:
+            "Read-only investigation request. Ask for concise findings, relevant file paths, and short snippets when useful."
+        }
+      },
+      required: ["task"]
+    }
+  },
+  {
     name: "codex_implement",
     description:
-      "Delegate implementation, testing, compile/runtime fixing, refactors, repo navigation, picture/image generation, browser navigation/control/automation, bug review, or goal-completion verification to embedded Codex GPT-5.5. Opus 4.8 drives architecture, strategy, UX/UI build-out when appropriate, human-facing orchestration, and guidance for Codex on constraints, UI intent, debugging direction, and follow-up corrections. Codex follows that guidance while independently verifying bugs and goal completion. Use codex_goal_set first for substantial top-level work; codex_implement will create a fallback native Codex goal if none exists and will sync goal status from the verifier verdict. Returns one of: {status:'completed', summary, files, goalReached, bugsFound, missingRequirements, nextAction, verifierVerdict, goal}; {status:'needs_decision', pendingId, kind, detail} - answer it with codex_respond; or {status:'failed', error}. If goalReached is false or nextAction is 'continue', continue/redelegate unless the human or an explicit Opus override says otherwise.",
+      "Delegate implementation, testing, compile/runtime fixing, refactors, repo navigation, picture/image generation, browser navigation/control/automation, bug review, or goal-completion verification to embedded Codex GPT-5.5. In Fusion Plan mode this tool refuses execution until the pane is switched back to Auto. Opus 4.8 drives architecture, strategy, UX/UI build-out when appropriate, human-facing orchestration, and guidance for Codex on constraints, UI intent, debugging direction, and follow-up corrections. Codex follows that guidance while independently verifying bugs and goal completion. Use codex_goal_set first for substantial top-level work; codex_implement will create a fallback native Codex goal if none exists and will sync goal status from the verifier verdict. Returns one of: {status:'completed', summary, files, goalReached, bugsFound, missingRequirements, nextAction, verifierVerdict, goal}; {status:'needs_decision', pendingId, kind, detail} - answer it with codex_respond; or {status:'failed', error}. If goalReached is false or nextAction is 'continue', continue/redelegate unless the human or an explicit Opus override says otherwise.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1409,6 +1978,8 @@ const TOOLS = [
   }
 ];
 
+const PLAN_MODE_ALLOWED_TOOLS = new Set(["codex_goal_get", "codex_investigate", "codex_cancel"]);
+
 function sendMcp(obj) {
   process.stdout.write(`${JSON.stringify(obj)}\n`);
 }
@@ -1418,7 +1989,13 @@ async function handleToolCall(id, params) {
   const args = (params && params.arguments) || {};
   try {
     let result;
-    if (name === "codex_goal_set") {
+    if (currentRunMode() === "plan" && !PLAN_MODE_ALLOWED_TOOLS.has(name)) {
+      result = {
+        status: "failed",
+        mode: "plan",
+        error: "Fusion Plan mode is active. Only read-only investigation, goal checks, and cancellation are available until Auto mode is restored."
+      };
+    } else if (name === "codex_goal_set") {
       result = await codexGoalSet({
         objective: args.objective != null ? String(args.objective) : "",
         status: args.status != null ? String(args.status) : undefined,
@@ -1428,6 +2005,8 @@ async function handleToolCall(id, params) {
       result = await codexGoalGet();
     } else if (name === "codex_goal_clear") {
       result = await codexGoalClear();
+    } else if (name === "codex_investigate") {
+      result = await codexInvestigate(String(args.task || ""));
     } else if (name === "codex_implement") {
       result = await codexImplement(String(args.task || ""));
     } else if (name === "codex_respond") {
@@ -1532,14 +2111,18 @@ function startMcpServer() {
 
 module.exports = {
   VERDICT_MARKER,
+  buildCodexInvestigationTask,
   buildCodexVerifierTask,
   extractVerifierVerdict,
+  commandExecutionDisplayText,
   goalStatusForVerdict,
   normalizeGoal,
   normalizeGoalStatus,
   normalizeVerifierVerdict,
+  readCodexSettings,
   shouldAutoSyncGoalStatus,
   shouldReplaceGoalForTask,
+  summarizeAgentMessageForDisplay,
   stripVerifierVerdictFromSummary,
   turnErrorMessage
 };

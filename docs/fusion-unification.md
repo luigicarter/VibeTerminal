@@ -11,8 +11,7 @@
 
 ## TL;DR
 
-Fusion is a two-model **router→executor** pipeline (Opus 4.8 plans/reviews
-read-only; Codex GPT-5.5 makes every edit and self-verifies) presented behind one
+Fusion is a two-model **router→executor** pipeline (Claude Opus/Sonnet 5 plans/reviews and can write UI/design/frontend directly; Codex GPT-5.5 owns execution and self-verifies) presented behind one
 pane. It already *intends* to be one agent, but leaks the split at nearly every
 surface. **~80% of the "two agents" feeling is presentation, not architecture**,
 and can be removed with wording/label/color changes that touch the hard guarantee
@@ -33,15 +32,16 @@ separate tiers:
 Fusion is **not one agent** under the hood — it is a strict two-model loop:
 
 ```
-You ──▶ Opus 4.8 (headless `claude`, READ-ONLY tools)
+You ──▶ Claude Opus/Sonnet 5 (headless `claude`, read + UI-write tools, Bash blocked)
             │  speaks prose + makes every tool call
+            │  optional: mcp__fusion-codex__codex_investigate(task)
             │  mcp__fusion-codex__codex_implement(task)
             ▼
         fusion-adapter.cjs   (MCP server north / JSON-RPC client south)
-            │  thread/start + turn/start(buildCodexVerifierTask(task))
+            │  thread/start + turn/start(investigation or verifier task)
             ▼
         codex app-server (GPT-5.5)  ← edits, runs tests, fixes, refactors
-            │  streams items; PARKS approvals as server→client requests
+            │  streams items; parks only exceptional requests/questions
             ▼
         verdict: FUSION_VERDICT_JSON {goalReached, bugsFound,
                                       missingRequirements, nextAction}
@@ -50,24 +50,30 @@ You ──▶ Opus 4.8 (headless `claude`, READ-ONLY tools)
 ### The mechanics, end to end
 
 1. **Launch & lock** — `main.cjs` `fusion-chat:start` →
-   `fusionChatHost.buildClaudeArgs`. Opus is spawned headless with
-   `--allowedTools` = `codex_implement, codex_respond, codex_goal_*, Read, Glob,
-   Grep` and `--disallowedTools Edit,Write,Bash`. Opus **physically cannot edit
-   the repo or invoke direct image-generation/browser-control tools** — every
-   mutation and every image/browser execution task must route through
-   `codex_implement`. This is the structural heart of Fusion.
+   `fusionChatHost.buildClaudeArgs`. Claude is spawned headless with `--tools`
+   limiting the built-in surface to `Read`, `Glob`, `Grep`, `Edit`, and `Write`,
+   `--allowedTools` exposing those plus the Fusion bridge,
+   `--disallowedTools Bash`, and `--strict-mcp-config`. Claude may directly
+   write UI/design/frontend code, while every command, test, build, debug run,
+   screenshot, browser action, image-generation task, and verification pass route
+   through `codex_implement`.
+   `VIBE_FUSION_UI_WRITE_GLOBS` path enforcement is deferred and not active
+   in this build; the current guard is Bash denial plus the restricted tool surface. This is the structural heart of Fusion.
 
-2. **The delegation loop** — `fusion-adapter.cjs` `codexImplement`. The adapter
-   owns one private `codex app-server` child over stdio. Each `codex_implement`
+2. **The delegation loop** — `fusion-adapter.cjs` `codexInvestigate` /
+   `codexImplement`. The adapter owns one private `codex app-server` child over
+   stdio. `codex_investigate` runs read-only scouting and returns findings/files
+   for Claude's planning under a `readOnly` turn sandbox. Each `codex_implement`
    wraps the task in a **verifier contract** (`buildCodexVerifierTask` — *"You are
    Codex GPT-5.5…"*) demanding a single-line JSON verdict, then streams Codex's
    items back to the renderer via the best-effort telemetry callback.
 
-3. **Approval parking** — `handleServerRequest` → `needs_decision`. When Codex
-   needs to run a command, apply a patch, or ask a question, the adapter *parks*
-   the server→client request and returns `{status:"needs_decision", pendingId}`
-   to Opus, who decides and calls `codex_respond`. "Route to Opus" is literally
-   true: Opus calls the next tool.
+3. **Exceptional decision parking** — `handleServerRequest` → `needs_decision`.
+   Codex now runs with full workspace access and no routine command approvals,
+   so read/edit/debug loops should not bounce through Opus. If Codex still asks
+   a question or surfaces an exceptional permission request, the adapter parks it
+   and returns `{status:"needs_decision", pendingId}` to Opus, who decides and
+   calls `codex_respond`.
 
 4. **The completion gate** — `normalizeVerifierVerdict`, `completedTurnResult`.
    The verdict is parsed **fail-closed**: missing / malformed / contradictory →
@@ -90,12 +96,12 @@ Three mechanisms, in **decreasing** order of how strongly they are enforced:
 
 | Mechanism | Enforcement | Where |
 |---|---|---|
-| Opus is read-only / Codex makes all edits, images, and browser actions | **Physical** (harness tool lock) | `main.cjs` allowed-tools bridge/read-only list + `disallowedTools='Edit,Write,Bash'`; `fusionChatHost.buildClaudeArgs` |
+| Claude UI-write / Codex owns execution, images, browser actions, and verification | **Physical** (harness tool lock) | `main.cjs` Fusion tool helpers + `disallowedTools='Bash'` + `--tools`/`--strict-mcp-config`; `fusionChatHost.buildClaudeArgs` |
 | Verdict value cannot falsely report success | **Structural** (fail-closed parser) | `fusion-adapter.cjs` `normalizeVerifierVerdict` |
 | Opus *honors* `nextAction:"continue"` | **Behavioral only** (prompt) | `buildFusionSystemPrompt` completion-gate copy |
 
 > ⚠️ The third row is the weak link (see [§5](#5-two-warnings)). Nothing
-> structurally stops Opus from telling the user "all done" while the verdict says
+> structurally stops Claude from telling the user "all done" while the verdict says
 > `continue`. Any unification work must **not** make this worse.
 
 ---
@@ -178,22 +184,19 @@ injected/returned block must be **hard-capped**.
    that silently swallows "keep going" is **worse** than two visible ones.
    Therefore: keep the verdict **one click away** (Details, A4) rather than fully
    buried, and in the prompt rewrite (A3) keep the gate language —
-   *"EVERY change MUST go through codex_implement"* and *"always let the verifier
-   verdict gate completion"* — **verbatim**. (The fusion-launch smoke test
+   *"Bash is blocked"*, *"ALL execution work goes through Codex"*, and *"Always let Codex's verifier verdict gate completion"* — **verbatim**. (The fusion-launch smoke test
    independently demands the `goalReached:false` and "Codex verifier override"
    literals survive, which partially backstops this.)
 
-2. **Do not auto-approve commands naively.** The tempting control-flow shortcut
-   (auto-clear "read-only" commands inside the adapter) has an **argv-array
-   bypass**: `params.command` can be an argv array, so an `argv[0]` allowlist is
-   fooled by argv-form mutators that need no shell metacharacters (`find … -exec`,
-   `xargs`, `git -c core.sshCommand=…`, `rg --pre`, anything with `-o/--output`).
-   An auto-approved "read-only" command that is actually a mutator lets a write
-   land with **no Opus/human approval** — a direct hole in the Codex-only-edits
-   guarantee. Keep it out of initial scope, or restrict to a closed safelist of
-   `argv[0]` with a vetted arg set **and** an explicit reject-list for
-   exec/output/sub-command flags. Patch/permission/question classes must stay
-   parked.
+2. **Do not reintroduce fragile approval automation.** Fusion now avoids the
+   old approval fight by launching Codex with `approvalPolicy:"never"` and full
+   workspace access. If a future mode brings approvals back, do not auto-clear
+   "read-only" commands with regex/argv-name checks: `params.command` can be an
+   argv array, so an `argv[0]` allowlist is fooled by argv-form mutators that
+   need no shell metacharacters (`find … -exec`, `xargs`,
+   `git -c core.sshCommand=…`, `rg --pre`, anything with `-o/--output`). Use a
+   closed safelist with vetted arguments and explicit reject rules, or keep the
+   request parked for Opus/human review.
 
 3. **(Loop cost, B7)** The internal verify→fix loop relies on
    `currentGoal.tokenBudget` as a backstop, but `tokensUsed` is **stale** (only

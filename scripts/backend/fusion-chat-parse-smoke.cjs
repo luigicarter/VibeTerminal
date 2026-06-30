@@ -40,10 +40,25 @@ const fixture = [
   { type: "stream_event", event: { type: "content_block_delta", delta: { type: "input_json_delta", partial_json: '{"task":"add ' } } },
   { type: "stream_event", event: { type: "content_block_delta", delta: { type: "input_json_delta", partial_json: 'rate limiting"}' } } },
   { type: "stream_event", event: { type: "content_block_stop" } },
+  {
+    type: "stream_event",
+    event: {
+      type: "content_block_start",
+      content_block: { type: "tool_use", id: "agent-1", name: "Task" }
+    }
+  },
+  { type: "stream_event", event: { type: "content_block_delta", delta: { type: "input_json_delta", partial_json: '{"description":"Review API",' } } },
+  { type: "stream_event", event: { type: "content_block_delta", delta: { type: "input_json_delta", partial_json: '"prompt":"Check background activity."}' } } },
+  { type: "stream_event", event: { type: "content_block_stop" } },
   { type: "stream_event", event: { type: "message_stop" } },
   {
     type: "user",
-    message: { content: [{ type: "tool_result", tool_use_id: "tool-1", content: '{"status":"completed"}' }] }
+    message: {
+      content: [
+        { type: "tool_result", tool_use_id: "tool-1", content: '{"status":"completed"}' },
+        { type: "tool_result", tool_use_id: "agent-1", content: "done" }
+      ]
+    }
   },
   { type: "result", subtype: "success", total_cost_usd: 0.012 }
 ];
@@ -76,6 +91,23 @@ function main() {
   const toolResult = events.find((e) => e.type === "tool-result");
   assert(toolResult && toolResult.toolId === "tool-1", "missing tool-result event");
 
+  const backgroundEvents = events.filter((e) => e.type === "background-activity");
+  assert(backgroundEvents.length === 2, `expected background start/stop, got ${backgroundEvents.length}`);
+  assert(
+    backgroundEvents[0].backgroundActivity.active === true &&
+      backgroundEvents[0].backgroundActivity.count === 1,
+    `background start should report one active agent: ${JSON.stringify(backgroundEvents[0])}`
+  );
+  assert(
+    backgroundEvents[0].backgroundActivity.items[0].label === "Review API",
+    `background label should come from Task description: ${JSON.stringify(backgroundEvents[0])}`
+  );
+  assert(
+    backgroundEvents[1].backgroundActivity.active === false &&
+      backgroundEvents[1].backgroundActivity.count === 0,
+    `background stop should clear active agents: ${JSON.stringify(backgroundEvents[1])}`
+  );
+
   assert(events.some((e) => e.type === "turn-start"), "missing turn-start");
   assert(events.some((e) => e.type === "turn-end"), "missing turn-end");
   const result = events.find((e) => e.type === "result");
@@ -87,8 +119,11 @@ function main() {
     systemPromptFile: "C:\\prompt dir\\system\"prompt.md",
     model: "opus",
     effort: "high",
-    allowedTools: "mcp__fusion-codex__codex_implement",
-    disallowedTools: "Edit,Write,Bash",
+    settingsFile: "C:\\cfg dir\\fusion-claude-settings.json",
+    tools: "Read,Glob,Grep,Edit,Write",
+    allowedTools: "mcp__fusion-codex__codex_investigate,mcp__fusion-codex__codex_implement,Read,Glob,Grep,Edit,Write",
+    disallowedTools: "Bash",
+    strictMcpConfig: true,
     resumeId: "resume & id"
   });
   assert(!claudeArgs.includes("claude"), "claude executable should not be part of argv args");
@@ -103,10 +138,26 @@ function main() {
   );
   assert(claudeArgs.includes("--effort") && claudeArgs.includes("high"), "effort should be passed to claude");
   assert(
-    claudeArgs.includes("--disallowedTools") &&
-      claudeArgs.includes("Edit,Write,Bash"),
-    "direct edit/shell tool denylist should be passed to claude"
+    claudeArgs.includes("--settings") &&
+      claudeArgs.includes("C:\\cfg dir\\fusion-claude-settings.json"),
+    "Fusion-specific Claude settings file should be passed to claude"
   );
+  assert(
+      claudeArgs.includes("--tools") &&
+      claudeArgs.includes("Read,Glob,Grep,Edit,Write"),
+    "available Claude built-ins should be restricted to read and UI write tools"
+  );
+  assert(
+      claudeArgs.includes("--allowedTools") &&
+      claudeArgs.includes("mcp__fusion-codex__codex_investigate,mcp__fusion-codex__codex_implement,Read,Glob,Grep,Edit,Write"),
+    "allowed tools should include the Fusion bridge plus direct UI write tools"
+  );
+  assert(
+    claudeArgs.includes("--disallowedTools") &&
+      claudeArgs.includes("Bash"),
+    "Bash denylist should be passed to claude"
+  );
+  assert(claudeArgs.includes("--strict-mcp-config"), "Fusion should isolate Claude to the per-pane MCP config");
 
   const escaped = windowsCmdArg("C:\\repo dir\\a&b|\"quoted\"");
   assert(escaped.startsWith('"') && escaped.endsWith('"'), "Windows special args should be quoted");
@@ -135,7 +186,9 @@ function main() {
       hostSource.includes("STEER CURRENT FUSION TURN:") &&
       hostSource.includes("payload?.steer") &&
       hostSource.includes('if (effort) args.push("--effort", String(effort));') &&
-      hostSource.includes('else if (msg.type === "activity") activity(msg.payload)'),
+      hostSource.includes('else if (msg.type === "activity") activity(msg.payload)') &&
+      hostSource.includes('type: "background-activity"') &&
+      hostSource.includes('function isBackgroundAgentTool'),
     "Fusion host should replay live sessions, reject stale process events, and report closed-session input"
   );
 

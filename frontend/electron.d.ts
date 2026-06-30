@@ -5,6 +5,7 @@ import type {
   CodeChangeSummary,
   FusionCodexModel,
   FusionEffort,
+  FusionRunMode,
   FusionChatEvent,
   FusionClaudeModel,
   TerminalEvent,
@@ -77,10 +78,19 @@ declare global {
           resumeId?: string;
           model?: FusionClaudeModel | string;
           codexModel?: FusionCodexModel | string;
+          mode?: FusionRunMode | string;
           effort?: Exclude<FusionEffort, "auto"> | string;
           codexEffort?: Exclude<FusionEffort, "auto"> | string;
         }) => Promise<{ ok: boolean; error?: string }>;
+        updateSettings: (
+          id: string,
+          settings: {
+            codexModel?: FusionCodexModel | string;
+            codexEffort?: FusionEffort | string;
+          }
+        ) => Promise<{ ok: boolean; error?: string }>;
         sendUserTurn: (id: string, text: string) => void;
+        setMode: (id: string, mode: FusionRunMode | string) => Promise<{ ok: boolean; mode?: FusionRunMode; error?: string }>;
         steer: (id: string, text: string) => void;
         interrupt: (id: string) => Promise<boolean>;
         stop: (id: string) => Promise<boolean>;

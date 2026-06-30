@@ -2,9 +2,9 @@
 
 > **Status: implemented (M2 engine + M3 headless chat UI + M4 embedded per-pane Codex).**
 > A Fusion pane is a custom **Claude-Code-style chat UI**: Claude runs HEADLESS
-> (stream-json) as **Opus 4.8** the orchestrator/architect and delegates
-> implementation plus verification to Codex (**GPT-5.5**) via a per-pane MCP
-> adapter; approvals route back to Opus. Each
+> (stream-json) as **Opus or Sonnet 5** the orchestrator/architect with direct UI/design/frontend writes and delegates
+> execution plus verification to Codex (**GPT-5.5**) via a per-pane MCP
+> adapter; exceptional decisions can route back to Opus. Each
 > Fusion terminal spawns its **OWN embedded** Codex `app-server` over **stdio**
 > (the bundled binary, `vendor/codex-bin/<plat>` → `resources/` via
 > `extraResources`; `resolveCodexBin()` permits a PATH fallback only in dev) — no
@@ -17,8 +17,8 @@
 > via `claude --resume`); per-platform binaries + code-signing for release.
 
 Goal: a **Fusion** terminal that fuses the *capabilities* of two coding agents
-behind one surface — Claude (Opus 4.8) as the orchestrator/architect/designer and
-long-horizon coding controller using Codex native goals, and Codex (GPT-5.5) as
+behind one surface — Claude (Opus or Sonnet 5) as the orchestrator/architect/designer and
+long-horizon coding controller using Codex native goals with direct UI/design/frontend edit/write tools, and Codex (GPT-5.5) as
 executor, tester, bug reviewer, and completion verifier — so the user talks to
 one terminal and the right model handles each sub-task. Think "OpenRouter, but for **complementary
 specialists** rather than interchangeable models": the router doesn't pick one
@@ -30,19 +30,7 @@ itself (an LLM that decides when to delegate), not a static rule table.
 
 ## Roles and completion authority
 
-The two models have hard, enforced scopes. Opus is launched with **read-only
-tools** (`Read`/`Grep`/`Glob`) plus the Codex bridge tools. The allowlist excludes
-direct editing, shell, image-generation, and browser-control tools, with a
-reduced `--disallowedTools` fallback for stable mutation/shell names
-(`Edit`/`Write`/`Bash`). So every file change, command, test run, image
-generation task, and browser-control task is structurally forced through
-`codex_implement` — Opus
-physically cannot edit the repo itself. This is what makes "Fusion actually uses
-Codex to write code" a guarantee rather than a suggestion. Codex remains the hard
-verifier for bugs and goal completion.
-(Reversible: re-add the tools to the `allowedTools` string in `main.cjs` and drop
-`disallowedTools` to restore the old "Claude may edit" behavior, e.g. behind a
-future per-pane mode toggle.)
+The two models have hard, enforced scopes. Claude is launched with `Read`/`Grep`/`Glob`, direct UI/design/frontend edit/write tools (`Edit`/`Write`), and the Codex bridge tools. `Bash` stays in `--disallowedTools`, and Claude is launched with a restricted built-in `--tools` surface plus a strict per-pane MCP config, so commands, tests, builds, debug runs, screenshots, browser control, and image generation are structurally forced through `codex_implement`. Codex remains the hard verifier for bugs and goal completion. Path-scope hardening via `VIBE_FUSION_UI_WRITE_GLOBS` is deferred and not enforced in this build; direct writes are limited to UI/design/frontend by the Fusion prompt and tool split, while Bash remains blocked. Reversible: remove `Edit`/`Write` from the Fusion helpers in `main.cjs` and restore the old Edit/Write/Bash denylist to return to read-only Claude.
 
 | Opus 4.8 (Claude - orchestrator/architect/designer) | Codex GPT-5.5 (implementer/reviewer/verifier) |
 |---|---|
@@ -52,7 +40,7 @@ future per-pane mode toggle.)
 | Reviewing a Codex plan before it touches a large repo | Refactors |
 | "What are we missing?" analysis | Repo navigation |
 | Tradeoff reasoning | Implementing from an approved plan |
-| Read-only investigation + review (Read/Grep/Glob) | Iterative debugging loops |
+| Direct UI/design/frontend edits plus Read/Grep/Glob review | Iterative debugging loops |
 | Guiding Codex with constraints, UI intent, debugging direction, and corrections | Following Claude guidance while independently checking the result |
 | Human-facing override decisions | Bug review and goal-completion verification |
 | Deciding when image/browser work is needed | Picture/image generation and browser control |
@@ -65,10 +53,11 @@ not a substitute for Codex's independent verifier verdict.
 
 **The loop:** Opus plans/designs → Codex implements + runs tests + fixes → produces
 a diff and structured verifier verdict → if Codex says not done, Opus continues
-or redelegates with more guidance → Codex fixes and verifies again. Opus reviews
-Codex's diffs read-only (Read/Grep/Glob); it has no edit tools of its own. Future
+or redelegates with more guidance → Codex fixes and verifies again. Claude reviews diffs with Read/Grep/Glob and may directly adjust UI/design/frontend files before sending the result to Codex for execution and verification. Future
 worktree isolation is a hardening option; the current implementation runs Codex
-in the pane's workspace with `workspace-write` and on-request approvals.
+implementation turns in the pane's workspace with `danger-full-access` and
+`approvalPolicy:"never"` so routine reads/writes do not bounce back through
+Claude as approval fights. `codex_investigate` turns are explicitly `readOnly`.
 
 **Interrupting a turn:** the Fusion chat host control protocol has a dedicated
 `interrupt` message (distinct from `stop`, which kills the whole session). The
@@ -137,6 +126,8 @@ own embedded Codex child (south). It exposes a small tool surface:
   status.
 - `codex_goal_clear()` — clear the native goal when the human abandons or
   replaces the objective.
+- `codex_investigate(task)` — run a read-only Codex scouting pass that returns
+  concise findings and relevant file paths/snippets for Claude's planning.
 - `codex_implement(plan)` — run the approved plan on the pane's thread (edit, run
   tests, generate images, control browsers, fix, verify), streaming progress.
 - `codex_respond(pendingId, decision)` — answer a parked approval or question.
@@ -159,10 +150,12 @@ is **turn-based**:
 ```
 Claude → codex_goal_set({ objective: top-level user goal, status: "active" })
    adapter → app-server: thread/start with goals enabled if needed, then thread/goal/set
+Claude → codex_investigate(task)             (optional read-only scouting)
+   adapter → app-server: turn/start without verifier, returns findings + files
 Claude → codex_implement(plan)
    adapter → app-server: thread/start with goals enabled (or reuse thread), send turn, stream items
    ...Codex edits / runs tests in the workspace...
-   app-server → adapter: fileChange requestApproval        ← Codex pauses here
+   app-server → adapter: exceptional request/question      ← Codex may pause here
    adapter PARKS the request, returns to Claude:
         { status: "needs_decision", pendingId, kind, detail, diff }
 Opus decides and calls:
@@ -172,14 +165,14 @@ Opus decides and calls:
                     bugsFound, missingRequirements, nextAction, verifierVerdict, goal }
 ```
 
-This makes "route to Opus" structurally true — Opus is literally the one calling
-the next tool. Opus answers from its own judgment and only **asks the human when it
-decides it must** (irreversible op, ambiguous intent, security) — by asking
-in-pane, which lights up the existing `agent.waiting` attention dot. No inbound
-port, no polling channel needed. `acceptForSession` lets Opus pre-approve a class
-to cut round-trips. Codex threads launch with `-a on-request --sandbox
-workspace-write` so Codex self-filters trivia and only escalates meaningful
-decisions.
+Older Fusion builds parked routine Codex approvals back to Opus. The current
+default is more autonomous: Codex threads launch with full workspace access and
+`approvalPolicy:"never"`, so Opus watches, steers, plans, and reviews instead of
+clearing read/write prompts. `needs_decision` remains a protocol path for
+exceptional questions or permission requests, but it should not be part of the
+normal read/edit/debug loop.
+Read-only scouting is the exception to the thread default: `codex_investigate`
+uses a `readOnly` turn sandbox.
 
 Completion is not free-form text only. The adapter wraps each Codex task with a
 verifier contract requiring a final `FUSION_VERDICT_JSON` line. The adapter
@@ -246,8 +239,7 @@ env vars, each guarded so the surface no-ops when they are unset:
 With all three unset the adapter is a complete host-free MCP server, so the whole
 `codex_implement → needs_decision → codex_respond → verifier` loop can be driven by
 a plain `claude --mcp-config …` with `--allowedTools "…,Read,Glob,Grep"
---disallowedTools "Edit,Write,Bash"` (the read-only lock is just those two CLI
-flags). This is kept as a **private validation/fallback hedge**, not a shipped
+--tools "Read,Glob,Grep,Edit,Write" --disallowedTools "Bash" --strict-mcp-config` (the execution lock is Bash denial plus the restricted built-in tool surface). This is kept as a **private validation/fallback hedge**, not a shipped
 public skill — the capability has no moat, so publishing it would cannibalize the
 app. The only thing lost off-host is the renderer activity relay and external
 steer/stop (interrupt is native to `claude`).
@@ -310,7 +302,7 @@ Details-only diagnostics.
    the M0 smoke test fail CI on a breaking bump.
 4. **Worktree vs in-place** — future worktree isolation could give Opus a stable
    review target and quarantine edits until approved. The current implementation
-   is in-place `workspace-write` with on-request approvals.
+   is in-place `danger-full-access` for Codex to avoid approval fights.
 
 ## Likely file touch-points (when implemented)
 

@@ -297,9 +297,9 @@ assert(
   "Fusion warmup errors should mark the session failed and request attention"
 );
 assert(
-  appSource.includes("fusionBridgeToolRef") &&
+    appSource.includes("fusionBridgeToolRef") &&
     appSource.includes('event.type === "tool-call"') &&
-    appSource.includes("/codex_implement|codex_respond/") &&
+    appSource.includes("/codex_investigate|codex_implement|codex_respond/") &&
     appSource.includes("if (!isFusionBridgeTool)") &&
     appSource.includes("fusionBridgeToolRef.current.delete(toolKey)"),
   "Fusion waiting cleanup should only react to Codex bridge tool results"
@@ -316,12 +316,19 @@ assert(
   appSource.includes("function clearFusionSession(") &&
     appSource.includes("threadRef: undefined") &&
     appSource.includes("resumeRef: currentClaudeRef ?? previousClaudeRef") &&
-    appSource.includes("function updateFusionSettings("),
-  "Fusion clear/settings should restart Claude-backed Fusion sessions without fabricating thread ids"
+    appSource.includes("function updateFusionSettings(") &&
+    appSource.includes("const codexSettingsChanged =") &&
+    appSource.includes("?.updateSettings(session.id") &&
+    appSource.includes("nextFusionModel !== currentFusionModel") &&
+    appSource.includes("nextFusionClaudeEffort !== currentFusionClaudeEffort") &&
+    appSource.includes('nextLaunchMode: relaunchResumeRef?.id ? "resume" : "new"'),
+  "Fusion clear/planning settings should restart and resume Claude, while Codex-only settings update live"
 );
 assert(
   appSource.includes('event.type === "agent-running"') &&
-    appSource.includes("applyAgentRunning("),
+    appSource.includes("applyAgentRunning(") &&
+    appSource.includes('event.type === "agent-background-activity"') &&
+    appSource.includes("applyAgentBackgroundActivity(event.id, event.backgroundActivity)"),
   "app should turn agent-running telemetry into a forced running status"
 );
 assert(
@@ -405,6 +412,8 @@ assert(
     fusionChatPaneSource.includes('raw.match(/^\\/(?:claude|model\\s+claude)\\s+(.+)$/i)') &&
     fusionChatPaneSource.includes('raw.match(/^\\/(?:codex|model\\s+codex)\\s+(.+)$/i)') &&
     fusionChatPaneSource.includes("pendingRestartNoticeRef") &&
+    fusionChatPaneSource.includes("Updated Fusion ${label} live") &&
+    fusionChatPaneSource.includes("pendingRestartNoticeRef.current = session.started && requiresRestart ? notice : null") &&
     fusionChatPaneSource.includes("const FUSION_SLASH_COMMANDS") &&
     fusionChatPaneSource.includes("const FREE_TEXT_SLASH_COMMANDS") &&
     fusionChatPaneSource.includes(".filter((cmd) => cmd.takesArg)") &&
@@ -427,6 +436,10 @@ assert(
     fusionChatPaneSource.includes("function applyEffortLevel") &&
     fusionChatPaneSource.includes("function normalizeRoleScope") &&
     fusionChatPaneSource.includes("function normalizeSpeedPreset") &&
+    fusionChatPaneSource.includes('{ name: "/plan"') &&
+    fusionChatPaneSource.includes('{ name: "/auto"') &&
+    fusionChatPaneSource.includes('if (normalized === "/plan")') &&
+    fusionChatPaneSource.includes('if (normalized === "/auto")') &&
     fusionChatPaneSource.includes('applySpeedPreset("execution"') &&
     fusionChatPaneSource.includes('applyEffortLevel(normalizeRoleScope(effortMatch[1]), effortMatch[2] as FusionEffort)') &&
     fusionChatPaneSource.includes('"Planning role"') &&
@@ -437,6 +450,9 @@ assert(
     !fusionChatPaneSource.includes('"Fusion - Claude Code"') &&
     !fusionChatPaneSource.includes('"Fusion - Codex"') &&
     fusionChatPaneSource.includes("activeRoleLabel") &&
+    fusionChatPaneSource.includes("formatBackgroundActivityTitle") &&
+    fusionChatPaneSource.includes('className="fusion-background-activity"') &&
+    fusionChatPaneSource.includes("backgroundActivity.count > 1") &&
     fusionChatPaneSource.includes('m.kind === "thinking" && !m.text.trim()'),
   "FusionChatPane should drive harness-specific speed/effort submenus, unified role labels, and empty-thinking suppression"
 );

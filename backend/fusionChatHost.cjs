@@ -7,7 +7,7 @@
 // and speaks a JSONL control protocol with main over its own stdin/stdout.
 //
 // Control IN (from main, one JSON per line on stdin):
-//   {type:"start",  payload:{id, cwd, mcpConfig, systemPromptFile, model, effort?, allowedTools, disallowedTools?, resumeId?}}
+//   {type:"start",  payload:{id, cwd, mcpConfig, systemPromptFile, model, mode?, effort?, settingsFile?, tools?, allowedTools, disallowedTools?, permissionMode?, strictMcpConfig?, resumeId?}}
 //   {type:"input",  payload:{id, text, steer?}}
 //   {type:"interrupt", payload:{id}}   ← abort the CURRENT turn, keep the session
 //   {type:"stop",   payload:{id}}       ← kill the whole session process
@@ -24,10 +24,99 @@ const isWin = process.platform === "win32";
 const CLAUDE_BIN = process.env.VIBE_CLAUDE_BIN || "claude";
 const MAX_HISTORY_EVENTS = 20_000;
 
+function normalizeFusionRunMode(value) {
+  return String(value || "").trim().toLowerCase() === "plan" ? "plan" : "auto";
+}
+
+function planModeDirective() {
+  return [
+    "FUSION PLAN MODE IS ACTIVE.",
+    "Investigate read-only with Read, Grep, Glob, or codex_investigate, then present a concrete implementation plan to the user.",
+    "Do not call codex_implement, codex_respond, codex_goal_set, codex_goal_clear, or any execution tool until the user switches this pane back to Auto mode.",
+    "Execution is hard-blocked in the adapter while Plan mode is active."
+  ].join("\n");
+}
+
+function buildFusionInputContent(text, mode, steer) {
+  if (mode !== "plan") {
+    return steer
+      ? [
+          "STEER CURRENT FUSION TURN:",
+          text,
+          "",
+          "Incorporate this direction into the active response. If Codex is currently running, use this as steering for the next Codex decision, correction, or follow-up delegation instead of treating it as a separate new request."
+        ].join("\n")
+      : text;
+  }
+
+  const directive = planModeDirective();
+  return steer
+    ? [
+        directive,
+        "",
+        "STEER CURRENT FUSION TURN:",
+        text,
+        "",
+        "Incorporate this direction into the active response as read-only planning guidance. Present the plan; do not delegate execution until Auto mode is restored."
+      ].join("\n")
+    : [directive, "", "USER REQUEST:", text].join("\n");
+}
+
+function toolDisplayName(name) {
+  return String(name || "").replace(/^mcp__[^_]+__/, "");
+}
+
+function isBackgroundAgentTool(name) {
+  const displayName = toolDisplayName(name);
+  return displayName === "Task" || displayName === "Agent";
+}
+
+function asObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function clipped(value, max) {
+  const text = String(value || "").trim();
+  return text.length > max ? text.slice(0, max) + "..." : text;
+}
+
+function backgroundAgentItem(toolId, name, input) {
+  const data = asObject(input);
+  const displayName = toolDisplayName(name);
+  const description =
+    typeof data.description === "string" && data.description.trim()
+      ? data.description
+      : typeof data.subagent_type === "string" && data.subagent_type.trim()
+        ? data.subagent_type
+        : "";
+  const prompt = typeof data.prompt === "string" && data.prompt.trim() ? data.prompt : "";
+  return {
+    id: String(toolId || displayName + "-" + Date.now()),
+    source: "opus",
+    label: clipped(description || displayName + " subagent", 80),
+    detail: clipped(prompt || description || displayName + " subagent running", 220)
+  };
+}
+
+function appendBackgroundActivity(events, activeBackgroundAgents) {
+  const items = Array.from(activeBackgroundAgents.values());
+  events.push({
+    type: "background-activity",
+    backgroundActivity: {
+      active: items.length > 0,
+      count: items.length,
+      source: "opus",
+      items,
+      updatedAt: Date.now()
+    }
+  });
+}
+
 // ---- stream-json normalizer (pure, per-session state) ----
 // Turns the raw Anthropic stream-json line objects into high-level chat events.
 function createStreamNormalizer() {
   let block = null; // { kind: "text"|"thinking"|"tool_use", toolId?, name?, jsonBuf? }
+  const activeBackgroundAgents = new Map();
 
   return function normalize(line) {
     let msg;
@@ -44,6 +133,10 @@ function createStreamNormalizer() {
     }
 
     if (msg.type === "result") {
+      if (activeBackgroundAgents.size > 0) {
+        activeBackgroundAgents.clear();
+        appendBackgroundActivity(events, activeBackgroundAgents);
+      }
       events.push({
         type: "result",
         subtype: msg.subtype,
@@ -57,6 +150,7 @@ function createStreamNormalizer() {
     if (msg.type === "user" && msg.message && Array.isArray(msg.message.content)) {
       for (const part of msg.message.content) {
         if (part && part.type === "tool_result") {
+          const toolId = String(part.tool_use_id || "");
           events.push({
             type: "tool-result",
             toolId: part.tool_use_id,
@@ -65,6 +159,9 @@ function createStreamNormalizer() {
                 ? part.content
                 : JSON.stringify(part.content)
           });
+          if (toolId && activeBackgroundAgents.delete(toolId)) {
+            appendBackgroundActivity(events, activeBackgroundAgents);
+          }
         }
       }
       return events;
@@ -118,6 +215,13 @@ function createStreamNormalizer() {
             name: block.name,
             input
           });
+          if (isBackgroundAgentTool(block.name)) {
+            activeBackgroundAgents.set(
+              String(block.toolId || ""),
+              backgroundAgentItem(block.toolId, block.name, input)
+            );
+            appendBackgroundActivity(events, activeBackgroundAgents);
+          }
         }
         block = null;
         break;
@@ -186,10 +290,25 @@ function runHost() {
   }
 
   function start(payload) {
-    const { id, cwd, mcpConfig, systemPromptFile, model, effort, allowedTools, disallowedTools, resumeId } = payload;
+    const {
+      id,
+      cwd,
+      mcpConfig,
+      systemPromptFile,
+      model,
+      effort,
+      settingsFile,
+      tools,
+      allowedTools,
+      disallowedTools,
+      permissionMode,
+      strictMcpConfig,
+      resumeId
+    } = payload;
     if (sessions.has(id)) {
       const existingState = sessions.get(id);
       if (existingState?.child) {
+        existingState.mode = normalizeFusionRunMode(payload.mode);
         replaySession(id, existingState);
         return;
       }
@@ -205,7 +324,7 @@ function runHost() {
     });
 
     const normalizer = createStreamNormalizer();
-    const state = { child, normalizer, buffer: "", history: [] };
+    const state = { child, normalizer, buffer: "", history: [], mode: normalizeFusionRunMode(payload.mode) };
     sessions.set(id, state);
 
     child.stdout.on("data", (chunk) => {
@@ -270,14 +389,7 @@ function runHost() {
 
     try {
       emitSessionEvent(id, state, { type: "user", text, steer });
-      const content = steer
-        ? [
-            "STEER CURRENT FUSION TURN:",
-            text,
-            "",
-            "Incorporate this direction into the active response. If Codex is currently running, use this as steering for the next Codex decision, correction, or follow-up delegation instead of treating it as a separate new request."
-          ].join("\n")
-        : text;
+      const content = buildFusionInputContent(text, normalizeFusionRunMode(state.mode), steer);
       state.child.stdin.write(
         JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n"
       );
@@ -305,6 +417,13 @@ function runHost() {
   // stream-json interrupt control-request on the live child's stdin (the same
   // mechanism the Agent SDK's interrupt() uses). The process stays up so the
   // user can immediately type the next turn — unlike stop(), which kills it.
+  function mode(payload) {
+    const id = payload?.id;
+    const state = sessions.get(id);
+    if (!state) return;
+    state.mode = normalizeFusionRunMode(payload.mode);
+  }
+
   function interrupt(payload) {
     const id = payload?.id;
     const state = sessions.get(id);
@@ -356,6 +475,7 @@ function runHost() {
       if (msg.type === "start") start(msg.payload);
       else if (msg.type === "input") input(msg.payload);
       else if (msg.type === "activity") activity(msg.payload);
+      else if (msg.type === "mode") mode(msg.payload);
       else if (msg.type === "interrupt") interrupt(msg.payload);
       else if (msg.type === "stop") stop(msg.payload);
       else if (msg.type === "shutdown") shutdown();
@@ -373,10 +493,18 @@ function buildClaudeArgs(payload = {}) {
     systemPromptFile,
     model,
     effort,
+    settingsFile,
+    tools,
     allowedTools,
     disallowedTools,
+    permissionMode,
+    strictMcpConfig,
     resumeId
   } = payload;
+  const effectivePermissionMode =
+    typeof permissionMode === "string" && permissionMode.trim()
+      ? permissionMode.trim()
+      : "acceptEdits";
   const args = [
     "--print",
     "--input-format",
@@ -386,14 +514,17 @@ function buildClaudeArgs(payload = {}) {
     "--verbose",
     "--include-partial-messages",
     "--permission-mode",
-    "acceptEdits"
+    effectivePermissionMode
   ];
   if (model) args.push("--model", String(model));
   if (effort) args.push("--effort", String(effort));
+  if (settingsFile) args.push("--settings", String(settingsFile));
+  if (tools) args.push("--tools", String(tools));
   if (allowedTools) args.push("--allowedTools", String(allowedTools));
-  // Hard-block Opus's mutation/shell tools so implementation MUST route through
-  // codex_implement — this is what makes Fusion actually use Codex to write code.
+  // Bash stays explicitly denied; execution/browser/image tools are kept out of
+  // Claude's exposed surface with --tools and the Fusion-only MCP config.
   if (disallowedTools) args.push("--disallowedTools", String(disallowedTools));
+  if (strictMcpConfig) args.push("--strict-mcp-config");
   if (mcpConfig) args.push("--mcp-config", String(mcpConfig));
   if (systemPromptFile) args.push("--append-system-prompt-file", String(systemPromptFile));
   if (cwd) args.push("--add-dir", String(cwd));

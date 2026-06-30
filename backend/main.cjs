@@ -120,6 +120,16 @@ let updateState = {
   updatedAt: Date.now()
 };
 const FUSION_MODEL_ID_PATTERN = /^[A-Za-z0-9._:/@+-]+$/;
+const FUSION_CODEX_BRIDGE_TOOLS = [
+  "mcp__fusion-codex__codex_investigate",
+  "mcp__fusion-codex__codex_implement",
+  "mcp__fusion-codex__codex_respond",
+  "mcp__fusion-codex__codex_goal_set",
+  "mcp__fusion-codex__codex_goal_get",
+  "mcp__fusion-codex__codex_goal_clear"
+];
+const FUSION_CLAUDE_UI_WRITE_TOOLS = ["Edit", "Write"];
+const FUSION_CLAUDE_BUILTIN_TOOLS = ["Read", "Glob", "Grep", ...FUSION_CLAUDE_UI_WRITE_TOOLS];
 
 function pathFromFileUrl(value) {
   try {
@@ -768,7 +778,16 @@ function parseFusionChatHostOutput(chunk) {
       try {
         const message = JSON.parse(line);
         if (message.type === "event") {
-          broadcastFusionChatEvent({ id: message.id, ...message.event });
+          const fusionEvent = { id: message.id, ...message.event };
+          broadcastFusionChatEvent(fusionEvent);
+          if (message.event?.type === "background-activity") {
+            broadcastTerminalEvent({
+              id: message.id,
+              type: "agent-background-activity",
+              provider: "claude",
+              backgroundActivity: message.event.backgroundActivity
+            });
+          }
         } else if (message.type === "closed") {
           broadcastFusionChatEvent({ id: message.id, type: "closed", code: message.code });
         }
@@ -858,6 +877,17 @@ function normalizeFusionEffort(value) {
     : undefined;
 }
 
+function normalizeFusionRunMode(value) {
+  return normalizeFusionString(value)?.trim().toLowerCase() === "plan" ? "plan" : "auto";
+}
+
+function fusionClaudeTools() {
+  return [...FUSION_CODEX_BRIDGE_TOOLS, ...FUSION_CLAUDE_BUILTIN_TOOLS].join(",");
+}
+
+function fusionClaudeAllowedTools() {
+  return [...FUSION_CODEX_BRIDGE_TOOLS, ...FUSION_CLAUDE_BUILTIN_TOOLS].join(",");
+}
 function resolveAgentThreadRequest(requestId, result) {
   const pending = pendingAgentThreadRequests.get(requestId);
   if (!pending) {
@@ -1193,12 +1223,14 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
     const fusionCodexModel = normalizeFusionCodexModel(rawCodexModel);
     const fusionClaudeEffort = normalizeFusionEffort(payload.effort);
     const fusionCodexEffort = normalizeFusionEffort(payload.codexEffort ?? payload.effort);
+    const fusionRunMode = normalizeFusionRunMode(payload.mode);
     const telemetry = getAgentTelemetry();
     const files = await telemetry.prepareFusionFiles(id, {
       cwd: launchCwd.cwd,
       codexBin,
       codexModel: fusionCodexModel,
-      codexEffort: fusionCodexEffort
+      codexEffort: fusionCodexEffort,
+      runMode: fusionRunMode
     });
     if (!files) {
       return { ok: false, error: "could not prepare Fusion files" };
@@ -1211,16 +1243,14 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
         mcpConfig: files.mcpConfig,
         systemPromptFile: files.systemPromptFile,
         model: fusionModel,
+        mode: fusionRunMode,
         effort: fusionClaudeEffort,
-        // Opus orchestrates: it may READ/search to plan and review, and drives
-        // Codex through the bridge tools. It has NO direct edit/shell/image or
-        // browser-control tools, so concrete execution goes through codex_implement.
-        allowedTools:
-          "mcp__fusion-codex__codex_implement,mcp__fusion-codex__codex_respond,mcp__fusion-codex__codex_goal_set,mcp__fusion-codex__codex_goal_get,mcp__fusion-codex__codex_goal_clear,Read,Glob,Grep",
-        // Belt-and-suspenders: hard-block stable mutation/shell tool names
-        // regardless of permission mode. The allowlist above is the primary
-        // control; avoid optional tool names that some Claude builds warn about.
-        disallowedTools: "Edit,Write,Bash",
+        // Claude can directly write UI/design/frontend files; Codex owns all
+        // execution and final bug/goal verification.
+        tools: fusionClaudeTools(),
+        allowedTools: fusionClaudeAllowedTools(),
+        disallowedTools: "Bash",
+        strictMcpConfig: true,
         resumeId: payload.resumeId || undefined
       }
     });
@@ -1231,6 +1261,45 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
   } catch (error) {
     return { ok: false, error: error.message };
   }
+});
+
+ipcMain.handle("fusion-chat:update-settings", async (_event, payload) => {
+  if (!payload?.id) {
+    return { ok: false, error: "missing session id" };
+  }
+  const payloadCodexModel =
+    typeof payload.codexModel === "string" ? payload.codexModel.trim() : "";
+  const rawCodexModel =
+    payloadCodexModel &&
+    payloadCodexModel.toLowerCase() !== "auto" &&
+    payloadCodexModel.toLowerCase() !== "default"
+      ? payloadCodexModel
+      : process.env.VIBE_FUSION_CODEX_MODEL;
+  const fusionCodexModel = normalizeFusionCodexModel(rawCodexModel);
+  const fusionCodexEffort = normalizeFusionEffort(payload.codexEffort);
+  const result = await getAgentTelemetry().updateFusionSettings(payload.id, {
+    codexModel: fusionCodexModel,
+    codexEffort: fusionCodexEffort
+  });
+  if (result.status === "failed") {
+    return { ok: false, error: result.error || "could not update Fusion settings" };
+  }
+  return { ok: true };
+});
+ipcMain.handle("fusion-chat:set-mode", async (_event, payload) => {
+  if (!payload?.id) {
+    return { ok: false, error: "missing session id" };
+  }
+  const mode = normalizeFusionRunMode(payload.mode);
+  const sent = sendToFusionChatHost({ type: "mode", payload: { id: payload.id, mode } });
+  if (!sent) {
+    return { ok: false, mode, error: "Fusion chat host is not running." };
+  }
+  const adapterResult = await getAgentTelemetry().setFusionSessionMode(payload.id, mode);
+  if (adapterResult.status === "failed") {
+    return { ok: false, mode, error: adapterResult.error || "could not set Fusion mode" };
+  }
+  return { ok: true, mode };
 });
 
 ipcMain.handle("fusion-chat:interrupt", (_event, payload) => {

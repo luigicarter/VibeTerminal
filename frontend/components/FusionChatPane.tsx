@@ -19,8 +19,10 @@ import {
   XCircle
 } from "lucide-react";
 import clsx from "clsx";
+import { shouldShowAttentionDot } from "../attention";
 import type {
   AgentAttentionEvent,
+  AgentBackgroundActivity,
   AgentProfile,
   AgentSession,
   AgentThreadRef,
@@ -29,6 +31,7 @@ import type {
   FusionCodexModel,
   FusionChatEvent,
   FusionEffort,
+  FusionRunMode,
   FusionSettings,
   SessionStatus
 } from "../types";
@@ -56,6 +59,7 @@ const OPUS_LABEL = "Opus 4.8";
 const DEFAULT_FUSION_MODEL: FusionClaudeModel = "opus";
 const DEFAULT_FUSION_CODEX_MODEL: FusionCodexModel = "auto";
 const DEFAULT_FUSION_EFFORT: FusionEffort = "auto";
+const DEFAULT_FUSION_RUN_MODE: FusionRunMode = "auto";
 const FUSION_MODEL_ID_PATTERN = /^[A-Za-z0-9._:/@+-]+$/;
 const FUSION_EFFORT_LABELS: Record<FusionEffort, string> = {
   auto: "Auto",
@@ -64,6 +68,10 @@ const FUSION_EFFORT_LABELS: Record<FusionEffort, string> = {
   high: "High",
   xhigh: "XHigh",
   max: "Max"
+};
+const FUSION_RUN_MODE_LABELS: Record<FusionRunMode, string> = {
+  auto: "Auto",
+  plan: "Plan"
 };
 const FUSION_EFFORT_VALUES = Object.keys(FUSION_EFFORT_LABELS) as FusionEffort[];
 const FUSION_COMPOSER_MAX_PX = 160;
@@ -183,6 +191,9 @@ interface SlashMenu {
 // The "/" palette — the Fusion equivalent of the slash menu a real CLI draws
 // inside xterm. Every entry routes back through handleSlashCommand.
 const FUSION_SLASH_COMMANDS: SlashCommand[] = [
+  { name: "/plan", desc: "Switch Fusion to Plan mode" },
+  { name: "/auto", desc: "Switch Fusion to Auto mode" },
+  { name: "/mode", desc: "Toggle Auto/Plan mode" },
   { name: "/speed", desc: "Fusion speed presets", submenu: true },
   { name: "/effort", desc: "Fusion reasoning effort", submenu: true },
   { name: "/opus", desc: "Advanced planning role settings", submenu: true },
@@ -479,6 +490,10 @@ function normalizeFusionEffort(value: unknown): FusionEffort {
     : DEFAULT_FUSION_EFFORT;
 }
 
+function normalizeFusionRunMode(value: unknown): FusionRunMode {
+  return String(value || "").trim().toLowerCase() === "plan" ? "plan" : DEFAULT_FUSION_RUN_MODE;
+}
+
 function fusionClaudeModelLabel(value: FusionClaudeModel) {
   if (value === "opus") return OPUS_LABEL;
   if (value === "sonnet") return "Fast";
@@ -489,8 +504,12 @@ function fusionCodexModelLabel(value: FusionCodexModel) {
   return value === "auto" ? "Codex default" : value;
 }
 
+function fusionRunModeLabel(value: FusionRunMode) {
+  return FUSION_RUN_MODE_LABELS[value];
+}
+
 function fusionSettingsSummary(settings: FusionSettings) {
-  return `Planning ${fusionClaudeModelLabel(settings.model)} · Planning effort ${FUSION_EFFORT_LABELS[settings.claudeEffort]} · Execution ${fusionCodexModelLabel(settings.codexModel)} · Execution effort ${FUSION_EFFORT_LABELS[settings.codexEffort]}`;
+  return `Mode ${fusionRunModeLabel(settings.mode)} · Planning ${fusionClaudeModelLabel(settings.model)} · Planning effort ${FUSION_EFFORT_LABELS[settings.claudeEffort]} · Execution ${fusionCodexModelLabel(settings.codexModel)} · Execution effort ${FUSION_EFFORT_LABELS[settings.codexEffort]}`;
 }
 
 interface ToolMeta {
@@ -511,7 +530,7 @@ const FUSION_SPEAKER_LABEL = "Fusion";
 // Opus makes every tool call. Fusion bridge calls are plumbing; Codex's
 // user-facing voice is the concise result/status we derive from those calls.
 function isCodexBridgeTool(name: string): boolean {
-  return /codex_implement|codex_respond/.test(name);
+  return /codex_investigate|codex_implement|codex_respond/.test(name);
 }
 
 function isCodexGoalTool(name: string): boolean {
@@ -529,6 +548,26 @@ function fusionRoleLabel(_role: FusionActiveRole) {
 const baseName = (value: string) => value.split(/[\\/]/).filter(Boolean).pop() ?? value;
 const clip = (value: string, max: number) =>
   value.length > max ? `${value.slice(0, max)}…` : value;
+
+function formatBackgroundActivityTitle(activity: AgentBackgroundActivity | null) {
+  if (!activity || activity.count <= 0) {
+    return "";
+  }
+
+  const header =
+    activity.count === 1
+      ? "Background agent running"
+      : `${activity.count} background agents running`;
+  const details = (activity.items ?? [])
+    .slice(0, 4)
+    .map((item) => {
+      const label = item.label || "Background agent";
+      return item.detail ? `${label}: ${clip(item.detail, 160)}` : label;
+    })
+    .filter(Boolean);
+
+  return details.length ? [header, ...details].join("\n") : header;
+}
 
 // A short argument hint so a tool chip reads "Read FusionChatPane.tsx", not "Read".
 function toolHint(name: string, data: Record<string, unknown>): string {
@@ -557,6 +596,9 @@ function formatToolCall(name: string, input: unknown): string {
   }
   if (name.endsWith("codex_implement")) {
     return `implementation handoff · ${clip(String(data.task ?? ""), 180)}`;
+  }
+  if (name.endsWith("codex_investigate")) {
+    return `investigation handoff · ${clip(String(data.task ?? ""), 180)}`;
   }
   if (name.endsWith("codex_respond")) {
     return `approval response · ${String(data.decision ?? "")}${data.note ? `: ${data.note}` : ""}`;
@@ -595,6 +637,11 @@ function formatCodexBridgeResult(name: string, text: string): string {
   }
 
   if (status === "completed") {
+    if (name.endsWith("codex_investigate")) {
+      const findings = String(parsed.findings ?? "investigation finished");
+      const files = Array.isArray(parsed.files) ? parsed.files.length : 0;
+      return `findings: ${clip(findings, 220)}${files ? ` · ${files} file${files === 1 ? "" : "s"}` : ""}`;
+    }
     const rawSummary =
       parsed.summary ?? parsed.verifierSummary ?? parsed.verifierVerdict ?? "implementation pass finished";
     const summary =
@@ -730,9 +777,12 @@ export default function FusionChatPane({
   const fusionCodexModel = normalizeFusionCodexModel(session.fusionCodexModel);
   const fusionClaudeEffort = normalizeFusionEffort(session.fusionClaudeEffort ?? session.fusionEffort);
   const fusionCodexEffort = normalizeFusionEffort(session.fusionCodexEffort ?? session.fusionEffort);
+  const fusionRunMode = normalizeFusionRunMode(session.fusionRunMode);
+  const fusionRunModeText = fusionRunModeLabel(fusionRunMode);
   const fusionModelLabel = fusionClaudeModelLabel(fusionModel);
   const codexModelLabel = fusionCodexModelLabel(fusionCodexModel);
   const fusionSettingsLine = fusionSettingsSummary({
+    mode: fusionRunMode,
     model: fusionModel,
     codexModel: fusionCodexModel,
     claudeEffort: fusionClaudeEffort,
@@ -740,6 +790,12 @@ export default function FusionChatPane({
   });
   const activeRoleLabel = fusionRoleLabel(activeRole);
   const inputIsSlashCommand = input.trim().startsWith("/");
+  const showAttention = shouldShowAttentionDot(session);
+  const backgroundActivity =
+    session.backgroundActivity?.active && session.backgroundActivity.count > 0
+      ? session.backgroundActivity
+      : null;
+  const backgroundActivityTitle = formatBackgroundActivityTitle(backgroundActivity);
   const canResumeClaude = session.resumeRef?.provider === "claude" && Boolean(session.resumeRef.id);
   const slashMenu = buildSlashMenu(input);
   const slashMenuOpen = slashMenu.items.length > 0;
@@ -886,6 +942,7 @@ export default function FusionChatPane({
           id: session.id,
           cwd: session.cwd,
           resumeId,
+          mode: fusionRunMode,
           model: fusionModel,
           ...(fusionCodexModel === "auto" ? {} : { codexModel: fusionCodexModel }),
           ...(fusionClaudeEffort === "auto" ? {} : { effort: fusionClaudeEffort }),
@@ -1163,12 +1220,14 @@ export default function FusionChatPane({
 
   function applySettings(settings: Partial<FusionSettings>, label = "settings") {
     const nextSettings = {
+      mode: normalizeFusionRunMode(settings.mode ?? fusionRunMode),
       model: normalizeFusionModel(settings.model ?? fusionModel),
       codexModel: normalizeFusionCodexModel(settings.codexModel ?? fusionCodexModel),
       claudeEffort: normalizeFusionEffort(settings.claudeEffort ?? fusionClaudeEffort),
       codexEffort: normalizeFusionEffort(settings.codexEffort ?? fusionCodexEffort)
     };
     if (
+      nextSettings.mode === fusionRunMode &&
       nextSettings.model === fusionModel &&
       nextSettings.codexModel === fusionCodexModel &&
       nextSettings.claudeEffort === fusionClaudeEffort &&
@@ -1177,12 +1236,59 @@ export default function FusionChatPane({
       pushCommandStatus(`Already using ${fusionSettingsSummary(nextSettings)}.`);
       return;
     }
+    const requiresRestart =
+      nextSettings.model !== fusionModel ||
+      nextSettings.claudeEffort !== fusionClaudeEffort;
     const notice = session.started
-      ? `${busyRef.current ? "Interrupting current turn and restarting" : "Restarting"} Fusion with ${fusionSettingsSummary(nextSettings)}.`
+      ? requiresRestart
+        ? `${busyRef.current ? "Interrupting current turn and restarting" : "Restarting"} Fusion with ${fusionSettingsSummary(nextSettings)}.`
+        : `Updated Fusion ${label} live: ${fusionSettingsSummary(nextSettings)}. Next Codex turn will use it.`
       : `Saved Fusion ${label}: ${fusionSettingsSummary(nextSettings)}.`;
-    pendingRestartNoticeRef.current = session.started ? notice : null;
+    pendingRestartNoticeRef.current = session.started && requiresRestart ? notice : null;
     pushCommandStatus(notice);
     onSettingsChange(nextSettings);
+  }
+
+  function applyRunMode(nextMode: FusionRunMode) {
+    const mode = normalizeFusionRunMode(nextMode);
+    if (mode === fusionRunMode) {
+      return;
+    }
+
+    const nextSettings = {
+      mode,
+      model: fusionModel,
+      codexModel: fusionCodexModel,
+      claudeEffort: fusionClaudeEffort,
+      codexEffort: fusionCodexEffort
+    };
+
+    if (session.started) {
+      const setMode = window.vibe?.fusionChat?.setMode;
+      if (!setMode) {
+        push({ role: "opus", kind: "error", text: "Fusion unavailable: mode bridge is not available." });
+        return;
+      }
+      setMode(session.id, mode)
+        .then((result) => {
+          if (result && result.ok === false) {
+            push({ role: "opus", kind: "error", text: `Could not set Fusion mode: ${result.error || "unknown error"}` });
+            return;
+          }
+          onSettingsChange(nextSettings);
+          pushCommandStatus(`Mode: ${mode === "plan" ? "Plan" : "Auto"}.`);
+        })
+        .catch((error) => {
+          push({ role: "opus", kind: "error", text: `Could not set Fusion mode: ${error?.message || "unknown error"}` });
+        });
+      return;
+    }
+
+    onSettingsChange(nextSettings);
+  }
+
+  function toggleRunMode() {
+    applyRunMode(fusionRunMode === "plan" ? "auto" : "plan");
   }
 
   function applySlashSelection(item: SlashMenuItem | undefined) {
@@ -1305,8 +1411,26 @@ export default function FusionChatPane({
     if (normalized === "/help") {
       setInput("");
       pushCommandStatus(
-        "commands: /speed, /effort, /models, /clear, /resume. Advanced: /opus, /codex, /claude <model>."
+        "commands: /plan, /auto, /mode, /speed, /effort, /models, /clear, /resume. Advanced: /opus, /codex, /claude <model>."
       );
+      return true;
+    }
+
+    if (normalized === "/plan") {
+      setInput("");
+      applyRunMode("plan");
+      return true;
+    }
+
+    if (normalized === "/auto") {
+      setInput("");
+      applyRunMode("auto");
+      return true;
+    }
+
+    if (normalized === "/mode") {
+      setInput("");
+      toggleRunMode();
       return true;
     }
 
@@ -1646,7 +1770,14 @@ export default function FusionChatPane({
 
   return (
     <article
-      className={clsx("terminal-pane", "fusion-pane")}
+      className={clsx(
+        "terminal-pane",
+        "fusion-pane",
+        showAttention && "terminal-pane-attention",
+        showAttention &&
+          session.attention &&
+          `terminal-pane-attention-${session.attention.state}`
+      )}
       style={{ "--pane-accent": profile.accent } as React.CSSProperties}
       onPointerDown={onSelect}
     >
@@ -1658,6 +1789,18 @@ export default function FusionChatPane({
           <span className="fusion-chip" title={fusionSettingsLine}>
             {activeRoleLabel}
           </span>
+          {backgroundActivity && (
+            <span
+              className="fusion-background-activity"
+              title={backgroundActivityTitle}
+              aria-label={backgroundActivityTitle}
+            >
+              <span className="fusion-background-dot" aria-hidden="true" />
+              {backgroundActivity.count > 1 && (
+                <span className="fusion-background-count">{backgroundActivity.count}</span>
+              )}
+            </span>
+          )}
         </div>
         <div className="pane-status">
           <span
@@ -1700,7 +1843,7 @@ export default function FusionChatPane({
           <span className="fusion-settings-summary" title="Type /help in the composer to change these">
             <span className="fusion-setting">
               <span className="fusion-setting-key">Mode</span>
-              Fusion
+              {fusionRunModeText}
             </span>
             {verbose && (
               <>
@@ -1900,6 +2043,11 @@ export default function FusionChatPane({
               onDrop={handleComposerDrop}
               onDragOver={handleComposerDragOver}
               onKeyDown={(e) => {
+                if (e.key === "Tab" && e.shiftKey) {
+                  e.preventDefault();
+                  toggleRunMode();
+                  return;
+                }
                 if (slashMenuOpen) {
                   if (e.key === "ArrowDown") {
                     e.preventDefault();
@@ -1948,8 +2096,12 @@ export default function FusionChatPane({
               <Send size={15} />
             </button>
           </div>
-          <div className="fusion-input-settings" title={fusionSettingsLine}>
-            {fusionSettingsLine}
+          <div className="fusion-input-settings" title={`${fusionSettingsLine} · Shift+Tab toggles mode`}>
+            <span className={clsx("fusion-mode-indicator", `is-${fusionRunMode}`)}>
+              Mode: {fusionRunModeText}
+            </span>
+            <span className="fusion-mode-shortcut">Shift+Tab</span>
+            <span className="fusion-settings-detail">{fusionSettingsLine}</span>
           </div>
           {slashMenuOpen && (
             <div className="fusion-slash-panel" aria-label="Slash command options">
