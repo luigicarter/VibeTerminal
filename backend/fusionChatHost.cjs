@@ -7,9 +7,10 @@
 // and speaks a JSONL control protocol with main over its own stdin/stdout.
 //
 // Control IN (from main, one JSON per line on stdin):
-//   {type:"start",  payload:{id, cwd, mcpConfig, systemPromptFile, model, effort?, allowedTools, resumeId?}}
+//   {type:"start",  payload:{id, cwd, mcpConfig, systemPromptFile, model, effort?, allowedTools, disallowedTools?, resumeId?}}
 //   {type:"input",  payload:{id, text}}
-//   {type:"stop",   payload:{id}}
+//   {type:"interrupt", payload:{id}}   ← abort the CURRENT turn, keep the session
+//   {type:"stop",   payload:{id}}       ← kill the whole session process
 //   {type:"shutdown"}
 // Events OUT (to main, one JSON per line on stdout): {type:"event", id, event}
 //   plus {type:"ready"} on boot. Session exits are event.type === "closed".
@@ -185,7 +186,7 @@ function runHost() {
   }
 
   function start(payload) {
-    const { id, cwd, mcpConfig, systemPromptFile, model, effort, allowedTools, resumeId } = payload;
+    const { id, cwd, mcpConfig, systemPromptFile, model, effort, allowedTools, disallowedTools, resumeId } = payload;
     if (sessions.has(id)) {
       const existingState = sessions.get(id);
       if (existingState?.child) {
@@ -291,6 +292,29 @@ function runHost() {
     });
   }
 
+  // Interrupt the in-flight turn WITHOUT killing the session: send Claude's
+  // stream-json interrupt control-request on the live child's stdin (the same
+  // mechanism the Agent SDK's interrupt() uses). The process stays up so the
+  // user can immediately type the next turn — unlike stop(), which kills it.
+  function interrupt(payload) {
+    const id = payload?.id;
+    const state = sessions.get(id);
+    if (!state || !state.child || !state.child.stdin.writable) return;
+    state.interruptSeq = (state.interruptSeq || 0) + 1;
+    try {
+      state.child.stdin.write(
+        JSON.stringify({
+          type: "control_request",
+          request_id: `int_${id}_${state.interruptSeq}`,
+          request: { subtype: "interrupt" }
+        }) + "\n"
+      );
+      emitSessionEvent(id, state, { type: "interrupted" });
+    } catch {
+      // best-effort; the user can still Restart as the hard stop.
+    }
+  }
+
   function stop(payload) {
     const state = sessions.get(payload.id);
     if (state) {
@@ -323,6 +347,7 @@ function runHost() {
       if (msg.type === "start") start(msg.payload);
       else if (msg.type === "input") input(msg.payload);
       else if (msg.type === "activity") activity(msg.payload);
+      else if (msg.type === "interrupt") interrupt(msg.payload);
       else if (msg.type === "stop") stop(msg.payload);
       else if (msg.type === "shutdown") shutdown();
     }
@@ -333,7 +358,16 @@ function runHost() {
 }
 
 function buildClaudeArgs(payload = {}) {
-  const { cwd, mcpConfig, systemPromptFile, model, effort, allowedTools, resumeId } = payload;
+  const {
+    cwd,
+    mcpConfig,
+    systemPromptFile,
+    model,
+    effort,
+    allowedTools,
+    disallowedTools,
+    resumeId
+  } = payload;
   const args = [
     "--print",
     "--input-format",
@@ -348,6 +382,9 @@ function buildClaudeArgs(payload = {}) {
   if (model) args.push("--model", String(model));
   if (effort) args.push("--effort", String(effort));
   if (allowedTools) args.push("--allowedTools", String(allowedTools));
+  // Hard-block Opus's mutation/shell tools so implementation MUST route through
+  // codex_implement — this is what makes Fusion actually use Codex to write code.
+  if (disallowedTools) args.push("--disallowedTools", String(disallowedTools));
   if (mcpConfig) args.push("--mcp-config", String(mcpConfig));
   if (systemPromptFile) args.push("--append-system-prompt-file", String(systemPromptFile));
   if (cwd) args.push("--add-dir", String(cwd));

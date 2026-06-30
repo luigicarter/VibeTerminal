@@ -3,19 +3,17 @@ import {
   ChevronDown,
   ChevronRight,
   CopyPlus,
-  Gauge,
   GripVertical,
   Maximize2,
   Minimize2,
   Play,
   Plus,
-  Cpu,
   RefreshCcw,
   RotateCcw,
   Send,
   Sparkles,
-  X,
-  Zap
+  Square,
+  X
 } from "lucide-react";
 import clsx from "clsx";
 import type {
@@ -36,6 +34,7 @@ interface FusionChatPaneProps {
   session: AgentSession;
   profile: AgentProfile;
   isMaximized: boolean;
+  isSelected: boolean;
   onClose: () => void;
   onDuplicate: () => void;
   onRestart: () => void;
@@ -64,6 +63,33 @@ const FUSION_EFFORT_LABELS: Record<FusionEffort, string> = {
   max: "Max"
 };
 const FUSION_EFFORT_VALUES = Object.keys(FUSION_EFFORT_LABELS) as FusionEffort[];
+const FUSION_COMPOSER_MAX_PX = 160;
+
+interface SlashCommand {
+  name: string;
+  arg?: string;
+  desc: string;
+  takesArg?: boolean;
+}
+
+// The "/" palette — the Fusion equivalent of the slash menu a real CLI draws
+// inside xterm. Every entry routes back through handleSlashCommand.
+const FUSION_SLASH_COMMANDS: SlashCommand[] = [
+  { name: "/opus", desc: "Switch Claude to Opus 4.8" },
+  { name: "/fast", desc: "Switch Claude to the fast model" },
+  { name: "/claude", arg: "<model>", desc: "Set the Claude model", takesArg: true },
+  { name: "/codex", arg: "<model|auto>", desc: "Set the Codex model", takesArg: true },
+  {
+    name: "/effort",
+    arg: "<auto|low|medium|high|xhigh|max>",
+    desc: "Set Codex reasoning effort",
+    takesArg: true
+  },
+  { name: "/models", desc: "Show the current models and effort" },
+  { name: "/resume", desc: "Resume the last Claude Fusion chat" },
+  { name: "/clear", desc: "Clear this conversation" },
+  { name: "/help", desc: "List the available commands" }
+];
 
 function normalizeModelId(value: unknown, fallback: string) {
   const trimmed = typeof value === "string" ? value.trim() : "";
@@ -159,6 +185,7 @@ export default function FusionChatPane({
   session,
   profile,
   isMaximized,
+  isSelected,
   onClose,
   onDuplicate,
   onRestart,
@@ -175,10 +202,12 @@ export default function FusionChatPane({
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
-  const [claudeModelDraft, setClaudeModelDraft] = useState("");
-  const [codexModelDraft, setCodexModelDraft] = useState("");
+  const [interrupting, setInterrupting] = useState(false);
+  const [slashIndex, setSlashIndex] = useState(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const keyRef = useRef(0);
+  const interruptingRef = useRef(false);
   const onThreadRefChangeRef = useRef(onThreadRefChange);
   const onStatusChangeRef = useRef(onStatusChange);
   const onAttentionRef = useRef(onAttention);
@@ -200,8 +229,15 @@ export default function FusionChatPane({
   const codexModelLabel = fusionCodexModelLabel(fusionCodexModel);
   const inputIsSlashCommand = input.trim().startsWith("/");
   const canResumeClaude = session.resumeRef?.provider === "claude" && Boolean(session.resumeRef.id);
-  const claudeModelsListId = `${session.id}-fusion-claude-models`;
-  const codexModelsListId = `${session.id}-fusion-codex-models`;
+  // Show the palette only while typing the command token itself (no space yet):
+  // once an argument starts, the menu gets out of the way like a real CLI.
+  const slashToken =
+    input.startsWith("/") && !/\s/.test(input) ? input.slice(1).toLowerCase() : null;
+  const slashMatches =
+    slashToken !== null
+      ? FUSION_SLASH_COMMANDS.filter((cmd) => cmd.name.slice(1).startsWith(slashToken))
+      : [];
+  const slashMenuOpen = slashMatches.length > 0;
 
   useEffect(() => {
     onThreadRefChangeRef.current = onThreadRefChange;
@@ -209,13 +245,19 @@ export default function FusionChatPane({
     onAttentionRef.current = onAttention;
   }, [onThreadRefChange, onStatusChange, onAttention]);
 
+  // Auto-grow the composer up to a cap, then scroll — so multi-line prompts are
+  // fully visible instead of being clipped to a single scrolling row.
   useEffect(() => {
-    setClaudeModelDraft(fusionModel);
-  }, [fusionModel]);
+    const el = composerRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, FUSION_COMPOSER_MAX_PX)}px`;
+  }, [input]);
 
+  // Reset the highlighted command whenever the typed token changes.
   useEffect(() => {
-    setCodexModelDraft(fusionCodexModel);
-  }, [fusionCodexModel]);
+    setSlashIndex(0);
+  }, [slashToken]);
 
   const nextKey = () => `m${keyRef.current++}`;
   const push = (entry: Omit<ChatMessage, "key" | "ts"> & { ts?: number }) =>
@@ -223,6 +265,10 @@ export default function FusionChatPane({
   const setBusyState = (next: boolean) => {
     busyRef.current = next;
     setBusy(next);
+  };
+  const setInterruptingState = (next: boolean) => {
+    interruptingRef.current = next;
+    setInterrupting(next);
   };
   const emitAttention = (
     state: AgentAttentionEvent["state"],
@@ -248,6 +294,7 @@ export default function FusionChatPane({
     setMessages([]);
     setExpanded(new Set());
     toolRoleRef.current.clear();
+    setInterruptingState(false);
     setBusyState(false);
     onStatusChangeRef.current("starting");
     let cancelled = false;
@@ -316,6 +363,7 @@ export default function FusionChatPane({
       if (!("id" in event) || event.id !== session.id) {
         if (event.type === "host-error") {
           push({ role: "opus", kind: "error", text: event.message });
+          setInterruptingState(false);
           setBusyState(false);
           emitAttention("failed", "error", event.message);
         }
@@ -335,6 +383,7 @@ export default function FusionChatPane({
           push({ role: "user", kind: "text", text: event.text });
           break;
         case "turn-start":
+          setInterruptingState(false);
           setBusyState(true);
           onStatusChangeRef.current("running");
           // One answer spans several assistant messages (a turn-start each); add
@@ -397,8 +446,16 @@ export default function FusionChatPane({
           break;
         case "result":
           stopStreaming();
+          setInterruptingState(false);
           setBusyState(false);
           emitAttention("completed", "done");
+          break;
+        case "interrupted":
+          stopStreaming();
+          setInterruptingState(false);
+          setBusyState(false);
+          onStatusChangeRef.current("waiting");
+          setInterruptStatus("Interrupted by user.");
           break;
         case "stderr": {
           const text = event.text.trim();
@@ -409,12 +466,14 @@ export default function FusionChatPane({
         }
         case "error":
           stopStreaming();
+          setInterruptingState(false);
           push({ role: "opus", kind: "error", text: event.message });
           setBusyState(false);
           emitAttention("failed", "error", event.message);
           break;
         case "closed":
           stopStreaming();
+          setInterruptingState(false);
           if (event.code != null && event.code !== 0) {
             const message = `Fusion process exited with code ${event.code}.`;
             setBusyState(false);
@@ -462,20 +521,38 @@ export default function FusionChatPane({
     onSettingsChange(nextSettings);
   }
 
-  function commitClaudeModelDraft() {
-    const nextModel = normalizeFusionModel(claudeModelDraft);
-    setClaudeModelDraft(nextModel);
-    applySettings({ model: nextModel });
-  }
-
-  function commitCodexModelDraft() {
-    const nextModel = normalizeFusionCodexModel(codexModelDraft);
-    setCodexModelDraft(nextModel);
-    applySettings({ codexModel: nextModel });
+  // Picking from the palette: an argument-less command runs immediately; a
+  // command that needs an argument is filled in so the user can type the value.
+  function applySlashSelection(cmd: SlashCommand | undefined) {
+    if (!cmd) return;
+    if (cmd.takesArg) {
+      setInput(`${cmd.name} `);
+      setSlashIndex(0);
+      composerRef.current?.focus();
+      return;
+    }
+    handleSlashCommand(cmd.name);
   }
 
   function pushCommandStatus(text: string) {
     push({ role: "opus", kind: "activity", text });
+  }
+
+  function setInterruptStatus(text: string) {
+    setMessages((prev) => {
+      const last = prev[prev.length - 1];
+      if (
+        last &&
+        last.role === "opus" &&
+        last.kind === "activity" &&
+        (last.text === "Interrupt requested." || last.text === "Interrupted by user.")
+      ) {
+        const copy = prev.slice();
+        copy[copy.length - 1] = { ...last, text };
+        return copy;
+      }
+      return [...prev, { key: nextKey(), role: "opus", kind: "activity", text, ts: Date.now() }];
+    });
   }
 
   function handleSlashCommand(text: string) {
@@ -504,6 +581,7 @@ export default function FusionChatPane({
     if (normalized === "/clear") {
       setInput("");
       setMessages([]);
+      setInterruptingState(false);
       setBusyState(false);
       onClear();
       return true;
@@ -513,6 +591,7 @@ export default function FusionChatPane({
       setInput("");
       if (canResumeClaude) {
         setMessages([]);
+        setInterruptingState(false);
         setBusyState(false);
         onResume();
       } else {
@@ -541,7 +620,6 @@ export default function FusionChatPane({
     if (claudeMatch) {
       const nextModel = normalizeFusionModel(claudeMatch[1]);
       setInput("");
-      setClaudeModelDraft(nextModel);
       applySettings({ model: nextModel });
       return true;
     }
@@ -550,7 +628,6 @@ export default function FusionChatPane({
     if (codexMatch) {
       const nextModel = normalizeFusionCodexModel(codexMatch[1]);
       setInput("");
-      setCodexModelDraft(nextModel);
       applySettings({ codexModel: nextModel });
       return true;
     }
@@ -578,9 +655,45 @@ export default function FusionChatPane({
     }
     window.vibe.fusionChat.sendUserTurn(session.id, text);
     setInput("");
+    setInterruptingState(false);
     setBusyState(true);
     onStatusChangeRef.current("running");
   }
+
+  // Abort the in-flight turn but keep the session alive (Stop button / Esc), so
+  // the user can immediately type again — the host sends Claude an interrupt
+  // rather than killing the process (that's Restart).
+  function interrupt() {
+    if (!busyRef.current || interruptingRef.current) return;
+    if (!window.vibe?.fusionChat?.interrupt) {
+      push({ role: "opus", kind: "error", text: "Fusion unavailable: interrupt bridge is not available." });
+      return;
+    }
+    window.vibe.fusionChat.interrupt(session.id).catch((error) => {
+      setInterruptingState(false);
+      push({
+        role: "opus",
+        kind: "error",
+        text: `Could not interrupt Fusion: ${error?.message || "unknown error"}`
+      });
+    });
+    setInterruptingState(true);
+    setInterruptStatus("Interrupt requested.");
+  }
+
+  useEffect(() => {
+    if (!busy || !isSelected) return;
+    const handleWindowKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.key !== "Escape") return;
+      event.preventDefault();
+      interrupt();
+    };
+    window.addEventListener("keydown", handleWindowKeyDown);
+    return () => window.removeEventListener("keydown", handleWindowKeyDown);
+    // `interrupt` reads mutable refs, so the listener stays current without
+    // rebinding for every transient interrupt-request render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, isSelected, session.id]);
 
   return (
     <article
@@ -630,64 +743,21 @@ export default function FusionChatPane({
       <div className="fusion-control-strip">
         <span className="fusion-control-path">{session.cwd}</span>
         <div className="fusion-controls">
-          <label className="fusion-model-field" title="Claude model">
-            <Zap size={12} />
-            <span>Claude</span>
-            <input
-              aria-label="Fusion Claude model"
-              value={claudeModelDraft}
-              list={claudeModelsListId}
-              onChange={(event) => setClaudeModelDraft(event.target.value)}
-              onBlur={commitClaudeModelDraft}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  event.currentTarget.blur();
-                }
-              }}
-            />
-            <datalist id={claudeModelsListId}>
-              <option value="opus" label={OPUS_LABEL} />
-              <option value="sonnet" label="Fast" />
-            </datalist>
-          </label>
-          <label className="fusion-model-field" title="Codex model">
-            <Cpu size={12} />
-            <span>Codex</span>
-            <input
-              aria-label="Fusion Codex model"
-              value={codexModelDraft}
-              list={codexModelsListId}
-              onChange={(event) => setCodexModelDraft(event.target.value)}
-              onBlur={commitCodexModelDraft}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  event.currentTarget.blur();
-                }
-              }}
-            />
-            <datalist id={codexModelsListId}>
-              <option value="auto" label="Default" />
-              <option value="gpt-5.5" label="GPT-5.5" />
-            </datalist>
-          </label>
-          <label className="fusion-select" title="Effort level">
-            <Gauge size={12} />
-            <select
-              aria-label="Fusion effort level"
-              value={fusionEffort}
-              onChange={(event) =>
-                applySettings({ effort: event.target.value as FusionEffort })
-              }
-            >
-              {FUSION_EFFORT_VALUES.map((effort) => (
-                <option key={effort} value={effort}>
-                  {FUSION_EFFORT_LABELS[effort]}
-                </option>
-              ))}
-            </select>
-          </label>
+          <span className="fusion-settings-summary" title="Type /help in the composer to change these">
+            <span className="fusion-setting">
+              <span className="fusion-setting-key">Claude</span>
+              {fusionModelLabel}
+            </span>
+            <span className="fusion-setting">
+              <span className="fusion-setting-key">Codex</span>
+              {codexModelLabel}
+            </span>
+            <span className="fusion-setting">
+              <span className="fusion-setting-key">Effort</span>
+              {FUSION_EFFORT_LABELS[fusionEffort]}
+            </span>
+            <span className="fusion-settings-hint">/help</span>
+          </span>
           <button
             type="button"
             className={clsx("fusion-verbose-toggle", verbose && "is-on")}
@@ -786,11 +856,68 @@ export default function FusionChatPane({
         </div>
 
         <div className="fusion-composer">
+          {slashMenuOpen && (
+            <ul className="fusion-slash-menu" role="listbox" aria-label="Slash commands">
+              {slashMatches.map((cmd, i) => (
+                <li
+                  key={cmd.name}
+                  role="option"
+                  aria-selected={i === slashIndex}
+                  className={clsx("fusion-slash-item", i === slashIndex && "is-active")}
+                  onMouseEnter={() => setSlashIndex(i)}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    applySlashSelection(cmd);
+                  }}
+                >
+                  <span className="fusion-slash-name">
+                    {cmd.name}
+                    {cmd.arg && <span className="fusion-slash-arg"> {cmd.arg}</span>}
+                  </span>
+                  <span className="fusion-slash-desc">{cmd.desc}</span>
+                </li>
+              ))}
+            </ul>
+          )}
           <textarea
+            ref={composerRef}
             value={input}
             placeholder={busy ? "Working…" : "Ask Fusion to build, fix, or design…"}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
+              if (slashMenuOpen) {
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setSlashIndex((i) => (i + 1) % slashMatches.length);
+                  return;
+                }
+                if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setSlashIndex((i) => (i - 1 + slashMatches.length) % slashMatches.length);
+                  return;
+                }
+                if (e.key === "Tab") {
+                  e.preventDefault();
+                  const cmd = slashMatches[slashIndex] ?? slashMatches[0];
+                  setInput(cmd.takesArg ? `${cmd.name} ` : cmd.name);
+                  return;
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setInput("");
+                  return;
+                }
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  applySlashSelection(slashMatches[slashIndex] ?? slashMatches[0]);
+                  return;
+                }
+              }
+              if (e.key === "Escape" && busy) {
+                e.preventDefault();
+                interrupt();
+                return;
+              }
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 send();
@@ -798,6 +925,16 @@ export default function FusionChatPane({
             }}
             rows={1}
           />
+          {busy && (
+            <button
+              className="fusion-stop"
+              title={interrupting ? "Interrupt requested" : "Stop the current turn (Esc)"}
+              disabled={interrupting}
+              onClick={interrupt}
+            >
+              <Square size={13} />
+            </button>
+          )}
           <button
             className="fusion-send"
             title="Send (Enter)"

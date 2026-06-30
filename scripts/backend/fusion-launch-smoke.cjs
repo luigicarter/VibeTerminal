@@ -52,6 +52,8 @@ async function main() {
     assert(/codex_implement/.test(prompt), "system prompt missing codex_implement");
     assert(/goalReached:false/.test(prompt), "system prompt missing goalReached continuation gate");
     assert(/Codex verifier override/.test(prompt), "system prompt missing explicit override rule");
+    assert(/READ-ONLY tools/i.test(prompt), "system prompt must declare Opus read-only so it delegates implementation");
+    assert(/MUST go through/i.test(prompt), "system prompt must require routing every code change through codex_implement");
 
     assert(files.mcpConfig && fs.existsSync(files.mcpConfig), "missing mcp config");
     const mcp = JSON.parse(fs.readFileSync(files.mcpConfig, "utf8"));
@@ -92,9 +94,22 @@ async function main() {
       "buildFusionSystemPrompt is missing protected native goal status behavior"
     );
     const mainSource = fs.readFileSync(path.join(rootDir, "backend", "main.cjs"), "utf8");
+    const allowMatch = mainSource.match(/allowedTools:\s*\n?\s*"([^"]+)"/);
+    assert(allowMatch, "Fusion allowedTools string not found in main.cjs");
+    const allowList = allowMatch[1].split(",").map((tool) => tool.trim());
     assert(
-      /Edit,MultiEdit,Write/.test(mainSource),
-      "Fusion Claude allowlist is missing direct-edit tools for exceptional/UI edits"
+      !allowList.some((tool) => /^(Edit|MultiEdit|Write|NotebookEdit|Bash)$/.test(tool)),
+      "Fusion Claude allowlist must NOT grant direct edit/shell tools (implementation routes through Codex)"
+    );
+    assert(
+      ["codex_goal_set", "codex_goal_get", "codex_goal_clear"].every((tool) =>
+        allowList.some((entry) => entry.includes(tool))
+      ),
+      "Fusion allowlist should expose the codex_goal_* native-goal tools so the prompt's goal instructions work"
+    );
+    assert(
+      /disallowedTools:\s*"Edit,MultiEdit,Write,NotebookEdit,Bash"/.test(mainSource),
+      "Fusion Claude must hard-block direct edit/shell tools via --disallowedTools"
     );
     assert(
       /normalizeFusionModel/.test(mainSource) &&

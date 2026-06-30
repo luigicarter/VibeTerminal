@@ -290,6 +290,7 @@ export type FusionChatEvent =
   | { id: string; type: "activity"; role: "opus" | "codex"; kind: string; text?: string }
   | { id: string; type: "turn-end" }
   | { id: string; type: "result"; subtype?: string; costUsd?: number }
+  | { id: string; type: "interrupted" }
   | { id: string; type: "stderr"; text: string }
   | { id: string; type: "error"; message: string }
   | { id: string; type: "closed"; code?: number }

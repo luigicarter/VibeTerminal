@@ -57,6 +57,7 @@ contextBridge.exposeInMainWorld("vibe", {
   fusionChat: {
     start: (payload) => ipcRenderer.invoke("fusion-chat:start", payload),
     sendUserTurn: (id, text) => ipcRenderer.send("fusion-chat:input", { id, text }),
+    interrupt: (id) => ipcRenderer.invoke("fusion-chat:interrupt", { id }),
     stop: (id) => ipcRenderer.invoke("fusion-chat:stop", { id }),
     onEvent: (callback) => {
       const listener = (_event, payload) => callback(payload);

@@ -28,10 +28,16 @@ delegate), not a static rule table.
 
 ## Roles and completion authority
 
-The two models have different default scopes, but this is not a brittle
-"never cross lanes" rule. Claude may edit when that is the right tool, especially
-for UI build-out or exceptional orchestration cases. Codex remains the hard
-verifier for bugs and whether the goal is reached.
+The two models have hard, enforced scopes. Opus is launched with **read-only
+tools** (`Read`/`Grep`/`Glob`) plus the Codex bridge tools, and its edit/shell
+tools (`Edit`/`Write`/`MultiEdit`/`NotebookEdit`/`Bash`) are **hard-blocked via
+`--disallowedTools`**. So every file change, command, and test run is structurally
+forced through `codex_implement` — Opus physically cannot edit the repo itself.
+This is what makes "Fusion actually uses Codex to write code" a guarantee rather
+than a suggestion. Codex remains the hard verifier for bugs and goal completion.
+(Reversible: re-add the tools to the `allowedTools` string in `main.cjs` and drop
+`disallowedTools` to restore the old "Claude may edit" behavior, e.g. behind a
+future per-pane mode toggle.)
 
 | Opus 4.8 (Claude - orchestrator/architect/designer) | Codex GPT-5.5 (implementer/reviewer/verifier) |
 |---|---|
@@ -41,7 +47,7 @@ verifier for bugs and whether the goal is reached.
 | Reviewing a Codex plan before it touches a large repo | Refactors |
 | "What are we missing?" analysis | Repo navigation |
 | Tradeoff reasoning | Implementing from an approved plan |
-| UI build-out or exceptional direct edits when needed | Iterative debugging loops |
+| Read-only investigation + review (Read/Grep/Glob) | Iterative debugging loops |
 | Guiding Codex with constraints, UI intent, debugging direction, and corrections | Following Claude guidance while independently checking the result |
 | Human-facing override decisions | Bug review and goal-completion verification |
 
@@ -53,10 +59,19 @@ not a substitute for Codex's independent verifier verdict.
 
 **The loop:** Opus plans/designs → Codex implements + runs tests + fixes → produces
 a diff and structured verifier verdict → if Codex says not done, Opus continues
-or redelegates with more guidance → Codex fixes and verifies again. If Opus
-directly edits, it must send Codex a review-only verification pass before final completion. Future
+or redelegates with more guidance → Codex fixes and verifies again. Opus reviews
+Codex's diffs read-only (Read/Grep/Glob); it has no edit tools of its own. Future
 worktree isolation is a hardening option; the current implementation runs Codex
 in the pane's workspace with `workspace-write` and on-request approvals.
+
+**Interrupting a turn:** the Fusion chat host control protocol has a dedicated
+`interrupt` message (distinct from `stop`, which kills the whole session). The
+composer shows a **Stop** button while a turn runs, and **Esc** is bound both in
+the composer and at the selected-pane window level. Both send Claude a
+stream-json `control_request` interrupt over the live child's stdin. The host
+then emits `interrupted`, and the renderer clears the running state from that
+acknowledgement so the session stays up for the next message. Restart/Close
+remain the hard kill (`fusion-chat:stop` → `killChild`).
 
 ## Key finding: Codex 0.142.3 ships the app-server stack natively
 

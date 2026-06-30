@@ -2132,6 +2132,7 @@ export default function App() {
                     session={session}
                     profile={getProfile("fusion")}
                     isMaximized={session.id === maximizedSessionId}
+                    isSelected={session.id === selectedSessionId}
                     onClose={() => closeSession(activeScope, session)}
                     onDuplicate={() => duplicateSession(activeScope, session)}
                     onRestart={() => restartSession(activeScope, session)}

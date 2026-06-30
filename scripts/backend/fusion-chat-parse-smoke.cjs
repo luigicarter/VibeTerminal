@@ -88,6 +88,7 @@ function main() {
     model: "opus",
     effort: "high",
     allowedTools: "mcp__fusion-codex__codex_implement",
+    disallowedTools: "Edit,MultiEdit,Write,NotebookEdit,Bash",
     resumeId: "resume & id"
   });
   assert(!claudeArgs.includes("claude"), "claude executable should not be part of argv args");
@@ -101,6 +102,11 @@ function main() {
     "system prompt path should remain one raw argv value"
   );
   assert(claudeArgs.includes("--effort") && claudeArgs.includes("high"), "effort should be passed to claude");
+  assert(
+    claudeArgs.includes("--disallowedTools") &&
+      claudeArgs.includes("Edit,MultiEdit,Write,NotebookEdit,Bash"),
+    "direct edit/shell tool denylist should be passed to claude"
+  );
 
   const escaped = windowsCmdArg("C:\\repo dir\\a&b|\"quoted\"");
   assert(escaped.startsWith('"') && escaped.endsWith('"'), "Windows special args should be quoted");

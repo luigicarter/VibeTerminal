@@ -340,8 +340,9 @@ assert(
     fusionChatPaneSource.includes('normalized === "/fast"') &&
     fusionChatPaneSource.includes('raw.match(/^\\/(?:claude|model\\s+claude)\\s+(.+)$/i)') &&
     fusionChatPaneSource.includes('raw.match(/^\\/(?:codex|model\\s+codex)\\s+(.+)$/i)') &&
-    fusionChatPaneSource.includes('aria-label="Fusion Codex model"') &&
-    fusionChatPaneSource.includes('aria-label="Fusion effort level"') &&
+    fusionChatPaneSource.includes("const FUSION_SLASH_COMMANDS") &&
+    fusionChatPaneSource.includes('className="fusion-slash-menu"') &&
+    fusionChatPaneSource.includes('className="fusion-settings-summary"') &&
     fusionChatPaneSource.includes("const startPayload =") &&
     fusionChatPaneSource.includes('model: fusionModel') &&
     fusionChatPaneSource.includes(
@@ -350,13 +351,29 @@ assert(
     fusionChatPaneSource.includes(
       'fusionEffort === "auto" ? {} : { effort: fusionEffort }'
     ),
-  "FusionChatPane should expose Claude/Codex model controls, effort controls, and local clear/resume commands"
+  "FusionChatPane should drive model/codex/effort via the slash-command palette + read-only summary"
 );
 assert(
   fusionChatPaneSource.includes("function normalizeFusionModel(value: unknown)") &&
     fusionChatPaneSource.includes('case "stderr"') &&
     fusionChatPaneSource.includes("busy && !inputIsSlashCommand"),
   "FusionChatPane should normalize restored settings, show stderr, and allow slash commands while busy"
+);
+assert(
+  fusionChatPaneSource.includes("window.vibe.fusionChat.interrupt(session.id)") &&
+    fusionChatPaneSource.includes('className="fusion-stop"') &&
+    fusionChatPaneSource.includes('e.key === "Escape" && busy') &&
+    fusionChatPaneSource.includes('case "interrupted"') &&
+    fusionChatPaneSource.includes('window.addEventListener("keydown", handleWindowKeyDown)') &&
+    fusionChatPaneSource.includes("isSelected") &&
+    appSource.includes("isSelected={session.id === selectedSessionId}"),
+  "FusionChatPane should let the selected pane interrupt the running turn (Stop button + textarea/window Esc)"
+);
+assert(
+  fusionChatPaneSource.includes("composerRef") &&
+    fusionChatPaneSource.includes("el.scrollHeight") &&
+    fusionChatPaneSource.includes("FUSION_COMPOSER_MAX_PX"),
+  "FusionChatPane composer should auto-grow with content instead of clipping to one line"
 );
 
 const stylesSource = fs.readFileSync(stylesPath, "utf8");

@@ -976,8 +976,13 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
         systemPromptFile: files.systemPromptFile,
         model: fusionModel,
         effort: fusionEffort,
+        // Opus orchestrates: it may READ/search to plan and review, and drives
+        // Codex through the bridge tools — but it has NO direct edit/shell tools,
+        // so every code change goes through codex_implement (the point of Fusion).
         allowedTools:
-          "mcp__fusion-codex__codex_implement,mcp__fusion-codex__codex_respond,Bash,Read,Glob,Grep,Edit,MultiEdit,Write",
+          "mcp__fusion-codex__codex_implement,mcp__fusion-codex__codex_respond,mcp__fusion-codex__codex_goal_set,mcp__fusion-codex__codex_goal_get,mcp__fusion-codex__codex_goal_clear,Read,Glob,Grep",
+        // Belt-and-suspenders: hard-block mutation/shell regardless of permission mode.
+        disallowedTools: "Edit,MultiEdit,Write,NotebookEdit,Bash",
         resumeId: payload.resumeId || undefined
       }
     });
@@ -988,6 +993,13 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
   } catch (error) {
     return { ok: false, error: error.message };
   }
+});
+
+ipcMain.handle("fusion-chat:interrupt", (_event, payload) => {
+  if (payload?.id) {
+    sendToFusionChatHost({ type: "interrupt", payload: { id: payload.id } });
+  }
+  return true;
 });
 
 ipcMain.handle("fusion-chat:stop", (_event, payload) => {

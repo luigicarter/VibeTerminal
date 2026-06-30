@@ -1408,50 +1408,35 @@ button {
   flex-wrap: wrap;
 }
 
-.fusion-select,
-.fusion-model-field {
+/* Read-only status of the current models/effort; editing is via slash commands. */
+.fusion-settings-summary {
   display: inline-flex;
-  height: 22px;
   align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+  flex-wrap: wrap;
+}
+.fusion-setting {
+  display: inline-flex;
+  align-items: baseline;
   gap: 4px;
-  border: 1px solid #343b34;
-  border-radius: 6px;
-  background: #20251f;
   color: #d8d9d2;
-  padding: 0 5px;
+  font-size: 10px;
+  font-weight: 700;
 }
-
-.fusion-select svg,
-.fusion-model-field svg {
-  flex: 0 0 auto;
-  color: var(--pane-accent);
-}
-
-.fusion-model-field span {
-  flex: 0 0 auto;
+.fusion-setting-key {
   color: #8f968e;
   font-size: 9px;
   font-weight: 800;
   text-transform: uppercase;
 }
-
-.fusion-select select,
-.fusion-model-field input {
-  min-width: 64px;
-  border: 0;
-  outline: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
+.fusion-settings-hint {
+  color: var(--pane-accent);
+  font-family: "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
   font-size: 10px;
   font-weight: 700;
-  text-transform: uppercase;
-}
-
-.fusion-model-field input {
-  width: 86px;
-  min-width: 0;
-  text-transform: none;
+  opacity: 0.85;
 }
 
 .fusion-verbose-toggle {
@@ -1586,6 +1571,7 @@ button {
 
 /* Claude-Code-style rounded composer */
 .fusion-composer {
+  position: relative;
   flex: 0 0 auto;
   display: flex;
   align-items: flex-end;
@@ -1599,7 +1585,9 @@ button {
 .fusion-composer textarea {
   flex: 1;
   resize: none;
-  max-height: 120px;
+  min-height: 20px;
+  max-height: 160px;
+  overflow-y: auto;
   border: none;
   outline: none;
   background: transparent;
@@ -1607,6 +1595,52 @@ button {
   font-family: inherit;
   font-size: 13px;
   line-height: 1.4;
+}
+
+/* Slash-command palette — the Fusion stand-in for the menu a real CLI draws
+   inside xterm. Floats above the composer, filtered as you type "/". */
+.fusion-slash-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 6px);
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid #343b34;
+  border-radius: 10px;
+  background: #181c18;
+  box-shadow: 0 10px 28px #0009;
+  z-index: 20;
+}
+.fusion-slash-item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.fusion-slash-item.is-active {
+  background: color-mix(in srgb, var(--pane-accent) 22%, #20251f);
+}
+.fusion-slash-name {
+  flex: 0 0 auto;
+  color: #e6ebe6;
+  font-family: "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+  font-size: 12px;
+  font-weight: 700;
+}
+.fusion-slash-arg { color: #8f968e; font-weight: 500; }
+.fusion-slash-desc {
+  min-width: 0;
+  color: #8f968e;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .fusion-composer textarea::placeholder { color: #6f766f; }
 .fusion-send {
@@ -1623,3 +1657,21 @@ button {
   cursor: pointer;
 }
 .fusion-send:disabled { opacity: 0.4; cursor: default; }
+.fusion-stop {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid #ff8e9533;
+  background: #ff8e9522;
+  color: #ff8e95;
+  cursor: pointer;
+}
+.fusion-stop:hover { background: #ff8e9533; }
+.fusion-stop:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}

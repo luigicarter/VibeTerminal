@@ -64,6 +64,7 @@ declare global {
           effort?: Exclude<FusionEffort, "auto"> | string;
         }) => Promise<{ ok: boolean; error?: string }>;
         sendUserTurn: (id: string, text: string) => void;
+        interrupt: (id: string) => Promise<boolean>;
         stop: (id: string) => Promise<boolean>;
         onEvent: (callback: (event: FusionChatEvent) => void) => () => void;
       };
