@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { CanvasAddon } from "@xterm/addon-canvas";
 import {
   CopyPlus,
   GripVertical,
@@ -124,7 +123,6 @@ export default function TerminalPane({
   const isArrangingRef = useRef(isArranging);
   const pendingFitRef = useRef(false);
   const fitFrameRef = useRef<number | null>(null);
-  const repaintFrameRef = useRef<number | null>(null);
   const fitAndResizeRef = useRef<(() => void) | null>(null);
   const lastSentSizeRef = useRef<{ cols: number; rows: number } | null>(null);
   const threadLookupTimeoutRef = useRef<number | null>(null);
@@ -271,25 +269,6 @@ export default function TerminalPane({
     });
   }
 
-  function scheduleTerminalRepaint() {
-    if (repaintFrameRef.current !== null) {
-      return;
-    }
-
-    repaintFrameRef.current = requestAnimationFrame(() => {
-      repaintFrameRef.current = null;
-      const terminal = terminalRef.current;
-      if (!terminal || terminal.rows <= 0) {
-        return;
-      }
-
-      try {
-        terminal.refresh(0, terminal.rows - 1);
-      } catch {
-        // A repaint can race with xterm teardown during pane removal.
-      }
-    });
-  }
 
   function focusTerminal() {
     if (!isArrangingRef.current) {
@@ -409,20 +388,6 @@ export default function TerminalPane({
     terminal.loadAddon(new WebLinksAddon());
     terminal.open(containerRef.current);
 
-    // Use xterm's canvas (2D) renderer rather than WebGL. WebGL allocates one
-    // GL context per terminal and Chromium caps concurrent contexts (~16,
-    // evicting the oldest -> context loss), which breaks a tiled board of many
-    // panes; the 2D canvas renderer has no per-page context limit. Note it
-    // repaints only the rows xterm marks dirty (not the whole surface), so it
-    // cannot mask buffer-level corruption -- left-column glyph bleed is fixed by
-    // keeping convertEol false above, not here. If the renderer can't initialize
-    // we fall back to xterm's built-in DOM renderer.
-    try {
-      terminal.loadAddon(new CanvasAddon());
-      scheduleTerminalRepaint();
-    } catch {
-      // Canvas context unavailable: xterm keeps using the DOM renderer.
-    }
 
     terminal.focus();
     terminal.attachCustomKeyEventHandler((event) => {
@@ -474,7 +439,6 @@ export default function TerminalPane({
 
       try {
         fitAddon.fit();
-        scheduleTerminalRepaint();
         const size = {
           cols: terminal.cols,
           rows: terminal.rows
@@ -522,7 +486,7 @@ export default function TerminalPane({
         }
 
         terminal.writeln("");
-        terminal.writeln(`\x1b[31m${event.message}\x1b[0m`, scheduleTerminalRepaint);
+        terminal.writeln(`\x1b[31m${event.message}\x1b[0m`);
         clearIdleTimer();
         setStatus("failed");
         return;
@@ -533,15 +497,14 @@ export default function TerminalPane({
       }
 
       if (event.type === "data") {
-        terminal.write(event.data, scheduleTerminalRepaint);
+        terminal.write(event.data);
         markActiveFromOutput();
       }
 
       if (event.type === "snapshot") {
         terminal.reset();
-        scheduleTerminalRepaint();
         if (event.data) {
-          terminal.write(event.data, scheduleTerminalRepaint);
+          terminal.write(event.data);
         }
 
         if (event.isRunning) {
@@ -550,8 +513,7 @@ export default function TerminalPane({
           terminalExitedRef.current = true;
           terminal.writeln("");
           terminal.writeln(
-            "\x1b[33mProcess exited. Use restart to run it again.\x1b[0m",
-            scheduleTerminalRepaint
+            "\x1b[33mProcess exited. Use restart to run it again.\x1b[0m"
           );
           clearIdleTimer();
           setStatus(event.exitCode === 0 ? "done" : "failed");
@@ -560,7 +522,7 @@ export default function TerminalPane({
 
       if (event.type === "error") {
         terminal.writeln("");
-        terminal.writeln(`\x1b[31m${event.message}\x1b[0m`, scheduleTerminalRepaint);
+        terminal.writeln(`\x1b[31m${event.message}\x1b[0m`);
         clearIdleTimer();
         setStatus("failed");
       }
@@ -569,8 +531,7 @@ export default function TerminalPane({
         terminalExitedRef.current = true;
         terminal.writeln("");
         terminal.writeln(
-          "\x1b[33mProcess exited. Use restart to run it again.\x1b[0m",
-          scheduleTerminalRepaint
+          "\x1b[33mProcess exited. Use restart to run it again.\x1b[0m"
         );
         scheduleThreadLookup(200, true);
         clearIdleTimer();
@@ -596,10 +557,6 @@ export default function TerminalPane({
       if (fitFrameRef.current !== null) {
         cancelAnimationFrame(fitFrameRef.current);
         fitFrameRef.current = null;
-      }
-      if (repaintFrameRef.current !== null) {
-        cancelAnimationFrame(repaintFrameRef.current);
-        repaintFrameRef.current = null;
       }
       if (
         !terminalExitedRef.current &&
@@ -696,7 +653,6 @@ export default function TerminalPane({
     createdRef.current = true;
     terminalExitedRef.current = false;
     terminal.clear();
-    scheduleTerminalRepaint();
     clearIdleTimer();
     setStatus("starting");
     lastSentSizeRef.current = {
