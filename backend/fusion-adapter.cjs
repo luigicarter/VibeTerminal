@@ -33,9 +33,9 @@ const TOKEN = process.env.VIBE_TERMINAL_TELEMETRY_TOKEN;
 const MODEL = process.env.VIBE_FUSION_CODEX_MODEL || null;
 const EFFORT = process.env.VIBE_FUSION_CODEX_EFFORT || null;
 const REQUEST_TIMEOUT_MS = Number(process.env.VIBE_FUSION_RPC_TIMEOUT_MS || 30000);
-const TURN_IDLE_TIMEOUT_MS = Number(process.env.VIBE_FUSION_TURN_IDLE_TIMEOUT_MS || 300000);
+const TURN_IDLE_TIMEOUT_MS = Number(process.env.VIBE_FUSION_TURN_IDLE_TIMEOUT_MS || 600000);
 const TURN_AFTER_COMMAND_TIMEOUT_MS = Number(
-  process.env.VIBE_FUSION_TURN_AFTER_COMMAND_TIMEOUT_MS || 90000
+  process.env.VIBE_FUSION_TURN_AFTER_COMMAND_TIMEOUT_MS || 180000
 );
 const PARKED_REQUEST_METHODS = new Set([
   "item/commandExecution/requestApproval",
@@ -371,6 +371,10 @@ function clearCurrentTurnTimers(turn = currentTurn) {
 function refreshTurnIdleTimer(reason = "progress") {
   if (!currentTurn || !Number.isFinite(TURN_IDLE_TIMEOUT_MS) || TURN_IDLE_TIMEOUT_MS <= 0) {
     return;
+  }
+  if (currentTurn.commandTimer) {
+    clearTimeout(currentTurn.commandTimer);
+    currentTurn.commandTimer = null;
   }
   if (currentTurn.idleTimer) {
     clearTimeout(currentTurn.idleTimer);

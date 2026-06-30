@@ -1,5 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
+  Ban,
+  Check,
   ChevronDown,
   ChevronRight,
   CopyPlus,
@@ -11,8 +13,10 @@ import {
   RefreshCcw,
   RotateCcw,
   Send,
+  ShieldCheck,
   Sparkles,
-  X
+  X,
+  XCircle
 } from "lucide-react";
 import clsx from "clsx";
 import type {
@@ -477,6 +481,12 @@ interface ToolMeta {
   isGoalTool: boolean;
 }
 
+interface PendingFusionDecision {
+  pendingId: string;
+  kind: string;
+  detail: string;
+}
+
 type FusionActiveRole = "claude" | "codex";
 const FUSION_SPEAKER_LABEL = "Fusion";
 
@@ -594,6 +604,45 @@ function formatCodexBridgeResult(name: string, text: string): string {
   return previewToolResult(text);
 }
 
+function pendingFusionDecisionFromResult(
+  parsed: Record<string, unknown> | null
+): PendingFusionDecision | null {
+  if (!parsed || parsed.status !== "needs_decision") return null;
+  const pendingId = typeof parsed.pendingId === "string" ? parsed.pendingId.trim() : "";
+  if (!pendingId) return null;
+  return {
+    pendingId,
+    kind: typeof parsed.kind === "string" && parsed.kind ? parsed.kind : "decision",
+    detail: typeof parsed.detail === "string" && parsed.detail ? parsed.detail : "Fusion needs a decision."
+  };
+}
+
+function fusionDecisionInstruction(
+  pending: PendingFusionDecision,
+  decision: "accept" | "acceptForSession" | "decline" | "cancel",
+  note?: string
+) {
+  const action =
+    decision === "acceptForSession"
+      ? "Approve this request for the session"
+      : decision === "accept"
+        ? pending.kind === "question"
+          ? "Answer this question"
+          : "Approve this request"
+        : decision === "decline"
+          ? "Decline this request"
+          : "Cancel this request";
+  const args = [
+    `pendingId: "${pending.pendingId}"`,
+    `decision: "${decision}"`,
+    note ? `note: ${JSON.stringify(note)}` : ""
+  ].filter(Boolean);
+  return [
+    `${action}.`,
+    `Call codex_respond with ${args.join(", ")} now, then continue the same Fusion task.`
+  ].join(" ");
+}
+
 // Collapsed one-line preview of a tool result; the full text shows on expand
 // (Claude-Code style), so nothing is lost — it's just folded away by default.
 function previewToolResult(text: string): string {
@@ -626,6 +675,7 @@ export default function FusionChatPane({
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [waiting, setWaiting] = useState(false);
+  const [pendingDecision, setPendingDecision] = useState<PendingFusionDecision | null>(null);
   const [interrupting, setInterrupting] = useState(false);
   const [activeRole, setActiveRole] = useState<FusionActiveRole>("claude");
   const [slashIndex, setSlashIndex] = useState(0);
@@ -636,6 +686,7 @@ export default function FusionChatPane({
   const interruptingRef = useRef(false);
   const pendingRestartNoticeRef = useRef<string | null>(null);
   const waitingForDecisionRef = useRef(false);
+  const decisionTurnLabelsRef = useRef(new Map<string, string>());
   const onThreadRefChangeRef = useRef(onThreadRefChange);
   const onStatusChangeRef = useRef(onStatusChange);
   const onAttentionRef = useRef(onAttention);
@@ -668,6 +719,7 @@ export default function FusionChatPane({
   const slashMenu = buildSlashMenu(input);
   const slashMenuOpen = slashMenu.items.length > 0;
   const visibleMessages = verbose ? messages : messages.filter((message) => !message.internal);
+  const pendingDecisionIsQuestion = pendingDecision?.kind === "question";
 
   useEffect(() => {
     inputRef.current = input;
@@ -715,6 +767,7 @@ export default function FusionChatPane({
     waitingForDecisionRef.current = next;
     setWaiting(next);
   };
+  const clearPendingDecision = () => setPendingDecision(null);
   const setInterruptingState = (next: boolean) => {
     interruptingRef.current = next;
     setInterrupting(next);
@@ -849,12 +902,19 @@ export default function FusionChatPane({
           });
           break;
         case "user":
-          push({ role: "user", kind: "text", text: event.steer ? `Steer: ${event.text}` : event.text });
+          if (decisionTurnLabelsRef.current.has(event.text)) {
+            const label = decisionTurnLabelsRef.current.get(event.text) || "Decision sent.";
+            decisionTurnLabelsRef.current.delete(event.text);
+            push({ role: "user", kind: "text", text: label });
+          } else {
+            push({ role: "user", kind: "text", text: event.steer ? `Steer: ${event.text}` : event.text });
+          }
           break;
         case "turn-start":
           setActiveRole("claude");
           setInterruptingState(false);
           setWaitingState(false);
+          clearPendingDecision();
           setBusyState(true);
           onStatusChangeRef.current("running");
           // One answer spans several assistant messages (a turn-start each); add
@@ -924,6 +984,7 @@ export default function FusionChatPane({
             internal: !fromCodex || Boolean(meta?.isGoalTool)
           });
           if (needsDecision) {
+            setPendingDecision(pendingFusionDecisionFromResult(parsed));
             setWaitingState(true);
             setBusyState(false);
             onStatusChangeRef.current("waiting");
@@ -932,6 +993,8 @@ export default function FusionChatPane({
               parsed.status === "needs_decision" ? "approval" : "question",
               text
             );
+          } else if (fromCodex && parsed) {
+            clearPendingDecision();
           }
           break;
         }
@@ -964,6 +1027,7 @@ export default function FusionChatPane({
           stopStreaming();
           setInterruptingState(false);
           setWaitingState(false);
+          clearPendingDecision();
           setBusyState(false);
           onStatusChangeRef.current("waiting");
           setInterruptStatus("Interrupted by user.");
@@ -982,6 +1046,7 @@ export default function FusionChatPane({
           setWaitingState(false);
           push({ role: "opus", kind: "error", text: event.message });
           setBusyState(false);
+          clearPendingDecision();
           emitAttention("failed", "error", event.message);
           break;
         case "closed":
@@ -991,11 +1056,13 @@ export default function FusionChatPane({
           if (event.code != null && event.code !== 0) {
             const message = `Fusion process exited with code ${event.code}.`;
             setBusyState(false);
+            clearPendingDecision();
             push({ role: "opus", kind: "error", text: message });
             emitAttention("failed", "exit", message);
           } else if (busyRef.current) {
             const message = "Fusion process closed before returning a result.";
             setBusyState(false);
+            clearPendingDecision();
             push({ role: "opus", kind: "error", text: message });
             emitAttention("failed", "exit", message);
           } else {
@@ -1405,6 +1472,10 @@ export default function FusionChatPane({
     const text = input.trim();
     if (!text) return;
     if (handleSlashCommand(text)) return;
+    if (pendingDecisionIsQuestion && pendingDecision) {
+      submitPendingDecision("accept", text);
+      return;
+    }
     if (!window.vibe?.fusionChat?.sendUserTurn) {
       const message = "Fusion unavailable: fusion chat bridge is not available.";
       push({ role: "opus", kind: "error", text: message });
@@ -1423,11 +1494,44 @@ export default function FusionChatPane({
       return;
     }
     setWaitingState(false);
+    clearPendingDecision();
     window.vibe.fusionChat.sendUserTurn(session.id, text);
     setInput("");
     setInterruptingState(false);
     setBusyState(true);
     onStatusChangeRef.current("running");
+  }
+
+  function submitPendingDecision(
+    decision: "accept" | "acceptForSession" | "decline" | "cancel",
+    note?: string
+  ) {
+    if (!pendingDecision || !window.vibe?.fusionChat?.sendUserTurn) {
+      const message = "Fusion unavailable: approval bridge is not available.";
+      push({ role: "opus", kind: "error", text: message });
+      emitAttention("failed", "error", message);
+      return;
+    }
+    const text = fusionDecisionInstruction(pendingDecision, decision, note?.trim());
+    const label =
+      pendingDecision.kind === "question"
+        ? `Answer: ${note?.trim() || ""}`
+        : decision === "acceptForSession"
+          ? "Approved for this session."
+          : decision === "accept"
+            ? "Approved."
+            : decision === "decline"
+              ? "Declined."
+              : "Cancelled.";
+    decisionTurnLabelsRef.current.set(text, label);
+    clearPendingDecision();
+    setWaitingState(false);
+    setInput("");
+    inputRef.current = "";
+    setInterruptingState(false);
+    setBusyState(true);
+    onStatusChangeRef.current("running");
+    window.vibe.fusionChat.sendUserTurn(session.id, text);
   }
 
   // Abort the in-flight turn but keep the session alive (Stop button / Esc), so
@@ -1635,6 +1739,65 @@ export default function FusionChatPane({
         </div>
 
         <div className="fusion-input-area">
+          {pendingDecision && (
+            <div className="fusion-decision-panel" role="group" aria-label="Fusion decision">
+              <div className="fusion-decision-copy">
+                <span className="fusion-decision-kind">{pendingDecision.kind}</span>
+                <span className="fusion-decision-detail">{pendingDecision.detail}</span>
+              </div>
+              {pendingDecisionIsQuestion ? (
+                <button
+                  className="fusion-decision-button is-primary"
+                  type="button"
+                  title="Send this answer to Fusion"
+                  disabled={!input.trim()}
+                  onClick={() => submitPendingDecision("accept", input.trim())}
+                >
+                  <Check size={14} />
+                  <span>Send answer</span>
+                </button>
+              ) : (
+                <div className="fusion-decision-actions">
+                  <button
+                    className="fusion-decision-button is-primary"
+                    type="button"
+                    title="Approve once"
+                    onClick={() => submitPendingDecision("accept")}
+                  >
+                    <Check size={14} />
+                    <span>Approve</span>
+                  </button>
+                  <button
+                    className="fusion-decision-button"
+                    type="button"
+                    title="Approve similar requests for this session"
+                    onClick={() => submitPendingDecision("acceptForSession")}
+                  >
+                    <ShieldCheck size={14} />
+                    <span>Approve session</span>
+                  </button>
+                  <button
+                    className="fusion-decision-button"
+                    type="button"
+                    title="Decline this request"
+                    onClick={() => submitPendingDecision("decline")}
+                  >
+                    <Ban size={14} />
+                    <span>Decline</span>
+                  </button>
+                  <button
+                    className="fusion-decision-button"
+                    type="button"
+                    title="Cancel this request"
+                    onClick={() => submitPendingDecision("cancel")}
+                  >
+                    <XCircle size={14} />
+                    <span>Cancel</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
           <div className="fusion-composer">
             <textarea
               ref={composerRef}
@@ -1643,7 +1806,11 @@ export default function FusionChatPane({
                 busy
                   ? "Steer the running turn…"
                   : waiting
-                    ? "Answer Fusion to continue…"
+                    ? pendingDecision
+                      ? pendingDecisionIsQuestion
+                        ? "Type the answer for Fusion…"
+                        : "Choose an approval action or add guidance…"
+                      : "Answer Fusion to continue…"
                     : "Ask Fusion to build, fix, or design…"
               }
               onChange={(e) => {

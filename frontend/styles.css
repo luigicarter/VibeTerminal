@@ -1585,6 +1585,80 @@ button {
   margin: 8px 10px 10px;
 }
 
+.fusion-decision-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 42px;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--pane-accent) 42%, #3a403a);
+  border-radius: 8px;
+  background: #151815;
+  box-shadow: 0 10px 22px #0005;
+}
+.fusion-decision-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: baseline;
+  gap: 8px;
+}
+.fusion-decision-kind {
+  flex: 0 0 auto;
+  color: var(--pane-accent);
+  font-size: 9px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+.fusion-decision-detail {
+  min-width: 0;
+  color: #d8d9d2;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.fusion-decision-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.fusion-decision-button {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 1px solid #3a403a;
+  border-radius: 6px;
+  background: #20251f;
+  color: #d8d9d2;
+  padding: 0 9px;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.fusion-decision-button svg {
+  flex: 0 0 auto;
+}
+.fusion-decision-button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--pane-accent) 60%, #3a403a);
+  color: #f3f0e7;
+}
+.fusion-decision-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.fusion-decision-button.is-primary {
+  border-color: color-mix(in srgb, var(--pane-accent) 72%, #3a403a);
+  background: color-mix(in srgb, var(--pane-accent) 18%, #20251f);
+  color: #f3f0e7;
+}
+
 /* Claude-Code-style rounded composer */
 .fusion-composer {
   position: relative;
