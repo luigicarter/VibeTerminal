@@ -34,9 +34,22 @@ const MODEL = process.env.VIBE_FUSION_CODEX_MODEL || null;
 const EFFORT = process.env.VIBE_FUSION_CODEX_EFFORT || null;
 const EAGER_BOOT = process.env.VIBE_FUSION_EAGER_BOOT === "1";
 const REQUEST_TIMEOUT_MS = Number(process.env.VIBE_FUSION_RPC_TIMEOUT_MS || 30000);
-const TURN_IDLE_TIMEOUT_MS = Number(process.env.VIBE_FUSION_TURN_IDLE_TIMEOUT_MS || 600000);
+const TURN_IDLE_TIMEOUT_MS = (() => {
+  // env="0" is truthy, so `Number(env || default)` would treat 0 as "disabled"
+  // and silently remove the only idle backstop. Floor 0/NaN/negative to default.
+  const n = Number(process.env.VIBE_FUSION_TURN_IDLE_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? n : 600000;
+})();
 const TURN_AFTER_COMMAND_TIMEOUT_MS = Number(
   process.env.VIBE_FUSION_TURN_AFTER_COMMAND_TIMEOUT_MS || 180000
+);
+// Absolute per-turn ceiling: armed once at turn start, never refreshed, and
+// floored so env cannot disable it. Guarantees the turn waiter (`await done`)
+// always resolves even if the refreshable idle watchdog is starved by progress
+// churn (the broken-sandbox retry loop) or misconfigured to 0.
+const TURN_HARD_TIMEOUT_MS = Math.max(
+  Number(process.env.VIBE_FUSION_TURN_HARD_TIMEOUT_MS) || 900000,
+  60000
 );
 const PARKED_REQUEST_METHODS = new Set([
   "item/commandExecution/requestApproval",
@@ -373,6 +386,10 @@ function clearCurrentTurnTimers(turn = currentTurn) {
   if (turn.commandTimer) {
     clearTimeout(turn.commandTimer);
     turn.commandTimer = null;
+  }
+  if (turn.hardTimer) {
+    clearTimeout(turn.hardTimer);
+    turn.hardTimer = null;
   }
 }
 
@@ -1084,8 +1101,17 @@ function awaitTurn() {
   }
   return new Promise((resolve) => {
     clearCurrentTurnTimers();
-    currentTurn = { resolve, idleTimer: null, commandTimer: null };
+    currentTurn = { resolve, idleTimer: null, commandTimer: null, hardTimer: null };
     refreshTurnIdleTimer("turn start");
+    // Absolute ceiling: never refreshed by refreshTurnIdleTimer, so progress
+    // churn cannot keep the turn alive forever. This is the backstop that makes
+    // `await done` guaranteed to resolve even when the idle watchdog is starved.
+    currentTurn.hardTimer = setTimeout(() => {
+      resolveTurn({
+        status: "failed",
+        error: "Fusion turn exceeded the maximum duration."
+      });
+    }, TURN_HARD_TIMEOUT_MS);
   });
 }
 
@@ -1140,6 +1166,28 @@ async function codexGoalClear() {
   } catch (error) {
     return goalsUnavailableResult(error);
   }
+}
+
+// Orchestrator-reachable escape hatch for a wedged turn: clears local turn state
+// so the next codex_implement starts fresh, without restarting the pane. The
+// Codex thread and native goal stay alive. Unlike resetHarness (host-only, kills
+// the child), this keeps the bridge warm and never blocks on the child.
+function codexCancel() {
+  const hadActiveTurn = Boolean(currentTurn);
+  const clearedDecisions = parked.size > 0;
+  // Best-effort: ask the app-server to abandon the active turn. Fire-and-forget
+  // (never awaited) so a wedged or silent child cannot block the escape hatch.
+  if (threadId && activeTurnId) {
+    rpc("turn/interrupt", { threadId, turnId: activeTurnId }).catch(() => {});
+  }
+  // Clear the local mirror and unblock any in-flight `await done` synchronously,
+  // so the orchestrator is freed even if the child never replies.
+  parked.clear();
+  latchedTurnResult = null;
+  resolveTurn({ status: "cancelled", error: "Fusion turn cancelled by the orchestrator." });
+  activeTurnId = null;
+  relay({ role: "opus", kind: "cancel", text: "turn cancelled" });
+  return { status: "cancelled", hadActiveTurn, clearedDecisions };
 }
 
 async function ensureGoalForTask(task) {
@@ -1349,6 +1397,15 @@ const TOOLS = [
       },
       required: ["pendingId", "decision"]
     }
+  },
+  {
+    name: "codex_cancel",
+    description:
+      "Abort the in-flight Codex turn and clear any pending approvals for this Fusion pane WITHOUT restarting the pane. Use it as the escape hatch when a turn is wedged - e.g. codex_implement keeps returning a 'turn already in progress' error with no decision to answer, or a parked approval can no longer be resolved. The Codex thread and native goal stay alive, so you can re-delegate with codex_implement afterwards. Returns {status:'cancelled', hadActiveTurn, clearedDecisions}.",
+    inputSchema: {
+      type: "object",
+      properties: {}
+    }
   }
 ];
 
@@ -1379,6 +1436,8 @@ async function handleToolCall(id, params) {
         String(args.decision || ""),
         args.note != null ? String(args.note) : ""
       );
+    } else if (name === "codex_cancel") {
+      result = codexCancel();
     } else {
       sendMcp({ jsonrpc: "2.0", id, error: { code: -32602, message: `Unknown tool: ${name}` } });
       return;

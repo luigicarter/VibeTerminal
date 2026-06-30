@@ -114,6 +114,7 @@ function main() {
             assert(names.includes("codex_goal_clear"), "tools/list missing codex_goal_clear");
             assert(names.includes("codex_implement"), "tools/list missing codex_implement");
             assert(names.includes("codex_respond"), "tools/list missing codex_respond");
+            assert(names.includes("codex_cancel"), "tools/list missing codex_cancel");
             const goalTool = tools.find((t) => t.name === "codex_goal_set");
             assert(
               goalTool && /native Codex per-thread goal/i.test(goalTool.description),
@@ -181,6 +182,22 @@ function main() {
               source.includes('turn.status === "failed"') &&
                 source.includes("turnErrorMessage(turn)"),
               "adapter should surface failed turn/completed status instead of reporting a synthetic stall"
+            );
+            assert(
+              source.includes("TURN_HARD_TIMEOUT_MS") &&
+                source.includes("hardTimer") &&
+                source.includes("Fusion turn exceeded the maximum duration"),
+              "adapter must arm a non-disableable hard turn ceiling so the turn waiter always resolves"
+            );
+            assert(
+              source.includes("function codexCancel") &&
+                source.includes('name: "codex_cancel"') &&
+                source.includes("parked.clear()"),
+              "adapter must expose an orchestrator-reachable codex_cancel escape hatch that clears parked state"
+            );
+            assert(
+              source.includes("Number.isFinite(n) && n > 0 ? n : 600000"),
+              "adapter must floor the idle-timeout env so 0/NaN cannot silently disable the only idle backstop"
             );
             cleanup();
             resolve();
@@ -1229,6 +1246,180 @@ function callAdapterClearsParkedApprovalWhenAppServerExits() {
 // initialize -> tools/list -> tools/call round-trip against a fake app-server. A
 // future edit that hard-requires the host (an unguarded env read, a require() of
 // host code, or a control server that binds unconditionally) breaks this here.
+// A fake app-server that wedges the FIRST turn (parks an approval, then goes
+// silent — no completion), and completes cleanly on the SECOND turn/start. This
+// reproduces the "interfaces fighting" deadlock and lets us prove codex_cancel
+// frees it: cancel the wedged turn, then re-delegate and reach completion.
+function writeCancelWedgeFakeAppServer(dir) {
+  const summaryText = JSON.stringify(
+    `Re-delegated after cancel and completed.\n${VERDICT_MARKER} {"goalReached":true,"bugsFound":[],"missingRequirements":[],"nextAction":"done","summary":"Completed after cancel."}`
+  );
+  fs.writeFileSync(
+    path.join(dir, "app-server"),
+    `
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+const approvalRequestId = 950;
+const summaryText = ${summaryText};
+let turnStarts = 0;
+function send(msg) { process.stdout.write(JSON.stringify(msg) + "\\n"); }
+function turn(status, items = []) {
+  return { id: "turn-" + turnStarts, items, itemsView: "full", status, error: null, startedAt: 1, completedAt: status === "completed" ? 2 : null, durationMs: status === "completed" ? 10 : null };
+}
+function goal() {
+  return { threadId: "thread-1", objective: "do work", status: "active", tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0, createdAt: 1, updatedAt: 1 };
+}
+function agentItem() {
+  return { type: "agentMessage", id: "msg-1", text: summaryText, phase: null, memoryCitation: null };
+}
+rl.on("line", (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+  if (msg.method === "initialize") { send({ id: msg.id, result: {} }); return; }
+  if (msg.method === "thread/start") { send({ id: msg.id, result: { thread: { id: "thread-1" } } }); return; }
+  if (msg.method === "thread/goal/set") { send({ id: msg.id, result: { goal: goal() } }); return; }
+  if (msg.method === "turn/start") {
+    turnStarts += 1;
+    send({ id: msg.id, result: { turn: turn("running") } });
+    send({ method: "turn/started", params: { threadId: "thread-1", turn: turn("running") } });
+    if (turnStarts === 1) {
+      // Wedge: park an approval, then never complete (silent child).
+      send({ id: approvalRequestId, method: "item/commandExecution/requestApproval", params: { threadId: "thread-1", turnId: "turn-1", itemId: "cmd-1", startedAtMs: Date.now(), approvalId: null, environmentId: null, reason: "needs approval", command: "git status --short", cwd: process.cwd(), commandActions: [], availableDecisions: ["accept", "acceptForSession", "decline", "cancel"] } });
+    } else {
+      const agent = agentItem();
+      send({ method: "item/completed", params: { threadId: "thread-1", turnId: turn("running").id, item: agent } });
+      send({ method: "turn/completed", params: { threadId: "thread-1", turn: turn("completed", [agent]) } });
+    }
+    return;
+  }
+  if (msg.id !== undefined) send({ id: msg.id, result: {} });
+});
+`
+  );
+}
+
+function callAdapterCancelClearsWedge() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-adapter-cancel-"));
+  writeCancelWedgeFakeAppServer(tempDir);
+  const child = spawn(process.execPath, [adapterPath], {
+    cwd: tempDir,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      VIBE_FUSION_CODEX_BIN: process.execPath,
+      VIBE_TERMINAL_FUSION_CWD: tempDir,
+      VIBE_TERMINAL_SESSION_ID: "fusion-adapter-cancel",
+      VIBE_FUSION_TURN_IDLE_TIMEOUT_MS: "5000",
+      VIBE_FUSION_TURN_AFTER_COMMAND_TIMEOUT_MS: "5000"
+    }
+  });
+
+  let buffer = "";
+  let stderr = "";
+  let finished = false;
+  let sentCancel = false;
+  let sentReimplement = false;
+
+  function cleanup() {
+    try {
+      child.stdin.end();
+    } catch {
+      // ignore
+    }
+    try {
+      child.kill();
+    } catch {
+      // ignore
+    }
+    if (isWin && child.pid) {
+      try {
+        execFileSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
+      } catch {
+        // best-effort
+      }
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      finished = true;
+      cleanup();
+      reject(new Error(`timed out waiting for cancel-clears-wedge result; stderr=${stderr}`));
+    }, 10000);
+
+    function fail(error) {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      cleanup();
+      reject(error);
+    }
+
+    child.on("error", fail);
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("exit", (code) => {
+      if (finished) return;
+      fail(new Error(`adapter exited before cancel-clears-wedge result: code=${code}; stderr=${stderr}`));
+    });
+
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      let index;
+      while ((index = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, index).trim();
+        buffer = buffer.slice(index + 1);
+        if (!line) continue;
+        let msg;
+        try {
+          msg = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (msg.id === undefined || !msg.result || !msg.result.content) continue;
+        try {
+          if (msg.id === 2 && !sentCancel) {
+            const parsed = JSON.parse(msg.result.content[0].text);
+            assert(parsed.status === "needs_decision", `expected a parked approval before cancel: ${msg.result.content[0].text}`);
+            assert(parsed.pendingId, "wedged approval missing pendingId");
+            sentCancel = true;
+            child.stdin.write(
+              `${JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "codex_cancel", arguments: {} } })}\n`
+            );
+          } else if (msg.id === 3 && !sentReimplement) {
+            const parsed = JSON.parse(msg.result.content[0].text);
+            assert(parsed.status === "cancelled", `codex_cancel should report cancelled: ${msg.result.content[0].text}`);
+            assert(parsed.clearedDecisions === true, `codex_cancel should clear the parked decision: ${msg.result.content[0].text}`);
+            sentReimplement = true;
+            child.stdin.write(
+              `${JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "codex_implement", arguments: { task: "finish the work after cancel" } } })}\n`
+            );
+          } else if (msg.id === 4) {
+            const parsed = JSON.parse(msg.result.content[0].text);
+            assert(parsed.status === "completed", `re-delegate after cancel should complete, not wedge: ${msg.result.content[0].text}`);
+            assert(parsed.goalReached === true, `re-delegate after cancel should reach the goal: ${msg.result.content[0].text}`);
+            finished = true;
+            clearTimeout(timer);
+            cleanup();
+            resolve();
+          }
+        } catch (error) {
+          fail(error);
+        }
+      }
+    });
+
+    child.stdin.write(
+      `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fusion-cancel", version: "0.0.0" } } })}\n`
+    );
+    child.stdin.write(
+      `${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "codex_implement", arguments: { task: "do work that needs approval" } } })}\n`
+    );
+  });
+}
+
 function assertAdapterRunsHostFree() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-adapter-hostfree-"));
   writeFakeAppServer(tempDir);
@@ -1324,7 +1515,7 @@ function assertAdapterRunsHostFree() {
             );
             const tools = responses.get(2).result && responses.get(2).result.tools ? responses.get(2).result.tools : [];
             const names = tools.map((t) => t.name);
-            for (const tool of ["codex_goal_set", "codex_goal_get", "codex_goal_clear", "codex_implement", "codex_respond"]) {
+            for (const tool of ["codex_goal_set", "codex_goal_get", "codex_goal_clear", "codex_implement", "codex_respond", "codex_cancel"]) {
               assert(names.includes(tool), `host-free tools/list missing ${tool}`);
             }
             const callText = responses.get(3).result.content[0].text;
@@ -1526,6 +1717,7 @@ main()
     await callAdapterApprovalResumeWithFakeAppServer({ exercisePendingRecovery: true });
     await callAdapterApprovalResumeWithFakeAppServer({ queueSecondApproval: true });
     await callAdapterClearsParkedApprovalWhenAppServerExits();
+    await callAdapterCancelClearsWedge();
     console.log("Fusion adapter smoke passed");
   })
   .catch((error) => {
