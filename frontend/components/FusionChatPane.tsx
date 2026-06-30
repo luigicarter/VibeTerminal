@@ -48,6 +48,7 @@ interface FusionChatPaneProps {
   onSelect: () => void;
   onMaximize: () => void;
   onThreadRefChange: (threadRef: AgentThreadRef) => void;
+  onFreshLaunchFallback: () => void;
   onStatusChange: (status: SessionStatus) => void;
   onAttention: (attention: AgentAttentionEvent) => void;
 }
@@ -668,6 +669,7 @@ export default function FusionChatPane({
   onSelect,
   onMaximize,
   onThreadRefChange,
+  onFreshLaunchFallback,
   onStatusChange,
   onAttention
 }: FusionChatPaneProps) {
@@ -689,6 +691,7 @@ export default function FusionChatPane({
   const waitingForDecisionRef = useRef(false);
   const decisionTurnLabelsRef = useRef(new Map<string, string>());
   const onThreadRefChangeRef = useRef(onThreadRefChange);
+  const onFreshLaunchFallbackRef = useRef(onFreshLaunchFallback);
   const onStatusChangeRef = useRef(onStatusChange);
   const onAttentionRef = useRef(onAttention);
   const busyRef = useRef(false);
@@ -728,9 +731,10 @@ export default function FusionChatPane({
 
   useEffect(() => {
     onThreadRefChangeRef.current = onThreadRefChange;
+    onFreshLaunchFallbackRef.current = onFreshLaunchFallback;
     onStatusChangeRef.current = onStatusChange;
     onAttentionRef.current = onAttention;
-  }, [onThreadRefChange, onStatusChange, onAttention]);
+  }, [onThreadRefChange, onFreshLaunchFallback, onStatusChange, onAttention]);
 
   // Auto-grow the composer up to a cap, then scroll — so multi-line prompts are
   // fully visible instead of being clipped to a single scrolling row.
@@ -830,23 +834,57 @@ export default function FusionChatPane({
       return;
     }
     const startTimer = window.setTimeout(() => {
-      const startPayload = {
-        id: session.id,
-        cwd: session.cwd,
-        resumeId,
-        model: fusionModel,
-        ...(fusionCodexModel === "auto" ? {} : { codexModel: fusionCodexModel }),
-        ...(fusionClaudeEffort === "auto" ? {} : { effort: fusionClaudeEffort }),
-        ...(fusionCodexEffort === "auto" ? {} : { codexEffort: fusionCodexEffort })
-      };
-      fusionChat
-        .start(startPayload)
-        .then((result) => {
-          if (cancelled || !result || result.ok !== false) return;
-          const message = `Fusion unavailable: ${result.error}`;
-          push({ role: "opus", kind: "error", text: message });
-          emitAttention("failed", "error", message);
-        });
+      void (async () => {
+        let launchResumeId = resumeId;
+        if (launchResumeId && window.vibe?.agentThreads?.findLatest) {
+          try {
+            const result = await window.vibe.agentThreads.findLatest({
+              provider: "claude",
+              cwd: session.cwd,
+              confirmId: launchResumeId
+            });
+
+            if (cancelled) {
+              return;
+            }
+
+            if (result?.status === "missing") {
+              launchResumeId = undefined;
+              onFreshLaunchFallbackRef.current();
+              push({
+                role: "opus",
+                kind: "activity",
+                text: "Saved Fusion Claude chat is no longer available. Started fresh."
+              });
+            }
+          } catch {
+            // Confirmation unavailable: keep the resume request rather than risk a
+            // duplicate Claude session id for a transcript that may still exist.
+          }
+        }
+
+        if (cancelled) {
+          return;
+        }
+
+        const startPayload = {
+          id: session.id,
+          cwd: session.cwd,
+          resumeId: launchResumeId,
+          model: fusionModel,
+          ...(fusionCodexModel === "auto" ? {} : { codexModel: fusionCodexModel }),
+          ...(fusionClaudeEffort === "auto" ? {} : { effort: fusionClaudeEffort }),
+          ...(fusionCodexEffort === "auto" ? {} : { codexEffort: fusionCodexEffort })
+        };
+        fusionChat
+          .start(startPayload)
+          .then((result) => {
+            if (cancelled || !result || result.ok !== false) return;
+            const message = `Fusion unavailable: ${result.error}`;
+            push({ role: "opus", kind: "error", text: message });
+            emitAttention("failed", "error", message);
+          });
+      })();
     }, 0);
     return () => {
       cancelled = true;

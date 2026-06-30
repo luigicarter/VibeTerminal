@@ -225,10 +225,21 @@ function hasClaudeThreadId(threadRef?: AgentThreadRef): threadRef is AgentThread
   return threadRef?.provider === "claude" && Boolean(threadRef.id);
 }
 
+function threadRefForKind(kind: AgentKind, threadRef?: AgentThreadRef) {
+  return threadRef && isThreadedAgentKind(kind) && threadRef.provider === kind
+    ? threadRef
+    : undefined;
+}
+
+function resumableThreadRefForKind(kind: AgentKind, threadRef?: AgentThreadRef) {
+  const matchingRef = threadRefForKind(kind, threadRef);
+  return matchingRef?.id ? matchingRef : undefined;
+}
+
 function canResumeSessionThread(session: AgentSession) {
   return session.fusion
     ? hasClaudeThreadId(session.threadRef)
-    : isThreadedAgentKind(session.kind) && Boolean(session.threadRef?.id);
+    : Boolean(resumableThreadRefForKind(session.kind, session.threadRef));
 }
 
 function sessionResumeRef(session: AgentSession) {
@@ -236,7 +247,15 @@ function sessionResumeRef(session: AgentSession) {
     ? hasClaudeThreadId(session.resumeRef)
       ? session.resumeRef
       : undefined
-    : session.resumeRef;
+    : resumableThreadRefForKind(session.kind, session.resumeRef);
+}
+
+function activeSessionThreadRef(session: AgentSession) {
+  return session.fusion
+    ? hasClaudeThreadId(session.threadRef)
+      ? session.threadRef
+      : undefined
+    : resumableThreadRefForKind(session.kind, session.threadRef);
 }
 
 function rectanglesOverlap(a: LayoutBox, b: LayoutBox) {
@@ -524,17 +543,19 @@ function restoreSession(session: AgentSession): AgentSession {
   //   launch their plain command, letting discovery bind the new session.
   // The most recent resumable thread wins; if the pane had no thread yet we keep
   // whatever resumeRef was already stored.
-  const activeThreadRef =
-    isFusion && !hasClaudeThreadId(session.threadRef)
-      ? undefined
-      : session.threadRef;
+  const activeThreadRef = isFusion
+    ? hasClaudeThreadId(session.threadRef)
+      ? session.threadRef
+      : undefined
+    : threadRefForKind(restoredKind, session.threadRef);
+  const storedResumeRef = isFusion
+    ? hasClaudeThreadId(session.resumeRef)
+      ? session.resumeRef
+      : undefined
+    : resumableThreadRefForKind(restoredKind, session.resumeRef);
   const resumeRef = activeThreadRef?.id
     ? activeThreadRef
-    : isFusion
-      ? hasClaudeThreadId(session.resumeRef)
-        ? session.resumeRef
-        : undefined
-      : session.resumeRef;
+    : storedResumeRef;
 
   return {
     ...session,
@@ -1251,9 +1272,7 @@ export default function App() {
     // A duplicate is a fresh pane (two panes must never resume the same id), but
     // it inherits the source's conversation as `resumeRef` so the copy can offer
     // "Resume last chat" to continue where the original left off.
-    const sourceThread = session.threadRef?.id
-      ? session.threadRef
-      : session.resumeRef;
+    const sourceThread = activeSessionThreadRef(session) ?? sessionResumeRef(session);
     updateScopeSessions(scope, (sessions) => [
       ...sessions,
       {
@@ -1584,35 +1603,64 @@ export default function App() {
   }
 
   // Deliberately resume the pane's previous conversation. Mirrors restartSession
-  // but forces nextLaunchMode "resume" against the stashed resumeRef, then clears
-  // resumeRef (the resumed thread becomes the pane's active threadRef). For
-  // claude the launch is still safety-checked by resolveLaunchCommand, which
-  // falls back to a fresh start if the transcript no longer exists.
+  // but forces nextLaunchMode "resume" against the stashed resumeRef. The
+  // outgoing active thread becomes the next resumeRef so switching back does not
+  // discard the current conversation pointer.
   function resumeSession(scope: SessionScope, session: AgentSession) {
     const resumeRef = sessionResumeRef(session);
     if (!resumeRef?.id) {
       return;
     }
 
-    stopSessionProcess(session).then(() => {
+    if (isThreadRefClaimedByOther(session.id, resumeRef)) {
       updateScopeSessions(scope, (sessions) =>
         sessions.map((item) =>
           item.id === session.id
             ? {
                 ...item,
-                started: true,
-                launchToken: item.launchToken + 1,
-                nextLaunchMode: "resume",
-                threadRef: resumeRef,
-                resumeRef: undefined,
-                threadLookupStartedAt: undefined,
-                threadLookupStatus: "found",
-                threadLookupMessage: undefined,
-                status: "idle",
-                attention: EMPTY_ATTENTION
+                threadLookupStatus: "failed",
+                threadLookupMessage: "That chat is already open in another pane."
               }
             : item
         )
+      );
+      return;
+    }
+
+    stopSessionProcess(session).then(() => {
+      updateScopeSessions(scope, (sessions) =>
+        sessions.map((item) => {
+          if (item.id !== session.id) {
+            return item;
+          }
+
+          const latestResumeRef = sessionResumeRef(item);
+          if (!latestResumeRef?.id) {
+            return item;
+          }
+
+          const currentThreadRef = activeSessionThreadRef(item);
+          const nextResumeRef =
+            currentThreadRef?.id &&
+            (currentThreadRef.provider !== latestResumeRef.provider ||
+              currentThreadRef.id !== latestResumeRef.id)
+              ? currentThreadRef
+              : undefined;
+
+          return {
+            ...item,
+            started: true,
+            launchToken: item.launchToken + 1,
+            nextLaunchMode: "resume",
+            threadRef: latestResumeRef,
+            resumeRef: nextResumeRef,
+            threadLookupStartedAt: undefined,
+            threadLookupStatus: "found",
+            threadLookupMessage: undefined,
+            status: "idle",
+            attention: EMPTY_ATTENTION
+          };
+        })
       );
     });
   }
@@ -1672,7 +1720,6 @@ export default function App() {
             ? item.threadRef
             : undefined;
           const previousClaudeRef = sessionResumeRef(item);
-          const canResume = !item.fusion && canResumeSessionThread(item);
           const fusionModel = normalizeFusionModel(settings.model);
           const fusionCodexModel = normalizeFusionCodexModel(settings.codexModel);
           const fusionClaudeEffort = normalizeFusionEffort(settings.claudeEffort);
@@ -1694,9 +1741,9 @@ export default function App() {
               ? {
                   started: true,
                   launchToken: item.launchToken + 1,
-                  nextLaunchMode: canResume ? "resume" : "new",
+                  nextLaunchMode: "new",
                   threadLookupStartedAt: undefined,
-                  threadLookupStatus: canResume ? "found" : "idle",
+                  threadLookupStatus: "idle",
                   threadLookupMessage: undefined,
                   status: "idle" as const,
                   attention: EMPTY_ATTENTION
@@ -1793,6 +1840,27 @@ export default function App() {
     );
   }
 
+  function resetSessionThreadForFreshLaunch(
+    scope: SessionScope,
+    sessionId: string,
+    patch: ThreadLookupPatch
+  ) {
+    updateScopeSessions(scope, (sessions) =>
+      sessions.map((session) =>
+        session.id === sessionId
+          ? {
+              ...session,
+              threadRef: undefined,
+              nextLaunchMode: "new",
+              threadLookupStartedAt: patch.threadLookupStartedAt,
+              threadLookupStatus: patch.threadLookupStatus,
+              threadLookupMessage: patch.threadLookupMessage
+            }
+          : session
+      )
+    );
+  }
+
   function updateSessionThreadLookup(
     scope: SessionScope,
     sessionId: string,
@@ -1829,6 +1897,22 @@ export default function App() {
       .filter((session) => session.id !== sessionId)
       .map((session) => session.threadRef?.id)
       .filter((id): id is string => Boolean(id));
+  }
+
+  function isThreadRefClaimedByOther(
+    sessionId: string,
+    threadRef?: AgentThreadRef
+  ) {
+    if (!threadRef?.id) {
+      return false;
+    }
+
+    return allSessions.some(
+      (session) =>
+        session.id !== sessionId &&
+        session.threadRef?.provider === threadRef.provider &&
+        session.threadRef.id === threadRef.id
+    );
   }
 
   function workspaceHasUnreadAttention(workspace: ProjectWorkspace) {
@@ -2384,6 +2468,12 @@ export default function App() {
                     onThreadRefChange={(threadRef) =>
                       updateSessionThreadRef(activeScope, session.id, threadRef)
                     }
+                    onFreshLaunchFallback={() =>
+                      resetSessionThreadForFreshLaunch(activeScope, session.id, {
+                        threadLookupStatus: "idle",
+                        threadLookupMessage: undefined
+                      })
+                    }
                     onStatusChange={(status) =>
                       updateSessionStatus(activeScope, session.id, status)
                     }
@@ -2415,6 +2505,13 @@ export default function App() {
                     }
                     onThreadRefChange={(threadRef) =>
                       updateSessionThreadRef(activeScope, session.id, threadRef)
+                    }
+                    onFreshLaunchFallback={(patch) =>
+                      resetSessionThreadForFreshLaunch(
+                        activeScope,
+                        session.id,
+                        patch
+                      )
                     }
                     onThreadLookupChange={(patch) =>
                       updateSessionThreadLookup(activeScope, session.id, patch)

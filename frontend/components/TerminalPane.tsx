@@ -19,6 +19,7 @@ import clsx from "clsx";
 import {
   isTurnTelemetryKind,
   reconcileStatus,
+  shouldSettleStatusOnPaneUnmount,
   shouldShowAttentionDot
 } from "../attention";
 import { buildLaunchCommand, isThreadedAgentKind } from "../sessionLaunch";
@@ -70,6 +71,7 @@ interface TerminalPaneProps {
   onSelect: () => void;
   onMaximize: () => void;
   onThreadRefChange: (threadRef: AgentThreadRef) => void;
+  onFreshLaunchFallback: (patch: ThreadLookupPatch) => void;
   onThreadLookupChange: (patch: ThreadLookupPatch) => void;
   onStatusChange: (status: SessionStatus) => void;
 }
@@ -105,6 +107,7 @@ export default function TerminalPane({
   onResume,
   onSelect,
   onThreadRefChange,
+  onFreshLaunchFallback,
   onThreadLookupChange,
   onStatusChange
 }: TerminalPaneProps) {
@@ -116,6 +119,7 @@ export default function TerminalPane({
   const lastLaunchTokenRef = useRef(0);
   const onStatusChangeRef = useRef(onStatusChange);
   const onThreadRefChangeRef = useRef(onThreadRefChange);
+  const onFreshLaunchFallbackRef = useRef(onFreshLaunchFallback);
   const onThreadLookupChangeRef = useRef(onThreadLookupChange);
   const isArrangingRef = useRef(isArranging);
   const pendingFitRef = useRef(false);
@@ -132,6 +136,7 @@ export default function TerminalPane({
   const lastInputAtRef = useRef(0);
   const lookupInFlightRef = useRef(false);
   const claimedThreadIdsRef = useRef(claimedThreadIds);
+  const forceThreadLookupTokenRef = useRef<number | null>(null);
 
   const platform = window.vibe?.platform;
 
@@ -151,6 +156,10 @@ export default function TerminalPane({
   useEffect(() => {
     onThreadRefChangeRef.current = onThreadRefChange;
   }, [onThreadRefChange]);
+
+  useEffect(() => {
+    onFreshLaunchFallbackRef.current = onFreshLaunchFallback;
+  }, [onFreshLaunchFallback]);
 
   useEffect(() => {
     onThreadLookupChangeRef.current = onThreadLookupChange;
@@ -592,6 +601,12 @@ export default function TerminalPane({
         cancelAnimationFrame(repaintFrameRef.current);
         repaintFrameRef.current = null;
       }
+      if (
+        !terminalExitedRef.current &&
+        shouldSettleStatusOnPaneUnmount(sessionRef.current)
+      ) {
+        setStatus("waiting");
+      }
       clearIdleTimer();
       removeListener?.();
       removeContextMenuPasteListener?.();
@@ -613,12 +628,14 @@ export default function TerminalPane({
 
   // A resume only succeeds once the agent has persisted its session locally:
   // claude needs a transcript (`claude --resume <id>`), codex a rollout file
-  // (`codex resume <id>`), opencode a known session (`opencode --session <id>`).
+  // (`codex resume <id>`), opencode a known session (`opencode --session <id>`),
+  // and cursor a saved chat (`cursor-agent --resume <id>`).
   // Resuming an id the agent no longer has hard-fails in the live shell pane
   // (e.g. claude's "No conversation found") and strands the user at a bare
   // prompt. So before resuming any threaded agent, confirm the id still exists;
-  // if it does not, start a clean session instead. (For claude the fresh launch
-  // reuses the still-unused pre-assigned id; codex/opencode just launch plain.)
+  // if it does not, start a clean session instead. Claude keeps the pane's
+  // assigned session id for the fresh launch; other threaded agents launch plain
+  // and rediscover their new local thread metadata.
   async function resolveLaunchCommand(
     currentSession: AgentSession,
     defaultCommand: string
@@ -637,6 +654,15 @@ export default function TerminalPane({
         });
 
         if (result?.status === "missing") {
+          if (currentSession.kind !== "claude") {
+            forceThreadLookupTokenRef.current = currentSession.launchToken;
+            onFreshLaunchFallbackRef.current({
+              threadLookupStartedAt: threadLookupAfterRef.current,
+              threadLookupStatus: "pending",
+              threadLookupMessage: `Saved ${profile.label} resume thread is no longer available. Started fresh and waiting for local thread metadata.`
+            });
+          }
+
           return buildLaunchCommand(currentSession, {
             mode: "new",
             platform: window.vibe?.platform
@@ -731,9 +757,11 @@ export default function TerminalPane({
   function scheduleThreadLookup(delayMs: number, finalAttempt = false) {
     const currentSession = sessionRef.current;
     const provider = currentSession.kind;
+    const forceLookup =
+      forceThreadLookupTokenRef.current === currentSession.launchToken;
 
     if (
-      currentSession.threadRef?.id ||
+      (currentSession.threadRef?.id && !forceLookup) ||
       !isThreadedAgentKind(provider) ||
       !window.vibe?.agentThreads ||
       (!finalAttempt && terminalExitedRef.current) ||
@@ -757,12 +785,22 @@ export default function TerminalPane({
   async function runThreadLookup(finalAttempt: boolean) {
     const currentSession = sessionRef.current;
     const provider = currentSession.kind;
+    const launchToken = currentSession.launchToken;
+    const cwd = currentSession.cwd;
+    const forceLookup =
+      forceThreadLookupTokenRef.current === currentSession.launchToken;
 
     threadLookupTimeoutRef.current = null;
 
+    if (lookupInFlightRef.current) {
+      if (!finalAttempt) {
+        scheduleThreadLookup(THREAD_LOOKUP_POLL_MS);
+      }
+      return;
+    }
+
     if (
-      lookupInFlightRef.current ||
-      currentSession.threadRef?.id ||
+      (currentSession.threadRef?.id && !forceLookup) ||
       !isThreadedAgentKind(provider) ||
       !window.vibe?.agentThreads
     ) {
@@ -789,18 +827,54 @@ export default function TerminalPane({
     lookupInFlightRef.current = true;
 
     try {
-      if (sessionRef.current.threadRef?.id) {
+      if (sessionRef.current.threadRef?.id && !forceLookup) {
         return;
       }
 
       const result = await window.vibe?.agentThreads.findLatest({
         provider,
-        cwd: currentSession.cwd,
+        cwd,
         after: lookupStartedAt,
         excludeIds: claimedThreadIdsRef.current
       });
 
+      const latestSession = sessionRef.current;
+      const latestForceLookup =
+        forceThreadLookupTokenRef.current === latestSession.launchToken;
+      if (
+        latestSession.launchToken !== launchToken ||
+        latestSession.kind !== provider ||
+        latestSession.cwd !== cwd ||
+        threadLookupAfterRef.current !== lookupStartedAt ||
+        (latestSession.threadRef?.id && !latestForceLookup)
+      ) {
+        return;
+      }
+
       if (result?.status === "found") {
+        if (
+          result.threadRef.id &&
+          claimedThreadIdsRef.current.includes(result.threadRef.id)
+        ) {
+          if (finalAttempt) {
+            onThreadLookupChangeRef.current({
+              threadLookupStartedAt: lookupStartedAt,
+              threadLookupStatus: "failed",
+              threadLookupMessage: `${profile.label} thread was already claimed by another pane.`
+            });
+            return;
+          }
+
+          onThreadLookupChangeRef.current({
+            threadLookupStartedAt: lookupStartedAt,
+            threadLookupStatus: "pending",
+            threadLookupMessage: `Waiting for an unclaimed ${profile.label} thread.`
+          });
+          scheduleThreadLookup(THREAD_LOOKUP_POLL_MS);
+          return;
+        }
+
+        forceThreadLookupTokenRef.current = null;
         onThreadRefChangeRef.current(result.threadRef);
         onThreadLookupChangeRef.current({
           threadLookupStartedAt: lookupStartedAt,

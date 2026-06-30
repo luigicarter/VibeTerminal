@@ -1,6 +1,6 @@
 {
   "name": "vibe-terminal",
-  "version": "0.1.26",
+  "version": "0.1.27",
   "private": true,
   "description": "A tiled local workspace for running multiple coding agents side by side.",
   "author": "vibeTerminal contributors",
@@ -19,6 +19,7 @@
     "screenshot": "node scripts/qa/screenshot.cjs",
     "smoke:backend:agent-telemetry": "node scripts/backend/agent-telemetry-smoke.cjs",
     "smoke:backend:code-changes": "node scripts/backend/code-changes-smoke.cjs",
+    "smoke:backend:launch-cwd": "node scripts/backend/launch-cwd-smoke.cjs",
     "smoke:backend:codex-discovery": "node scripts/backend/codex-discovery-smoke.cjs",
     "smoke:backend:claude-discovery": "node scripts/backend/claude-discovery-smoke.cjs",
     "smoke:backend:updates": "node scripts/backend/update-smoke.cjs",

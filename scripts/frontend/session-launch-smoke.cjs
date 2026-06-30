@@ -90,7 +90,7 @@ assert.strictEqual(
 
 // A mode override forces a fresh launch even when the session is set to resume —
 // this is how the self-healing launcher recovers from a non-resumable id (no
-// persisted transcript) by reusing the still-unused pre-assigned id.
+// persisted transcript) while keeping Claude pinned to the pane's session id.
 assert.strictEqual(
   buildLaunchCommand(
     session({
@@ -256,6 +256,19 @@ const lifecycleDeps = terminalPaneSource
 assert(
   !lifecycleDeps.includes("launchCommand"),
   "the terminal-lifecycle effect must not depend on launchCommand (it would blank the live pane on a mid-session resume id)"
+);
+
+assert(
+  terminalPaneSource.includes("onFreshLaunchFallbackRef.current") &&
+    terminalPaneSource.includes('currentSession.kind !== "claude"') &&
+    terminalPaneSource.includes("forceThreadLookupTokenRef.current = currentSession.launchToken") &&
+    terminalPaneSource.includes("(currentSession.threadRef?.id && !forceLookup)") &&
+    terminalPaneSource.includes("latestSession.launchToken !== launchToken") &&
+    terminalPaneSource.includes("latestSession.cwd !== cwd") &&
+    terminalPaneSource.includes("threadLookupAfterRef.current !== lookupStartedAt") &&
+    terminalPaneSource.includes("claimedThreadIdsRef.current.includes(result.threadRef.id)") &&
+    terminalPaneSource.includes("forceThreadLookupTokenRef.current = null"),
+  "a missing non-Claude resume id should fall back to a fresh launch, clear stale state, force rediscovery, and ignore stale async lookup results"
 );
 
 console.log("session launch smoke passed");

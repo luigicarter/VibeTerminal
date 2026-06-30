@@ -1594,6 +1594,16 @@ function createAgentTelemetryManager(options = {}) {
         return;
       }
 
+      let stat = null;
+      try {
+        stat = fs.statSync(cwd);
+      } catch {
+        return;
+      }
+      if (!stat.isDirectory()) {
+        return;
+      }
+
       const dir = path.join(cwd, ".cursor");
       const file = path.join(dir, "hooks.json");
 

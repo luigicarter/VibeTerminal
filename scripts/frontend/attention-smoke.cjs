@@ -47,6 +47,7 @@ const {
   isTurnTelemetryKind,
   normalizeAttention,
   reconcileStatus,
+  shouldSettleStatusOnPaneUnmount,
   shouldMarkAttentionUnread,
   shouldShowAttentionDot,
   shouldUseTerminalEventAttention,
@@ -226,6 +227,32 @@ assert.strictEqual(isTurnTelemetryKind("cursor"), true);
 assert.strictEqual(isTurnTelemetryKind("codex"), false);
 assert.strictEqual(isTurnTelemetryKind("terminal"), false);
 
+// Plain terminals and Codex use TerminalPane's mounted output-idle heuristic.
+// If that pane unmounts while marked running, the folder spinner must not stay
+// stuck on "working" forever. A telemetry-backed agent that unmounts during its
+// initial boot also must not stay "starting" forever. Telemetry-backed running
+// state is provider-driven and should be preserved.
+assert.strictEqual(
+  shouldSettleStatusOnPaneUnmount({ kind: "terminal", status: "running" }),
+  true
+);
+assert.strictEqual(
+  shouldSettleStatusOnPaneUnmount({ kind: "codex", status: "running" }),
+  true
+);
+assert.strictEqual(
+  shouldSettleStatusOnPaneUnmount({ kind: "claude", status: "starting" }),
+  true
+);
+assert.strictEqual(
+  shouldSettleStatusOnPaneUnmount({ kind: "claude", status: "running" }),
+  false
+);
+assert.strictEqual(
+  shouldSettleStatusOnPaneUnmount({ kind: "terminal", status: "waiting" }),
+  false
+);
+
 // A coding agent runs inside the pane shell, so its lifecycle only surfaces
 // through telemetry attention. Those states must map onto the pill status.
 assert.strictEqual(statusFromAttentionState("waiting"), "waiting");
@@ -329,6 +356,21 @@ assert(
     terminalPaneSource.includes('setStatus("waiting")'),
   "terminal pane should fall back to a waiting status when output goes idle"
 );
+const terminalDisposeForCleanupIdx = terminalPaneSource.indexOf("terminal.dispose()");
+const cleanupStart = terminalPaneSource.lastIndexOf(
+  "return () => {",
+  terminalDisposeForCleanupIdx
+);
+const cleanupEnd = terminalDisposeForCleanupIdx;
+const cleanupBlock = terminalPaneSource.slice(cleanupStart, cleanupEnd);
+assert(
+  cleanupStart !== -1 &&
+    cleanupEnd !== -1 &&
+    cleanupBlock.includes("shouldSettleStatusOnPaneUnmount(sessionRef.current)") &&
+    cleanupBlock.indexOf('setStatus("waiting")') <
+      cleanupBlock.indexOf("clearIdleTimer()"),
+  "terminal pane unmount should settle stale status before clearing the idle timer"
+);
 assert(
   terminalPaneSource.includes('event.type === "host-error" || event.type === "host-exit"') &&
     terminalPaneSource.includes('event.id && event.id !== session.id') &&
@@ -399,6 +441,14 @@ assert(
     fusionChatPaneSource.includes('case "stderr"') &&
     fusionChatPaneSource.includes("busy && !inputIsSlashCommand"),
   "FusionChatPane should normalize restored settings, show stderr, and allow slash commands while busy"
+);
+assert(
+  fusionChatPaneSource.includes("window.vibe?.agentThreads?.findLatest") &&
+    fusionChatPaneSource.includes('provider: "claude"') &&
+    fusionChatPaneSource.includes("confirmId: launchResumeId") &&
+    fusionChatPaneSource.includes('result?.status === "missing"') &&
+    fusionChatPaneSource.includes("onFreshLaunchFallbackRef.current()"),
+  "Fusion resume should preflight stale Claude resume ids and self-heal to a fresh launch"
 );
 assert(
     fusionChatPaneSource.includes("window.vibe.fusionChat.interrupt(session.id)") &&

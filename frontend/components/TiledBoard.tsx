@@ -437,11 +437,9 @@ function buildSwapCommitLayouts(
 }
 
 // Adjacency is tested against the perpendicular span of the *resized* rect, not
-// the start rect. For a single-edge drag the perpendicular span is unchanged, so
-// behavior matches before. For a corner drag the grown rect now spans far enough
-// to reach the diagonal pane on both axes, so it is detected as both a side and a
-// stacked neighbor and absorbs the resize in both directions instead of being
-// left to collide and reflow.
+// the start rect. A neighbor only joins the resize once the active edge pushes
+// into its gap; dragging the edge away leaves the neighbor fixed so touching
+// panes can be separated without moving a whole pane first.
 function isRightResizeNeighbor(
   startRect: PixelRect,
   activeRect: PixelRect,
@@ -449,13 +447,11 @@ function isRightResizeNeighbor(
 ) {
   const startRight = rectRight(startRect);
   const activeRight = rectRight(activeRect);
-  const initialGap = neighborRect.left - startRight;
 
   return (
     rangesOverlap(activeRect.top, rectBottom(activeRect), neighborRect.top, rectBottom(neighborRect)) &&
     neighborRect.left >= startRight - ADJACENT_RESIZE_TOLERANCE &&
-    (initialGap <= ADJACENT_RESIZE_TOLERANCE ||
-      activeRight + BOARD_GAP > neighborRect.left)
+    activeRight + BOARD_GAP > neighborRect.left
   );
 }
 
@@ -465,13 +461,11 @@ function isLeftResizeNeighbor(
   neighborRect: PixelRect
 ) {
   const neighborRight = rectRight(neighborRect);
-  const initialGap = startRect.left - neighborRight;
 
   return (
     rangesOverlap(activeRect.top, rectBottom(activeRect), neighborRect.top, rectBottom(neighborRect)) &&
     neighborRight <= startRect.left + ADJACENT_RESIZE_TOLERANCE &&
-    (initialGap <= ADJACENT_RESIZE_TOLERANCE ||
-      activeRect.left < neighborRight + BOARD_GAP)
+    activeRect.left < neighborRight + BOARD_GAP
   );
 }
 
@@ -482,13 +476,11 @@ function isBelowResizeNeighbor(
 ) {
   const startBottom = rectBottom(startRect);
   const activeBottom = rectBottom(activeRect);
-  const initialGap = neighborRect.top - startBottom;
 
   return (
     rangesOverlap(activeRect.left, rectRight(activeRect), neighborRect.left, rectRight(neighborRect)) &&
     neighborRect.top >= startBottom - ADJACENT_RESIZE_TOLERANCE &&
-    (initialGap <= ADJACENT_RESIZE_TOLERANCE ||
-      activeBottom + BOARD_GAP > neighborRect.top)
+    activeBottom + BOARD_GAP > neighborRect.top
   );
 }
 
@@ -498,13 +490,11 @@ function isAboveResizeNeighbor(
   neighborRect: PixelRect
 ) {
   const neighborBottom = rectBottom(neighborRect);
-  const initialGap = startRect.top - neighborBottom;
 
   return (
     rangesOverlap(activeRect.left, rectRight(activeRect), neighborRect.left, rectRight(neighborRect)) &&
     neighborBottom <= startRect.top + ADJACENT_RESIZE_TOLERANCE &&
-    (initialGap <= ADJACENT_RESIZE_TOLERANCE ||
-      activeRect.top < neighborBottom + BOARD_GAP)
+    activeRect.top < neighborBottom + BOARD_GAP
   );
 }
 
@@ -545,15 +535,9 @@ function buildAdjacentResizeLayouts(
     innerWidth
   );
 
-  // A neighbor follows the active pane's freed edge, but it must not sweep across
-  // a *third* pane that overlaps its perpendicular span. If it did, the
-  // commit-time gravity pass would see the overlap and bury that third pane under
-  // the now-overgrown neighbor ("snapped under everything"). Clamp every follow
-  // to the nearest blocker so the neighbor stops at it instead.
-  const blockersFor = (neighborId: string) =>
-    neighborEntries
-      .filter((entry) => entry.id !== neighborId)
-      .map((entry) => entry.rect);
+  // Pushed neighbors keep their far edge anchored and shrink away from the
+  // active pane, so they do not sweep across unrelated panes while absorbing
+  // the resize.
 
   if (axis?.includes("e")) {
     const rightNeighbors = neighborEntries.filter(({ rect }) =>
@@ -568,15 +552,11 @@ function buildAdjacentResizeLayouts(
 
     activeRect.width = Math.max(activeMinWidth, activeRight - activeRect.left);
     rightNeighbors.forEach(({ id, rect }) => {
-      const blockedLeft = blockersFor(id).reduce(
-        (limit, blocker) =>
-          rangesOverlap(rect.top, rectBottom(rect), blocker.top, rectBottom(blocker)) &&
-          blocker.left < rectRight(rect)
-            ? Math.max(limit, rectRight(blocker) + BOARD_GAP)
-            : limit,
-        -Infinity
-      );
-      const nextLeft = Math.max(rectRight(activeRect) + BOARD_GAP, blockedLeft);
+      if (!isRightResizeNeighbor(startRect, activeRect, rect)) {
+        return;
+      }
+
+      const nextLeft = rectRight(activeRect) + BOARD_GAP;
       const current = neighborRects.get(id);
 
       if (!current) {
@@ -602,15 +582,11 @@ function buildAdjacentResizeLayouts(
     activeRect.left = Math.min(Math.max(activeRect.left, leftLimit), activeRight - activeMinWidth);
     activeRect.width = activeRight - activeRect.left;
     leftNeighbors.forEach(({ id, rect }) => {
-      const blockedRight = blockersFor(id).reduce(
-        (limit, blocker) =>
-          rangesOverlap(rect.top, rectBottom(rect), blocker.top, rectBottom(blocker)) &&
-          rectRight(blocker) > rect.left
-            ? Math.min(limit, blocker.left - BOARD_GAP)
-            : limit,
-        Infinity
-      );
-      const nextRight = Math.min(activeRect.left - BOARD_GAP, blockedRight);
+      if (!isLeftResizeNeighbor(startRect, activeRect, rect)) {
+        return;
+      }
+
+      const nextRight = activeRect.left - BOARD_GAP;
       const current = neighborRects.get(id);
 
       if (!current) {
@@ -634,15 +610,11 @@ function buildAdjacentResizeLayouts(
 
     activeRect.height = Math.max(activeOption.minH, activeBottom - activeRect.top);
     belowNeighbors.forEach(({ id, rect }) => {
-      const blockedTop = blockersFor(id).reduce(
-        (limit, blocker) =>
-          rangesOverlap(rect.left, rectRight(rect), blocker.left, rectRight(blocker)) &&
-          blocker.top < rectBottom(rect)
-            ? Math.max(limit, rectBottom(blocker) + BOARD_GAP)
-            : limit,
-        -Infinity
-      );
-      const nextTop = Math.max(rectBottom(activeRect) + BOARD_GAP, blockedTop);
+      if (!isBelowResizeNeighbor(startRect, activeRect, rect)) {
+        return;
+      }
+
+      const nextTop = rectBottom(activeRect) + BOARD_GAP;
       const current = neighborRects.get(id);
 
       if (!current) {
@@ -668,15 +640,11 @@ function buildAdjacentResizeLayouts(
     activeRect.top = Math.min(Math.max(activeRect.top, topLimit), activeBottom - activeOption.minH);
     activeRect.height = activeBottom - activeRect.top;
     aboveNeighbors.forEach(({ id, rect }) => {
-      const blockedBottom = blockersFor(id).reduce(
-        (limit, blocker) =>
-          rangesOverlap(rect.left, rectRight(rect), blocker.left, rectRight(blocker)) &&
-          rectBottom(blocker) > rect.top
-            ? Math.min(limit, blocker.top - BOARD_GAP)
-            : limit,
-        Infinity
-      );
-      const nextBottom = Math.min(activeRect.top - BOARD_GAP, blockedBottom);
+      if (!isAboveResizeNeighbor(startRect, activeRect, rect)) {
+        return;
+      }
+
+      const nextBottom = activeRect.top - BOARD_GAP;
       const current = neighborRects.get(id);
 
       if (!current) {

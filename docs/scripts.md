@@ -12,6 +12,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `scripts/backend/claude-discovery-smoke.cjs` - Creates temporary fake Claude transcripts and validates `backend/agentThreadHost.cjs` Claude discovery for title extraction from array content, `excludeIds` filtering, foreign-cwd tolerance, and the `after` cutoff.
 - `scripts/backend/agent-telemetry-smoke.cjs` - Creates temporary fake provider commands, validates per-pane shim PATH injection, telemetry token rejection, lifecycle attention events, and stale owned shim cleanup.
 - `scripts/backend/code-changes-smoke.cjs` - Validates Git status parsing and non-repository workspace handling for code-change tracking.
+- `scripts/backend/launch-cwd-smoke.cjs` - Validates terminal/Fusion launch cwd resolution rejects missing or file paths without creating them.
 - `scripts/backend/update-smoke.cjs` - Validates packaged update policy, silent Windows update apply behavior, and matching user-facing docs.
 - `scripts/backend/fusion-launch-smoke.cjs` - Validates Fusion per-pane prompt/MCP file generation and confirms the adapter receives the embedded Codex binary path.
 - `scripts/backend/fusion-adapter-smoke.cjs` - Validates the Fusion adapter MCP surface exposed to Claude.
@@ -23,7 +24,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `scripts/frontend/attention-smoke.cjs` - Validates the shared terminal attention helpers used to decide whether sidebar workspace dots should appear and when unread attention is cleared.
 - `scripts/frontend/workspace-smoke.cjs` - Validates empty-install workspace startup, project folder removal wiring, and sidebar remove control styling.
 - `scripts/frontend/session-launch-smoke.cjs` - Validates launch/resume command construction and launch-mode gating, and guards that the terminal-creation effect stays decoupled from the command string so a resume id discovered mid-session cannot blank a live pane.
-- `scripts/frontend/tiled-board-resize-smoke.cjs` - Validates tiled-board resize geometry so adjacent panes stop at blocking panes instead of sweeping over them and burying untouched panes on release.
+- `scripts/frontend/tiled-board-resize-smoke.cjs` - Validates tiled-board resize geometry for directional neighbor pushes, edge detaching, multi-neighbor clamping, and no-overlap release behavior.
 
 ## QA Scripts
 
@@ -45,6 +46,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `npm run smoke:backend:claude-discovery` - Backend smoke test for Claude thread discovery.
 - `npm run smoke:backend:agent-telemetry` - Backend smoke test for vibeTerminal-owned agent telemetry shims.
 - `npm run smoke:backend:code-changes` - Backend smoke test for code-change tracking.
+- `npm run smoke:backend:launch-cwd` - Backend smoke test for terminal/Fusion launch cwd validation.
 - `npm run smoke:backend:updates` - Backend smoke test for update policy and silent Windows update apply behavior.
 - `npm run smoke:backend:fusion-launch` - Backend smoke test for Fusion prompt/MCP launch files.
 - `npm run smoke:backend:fusion-adapter` - Backend smoke test for the Fusion adapter MCP tools.

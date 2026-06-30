@@ -769,6 +769,14 @@ function postWithBadToken(callbackUrl) {
       "ensureCursorProjectHooks must not clobber an unparseable hooks.json"
     );
 
+    // A stale/missing cwd must not be recreated just to install Cursor hooks.
+    const cursorMissingCwd = path.join(root, "cursor-proj-missing");
+    await manager.ensureCursorProjectHooks(cursorMissingCwd);
+    assert(
+      !fs.existsSync(cursorMissingCwd),
+      "ensureCursorProjectHooks must not create a missing workspace cwd"
+    );
+
     // mergeCursorHooks / stripCursorHooks unit behaviour with the real entry set.
     const entries = cursorHookEntries(
       "/run/vibeterminal-cursor-notify.sh",

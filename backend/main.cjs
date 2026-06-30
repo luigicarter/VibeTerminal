@@ -13,6 +13,7 @@ const path = require("path");
 const { spawn } = require("child_process");
 const { createAgentTelemetryManager } = require("./agentTelemetry.cjs");
 const { getCodeChangeSummary } = require("./codeChanges.cjs");
+const { resolveLaunchCwd } = require("./launchCwd.cjs");
 
 const isScreenshotMode =
   process.env.VIBE_SCREENSHOT_MODE === "1" || Boolean(process.env.VIBE_SCREENSHOT_PATH);
@@ -1131,6 +1132,18 @@ ipcMain.handle("agent-thread:latest", (_event, payload) =>
 );
 
 ipcMain.handle("terminal:create", async (_event, payload) => {
+  const launchCwd = resolveLaunchCwd(payload?.cwd, getDefaultRuntimeCwd());
+  if (!launchCwd.ok) {
+    if (payload?.id) {
+      broadcastTerminalEvent({
+        id: payload.id,
+        type: "error",
+        message: launchCwd.message
+      });
+    }
+    return false;
+  }
+
   startPtyHost();
   const telemetry = getAgentTelemetry();
   // Fusion panes do NOT use the PTY path — they run headless via fusion-chat:start.
@@ -1139,17 +1152,18 @@ ipcMain.handle("terminal:create", async (_event, payload) => {
   // Cursor's stop hook lives in the project's .cursor/hooks.json, so install it
   // (idempotently) whenever a cursor-agent pane launches and the cwd is known.
   if (
-    payload?.cwd &&
+    launchCwd.cwd &&
     typeof payload.command === "string" &&
     /\bcursor-agent\b/.test(payload.command)
   ) {
-    telemetry.ensureCursorProjectHooks(payload.cwd).catch(() => {});
+    telemetry.ensureCursorProjectHooks(launchCwd.cwd).catch(() => {});
   }
 
   return sendToPtyHost({
     type: "create",
     payload: {
       ...payload,
+      cwd: launchCwd.cwd,
       instrumentation
     }
   });
@@ -1159,6 +1173,10 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
   const id = payload?.id;
   if (!id) {
     return { ok: false, error: "missing session id" };
+  }
+  const launchCwd = resolveLaunchCwd(payload.cwd, getDefaultRuntimeCwd());
+  if (!launchCwd.ok) {
+    return { ok: false, error: launchCwd.message };
   }
   try {
     const codexBin = resolveCodexBin();
@@ -1177,7 +1195,7 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
     const fusionCodexEffort = normalizeFusionEffort(payload.codexEffort ?? payload.effort);
     const telemetry = getAgentTelemetry();
     const files = await telemetry.prepareFusionFiles(id, {
-      cwd: payload.cwd,
+      cwd: launchCwd.cwd,
       codexBin,
       codexModel: fusionCodexModel,
       codexEffort: fusionCodexEffort
@@ -1189,7 +1207,7 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
       type: "start",
       payload: {
         id,
-        cwd: payload.cwd,
+        cwd: launchCwd.cwd,
         mcpConfig: files.mcpConfig,
         systemPromptFile: files.systemPromptFile,
         model: fusionModel,

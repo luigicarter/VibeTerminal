@@ -23,6 +23,9 @@ assert(
 assert(
   appSource.includes("function restoreStoredSession(value: unknown)") &&
     appSource.includes("function restoreStoredWorkspace(value: unknown)") &&
+    appSource.includes("function threadRefForKind(kind: AgentKind, threadRef?: AgentThreadRef)") &&
+    appSource.includes("function resumableThreadRefForKind(kind: AgentKind, threadRef?: AgentThreadRef)") &&
+    appSource.includes("function activeSessionThreadRef(session: AgentSession)") &&
     appSource.includes(".map(restoreStoredWorkspace)") &&
     appSource.includes(".map(restoreStoredSession)") &&
     appSource.includes("threadRef: isFusion") &&
@@ -31,6 +34,24 @@ assert(
     appSource.includes("normalizeFusionEffort(session.fusionClaudeEffort ?? session.fusionEffort)") &&
     appSource.includes("normalizeFusionEffort(session.fusionCodexEffort ?? session.fusionEffort)"),
   "workspace restore should skip corrupt saved entries and normalize Fusion settings"
+);
+
+assert(
+  appSource.includes("function resetSessionThreadForFreshLaunch(") &&
+    appSource.includes("threadRef: undefined") &&
+    appSource.includes('nextLaunchMode: "new"') &&
+    appSource.includes("onFreshLaunchFallback={(patch) =>") &&
+    appSource.includes("onFreshLaunchFallback={() =>"),
+  "missing resume fallback should clear stale thread refs and relaunch as a fresh discoverable session"
+);
+
+assert(
+  appSource.includes("const sourceThread = activeSessionThreadRef(session) ?? sessionResumeRef(session)") &&
+    appSource.includes("function isThreadRefClaimedByOther(") &&
+    appSource.includes("That chat is already open in another pane.") &&
+    appSource.includes("const nextResumeRef =") &&
+    appSource.includes("resumeRef: nextResumeRef"),
+  "duplicate panes should only inherit provider-matched resumable thread refs"
 );
 
 assert(

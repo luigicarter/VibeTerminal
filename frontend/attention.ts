@@ -48,6 +48,15 @@ export function isTurnTelemetryKind(kind: AgentKind) {
   return kind === "claude" || kind === "opencode" || kind === "cursor";
 }
 
+export function shouldSettleStatusOnPaneUnmount(
+  session: Pick<AgentSession, "kind" | "status">
+) {
+  return (
+    session.status === "starting" ||
+    (session.status === "running" && !isTurnTelemetryKind(session.kind))
+  );
+}
+
 export function attentionFromEvent(
   attentionEvent: AgentAttentionEvent,
   unread: boolean
