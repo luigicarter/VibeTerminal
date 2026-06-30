@@ -1,4 +1,35 @@
-const { clipboard, contextBridge, ipcRenderer } = require("electron");
+const { clipboard, contextBridge, ipcRenderer, webUtils } = require("electron");
+
+function parseWindowsClipboardFilePaths() {
+  if (process.platform !== "win32") {
+    return [];
+  }
+  try {
+    if (!clipboard.availableFormats().includes("FileNameW")) {
+      return [];
+    }
+    const buffer = clipboard.readBuffer("FileNameW");
+    if (!buffer || buffer.length === 0) {
+      return [];
+    }
+    return buffer
+      .toString("utf16le")
+      .replace(/\0+$/, "")
+      .split("\0")
+      .map((value) => value.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function getPathForDroppedFile(file) {
+  try {
+    return webUtils?.getPathForFile?.(file) || file?.path || "";
+  } catch {
+    return file?.path || "";
+  }
+}
 
 contextBridge.exposeInMainWorld("vibe", {
   // The launch command is typed into the platform shell (PowerShell on Windows,
@@ -10,7 +41,8 @@ contextBridge.exposeInMainWorld("vibe", {
   },
   clipboard: {
     readText: () => clipboard.readText(),
-    writeText: (text) => clipboard.writeText(String(text ?? ""))
+    writeText: (text) => clipboard.writeText(String(text ?? "")),
+    readFilePaths: () => parseWindowsClipboardFilePaths()
   },
   updates: {
     getState: () => ipcRenderer.invoke("updates:get-state"),
@@ -27,6 +59,10 @@ contextBridge.exposeInMainWorld("vibe", {
     selectFolder: () => ipcRenderer.invoke("workspace:select-folder"),
     getCodeChanges: (cwd) =>
       ipcRenderer.invoke("workspace:code-changes", { cwd })
+  },
+  files: {
+    getPathForFile: (file) => getPathForDroppedFile(file),
+    describePaths: (payload) => ipcRenderer.invoke("files:describe-paths", payload)
   },
   agentThreads: {
     findLatest: (payload) => ipcRenderer.invoke("agent-thread:latest", payload)

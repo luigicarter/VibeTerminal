@@ -63,6 +63,97 @@ const FUSION_EFFORT_LABELS: Record<FusionEffort, string> = {
 };
 const FUSION_EFFORT_VALUES = Object.keys(FUSION_EFFORT_LABELS) as FusionEffort[];
 const FUSION_COMPOSER_MAX_PX = 160;
+const MAX_COMPOSER_PATHS = 32;
+
+interface ComposerFileRef {
+  path: string;
+  kind: "text" | "image" | "directory" | "file" | "missing";
+  label: string;
+  lineCount?: number;
+}
+
+interface FileWithPath extends File {
+  path?: string;
+}
+
+function cleanPastedPathToken(value: string) {
+  let text = value.trim();
+  if (
+    (text.startsWith('"') && text.endsWith('"')) ||
+    (text.startsWith("'") && text.endsWith("'")) ||
+    (text.startsWith("<") && text.endsWith(">"))
+  ) {
+    text = text.slice(1, -1).trim();
+  }
+  return text;
+}
+
+function isPlausiblePathToken(value: string) {
+  const text = cleanPastedPathToken(value);
+  if (!text) return false;
+  return (
+    /^file:\/\//i.test(text) ||
+    /^[A-Za-z]:[\\/]/.test(text) ||
+    /^\\\\/.test(text) ||
+    text.startsWith("/") ||
+    text.startsWith("./") ||
+    text.startsWith("../") ||
+    text.startsWith("~") ||
+    (/[\\/]/.test(text) && !/[<>|?*]/.test(text))
+  );
+}
+
+function uniqueComposerPaths(paths: string[]) {
+  const seen = new Set<string>();
+  return paths
+    .map(cleanPastedPathToken)
+    .filter(Boolean)
+    .filter((pathValue) => {
+      const key = pathValue.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, MAX_COMPOSER_PATHS);
+}
+
+function pathsFromPlainText(text: string) {
+  const paths = uniqueComposerPaths(text.split(/\r?\n/));
+  if (paths.length === 0 || !paths.every(isPlausiblePathToken)) {
+    return [];
+  }
+  return paths;
+}
+
+function pathsFromFileList(
+  files: FileList,
+  getPathForFile?: (file: File) => string
+) {
+  return uniqueComposerPaths(
+    Array.from(files).map((file) => {
+      try {
+        return getPathForFile?.(file) || (file as FileWithPath).path || "";
+      } catch {
+        return (file as FileWithPath).path || "";
+      }
+    })
+  );
+}
+
+function formatComposerFileRef(ref: ComposerFileRef) {
+  return `${ref.path} ${ref.label}`;
+}
+
+function padComposerInsertion(text: string, before: string, after: string) {
+  let insertion = text;
+  if (before && !/\s$/.test(before)) {
+    insertion = `\n${insertion}`;
+  }
+  if (after && !/^\s/.test(after)) {
+    insertion = `${insertion}\n`;
+  }
+  return insertion;
+}
 
 interface SlashCommand {
   name: string;
@@ -387,6 +478,7 @@ interface ToolMeta {
 }
 
 type FusionActiveRole = "claude" | "codex";
+const FUSION_SPEAKER_LABEL = "Fusion";
 
 // Opus makes every tool call. Fusion bridge calls are plumbing; Codex's
 // user-facing voice is the concise result/status we derive from those calls.
@@ -402,8 +494,8 @@ function isInternalActivity(kind: string): boolean {
   return ["delegate", "decision", "goal"].includes(kind);
 }
 
-function fusionRoleLabel(role: FusionActiveRole) {
-  return role === "codex" ? "Fusion - Codex" : "Fusion - Claude Code";
+function fusionRoleLabel(_role: FusionActiveRole) {
+  return FUSION_SPEAKER_LABEL;
 }
 
 const baseName = (value: string) => value.split(/[\\/]/).filter(Boolean).pop() ?? value;
@@ -470,7 +562,7 @@ function formatCodexBridgeResult(name: string, text: string): string {
   const status = String(parsed.status ?? "");
   if (status === "needs_decision") {
     const kind = String(parsed.kind ?? "decision");
-    const detail = String(parsed.detail ?? "Codex needs a decision.");
+    const detail = String(parsed.detail ?? "Decision needed.");
     return `needs ${kind}: ${clip(detail, 180)}`;
   }
 
@@ -492,7 +584,7 @@ function formatCodexBridgeResult(name: string, text: string): string {
   }
 
   if (status === "failed" || status === "error") {
-    return `failed: ${clip(String(parsed.error ?? "Codex returned an error."), 220)}`;
+    return `failed: ${clip(String(parsed.error ?? "Request failed."), 220)}`;
   }
 
   if (status === "ok" || status === "skipped") {
@@ -539,6 +631,7 @@ export default function FusionChatPane({
   const [slashIndex, setSlashIndex] = useState(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const inputRef = useRef("");
   const keyRef = useRef(0);
   const interruptingRef = useRef(false);
   const pendingRestartNoticeRef = useRef<string | null>(null);
@@ -575,6 +668,10 @@ export default function FusionChatPane({
   const slashMenu = buildSlashMenu(input);
   const slashMenuOpen = slashMenu.items.length > 0;
   const visibleMessages = verbose ? messages : messages.filter((message) => !message.internal);
+
+  useEffect(() => {
+    inputRef.current = input;
+  }, [input]);
 
   useEffect(() => {
     onThreadRefChangeRef.current = onThreadRefChange;
@@ -1220,6 +1317,90 @@ export default function FusionChatPane({
     return false;
   }
 
+  function insertComposerText(text: string) {
+    const el = composerRef.current;
+    const currentInput = inputRef.current;
+    const start = el?.selectionStart ?? currentInput.length;
+    const end = el?.selectionEnd ?? currentInput.length;
+    const before = currentInput.slice(0, start);
+    const after = currentInput.slice(end);
+    const insertion = padComposerInsertion(text, before, after);
+    const nextInput = `${before}${insertion}${after}`;
+    const cursor = before.length + insertion.length;
+    inputRef.current = nextInput;
+    setInput(nextInput);
+    window.requestAnimationFrame(() => {
+      const nextEl = composerRef.current;
+      nextEl?.focus();
+      nextEl?.setSelectionRange(cursor, cursor);
+    });
+  }
+
+  async function insertComposerFileRefs(paths: string[], fallbackText?: string) {
+    const nextPaths = uniqueComposerPaths(paths);
+    if (nextPaths.length === 0) return false;
+
+    const describePaths = window.vibe?.files?.describePaths;
+    if (!describePaths) {
+      insertComposerText(fallbackText || nextPaths.join("\n"));
+      return true;
+    }
+
+    try {
+      const refs = await describePaths({ cwd: session.cwd, paths: nextPaths });
+      const nonMissingRefs = refs.filter((ref) => ref.kind !== "missing");
+      const visibleRefs =
+        fallbackText && nonMissingRefs.length === 0 ? [] : refs;
+      const text =
+        visibleRefs.length > 0
+          ? visibleRefs.map(formatComposerFileRef).join("\n")
+          : fallbackText || nextPaths.join("\n");
+      insertComposerText(text);
+      return true;
+    } catch {
+      insertComposerText(fallbackText || nextPaths.join("\n"));
+      return true;
+    }
+  }
+
+  function handleComposerPaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const getPathForFile = window.vibe?.files?.getPathForFile;
+    const filePaths = pathsFromFileList(event.clipboardData.files, getPathForFile);
+    if (filePaths.length > 0) {
+      event.preventDefault();
+      void insertComposerFileRefs(filePaths);
+      return;
+    }
+
+    const nativeFilePaths = window.vibe?.clipboard.readFilePaths?.() ?? [];
+    if (nativeFilePaths.length > 0) {
+      event.preventDefault();
+      void insertComposerFileRefs(nativeFilePaths);
+      return;
+    }
+
+    const text = event.clipboardData.getData("text/plain");
+    const textPaths = pathsFromPlainText(text);
+    if (textPaths.length > 0) {
+      event.preventDefault();
+      void insertComposerFileRefs(textPaths, text);
+    }
+  }
+
+  function handleComposerDrop(event: React.DragEvent<HTMLTextAreaElement>) {
+    const getPathForFile = window.vibe?.files?.getPathForFile;
+    const filePaths = pathsFromFileList(event.dataTransfer.files, getPathForFile);
+    if (filePaths.length === 0) return;
+    event.preventDefault();
+    void insertComposerFileRefs(filePaths);
+  }
+
+  function handleComposerDragOver(event: React.DragEvent<HTMLTextAreaElement>) {
+    if (Array.from(event.dataTransfer.types).includes("Files")) {
+      event.preventDefault();
+    }
+  }
+
   function send() {
     const text = input.trim();
     if (!text) return;
@@ -1295,7 +1476,7 @@ export default function FusionChatPane({
           <GripVertical className="drag-grip" size={15} />
           <Sparkles size={15} />
           <span>{session.name}</span>
-          <span className="fusion-chip fusion-chip-opus" title={fusionSettingsLine}>
+          <span className="fusion-chip" title={fusionSettingsLine}>
             {activeRoleLabel}
           </span>
         </div>
@@ -1379,12 +1560,7 @@ export default function FusionChatPane({
                 return null;
               }
 
-              const author =
-                m.role === "opus"
-                  ? "Fusion - Claude Code"
-                  : m.role === "codex"
-                    ? "Fusion - Codex"
-                    : "Fusion";
+              const author = m.role === "user" ? "You" : FUSION_SPEAKER_LABEL;
               const className = clsx("chat-msg", `chat-${m.role}`, `chat-kind-${m.kind}`);
 
               // Collapsible detail: a tool result or Opus's thinking. Streams open
@@ -1449,7 +1625,7 @@ export default function FusionChatPane({
             })
           )}
           {busy && (
-            <div className={clsx("chat-msg", activeRole === "codex" ? "chat-codex" : "chat-opus", "chat-kind-status")}>
+            <div className={clsx("chat-msg", "chat-kind-status")}>
               <span className="chat-gutter chat-spinner">✻</span>
               <div className="chat-body">
                 <span className="chat-text muted">{activeRoleLabel} working…</span>
@@ -1470,7 +1646,13 @@ export default function FusionChatPane({
                     ? "Answer Fusion to continue…"
                     : "Ask Fusion to build, fix, or design…"
               }
-              onChange={(e) => setInput(e.target.value)}
+              onChange={(e) => {
+                inputRef.current = e.target.value;
+                setInput(e.target.value);
+              }}
+              onPaste={handleComposerPaste}
+              onDrop={handleComposerDrop}
+              onDragOver={handleComposerDragOver}
               onKeyDown={(e) => {
                 if (slashMenuOpen) {
                   if (e.key === "ArrowDown") {

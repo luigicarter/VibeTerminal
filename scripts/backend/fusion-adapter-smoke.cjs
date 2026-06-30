@@ -8,6 +8,7 @@
 
 const { execFileSync, spawn } = require("child_process");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
 const adapterPath = path.join(__dirname, "..", "..", "backend", "fusion-adapter.cjs");
@@ -21,7 +22,8 @@ const {
   normalizeGoalStatus,
   shouldAutoSyncGoalStatus,
   shouldReplaceGoalForTask,
-  stripVerifierVerdictFromSummary
+  stripVerifierVerdictFromSummary,
+  turnErrorMessage
 } = require(adapterPath);
 
 function assert(condition, message) {
@@ -150,6 +152,22 @@ function main() {
             assert(source.includes('rpc("thread/goal/get"'), "adapter does not call native goal get");
             assert(source.includes('rpc("thread/goal/clear"'), "adapter does not call native goal clear");
             assert(source.includes("buildCodexVerifierTask(task)"), "adapter does not wrap Codex tasks with the verifier contract");
+            assert(
+              source.includes(".then(handleTurnStartResponse)") &&
+                source.includes('refreshTurnIdleTimer("turn/start response")'),
+              "adapter should treat the turn/start response itself as live turn progress"
+            );
+            assert(
+              source.includes("isTurnProgressNotification") &&
+                source.includes('method === "item/agentMessage/delta"') &&
+                source.includes("appendAgentMessageDelta"),
+              "adapter should keep the bridge alive on streamed app-server progress events"
+            );
+            assert(
+              source.includes('turn.status === "failed"') &&
+                source.includes("turnErrorMessage(turn)"),
+              "adapter should surface failed turn/completed status instead of reporting a synthetic stall"
+            );
             cleanup();
             resolve();
           } catch (error) {
@@ -174,6 +192,184 @@ function main() {
       })}\n`
     );
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" })}\n`);
+  });
+}
+
+function writeFakeAppServer(dir) {
+  fs.writeFileSync(
+    path.join(dir, "app-server"),
+    `
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+function send(msg) { process.stdout.write(JSON.stringify(msg) + "\\n"); }
+rl.on("line", (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+  if (msg.method === "initialize") {
+    send({ id: msg.id, result: {} });
+    return;
+  }
+  if (msg.method === "thread/start") {
+    send({ id: msg.id, result: { thread: { id: "thread-1" } } });
+    return;
+  }
+  if (msg.method === "thread/goal/set") {
+    send({
+      id: msg.id,
+      result: {
+        goal: {
+          threadId: "thread-1",
+          objective: msg.params.objective || "",
+          status: msg.params.status || "active",
+          tokenBudget: null,
+          tokensUsed: 0,
+          timeUsedSeconds: 0,
+          createdAt: 1,
+          updatedAt: 1
+        }
+      }
+    });
+    return;
+  }
+  if (msg.method === "turn/start") {
+    send({
+      id: msg.id,
+      result: {
+        turn: {
+          id: "turn-1",
+          items: [],
+          itemsView: "full",
+          status: "failed",
+          error: { message: "Fake upstream failed.", additionalDetails: "Retry with auth." },
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1
+        }
+      }
+    });
+    return;
+  }
+  if (msg.id !== undefined) send({ id: msg.id, result: {} });
+});
+`
+  );
+}
+
+function callAdapterToolWithFakeAppServer() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-adapter-fake-"));
+  writeFakeAppServer(tempDir);
+  const child = spawn(process.execPath, [adapterPath], {
+    cwd: tempDir,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      VIBE_FUSION_CODEX_BIN: process.execPath,
+      VIBE_TERMINAL_FUSION_CWD: tempDir,
+      VIBE_TERMINAL_SESSION_ID: "fusion-adapter-fake",
+      VIBE_FUSION_TURN_IDLE_TIMEOUT_MS: "200"
+    }
+  });
+
+  const responses = new Map();
+  let buffer = "";
+  let stderr = "";
+
+  function cleanup() {
+    try {
+      child.stdin.end();
+    } catch {
+      // ignore
+    }
+    try {
+      child.kill();
+    } catch {
+      // ignore
+    }
+    if (isWin && child.pid) {
+      try {
+        execFileSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+          stdio: "ignore"
+        });
+      } catch {
+        // best-effort
+      }
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("timed out waiting for fake app-server tool result"));
+    }, 10000);
+
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      cleanup();
+      reject(error);
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+
+    child.on("exit", (code) => {
+      if (responses.has(2)) return;
+      clearTimeout(timer);
+      cleanup();
+      reject(new Error(`adapter exited before fake tool result: code=${code}; stderr=${stderr}`));
+    });
+
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      let index;
+      while ((index = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, index).trim();
+        buffer = buffer.slice(index + 1);
+        if (!line) continue;
+        const msg = JSON.parse(line);
+        if (msg.id !== undefined) responses.set(msg.id, msg);
+        if (responses.has(2)) {
+          clearTimeout(timer);
+          try {
+            const response = responses.get(2);
+            const text = response.result.content[0].text;
+            const parsed = JSON.parse(text);
+            assert(parsed.status === "failed", `fake turn should fail: ${text}`);
+            assert(
+              parsed.error === "Fake upstream failed. Retry with auth.",
+              `failed turn should preserve app-server error details, got ${text}`
+            );
+            cleanup();
+            resolve();
+          } catch (error) {
+            cleanup();
+            reject(error);
+          }
+        }
+      }
+    });
+
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "fusion-adapter-fake", version: "0.0.0" }
+        }
+      })}\n`
+    );
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "codex_implement", arguments: { task: "do work" } }
+      })}\n`
+    );
   });
 }
 
@@ -283,12 +479,26 @@ function assertVerifierHelpers() {
     !shouldAutoSyncGoalStatus({ status: "blocked" }, "complete"),
     "blocked goal should not be auto-overwritten"
   );
+  assert(
+    turnErrorMessage({
+      error: {
+        message: "Network failed.",
+        additionalDetails: "Retry later."
+      }
+    }) === "Network failed. Retry later.",
+    "turnErrorMessage should preserve server failure details"
+  );
+  assert(
+    turnErrorMessage({ error: null }, "fallback") === "fallback",
+    "turnErrorMessage should fall back when the turn has no error payload"
+  );
 }
 
 main()
-  .then(() => {
+  .then(async () => {
     assertGoalSchema();
     assertVerifierHelpers();
+    await callAdapterToolWithFakeAppServer();
     console.log("Fusion adapter smoke passed");
   })
   .catch((error) => {

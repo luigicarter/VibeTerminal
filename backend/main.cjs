@@ -16,6 +16,75 @@ const { getCodeChangeSummary } = require("./codeChanges.cjs");
 
 const isScreenshotMode =
   process.env.VIBE_SCREENSHOT_MODE === "1" || Boolean(process.env.VIBE_SCREENSHOT_PATH);
+const IMAGE_FILE_EXTENSIONS = new Set([
+  ".apng",
+  ".avif",
+  ".bmp",
+  ".gif",
+  ".heic",
+  ".heif",
+  ".ico",
+  ".jpeg",
+  ".jpg",
+  ".png",
+  ".svg",
+  ".tif",
+  ".tiff",
+  ".webp"
+]);
+const TEXT_FILE_EXTENSIONS = new Set([
+  ".bat",
+  ".c",
+  ".cc",
+  ".cfg",
+  ".cjs",
+  ".clj",
+  ".cmd",
+  ".conf",
+  ".cpp",
+  ".cs",
+  ".css",
+  ".csv",
+  ".cts",
+  ".env",
+  ".go",
+  ".h",
+  ".hpp",
+  ".html",
+  ".ini",
+  ".java",
+  ".js",
+  ".json",
+  ".jsx",
+  ".kt",
+  ".less",
+  ".log",
+  ".lua",
+  ".md",
+  ".mdx",
+  ".mjs",
+  ".mts",
+  ".php",
+  ".ps1",
+  ".py",
+  ".rb",
+  ".rs",
+  ".sass",
+  ".scss",
+  ".sh",
+  ".sql",
+  ".svelte",
+  ".toml",
+  ".ts",
+  ".tsx",
+  ".txt",
+  ".vue",
+  ".xml",
+  ".yaml",
+  ".yml"
+]);
+const MAX_DESCRIBE_PATHS = 32;
+const TEXT_SAMPLE_BYTES = 4096;
 
 if (isScreenshotMode) {
   const screenshotUserData =
@@ -50,6 +119,149 @@ let updateState = {
   updatedAt: Date.now()
 };
 const FUSION_MODEL_ID_PATTERN = /^[A-Za-z0-9._:/@+-]+$/;
+
+function pathFromFileUrl(value) {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "file:") return value;
+    const pathname =
+      process.platform === "win32" && /^\/[A-Za-z]:/.test(url.pathname)
+        ? url.pathname.slice(1)
+        : url.pathname;
+    return decodeURIComponent(pathname).replace(
+      /\//g,
+      process.platform === "win32" ? "\\" : "/"
+    );
+  } catch {
+    return value;
+  }
+}
+
+function normalizeIncomingFilePath(value, cwd) {
+  let text = String(value || "").trim();
+  if (!text) return null;
+  if (
+    (text.startsWith('"') && text.endsWith('"')) ||
+    (text.startsWith("'") && text.endsWith("'"))
+  ) {
+    text = text.slice(1, -1);
+  }
+  if (/^file:\/\//i.test(text)) {
+    text = pathFromFileUrl(text);
+  }
+  if (text === "~" || text.startsWith(`~${path.sep}`) || text.startsWith("~/")) {
+    text = path.join(os.homedir(), text.slice(1));
+  }
+  return path.isAbsolute(text) ? path.normalize(text) : path.resolve(cwd || process.cwd(), text);
+}
+
+function looksLikeTextSample(buffer) {
+  if (!buffer || buffer.length === 0) return true;
+  let controlCount = 0;
+  for (const byte of buffer) {
+    if (byte === 0) return false;
+    if (byte < 32 && byte !== 9 && byte !== 10 && byte !== 12 && byte !== 13) {
+      controlCount += 1;
+    }
+  }
+  return controlCount / buffer.length < 0.04;
+}
+
+async function readFileSample(filePath) {
+  const handle = await fs.promises.open(filePath, "r");
+  try {
+    const buffer = Buffer.alloc(TEXT_SAMPLE_BYTES);
+    const { bytesRead } = await handle.read(buffer, 0, TEXT_SAMPLE_BYTES, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function countTextLines(filePath) {
+  return new Promise((resolve, reject) => {
+    let bytes = 0;
+    let lines = 0;
+    let lastByte = null;
+    const stream = fs.createReadStream(filePath);
+    stream.on("data", (chunk) => {
+      bytes += chunk.length;
+      for (const byte of chunk) {
+        if (byte === 10) lines += 1;
+      }
+      if (chunk.length > 0) {
+        lastByte = chunk[chunk.length - 1];
+      }
+    });
+    stream.on("error", reject);
+    stream.on("end", () => {
+      resolve(lines + (bytes > 0 && lastByte !== 10 ? 1 : 0));
+    });
+  });
+}
+
+async function describeFilePath(rawPath, cwd) {
+  const resolvedPath = normalizeIncomingFilePath(rawPath, cwd);
+  if (!resolvedPath) return null;
+
+  try {
+    const stat = await fs.promises.stat(resolvedPath);
+    if (stat.isDirectory()) {
+      return { path: resolvedPath, kind: "directory", label: "[folder]" };
+    }
+    if (!stat.isFile()) {
+      return { path: resolvedPath, kind: "file", label: "[file]" };
+    }
+
+    const extension = path.extname(resolvedPath).toLowerCase();
+    if (IMAGE_FILE_EXTENSIONS.has(extension)) {
+      return { path: resolvedPath, kind: "image", label: "[image]" };
+    }
+
+    const isKnownText = TEXT_FILE_EXTENSIONS.has(extension);
+    const sample = isKnownText ? null : await readFileSample(resolvedPath);
+    if (isKnownText || looksLikeTextSample(sample)) {
+      const lineCount = await countTextLines(resolvedPath);
+      return {
+        path: resolvedPath,
+        kind: "text",
+        lineCount,
+        label: `[${lineCount} ${lineCount === 1 ? "line" : "lines"}]`
+      };
+    }
+
+    return { path: resolvedPath, kind: "file", label: "[file]" };
+  } catch (error) {
+    return {
+      path: resolvedPath,
+      kind: "missing",
+      label: "[missing]",
+      error: error.message
+    };
+  }
+}
+
+async function describeFilePaths(payload = {}) {
+  const cwd = typeof payload.cwd === "string" ? payload.cwd : process.cwd();
+  const rawPaths = Array.isArray(payload.paths) ? payload.paths : [];
+  const seen = new Set();
+  const paths = rawPaths
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .filter((value) => {
+      const key = value.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, MAX_DESCRIBE_PATHS);
+  const results = [];
+  for (const rawPath of paths) {
+    const result = await describeFilePath(rawPath, cwd);
+    if (result) results.push(result);
+  }
+  return results;
+}
 
 function getAutoUpdater() {
   if (!autoUpdater) {
@@ -908,6 +1120,10 @@ ipcMain.handle("workspace:select-folder", async () => {
 
 ipcMain.handle("workspace:code-changes", (_event, payload) =>
   getCodeChangeSummary(payload?.cwd)
+);
+
+ipcMain.handle("files:describe-paths", (_event, payload) =>
+  describeFilePaths(payload)
 );
 
 ipcMain.handle("agent-thread:latest", (_event, payload) =>

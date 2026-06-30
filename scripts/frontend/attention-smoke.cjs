@@ -22,6 +22,8 @@ const fusionChatPanePath = path.join(
   "components",
   "FusionChatPane.tsx"
 );
+const preloadPath = path.join(__dirname, "..", "..", "preload", "preload.cjs");
+const mainPath = path.join(__dirname, "..", "..", "backend", "main.cjs");
 const stylesPath = path.join(__dirname, "..", "..", "frontend", "styles.css");
 const source = fs.readFileSync(attentionPath, "utf8");
 const compiled = ts.transpileModule(source, {
@@ -369,11 +371,14 @@ assert(
     fusionChatPaneSource.includes('applyEffortLevel(normalizeRoleScope(effortMatch[1]), effortMatch[2] as FusionEffort)') &&
     fusionChatPaneSource.includes('"Planning role"') &&
     fusionChatPaneSource.includes('"Execution role"') &&
-    fusionChatPaneSource.includes('"Fusion - Claude Code"') &&
-    fusionChatPaneSource.includes('"Fusion - Codex"') &&
+    fusionChatPaneSource.includes('const FUSION_SPEAKER_LABEL = "Fusion"') &&
+    fusionChatPaneSource.includes("function fusionRoleLabel") &&
+    fusionChatPaneSource.includes("return FUSION_SPEAKER_LABEL") &&
+    !fusionChatPaneSource.includes('"Fusion - Claude Code"') &&
+    !fusionChatPaneSource.includes('"Fusion - Codex"') &&
     fusionChatPaneSource.includes("activeRoleLabel") &&
     fusionChatPaneSource.includes('m.kind === "thinking" && !m.text.trim()'),
-  "FusionChatPane should drive harness-specific speed/effort submenus, role labels, and empty-thinking suppression"
+  "FusionChatPane should drive harness-specific speed/effort submenus, unified role labels, and empty-thinking suppression"
 );
 assert(
   fusionChatPaneSource.includes("function normalizeFusionModel(value: unknown)") &&
@@ -404,11 +409,44 @@ assert(
   "FusionChatPane composer should size before first paint and auto-grow with content"
 );
 assert(
+  fusionChatPaneSource.includes("handleComposerPaste") &&
+    fusionChatPaneSource.includes("handleComposerDrop") &&
+    fusionChatPaneSource.includes("pathsFromPlainText") &&
+    fusionChatPaneSource.includes("pathsFromFileList") &&
+    fusionChatPaneSource.includes("window.vibe?.files?.describePaths") &&
+    fusionChatPaneSource.includes("window.vibe?.clipboard.readFilePaths") &&
+    fusionChatPaneSource.includes("onPaste={handleComposerPaste}") &&
+    fusionChatPaneSource.includes("onDrop={handleComposerDrop}") &&
+    fusionChatPaneSource.includes("onDragOver={handleComposerDragOver}"),
+  "FusionChatPane composer should translate pasted/dropped paths into file references"
+);
+assert(
   fusionChatPaneSource.includes("waitingForDecisionRef") &&
     fusionChatPaneSource.includes("setWaitingState(true)") &&
     fusionChatPaneSource.includes('status-${busy ? "running" : waiting ? "waiting" : "idle"}') &&
     fusionChatPaneSource.includes("Answer Fusion to continue"),
   "FusionChatPane should render a distinct waiting state for approval/question turns"
+);
+
+const preloadSource = fs.readFileSync(preloadPath, "utf8");
+assert(
+  preloadSource.includes("parseWindowsClipboardFilePaths") &&
+    preloadSource.includes('clipboard.readBuffer("FileNameW")') &&
+    preloadSource.includes("webUtils?.getPathForFile") &&
+    preloadSource.includes("getPathForFile: (file) => getPathForDroppedFile(file)") &&
+    preloadSource.includes('ipcRenderer.invoke("files:describe-paths", payload)'),
+  "preload should expose clipboard and dropped-file path helpers for composer references"
+);
+
+const mainSource = fs.readFileSync(mainPath, "utf8");
+assert(
+  mainSource.includes("IMAGE_FILE_EXTENSIONS") &&
+    mainSource.includes("TEXT_FILE_EXTENSIONS") &&
+    mainSource.includes("countTextLines") &&
+    mainSource.includes('label: "[image]"') &&
+    mainSource.includes('label: `[${lineCount} ${lineCount === 1 ? "line" : "lines"}]`') &&
+    mainSource.includes('ipcMain.handle("files:describe-paths"'),
+  "main process should describe composer paths with Codex-style file labels"
 );
 
 const stylesSource = fs.readFileSync(stylesPath, "utf8");
@@ -427,6 +465,14 @@ assert(
   stylesSource.includes(".fusion-composer textarea") &&
     stylesSource.includes("height: 20px;"),
   "Fusion composer textarea should have a stable one-line initial height"
+);
+assert(
+  stylesSource.includes(".chat-opus .chat-author,") &&
+    stylesSource.includes(".chat-codex .chat-author { color: var(--pane-accent); }") &&
+    stylesSource.includes(".chat-opus .chat-tool-author,") &&
+    stylesSource.includes(".chat-codex .chat-tool-author { color: var(--pane-accent); }") &&
+    !stylesSource.includes(".fusion-chip-codex"),
+  "Fusion transcript should render Opus and Codex activity with one visible speaker style"
 );
 
 console.log("attention smoke passed");

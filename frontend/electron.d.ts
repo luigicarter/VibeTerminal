@@ -13,6 +13,14 @@ import type {
   UpdateState
 } from "./types";
 
+export interface FilePathDescription {
+  path: string;
+  kind: "text" | "image" | "directory" | "file" | "missing";
+  label: string;
+  lineCount?: number;
+  error?: string;
+}
+
 declare global {
   interface Window {
     vibe?: {
@@ -23,6 +31,7 @@ declare global {
       clipboard: {
         readText: () => string;
         writeText: (text: string) => void;
+        readFilePaths?: () => string[];
       };
       updates: {
         getState: () => Promise<UpdateState>;
@@ -34,6 +43,13 @@ declare global {
       workspace: {
         selectFolder: () => Promise<string | null>;
         getCodeChanges: (cwd: string) => Promise<CodeChangeSummary>;
+      };
+      files?: {
+        getPathForFile?: (file: File) => string;
+        describePaths: (payload: {
+          cwd: string;
+          paths: string[];
+        }) => Promise<FilePathDescription[]>;
       };
       agentThreads: {
         findLatest: (

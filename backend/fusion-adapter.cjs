@@ -96,7 +96,7 @@ function missingVerifierVerdict() {
     {
       goalReached: false,
       bugsFound: [],
-      missingRequirements: ["Codex did not provide the required structured Fusion verifier verdict."],
+      missingRequirements: ["The implementation did not provide the required structured Fusion verifier verdict."],
       nextAction: "continue",
       summary: "Missing structured verifier verdict."
     },
@@ -117,8 +117,8 @@ function extractVerifierVerdict(summary) {
       return normalizeVerifierVerdict(
         {
           goalReached: false,
-          bugsFound: ["Codex returned malformed Fusion verifier JSON."],
-          missingRequirements: ["Retry or ask Codex to produce valid verifier JSON."],
+          bugsFound: ["The implementation returned malformed Fusion verifier JSON."],
+          missingRequirements: ["Retry or ask for valid verifier JSON."],
           nextAction: "continue",
           summary: "Malformed structured verifier verdict."
         },
@@ -282,6 +282,8 @@ let currentTurn = null; // {resolve, idleTimer, commandTimer} - fulfilled by tur
 let activeTurnId = null;
 let turnSummary = [];
 let turnFiles = [];
+let completedItemIds = new Set();
+let agentMessageDeltas = new Map();
 let currentGoal = null;
 let goalFeatureAvailable = null;
 let controlServer = null;
@@ -344,11 +346,11 @@ async function codexInterrupt() {
   try {
     const turnId = activeTurnId;
     await rpc("turn/interrupt", { threadId, turnId });
-    relay({ role: "codex", kind: "interrupt", text: "active Codex turn interrupted" });
+    relay({ role: "codex", kind: "interrupt", text: "active Fusion turn interrupted" });
     activeTurnId = null;
     return { status: "accepted", turnId };
   } catch (error) {
-    const message = error?.message || "Codex interrupt failed";
+    const message = error?.message || "Interrupt failed";
     relay({ role: "codex", kind: "interrupt", text: `interrupt failed: ${message}` });
     return { status: "failed", error: message };
   }
@@ -376,7 +378,7 @@ function refreshTurnIdleTimer(reason = "progress") {
   currentTurn.idleTimer = setTimeout(() => {
     resolveTurn({
       status: "failed",
-      error: `Codex bridge stalled after ${reason}.`
+      error: `Fusion work stalled after ${reason}.`
     });
   }, TURN_IDLE_TIMEOUT_MS);
 }
@@ -395,9 +397,16 @@ function startTurnAfterCommandTimer(command = "command") {
   currentTurn.commandTimer = setTimeout(() => {
     resolveTurn({
       status: "failed",
-      error: `Codex command finished but the turn did not complete: ${command}`
+      error: `Command finished but the turn did not complete: ${command}`
     });
   }, TURN_AFTER_COMMAND_TIMEOUT_MS);
+}
+
+function resetTurnBuffers() {
+  turnSummary = [];
+  turnFiles = [];
+  completedItemIds = new Set();
+  agentMessageDeltas = new Map();
 }
 
 function resetHarness(reason = "Fusion stopped.") {
@@ -406,8 +415,7 @@ function resetHarness(reason = "Fusion stopped.") {
   killCodex();
   threadId = null;
   activeTurnId = null;
-  turnSummary = [];
-  turnFiles = [];
+  resetTurnBuffers();
   currentGoal = null;
   goalFeatureAvailable = null;
 }
@@ -534,7 +542,7 @@ function connect() {
     child.on("exit", () => {
       codexChild = null;
       codexReady = null;
-      failAll(new Error("codex app-server exited"));
+      failAll(new Error("Fusion execution worker exited"));
     });
   });
   return codexReady;
@@ -591,7 +599,7 @@ function rpc(method, params) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pendingReq.delete(id);
-      reject(new Error(`Codex app-server request timed out: ${method}`));
+      reject(new Error(`Fusion execution request timed out: ${method}`));
     }, REQUEST_TIMEOUT_MS);
     pendingReq.set(id, {
       resolve: (value) => {
@@ -607,7 +615,7 @@ function rpc(method, params) {
       const pending = pendingReq.get(id);
       pendingReq.delete(id);
       if (pending) {
-        pending.reject(new Error("Codex app-server stdin is not writable"));
+        pending.reject(new Error("Fusion execution channel is not writable"));
       }
     }
   });
@@ -624,6 +632,117 @@ function resolveTurn(result) {
   activeTurnId = null;
   clearCurrentTurnTimers(turn);
   turn.resolve(result);
+}
+
+function turnErrorMessage(turn, fallback = "Fusion turn failed") {
+  const error = turn && turn.error;
+  const message = error && error.message ? String(error.message) : "";
+  const detail =
+    error && error.additionalDetails ? String(error.additionalDetails) : "";
+  if (message && detail) return `${message} ${detail}`;
+  return message || detail || fallback;
+}
+
+function completedTurnResult() {
+  const streamedText = Array.from(agentMessageDeltas.values()).join("").trim();
+  const rawSummary = (turnSummary.join("\n").trim() || streamedText).trim();
+  const verifierVerdict = extractVerifierVerdict(rawSummary);
+  const displaySummary = stripVerifierVerdictFromSummary(rawSummary);
+  return {
+    status: "completed",
+    summary: displaySummary || verifierVerdict.summary || "(No message returned.)",
+    files: Array.from(new Set(turnFiles.filter(Boolean))),
+    goalReached: verifierVerdict.goalReached,
+    bugsFound: verifierVerdict.bugsFound,
+    missingRequirements: verifierVerdict.missingRequirements,
+    nextAction: verifierVerdict.nextAction,
+    verifierSummary: verifierVerdict.summary,
+    verifierVerdict
+  };
+}
+
+function accumulateTurnItem(item, options = {}) {
+  if (!item || typeof item !== "object") return;
+  const itemId = typeof item.id === "string" ? item.id : "";
+  if (itemId && completedItemIds.has(itemId)) {
+    return;
+  }
+  if (itemId) {
+    completedItemIds.add(itemId);
+  }
+  if (options.relay !== false) {
+    relayItem(item);
+  }
+  accumulate(item);
+}
+
+function accumulateTurnItems(items, options = {}) {
+  if (!Array.isArray(items)) return;
+  for (const item of items) {
+    accumulateTurnItem(item, options);
+  }
+}
+
+function resolveCompletedTurn(turn) {
+  accumulateTurnItems(turn && turn.items);
+  const status = turn && turn.status;
+  if (status === "failed") {
+    resolveTurn({ status: "failed", error: turnErrorMessage(turn) });
+    return;
+  }
+  if (status === "interrupted") {
+    resolveTurn({ status: "failed", error: "Fusion turn was interrupted." });
+    return;
+  }
+  resolveTurn(completedTurnResult());
+}
+
+function handleTurnStartResponse(response) {
+  if (!currentTurn) return;
+  refreshTurnIdleTimer("turn/start response");
+  const nextTurnId = extractTurnId(response);
+  if (nextTurnId) {
+    activeTurnId = nextTurnId;
+  }
+  const turn = response && response.turn;
+  if (!turn || typeof turn !== "object") {
+    return;
+  }
+  accumulateTurnItems(turn.items, { relay: false });
+  if (turn.status === "completed" || turn.status === "failed" || turn.status === "interrupted") {
+    resolveCompletedTurn(turn);
+  }
+}
+
+function isTurnProgressNotification(method, params = {}) {
+  if (!currentTurn) return false;
+  if (typeof method !== "string") return false;
+  if (
+    method === "error" ||
+    method === "warning" ||
+    method === "guardianWarning" ||
+    method.startsWith("turn/") ||
+    method.startsWith("item/") ||
+    method.startsWith("hook/") ||
+    method.startsWith("model/")
+  ) {
+    return true;
+  }
+  if (
+    method === "thread/tokenUsage/updated" ||
+    method === "thread/settings/updated" ||
+    method === "thread/status/changed"
+  ) {
+    return true;
+  }
+  return Boolean(params.turnId || params.itemId || (params.turn && params.turn.id));
+}
+
+function appendAgentMessageDelta(params = {}) {
+  const itemId = typeof params.itemId === "string" && params.itemId ? params.itemId : "__default__";
+  const delta = typeof params.delta === "string" ? params.delta : "";
+  if (!delta) return;
+  agentMessageDeltas.set(itemId, `${agentMessageDeltas.get(itemId) || ""}${delta}`);
 }
 
 function handleSouth(msg) {
@@ -646,62 +765,52 @@ function handleSouth(msg) {
 function handleNotification(msg) {
   const method = msg.method;
   const params = msg.params || {};
-  if (method === "thread/goal/updated" && params.goal) {
+  if (isTurnProgressNotification(method, params)) {
     refreshTurnIdleTimer(method);
+  }
+  if (method === "thread/goal/updated" && params.goal) {
     goalFeatureAvailable = true;
     currentGoal = normalizeGoal(params.goal);
     return;
   }
   if (method === "thread/goal/cleared") {
-    refreshTurnIdleTimer(method);
     goalFeatureAvailable = true;
     currentGoal = null;
     return;
   }
   if (method === "turn/started") {
-    refreshTurnIdleTimer(method);
     const nextTurnId = extractTurnId(params);
     if (nextTurnId) {
       activeTurnId = nextTurnId;
     }
+    accumulateTurnItems(params.turn && params.turn.items, { relay: false });
+    return;
+  }
+  if (method === "item/agentMessage/delta") {
+    appendAgentMessageDelta(params);
     return;
   }
   if (method === "item/completed" && params.item) {
-    refreshTurnIdleTimer(method);
-    relayItem(params.item);
-    accumulate(params.item);
+    accumulateTurnItem(params.item);
     if (params.item.type === "commandExecution" && params.item.exitCode != null) {
       startTurnAfterCommandTimer(params.item.command || "command");
     }
     return;
   }
   if (method === "turn/completed") {
-    const rawSummary = turnSummary.join("\n").trim();
-    const verifierVerdict = extractVerifierVerdict(rawSummary);
-    const displaySummary = stripVerifierVerdictFromSummary(rawSummary);
-    resolveTurn({
-      status: "completed",
-      summary: displaySummary || verifierVerdict.summary || "(Codex returned no message.)",
-      files: Array.from(new Set(turnFiles.filter(Boolean))),
-      goalReached: verifierVerdict.goalReached,
-      bugsFound: verifierVerdict.bugsFound,
-      missingRequirements: verifierVerdict.missingRequirements,
-      nextAction: verifierVerdict.nextAction,
-      verifierSummary: verifierVerdict.summary,
-      verifierVerdict
-    });
+    resolveCompletedTurn(params.turn);
     return;
   }
   if (method === "turn/failed" || method === "error") {
     const message =
-      (params.error && params.error.message) || params.message || "Codex turn failed";
+      (params.error && params.error.message) || params.message || "Fusion turn failed";
     resolveTurn({ status: "failed", error: message });
   }
 }
 
 function sendServerResult(id, result) {
   if (!codexSend({ id, result })) {
-    resolveTurn({ status: "failed", error: "Codex app-server stdin is not writable" });
+    resolveTurn({ status: "failed", error: "Fusion execution channel is not writable" });
   }
 }
 
@@ -710,7 +819,7 @@ function sendServerError(id, message, code = -32603) {
 }
 
 function unsupportedServerRequest(msg, message) {
-  const text = message || `Codex app-server requested unsupported method: ${msg.method}`;
+  const text = message || `Unsupported Fusion execution request: ${msg.method}`;
   relay({ role: "codex", kind: "unsupported_request", text });
   sendServerError(msg.id, text);
   resolveTurn({ status: "failed", error: text });
@@ -734,7 +843,7 @@ function handleServerRequest(msg) {
       contentItems: [
         {
           type: "inputText",
-          text: "Fusion adapter does not support dynamic Codex tool calls."
+          text: "Fusion adapter does not support dynamic execution tool calls."
         }
       ]
     });
@@ -743,7 +852,7 @@ function handleServerRequest(msg) {
   if (method === "account/chatgptAuthTokens/refresh" || method === "attestation/generate") {
     unsupportedServerRequest(
       msg,
-      `Codex app-server requested ${method}, which Fusion cannot satisfy in embedded mode.`
+      `Fusion execution requested ${method}, which is not available in embedded mode.`
     );
     return;
   }
@@ -778,22 +887,22 @@ function approvalDetail(method, params) {
     return (params.questions || [])
       .map((q) => q.question || q.header)
       .filter(Boolean)
-      .join(" / ") || "Codex is asking a question.";
+      .join(" / ") || "A question needs an answer.";
   }
   if (approvalKind(method) === "patch") {
-    return params.reason || "Codex wants to apply a patch.";
+    return params.reason || "Apply patch?";
   }
   if (approvalKind(method) === "permission") {
     const requested = params.permissions ? JSON.stringify(params.permissions) : "extra permissions";
     const reason = params.reason ? ` — ${params.reason}` : "";
-    return `Codex needs ${requested}${reason}`;
+    return `Approve ${requested}?${reason}`;
   }
   const commandActions = Array.isArray(params.commandActions)
     ? params.commandActions.map((action) => action.command || action.type || "command").join(", ")
     : "";
   const command = params.command || commandActions || (params.command_actions && "command") || "a command";
   const reason = params.reason ? ` — ${params.reason}` : "";
-  return `Codex wants to run ${command}${reason}`;
+  return `Run ${command}?${reason}`;
 }
 
 function relayItem(item) {
@@ -930,8 +1039,7 @@ async function codexImplement(task) {
   if (!task) return { status: "error", error: "task is required" };
   await ensureThread();
   const goalSetup = await ensureGoalForTask(task);
-  turnSummary = [];
-  turnFiles = [];
+  resetTurnBuffers();
   relay({ role: "opus", kind: "delegate", text: task });
   const done = awaitTurn();
   const params = {
@@ -942,12 +1050,7 @@ async function codexImplement(task) {
   };
   if (EFFORT) params.effort = EFFORT;
   rpc("turn/start", params)
-    .then((response) => {
-      const nextTurnId = extractTurnId(response);
-      if (nextTurnId) {
-        activeTurnId = nextTurnId;
-      }
-    })
+    .then(handleTurnStartResponse)
     .catch((error) => resolveTurn({ status: "failed", error: error.message }));
   const result = await done;
   const withGoal = await syncGoalAfterTurn(result);
@@ -995,7 +1098,7 @@ async function codexRespond(pendingId, decision, note) {
   relay({ role: "opus", kind: "decision", text: `${decision}` });
   const done = awaitTurn();
   if (!codexSend({ id: item.rpcId, result })) {
-    resolveTurn({ status: "failed", error: "Codex app-server stdin is not writable" });
+    resolveTurn({ status: "failed", error: "Fusion execution channel is not writable" });
   }
   const resumed = await done;
   return syncGoalAfterTurn(resumed);
@@ -1205,7 +1308,8 @@ module.exports = {
   normalizeVerifierVerdict,
   shouldAutoSyncGoalStatus,
   shouldReplaceGoalForTask,
-  stripVerifierVerdictFromSummary
+  stripVerifierVerdictFromSummary,
+  turnErrorMessage
 };
 
 if (require.main === module) {
