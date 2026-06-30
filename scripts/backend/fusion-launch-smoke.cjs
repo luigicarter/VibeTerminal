@@ -52,6 +52,8 @@ async function main() {
     assert(/codex_implement/.test(prompt), "system prompt missing codex_implement");
     assert(/goalReached:false/.test(prompt), "system prompt missing goalReached continuation gate");
     assert(/Codex verifier override/.test(prompt), "system prompt missing explicit override rule");
+    assert(/Picture\/image generation/i.test(prompt), "system prompt must route image generation to Codex");
+    assert(/browser navigation\/control\/automation/i.test(prompt), "system prompt must route browser control to Codex");
     assert(/READ-ONLY tools/i.test(prompt), "system prompt must declare Opus read-only so it delegates implementation");
     assert(/MUST go through/i.test(prompt), "system prompt must require routing every code change through codex_implement");
 
@@ -67,6 +69,10 @@ async function main() {
     assert(
       adapter.env && adapter.env.VIBE_FUSION_CODEX_BIN === codexBin,
       "adapter env missing the embedded Codex binary path"
+    );
+    assert(
+      adapter.env && adapter.env.VIBE_FUSION_EAGER_BOOT === "1",
+      "adapter env should eager-boot the Fusion bridge at pane launch"
     );
     assert(
       adapter.env.CODEX_HOME && adapter.env.CODEX_HOME.endsWith(".codex"),
@@ -100,6 +106,10 @@ async function main() {
     assert(
       !allowList.some((tool) => /^(Edit|MultiEdit|Write|NotebookEdit|Bash)$/.test(tool)),
       "Fusion Claude allowlist must NOT grant direct edit/shell tools (implementation routes through Codex)"
+    );
+    assert(
+      !allowList.some((tool) => /(?:image|picture|browser|chrome|webfetch|websearch)/i.test(tool)),
+      "Fusion Claude allowlist must NOT grant direct image-generation or browser-control tools"
     );
     assert(
       ["codex_goal_set", "codex_goal_get", "codex_goal_clear"].every((tool) =>

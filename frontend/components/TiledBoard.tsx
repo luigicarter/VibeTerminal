@@ -243,6 +243,30 @@ function horizontalOverlap(a: PixelRect, b: PixelRect, gap = BOARD_GAP) {
   return a.left < b.left + b.width + g && a.left + a.width + g > b.left;
 }
 
+// A committed drag/resize only needs the gravity compaction pass when its
+// layouts actually collide. When nothing overlaps, the live preview is already
+// a valid resting state, so committing it verbatim keeps the pane exactly where
+// it was dropped (no re-pack, no glide). Uses the same gap-aware predicate the
+// gravity pass is built on, so skipping it can never leave an overlap behind.
+function committedLayoutsOverlap(
+  layouts: Record<string, LayoutBox>,
+  innerWidth: number
+) {
+  const rects = Object.values(layouts).map((layout) =>
+    layoutToRect(layout, innerWidth)
+  );
+
+  for (let i = 0; i < rects.length; i += 1) {
+    for (let j = i + 1; j < rects.length; j += 1) {
+      if (rectsOverlap(rects[i], rects[j])) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 function rectArea(rect: PixelRect) {
   return rect.width * rect.height;
 }
@@ -1072,6 +1096,10 @@ export default function TiledBoard({
     type: "move" | "resize";
     axis?: ResizeAxis;
   } | null>(null);
+  // True for the frames between releasing a drag/resize and the layout settling.
+  // Keeps `.pane-frame` transitions suppressed across the synchronous commit ->
+  // persist -> propLayouts round-trip so nothing eases from the drop spot.
+  const [released, setReleased] = useState(false);
 
   const innerWidth = useMemo(
     () => Math.max(1, metrics.width - BOARD_PADDING * 2),
@@ -1140,6 +1168,20 @@ export default function TiledBoard({
       layoutsEqual(current, propLayouts) ? current : propLayouts
     );
   }, [propLayouts]);
+
+  // Clear the post-release transition suppression one frame after the layout
+  // stops moving. Keyed on liveLayouts so each post-release change (the commit,
+  // then the synchronous persist -> propLayouts round-trip) re-arms the frame;
+  // released only clears once nothing further is pending, avoiding a fixed-timer
+  // race that could re-enable the eased transition mid-settle.
+  useEffect(() => {
+    if (!released) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => setReleased(false));
+    return () => window.cancelAnimationFrame(frame);
+  }, [released, liveLayouts]);
 
   useEffect(() => {
     if (!boardRef.current) {
@@ -1302,11 +1344,12 @@ export default function TiledBoard({
           };
         })();
 
-      const compactedLayouts = compactCommittedLayouts(
+      const compactedLayouts = committedLayoutsOverlap(
         committedLayouts,
-        items,
         innerWidth
-      );
+      )
+        ? compactCommittedLayouts(committedLayouts, items, innerWidth)
+        : committedLayouts;
 
       try {
         interaction.capturedElement.releasePointerCapture(interaction.pointerId);
@@ -1320,6 +1363,7 @@ export default function TiledBoard({
         layoutsEqual(current, compactedLayouts) ? current : compactedLayouts
       );
       setActiveInteraction(null);
+      setReleased(true);
       finishArrangeAfterSettle();
       onLayoutCommitRef.current(compactedLayouts);
     };
@@ -1471,6 +1515,7 @@ export default function TiledBoard({
       className={clsx(
         "tiled-board",
         activeInteraction && "tiled-board-arranging",
+        released && "tiled-board-released",
         disabled && "tiled-board-disabled"
       )}
       style={{ height: boardHeight }}

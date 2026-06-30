@@ -501,7 +501,7 @@ function isCodexGoalTool(name: string): boolean {
 }
 
 function isInternalActivity(kind: string): boolean {
-  return ["delegate", "decision", "goal"].includes(kind);
+  return ["delegate", "decision", "goal", "warmup"].includes(kind);
 }
 
 function fusionRoleLabel(_role: FusionActiveRole) {
@@ -675,6 +675,7 @@ export default function FusionChatPane({
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [waiting, setWaiting] = useState(false);
+  const [failed, setFailed] = useState(false);
   const [pendingDecision, setPendingDecision] = useState<PendingFusionDecision | null>(null);
   const [interrupting, setInterrupting] = useState(false);
   const [activeRole, setActiveRole] = useState<FusionActiveRole>("claude");
@@ -814,6 +815,7 @@ export default function FusionChatPane({
     setWaitingState(false);
     setInterruptingState(false);
     setBusyState(false);
+    setFailed(false);
     onStatusChangeRef.current("starting");
     let cancelled = false;
     const resumeId =
@@ -914,6 +916,7 @@ export default function FusionChatPane({
           setActiveRole("claude");
           setInterruptingState(false);
           setWaitingState(false);
+          setFailed(false);
           clearPendingDecision();
           setBusyState(true);
           onStatusChangeRef.current("running");
@@ -995,6 +998,7 @@ export default function FusionChatPane({
             );
           } else if (fromCodex && parsed) {
             clearPendingDecision();
+            setWaitingState(false);
           }
           break;
         }
@@ -1006,6 +1010,16 @@ export default function FusionChatPane({
             text: `${event.kind ? `${event.kind}: ` : ""}${event.text ?? ""}`,
             internal: isInternalActivity(event.kind || "")
           });
+          if (event.kind === "warmup_error") {
+            const message = event.text || "Fusion execution bridge failed to start.";
+            setInterruptingState(false);
+            setWaitingState(false);
+            setBusyState(false);
+            setFailed(true);
+            clearPendingDecision();
+            onStatusChangeRef.current("failed");
+            emitAttention("failed", "error", message);
+          }
           break;
         case "turn-end":
           // Keep the Opus bubble open across assistant-message seams; it is
@@ -1027,6 +1041,7 @@ export default function FusionChatPane({
           stopStreaming();
           setInterruptingState(false);
           setWaitingState(false);
+          setFailed(false);
           clearPendingDecision();
           setBusyState(false);
           onStatusChangeRef.current("waiting");
@@ -1046,6 +1061,7 @@ export default function FusionChatPane({
           setWaitingState(false);
           push({ role: "opus", kind: "error", text: event.message });
           setBusyState(false);
+          setFailed(true);
           clearPendingDecision();
           emitAttention("failed", "error", event.message);
           break;
@@ -1056,12 +1072,14 @@ export default function FusionChatPane({
           if (event.code != null && event.code !== 0) {
             const message = `Fusion process exited with code ${event.code}.`;
             setBusyState(false);
+            setFailed(true);
             clearPendingDecision();
             push({ role: "opus", kind: "error", text: message });
             emitAttention("failed", "exit", message);
           } else if (busyRef.current) {
             const message = "Fusion process closed before returning a result.";
             setBusyState(false);
+            setFailed(true);
             clearPendingDecision();
             push({ role: "opus", kind: "error", text: message });
             emitAttention("failed", "exit", message);
@@ -1585,8 +1603,12 @@ export default function FusionChatPane({
           </span>
         </div>
         <div className="pane-status">
-          <span className={`status-pill status-${busy ? "running" : waiting ? "waiting" : "idle"}`}>
-            {busy ? "working" : waiting ? "waiting" : "ready"}
+          <span
+            className={`status-pill status-${
+              busy ? "running" : waiting ? "waiting" : failed ? "failed" : "idle"
+            }`}
+          >
+            {busy ? "working" : waiting ? "waiting" : failed ? "failed" : "ready"}
           </span>
         </div>
         <div className="pane-actions">

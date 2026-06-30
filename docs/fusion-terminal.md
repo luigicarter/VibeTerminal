@@ -23,16 +23,20 @@ executor, tester, bug reviewer, and completion verifier — so the user talks to
 one terminal and the right model handles each sub-task. Think "OpenRouter, but for **complementary
 specialists** rather than interchangeable models": the router doesn't pick one
 engine for the whole prompt, it **decomposes** the task and routes sub-tasks by
-specialty. The routing intelligence is Claude itself (an LLM that decides when to
-delegate), not a static rule table.
+specialty. Picture/image generation and web browser control are Codex-owned
+execution tasks in this split: Claude decides what is needed, then delegates the
+actual image or browser work through Codex. The routing intelligence is Claude
+itself (an LLM that decides when to delegate), not a static rule table.
 
 ## Roles and completion authority
 
 The two models have hard, enforced scopes. Opus is launched with **read-only
 tools** (`Read`/`Grep`/`Glob`) plus the Codex bridge tools. The allowlist excludes
-direct editing and shell tools, with a reduced `--disallowedTools` fallback for
-stable mutation/shell names (`Edit`/`Write`/`Bash`). So every file change,
-command, and test run is structurally forced through `codex_implement` — Opus
+direct editing, shell, image-generation, and browser-control tools, with a
+reduced `--disallowedTools` fallback for stable mutation/shell names
+(`Edit`/`Write`/`Bash`). So every file change, command, test run, image
+generation task, and browser-control task is structurally forced through
+`codex_implement` — Opus
 physically cannot edit the repo itself. This is what makes "Fusion actually uses
 Codex to write code" a guarantee rather than a suggestion. Codex remains the hard
 verifier for bugs and goal completion.
@@ -51,6 +55,7 @@ future per-pane mode toggle.)
 | Read-only investigation + review (Read/Grep/Glob) | Iterative debugging loops |
 | Guiding Codex with constraints, UI intent, debugging direction, and corrections | Following Claude guidance while independently checking the result |
 | Human-facing override decisions | Bug review and goal-completion verification |
+| Deciding when image/browser work is needed | Picture/image generation and browser control |
 
 Codex's structured verifier verdict gates completion. Claude can continue, ask
 the human, or explicitly override, but it should not present the task as done
@@ -110,8 +115,9 @@ The **only substantial custom component** is the per-pane MCP↔app-server adapt
 
 - **Per-pane, adapter-owned.** Each Fusion pane starts global `claude` headless,
   and that Claude process starts one MCP adapter. The adapter starts one embedded
-  `codex app-server` child over stdio. Closing the pane tears down that private
-  executor path.
+  `codex app-server` child over stdio and eagerly initializes the pane's Codex
+  thread on adapter startup, so the bridge is warmed before the first user turn.
+  Closing the pane tears down that private executor path.
 - **Cross-project safe.** Each Fusion pane's adapter starts its thread with the
   pane's `cwd`, so project A and project B do not share one app-server process.
 - **Bundled-private Codex.** The server runs the bundled binary by absolute path
@@ -132,7 +138,7 @@ own embedded Codex child (south). It exposes a small tool surface:
 - `codex_goal_clear()` — clear the native goal when the human abandons or
   replaces the objective.
 - `codex_implement(plan)` — run the approved plan on the pane's thread (edit, run
-  tests, fix, verify), streaming progress.
+  tests, generate images, control browsers, fix, verify), streaming progress.
 - `codex_respond(pendingId, decision)` — answer a parked approval or question.
 
 Fusion starts the app-server thread with `config: { "features.goals": true }`,
@@ -221,6 +227,38 @@ vanilla:
    adapter rejects mismatched session ids.
 5. **Bundled binary** — reached only by the Fusion adapter, by absolute path in
    packaged builds; manual `codex` stays global everywhere.
+
+## Host portability (the CC-host hedge)
+
+The product is the custom workspace (the tiled multi-pane board, the heterogeneous
+agent panes, the unified Fusion voice — none of which Claude Code can render), so
+the custom UI stays. But the genuinely custom IP — the verifier contract, approval
+parking, turn lifecycle, and goal sync — all lives in `fusion-adapter.cjs`, which
+is a **plain stdio MCP server**. Its only coupling to the Electron host is three
+env vars, each guarded so the surface no-ops when they are unset:
+
+| Var | Powers | Guard |
+|---|---|---|
+| `VIBE_TERMINAL_CALLBACK_URL` | streamed Codex activity → renderer log | `postTelemetry` returns early |
+| `VIBE_TERMINAL_TELEMETRY_TOKEN` | telemetry auth + control-server token | `postTelemetry` / `startControlServer` return early |
+| `VIBE_TERMINAL_SESSION_ID` | per-pane scoping + control routing | both return early |
+
+With all three unset the adapter is a complete host-free MCP server, so the whole
+`codex_implement → needs_decision → codex_respond → verifier` loop can be driven by
+a plain `claude --mcp-config …` with `--allowedTools "…,Read,Glob,Grep"
+--disallowedTools "Edit,Write,Bash"` (the read-only lock is just those two CLI
+flags). This is kept as a **private validation/fallback hedge**, not a shipped
+public skill — the capability has no moat, so publishing it would cannibalize the
+app. The only thing lost off-host is the renderer activity relay and external
+steer/stop (interrupt is native to `claude`).
+
+> **Invariant — keep this free.** The portability above costs nothing only while
+> the adapter stays decoupled. `scripts/backend/fusion-adapter-smoke.cjs`
+> enforces it: `assertAdapterRunsHostFree` boots the adapter with the three vars
+> unset and drives a full `initialize → tools/list → tools/call` round-trip, and
+> `assertPortabilityGuards` pins the three env reads and their no-op guards.
+> Re-coupling the adapter to host code (an unguarded env read, a `require()` of
+> the Electron host) fails CI here.
 
 ## UI — unified role-tagged log
 

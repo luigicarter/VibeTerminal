@@ -775,6 +775,7 @@ export default function App() {
     selectedSessionId: null,
     visibleSessionIds: []
   });
+  const fusionBridgeToolRef = useRef<Map<string, boolean>>(new Map());
   const [shellMessage, setShellMessage] = useState<string | null>(null);
   const [updateState, setUpdateState] = useState<UpdateState | null>(null);
   const [workspaceChangeSummaries, setWorkspaceChangeSummaries] = useState<
@@ -1403,7 +1404,32 @@ export default function App() {
       return;
     }
 
+    if (event.type === "activity" && event.kind === "warmup_error") {
+      applyFusionAttention(event.id, {
+        state: "failed",
+        reason: "error",
+        source: "provider",
+        updatedAt: Date.now(),
+        message: event.text || "Fusion execution bridge failed to start."
+      });
+      return;
+    }
+
+    if (event.type === "tool-call") {
+      fusionBridgeToolRef.current.set(
+        `${event.id}:${event.toolId}`,
+        /codex_implement|codex_respond/.test(event.name)
+      );
+      return;
+    }
+
     if (event.type === "tool-result") {
+      const toolKey = `${event.id}:${event.toolId}`;
+      const isFusionBridgeTool = fusionBridgeToolRef.current.get(toolKey) === true;
+      fusionBridgeToolRef.current.delete(toolKey);
+      if (!isFusionBridgeTool) {
+        return;
+      }
       const parsed = parseFusionToolResult(event.text);
       if (parsed?.status === "needs_decision" || parsed?.nextAction === "ask_human") {
         applyFusionAttention(event.id, {
@@ -1427,6 +1453,12 @@ export default function App() {
               ? parsed.error
               : "Fusion returned an error."
         });
+      } else if (parsed) {
+        updateAnySession(event.id, (session) =>
+          session.fusion && session.status === "waiting"
+            ? { ...session, status: "running", attention: EMPTY_ATTENTION }
+            : session
+        );
       }
       return;
     }

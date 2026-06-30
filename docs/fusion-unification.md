@@ -53,8 +53,9 @@ You ──▶ Opus 4.8 (headless `claude`, READ-ONLY tools)
    `fusionChatHost.buildClaudeArgs`. Opus is spawned headless with
    `--allowedTools` = `codex_implement, codex_respond, codex_goal_*, Read, Glob,
    Grep` and `--disallowedTools Edit,Write,Bash`. Opus **physically cannot edit
-   the repo** — every mutation must route through `codex_implement`. This is the
-   structural heart of Fusion.
+   the repo or invoke direct image-generation/browser-control tools** — every
+   mutation and every image/browser execution task must route through
+   `codex_implement`. This is the structural heart of Fusion.
 
 2. **The delegation loop** — `fusion-adapter.cjs` `codexImplement`. The adapter
    owns one private `codex app-server` child over stdio. Each `codex_implement`
@@ -89,7 +90,7 @@ Three mechanisms, in **decreasing** order of how strongly they are enforced:
 
 | Mechanism | Enforcement | Where |
 |---|---|---|
-| Opus is read-only / Codex makes all edits | **Physical** (harness tool lock) | `main.cjs` `disallowedTools='Edit,Write,Bash'`; `fusionChatHost.buildClaudeArgs` |
+| Opus is read-only / Codex makes all edits, images, and browser actions | **Physical** (harness tool lock) | `main.cjs` allowed-tools bridge/read-only list + `disallowedTools='Edit,Write,Bash'`; `fusionChatHost.buildClaudeArgs` |
 | Verdict value cannot falsely report success | **Structural** (fail-closed parser) | `fusion-adapter.cjs` `normalizeVerifierVerdict` |
 | Opus *honors* `nextAction:"continue"` | **Behavioral only** (prompt) | `buildFusionSystemPrompt` completion-gate copy |
 

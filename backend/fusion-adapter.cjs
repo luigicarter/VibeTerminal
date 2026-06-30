@@ -32,6 +32,7 @@ const CALLBACK_URL = process.env.VIBE_TERMINAL_CALLBACK_URL;
 const TOKEN = process.env.VIBE_TERMINAL_TELEMETRY_TOKEN;
 const MODEL = process.env.VIBE_FUSION_CODEX_MODEL || null;
 const EFFORT = process.env.VIBE_FUSION_CODEX_EFFORT || null;
+const EAGER_BOOT = process.env.VIBE_FUSION_EAGER_BOOT === "1";
 const REQUEST_TIMEOUT_MS = Number(process.env.VIBE_FUSION_RPC_TIMEOUT_MS || 30000);
 const TURN_IDLE_TIMEOUT_MS = Number(process.env.VIBE_FUSION_TURN_IDLE_TIMEOUT_MS || 600000);
 const TURN_AFTER_COMMAND_TIMEOUT_MS = Number(
@@ -144,6 +145,7 @@ function buildCodexVerifierTask(task) {
     "## Fusion verifier contract",
     "You are Codex GPT-5.5 inside Terminal Fusion. You implement, run tests, debug, and verify whether the user's goal is actually reached.",
     "Claude/Opus may provide strategy, constraints, UI intent, debugging direction, and follow-up corrections; follow that guidance while still independently checking the result.",
+    "Within Fusion, picture/image generation and browser navigation/control/automation are Codex-owned execution work. Perform those delegated operations here and verify the resulting image or browser state.",
     "Before your final answer, review the implementation for bugs, compile/runtime failures, missing requirements, and whether the original goal is complete.",
     "Your final answer MUST end with exactly one single-line JSON verdict prefixed by this marker:",
     `${VERDICT_MARKER} {"goalReached":false,"bugsFound":[],"missingRequirements":[],"nextAction":"continue","summary":""}`,
@@ -276,10 +278,12 @@ let codexReady = null;
 let codexBuffer = "";
 let nextId = 1;
 let threadId = null;
+let threadReady = null;
 const pendingReq = new Map(); // app-server request id -> {resolve, reject}
 const parked = new Map(); // pendingId -> {rpcId, method, params}
 let currentTurn = null; // {resolve, idleTimer, commandTimer} - fulfilled by turn/completed | turn/failed | an approval request
 let activeTurnId = null;
+let latchedTurnResult = null;
 let turnSummary = [];
 let turnFiles = [];
 let completedItemIds = new Set();
@@ -287,6 +291,10 @@ let agentMessageDeltas = new Map();
 let currentGoal = null;
 let goalFeatureAvailable = null;
 let controlServer = null;
+
+function isCurrentCodexChild(child) {
+  return Boolean(child && codexChild === child);
+}
 
 function extractTurnId(value) {
   if (!value || typeof value !== "object") return null;
@@ -418,7 +426,9 @@ function resetHarness(reason = "Fusion stopped.") {
   failAll(new Error(reason));
   killCodex();
   threadId = null;
+  threadReady = null;
   activeTurnId = null;
+  latchedTurnResult = null;
   resetTurnBuffers();
   currentGoal = null;
   goalFeatureAvailable = null;
@@ -508,6 +518,7 @@ function connect() {
     }
 
     codexChild = child;
+    codexBuffer = "";
     let settled = false;
     const timer = setTimeout(() => {
       if (settled) return;
@@ -526,9 +537,18 @@ function connect() {
         clearTimeout(timer);
         reject(error);
       }
-      failAll(error);
+      if (isCurrentCodexChild(child)) {
+        codexChild = null;
+        codexReady = null;
+        threadId = null;
+        threadReady = null;
+        failAll(error);
+      }
     });
     child.stdout.on("data", (chunk) => {
+      if (!isCurrentCodexChild(child)) {
+        return;
+      }
       codexBuffer += chunk.toString("utf8");
       let index;
       while ((index = codexBuffer.indexOf("\n")) !== -1) {
@@ -544,8 +564,13 @@ function connect() {
     });
     child.stderr.on("data", () => {});
     child.on("exit", () => {
+      if (!isCurrentCodexChild(child)) {
+        return;
+      }
       codexChild = null;
       codexReady = null;
+      threadId = null;
+      threadReady = null;
       failAll(new Error("Fusion execution worker exited"));
     });
   });
@@ -567,6 +592,7 @@ function codexSend(obj) {
 
 function killCodex() {
   if (!codexChild || codexChild.killed) return;
+  threadReady = null;
   if (isWin && codexChild.pid) {
     try {
       require("child_process").execFileSync(
@@ -576,6 +602,7 @@ function killCodex() {
       );
       codexChild = null;
       codexReady = null;
+      threadId = null;
       return;
     } catch {
       // fall through
@@ -588,6 +615,7 @@ function killCodex() {
   }
   codexChild = null;
   codexReady = null;
+  threadId = null;
 }
 
 function failAll(error) {
@@ -633,9 +661,28 @@ function resolveTurn(result) {
   if (!currentTurn) return;
   const turn = currentTurn;
   currentTurn = null;
-  activeTurnId = null;
+  if (!result || result.status !== "needs_decision") {
+    activeTurnId = null;
+  }
   clearCurrentTurnTimers(turn);
   turn.resolve(result);
+}
+
+function resolveOrLatchTurn(result) {
+  if (currentTurn) {
+    resolveTurn(result);
+    return;
+  }
+  latchedTurnResult = result;
+  activeTurnId = null;
+}
+
+function drainLatchedTurnResult() {
+  if (!currentTurn || !latchedTurnResult) return false;
+  const result = latchedTurnResult;
+  latchedTurnResult = null;
+  resolveTurn(result);
+  return true;
 }
 
 function turnErrorMessage(turn, fallback = "Fusion turn failed") {
@@ -688,27 +735,42 @@ function accumulateTurnItems(items, options = {}) {
 }
 
 function resolveCompletedTurn(turn) {
+  const turnId = extractTurnId(turn);
+  if (activeTurnId && turnId && activeTurnId !== turnId) {
+    return;
+  }
+  if (!currentTurn && !activeTurnId && parked.size === 0) {
+    return;
+  }
   accumulateTurnItems(turn && turn.items);
   const status = turn && turn.status;
   if (status === "failed") {
-    resolveTurn({ status: "failed", error: turnErrorMessage(turn) });
+    resolveOrLatchTurn({ status: "failed", error: turnErrorMessage(turn) });
     return;
   }
   if (status === "interrupted") {
-    resolveTurn({ status: "failed", error: "Fusion turn was interrupted." });
+    resolveOrLatchTurn({ status: "failed", error: "Fusion turn was interrupted." });
     return;
   }
-  resolveTurn(completedTurnResult());
+  resolveOrLatchTurn(completedTurnResult());
 }
 
 function handleTurnStartResponse(response) {
-  if (!currentTurn) return;
-  refreshTurnIdleTimer("turn/start response");
   const nextTurnId = extractTurnId(response);
   if (nextTurnId) {
     activeTurnId = nextTurnId;
   }
   const turn = response && response.turn;
+  if (!currentTurn) {
+    if (
+      turn &&
+      (turn.status === "completed" || turn.status === "failed" || turn.status === "interrupted")
+    ) {
+      resolveCompletedTurn(turn);
+    }
+    return;
+  }
+  refreshTurnIdleTimer("turn/start response");
   if (!turn || typeof turn !== "object") {
     return;
   }
@@ -735,7 +797,8 @@ function isTurnProgressNotification(method, params = {}) {
   if (
     method === "thread/tokenUsage/updated" ||
     method === "thread/settings/updated" ||
-    method === "thread/status/changed"
+    method === "thread/status/changed" ||
+    method === "serverRequest/resolved"
   ) {
     return true;
   }
@@ -808,7 +871,7 @@ function handleNotification(msg) {
   if (method === "turn/failed" || method === "error") {
     const message =
       (params.error && params.error.message) || params.message || "Fusion turn failed";
-    resolveTurn({ status: "failed", error: message });
+    resolveOrLatchTurn({ status: "failed", error: message });
   }
 }
 
@@ -866,6 +929,10 @@ function handleServerRequest(msg) {
   }
 
   const pendingId = `p${nextId++}`;
+  const requestTurnId = extractTurnId(params);
+  if (requestTurnId) {
+    activeTurnId = requestTurnId;
+  }
   refreshTurnIdleTimer(method);
   parked.set(pendingId, { rpcId: msg.id, method, params });
   const detail = approvalDetail(method, params);
@@ -935,27 +1002,57 @@ function accumulate(item) {
 
 async function ensureThread() {
   if (threadId) return threadId;
-  await connect();
-  await rpc("initialize", {
-    clientInfo: { name: "vibeTerminal-fusion-adapter", version: "0.1.0" },
-    capabilities: { experimentalApi: true }
-  });
-  notify("initialized");
-  const params = {
-    cwd: CWD,
-    sandbox: "workspace-write",
-    approvalPolicy: "on-request",
-    approvalsReviewer: "user",
-    config: { "features.goals": true }
-  };
-  if (MODEL) params.model = MODEL;
-  const res = await rpc("thread/start", params);
-  threadId = res && res.thread && res.thread.id;
-  if (!threadId) throw new Error("thread/start returned no thread id");
-  return threadId;
+  if (!threadReady) {
+    threadReady = (async () => {
+      await connect();
+      await rpc("initialize", {
+        clientInfo: { name: "vibeTerminal-fusion-adapter", version: "0.1.0" },
+        capabilities: { experimentalApi: true }
+      });
+      notify("initialized");
+      const params = {
+        cwd: CWD,
+        sandbox: "workspace-write",
+        approvalPolicy: "on-request",
+        approvalsReviewer: "user",
+        config: { "features.goals": true }
+      };
+      if (MODEL) params.model = MODEL;
+      const res = await rpc("thread/start", params);
+      const nextThreadId = res && res.thread && res.thread.id;
+      if (!nextThreadId) throw new Error("thread/start returned no thread id");
+      threadId = nextThreadId;
+      return threadId;
+    })();
+  }
+
+  try {
+    return await threadReady;
+  } catch (error) {
+    threadReady = null;
+    throw error;
+  } finally {
+    if (threadId) {
+      threadReady = null;
+    }
+  }
+}
+
+async function warmupCodexThread() {
+  try {
+    await ensureThread();
+    relay({ role: "codex", kind: "warmup", text: "execution bridge ready" });
+  } catch (error) {
+    const message = error?.message || "Fusion execution bridge failed to start";
+    logErr(`warmup failed: ${message}`);
+    relay({ role: "codex", kind: "warmup_error", text: `execution bridge not ready: ${message}` });
+  }
 }
 
 function awaitTurn() {
+  if (currentTurn) {
+    throw new Error("Fusion bridge already has a pending turn waiter.");
+  }
   return new Promise((resolve) => {
     clearCurrentTurnTimers();
     currentTurn = { resolve, idleTimer: null, commandTimer: null };
@@ -1041,9 +1138,16 @@ async function syncGoalAfterTurn(result) {
 
 async function codexImplement(task) {
   if (!task) return { status: "error", error: "task is required" };
+  if (currentTurn || parked.size > 0) {
+    return {
+      status: "error",
+      error: "Fusion turn already in progress; answer the pending approval before starting another task."
+    };
+  }
   await ensureThread();
   const goalSetup = await ensureGoalForTask(task);
   resetTurnBuffers();
+  latchedTurnResult = null;
   relay({ role: "opus", kind: "delegate", text: task });
   const done = awaitTurn();
   const params = {
@@ -1095,6 +1199,9 @@ function buildDecisionResult(method, params, decision, note) {
 }
 
 async function codexRespond(pendingId, decision, note) {
+  if (currentTurn) {
+    return { status: "error", error: "Fusion is already waiting for a turn result." };
+  }
   const item = parked.get(pendingId);
   if (!item) return { status: "error", error: `unknown pendingId: ${pendingId}` };
   parked.delete(pendingId);
@@ -1103,6 +1210,8 @@ async function codexRespond(pendingId, decision, note) {
   const done = awaitTurn();
   if (!codexSend({ id: item.rpcId, result })) {
     resolveTurn({ status: "failed", error: "Fusion execution channel is not writable" });
+  } else {
+    drainLatchedTurnResult();
   }
   const resumed = await done;
   return syncGoalAfterTurn(resumed);
@@ -1154,7 +1263,7 @@ const TOOLS = [
   {
     name: "codex_implement",
     description:
-      "Delegate implementation, testing, compile/runtime fixing, refactors, repo navigation, bug review, or goal-completion verification to embedded Codex GPT-5.5. Opus 4.8 drives architecture, strategy, UX/UI build-out when appropriate, human-facing orchestration, and guidance for Codex on constraints, UI intent, debugging direction, and follow-up corrections. Codex follows that guidance while independently verifying bugs and goal completion. Use codex_goal_set first for substantial top-level work; codex_implement will create a fallback native Codex goal if none exists and will sync goal status from the verifier verdict. Returns one of: {status:'completed', summary, files, goalReached, bugsFound, missingRequirements, nextAction, verifierVerdict, goal}; {status:'needs_decision', pendingId, kind, detail} - answer it with codex_respond; or {status:'failed', error}. If goalReached is false or nextAction is 'continue', continue/redelegate unless the human or an explicit Opus override says otherwise.",
+      "Delegate implementation, testing, compile/runtime fixing, refactors, repo navigation, picture/image generation, browser navigation/control/automation, bug review, or goal-completion verification to embedded Codex GPT-5.5. Opus 4.8 drives architecture, strategy, UX/UI build-out when appropriate, human-facing orchestration, and guidance for Codex on constraints, UI intent, debugging direction, and follow-up corrections. Codex follows that guidance while independently verifying bugs and goal completion. Use codex_goal_set first for substantial top-level work; codex_implement will create a fallback native Codex goal if none exists and will sync goal status from the verifier verdict. Returns one of: {status:'completed', summary, files, goalReached, bugsFound, missingRequirements, nextAction, verifierVerdict, goal}; {status:'needs_decision', pendingId, kind, detail} - answer it with codex_respond; or {status:'failed', error}. If goalReached is false or nextAction is 'continue', continue/redelegate unless the human or an explicit Opus override says otherwise.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1300,6 +1409,9 @@ function startMcpServer() {
   });
 
   logErr(`started (codex=${CODEX_BIN}, session=${SESSION_ID || "?"})`);
+  if (EAGER_BOOT) {
+    void warmupCodexThread();
+  }
 }
 
 module.exports = {

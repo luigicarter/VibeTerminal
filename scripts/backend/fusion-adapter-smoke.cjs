@@ -37,8 +37,8 @@ function main() {
     stdio: ["pipe", "pipe", "pipe"],
     env: {
       ...process.env,
-      // A dummy endpoint: the adapter connects lazily (only on a tool call), so
-      // the MCP surface is exercised without a live app-server.
+      // Eager boot is opt-in. Without that env flag the adapter still connects
+      // lazily, so the MCP surface is exercised without a live app-server.
       VIBE_TERMINAL_FUSION_WS: "ws://127.0.0.1:1",
       VIBE_TERMINAL_SESSION_ID: "fusion-adapter-smoke"
     }
@@ -123,7 +123,9 @@ function main() {
             assert(
               implementTool &&
                 /guidance for Codex/i.test(implementTool.description) &&
-                /independently verifying/i.test(implementTool.description),
+                /independently verifying/i.test(implementTool.description) &&
+                /picture\/image generation/i.test(implementTool.description) &&
+                /browser navigation\/control\/automation/i.test(implementTool.description),
               "codex_implement description missing Claude-guides-Codex contract"
             );
             const source = fs.readFileSync(adapterPath, "utf8");
@@ -152,6 +154,18 @@ function main() {
             assert(source.includes('rpc("thread/goal/get"'), "adapter does not call native goal get");
             assert(source.includes('rpc("thread/goal/clear"'), "adapter does not call native goal clear");
             assert(source.includes("buildCodexVerifierTask(task)"), "adapter does not wrap Codex tasks with the verifier contract");
+            assert(
+              source.includes("VIBE_FUSION_EAGER_BOOT") &&
+                source.includes("warmupCodexThread") &&
+                source.includes("threadReady"),
+              "adapter should eager-boot and de-dupe startup thread initialization"
+            );
+            assert(
+              source.includes("function isCurrentCodexChild") &&
+                source.includes("if (!isCurrentCodexChild(child))") &&
+                source.includes("codexBuffer = \"\""),
+              "adapter should ignore stale app-server stdout/exit after a replacement child starts"
+            );
             assert(
               source.includes(".then(handleTurnStartResponse)") &&
                 source.includes('refreshTurnIdleTimer("turn/start response")'),
@@ -195,13 +209,21 @@ function main() {
   });
 }
 
-function writeFakeAppServer(dir) {
+function writeFakeAppServer(dir, options = {}) {
+  const markerFile = options.markerFile ? JSON.stringify(options.markerFile) : "null";
+  const delayThreadStartMs = Number(options.delayThreadStartMs || 0);
   fs.writeFileSync(
     path.join(dir, "app-server"),
     `
+const fs = require("fs");
 const readline = require("readline");
+const markerFile = ${markerFile};
+const delayThreadStartMs = ${Number.isFinite(delayThreadStartMs) ? delayThreadStartMs : 0};
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 function send(msg) { process.stdout.write(JSON.stringify(msg) + "\\n"); }
+function sendThreadStart(id) {
+  send({ id, result: { thread: { id: "thread-1" } } });
+}
 rl.on("line", (line) => {
   if (!line.trim()) return;
   const msg = JSON.parse(line);
@@ -210,7 +232,12 @@ rl.on("line", (line) => {
     return;
   }
   if (msg.method === "thread/start") {
-    send({ id: msg.id, result: { thread: { id: "thread-1" } } });
+    if (markerFile) fs.appendFileSync(markerFile, "thread-started\\n");
+    if (delayThreadStartMs > 0) {
+      setTimeout(() => sendThreadStart(msg.id), delayThreadStartMs);
+    } else {
+      sendThreadStart(msg.id);
+    }
     return;
   }
   if (msg.method === "thread/goal/set") {
@@ -253,6 +280,193 @@ rl.on("line", (line) => {
 });
 `
   );
+}
+
+function waitForFile(file, timeoutMs = 10000) {
+  return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
+    const timer = setInterval(() => {
+      if (fs.existsSync(file)) {
+        clearInterval(timer);
+        resolve();
+        return;
+      }
+      if (Date.now() - startedAt > timeoutMs) {
+        clearInterval(timer);
+        reject(new Error(`timed out waiting for ${path.basename(file)}`));
+      }
+    }, 50);
+  });
+}
+
+async function assertEagerBootStartsThread() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-adapter-eager-"));
+  const markerFile = path.join(tempDir, "thread-started.txt");
+  writeFakeAppServer(tempDir, { markerFile });
+  const child = spawn(process.execPath, [adapterPath], {
+    cwd: tempDir,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      VIBE_FUSION_CODEX_BIN: process.execPath,
+      VIBE_TERMINAL_FUSION_CWD: tempDir,
+      VIBE_TERMINAL_SESSION_ID: "fusion-adapter-eager",
+      VIBE_FUSION_EAGER_BOOT: "1"
+    }
+  });
+
+  let stderr = "";
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk.toString("utf8");
+  });
+
+  function cleanup() {
+    try {
+      child.stdin.end();
+    } catch {
+      // ignore
+    }
+    try {
+      child.kill();
+    } catch {
+      // ignore
+    }
+    if (isWin && child.pid) {
+      try {
+        execFileSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+          stdio: "ignore"
+        });
+      } catch {
+        // best-effort
+      }
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+
+  try {
+    await waitForFile(markerFile);
+  } catch (error) {
+    throw new Error(`${error.message}; adapter stderr=${stderr}`);
+  } finally {
+    cleanup();
+  }
+}
+
+function callAdapterToolDuringEagerBootUsesOneThreadStart() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-adapter-dedupe-"));
+  const markerFile = path.join(tempDir, "thread-started.txt");
+  writeFakeAppServer(tempDir, { markerFile, delayThreadStartMs: 200 });
+  const child = spawn(process.execPath, [adapterPath], {
+    cwd: tempDir,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      VIBE_FUSION_CODEX_BIN: process.execPath,
+      VIBE_TERMINAL_FUSION_CWD: tempDir,
+      VIBE_TERMINAL_SESSION_ID: "fusion-adapter-dedupe",
+      VIBE_FUSION_EAGER_BOOT: "1"
+    }
+  });
+
+  const responses = new Map();
+  let buffer = "";
+  let stderr = "";
+
+  function cleanup() {
+    try {
+      child.stdin.end();
+    } catch {
+      // ignore
+    }
+    try {
+      child.kill();
+    } catch {
+      // ignore
+    }
+    if (isWin && child.pid) {
+      try {
+        execFileSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+          stdio: "ignore"
+        });
+      } catch {
+        // best-effort
+      }
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`timed out waiting for eager de-dupe result; stderr=${stderr}`));
+    }, 10000);
+
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      cleanup();
+      reject(error);
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+
+    child.on("exit", (code) => {
+      if (responses.has(2)) return;
+      clearTimeout(timer);
+      cleanup();
+      reject(new Error(`adapter exited before eager de-dupe result: code=${code}; stderr=${stderr}`));
+    });
+
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      let index;
+      while ((index = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, index).trim();
+        buffer = buffer.slice(index + 1);
+        if (!line) continue;
+        const msg = JSON.parse(line);
+        if (msg.id !== undefined) responses.set(msg.id, msg);
+        if (responses.has(2)) {
+          clearTimeout(timer);
+          try {
+            const response = responses.get(2);
+            const text = response.result.content[0].text;
+            const parsed = JSON.parse(text);
+            const starts = fs.readFileSync(markerFile, "utf8").trim().split(/\r?\n/).filter(Boolean);
+            assert(parsed.status === "ok", `goal get should succeed after eager boot: ${text}`);
+            assert(starts.length === 1, `expected one thread/start during eager boot race, got ${starts.length}`);
+            cleanup();
+            resolve();
+          } catch (error) {
+            cleanup();
+            reject(error);
+          }
+        }
+      }
+    });
+
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "fusion-adapter-dedupe", version: "0.0.0" }
+        }
+      })}\n`
+    );
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "codex_goal_get", arguments: {} }
+      })}\n`
+    );
+  });
 }
 
 function callAdapterToolWithFakeAppServer() {
@@ -373,6 +587,451 @@ function callAdapterToolWithFakeAppServer() {
   });
 }
 
+function writeApprovalResumeFakeAppServer(dir, options = {}) {
+  const completeBeforeApprovalResponse = options.completeBeforeApprovalResponse === true;
+  const summaryText = JSON.stringify(
+    `Approval resumed and completed.\n${VERDICT_MARKER} {"goalReached":true,"bugsFound":[],"missingRequirements":[],"nextAction":"done","summary":"Approval resume completed."}`
+  );
+  fs.writeFileSync(
+    path.join(dir, "app-server"),
+    `
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+const approvalRequestId = 900;
+const summaryText = ${summaryText};
+const completeBeforeApprovalResponse = ${completeBeforeApprovalResponse ? "true" : "false"};
+
+function send(msg) {
+  process.stdout.write(JSON.stringify(msg) + "\\n");
+}
+
+function goal(params = {}) {
+  return {
+    threadId: "thread-1",
+    objective: params.objective || "do work",
+    status: params.status || "active",
+    tokenBudget: null,
+    tokensUsed: 0,
+    timeUsedSeconds: 0,
+    createdAt: 1,
+    updatedAt: 1
+  };
+}
+
+function turn(status, items = []) {
+  return {
+    id: "turn-1",
+    items,
+    itemsView: "full",
+    status,
+    error: null,
+    startedAt: 1,
+    completedAt: status === "completed" ? 2 : null,
+    durationMs: status === "completed" ? 10 : null
+  };
+}
+
+function commandItem() {
+  return {
+    type: "commandExecution",
+    id: "cmd-1",
+    command: "git symbolic-ref --short HEAD",
+    cwd: process.cwd(),
+    processId: null,
+    source: "shell",
+    status: "completed",
+    commandActions: [],
+    aggregatedOutput: "main\\n",
+    exitCode: 0,
+    durationMs: 5
+  };
+}
+
+function agentItem() {
+  return {
+    type: "agentMessage",
+    id: "msg-1",
+    text: summaryText,
+    phase: null,
+    memoryCitation: null
+  };
+}
+
+function sendCompletion() {
+  const command = commandItem();
+  const agent = agentItem();
+  send({
+    method: "serverRequest/resolved",
+    params: { threadId: "thread-1", turnId: "turn-1", itemId: "cmd-1", requestId: approvalRequestId }
+  });
+  send({ method: "item/completed", params: { threadId: "thread-1", turnId: "turn-1", item: command } });
+  send({ method: "item/completed", params: { threadId: "thread-1", turnId: "turn-1", item: agent } });
+  send({ method: "turn/completed", params: { threadId: "thread-1", turn: turn("completed", [command, agent]) } });
+}
+
+rl.on("line", (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+  if (msg.method === "initialize") {
+    send({ id: msg.id, result: {} });
+    return;
+  }
+  if (msg.method === "thread/start") {
+    send({ id: msg.id, result: { thread: { id: "thread-1" } } });
+    return;
+  }
+  if (msg.method === "thread/goal/set") {
+    send({ id: msg.id, result: { goal: goal(msg.params || {}) } });
+    return;
+  }
+  if (msg.method === "turn/start") {
+    send({ id: msg.id, result: { turn: turn("running") } });
+    send({ method: "turn/started", params: { threadId: "thread-1", turn: turn("running") } });
+    send({
+      id: approvalRequestId,
+      method: "item/commandExecution/requestApproval",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "cmd-1",
+        startedAtMs: Date.now(),
+        approvalId: null,
+        environmentId: null,
+        reason: "read branch",
+        command: "git symbolic-ref --short HEAD",
+        cwd: process.cwd(),
+        commandActions: [],
+        availableDecisions: ["accept", "acceptForSession", "decline", "cancel"]
+      }
+    });
+    if (completeBeforeApprovalResponse) {
+      sendCompletion();
+    }
+    return;
+  }
+  if (msg.id === approvalRequestId && msg.result) {
+    if (!completeBeforeApprovalResponse) {
+      sendCompletion();
+    }
+    return;
+  }
+  if (msg.id !== undefined) send({ id: msg.id, result: {} });
+});
+`
+  );
+}
+
+function callAdapterApprovalResumeWithFakeAppServer(options = {}) {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-adapter-approval-"));
+  writeApprovalResumeFakeAppServer(tempDir, options);
+  const child = spawn(process.execPath, [adapterPath], {
+    cwd: tempDir,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      VIBE_FUSION_CODEX_BIN: process.execPath,
+      VIBE_TERMINAL_FUSION_CWD: tempDir,
+      VIBE_TERMINAL_SESSION_ID: options.completeBeforeApprovalResponse
+        ? "fusion-adapter-approval-latched"
+        : "fusion-adapter-approval",
+      VIBE_FUSION_TURN_IDLE_TIMEOUT_MS: "1000",
+      VIBE_FUSION_TURN_AFTER_COMMAND_TIMEOUT_MS: "100"
+    }
+  });
+
+  let buffer = "";
+  let stderr = "";
+  let sentRespond = false;
+  let finished = false;
+
+  function cleanup() {
+    try {
+      child.stdin.end();
+    } catch {
+      // ignore
+    }
+    try {
+      child.kill();
+    } catch {
+      // ignore
+    }
+    if (isWin && child.pid) {
+      try {
+        execFileSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+          stdio: "ignore"
+        });
+      } catch {
+        // best-effort
+      }
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      finished = true;
+      cleanup();
+      reject(new Error(`timed out waiting for approval resume result; stderr=${stderr}`));
+    }, 10000);
+
+    child.on("error", (error) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      cleanup();
+      reject(error);
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+
+    child.on("exit", (code) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      cleanup();
+      reject(new Error(`adapter exited before approval resume result: code=${code}; stderr=${stderr}`));
+    });
+
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      let index;
+      while ((index = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, index).trim();
+        buffer = buffer.slice(index + 1);
+        if (!line) continue;
+        const msg = JSON.parse(line);
+        try {
+          if (msg.id === 2 && !sentRespond) {
+            const parsed = JSON.parse(msg.result.content[0].text);
+            assert(parsed.status === "needs_decision", `expected approval request, got ${msg.result.content[0].text}`);
+            assert(parsed.pendingId, "approval result missing pendingId");
+            sentRespond = true;
+            child.stdin.write(
+              `${JSON.stringify({
+                jsonrpc: "2.0",
+                id: 3,
+                method: "tools/call",
+                params: {
+                  name: "codex_respond",
+                  arguments: { pendingId: parsed.pendingId, decision: "accept" }
+                }
+              })}\n`
+            );
+          }
+          if (msg.id === 3) {
+            finished = true;
+            clearTimeout(timer);
+            const text = msg.result.content[0].text;
+            const parsed = JSON.parse(text);
+            assert(parsed.status === "completed", `approval resume should complete: ${text}`);
+            assert(parsed.goalReached === true, `approval resume verdict should pass: ${text}`);
+            assert(parsed.nextAction === "done", `approval resume should be done: ${text}`);
+            assert(
+              parsed.summary === "Approval resumed and completed.",
+              `approval resume summary should strip verifier JSON: ${text}`
+            );
+            cleanup();
+            resolve();
+          }
+        } catch (error) {
+          finished = true;
+          clearTimeout(timer);
+          cleanup();
+          reject(error);
+        }
+      }
+    });
+
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "fusion-adapter-approval", version: "0.0.0" }
+        }
+      })}\n`
+    );
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "codex_implement", arguments: { task: "inspect the branch" } }
+      })}\n`
+    );
+  });
+}
+
+// CC-host portability guard (see docs/fusion-terminal.md "Host portability").
+// The Fusion delegation engine must stay a clean stdio MCP server that runs with
+// NO Electron host attached, so it can be driven by a plain `claude --mcp-config`
+// if the host strategy ever changes. This boots the adapter with the three
+// host-coupling env vars explicitly UNSET and drives the full
+// initialize -> tools/list -> tools/call round-trip against a fake app-server. A
+// future edit that hard-requires the host (an unguarded env read, a require() of
+// host code, or a control server that binds unconditionally) breaks this here.
+function assertAdapterRunsHostFree() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-adapter-hostfree-"));
+  writeFakeAppServer(tempDir);
+  const env = {
+    ...process.env,
+    VIBE_FUSION_CODEX_BIN: process.execPath,
+    VIBE_TERMINAL_FUSION_CWD: tempDir
+  };
+  // The three documented host-coupling vars (and the legacy WS hint) must be
+  // absent so this proves the adapter never *requires* the Electron host.
+  delete env.VIBE_TERMINAL_CALLBACK_URL;
+  delete env.VIBE_TERMINAL_TELEMETRY_TOKEN;
+  delete env.VIBE_TERMINAL_SESSION_ID;
+  delete env.VIBE_TERMINAL_FUSION_WS;
+
+  const child = spawn(process.execPath, [adapterPath], {
+    cwd: tempDir,
+    stdio: ["pipe", "pipe", "pipe"],
+    env
+  });
+
+  const responses = new Map();
+  let buffer = "";
+  let stderr = "";
+
+  function cleanup() {
+    try {
+      child.stdin.end();
+    } catch {
+      // ignore
+    }
+    try {
+      child.kill();
+    } catch {
+      // ignore
+    }
+    if (isWin && child.pid) {
+      try {
+        execFileSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+          stdio: "ignore"
+        });
+      } catch {
+        // best-effort
+      }
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`timed out waiting for host-free round-trip; stderr=${stderr}`));
+    }, 10000);
+
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      cleanup();
+      reject(error);
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+
+    child.on("exit", (code) => {
+      if (responses.has(3)) return;
+      clearTimeout(timer);
+      cleanup();
+      reject(new Error(`adapter exited before host-free round-trip: code=${code}; stderr=${stderr}`));
+    });
+
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      let index;
+      while ((index = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, index).trim();
+        buffer = buffer.slice(index + 1);
+        if (!line) continue;
+        let msg;
+        try {
+          msg = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (msg.id !== undefined) responses.set(msg.id, msg);
+        if (responses.has(1) && responses.has(2) && responses.has(3)) {
+          clearTimeout(timer);
+          try {
+            const init = responses.get(1);
+            assert(
+              init.result && init.result.serverInfo && init.result.serverInfo.name === "fusion-codex",
+              `host-free initialize did not identify the adapter: ${JSON.stringify(init)}`
+            );
+            const tools = responses.get(2).result && responses.get(2).result.tools ? responses.get(2).result.tools : [];
+            const names = tools.map((t) => t.name);
+            for (const tool of ["codex_goal_set", "codex_goal_get", "codex_goal_clear", "codex_implement", "codex_respond"]) {
+              assert(names.includes(tool), `host-free tools/list missing ${tool}`);
+            }
+            const callText = responses.get(3).result.content[0].text;
+            const parsed = JSON.parse(callText);
+            assert(parsed.status === "ok", `host-free tools/call round-trip should succeed: ${callText}`);
+            cleanup();
+            resolve();
+          } catch (error) {
+            cleanup();
+            reject(error);
+          }
+        }
+      }
+    });
+
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "fusion-adapter-hostfree", version: "0.0.0" }
+        }
+      })}\n`
+    );
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" })}\n`);
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "codex_goal_get", arguments: {} }
+      })}\n`
+    );
+  });
+}
+
+// Pin the portability boundary at the source level: the adapter's coupling to the
+// Electron host must stay limited to the three documented env vars, each guarded so
+// the relay/control surface no-ops when they are unset. Deleting a guard (which
+// would silently re-couple the adapter to the host) fails CI here.
+function assertPortabilityGuards() {
+  const source = fs.readFileSync(adapterPath, "utf8");
+  assert(
+    source.includes("process.env.VIBE_TERMINAL_CALLBACK_URL") &&
+      source.includes("process.env.VIBE_TERMINAL_TELEMETRY_TOKEN") &&
+      source.includes("process.env.VIBE_TERMINAL_SESSION_ID"),
+    "adapter host coupling must stay limited to the three documented env vars"
+  );
+  assert(
+    source.includes("if (!CALLBACK_URL || !TOKEN || !SESSION_ID) return"),
+    "postTelemetry must no-op when host telemetry env vars are unset"
+  );
+  assert(
+    source.includes("if (controlServer || !TOKEN || !SESSION_ID) return"),
+    "startControlServer must not bind when host control env vars are unset"
+  );
+}
+
 function assertGoalSchema() {
   const rootDir = path.join(__dirname, "..", "..");
   const clientSchema = fs.readFileSync(
@@ -397,6 +1056,11 @@ function assertVerifierHelpers() {
   assert(
     wrapped.includes("follow that guidance while still independently checking"),
     "wrapped task missing Claude-guides-Codex rule"
+  );
+  assert(
+    wrapped.includes("picture/image generation") &&
+      wrapped.includes("browser navigation/control/automation"),
+    "wrapped task should tell Codex it owns image generation and browser control"
   );
 
   const summary =
@@ -498,7 +1162,13 @@ main()
   .then(async () => {
     assertGoalSchema();
     assertVerifierHelpers();
+    assertPortabilityGuards();
+    await assertEagerBootStartsThread();
+    await callAdapterToolDuringEagerBootUsesOneThreadStart();
     await callAdapterToolWithFakeAppServer();
+    await assertAdapterRunsHostFree();
+    await callAdapterApprovalResumeWithFakeAppServer();
+    await callAdapterApprovalResumeWithFakeAppServer({ completeBeforeApprovalResponse: true });
     console.log("Fusion adapter smoke passed");
   })
   .catch((error) => {

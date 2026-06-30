@@ -1195,8 +1195,8 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
         model: fusionModel,
         effort: fusionClaudeEffort,
         // Opus orchestrates: it may READ/search to plan and review, and drives
-        // Codex through the bridge tools — but it has NO direct edit/shell tools,
-        // so every code change goes through codex_implement (the point of Fusion).
+        // Codex through the bridge tools. It has NO direct edit/shell/image or
+        // browser-control tools, so concrete execution goes through codex_implement.
         allowedTools:
           "mcp__fusion-codex__codex_implement,mcp__fusion-codex__codex_respond,mcp__fusion-codex__codex_goal_set,mcp__fusion-codex__codex_goal_get,mcp__fusion-codex__codex_goal_clear,Read,Glob,Grep",
         // Belt-and-suspenders: hard-block stable mutation/shell tool names

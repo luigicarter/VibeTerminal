@@ -881,6 +881,15 @@ button {
   transition: none;
 }
 
+/* Suppress the eased transition for every pane while a drag/resize is live
+   (so following neighbors and swap targets track the pointer 1:1, not just the
+   active pane) and for one settled frame after release (so nothing glides from
+   the drop spot to a recomputed resting spot). */
+.tiled-board-arranging .pane-frame,
+.tiled-board-released .pane-frame {
+  transition: none;
+}
+
 .pane-frame-moving .terminal-pane,
 .pane-frame-resizing .terminal-pane {
   border-color: color-mix(in srgb, var(--pane-accent) 78%, #ffffff);

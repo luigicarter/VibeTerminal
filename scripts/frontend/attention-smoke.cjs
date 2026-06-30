@@ -264,6 +264,20 @@ assert(
   "Fusion add/duplicate and completion attention should use the app attention path"
 );
 assert(
+  appSource.includes('event.type === "activity" && event.kind === "warmup_error"') &&
+    appSource.includes("applyFusionAttention(event.id") &&
+    appSource.includes("Fusion execution bridge failed to start."),
+  "Fusion warmup errors should mark the session failed and request attention"
+);
+assert(
+  appSource.includes("fusionBridgeToolRef") &&
+    appSource.includes('event.type === "tool-call"') &&
+    appSource.includes("/codex_implement|codex_respond/") &&
+    appSource.includes("if (!isFusionBridgeTool)") &&
+    appSource.includes("fusionBridgeToolRef.current.delete(toolKey)"),
+  "Fusion waiting cleanup should only react to Codex bridge tool results"
+);
+assert(
   appSource.includes("function stopSessionProcess(session") &&
     appSource.includes("window.vibe?.fusionChat?.stop(session.id)") &&
     appSource.includes("window.vibe?.terminal.kill(session.id)") &&
@@ -423,9 +437,12 @@ assert(
 assert(
   fusionChatPaneSource.includes("waitingForDecisionRef") &&
     fusionChatPaneSource.includes("setWaitingState(true)") &&
-    fusionChatPaneSource.includes('status-${busy ? "running" : waiting ? "waiting" : "idle"}') &&
+    fusionChatPaneSource.includes("const [failed, setFailed] = useState(false)") &&
+    fusionChatPaneSource.includes('event.kind === "warmup_error"') &&
+    fusionChatPaneSource.includes('onStatusChangeRef.current("failed")') &&
+    fusionChatPaneSource.includes('failed ? "failed" : "idle"') &&
     fusionChatPaneSource.includes("Answer Fusion to continue"),
-  "FusionChatPane should render a distinct waiting state for approval/question turns"
+  "FusionChatPane should render distinct waiting and failed states for approval/question turns and warmup errors"
 );
 
 const preloadSource = fs.readFileSync(preloadPath, "utf8");

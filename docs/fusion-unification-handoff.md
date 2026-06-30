@@ -51,8 +51,10 @@ guard **in the same change** or the smoke test fails.
 
 ## Guardrails (do not violate)
 
-1. **Never add an edit/shell tool to Opus.** `disallowedTools='Edit,Write,Bash'`
-   in `main.cjs` is the physical guarantee. All mutation stays in `codex_implement`.
+1. **Never add an edit/shell/image-generation/browser-control tool to Opus.**
+   The allowlist in `main.cjs`, backed by `disallowedTools='Edit,Write,Bash'`,
+   is the physical guarantee. All mutation and image/browser execution stays in
+   `codex_implement`.
 2. **Don't soften the gate language** in the system prompt rewrite (A3). Keep
    *"EVERY change MUST go through codex_implement"* and *"let the verifier verdict
    gate completion"* verbatim — the verdict gate is **behavioral only**, so the
