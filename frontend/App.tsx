@@ -55,6 +55,7 @@ import type {
   FusionClaudeModel,
   FusionCodexModel,
   FusionEffort,
+  FusionChatEvent,
   FusionSettings,
   LayoutBox,
   ProjectWorkspace,
@@ -930,6 +931,17 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    return window.vibe?.fusionChat?.onEvent((event: FusionChatEvent) => {
+      if (event.type === "host-error") {
+        setShellMessage(event.message);
+        return;
+      }
+
+      applyFusionChatLifecycle(event);
+    });
+  }, []);
+
+  useEffect(() => {
     let disposed = false;
 
     window.vibe?.updates.getState().then((state) => {
@@ -1368,6 +1380,174 @@ export default function App() {
           };
         })
       );
+    });
+  }
+
+  function applyFusionChatLifecycle(event: FusionChatEvent) {
+    if (!("id" in event) || typeof event.id !== "string") {
+      return;
+    }
+
+    if (event.type === "turn-start") {
+      updateAnySession(event.id, (session) => {
+        if (!session.fusion) {
+          return session;
+        }
+
+        return {
+          ...session,
+          status: "running",
+          attention: EMPTY_ATTENTION
+        };
+      });
+      return;
+    }
+
+    if (event.type === "tool-result") {
+      const parsed = parseFusionToolResult(event.text);
+      if (parsed?.status === "needs_decision" || parsed?.nextAction === "ask_human") {
+        applyFusionAttention(event.id, {
+          state: "waiting",
+          reason: parsed.status === "needs_decision" ? "approval" : "question",
+          source: "provider",
+          updatedAt: Date.now(),
+          message:
+            typeof parsed.detail === "string"
+              ? parsed.detail
+              : "Fusion needs a decision to continue."
+        });
+      } else if (parsed?.status === "failed" || parsed?.status === "error") {
+        applyFusionAttention(event.id, {
+          state: "failed",
+          reason: "error",
+          source: "provider",
+          updatedAt: Date.now(),
+          message:
+            typeof parsed.error === "string"
+              ? parsed.error
+              : "Fusion returned an error."
+        });
+      }
+      return;
+    }
+
+    if (event.type === "result") {
+      updateAnySession(event.id, (session) => {
+        if (!session.fusion || session.status === "waiting") {
+          return session;
+        }
+
+        const attentionEvent: AgentAttentionEvent = {
+          state: "completed",
+          reason: "done",
+          source: "provider",
+          updatedAt: Date.now()
+        };
+
+        return {
+          ...session,
+          status: reconcileStatus(session.status, "done"),
+          attention: attentionFromEvent(
+            attentionEvent,
+            shouldMarkFusionAttentionUnread(event.id, attentionEvent)
+          )
+        };
+      });
+      return;
+    }
+
+    if (event.type === "interrupted") {
+      updateAnySession(event.id, (session) =>
+        session.fusion ? { ...session, status: "waiting" } : session
+      );
+      return;
+    }
+
+    if (event.type === "error") {
+      applyFusionAttention(event.id, {
+        state: "failed",
+        reason: "error",
+        source: "provider",
+        updatedAt: Date.now(),
+        message: event.message
+      });
+      return;
+    }
+
+    if (event.type === "closed") {
+      updateAnySession(event.id, (session) => {
+        if (!session.fusion || session.status !== "running") {
+          return session;
+        }
+
+        const message =
+          event.code != null && event.code !== 0
+            ? `Fusion process exited with code ${event.code}.`
+            : "Fusion process closed before returning a result.";
+        const attentionEvent: AgentAttentionEvent = {
+          state: "failed",
+          reason: "exit",
+          source: "provider",
+          updatedAt: Date.now(),
+          message
+        };
+
+        return {
+          ...session,
+          status: "failed",
+          attention: attentionFromEvent(
+            attentionEvent,
+            shouldMarkFusionAttentionUnread(event.id, attentionEvent)
+          )
+        };
+      });
+    }
+  }
+
+  function parseFusionToolResult(text: string): Record<string, unknown> | null {
+    try {
+      const parsed = JSON.parse(text);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function shouldMarkFusionAttentionUnread(
+    sessionId: string,
+    attentionEvent: AgentAttentionEvent
+  ) {
+    const selection = attentionSelectionRef.current;
+    return shouldMarkAttentionUnread(
+      sessionId,
+      selection.selectedSessionId,
+      selection.visibleSessionIds,
+      attentionEvent
+    );
+  }
+
+  function applyFusionAttention(
+    sessionId: string,
+    attentionEvent: AgentAttentionEvent
+  ) {
+    const attentionStatus = statusFromAttentionState(attentionEvent.state);
+    updateAnySession(sessionId, (session) => {
+      if (!session.fusion) {
+        return session;
+      }
+
+      return {
+        ...session,
+        status: attentionStatus
+          ? reconcileStatus(session.status, attentionStatus)
+          : session.status,
+        attention: attentionFromEvent(
+          attentionEvent,
+          shouldMarkFusionAttentionUnread(sessionId, attentionEvent)
+        )
+      };
     });
   }
 

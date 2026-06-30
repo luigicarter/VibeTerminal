@@ -6,11 +6,12 @@
 // riskiest hand-written piece without needing codex auth or a model turn (the
 // full app-server turn round-trip is covered by the end-to-end check).
 
-const { spawn } = require("child_process");
+const { execFileSync, spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
 const adapterPath = path.join(__dirname, "..", "..", "backend", "fusion-adapter.cjs");
+const isWin = process.platform === "win32";
 const {
   VERDICT_MARKER,
   buildCodexVerifierTask,
@@ -53,9 +54,23 @@ function main() {
     function cleanup() {
       clearTimeout(timer);
       try {
+        child.stdin.end();
+      } catch {
+        // ignore
+      }
+      try {
         child.kill();
       } catch {
         // ignore
+      }
+      if (isWin && child.pid) {
+        try {
+          execFileSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+            stdio: "ignore"
+          });
+        } catch {
+          // best-effort
+        }
       }
     }
 

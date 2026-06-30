@@ -33,6 +33,10 @@ const TOKEN = process.env.VIBE_TERMINAL_TELEMETRY_TOKEN;
 const MODEL = process.env.VIBE_FUSION_CODEX_MODEL || null;
 const EFFORT = process.env.VIBE_FUSION_CODEX_EFFORT || null;
 const REQUEST_TIMEOUT_MS = Number(process.env.VIBE_FUSION_RPC_TIMEOUT_MS || 30000);
+const TURN_IDLE_TIMEOUT_MS = Number(process.env.VIBE_FUSION_TURN_IDLE_TIMEOUT_MS || 300000);
+const TURN_AFTER_COMMAND_TIMEOUT_MS = Number(
+  process.env.VIBE_FUSION_TURN_AFTER_COMMAND_TIMEOUT_MS || 90000
+);
 const PARKED_REQUEST_METHODS = new Set([
   "item/commandExecution/requestApproval",
   "item/fileChange/requestApproval",
@@ -274,7 +278,7 @@ let nextId = 1;
 let threadId = null;
 const pendingReq = new Map(); // app-server request id -> {resolve, reject}
 const parked = new Map(); // pendingId -> {rpcId, method, params}
-let currentTurn = null; // {resolve} — fulfilled by turn/completed | turn/failed | an approval request
+let currentTurn = null; // {resolve, idleTimer, commandTimer} - fulfilled by turn/completed | turn/failed | an approval request
 let activeTurnId = null;
 let turnSummary = [];
 let turnFiles = [];
@@ -350,10 +354,68 @@ async function codexInterrupt() {
   }
 }
 
+function clearCurrentTurnTimers(turn = currentTurn) {
+  if (!turn) return;
+  if (turn.idleTimer) {
+    clearTimeout(turn.idleTimer);
+    turn.idleTimer = null;
+  }
+  if (turn.commandTimer) {
+    clearTimeout(turn.commandTimer);
+    turn.commandTimer = null;
+  }
+}
+
+function refreshTurnIdleTimer(reason = "progress") {
+  if (!currentTurn || !Number.isFinite(TURN_IDLE_TIMEOUT_MS) || TURN_IDLE_TIMEOUT_MS <= 0) {
+    return;
+  }
+  if (currentTurn.idleTimer) {
+    clearTimeout(currentTurn.idleTimer);
+  }
+  currentTurn.idleTimer = setTimeout(() => {
+    resolveTurn({
+      status: "failed",
+      error: `Codex bridge stalled after ${reason}.`
+    });
+  }, TURN_IDLE_TIMEOUT_MS);
+}
+
+function startTurnAfterCommandTimer(command = "command") {
+  if (
+    !currentTurn ||
+    !Number.isFinite(TURN_AFTER_COMMAND_TIMEOUT_MS) ||
+    TURN_AFTER_COMMAND_TIMEOUT_MS <= 0
+  ) {
+    return;
+  }
+  if (currentTurn.commandTimer) {
+    clearTimeout(currentTurn.commandTimer);
+  }
+  currentTurn.commandTimer = setTimeout(() => {
+    resolveTurn({
+      status: "failed",
+      error: `Codex command finished but the turn did not complete: ${command}`
+    });
+  }, TURN_AFTER_COMMAND_TIMEOUT_MS);
+}
+
+function resetHarness(reason = "Fusion stopped.") {
+  parked.clear();
+  failAll(new Error(reason));
+  killCodex();
+  threadId = null;
+  activeTurnId = null;
+  turnSummary = [];
+  turnFiles = [];
+  currentGoal = null;
+  goalFeatureAvailable = null;
+}
+
 function startControlServer() {
   if (controlServer || !TOKEN || !SESSION_ID) return;
   controlServer = http.createServer((request, response) => {
-    if (request.method !== "POST" || !["/steer", "/interrupt"].includes(request.url)) {
+    if (request.method !== "POST" || !["/steer", "/interrupt", "/stop"].includes(request.url)) {
       response.writeHead(404);
       response.end();
       return;
@@ -379,10 +441,15 @@ function startControlServer() {
           response.end(JSON.stringify({ status: "failed", error: "session_mismatch" }));
           return;
         }
-        const result =
-          request.url === "/interrupt"
-            ? await codexInterrupt()
-            : await codexSteer(parsed.text);
+        let result;
+        if (request.url === "/interrupt") {
+          result = await codexInterrupt();
+        } else if (request.url === "/stop") {
+          resetHarness("Fusion stopped.");
+          result = { status: "stopped" };
+        } else {
+          result = await codexSteer(parsed.text);
+        }
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify(result));
       } catch (error) {
@@ -401,8 +468,6 @@ function startControlServer() {
     });
   });
 }
-
-startControlServer();
 
 // Spawn this pane's dedicated `codex app-server` (stdio transport). The boot
 // smoke proved newline-delimited JSON-RPC over stdio works on every platform.
@@ -497,6 +562,8 @@ function killCodex() {
         ["/pid", String(codexChild.pid), "/t", "/f"],
         { stdio: "ignore" }
       );
+      codexChild = null;
+      codexReady = null;
       return;
     } catch {
       // fall through
@@ -507,6 +574,8 @@ function killCodex() {
   } catch {
     // ignore
   }
+  codexChild = null;
+  codexReady = null;
 }
 
 function failAll(error) {
@@ -553,6 +622,7 @@ function resolveTurn(result) {
   const turn = currentTurn;
   currentTurn = null;
   activeTurnId = null;
+  clearCurrentTurnTimers(turn);
   turn.resolve(result);
 }
 
@@ -577,16 +647,19 @@ function handleNotification(msg) {
   const method = msg.method;
   const params = msg.params || {};
   if (method === "thread/goal/updated" && params.goal) {
+    refreshTurnIdleTimer(method);
     goalFeatureAvailable = true;
     currentGoal = normalizeGoal(params.goal);
     return;
   }
   if (method === "thread/goal/cleared") {
+    refreshTurnIdleTimer(method);
     goalFeatureAvailable = true;
     currentGoal = null;
     return;
   }
   if (method === "turn/started") {
+    refreshTurnIdleTimer(method);
     const nextTurnId = extractTurnId(params);
     if (nextTurnId) {
       activeTurnId = nextTurnId;
@@ -594,8 +667,12 @@ function handleNotification(msg) {
     return;
   }
   if (method === "item/completed" && params.item) {
+    refreshTurnIdleTimer(method);
     relayItem(params.item);
     accumulate(params.item);
+    if (params.item.type === "commandExecution" && params.item.exitCode != null) {
+      startTurnAfterCommandTimer(params.item.command || "command");
+    }
     return;
   }
   if (method === "turn/completed") {
@@ -676,6 +753,7 @@ function handleServerRequest(msg) {
   }
 
   const pendingId = `p${nextId++}`;
+  refreshTurnIdleTimer(method);
   parked.set(pendingId, { rpcId: msg.id, method, params });
   const detail = approvalDetail(method, params);
   relay({ role: "codex", kind: "approval", text: detail });
@@ -766,7 +844,9 @@ async function ensureThread() {
 
 function awaitTurn() {
   return new Promise((resolve) => {
-    currentTurn = { resolve };
+    clearCurrentTurnTimers();
+    currentTurn = { resolve, idleTimer: null, commandTimer: null };
+    refreshTurnIdleTimer("turn start");
   });
 }
 
@@ -1090,6 +1170,8 @@ function handleMcpLine(line) {
 }
 
 function startMcpServer() {
+  startControlServer();
+
   let stdinBuffer = "";
   process.stdin.setEncoding("utf8");
   process.stdin.on("data", (chunk) => {
@@ -1102,7 +1184,11 @@ function startMcpServer() {
     }
   });
   process.stdin.on("end", () => {
-    killCodex();
+    resetHarness("Fusion adapter closed.");
+    if (controlServer) {
+      controlServer.close();
+      controlServer = null;
+    }
     process.exit(0);
   });
 

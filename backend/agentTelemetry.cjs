@@ -1555,6 +1555,10 @@ function createAgentTelemetryManager(options = {}) {
     return postFusionAdapterControl(sessionId, "/interrupt");
   }
 
+  function stopFusionSession(sessionId) {
+    return postFusionAdapterControl(sessionId, "/stop");
+  }
+
   // Cursor has no per-invocation hook flag, so its hooks are registered in the
   // project's `.cursor/hooks.json`: `beforeSubmitPrompt` -> running and `stop` ->
   // completed/failed. This runs at launch (the cwd is known then) to merge our
@@ -1654,6 +1658,7 @@ function createAgentTelemetryManager(options = {}) {
     releaseSession,
     steerFusionSession,
     interruptFusionSession,
+    stopFusionSession,
     runDir,
     runId,
     token

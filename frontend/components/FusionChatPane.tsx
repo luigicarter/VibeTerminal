@@ -88,24 +88,87 @@ interface SlashMenu {
 // The "/" palette — the Fusion equivalent of the slash menu a real CLI draws
 // inside xterm. Every entry routes back through handleSlashCommand.
 const FUSION_SLASH_COMMANDS: SlashCommand[] = [
-  { name: "/opus", desc: "Claude model and effort", submenu: true },
-  { name: "/codex", desc: "Codex model and effort", submenu: true },
-  { name: "/speed", desc: "Speed presets", submenu: true },
-  { name: "/effort", desc: "Reasoning effort", submenu: true },
-  { name: "/fast", desc: "Switch Claude to the fast model" },
-  { name: "/claude", arg: "<model>", desc: "Set the Claude model", takesArg: true },
+  { name: "/speed", desc: "Fusion speed presets", submenu: true },
+  { name: "/effort", desc: "Fusion reasoning effort", submenu: true },
+  { name: "/opus", desc: "Advanced planning role settings", submenu: true },
+  { name: "/codex", desc: "Advanced execution role settings", submenu: true },
+  { name: "/fast", desc: "Switch Fusion to the fast preset" },
+  { name: "/claude", arg: "<model>", desc: "Set the planning model", takesArg: true },
   { name: "/models", desc: "Show the current models and effort" },
   { name: "/resume", desc: "Resume the last Claude Fusion chat" },
   { name: "/clear", desc: "Clear this conversation" },
   { name: "/help", desc: "List the available commands" }
 ];
 
-const effortItems = (prefix: string): SlashMenuItem[] =>
+type FusionRoleScope = "harness" | "planning" | "execution";
+type FusionSpeedPreset = "fast" | "balanced" | "deep" | "max";
+
+const FUSION_SPEED_LABELS: Record<FusionSpeedPreset, string> = {
+  fast: "Fast",
+  balanced: "Balanced",
+  deep: "Deep",
+  max: "Max"
+};
+
+const FUSION_SPEED_VALUES = Object.keys(FUSION_SPEED_LABELS) as FusionSpeedPreset[];
+
+const roleName = (scope: FusionRoleScope) =>
+  scope === "planning"
+    ? "Planning"
+    : scope === "execution"
+      ? "Execution"
+      : "Fusion";
+
+const scopeCommand = (scope: FusionRoleScope) =>
+  scope === "harness" ? "fusion" : scope;
+
+const effortItems = (prefix: string, scope: FusionRoleScope = "harness"): SlashMenuItem[] =>
   FUSION_EFFORT_VALUES.map((effort) => ({
-    key: `${prefix}-effort-${effort}`,
-    label: `Effort ${FUSION_EFFORT_LABELS[effort]}`,
-    desc: effort === "auto" ? "Use the runtime default" : `Use ${effort} reasoning effort`,
-    command: prefix === "/effort" ? `${prefix} ${effort}` : `${prefix} effort ${effort}`
+    key: `${prefix}-${scope}-effort-${effort}`,
+    label: `${roleName(scope)} ${FUSION_EFFORT_LABELS[effort]}`,
+    desc:
+      scope === "harness"
+        ? effort === "auto"
+          ? "Use runtime defaults across the harness"
+          : `Set both Fusion roles to ${effort}`
+        : effort === "auto"
+          ? `Use the runtime default for ${roleName(scope).toLowerCase()}`
+          : `Set ${roleName(scope).toLowerCase()} effort to ${effort}`,
+    command:
+      prefix === "/effort"
+        ? `${prefix} ${scopeCommand(scope)} ${effort}`
+        : `${prefix} effort ${effort}`
+  }));
+
+const speedItems = (scope: FusionRoleScope): SlashMenuItem[] =>
+  FUSION_SPEED_VALUES.map((preset) => ({
+    key: `speed-${scope}-${preset}`,
+    label: `${roleName(scope)} ${FUSION_SPEED_LABELS[preset]}`,
+    desc:
+      scope === "harness"
+        ? preset === "fast"
+          ? "Fast planning and low execution effort"
+          : preset === "balanced"
+            ? "Default Fusion balance"
+            : preset === "deep"
+              ? "High effort across Fusion"
+              : "Maximum effort across Fusion"
+        : scope === "planning"
+          ? preset === "fast"
+            ? "Fast planning model and low planning effort"
+            : preset === "balanced"
+              ? "Opus planning with automatic effort"
+              : preset === "deep"
+                ? "Opus planning with high effort"
+                : "Opus planning with max effort"
+          : preset === "fast"
+            ? "Low execution effort"
+            : preset === "balanced"
+              ? "Automatic execution effort"
+              : preset === "deep"
+                ? "High execution effort"
+                : "Max execution effort",
+    command: `/speed ${scopeCommand(scope)} ${preset}`
   }));
 
 const filterSlashItems = (items: SlashMenuItem[], query: string) => {
@@ -131,90 +194,129 @@ function buildSlashMenu(input: string): SlashMenu {
   };
 
   if (lower === "/opus" || lower.startsWith("/opus ")) {
-    return submenu("/opus", "Opus", [
+    return submenu("/opus", "Planning Role", [
       {
         key: "opus-model",
-        label: "Opus 4.8",
-        desc: "Claude orchestrator model",
+        label: "Model Opus 4.8",
+        desc: "Planning and review model",
         command: "/opus model"
       },
       {
-        key: "opus-speed-fast",
-        label: "Speed Fast",
-        desc: "Fast Claude model + low effort",
-        command: "/speed fast"
+        key: "opus-speed",
+        label: "Speed",
+        desc: "Planning speed presets",
+        fill: "/speed planning "
       },
       {
-        key: "opus-speed-balanced",
-        label: "Speed Balanced",
-        desc: "Opus + automatic effort",
-        command: "/speed balanced"
+        key: "opus-effort",
+        label: "Effort",
+        desc: "Planning effort levels",
+        fill: "/effort planning "
       },
-      {
-        key: "opus-speed-deep",
-        label: "Speed Deep",
-        desc: "Opus + high effort",
-        command: "/speed deep"
-      },
-      {
-        key: "opus-speed-max",
-        label: "Speed Max",
-        desc: "Opus + max effort",
-        command: "/speed max"
-      },
-      ...effortItems("/opus")
+      ...effortItems("/opus", "planning")
     ]);
   }
 
   if (lower === "/codex" || lower.startsWith("/codex ")) {
-    return submenu("/codex", "Codex", [
+    return submenu("/codex", "Execution Role", [
       {
         key: "codex-auto",
         label: "Default model",
-        desc: "Use the configured Codex default",
+        desc: "Use the configured execution model",
         command: "/codex auto"
       },
       {
         key: "codex-custom",
         label: "Custom model",
-        desc: "Type a Codex model id",
+        desc: "Type an execution model id",
         fill: "/codex "
       },
-      ...effortItems("/codex")
+      {
+        key: "codex-speed",
+        label: "Speed",
+        desc: "Execution speed presets",
+        fill: "/speed execution "
+      },
+      {
+        key: "codex-effort",
+        label: "Effort",
+        desc: "Execution effort levels",
+        fill: "/effort execution "
+      },
+      ...effortItems("/codex", "execution")
     ]);
+  }
+
+  if (lower === "/speed planning" || lower.startsWith("/speed planning ")) {
+    return submenu("/speed planning", "Fusion Speed / Planning", speedItems("planning"));
+  }
+
+  if (lower === "/speed execution" || lower.startsWith("/speed execution ")) {
+    return submenu("/speed execution", "Fusion Speed / Execution", speedItems("execution"));
+  }
+
+  if (lower === "/speed fusion" || lower.startsWith("/speed fusion ")) {
+    return submenu("/speed fusion", "Fusion Speed / Whole Harness", speedItems("harness"));
   }
 
   if (lower === "/speed" || lower.startsWith("/speed ")) {
-    return submenu("/speed", "Speed", [
+    return submenu("/speed", "Fusion Speed", [
       {
-        key: "speed-fast",
-        label: "Fast",
-        desc: "Claude fast model + low effort",
-        command: "/speed fast"
+        key: "speed-fusion",
+        label: "Whole harness",
+        desc: "Presets for planning and execution together",
+        fill: "/speed fusion "
       },
       {
-        key: "speed-balanced",
-        label: "Balanced",
-        desc: "Opus + automatic effort",
-        command: "/speed balanced"
+        key: "speed-planning",
+        label: "Planning role",
+        desc: "Planning and review speed",
+        fill: "/speed planning "
       },
       {
-        key: "speed-deep",
-        label: "Deep",
-        desc: "Opus + high effort",
-        command: "/speed deep"
+        key: "speed-execution",
+        label: "Execution role",
+        desc: "Implementation and verification speed",
+        fill: "/speed execution "
       },
-      {
-        key: "speed-max",
-        label: "Max",
-        desc: "Opus + max effort",
-        command: "/speed max"
-      }
+      ...speedItems("harness")
     ]);
   }
 
+  if (lower === "/effort planning" || lower.startsWith("/effort planning ")) {
+    return submenu("/effort planning", "Fusion Effort / Planning", effortItems("/effort", "planning"));
+  }
+
+  if (lower === "/effort execution" || lower.startsWith("/effort execution ")) {
+    return submenu("/effort execution", "Fusion Effort / Execution", effortItems("/effort", "execution"));
+  }
+
+  if (lower === "/effort fusion" || lower.startsWith("/effort fusion ")) {
+    return submenu("/effort fusion", "Fusion Effort / Whole Harness", effortItems("/effort", "harness"));
+  }
+
   if (lower === "/effort" || lower.startsWith("/effort ")) {
-    return submenu("/effort", "Effort", effortItems("/effort"));
+    return submenu("/effort", "Fusion Effort", [
+      {
+        key: "effort-fusion",
+        label: "Whole harness",
+        desc: "Set both Fusion roles together",
+        fill: "/effort fusion "
+      },
+      {
+        key: "effort-planning",
+        label: "Planning role",
+        desc: "Planning and review effort",
+        fill: "/effort planning "
+      },
+      {
+        key: "effort-execution",
+        label: "Execution role",
+        desc: "Implementation and verification effort",
+        fill: "/effort execution "
+      },
+      ...effortItems("/effort", "harness")
+    ]);
   }
 
   const token = input.startsWith("/") && !/\s/.test(input) ? input.slice(1).toLowerCase() : "";
@@ -275,7 +377,7 @@ function fusionCodexModelLabel(value: FusionCodexModel) {
 }
 
 function fusionSettingsSummary(settings: FusionSettings) {
-  return `Opus ${fusionClaudeModelLabel(settings.model)} · Opus effort ${FUSION_EFFORT_LABELS[settings.claudeEffort]} · Codex ${fusionCodexModelLabel(settings.codexModel)} · Codex effort ${FUSION_EFFORT_LABELS[settings.codexEffort]}`;
+  return `Planning ${fusionClaudeModelLabel(settings.model)} · Planning effort ${FUSION_EFFORT_LABELS[settings.claudeEffort]} · Execution ${fusionCodexModelLabel(settings.codexModel)} · Execution effort ${FUSION_EFFORT_LABELS[settings.codexEffort]}`;
 }
 
 interface ToolMeta {
@@ -283,6 +385,8 @@ interface ToolMeta {
   isCodexBridge: boolean;
   isGoalTool: boolean;
 }
+
+type FusionActiveRole = "claude" | "codex";
 
 // Opus makes every tool call. Fusion bridge calls are plumbing; Codex's
 // user-facing voice is the concise result/status we derive from those calls.
@@ -296,6 +400,10 @@ function isCodexGoalTool(name: string): boolean {
 
 function isInternalActivity(kind: string): boolean {
   return ["delegate", "decision", "goal"].includes(kind);
+}
+
+function fusionRoleLabel(role: FusionActiveRole) {
+  return role === "codex" ? "Fusion - Codex" : "Fusion - Claude Code";
 }
 
 const baseName = (value: string) => value.split(/[\\/]/).filter(Boolean).pop() ?? value;
@@ -427,6 +535,7 @@ export default function FusionChatPane({
   const [busy, setBusy] = useState(false);
   const [waiting, setWaiting] = useState(false);
   const [interrupting, setInterrupting] = useState(false);
+  const [activeRole, setActiveRole] = useState<FusionActiveRole>("claude");
   const [slashIndex, setSlashIndex] = useState(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
@@ -460,6 +569,7 @@ export default function FusionChatPane({
     claudeEffort: fusionClaudeEffort,
     codexEffort: fusionCodexEffort
   });
+  const activeRoleLabel = fusionRoleLabel(activeRole);
   const inputIsSlashCommand = input.trim().startsWith("/");
   const canResumeClaude = session.resumeRef?.provider === "claude" && Boolean(session.resumeRef.id);
   const slashMenu = buildSlashMenu(input);
@@ -550,6 +660,7 @@ export default function FusionChatPane({
     );
     setExpanded(new Set());
     toolRoleRef.current.clear();
+    setActiveRole("claude");
     setWaitingState(false);
     setInterruptingState(false);
     setBusyState(false);
@@ -596,6 +707,9 @@ export default function FusionChatPane({
   useEffect(() => {
     const appendStreaming = (kind: "text" | "thinking", delta: string) =>
       setMessages((prev) => {
+        if (kind === "thinking" && !delta.trim()) {
+          return prev;
+        }
         // Append to the open bubble while it is the latest message, so a single
         // content block streams as ONE coherent paragraph (no mid-call shred).
         // A tool chip or a kind switch starts a fresh bubble — chronological,
@@ -641,6 +755,7 @@ export default function FusionChatPane({
           push({ role: "user", kind: "text", text: event.steer ? `Steer: ${event.text}` : event.text });
           break;
         case "turn-start":
+          setActiveRole("claude");
           setInterruptingState(false);
           setWaitingState(false);
           setBusyState(true);
@@ -665,9 +780,11 @@ export default function FusionChatPane({
           });
           break;
         case "assistant-text":
+          setActiveRole("claude");
           appendStreaming("text", event.delta);
           break;
         case "thinking":
+          setActiveRole("claude");
           appendStreaming("thinking", event.delta);
           break;
         case "tool-call": {
@@ -675,6 +792,7 @@ export default function FusionChatPane({
           // result can be voiced as concise Codex implementation status.
           const isCodexBridge = isCodexBridgeTool(event.name);
           const isGoalTool = isCodexGoalTool(event.name);
+          setActiveRole(isCodexBridge ? "codex" : "claude");
           toolRoleRef.current.set(event.toolId, {
             name: event.name,
             isCodexBridge,
@@ -692,6 +810,7 @@ export default function FusionChatPane({
         case "tool-result": {
           const meta = toolRoleRef.current.get(event.toolId);
           const fromCodex = meta?.isCodexBridge ?? false;
+          setActiveRole(fromCodex ? "codex" : "claude");
           const parsed = meta ? parseJsonObject(event.text ?? "") : null;
           const needsDecision =
             fromCodex &&
@@ -720,6 +839,7 @@ export default function FusionChatPane({
           break;
         }
         case "activity":
+          setActiveRole(event.role === "codex" ? "codex" : "claude");
           push({
             role: event.role,
             kind: "activity",
@@ -732,6 +852,7 @@ export default function FusionChatPane({
           // closed on `result`/`closed` so the whole answer stays together.
           break;
         case "result":
+          setActiveRole("claude");
           stopStreaming();
           setInterruptingState(false);
           setBusyState(false);
@@ -742,6 +863,7 @@ export default function FusionChatPane({
           }
           break;
         case "interrupted":
+          setActiveRole("claude");
           stopStreaming();
           setInterruptingState(false);
           setWaitingState(false);
@@ -757,6 +879,7 @@ export default function FusionChatPane({
           break;
         }
         case "error":
+          setActiveRole("claude");
           stopStreaming();
           setInterruptingState(false);
           setWaitingState(false);
@@ -765,6 +888,7 @@ export default function FusionChatPane({
           emitAttention("failed", "error", event.message);
           break;
         case "closed":
+          setActiveRole("claude");
           stopStreaming();
           setInterruptingState(false);
           if (event.code != null && event.code !== 0) {
@@ -839,6 +963,76 @@ export default function FusionChatPane({
     push({ role: "opus", kind: "activity", text });
   }
 
+  function applySpeedPreset(scope: FusionRoleScope, preset: FusionSpeedPreset) {
+    if (scope === "planning") {
+      if (preset === "fast") {
+        applySettings({ model: "sonnet", claudeEffort: "low" }, "planning speed");
+      } else if (preset === "balanced") {
+        applySettings({ model: "opus", claudeEffort: "auto" }, "planning speed");
+      } else if (preset === "deep") {
+        applySettings({ model: "opus", claudeEffort: "high" }, "planning speed");
+      } else {
+        applySettings({ model: "opus", claudeEffort: "max" }, "planning speed");
+      }
+      return;
+    }
+
+    if (scope === "execution") {
+      if (preset === "fast") {
+        applySettings({ codexEffort: "low" }, "execution speed");
+      } else if (preset === "balanced") {
+        applySettings({ codexEffort: "auto" }, "execution speed");
+      } else if (preset === "deep") {
+        applySettings({ codexEffort: "high" }, "execution speed");
+      } else {
+        applySettings({ codexEffort: "max" }, "execution speed");
+      }
+      return;
+    }
+
+    if (preset === "fast") {
+      applySettings({ model: "sonnet", claudeEffort: "low", codexEffort: "low" }, "Fusion speed");
+    } else if (preset === "balanced") {
+      applySettings({ model: "opus", claudeEffort: "auto", codexEffort: "auto" }, "Fusion speed");
+    } else if (preset === "deep") {
+      applySettings({ model: "opus", claudeEffort: "high", codexEffort: "high" }, "Fusion speed");
+    } else {
+      applySettings({ model: "opus", claudeEffort: "max", codexEffort: "max" }, "Fusion speed");
+    }
+  }
+
+  function applyEffortLevel(scope: FusionRoleScope, effort: FusionEffort) {
+    if (scope === "planning") {
+      applySettings({ claudeEffort: effort }, "planning effort");
+      return;
+    }
+
+    if (scope === "execution") {
+      applySettings({ codexEffort: effort }, "execution effort");
+      return;
+    }
+
+    applySettings({ claudeEffort: effort, codexEffort: effort }, "Fusion effort");
+  }
+
+  function normalizeRoleScope(value: string | undefined): FusionRoleScope {
+    const normalized = String(value || "").toLowerCase();
+    if (["planning", "planner", "claude", "opus"].includes(normalized)) {
+      return "planning";
+    }
+    if (["execution", "executor", "codex"].includes(normalized)) {
+      return "execution";
+    }
+    return "harness";
+  }
+
+  function normalizeSpeedPreset(value: string | undefined): FusionSpeedPreset | null {
+    const normalized = String(value || "").toLowerCase();
+    return FUSION_SPEED_VALUES.includes(normalized as FusionSpeedPreset)
+      ? (normalized as FusionSpeedPreset)
+      : null;
+  }
+
   function setInterruptStatus(text: string) {
     setMessages((prev) => {
       const last = prev[prev.length - 1];
@@ -872,7 +1066,7 @@ export default function FusionChatPane({
     if (normalized === "/help") {
       setInput("");
       pushCommandStatus(
-        "commands: /opus, /codex, /speed <fast|balanced|deep|max>, /claude <model>, /codex <model|auto>, /effort <level>, /models, /clear, /resume"
+        "commands: /speed, /effort, /models, /clear, /resume. Advanced: /opus, /codex, /claude <model>."
       );
       return true;
     }
@@ -905,7 +1099,7 @@ export default function FusionChatPane({
 
     if (normalized === "/fast") {
       setInput("");
-      applySettings({ model: "sonnet", claudeEffort: "low", codexEffort: "low" }, "speed");
+      applySpeedPreset("harness", "fast");
       return true;
     }
 
@@ -930,42 +1124,53 @@ export default function FusionChatPane({
 
     const opusSpeedMatch = normalized.match(/^\/opus\s+(?:speed\s+)?(fast|balanced|deep|max)$/);
     if (opusSpeedMatch) {
-      handleSlashCommand(`/speed ${opusSpeedMatch[1]}`);
+      handleSlashCommand(`/speed planning ${opusSpeedMatch[1]}`);
       return true;
     }
 
-    if (normalized === "/speed" || normalized === "/claude" || normalized === "/codex" || normalized === "/effort") {
+    if (normalized === "/speed opus") {
+      setInput("");
+      applySpeedPreset("harness", "balanced");
+      return true;
+    }
+
+    if (
+      normalized === "/speed" ||
+      normalized === "/speed fusion" ||
+      normalized === "/speed planning" ||
+      normalized === "/speed execution" ||
+      normalized === "/claude" ||
+      normalized === "/codex" ||
+      normalized === "/effort" ||
+      normalized === "/effort fusion" ||
+      normalized === "/effort planning" ||
+      normalized === "/effort execution"
+    ) {
       setInput(`${normalized} `);
       composerRef.current?.focus();
       return true;
     }
 
-    const speedMatch = raw.match(/^\/speed\s+(.+)$/i);
+    const speedMatch = raw.match(/^\/speed(?:\s+(fusion|harness|planning|planner|claude|opus|execution|executor|codex))?\s+(.+)$/i);
     if (speedMatch) {
-      const value = speedMatch[1].trim().toLowerCase();
-      if (value === "fast") {
+      const scope = normalizeRoleScope(speedMatch[1]);
+      const value = speedMatch[2].trim();
+      const preset = normalizeSpeedPreset(value);
+      if (preset) {
         setInput("");
-        applySettings({ model: "sonnet", claudeEffort: "low", codexEffort: "low" }, "speed");
+        applySpeedPreset(scope, preset);
         return true;
       }
-      if (value === "balanced" || value === "opus") {
+
+      if (scope === "harness" && value.toLowerCase() === "opus") {
         setInput("");
-        applySettings({ model: "opus", claudeEffort: "auto", codexEffort: "auto" }, "speed");
+        applySpeedPreset("harness", "balanced");
         return true;
       }
-      if (value === "deep") {
-        setInput("");
-        applySettings({ model: "opus", claudeEffort: "high", codexEffort: "high" }, "speed");
-        return true;
-      }
-      if (value === "max") {
-        setInput("");
-        applySettings({ model: "opus", claudeEffort: "max", codexEffort: "max" }, "speed");
-        return true;
-      }
+
       const nextModel = normalizeFusionModel(value);
       setInput("");
-      applySettings({ model: nextModel }, "speed");
+      applySettings({ model: nextModel }, "planning model");
       return true;
     }
 
@@ -984,6 +1189,13 @@ export default function FusionChatPane({
       return true;
     }
 
+    const codexSpeedMatch = normalized.match(/^\/codex\s+(?:speed\s+)?(fast|balanced|deep|max)$/);
+    if (codexSpeedMatch) {
+      setInput("");
+      applySpeedPreset("execution", codexSpeedMatch[1] as FusionSpeedPreset);
+      return true;
+    }
+
     const codexMatch = raw.match(/^\/(?:codex|model\s+codex)\s+(.+)$/i);
     if (codexMatch) {
       const nextModel = normalizeFusionCodexModel(codexMatch[1]);
@@ -992,19 +1204,16 @@ export default function FusionChatPane({
       return true;
     }
 
-    const effortMatch = normalized.match(/^\/effort\s+(auto|low|medium|high|xhigh|max)$/);
+    const effortMatch = normalized.match(/^\/effort(?:\s+(fusion|harness|planning|planner|claude|opus|execution|executor|codex))?\s+(auto|low|medium|high|xhigh|max)$/);
     if (effortMatch) {
       setInput("");
-      applySettings({
-        claudeEffort: effortMatch[1] as FusionEffort,
-        codexEffort: effortMatch[1] as FusionEffort
-      }, "effort");
+      applyEffortLevel(normalizeRoleScope(effortMatch[1]), effortMatch[2] as FusionEffort);
       return true;
     }
 
     if (normalized.startsWith("/effort ")) {
       setInput("");
-      pushCommandStatus("Unknown effort. Use /effort auto, low, medium, high, xhigh, or max.");
+      pushCommandStatus("Unknown effort. Use /effort, /effort planning, or /effort execution.");
       return true;
     }
 
@@ -1086,7 +1295,9 @@ export default function FusionChatPane({
           <GripVertical className="drag-grip" size={15} />
           <Sparkles size={15} />
           <span>{session.name}</span>
-          <span className="fusion-chip fusion-chip-opus" title={fusionSettingsLine}>Fusion</span>
+          <span className="fusion-chip fusion-chip-opus" title={fusionSettingsLine}>
+            {activeRoleLabel}
+          </span>
         </div>
         <div className="pane-status">
           <span className={`status-pill status-${busy ? "running" : waiting ? "waiting" : "idle"}`}>
@@ -1130,11 +1341,11 @@ export default function FusionChatPane({
             {verbose && (
               <>
                 <span className="fusion-setting">
-                  <span className="fusion-setting-key">Opus</span>
+                  <span className="fusion-setting-key">Planning</span>
                   {fusionModelLabel} / {FUSION_EFFORT_LABELS[fusionClaudeEffort]}
                 </span>
                 <span className="fusion-setting">
-                  <span className="fusion-setting-key">Codex</span>
+                  <span className="fusion-setting-key">Execution</span>
                   {codexModelLabel} / {FUSION_EFFORT_LABELS[fusionCodexEffort]}
                 </span>
               </>
@@ -1164,7 +1375,16 @@ export default function FusionChatPane({
             </div>
           ) : (
             visibleMessages.map((m) => {
-              const author = verbose ? (m.role === "opus" ? "Opus" : "Codex") : "Fusion";
+              if (m.kind === "thinking" && !m.text.trim()) {
+                return null;
+              }
+
+              const author =
+                m.role === "opus"
+                  ? "Fusion - Claude Code"
+                  : m.role === "codex"
+                    ? "Fusion - Codex"
+                    : "Fusion";
               const className = clsx("chat-msg", `chat-${m.role}`, `chat-kind-${m.kind}`);
 
               // Collapsible detail: a tool result or Opus's thinking. Streams open
@@ -1229,10 +1449,10 @@ export default function FusionChatPane({
             })
           )}
           {busy && (
-            <div className="chat-msg chat-opus chat-kind-status">
+            <div className={clsx("chat-msg", activeRole === "codex" ? "chat-codex" : "chat-opus", "chat-kind-status")}>
               <span className="chat-gutter chat-spinner">✻</span>
               <div className="chat-body">
-                <span className="chat-text muted">Working…</span>
+                <span className="chat-text muted">{activeRoleLabel} working…</span>
               </div>
             </div>
           )}

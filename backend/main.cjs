@@ -1010,7 +1010,11 @@ ipcMain.handle("fusion-chat:interrupt", (_event, payload) => {
 
 ipcMain.handle("fusion-chat:stop", (_event, payload) => {
   if (payload?.id) {
+    getAgentTelemetry()
+      .stopFusionSession(payload.id)
+      .catch(() => {});
     sendToFusionChatHost({ type: "stop", payload: { id: payload.id } });
+    getAgentTelemetry().releaseSession(payload.id);
   }
   return true;
 });

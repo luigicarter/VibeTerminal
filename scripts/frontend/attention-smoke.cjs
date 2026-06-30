@@ -339,6 +339,11 @@ assert(
     fusionChatPaneSource.includes('normalized === "/resume"') &&
     fusionChatPaneSource.includes('normalized === "/fast"') &&
     fusionChatPaneSource.includes('normalized === "/speed"') &&
+    fusionChatPaneSource.includes('"Fusion Speed / Planning"') &&
+    fusionChatPaneSource.includes('"Fusion Speed / Execution"') &&
+    fusionChatPaneSource.includes('"Fusion Effort / Whole Harness"') &&
+    fusionChatPaneSource.includes('"Fusion Effort / Planning"') &&
+    fusionChatPaneSource.includes('"Fusion Effort / Execution"') &&
     fusionChatPaneSource.includes('raw.match(/^\\/(?:claude|model\\s+claude)\\s+(.+)$/i)') &&
     fusionChatPaneSource.includes('raw.match(/^\\/(?:codex|model\\s+codex)\\s+(.+)$/i)') &&
     fusionChatPaneSource.includes("pendingRestartNoticeRef") &&
@@ -356,10 +361,19 @@ assert(
     fusionChatPaneSource.includes(
       'fusionCodexEffort === "auto" ? {} : { codexEffort: fusionCodexEffort }'
     ) &&
-    fusionChatPaneSource.includes('command: prefix === "/effort" ? `${prefix} ${effort}`') &&
-    fusionChatPaneSource.includes("claudeEffort: opusEffortMatch[1] as FusionEffort") &&
-    fusionChatPaneSource.includes("codexEffort: codexEffortMatch[1] as FusionEffort"),
-  "FusionChatPane should drive model/codex/split-effort via the slash-command palette + read-only summary"
+    fusionChatPaneSource.includes("function applySpeedPreset") &&
+    fusionChatPaneSource.includes("function applyEffortLevel") &&
+    fusionChatPaneSource.includes("function normalizeRoleScope") &&
+    fusionChatPaneSource.includes("function normalizeSpeedPreset") &&
+    fusionChatPaneSource.includes('applySpeedPreset("execution"') &&
+    fusionChatPaneSource.includes('applyEffortLevel(normalizeRoleScope(effortMatch[1]), effortMatch[2] as FusionEffort)') &&
+    fusionChatPaneSource.includes('"Planning role"') &&
+    fusionChatPaneSource.includes('"Execution role"') &&
+    fusionChatPaneSource.includes('"Fusion - Claude Code"') &&
+    fusionChatPaneSource.includes('"Fusion - Codex"') &&
+    fusionChatPaneSource.includes("activeRoleLabel") &&
+    fusionChatPaneSource.includes('m.kind === "thinking" && !m.text.trim()'),
+  "FusionChatPane should drive harness-specific speed/effort submenus, role labels, and empty-thinking suppression"
 );
 assert(
   fusionChatPaneSource.includes("function normalizeFusionModel(value: unknown)") &&
