@@ -41,8 +41,8 @@ assert(
     appSource.includes("threadRef: undefined") &&
     appSource.includes('nextLaunchMode: "new"') &&
     appSource.includes("onFreshLaunchFallback={(patch) =>") &&
-    appSource.includes("onFreshLaunchFallback={() =>"),
-  "missing resume fallback should clear stale thread refs and relaunch as a fresh discoverable session"
+    !appSource.includes("onFreshLaunchFallback={() =>"),
+  "non-Fusion missing resume fallback should clear stale thread refs; Fusion must not silently relaunch fresh"
 );
 
 assert(

@@ -406,6 +406,10 @@ assert(
     fusionChatPaneSource.includes('raw.match(/^\\/(?:codex|model\\s+codex)\\s+(.+)$/i)') &&
     fusionChatPaneSource.includes("pendingRestartNoticeRef") &&
     fusionChatPaneSource.includes("const FUSION_SLASH_COMMANDS") &&
+    fusionChatPaneSource.includes("const FREE_TEXT_SLASH_COMMANDS") &&
+    fusionChatPaneSource.includes(".filter((cmd) => cmd.takesArg)") &&
+    fusionChatPaneSource.includes("function hasFreeTextSlashArgument") &&
+    fusionChatPaneSource.includes("if (hasFreeTextSlashArgument(input))") &&
     fusionChatPaneSource.includes('className="fusion-slash-menu"') &&
     fusionChatPaneSource.includes('className="fusion-settings-summary"') &&
     fusionChatPaneSource.includes("const startPayload =") &&
@@ -443,12 +447,17 @@ assert(
   "FusionChatPane should normalize restored settings, show stderr, and allow slash commands while busy"
 );
 assert(
-  fusionChatPaneSource.includes("window.vibe?.agentThreads?.findLatest") &&
-    fusionChatPaneSource.includes('provider: "claude"') &&
-    fusionChatPaneSource.includes("confirmId: launchResumeId") &&
-    fusionChatPaneSource.includes('result?.status === "missing"') &&
-    fusionChatPaneSource.includes("onFreshLaunchFallbackRef.current()"),
-  "Fusion resume should preflight stale Claude resume ids and self-heal to a fresh launch"
+  !fusionChatPaneSource.includes("window.vibe?.agentThreads?.findLatest") &&
+    !fusionChatPaneSource.includes("confirmId: launchResumeId") &&
+    !fusionChatPaneSource.includes("onFreshLaunchFallbackRef.current()") &&
+    fusionChatPaneSource.includes("const resumeThreadRef =") &&
+    fusionChatPaneSource.includes("const resumeId = resumeThreadRef?.id;") &&
+    fusionChatPaneSource.includes("claudeSessionIdRef.current = event.sessionId") &&
+    fusionChatPaneSource.includes("claudeThreadTitleRef.current = titleFromFirstPrompt(event.text)") &&
+    fusionChatPaneSource.includes("function publishClaudeThreadRef()") &&
+    fusionChatPaneSource.includes("session.threadRef?.title ||") &&
+    !fusionChatPaneSource.includes("session.resumeRef?.title ||"),
+  "Fusion resume should use captured Claude session/title refs without discovery or silent fresh fallback"
 );
 assert(
     fusionChatPaneSource.includes("window.vibe.fusionChat.interrupt(session.id)") &&

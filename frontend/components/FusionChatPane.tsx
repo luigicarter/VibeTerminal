@@ -48,7 +48,6 @@ interface FusionChatPaneProps {
   onSelect: () => void;
   onMaximize: () => void;
   onThreadRefChange: (threadRef: AgentThreadRef) => void;
-  onFreshLaunchFallback: () => void;
   onStatusChange: (status: SessionStatus) => void;
   onAttention: (attention: AgentAttentionEvent) => void;
 }
@@ -196,6 +195,12 @@ const FUSION_SLASH_COMMANDS: SlashCommand[] = [
   { name: "/help", desc: "List the available commands" }
 ];
 
+const FREE_TEXT_SLASH_COMMANDS = [
+  ...FUSION_SLASH_COMMANDS.filter((cmd) => cmd.takesArg).map((cmd) => cmd.name),
+  "/model claude",
+  "/model codex"
+];
+
 type FusionRoleScope = "harness" | "planning" | "execution";
 type FusionSpeedPreset = "fast" | "balanced" | "deep" | "max";
 
@@ -275,8 +280,20 @@ const filterSlashItems = (items: SlashMenuItem[], query: string) => {
   );
 };
 
+function hasFreeTextSlashArgument(input: string) {
+  const normalized = input.trim().replace(/\s+/g, " ").toLowerCase();
+  return FREE_TEXT_SLASH_COMMANDS.some((command) =>
+    normalized.startsWith(command + " ") &&
+      normalized.slice(command.length).trim().length > 0
+  );
+}
+
 function buildSlashMenu(input: string): SlashMenu {
   if (!input.startsWith("/")) {
+    return { title: "", items: [] };
+  }
+
+  if (hasFreeTextSlashArgument(input)) {
     return { title: "", items: [] };
   }
 
@@ -654,6 +671,10 @@ function previewToolResult(text: string): string {
   return line ? clip(line, 120) : "(no output)";
 }
 
+function titleFromFirstPrompt(text: string) {
+  return clip(text.replace(/\s+/g, " ").trim(), 80);
+}
+
 export default function FusionChatPane({
   session,
   profile,
@@ -669,7 +690,6 @@ export default function FusionChatPane({
   onSelect,
   onMaximize,
   onThreadRefChange,
-  onFreshLaunchFallback,
   onStatusChange,
   onAttention
 }: FusionChatPaneProps) {
@@ -691,11 +711,12 @@ export default function FusionChatPane({
   const waitingForDecisionRef = useRef(false);
   const decisionTurnLabelsRef = useRef(new Map<string, string>());
   const onThreadRefChangeRef = useRef(onThreadRefChange);
-  const onFreshLaunchFallbackRef = useRef(onFreshLaunchFallback);
   const onStatusChangeRef = useRef(onStatusChange);
   const onAttentionRef = useRef(onAttention);
   const busyRef = useRef(false);
   const toolRoleRef = useRef(new Map<string, ToolMeta>());
+  const claudeSessionIdRef = useRef("");
+  const claudeThreadTitleRef = useRef("");
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [verbose, setVerbose] = useState(false);
   const toggleExpanded = (key: string) =>
@@ -731,10 +752,9 @@ export default function FusionChatPane({
 
   useEffect(() => {
     onThreadRefChangeRef.current = onThreadRefChange;
-    onFreshLaunchFallbackRef.current = onFreshLaunchFallback;
     onStatusChangeRef.current = onStatusChange;
     onAttentionRef.current = onAttention;
-  }, [onThreadRefChange, onFreshLaunchFallback, onStatusChange, onAttention]);
+  }, [onThreadRefChange, onStatusChange, onAttention]);
 
   // Auto-grow the composer up to a cap, then scroll — so multi-line prompts are
   // fully visible instead of being clipped to a single scrolling row.
@@ -791,6 +811,24 @@ export default function FusionChatPane({
     });
   };
 
+  function publishClaudeThreadRef() {
+    const claudeSessionId = claudeSessionIdRef.current;
+    if (!claudeSessionId) {
+      return;
+    }
+
+    onThreadRefChangeRef.current({
+      provider: "claude",
+      id: claudeSessionId,
+      title:
+        claudeThreadTitleRef.current ||
+        session.threadRef?.title ||
+        session.name,
+      createdAt: session.threadRef?.createdAt ?? session.createdAt,
+      updatedAt: Date.now()
+    });
+  }
+
   // (Re)attach to the headless Claude process on launch. The host owns the
   // process lifetime; unmounting this view should not stop a Fusion pane when
   // the user switches projects.
@@ -822,10 +860,15 @@ export default function FusionChatPane({
     setFailed(false);
     onStatusChangeRef.current("starting");
     let cancelled = false;
-    const resumeId =
-      session.nextLaunchMode === "resume" && session.threadRef?.provider === "claude"
-        ? session.threadRef.id
+    const resumeThreadRef =
+      session.nextLaunchMode === "resume" &&
+      session.threadRef?.provider === "claude" &&
+      session.threadRef.id
+        ? session.threadRef
         : undefined;
+    claudeSessionIdRef.current = resumeThreadRef?.id ?? "";
+    claudeThreadTitleRef.current = resumeThreadRef?.title ?? "";
+    const resumeId = resumeThreadRef?.id;
     const fusionChat = window.vibe?.fusionChat;
     if (!fusionChat?.start) {
       const message = "Fusion unavailable: fusion chat bridge is not available.";
@@ -835,34 +878,6 @@ export default function FusionChatPane({
     }
     const startTimer = window.setTimeout(() => {
       void (async () => {
-        let launchResumeId = resumeId;
-        if (launchResumeId && window.vibe?.agentThreads?.findLatest) {
-          try {
-            const result = await window.vibe.agentThreads.findLatest({
-              provider: "claude",
-              cwd: session.cwd,
-              confirmId: launchResumeId
-            });
-
-            if (cancelled) {
-              return;
-            }
-
-            if (result?.status === "missing") {
-              launchResumeId = undefined;
-              onFreshLaunchFallbackRef.current();
-              push({
-                role: "opus",
-                kind: "activity",
-                text: "Saved Fusion Claude chat is no longer available. Started fresh."
-              });
-            }
-          } catch {
-            // Confirmation unavailable: keep the resume request rather than risk a
-            // duplicate Claude session id for a transcript that may still exist.
-          }
-        }
-
         if (cancelled) {
           return;
         }
@@ -870,7 +885,7 @@ export default function FusionChatPane({
         const startPayload = {
           id: session.id,
           cwd: session.cwd,
-          resumeId: launchResumeId,
+          resumeId,
           model: fusionModel,
           ...(fusionCodexModel === "auto" ? {} : { codexModel: fusionCodexModel }),
           ...(fusionClaudeEffort === "auto" ? {} : { effort: fusionClaudeEffort }),
@@ -933,15 +948,19 @@ export default function FusionChatPane({
       }
       switch (event.type) {
         case "session":
-          onThreadRefChangeRef.current({
-            provider: "claude",
-            id: event.sessionId,
-            title: session.name,
-            createdAt: session.createdAt,
-            updatedAt: Date.now()
-          });
+          claudeSessionIdRef.current = event.sessionId;
+          publishClaudeThreadRef();
           break;
         case "user":
+          if (
+            !event.steer &&
+            !decisionTurnLabelsRef.current.has(event.text) &&
+            !claudeThreadTitleRef.current
+          ) {
+            claudeThreadTitleRef.current = titleFromFirstPrompt(event.text);
+            publishClaudeThreadRef();
+          }
+
           if (decisionTurnLabelsRef.current.has(event.text)) {
             const label = decisionTurnLabelsRef.current.get(event.text) || "Decision sent.";
             decisionTurnLabelsRef.current.delete(event.text);

@@ -2468,12 +2468,6 @@ export default function App() {
                     onThreadRefChange={(threadRef) =>
                       updateSessionThreadRef(activeScope, session.id, threadRef)
                     }
-                    onFreshLaunchFallback={() =>
-                      resetSessionThreadForFreshLaunch(activeScope, session.id, {
-                        threadLookupStatus: "idle",
-                        threadLookupMessage: undefined
-                      })
-                    }
                     onStatusChange={(status) =>
                       updateSessionStatus(activeScope, session.id, status)
                     }
