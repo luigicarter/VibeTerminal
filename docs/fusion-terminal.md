@@ -29,12 +29,13 @@ delegate), not a static rule table.
 ## Roles and completion authority
 
 The two models have hard, enforced scopes. Opus is launched with **read-only
-tools** (`Read`/`Grep`/`Glob`) plus the Codex bridge tools, and its edit/shell
-tools (`Edit`/`Write`/`MultiEdit`/`NotebookEdit`/`Bash`) are **hard-blocked via
-`--disallowedTools`**. So every file change, command, and test run is structurally
-forced through `codex_implement` — Opus physically cannot edit the repo itself.
-This is what makes "Fusion actually uses Codex to write code" a guarantee rather
-than a suggestion. Codex remains the hard verifier for bugs and goal completion.
+tools** (`Read`/`Grep`/`Glob`) plus the Codex bridge tools. The allowlist excludes
+direct editing and shell tools, with a reduced `--disallowedTools` fallback for
+stable mutation/shell names (`Edit`/`Write`/`Bash`). So every file change,
+command, and test run is structurally forced through `codex_implement` — Opus
+physically cannot edit the repo itself. This is what makes "Fusion actually uses
+Codex to write code" a guarantee rather than a suggestion. Codex remains the hard
+verifier for bugs and goal completion.
 (Reversible: re-add the tools to the `allowedTools` string in `main.cjs` and drop
 `disallowedTools` to restore the old "Claude may edit" behavior, e.g. behind a
 future per-pane mode toggle.)
@@ -144,7 +145,8 @@ rejects native goals, the goal tools return
 
 `app-server` sends approvals/questions as **server→client JSON-RPC requests**
 (`ExecCommandApprovalParams`, `ApplyPatchApprovalParams`,
-`FileChangeRequestApprovalParams`, `ToolRequestUserInputParams`, …). Rather than
+`FileChangeRequestApprovalParams`, `PermissionsRequestApprovalParams`,
+`ToolRequestUserInputParams`, …). Rather than
 auto-deciding or depending on MCP sampling (unverified in Claude Code), the adapter
 is **turn-based**:
 
@@ -205,23 +207,27 @@ Not an adversarial boundary (a single-user OS can't isolate the user from
 themselves, and doesn't need to). Four independent reasons a normal pane stays
 vanilla:
 
-1. **Config** — the shim appends `--strict-mcp-config --mcp-config … --add-dir …`
-   only when the pane's env carries `VIBE_TERMINAL_FUSION_*`, set only for Fusion
-   panes (mirrors the existing per-pane `--settings` injection).
-2. **Per-pane only** — the shim injects `--mcp-config` (and the architect prompt)
-   for Fusion panes only, so non-Fusion claude panes never see the `codex_*`
-   tools. The config is non-strict, so the user's own MCP servers still load in a
-   Fusion pane.
-3. **Transport** — no inbound socket is opened. The adapter owns a child
-   `codex app-server` process over stdio, so only that adapter can speak to that
-   Codex instance.
-4. **Bundled binary** — reached only by the Fusion adapter, by absolute path in
+1. **Headless launch** — Fusion panes do not use the PTY shim path. The main
+   process starts a per-pane headless Claude chat host with an explicit
+   `--mcp-config`, architect prompt file, model, effort, allowlist, and denylist.
+2. **Per-pane adapter** — each Fusion pane gets its own MCP config pointing at
+   one adapter process. Non-Fusion Claude panes never see the `codex_*` tools.
+3. **Per-pane app-server** — each adapter owns exactly one child
+   `codex app-server` over stdio, so execution state, approvals, goals, and turn
+   ids cannot cross between Fusion terminals.
+4. **Local control channel** — adapter steering/interrupt endpoints bind to
+   `127.0.0.1` and register with telemetry under that pane's session id. Main
+   posts steering only to the URL stored for the matching pane id, and the
+   adapter rejects mismatched session ids.
+5. **Bundled binary** — reached only by the Fusion adapter, by absolute path in
    packaged builds; manual `codex` stays global everywhere.
 
 ## UI — unified role-tagged log
 
-One interleaved transcript, each line badged by role/model (Opus one accent, Codex
-another), approvals inline. **Not** split-lanes, **not** a side rail.
+One interleaved transcript, with internal bridge/tool mechanics hidden behind the
+Details toggle by default. The visible flow should read as one Fusion agent with
+concise implementation status, not a wall of raw goal/tool JSON. **Not**
+split-lanes, **not** a side rail.
 
 ```
 ┌─ Fusion terminal ───────────────────────────────────┐
@@ -234,9 +240,10 @@ another), approvals inline. **Not** split-lanes, **not** a side rail.
 └───────────────────────────────────────────────────────┘
 ```
 
-The renderer maps app-server item events (streamed via the telemetry callback
-server) to Codex-tagged lines; Opus's own turns are the Claude-tagged lines;
-parked approvals render as inline decision cards.
+The renderer maps meaningful app-server item events (streamed via the telemetry
+callback server) to concise implementation lines; Opus's own turns are the
+Claude-tagged prose; goal updates, bridge calls, and raw tool results are kept as
+Details-only diagnostics.
 
 ## Milestones
 
@@ -273,7 +280,7 @@ parked approvals render as inline decision cards.
 |---|---|
 | `fusion` flag on a session | `frontend/types.ts` (`AgentSession`) |
 | Fusion launcher + unified role-tagged log + badges | `frontend/` (launcher, `components/TerminalPane.tsx`, `styles.css`) |
-| Per-pane fusion env + shim flag injection + adapter source | `backend/agentTelemetry.cjs` |
+| Per-pane Fusion files + adapter-control registry | `backend/agentTelemetry.cjs` |
 | Fusion chat host + adapter-owned app-server lifecycle | `backend/fusionChatHost.cjs` + `backend/fusion-adapter.cjs` |
 | Codex-bin resolve and packaged fail-closed behavior | `backend/main.cjs` |
 | Generated protocol bindings (pinned) | `vendor/codex-appserver/<version>/` |

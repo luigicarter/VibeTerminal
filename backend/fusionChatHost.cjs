@@ -8,7 +8,7 @@
 //
 // Control IN (from main, one JSON per line on stdin):
 //   {type:"start",  payload:{id, cwd, mcpConfig, systemPromptFile, model, effort?, allowedTools, disallowedTools?, resumeId?}}
-//   {type:"input",  payload:{id, text}}
+//   {type:"input",  payload:{id, text, steer?}}
 //   {type:"interrupt", payload:{id}}   ← abort the CURRENT turn, keep the session
 //   {type:"stop",   payload:{id}}       ← kill the whole session process
 //   {type:"shutdown"}
@@ -250,6 +250,7 @@ function runHost() {
   function input(payload) {
     const id = payload?.id;
     const text = String(payload?.text ?? "");
+    const steer = Boolean(payload?.steer);
     const state = sessions.get(id);
     if (!state) {
       emitDirectSessionEvent(id, {
@@ -268,9 +269,17 @@ function runHost() {
     }
 
     try {
-      emitSessionEvent(id, state, { type: "user", text });
+      emitSessionEvent(id, state, { type: "user", text, steer });
+      const content = steer
+        ? [
+            "STEER CURRENT FUSION TURN:",
+            text,
+            "",
+            "Incorporate this direction into the active response. If Codex is currently running, use this as steering for the next Codex decision, correction, or follow-up delegation instead of treating it as a separate new request."
+          ].join("\n")
+        : text;
       state.child.stdin.write(
-        JSON.stringify({ type: "user", message: { role: "user", content: text } }) + "\n"
+        JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n"
       );
     } catch (error) {
       emitSessionEvent(id, state, {

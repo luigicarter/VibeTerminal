@@ -956,13 +956,14 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
         ? payloadCodexModel
         : process.env.VIBE_FUSION_CODEX_MODEL;
     const fusionCodexModel = normalizeFusionCodexModel(rawCodexModel);
-    const fusionEffort = normalizeFusionEffort(payload.effort);
+    const fusionClaudeEffort = normalizeFusionEffort(payload.effort);
+    const fusionCodexEffort = normalizeFusionEffort(payload.codexEffort ?? payload.effort);
     const telemetry = getAgentTelemetry();
     const files = await telemetry.prepareFusionFiles(id, {
       cwd: payload.cwd,
       codexBin,
       codexModel: fusionCodexModel,
-      codexEffort: fusionEffort
+      codexEffort: fusionCodexEffort
     });
     if (!files) {
       return { ok: false, error: "could not prepare Fusion files" };
@@ -975,14 +976,16 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
         mcpConfig: files.mcpConfig,
         systemPromptFile: files.systemPromptFile,
         model: fusionModel,
-        effort: fusionEffort,
+        effort: fusionClaudeEffort,
         // Opus orchestrates: it may READ/search to plan and review, and drives
         // Codex through the bridge tools — but it has NO direct edit/shell tools,
         // so every code change goes through codex_implement (the point of Fusion).
         allowedTools:
           "mcp__fusion-codex__codex_implement,mcp__fusion-codex__codex_respond,mcp__fusion-codex__codex_goal_set,mcp__fusion-codex__codex_goal_get,mcp__fusion-codex__codex_goal_clear,Read,Glob,Grep",
-        // Belt-and-suspenders: hard-block mutation/shell regardless of permission mode.
-        disallowedTools: "Edit,MultiEdit,Write,NotebookEdit,Bash",
+        // Belt-and-suspenders: hard-block stable mutation/shell tool names
+        // regardless of permission mode. The allowlist above is the primary
+        // control; avoid optional tool names that some Claude builds warn about.
+        disallowedTools: "Edit,Write,Bash",
         resumeId: payload.resumeId || undefined
       }
     });
@@ -997,6 +1000,9 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
 
 ipcMain.handle("fusion-chat:interrupt", (_event, payload) => {
   if (payload?.id) {
+    getAgentTelemetry()
+      .interruptFusionSession(payload.id)
+      .catch(() => {});
     sendToFusionChatHost({ type: "interrupt", payload: { id: payload.id } });
   }
   return true;
@@ -1014,6 +1020,25 @@ ipcMain.on("fusion-chat:input", (_event, payload) => {
     const sent = sendToFusionChatHost({
       type: "input",
       payload: { id: payload.id, text: payload.text }
+    });
+    if (!sent) {
+      broadcastFusionChatEvent({
+        id: payload.id,
+        type: "error",
+        message: "Fusion chat host is not running. Restart Fusion to continue."
+      });
+    }
+  }
+});
+
+ipcMain.on("fusion-chat:steer", (_event, payload) => {
+  if (payload?.id && typeof payload.text === "string") {
+    getAgentTelemetry()
+      .steerFusionSession(payload.id, payload.text)
+      .catch(() => {});
+    const sent = sendToFusionChatHost({
+      type: "input",
+      payload: { id: payload.id, text: payload.text, steer: true }
     });
     if (!sent) {
       broadcastFusionChatEvent({

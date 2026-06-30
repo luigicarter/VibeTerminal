@@ -108,14 +108,29 @@ async function main() {
       "Fusion allowlist should expose the codex_goal_* native-goal tools so the prompt's goal instructions work"
     );
     assert(
-      /disallowedTools:\s*"Edit,MultiEdit,Write,NotebookEdit,Bash"/.test(mainSource),
-      "Fusion Claude must hard-block direct edit/shell tools via --disallowedTools"
+      /disallowedTools:\s*"Edit,Write,Bash"/.test(mainSource),
+      "Fusion Claude must hard-block stable direct edit/shell tools via --disallowedTools"
+    );
+    assert(
+      !/disallowedTools:\s*"[^"]*(?:MultiEdit|NotebookEdit)/.test(mainSource),
+      "Fusion disallowedTools should avoid optional tool names that some Claude builds warn about"
     );
     assert(
       /normalizeFusionModel/.test(mainSource) &&
         /normalizeFusionCodexModel/.test(mainSource) &&
         /normalizeFusionEffort/.test(mainSource),
       "Fusion launch should normalize Claude model, Codex model, and effort controls"
+    );
+    assert(
+      /payload\.codexEffort \?\? payload\.effort/.test(mainSource) &&
+        /codexEffort: fusionCodexEffort/.test(mainSource) &&
+        /effort: fusionClaudeEffort/.test(mainSource),
+      "Fusion launch should pass independent Claude and Codex effort settings"
+    );
+    assert(
+      /steerFusionSession\(payload\.id, payload\.text\)/.test(mainSource) &&
+        /interruptFusionSession\(payload\.id\)/.test(mainSource),
+      "Fusion main process should route steer/interrupt to the terminal-scoped adapter control path"
     );
     assert(
       /payloadCodexModel/.test(mainSource) &&

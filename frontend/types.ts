@@ -25,7 +25,8 @@ export type FusionEffort = "auto" | "low" | "medium" | "high" | "xhigh" | "max";
 export interface FusionSettings {
   model: FusionClaudeModel;
   codexModel: FusionCodexModel;
-  effort: FusionEffort;
+  claudeEffort: FusionEffort;
+  codexEffort: FusionEffort;
 }
 
 export type AgentThreadLookupStatus =
@@ -140,6 +141,10 @@ export interface AgentSession {
   fusion?: boolean;
   fusionModel?: FusionClaudeModel;
   fusionCodexModel?: FusionCodexModel;
+  fusionClaudeEffort?: FusionEffort;
+  fusionCodexEffort?: FusionEffort;
+  // Legacy shared effort field from older saved Fusion panes. New panes store
+  // separate Opus/Codex effort values but keep this readable for migration.
   fusionEffort?: FusionEffort;
   cwd: string;
   createdAt: number;
@@ -281,7 +286,7 @@ export interface FusionLogEntry {
 // host-error (broadcast to all windows).
 export type FusionChatEvent =
   | { id: string; type: "session"; sessionId: string }
-  | { id: string; type: "user"; text: string }
+  | { id: string; type: "user"; text: string; steer?: boolean }
   | { id: string; type: "turn-start" }
   | { id: string; type: "assistant-text"; delta: string }
   | { id: string; type: "thinking"; delta: string }
@@ -308,4 +313,7 @@ export interface ChatMessage {
   toolId?: string;
   ts: number;
   streaming?: boolean;
+  // Internal Fusion bridge/tool mechanics. Hidden in the normal transcript and
+  // shown only when the Details toggle is enabled.
+  internal?: boolean;
 }

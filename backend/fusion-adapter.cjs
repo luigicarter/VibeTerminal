@@ -36,10 +36,12 @@ const REQUEST_TIMEOUT_MS = Number(process.env.VIBE_FUSION_RPC_TIMEOUT_MS || 3000
 const PARKED_REQUEST_METHODS = new Set([
   "item/commandExecution/requestApproval",
   "item/fileChange/requestApproval",
+  "item/permissions/requestApproval",
   "item/tool/requestUserInput",
   "execCommandApproval",
   "applyPatchApproval"
 ]);
+const CONTROL_MAX_BYTES = 16 * 1024;
 const VERDICT_MARKER = "FUSION_VERDICT_JSON:";
 const NEXT_ACTIONS = new Set(["continue", "ask_human", "done"]);
 const GOAL_STATUSES = new Set([
@@ -228,11 +230,10 @@ function logErr(message) {
 }
 
 // ---- read-only activity relay to the renderer (best-effort) ----
-function relay(entry) {
+function postTelemetry(entry, timeout = 1000) {
   if (!CALLBACK_URL || !TOKEN || !SESSION_ID) return;
   try {
     const body = JSON.stringify({
-      type: "fusion.activity",
       sessionId: SESSION_ID,
       ts: Date.now(),
       ...entry
@@ -258,6 +259,13 @@ function relay(entry) {
   }
 }
 
+function relay(entry) {
+  postTelemetry({
+    type: "fusion.activity",
+    ...entry
+  });
+}
+
 // ---- south side: this pane's OWN Codex app-server (stdio JSON-RPC) ----
 let codexChild = null;
 let codexReady = null;
@@ -267,10 +275,134 @@ let threadId = null;
 const pendingReq = new Map(); // app-server request id -> {resolve, reject}
 const parked = new Map(); // pendingId -> {rpcId, method, params}
 let currentTurn = null; // {resolve} — fulfilled by turn/completed | turn/failed | an approval request
+let activeTurnId = null;
 let turnSummary = [];
 let turnFiles = [];
 let currentGoal = null;
 let goalFeatureAvailable = null;
+let controlServer = null;
+
+function extractTurnId(value) {
+  if (!value || typeof value !== "object") return null;
+  const candidates = [
+    value.turnId,
+    value.turn_id,
+    value.id,
+    value.turn && value.turn.id,
+    value.turn && value.turn.turnId,
+    value.turn && value.turn.turn_id
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return null;
+}
+
+async function codexSteer(text) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) {
+    return { status: "skipped", reason: "empty_steer" };
+  }
+  if (!threadId || !activeTurnId) {
+    return { status: "skipped", reason: "no_active_codex_turn" };
+  }
+  try {
+    const response = await rpc("turn/steer", {
+      threadId,
+      expectedTurnId: activeTurnId,
+      input: [
+        {
+          type: "text",
+          text: `Live user steering for this active Fusion turn:\n${trimmed}`,
+          text_elements: []
+        }
+      ]
+    });
+    const nextTurnId = extractTurnId(response);
+    if (nextTurnId) {
+      activeTurnId = nextTurnId;
+    }
+    relay({ role: "codex", kind: "steer", text: "live steering accepted" });
+    return { status: "accepted", turnId: activeTurnId };
+  } catch (error) {
+    const message = error?.message || "Codex steer failed";
+    relay({ role: "codex", kind: "steer", text: `live steering failed: ${message}` });
+    return { status: "failed", error: message };
+  }
+}
+
+async function codexInterrupt() {
+  if (!threadId || !activeTurnId) {
+    return { status: "skipped", reason: "no_active_codex_turn" };
+  }
+  try {
+    const turnId = activeTurnId;
+    await rpc("turn/interrupt", { threadId, turnId });
+    relay({ role: "codex", kind: "interrupt", text: "active Codex turn interrupted" });
+    activeTurnId = null;
+    return { status: "accepted", turnId };
+  } catch (error) {
+    const message = error?.message || "Codex interrupt failed";
+    relay({ role: "codex", kind: "interrupt", text: `interrupt failed: ${message}` });
+    return { status: "failed", error: message };
+  }
+}
+
+function startControlServer() {
+  if (controlServer || !TOKEN || !SESSION_ID) return;
+  controlServer = http.createServer((request, response) => {
+    if (request.method !== "POST" || !["/steer", "/interrupt"].includes(request.url)) {
+      response.writeHead(404);
+      response.end();
+      return;
+    }
+    if (request.headers["x-vibe-telemetry-token"] !== TOKEN) {
+      response.writeHead(403);
+      response.end();
+      return;
+    }
+
+    let body = "";
+    request.on("data", (chunk) => {
+      body += chunk.toString("utf8");
+      if (body.length > CONTROL_MAX_BYTES) {
+        request.destroy();
+      }
+    });
+    request.on("end", async () => {
+      try {
+        const parsed = JSON.parse(body || "{}");
+        if (parsed.sessionId !== SESSION_ID) {
+          response.writeHead(409, { "content-type": "application/json" });
+          response.end(JSON.stringify({ status: "failed", error: "session_mismatch" }));
+          return;
+        }
+        const result =
+          request.url === "/interrupt"
+            ? await codexInterrupt()
+            : await codexSteer(parsed.text);
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify(result));
+      } catch (error) {
+        response.writeHead(400, { "content-type": "application/json" });
+        response.end(JSON.stringify({ status: "failed", error: error?.message || "bad request" }));
+      }
+    });
+  });
+  controlServer.on("error", (error) => logErr(`control server error: ${error.message}`));
+  controlServer.listen(0, "127.0.0.1", () => {
+    const address = controlServer.address();
+    if (!address || typeof address === "string") return;
+    postTelemetry({
+      type: "fusion.adapterReady",
+      controlUrl: `http://127.0.0.1:${address.port}`
+    });
+  });
+}
+
+startControlServer();
 
 // Spawn this pane's dedicated `codex app-server` (stdio transport). The boot
 // smoke proved newline-delimited JSON-RPC over stdio works on every platform.
@@ -420,6 +552,7 @@ function resolveTurn(result) {
   if (!currentTurn) return;
   const turn = currentTurn;
   currentTurn = null;
+  activeTurnId = null;
   turn.resolve(result);
 }
 
@@ -446,13 +579,18 @@ function handleNotification(msg) {
   if (method === "thread/goal/updated" && params.goal) {
     goalFeatureAvailable = true;
     currentGoal = normalizeGoal(params.goal);
-    relay({ role: "codex", kind: "goal", text: goalText(currentGoal) });
     return;
   }
   if (method === "thread/goal/cleared") {
     goalFeatureAvailable = true;
     currentGoal = null;
-    relay({ role: "codex", kind: "goal", text: "Codex goal cleared." });
+    return;
+  }
+  if (method === "turn/started") {
+    const nextTurnId = extractTurnId(params);
+    if (nextTurnId) {
+      activeTurnId = nextTurnId;
+    }
     return;
   }
   if (method === "item/completed" && params.item) {
@@ -513,15 +651,6 @@ function handleServerRequest(msg) {
     sendServerResult(msg.id, { action: "decline", content: null, _meta: null });
     return;
   }
-  if (method === "item/permissions/requestApproval") {
-    relay({
-      role: "codex",
-      kind: "permission",
-      text: "Codex requested extra permissions; Fusion denied the request."
-    });
-    sendServerResult(msg.id, { permissions: {}, scope: "turn" });
-    return;
-  }
   if (method === "item/tool/call") {
     sendServerResult(msg.id, {
       success: false,
@@ -560,6 +689,7 @@ function handleServerRequest(msg) {
 
 function approvalKind(method) {
   if (method.endsWith("requestUserInput")) return "question";
+  if (method.endsWith("permissions/requestApproval")) return "permission";
   if (method.toLowerCase().includes("filechange") || method === "applyPatchApproval")
     return "patch";
   return "command";
@@ -574,6 +704,11 @@ function approvalDetail(method, params) {
   }
   if (approvalKind(method) === "patch") {
     return params.reason || "Codex wants to apply a patch.";
+  }
+  if (approvalKind(method) === "permission") {
+    const requested = params.permissions ? JSON.stringify(params.permissions) : "extra permissions";
+    const reason = params.reason ? ` — ${params.reason}` : "";
+    return `Codex needs ${requested}${reason}`;
   }
   const commandActions = Array.isArray(params.commandActions)
     ? params.commandActions.map((action) => action.command || action.type || "command").join(", ")
@@ -658,7 +793,6 @@ async function codexGoalSet(options = {}) {
     const response = await rpc("thread/goal/set", params);
     goalFeatureAvailable = true;
     currentGoal = normalizeGoal(response && response.goal);
-    relay({ role: "codex", kind: "goal", text: goalText(currentGoal) });
     return { status: "ok", goal: currentGoal };
   } catch (error) {
     return goalsUnavailableResult(error);
@@ -683,7 +817,6 @@ async function codexGoalClear() {
     const response = await rpc("thread/goal/clear", { threadId });
     goalFeatureAvailable = true;
     currentGoal = null;
-    relay({ role: "codex", kind: "goal", text: "Codex goal cleared." });
     return { status: "ok", cleared: Boolean(response && response.cleared) };
   } catch (error) {
     return goalsUnavailableResult(error);
@@ -728,9 +861,14 @@ async function codexImplement(task) {
     approvalsReviewer: "user"
   };
   if (EFFORT) params.effort = EFFORT;
-  rpc("turn/start", params).catch((error) =>
-    resolveTurn({ status: "failed", error: error.message })
-  );
+  rpc("turn/start", params)
+    .then((response) => {
+      const nextTurnId = extractTurnId(response);
+      if (nextTurnId) {
+        activeTurnId = nextTurnId;
+      }
+    })
+    .catch((error) => resolveTurn({ status: "failed", error: error.message }));
   const result = await done;
   const withGoal = await syncGoalAfterTurn(result);
   if (goalSetup.status === "failed" && withGoal.status === "completed") {
@@ -756,6 +894,13 @@ function buildDecisionResult(method, params, decision, note) {
       cancel: "abort"
     };
     return { decision: map[decision] || "denied" };
+  }
+  if (method.endsWith("permissions/requestApproval")) {
+    const accepted = decision === "accept" || decision === "acceptForSession";
+    return {
+      permissions: accepted ? params.permissions || {} : {},
+      scope: decision === "acceptForSession" ? "session" : "turn"
+    };
   }
   // v2 item/.../requestApproval decisions.
   const allowed = ["accept", "acceptForSession", "decline", "cancel"];

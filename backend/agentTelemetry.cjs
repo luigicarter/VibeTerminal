@@ -274,14 +274,6 @@ function windowsPowerShellShimSource(provider) {
     "  $notifyValue = \"notify=['powershell','-NoProfile','-ExecutionPolicy','Bypass','-File','$($env:VIBE_TERMINAL_NOTIFY_PROGRAM)','agent.completed']\"",
     "  $ProviderArgs = @($ProviderArgs) + @('-c', $notifyValue)",
     "}",
-    "# Fusion panes: run claude as the Opus architect with the Codex MCP bridge + delegation prompt.",
-    "if ($Provider -eq 'claude' -and -not [string]::IsNullOrEmpty($env:VIBE_TERMINAL_FUSION_MCP)) {",
-    "  $ProviderArgs = @($ProviderArgs) + @('--mcp-config', $env:VIBE_TERMINAL_FUSION_MCP, '--model', 'opus')",
-    "  if (-not [string]::IsNullOrEmpty($env:VIBE_TERMINAL_FUSION_PROMPT_FILE)) {",
-    "    $ProviderArgs = @($ProviderArgs) + @('--append-system-prompt-file', $env:VIBE_TERMINAL_FUSION_PROMPT_FILE)",
-    "  }",
-    "}",
-    "",
     "$env:Path = $env:VIBE_TERMINAL_ORIGINAL_PATH",
     "$ExitCode = 0",
     "$global:LASTEXITCODE = $null",
@@ -503,23 +495,6 @@ function powershellCommand() {
       "-c",
       "notify=['" + process.env.VIBE_TERMINAL_NOTIFY_PROGRAM + "','agent.completed']"
     ]);
-  }
-
-  // Fusion panes: run claude as the Opus architect, wire the per-pane Codex MCP
-  // adapter (--mcp-config), and inject the delegation system prompt.
-  if (provider === "claude" && process.env.VIBE_TERMINAL_FUSION_MCP) {
-    args = args.concat([
-      "--mcp-config",
-      process.env.VIBE_TERMINAL_FUSION_MCP,
-      "--model",
-      "opus"
-    ]);
-    if (process.env.VIBE_TERMINAL_FUSION_PROMPT_FILE) {
-      args = args.concat([
-        "--append-system-prompt-file",
-        process.env.VIBE_TERMINAL_FUSION_PROMPT_FILE
-      ]);
-    }
   }
 
   const isWindowsCommandScript =
@@ -965,14 +940,13 @@ function buildFusionSystemPrompt() {
     "and goal-completion verifier.",
     "",
     "## Tooling (read this first)",
-    "You have READ-ONLY tools — **Read, Grep, Glob** — plus the Codex bridge",
-    "tools (`codex_implement`, `codex_respond`, `codex_goal_*`). You do **NOT**",
-    "have Edit, Write, MultiEdit, or a shell, and those tools are hard-blocked.",
-    "Therefore EVERY file change, command, and test run MUST go through",
-    "**codex_implement** — there is no path where you edit the repo yourself.",
-    "Investigate and review with Read/Grep/Glob; implement only by delegating to",
-    "Codex. If a request needs any code change, your first substantive action is a",
-    "codex_implement call, not an attempt to edit.",
+    "You have READ-ONLY tools for investigation — **Read, Grep, Glob** — plus the",
+    "Codex bridge tools. The tool allowlist does not expose direct editing or",
+    "shell execution to you. Therefore EVERY file change, command, and test run",
+    "MUST go through **codex_implement** — there is no path where you edit the",
+    "repo yourself. Investigate and review with Read/Grep/Glob; implement only",
+    "by delegating to Codex. If a request needs any code change, your first",
+    "substantive action is a codex_implement call, not an attempt to edit.",
     "",
     "## Your scope",
     "- Architecture and design decisions.",
@@ -1034,6 +1008,13 @@ function buildFusionSystemPrompt() {
     "`Codex verifier override:` followed by the reason in the transcript.",
     "You cannot edit the repo yourself, so there are never unverified Claude edits",
     "to reconcile — always let Codex's verifier verdict gate completion.",
+    "",
+    "## User-facing style",
+    "Present yourself as one Fusion agent. Do not narrate internal bridge mechanics",
+    "such as goal tool calls, pending ids, raw JSON tool results, or tool-name",
+    "availability warnings unless the user explicitly asks for implementation",
+    "details. Summarize delegated work in human terms: what you are checking, what",
+    "changed, what passed, and what still needs a decision.",
     ""
   ].join("\n");
 }
@@ -1259,6 +1240,7 @@ function createAgentTelemetryManager(options = {}) {
   // created) without disturbing the user's own hooks.
   const cursorHookFiles = new Map();
   const sessions = new Map();
+  const fusionAdapterControls = new Map();
   let server = null;
   let callbackUrl = null;
 
@@ -1322,7 +1304,28 @@ function createAgentTelemetryManager(options = {}) {
               return;
             }
 
-            if (event.type === "fusion.activity") {
+            if (event.type === "fusion.adapterReady") {
+              const normalizedSessionId = normalizeSessionId(event.sessionId);
+              let controlUrl = null;
+              try {
+                const parsedUrl = new URL(String(event.controlUrl || ""));
+                if (
+                  parsedUrl.protocol === "http:" &&
+                  parsedUrl.hostname === "127.0.0.1" &&
+                  parsedUrl.port
+                ) {
+                  parsedUrl.pathname = parsedUrl.pathname.replace(/\/+$/, "");
+                  parsedUrl.search = "";
+                  parsedUrl.hash = "";
+                  controlUrl = parsedUrl.toString().replace(/\/$/, "");
+                }
+              } catch {
+                controlUrl = null;
+              }
+              if (normalizedSessionId && controlUrl) {
+                fusionAdapterControls.set(normalizedSessionId, controlUrl);
+              }
+            } else if (event.type === "fusion.activity") {
               // Read-only Codex activity for the Fusion pane's role-tagged log
               // (relayed by backend/fusion-adapter.cjs). Not an attention signal.
               emit({
@@ -1473,11 +1476,83 @@ function createAgentTelemetryManager(options = {}) {
       return;
     }
 
+    fusionAdapterControls.delete(normalizedSessionId);
     const session = sessions.get(normalizedSessionId);
     sessions.delete(normalizedSessionId);
     if (session) {
       safeRemoveDir(session.dir, runDir);
     }
+  }
+
+  function postFusionAdapterControl(sessionId, pathName, payload = {}) {
+    const normalizedSessionId = normalizeSessionId(sessionId);
+    if (!normalizedSessionId) {
+      return Promise.resolve({ status: "skipped", reason: "invalid_session" });
+    }
+    const controlUrl = fusionAdapterControls.get(normalizedSessionId);
+    if (!controlUrl) {
+      return Promise.resolve({ status: "skipped", reason: "adapter_not_ready" });
+    }
+    return new Promise((resolve) => {
+      let url;
+      try {
+        url = new URL(`${controlUrl}${pathName}`);
+        if (url.protocol !== "http:" || url.hostname !== "127.0.0.1") {
+          resolve({ status: "skipped", reason: "invalid_adapter_url" });
+          return;
+        }
+      } catch (error) {
+        resolve({ status: "skipped", reason: error.message });
+        return;
+      }
+
+      const body = JSON.stringify({
+        sessionId: normalizedSessionId,
+        ...payload
+      });
+      const request = http.request(
+        {
+          hostname: url.hostname,
+          port: url.port,
+          path: url.pathname,
+          method: "POST",
+          timeout: 1000,
+          headers: {
+            "content-type": "application/json",
+            "content-length": Buffer.byteLength(body),
+            "x-vibe-telemetry-token": token
+          }
+        },
+        (response) => {
+          let responseBody = "";
+          response.on("data", (chunk) => {
+            responseBody += chunk.toString("utf8");
+          });
+          response.on("end", () => {
+            try {
+              const parsed = JSON.parse(responseBody || "{}");
+              resolve(parsed && typeof parsed === "object" ? parsed : { status: "ok" });
+            } catch {
+              resolve({ status: response.statusCode && response.statusCode >= 400 ? "failed" : "ok" });
+            }
+          });
+        }
+      );
+      request.on("error", (error) => resolve({ status: "failed", error: error.message }));
+      request.on("timeout", () => {
+        request.destroy();
+        resolve({ status: "failed", error: "adapter control timed out" });
+      });
+      request.end(body);
+    });
+  }
+
+  function steerFusionSession(sessionId, text) {
+    return postFusionAdapterControl(sessionId, "/steer", { text });
+  }
+
+  function interruptFusionSession(sessionId) {
+    return postFusionAdapterControl(sessionId, "/interrupt");
   }
 
   // Cursor has no per-invocation hook flag, so its hooks are registered in the
@@ -1577,6 +1652,8 @@ function createAgentTelemetryManager(options = {}) {
     prepareFusionFiles,
     ready,
     releaseSession,
+    steerFusionSession,
+    interruptFusionSession,
     runDir,
     runId,
     token

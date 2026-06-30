@@ -112,8 +112,20 @@ function main() {
             const source = fs.readFileSync(adapterPath, "utf8");
             assert(source.includes('notify("initialized")'), "adapter does not send initialized notification");
             assert(source.includes("PARKED_REQUEST_METHODS"), "adapter does not allowlist parked request methods");
+            assert(
+              source.includes('"item/permissions/requestApproval"') &&
+                source.includes('method.endsWith("permissions/requestApproval")'),
+              "adapter should park Codex permission approval requests instead of auto-denying them"
+            );
             assert(source.includes('method === "currentTime/read"'), "adapter does not handle currentTime/read");
             assert(source.includes("unsupportedServerRequest"), "adapter does not fail unsupported server requests explicitly");
+            assert(
+              source.includes('rpc("turn/steer"') &&
+                source.includes('rpc("turn/interrupt"') &&
+                source.includes("activeTurnId") &&
+                source.includes("fusion.adapterReady"),
+              "adapter should expose terminal-scoped direct Codex steer/interrupt control"
+            );
             assert(source.includes("goalReached"), "adapter does not return the structured verifier fields");
             assert(
               source.includes('config: { "features.goals": true }'),

@@ -462,7 +462,9 @@ function createSession(
     fusion: isFusion || undefined,
     fusionModel: isFusion ? DEFAULT_FUSION_CLAUDE_MODEL : undefined,
     fusionCodexModel: isFusion ? DEFAULT_FUSION_CODEX_MODEL : undefined,
-    fusionEffort: isFusion ? "auto" : undefined,
+    fusionClaudeEffort: isFusion ? "auto" : undefined,
+    fusionCodexEffort: isFusion ? "auto" : undefined,
+    fusionEffort: undefined,
     command: profile.command,
     cwd,
     createdAt: Date.now(),
@@ -553,8 +555,14 @@ function restoreSession(session: AgentSession): AgentSession {
     fusionCodexModel: isFusion
       ? normalizeFusionCodexModel(session.fusionCodexModel)
       : session.fusionCodexModel,
+    fusionClaudeEffort: isFusion
+      ? normalizeFusionEffort(session.fusionClaudeEffort ?? session.fusionEffort)
+      : session.fusionClaudeEffort,
+    fusionCodexEffort: isFusion
+      ? normalizeFusionEffort(session.fusionCodexEffort ?? session.fusionEffort)
+      : session.fusionCodexEffort,
     fusionEffort: isFusion
-      ? normalizeFusionEffort(session.fusionEffort)
+      ? undefined
       : session.fusionEffort,
     threadLookupStartedAt: undefined,
     threadLookupStatus: "idle",
@@ -1455,12 +1463,15 @@ export default function App() {
           const canResume = !item.fusion && canResumeSessionThread(item);
           const fusionModel = normalizeFusionModel(settings.model);
           const fusionCodexModel = normalizeFusionCodexModel(settings.codexModel);
-          const fusionEffort = normalizeFusionEffort(settings.effort);
+          const fusionClaudeEffort = normalizeFusionEffort(settings.claudeEffort);
+          const fusionCodexEffort = normalizeFusionEffort(settings.codexEffort);
           return {
             ...item,
             fusionModel,
             fusionCodexModel,
-            fusionEffort,
+            fusionClaudeEffort,
+            fusionCodexEffort,
+            fusionEffort: undefined,
             ...(item.fusion
               ? {
                   threadRef: undefined,

@@ -28,7 +28,8 @@ assert(
     appSource.includes("threadRef: isFusion") &&
     appSource.includes("normalizeFusionModel(session.fusionModel)") &&
     appSource.includes("normalizeFusionCodexModel(session.fusionCodexModel)") &&
-    appSource.includes("normalizeFusionEffort(session.fusionEffort)"),
+    appSource.includes("normalizeFusionEffort(session.fusionClaudeEffort ?? session.fusionEffort)") &&
+    appSource.includes("normalizeFusionEffort(session.fusionCodexEffort ?? session.fusionEffort)"),
   "workspace restore should skip corrupt saved entries and normalize Fusion settings"
 );
 

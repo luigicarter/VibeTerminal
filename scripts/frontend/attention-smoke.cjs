@@ -338,8 +338,10 @@ assert(
   fusionChatPaneSource.includes('normalized === "/clear"') &&
     fusionChatPaneSource.includes('normalized === "/resume"') &&
     fusionChatPaneSource.includes('normalized === "/fast"') &&
+    fusionChatPaneSource.includes('normalized === "/speed"') &&
     fusionChatPaneSource.includes('raw.match(/^\\/(?:claude|model\\s+claude)\\s+(.+)$/i)') &&
     fusionChatPaneSource.includes('raw.match(/^\\/(?:codex|model\\s+codex)\\s+(.+)$/i)') &&
+    fusionChatPaneSource.includes("pendingRestartNoticeRef") &&
     fusionChatPaneSource.includes("const FUSION_SLASH_COMMANDS") &&
     fusionChatPaneSource.includes('className="fusion-slash-menu"') &&
     fusionChatPaneSource.includes('className="fusion-settings-summary"') &&
@@ -349,9 +351,15 @@ assert(
       'fusionCodexModel === "auto" ? {} : { codexModel: fusionCodexModel }'
     ) &&
     fusionChatPaneSource.includes(
-      'fusionEffort === "auto" ? {} : { effort: fusionEffort }'
-    ),
-  "FusionChatPane should drive model/codex/effort via the slash-command palette + read-only summary"
+      'fusionClaudeEffort === "auto" ? {} : { effort: fusionClaudeEffort }'
+    ) &&
+    fusionChatPaneSource.includes(
+      'fusionCodexEffort === "auto" ? {} : { codexEffort: fusionCodexEffort }'
+    ) &&
+    fusionChatPaneSource.includes('command: prefix === "/effort" ? `${prefix} ${effort}`') &&
+    fusionChatPaneSource.includes("claudeEffort: opusEffortMatch[1] as FusionEffort") &&
+    fusionChatPaneSource.includes("codexEffort: codexEffortMatch[1] as FusionEffort"),
+  "FusionChatPane should drive model/codex/split-effort via the slash-command palette + read-only summary"
 );
 assert(
   fusionChatPaneSource.includes("function normalizeFusionModel(value: unknown)") &&
@@ -360,26 +368,51 @@ assert(
   "FusionChatPane should normalize restored settings, show stderr, and allow slash commands while busy"
 );
 assert(
-  fusionChatPaneSource.includes("window.vibe.fusionChat.interrupt(session.id)") &&
-    fusionChatPaneSource.includes('className="fusion-stop"') &&
+    fusionChatPaneSource.includes("window.vibe.fusionChat.interrupt(session.id)") &&
+    fusionChatPaneSource.includes("window.vibe.fusionChat.steer(session.id, text)") &&
+    !fusionChatPaneSource.includes('className="fusion-stop"') &&
+    !fusionChatPaneSource.includes("Stop the current turn") &&
+    fusionChatPaneSource.includes("Steer current turn") &&
     fusionChatPaneSource.includes('e.key === "Escape" && busy') &&
+    fusionChatPaneSource.includes('e.key === "Enter" && !e.shiftKey') &&
     fusionChatPaneSource.includes('case "interrupted"') &&
     fusionChatPaneSource.includes('window.addEventListener("keydown", handleWindowKeyDown)') &&
     fusionChatPaneSource.includes("isSelected") &&
     appSource.includes("isSelected={session.id === selectedSessionId}"),
-  "FusionChatPane should let the selected pane interrupt the running turn (Stop button + textarea/window Esc)"
+  "FusionChatPane should interrupt with Escape and submit prompt/steer with Enter, without a composer stop button"
 );
 assert(
-  fusionChatPaneSource.includes("composerRef") &&
+    fusionChatPaneSource.includes("useLayoutEffect") &&
+    fusionChatPaneSource.includes("composerRef") &&
     fusionChatPaneSource.includes("el.scrollHeight") &&
-    fusionChatPaneSource.includes("FUSION_COMPOSER_MAX_PX"),
-  "FusionChatPane composer should auto-grow with content instead of clipping to one line"
+    fusionChatPaneSource.includes("FUSION_COMPOSER_MAX_PX") &&
+    fusionChatPaneSource.includes("ResizeObserver"),
+  "FusionChatPane composer should size before first paint and auto-grow with content"
+);
+assert(
+  fusionChatPaneSource.includes("waitingForDecisionRef") &&
+    fusionChatPaneSource.includes("setWaitingState(true)") &&
+    fusionChatPaneSource.includes('status-${busy ? "running" : waiting ? "waiting" : "idle"}') &&
+    fusionChatPaneSource.includes("Answer Fusion to continue"),
+  "FusionChatPane should render a distinct waiting state for approval/question turns"
 );
 
 const stylesSource = fs.readFileSync(stylesPath, "utf8");
 assert(
   stylesSource.includes("grid-template-columns: 9px 18px minmax(0, 1fr) 16px;"),
   "workspace row grid should reserve dot space before the folder icon"
+);
+assert(
+  stylesSource.includes(".fusion-input-area") &&
+    stylesSource.includes(".fusion-slash-panel") &&
+    stylesSource.includes(".fusion-slash-title") &&
+    !stylesSource.includes(".fusion-stop"),
+  "Fusion slash-command palette should render as a submenu panel under the input"
+);
+assert(
+  stylesSource.includes(".fusion-composer textarea") &&
+    stylesSource.includes("height: 20px;"),
+  "Fusion composer textarea should have a stable one-line initial height"
 );
 
 console.log("attention smoke passed");

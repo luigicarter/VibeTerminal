@@ -88,7 +88,7 @@ function main() {
     model: "opus",
     effort: "high",
     allowedTools: "mcp__fusion-codex__codex_implement",
-    disallowedTools: "Edit,MultiEdit,Write,NotebookEdit,Bash",
+    disallowedTools: "Edit,Write,Bash",
     resumeId: "resume & id"
   });
   assert(!claudeArgs.includes("claude"), "claude executable should not be part of argv args");
@@ -104,7 +104,7 @@ function main() {
   assert(claudeArgs.includes("--effort") && claudeArgs.includes("high"), "effort should be passed to claude");
   assert(
     claudeArgs.includes("--disallowedTools") &&
-      claudeArgs.includes("Edit,MultiEdit,Write,NotebookEdit,Bash"),
+      claudeArgs.includes("Edit,Write,Bash"),
     "direct edit/shell tool denylist should be passed to claude"
   );
 
@@ -132,6 +132,8 @@ function main() {
       hostSource.includes("emitDirectSessionEvent(id,") &&
       hostSource.includes("sessions.get(id) !== state") &&
       hostSource.includes("Fusion process is closed. Restart Fusion to continue.") &&
+      hostSource.includes("STEER CURRENT FUSION TURN:") &&
+      hostSource.includes("payload?.steer") &&
       hostSource.includes('if (effort) args.push("--effort", String(effort));') &&
       hostSource.includes('else if (msg.type === "activity") activity(msg.payload)'),
     "Fusion host should replay live sessions, reject stale process events, and report closed-session input"
