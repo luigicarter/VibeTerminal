@@ -619,9 +619,15 @@ function killCodex() {
 }
 
 function failAll(error) {
+  const message = error && error.message ? error.message : String(error || "Fusion execution failed");
   for (const { reject } of pendingReq.values()) reject(error);
   pendingReq.clear();
-  resolveTurn({ status: "failed", error: error.message });
+  parked.clear();
+  activeTurnId = null;
+  latchedTurnResult = null;
+  currentGoal = null;
+  goalFeatureAvailable = null;
+  resolveTurn({ status: "failed", error: message });
 }
 
 // Send a request and await its response. South wire matches the boot smoke:
@@ -683,6 +689,29 @@ function drainLatchedTurnResult() {
   latchedTurnResult = null;
   resolveTurn(result);
   return true;
+}
+
+function pendingDecisionFor(pendingId, item) {
+  if (!pendingId || !item) return null;
+  return {
+    pendingId,
+    kind: approvalKind(item.method),
+    detail: approvalDetail(item.method, item.params)
+  };
+}
+
+function pendingDecisionResult(extra = {}) {
+  const decisions = Array.from(parked.entries())
+    .map(([pendingId, item]) => pendingDecisionFor(pendingId, item))
+    .filter(Boolean);
+  if (decisions.length === 0) return null;
+  const [first] = decisions;
+  return {
+    status: "needs_decision",
+    ...first,
+    pendingDecisions: decisions,
+    ...extra
+  };
 }
 
 function turnErrorMessage(turn, fallback = "Fusion turn failed") {
@@ -1138,10 +1167,16 @@ async function syncGoalAfterTurn(result) {
 
 async function codexImplement(task) {
   if (!task) return { status: "error", error: "task is required" };
-  if (currentTurn || parked.size > 0) {
+  const pendingDecision = pendingDecisionResult({
+    warning: "Fusion already has a pending decision; answer it before starting another task."
+  });
+  if (pendingDecision) {
+    return pendingDecision;
+  }
+  if (currentTurn) {
     return {
       status: "error",
-      error: "Fusion turn already in progress; answer the pending approval before starting another task."
+      error: "Fusion turn already in progress; wait for the active turn to surface a decision or complete."
     };
   }
   await ensureThread();
@@ -1200,19 +1235,41 @@ function buildDecisionResult(method, params, decision, note) {
 
 async function codexRespond(pendingId, decision, note) {
   if (currentTurn) {
-    return { status: "error", error: "Fusion is already waiting for a turn result." };
+    return (
+      pendingDecisionResult({
+        warning: "Fusion is still processing the active turn result."
+      }) || { status: "error", error: "Fusion is already waiting for a turn result." }
+    );
   }
   const item = parked.get(pendingId);
-  if (!item) return { status: "error", error: `unknown pendingId: ${pendingId}` };
+  if (!item) {
+    return (
+      pendingDecisionResult({
+        warning: `unknown pendingId: ${pendingId}`
+      }) || { status: "error", error: `unknown pendingId: ${pendingId}` }
+    );
+  }
   parked.delete(pendingId);
   const result = buildDecisionResult(item.method, item.params, decision, note);
   relay({ role: "opus", kind: "decision", text: `${decision}` });
-  const done = awaitTurn();
+  const hasQueuedDecision = parked.size > 0;
+  const done = hasQueuedDecision ? null : awaitTurn();
   if (!codexSend({ id: item.rpcId, result })) {
-    resolveTurn({ status: "failed", error: "Fusion execution channel is not writable" });
-  } else {
-    drainLatchedTurnResult();
+    if (done) {
+      resolveTurn({ status: "failed", error: "Fusion execution channel is not writable" });
+    }
+    return { status: "failed", error: "Fusion execution channel is not writable" };
   }
+  const nextDecision = pendingDecisionResult({
+    warning: "Fusion has another pending decision queued."
+  });
+  if (nextDecision) {
+    return nextDecision;
+  }
+  if (!done) {
+    return { status: "failed", error: "Fusion pending decision state changed before it could be surfaced." };
+  }
+  drainLatchedTurnResult();
   const resumed = await done;
   return syncGoalAfterTurn(resumed);
 }

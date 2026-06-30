@@ -589,6 +589,7 @@ function callAdapterToolWithFakeAppServer() {
 
 function writeApprovalResumeFakeAppServer(dir, options = {}) {
   const completeBeforeApprovalResponse = options.completeBeforeApprovalResponse === true;
+  const queueSecondApproval = options.queueSecondApproval === true;
   const summaryText = JSON.stringify(
     `Approval resumed and completed.\n${VERDICT_MARKER} {"goalReached":true,"bugsFound":[],"missingRequirements":[],"nextAction":"done","summary":"Approval resume completed."}`
   );
@@ -598,8 +599,12 @@ function writeApprovalResumeFakeAppServer(dir, options = {}) {
 const readline = require("readline");
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 const approvalRequestId = 900;
+const secondApprovalRequestId = 901;
 const summaryText = ${summaryText};
 const completeBeforeApprovalResponse = ${completeBeforeApprovalResponse ? "true" : "false"};
+const queueSecondApproval = ${queueSecondApproval ? "true" : "false"};
+const answeredApprovals = new Set();
+let completionSent = false;
 
 function send(msg) {
   process.stdout.write(JSON.stringify(msg) + "\\n");
@@ -658,15 +663,48 @@ function agentItem() {
 }
 
 function sendCompletion() {
+  if (completionSent) return;
+  completionSent = true;
   const command = commandItem();
   const agent = agentItem();
   send({
     method: "serverRequest/resolved",
     params: { threadId: "thread-1", turnId: "turn-1", itemId: "cmd-1", requestId: approvalRequestId }
   });
+  if (queueSecondApproval) {
+    send({
+      method: "serverRequest/resolved",
+      params: { threadId: "thread-1", turnId: "turn-1", itemId: "cmd-2", requestId: secondApprovalRequestId }
+    });
+  }
   send({ method: "item/completed", params: { threadId: "thread-1", turnId: "turn-1", item: command } });
   send({ method: "item/completed", params: { threadId: "thread-1", turnId: "turn-1", item: agent } });
   send({ method: "turn/completed", params: { threadId: "thread-1", turn: turn("completed", [command, agent]) } });
+}
+
+function sendApproval(id, itemId, command, reason) {
+  send({
+    id,
+    method: "item/commandExecution/requestApproval",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId,
+      startedAtMs: Date.now(),
+      approvalId: null,
+      environmentId: null,
+      reason,
+      command,
+      cwd: process.cwd(),
+      commandActions: [],
+      availableDecisions: ["accept", "acceptForSession", "decline", "cancel"]
+    }
+  });
+}
+
+function allApprovalsAnswered() {
+  return answeredApprovals.has(approvalRequestId) &&
+    (!queueSecondApproval || answeredApprovals.has(secondApprovalRequestId));
 }
 
 rl.on("line", (line) => {
@@ -687,32 +725,82 @@ rl.on("line", (line) => {
   if (msg.method === "turn/start") {
     send({ id: msg.id, result: { turn: turn("running") } });
     send({ method: "turn/started", params: { threadId: "thread-1", turn: turn("running") } });
-    send({
-      id: approvalRequestId,
-      method: "item/commandExecution/requestApproval",
-      params: {
-        threadId: "thread-1",
-        turnId: "turn-1",
-        itemId: "cmd-1",
-        startedAtMs: Date.now(),
-        approvalId: null,
-        environmentId: null,
-        reason: "read branch",
-        command: "git symbolic-ref --short HEAD",
-        cwd: process.cwd(),
-        commandActions: [],
-        availableDecisions: ["accept", "acceptForSession", "decline", "cancel"]
-      }
-    });
+    sendApproval(approvalRequestId, "cmd-1", "git symbolic-ref --short HEAD", "read branch");
+    if (queueSecondApproval) {
+      sendApproval(secondApprovalRequestId, "cmd-2", "git status --short", "read status");
+    }
     if (completeBeforeApprovalResponse) {
       sendCompletion();
     }
     return;
   }
-  if (msg.id === approvalRequestId && msg.result) {
-    if (!completeBeforeApprovalResponse) {
+  if ((msg.id === approvalRequestId || (queueSecondApproval && msg.id === secondApprovalRequestId)) && msg.result) {
+    answeredApprovals.add(msg.id);
+    if (!completeBeforeApprovalResponse && allApprovalsAnswered()) {
       sendCompletion();
     }
+    return;
+  }
+  if (msg.id !== undefined) send({ id: msg.id, result: {} });
+});
+`
+  );
+}
+
+function writeApprovalExitFakeAppServer(dir) {
+  fs.writeFileSync(
+    path.join(dir, "app-server"),
+    `
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+function send(msg) {
+  process.stdout.write(JSON.stringify(msg) + "\\n");
+}
+function goal(params = {}) {
+  return {
+    threadId: "thread-exit",
+    objective: params.objective || "do work",
+    status: params.status || "active",
+    tokenBudget: null,
+    tokensUsed: 0,
+    timeUsedSeconds: 0,
+    createdAt: 1,
+    updatedAt: 1
+  };
+}
+rl.on("line", (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+  if (msg.method === "initialize") {
+    send({ id: msg.id, result: {} });
+    return;
+  }
+  if (msg.method === "thread/start") {
+    send({ id: msg.id, result: { thread: { id: "thread-exit" } } });
+    return;
+  }
+  if (msg.method === "thread/goal/set") {
+    send({ id: msg.id, result: { goal: goal(msg.params || {}) } });
+    return;
+  }
+  if (msg.method === "turn/start") {
+    send({ id: msg.id, result: { turn: { id: "turn-exit", items: [], status: "running" } } });
+    send({ method: "turn/started", params: { threadId: "thread-exit", turn: { id: "turn-exit", items: [], status: "running" } } });
+    send({
+      id: 902,
+      method: "item/commandExecution/requestApproval",
+      params: {
+        threadId: "thread-exit",
+        turnId: "turn-exit",
+        itemId: "cmd-exit",
+        reason: "read status",
+        command: "git status --short",
+        cwd: process.cwd(),
+        commandActions: [],
+        availableDecisions: ["accept", "acceptForSession", "decline", "cancel"]
+      }
+    });
+    setTimeout(() => process.exit(0), 20);
     return;
   }
   if (msg.id !== undefined) send({ id: msg.id, result: {} });
@@ -724,6 +812,9 @@ rl.on("line", (line) => {
 function callAdapterApprovalResumeWithFakeAppServer(options = {}) {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-adapter-approval-"));
   writeApprovalResumeFakeAppServer(tempDir, options);
+  const exercisePendingRecovery = options.exercisePendingRecovery === true;
+  const queueSecondApproval = options.queueSecondApproval === true;
+  const finalRespondId = exercisePendingRecovery ? 5 : queueSecondApproval ? 4 : 3;
   const child = spawn(process.execPath, [adapterPath], {
     cwd: tempDir,
     stdio: ["pipe", "pipe", "pipe"],
@@ -741,7 +832,11 @@ function callAdapterApprovalResumeWithFakeAppServer(options = {}) {
 
   let buffer = "";
   let stderr = "";
-  let sentRespond = false;
+  let parkedPendingId = "";
+  let queuedPendingId = "";
+  let sentImplementProbe = false;
+  let sentWrongRespondProbe = false;
+  let sentFinalRespond = false;
   let finished = false;
 
   function cleanup() {
@@ -803,15 +898,42 @@ function callAdapterApprovalResumeWithFakeAppServer(options = {}) {
         if (!line) continue;
         const msg = JSON.parse(line);
         try {
-          if (msg.id === 2 && !sentRespond) {
+          if (msg.id === 2 && !parkedPendingId) {
             const parsed = JSON.parse(msg.result.content[0].text);
             assert(parsed.status === "needs_decision", `expected approval request, got ${msg.result.content[0].text}`);
             assert(parsed.pendingId, "approval result missing pendingId");
-            sentRespond = true;
+            parkedPendingId = parsed.pendingId;
+            if (exercisePendingRecovery) {
+              sentImplementProbe = true;
+              child.stdin.write(
+                `${JSON.stringify({
+                  jsonrpc: "2.0",
+                  id: 3,
+                  method: "tools/call",
+                  params: { name: "codex_implement", arguments: { task: "start unrelated work" } }
+                })}\n`
+              );
+              return;
+            }
+            if (queueSecondApproval) {
+              child.stdin.write(
+                `${JSON.stringify({
+                  jsonrpc: "2.0",
+                  id: 3,
+                  method: "tools/call",
+                  params: {
+                    name: "codex_respond",
+                    arguments: { pendingId: parsed.pendingId, decision: "accept" }
+                  }
+                })}\n`
+              );
+              return;
+            }
+            sentFinalRespond = true;
             child.stdin.write(
               `${JSON.stringify({
                 jsonrpc: "2.0",
-                id: 3,
+                id: finalRespondId,
                 method: "tools/call",
                 params: {
                   name: "codex_respond",
@@ -820,7 +942,90 @@ function callAdapterApprovalResumeWithFakeAppServer(options = {}) {
               })}\n`
             );
           }
-          if (msg.id === 3) {
+          if (queueSecondApproval && msg.id === 3) {
+            const text = msg.result.content[0].text;
+            const parsed = JSON.parse(text);
+            assert(parsed.status === "needs_decision", `queued approval should surface after first response: ${text}`);
+            assert(parsed.pendingId, `queued approval response missing pendingId: ${text}`);
+            assert(
+              parsed.pendingId !== parkedPendingId,
+              `queued approval should use the next pendingId: ${text}`
+            );
+            assert(
+              /another pending decision queued/i.test(String(parsed.warning || "")),
+              `queued approval should explain that another decision is waiting: ${text}`
+            );
+            queuedPendingId = parsed.pendingId;
+            sentFinalRespond = true;
+            child.stdin.write(
+              `${JSON.stringify({
+                jsonrpc: "2.0",
+                id: finalRespondId,
+                method: "tools/call",
+                params: {
+                  name: "codex_respond",
+                  arguments: { pendingId: queuedPendingId, decision: "accept" }
+                }
+              })}\n`
+            );
+            return;
+          }
+          if (exercisePendingRecovery && msg.id === 3) {
+            assert(sentImplementProbe, "recovery implement probe was not sent");
+            const text = msg.result.content[0].text;
+            const parsed = JSON.parse(text);
+            assert(parsed.status === "needs_decision", `recovery implement should surface pending approval: ${text}`);
+            assert(
+              parsed.pendingId === parkedPendingId,
+              `recovery implement returned wrong pendingId: ${text}`
+            );
+            assert(
+              /pending decision/i.test(String(parsed.warning || "")),
+              `recovery implement should explain the parked decision: ${text}`
+            );
+            sentWrongRespondProbe = true;
+            child.stdin.write(
+              `${JSON.stringify({
+                jsonrpc: "2.0",
+                id: 4,
+                method: "tools/call",
+                params: {
+                  name: "codex_respond",
+                  arguments: { pendingId: "not-the-real-id", decision: "accept" }
+                }
+              })}\n`
+            );
+            return;
+          }
+          if (exercisePendingRecovery && msg.id === 4) {
+            assert(sentWrongRespondProbe, "wrong pendingId probe was not sent");
+            const text = msg.result.content[0].text;
+            const parsed = JSON.parse(text);
+            assert(parsed.status === "needs_decision", `wrong pendingId should re-surface pending approval: ${text}`);
+            assert(
+              parsed.pendingId === parkedPendingId,
+              `wrong pendingId recovery returned wrong pendingId: ${text}`
+            );
+            assert(
+              /unknown pendingId: not-the-real-id/i.test(String(parsed.warning || "")),
+              `wrong pendingId recovery should include the bad id: ${text}`
+            );
+            sentFinalRespond = true;
+            child.stdin.write(
+              `${JSON.stringify({
+                jsonrpc: "2.0",
+                id: finalRespondId,
+                method: "tools/call",
+                params: {
+                  name: "codex_respond",
+                  arguments: { pendingId: parkedPendingId, decision: "accept" }
+                }
+              })}\n`
+            );
+            return;
+          }
+          if (msg.id === finalRespondId) {
+            assert(sentFinalRespond, "final approval response was not sent");
             finished = true;
             clearTimeout(timer);
             const text = msg.result.content[0].text;
@@ -862,6 +1067,155 @@ function callAdapterApprovalResumeWithFakeAppServer(options = {}) {
         id: 2,
         method: "tools/call",
         params: { name: "codex_implement", arguments: { task: "inspect the branch" } }
+      })}\n`
+    );
+  });
+}
+
+function callAdapterClearsParkedApprovalWhenAppServerExits() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-adapter-approval-exit-"));
+  writeApprovalExitFakeAppServer(tempDir);
+  const child = spawn(process.execPath, [adapterPath], {
+    cwd: tempDir,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      VIBE_FUSION_CODEX_BIN: process.execPath,
+      VIBE_TERMINAL_FUSION_CWD: tempDir,
+      VIBE_TERMINAL_SESSION_ID: "fusion-adapter-approval-exit",
+      VIBE_FUSION_TURN_IDLE_TIMEOUT_MS: "1000",
+      VIBE_FUSION_TURN_AFTER_COMMAND_TIMEOUT_MS: "100"
+    }
+  });
+
+  let buffer = "";
+  let stderr = "";
+  let parkedPendingId = "";
+  let sentStaleRespond = false;
+  let finished = false;
+
+  function cleanup() {
+    try {
+      child.stdin.end();
+    } catch {
+      // ignore
+    }
+    try {
+      child.kill();
+    } catch {
+      // ignore
+    }
+    if (isWin && child.pid) {
+      try {
+        execFileSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+          stdio: "ignore"
+        });
+      } catch {
+        // best-effort
+      }
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      finished = true;
+      cleanup();
+      reject(new Error(`timed out waiting for stale approval cleanup; stderr=${stderr}`));
+    }, 10000);
+
+    child.on("error", (error) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      cleanup();
+      reject(error);
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+
+    child.on("exit", (code) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      cleanup();
+      reject(new Error(`adapter exited before stale approval cleanup result: code=${code}; stderr=${stderr}`));
+    });
+
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      let index;
+      while ((index = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, index).trim();
+        buffer = buffer.slice(index + 1);
+        if (!line) continue;
+        const msg = JSON.parse(line);
+        try {
+          if (msg.id === 2 && !parkedPendingId) {
+            const parsed = JSON.parse(msg.result.content[0].text);
+            assert(parsed.status === "needs_decision", `expected parked approval before exit: ${msg.result.content[0].text}`);
+            assert(parsed.pendingId, "parked approval before exit missing pendingId");
+            parkedPendingId = parsed.pendingId;
+            setTimeout(() => {
+              if (finished) return;
+              sentStaleRespond = true;
+              child.stdin.write(
+                `${JSON.stringify({
+                  jsonrpc: "2.0",
+                  id: 3,
+                  method: "tools/call",
+                  params: {
+                    name: "codex_respond",
+                    arguments: { pendingId: parkedPendingId, decision: "accept" }
+                  }
+                })}\n`
+              );
+            }, 200);
+            return;
+          }
+          if (msg.id === 3) {
+            assert(sentStaleRespond, "stale approval response was not sent");
+            const text = msg.result.content[0].text;
+            const parsed = JSON.parse(text);
+            assert(parsed.status === "error", `stale pendingId should be rejected after worker exit: ${text}`);
+            assert(
+              String(parsed.error || "").includes(`unknown pendingId: ${parkedPendingId}`),
+              `stale pendingId should not be recoverable after worker exit: ${text}`
+            );
+            finished = true;
+            clearTimeout(timer);
+            cleanup();
+            resolve();
+          }
+        } catch (error) {
+          finished = true;
+          clearTimeout(timer);
+          cleanup();
+          reject(error);
+        }
+      }
+    });
+
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "fusion-adapter-approval-exit", version: "0.0.0" }
+        }
+      })}\n`
+    );
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "codex_implement", arguments: { task: "inspect status" } }
       })}\n`
     );
   });
@@ -1169,6 +1523,9 @@ main()
     await assertAdapterRunsHostFree();
     await callAdapterApprovalResumeWithFakeAppServer();
     await callAdapterApprovalResumeWithFakeAppServer({ completeBeforeApprovalResponse: true });
+    await callAdapterApprovalResumeWithFakeAppServer({ exercisePendingRecovery: true });
+    await callAdapterApprovalResumeWithFakeAppServer({ queueSecondApproval: true });
+    await callAdapterClearsParkedApprovalWhenAppServerExits();
     console.log("Fusion adapter smoke passed");
   })
   .catch((error) => {
