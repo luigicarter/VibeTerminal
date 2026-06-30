@@ -230,6 +230,7 @@ export interface UpdateProgress {
 export interface UpdateState {
   status: UpdateStatus;
   updatedAt: number;
+  currentVersion?: string;
   info?: UpdateInfo;
   progress?: UpdateProgress;
   errorMessage?: string;

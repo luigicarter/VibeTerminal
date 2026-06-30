@@ -46,6 +46,7 @@ let updateDownloadRequested = false;
 let manualUpdateCheckRequested = false;
 let updateState = {
   status: app.isPackaged ? "idle" : "disabled",
+  currentVersion: app.getVersion(),
   updatedAt: Date.now()
 };
 const FUSION_MODEL_ID_PATTERN = /^[A-Za-z0-9._:/@+-]+$/;

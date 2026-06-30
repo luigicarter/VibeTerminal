@@ -523,7 +523,14 @@ button {
 
 .quick-actions {
   display: flex;
+  align-items: center;
   gap: 8px;
+}
+
+.app-version {
+  color: #8f958f;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .quick-actions button {

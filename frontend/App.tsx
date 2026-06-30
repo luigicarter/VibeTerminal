@@ -2014,6 +2014,9 @@ export default function App() {
   const updateVersion = updateState?.info?.version
     ? `v${updateState.info.version}`
     : "a new version";
+  const currentAppVersionLabel = updateState?.currentVersion
+    ? `v${updateState.currentVersion}`
+    : null;
   const updatePercent = updateState ? formatUpdatePercent(updateState) : 0;
   const updateCheckLabel =
     updateState?.status === "checking"
@@ -2230,6 +2233,11 @@ export default function App() {
           </div>
 
           <div className="quick-actions">
+            {currentAppVersionLabel && (
+              <span className="app-version" title="Current app version">
+                {currentAppVersionLabel}
+              </span>
+            )}
             <button onClick={checkForUpdates} disabled={updateCheckDisabled}>
               <RefreshCw size={16} />
               {updateCheckLabel}

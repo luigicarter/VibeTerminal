@@ -33,6 +33,11 @@ assert(
 );
 
 assert(
+  mainSource.includes("currentVersion: app.getVersion()"),
+  "update state should expose the current app version to the renderer"
+);
+
+assert(
   mainSource.includes("getAutoUpdater().quitAndInstall(true, true)") &&
     !mainSource.includes("quitAndInstall(false, true)"),
   "Windows updates should install silently and relaunch after explicit restart"
