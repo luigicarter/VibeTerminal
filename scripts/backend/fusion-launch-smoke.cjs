@@ -62,6 +62,13 @@ async function main() {
     assert(/Bash is blocked/i.test(prompt), "system prompt must state Bash is blocked for Claude");
     assert(/ALL execution work goes through Codex/i.test(prompt), "system prompt must route execution through Codex");
     assert(/Read\/Grep\/Glob/i.test(prompt), "system prompt must keep read-only review through Read/Grep/Glob");
+    assert(
+      /capability you do not have directly/i.test(prompt) &&
+        /delegate to Codex instead of guessing, refusing, or describing your limitation/i.test(prompt) &&
+        /future tool or environment\s+capability outside your direct Read\/Grep\/Glob\/Edit\/Write surface/i.test(prompt) &&
+        /Do not answer "I cannot access X here" unless Codex has attempted/i.test(prompt),
+      "system prompt must delegate any missing tool/environment capability to Codex"
+    );
 
     assert(files.mcpConfig && fs.existsSync(files.mcpConfig), "missing mcp config");
     const mcp = JSON.parse(fs.readFileSync(files.mcpConfig, "utf8"));

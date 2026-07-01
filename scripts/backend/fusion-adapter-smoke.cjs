@@ -162,12 +162,14 @@ function main() {
             assert(
               source.includes('sandbox: "danger-full-access"') &&
                 source.includes('approvalPolicy: "never"') &&
-                source.includes('sandboxPolicy: { type: "dangerFullAccess" }'),
+                source.includes("function fusionCodexSandboxPolicy") &&
+                source.includes('return { type: "dangerFullAccess" };') &&
+                (source.match(/sandboxPolicy: fusionCodexSandboxPolicy\(\)/g) || []).length >= 2,
               "adapter should run Fusion Codex with full access and no routine approval prompts"
             );
             assert(
-              source.includes('sandboxPolicy: { type: "readOnly" }'),
-              "codex_investigate should use a read-only turn sandbox"
+              !source.includes('sandboxPolicy: { type: "readOnly" }'),
+              "codex_investigate should not use Codex's read-only OS sandbox because it can fail before read-only commands run"
             );
             assert(
               source.includes("function resetCodexProcessState") &&

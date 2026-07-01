@@ -30,7 +30,7 @@ itself (an LLM that decides when to delegate), not a static rule table.
 
 ## Roles and completion authority
 
-The two models have hard, enforced scopes. Claude is launched with `Read`/`Grep`/`Glob`, direct UI/design/frontend edit/write tools (`Edit`/`Write`), and the Codex bridge tools. `Bash` stays in `--disallowedTools`, and Claude is launched with a restricted built-in `--tools` surface plus a strict per-pane MCP config, so commands, tests, builds, debug runs, screenshots, browser control, and image generation are structurally forced through `codex_implement`. Codex remains the hard verifier for bugs and goal completion. Path-scope hardening via `VIBE_FUSION_UI_WRITE_GLOBS` is deferred and not enforced in this build; direct writes are limited to UI/design/frontend by the Fusion prompt and tool split, while Bash remains blocked. Reversible: remove `Edit`/`Write` from the Fusion helpers in `main.cjs` and restore the old Edit/Write/Bash denylist to return to read-only Claude.
+The two models have hard, enforced scopes. Claude is launched with `Read`/`Grep`/`Glob`, direct UI/design/frontend edit/write tools (`Edit`/`Write`), and the Codex bridge tools. `Bash` stays in `--disallowedTools`, and Claude is launched with a restricted built-in `--tools` surface plus a strict per-pane MCP config, so read-only command/environment checks go through `codex_investigate`, while tests, builds, debug runs, screenshots, browser control, image generation, and any mutating work are structurally forced through `codex_implement`. Codex remains the hard verifier for bugs and goal completion. Path-scope hardening via `VIBE_FUSION_UI_WRITE_GLOBS` is deferred and not enforced in this build; direct writes are limited to UI/design/frontend by the Fusion prompt and tool split, while Bash remains blocked. Reversible: remove `Edit`/`Write` from the Fusion helpers in `main.cjs` and restore the old Edit/Write/Bash denylist to return to read-only Claude.
 
 | Opus 4.8 (Claude - orchestrator/architect/designer) | Codex GPT-5.5 (implementer/reviewer/verifier) |
 |---|---|
@@ -57,7 +57,9 @@ or redelegates with more guidance → Codex fixes and verifies again. Claude rev
 worktree isolation is a hardening option; the current implementation runs Codex
 implementation turns in the pane's workspace with `danger-full-access` and
 `approvalPolicy:"never"` so routine reads/writes do not bounce back through
-Claude as approval fights. `codex_investigate` turns are explicitly `readOnly`.
+Claude as approval fights. `codex_investigate` uses the same full-access executor
+path so read-only command checks cannot fail in sandbox bootstrap; it remains
+read-only by task contract rather than by OS sandbox.
 
 **Interrupting a turn:** the Fusion chat host control protocol has a dedicated
 `interrupt` message (distinct from `stop`, which kills the whole session). The
@@ -172,7 +174,9 @@ clearing read/write prompts. `needs_decision` remains a protocol path for
 exceptional questions or permission requests, but it should not be part of the
 normal read/edit/debug loop.
 Read-only scouting is the exception to the thread default: `codex_investigate`
-uses a `readOnly` turn sandbox.
+uses the unrestricted executor path but is wrapped in a read-only investigation
+contract: gather context, run non-mutating checks, and do not edit files, install
+packages, launch apps, or make irreversible changes.
 
 Completion is not free-form text only. The adapter wraps each Codex task with a
 verifier contract requiring a final `FUSION_VERDICT_JSON` line. The adapter

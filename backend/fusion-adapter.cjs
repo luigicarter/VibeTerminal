@@ -77,6 +77,11 @@ const GOAL_STATUSES = new Set([
 ]);
 const PRESERVED_GOAL_STATUSES = new Set(["blocked", "usageLimited", "budgetLimited"]);
 const MAX_GOAL_OBJECTIVE_CHARS = 4000;
+
+function fusionCodexSandboxPolicy() {
+  return { type: "dangerFullAccess" };
+}
+
 function normalizeStringList(value) {
   if (!Array.isArray(value)) return [];
   return value
@@ -1758,7 +1763,7 @@ async function codexImplement(task) {
     threadId,
     input: [{ type: "text", text: buildCodexVerifierTask(task), text_elements: [] }],
     approvalPolicy: "never",
-    sandboxPolicy: { type: "dangerFullAccess" }
+    sandboxPolicy: fusionCodexSandboxPolicy()
   };
   applyCodexTurnSettings(params);
   rpc("turn/start", params)
@@ -1795,7 +1800,7 @@ async function codexInvestigate(task) {
     threadId,
     input: [{ type: "text", text: buildCodexInvestigationTask(task), text_elements: [] }],
     approvalPolicy: "never",
-    sandboxPolicy: { type: "readOnly" }
+    sandboxPolicy: fusionCodexSandboxPolicy()
   };
   applyCodexTurnSettings(params);
   rpc("turn/start", params)
