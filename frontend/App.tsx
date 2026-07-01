@@ -66,7 +66,6 @@ import type {
   FusionChatEvent,
   FusionSettings,
   LayoutBox,
-  OpenFusionSettings,
   ProjectWorkspace,
   UpdateState
 } from "./types";
@@ -843,6 +842,41 @@ function moveWorkspace(
 
 export default function App() {
   const [initialState] = useState(() => {
+    const screenshotFixture = window.vibe?.app.screenshotFixture;
+    if (screenshotFixture?.mode === "openfusion") {
+      const workspace = starterWorkspace(screenshotFixture.cwd);
+      const session = createSession(
+        "openfusion",
+        screenshotFixture.cwd,
+        [],
+        "Open Fusion CLI"
+      );
+      const screenshotSession: AgentSession = {
+        ...session,
+        command: screenshotFixture.openCodeCommand?.trim() || session.command,
+        layout: {
+          x: LEGACY_BOARD_PADDING,
+          y: LEGACY_BOARD_PADDING,
+          w: 100 - LEGACY_BOARD_PADDING * 2,
+          h: 640,
+          unit: "fluid"
+        }
+      };
+
+      return {
+        workspaces: [
+          {
+            ...workspace,
+            sessions: [screenshotSession]
+          }
+        ],
+        activeWorkspaceId: workspace.id,
+        multiSessions: [],
+        activeView: "project" as AppView,
+        sidebarWidth: loadSidebarWidth()
+      };
+    }
+
     const initialWorkspaces = loadWorkspaces();
     return {
       workspaces: initialWorkspaces,
@@ -870,6 +904,7 @@ export default function App() {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
     null
   );
+  const screenshotFixtureSeededRef = useRef(false);
   const attentionSelectionRef = useRef<{
     selectedSessionId: string | null;
     visibleSessionIds: string[];
@@ -931,6 +966,61 @@ export default function App() {
     null;
   const workspaceClosePendingSessionCount =
     workspaceClosePending?.sessions.length ?? 0;
+
+  useEffect(() => {
+    if (screenshotFixtureSeededRef.current) {
+      return;
+    }
+
+    screenshotFixtureSeededRef.current = true;
+    let cancelled = false;
+
+    window.vibe?.app.getScreenshotFixture?.().then((fixture) => {
+      if (
+        cancelled ||
+        fixture?.mode !== "openfusion" ||
+        boardSessions.length > 0 ||
+        multiSessions.length > 0
+      ) {
+        return;
+      }
+
+      const workspace =
+        activeWorkspace?.sessions.length === 0
+          ? { ...activeWorkspace, path: fixture.cwd, name: folderName(fixture.cwd) }
+          : starterWorkspace(fixture.cwd);
+      const session = createSession(
+        "openfusion",
+        fixture.cwd,
+        [],
+        "Open Fusion CLI"
+      );
+      const screenshotSession: AgentSession = {
+        ...session,
+        layout: {
+          x: LEGACY_BOARD_PADDING,
+          y: LEGACY_BOARD_PADDING,
+          w: 100 - LEGACY_BOARD_PADDING * 2,
+          h: 640,
+          unit: "fluid"
+        }
+      };
+
+      setWorkspaces(() => [
+        {
+          ...workspace,
+          sessions: [screenshotSession]
+        }
+      ]);
+      setActiveWorkspaceId(workspace.id);
+      setActiveView("project");
+      setSelectedSessionId(screenshotSession.id);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeWorkspace, boardSessions.length, multiSessions.length]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(workspaces));
@@ -1926,76 +2016,6 @@ export default function App() {
     }
   }
 
-  function updateOpenFusionSettings(
-    scope: SessionScope,
-    session: AgentSession,
-    settings: OpenFusionSettings
-  ) {
-    if (!session.openFusion) {
-      return;
-    }
-
-    const nextPlannerModel = normalizeOpenFusionModel(
-      settings.plannerModel,
-      DEFAULT_OPEN_FUSION_PLANNER_MODEL
-    );
-    const nextExecutorModel = normalizeOpenFusionModel(
-      settings.executorModel,
-      DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
-    );
-    const currentPlannerModel = normalizeOpenFusionModel(
-      session.openFusionPlannerModel,
-      DEFAULT_OPEN_FUSION_PLANNER_MODEL
-    );
-    const currentExecutorModel = normalizeOpenFusionModel(
-      session.openFusionExecutorModel,
-      DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
-    );
-
-    if (
-      nextPlannerModel === currentPlannerModel &&
-      nextExecutorModel === currentExecutorModel
-    ) {
-      return;
-    }
-
-    const applySettings = () => {
-      updateScopeSessions(scope, (sessions) =>
-        sessions.map((item) => {
-          if (item.id !== session.id) {
-            return item;
-          }
-
-          const activeRef = activeSessionThreadRef(item);
-          return {
-            ...item,
-            openFusionPlannerModel: nextPlannerModel,
-            openFusionExecutorModel: nextExecutorModel,
-            ...(item.started
-              ? {
-                  started: true,
-                  launchToken: item.launchToken + 1,
-                  nextLaunchMode: activeRef?.id ? "resume" : "new",
-                  threadLookupStartedAt: undefined,
-                  threadLookupStatus: activeRef?.id ? "found" : "idle",
-                  threadLookupMessage: undefined,
-                  status: "idle" as const,
-                  attention: EMPTY_ATTENTION,
-                  backgroundActivity: undefined
-                }
-              : {})
-          };
-        })
-      );
-    };
-
-    if (session.started) {
-      stopSessionProcess(session).then(applySettings);
-    } else {
-      applySettings();
-    }
-  }
-
   function updateSessionStatus(
     scope: SessionScope,
     sessionId: string,
@@ -2724,27 +2744,7 @@ export default function App() {
                           ? getProfile("fusion")
                           : getProfile(session.kind)
                     }
-                    openFusionControls={
-                      session.openFusion
-                        ? {
-                            logoSrc: openFusionLogo,
-                            plannerModel: normalizeOpenFusionModel(
-                              session.openFusionPlannerModel,
-                              DEFAULT_OPEN_FUSION_PLANNER_MODEL
-                            ),
-                            executorModel: normalizeOpenFusionModel(
-                              session.openFusionExecutorModel,
-                              DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
-                            ),
-                            onSettingsChange: (settings) =>
-                              updateOpenFusionSettings(
-                                activeScope,
-                                session,
-                                settings
-                              )
-                          }
-                        : undefined
-                    }
+                    providerLogoSrc={session.openFusion ? openFusionLogo : undefined}
                     claimedThreadIds={claimedThreadIds(session.id)}
                     isMaximized={session.id === maximizedSessionId}
                     isArranging={isArranging}

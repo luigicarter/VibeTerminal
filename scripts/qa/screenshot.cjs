@@ -1,6 +1,7 @@
 const { spawn, spawnSync } = require("child_process");
 const fs = require("fs");
 const http = require("http");
+const net = require("net");
 const path = require("path");
 const { cleanupStaleShimDirs } = require("../../backend/agentTelemetry.cjs");
 
@@ -13,12 +14,18 @@ const electronBin = path.join(
   ".bin",
   isWindows ? "electron.cmd" : "electron"
 );
-const rendererCommand = isWindows ? `${npmCmd} run dev:frontend` : npmCmd;
-const rendererArgs = isWindows ? [] : ["run", "dev:frontend"];
+const rendererCommand = npmCmd;
 const electronCommand = isWindows ? `"${electronBin}" .` : electronBin;
 const electronArgs = isWindows ? [] : ["."];
 const artifactDir = path.join(rootDir, "artifacts");
-const screenshotPath = path.join(artifactDir, "vibe-terminal-screenshot.png");
+const args = new Set(process.argv.slice(2));
+const screenshotFixture = args.has("--openfusion") ? "openfusion" : "default";
+const screenshotPath = path.join(
+  artifactDir,
+  screenshotFixture === "openfusion"
+    ? "vibe-terminal-openfusion-screenshot.png"
+    : "vibe-terminal-screenshot.png"
+);
 const screenshotUserData = path.join(
   rootDir,
   ".tmp",
@@ -29,8 +36,23 @@ const screenshotShimBase = path.join(
   ".tmp",
   `screenshot-agent-shims-${Date.now()}-${process.pid}`
 );
+const screenshotFakeBin = path.join(
+  rootDir,
+  ".tmp",
+  `screenshot-fake-bin-${Date.now()}-${process.pid}`
+);
+const screenshotFakeOpenCodeMarker = path.join(
+  rootDir,
+  ".tmp",
+  `screenshot-fake-opencode-${Date.now()}-${process.pid}.json`
+);
+const screenshotPtyDebugPath = path.join(
+  rootDir,
+  ".tmp",
+  `screenshot-pty-debug-${Date.now()}-${process.pid}.jsonl`
+);
 const screenshotTimeoutMs = 30000;
-const screenshotDelayMs = 4500;
+const screenshotDelayMs = screenshotFixture === "openfusion" ? 8500 : 4500;
 const shimBaseDir = path.join(rootDir, ".tmp", "vibe-agent-shims");
 
 function electronAppEnv(extra = {}) {
@@ -38,12 +60,115 @@ function electronAppEnv(extra = {}) {
     ...process.env,
     ...extra
   };
+  if (isWindows) {
+    const pathOverride = extra.Path || extra.PATH || extra.path;
+    if (pathOverride) {
+      for (const key of Object.keys(env)) {
+        if (key.toLowerCase() === "path") {
+          delete env[key];
+        }
+      }
+      env.Path = pathOverride;
+    }
+  }
   delete env.ELECTRON_RUN_AS_NODE;
   return env;
 }
 
+function pathEnvKey(env = process.env) {
+  if (!isWindows) {
+    return "PATH";
+  }
+
+  return Object.keys(env).find((key) => key.toLowerCase() === "path") || "Path";
+}
+
+function quoteShellCommand(value) {
+  if (isWindows) {
+    return `& '${String(value).replace(/'/g, "''")}'`;
+  }
+
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+function writeFakeOpenCodeBin(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  const scriptPath = path.join(dir, "opencode-fake.cjs");
+  fs.writeFileSync(
+    scriptPath,
+    [
+      "process.stdout.write('\\x1b[2J\\x1b[H');",
+      "const args = process.argv.slice(2).join(' ');",
+      "try {",
+      "  const fs = require('fs');",
+      "  const marker = process.env.VIBE_SCREENSHOT_FAKE_OPENCODE_MARKER;",
+      "  if (marker) fs.writeFileSync(marker, JSON.stringify({ args, cwd: process.cwd() }, null, 2));",
+      "} catch {}",
+      "const lines = [",
+      "  'opencode',",
+      "  '',",
+      "  'Open Fusion CLI embedded in vibeTerminal',",
+      "  '',",
+      "  'Brain    - anthropic/claude-sonnet-4-5',",
+      "  'Executor - opencode/gpt-5.1-codex',",
+      "  '',",
+      "  'Native slash commands:',",
+      "  '  /brain-model       set pane Brain model for next restart',",
+      "  '  /executor-model    set pane Executor model for next restart',",
+      "  '  /brain-model-live  open OpenCode model picker for this Brain turn',",
+      "  '  /delegate <task>   delegate work to the executor subagent',",
+      "  '  /review <evidence> planner review gate',",
+      "  '',",
+      "  'Launch: opencode ' + args,",
+      "  '',",
+      "  'This screenshot fixture uses the real Electron PTY/Open Fusion harness.'",
+      "];",
+      "for (const line of lines) console.log(line);",
+      "process.on('SIGINT', () => process.exit(0));",
+      "process.on('SIGTERM', () => process.exit(0));",
+      "setInterval(() => {}, 1000);",
+      ""
+    ].join("\n")
+  );
+
+  if (isWindows) {
+    fs.writeFileSync(
+      path.join(dir, "opencode.cmd"),
+      '@echo off\r\nnode "%~dp0opencode-fake.cjs" %*\r\n'
+    );
+    return path.join(dir, "opencode.cmd");
+  }
+
+  const shellPath = path.join(dir, "opencode");
+  fs.writeFileSync(
+    shellPath,
+    '#!/usr/bin/env sh\nexec node "$(dirname "$0")/opencode-fake.cjs" "$@"\n'
+  );
+  fs.chmodSync(shellPath, 0o755);
+  return shellPath;
+}
+
 function cleanupDeadShimRuns() {
   cleanupStaleShimDirs({ baseDir: shimBaseDir });
+}
+
+function findFreePort(host = "127.0.0.1") {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.on("error", reject);
+    server.listen(0, host, () => {
+      const address = server.address();
+      server.close(() => {
+        if (!address || typeof address === "string") {
+          reject(new Error("Unable to allocate a renderer port."));
+          return;
+        }
+
+        resolve(address.port);
+      });
+    });
+  });
 }
 
 function killTree(child) {
@@ -189,6 +314,28 @@ async function main() {
   fs.mkdirSync(artifactDir, { recursive: true });
   cleanupDeadShimRuns();
 
+  const electronEnv = {};
+  if (screenshotFixture === "openfusion") {
+    const fakeOpenCodeCommand = writeFakeOpenCodeBin(screenshotFakeBin);
+    const key = pathEnvKey();
+    electronEnv[key] = [screenshotFakeBin, process.env[key]].filter(Boolean).join(path.delimiter);
+    electronEnv.VIBE_SCREENSHOT_SEED_OPEN_FUSION = "1";
+    electronEnv.VIBE_SCREENSHOT_FIXTURE_CWD = rootDir;
+    electronEnv.VIBE_SCREENSHOT_OPENCODE_COMMAND = quoteShellCommand(fakeOpenCodeCommand);
+    electronEnv.VIBE_SCREENSHOT_FAKE_OPENCODE_MARKER = screenshotFakeOpenCodeMarker;
+  }
+
+  const rendererPort = await findFreePort();
+  const rendererUrl = `http://127.0.0.1:${rendererPort}`;
+  const rendererArgs = [
+    "run",
+    "dev:frontend",
+    "--",
+    "--port",
+    String(rendererPort),
+    "--strictPort"
+  ];
+
   const renderer = spawn(rendererCommand, rendererArgs, {
     cwd: rootDir,
     stdio: ["ignore", "pipe", "pipe"],
@@ -206,19 +353,21 @@ async function main() {
   let app = null;
 
   try {
-    await waitForRenderer("http://127.0.0.1:5173");
+    await waitForRenderer(rendererUrl);
 
     app = spawn(electronCommand, electronArgs, {
       cwd: rootDir,
       stdio: "inherit",
       env: electronAppEnv({
-        VITE_DEV_SERVER_URL: "http://127.0.0.1:5173",
+        VITE_DEV_SERVER_URL: rendererUrl,
         VIBE_INTERNAL_SCREENSHOT: "1",
         VIBE_SCREENSHOT_MODE: "1",
         VIBE_SCREENSHOT_PATH: screenshotPath,
         VIBE_SCREENSHOT_USER_DATA: screenshotUserData,
         VIBE_AGENT_SHIM_BASE_DIR: screenshotShimBase,
-        VIBE_SCREENSHOT_DELAY_MS: String(screenshotDelayMs)
+        VIBE_SCREENSHOT_DELAY_MS: String(screenshotDelayMs),
+        VIBE_SCREENSHOT_PTY_DEBUG: screenshotPtyDebugPath,
+        ...electronEnv
       }),
       shell: isWindows
     });
@@ -242,6 +391,15 @@ async function main() {
     if (!fs.existsSync(screenshotPath)) {
       throw new Error(`Screenshot was not written: ${screenshotPath}`);
     }
+    if (
+      screenshotFixture === "openfusion" &&
+      !fs.existsSync(screenshotFakeOpenCodeMarker)
+    ) {
+      if (fs.existsSync(screenshotPtyDebugPath)) {
+        process.stderr.write(fs.readFileSync(screenshotPtyDebugPath, "utf8"));
+      }
+      throw new Error("Open Fusion screenshot fixture did not execute fake opencode.");
+    }
 
     console.log(`Screenshot written: ${screenshotPath}`);
   } finally {
@@ -254,6 +412,9 @@ async function main() {
       // Chromium can hold a cache file for a moment on Windows; this is test-only data.
     }
     fs.rmSync(screenshotShimBase, { recursive: true, force: true });
+    fs.rmSync(screenshotFakeBin, { recursive: true, force: true });
+    fs.rmSync(screenshotFakeOpenCodeMarker, { force: true });
+    fs.rmSync(screenshotPtyDebugPath, { force: true });
   }
 }
 

@@ -17,6 +17,19 @@ function emit(event) {
   process.stdout.write(`${JSON.stringify(event)}\n`);
 }
 
+function debug(event) {
+  const file = process.env.VIBE_SCREENSHOT_PTY_DEBUG;
+  if (!file) {
+    return;
+  }
+
+  try {
+    require("fs").appendFileSync(file, `${JSON.stringify(event)}\n`);
+  } catch {
+    // Screenshot diagnostics must never affect terminal behavior.
+  }
+}
+
 function shellForPlatform() {
   if (process.platform === "win32") {
     return {
@@ -68,6 +81,14 @@ function emitSnapshot(id, session) {
 }
 
 function createSession(payload) {
+  debug({
+    type: "create",
+    id: payload.id,
+    command: payload.command,
+    cwd: payload.cwd,
+    launchToken: payload.launchToken
+  });
+
   if (!pty) {
     emit({
       id: payload.id,
@@ -169,6 +190,11 @@ function createSession(payload) {
       const lineEnding = process.platform === "win32" ? "\r" : "\n";
       setTimeout(() => {
         if (sessions.get(payload.id) === session && session.terminal === terminal) {
+          debug({
+            type: "write-command",
+            id: payload.id,
+            command: payload.command
+          });
           terminal.write(`${payload.command}${lineEnding}`);
         }
       }, 250);

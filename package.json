@@ -1,6 +1,6 @@
 {
   "name": "vibe-terminal",
-  "version": "0.1.31",
+  "version": "0.1.32",
   "private": true,
   "description": "A tiled local workspace for running multiple coding agents side by side.",
   "author": "vibeTerminal contributors",
@@ -17,6 +17,7 @@
     "build": "tsc --noEmit && vite build",
     "start": "npm run build && electron .",
     "screenshot": "node scripts/qa/screenshot.cjs",
+    "screenshot:openfusion": "node scripts/qa/screenshot.cjs --openfusion",
     "smoke:backend:agent-telemetry": "node scripts/backend/agent-telemetry-smoke.cjs",
     "smoke:backend:code-changes": "node scripts/backend/code-changes-smoke.cjs",
     "smoke:backend:launch-cwd": "node scripts/backend/launch-cwd-smoke.cjs",

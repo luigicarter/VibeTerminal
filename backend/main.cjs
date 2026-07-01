@@ -360,10 +360,18 @@ function getAgentShimBaseDir() {
   );
 }
 
+function getOpenFusionBaseDir() {
+  return (
+    process.env.VIBE_OPEN_FUSION_BASE_DIR ||
+    path.join(app.getPath("userData"), "openfusion")
+  );
+}
+
 function getAgentTelemetry() {
   if (!agentTelemetry) {
     agentTelemetry = createAgentTelemetryManager({
       baseDir: getAgentShimBaseDir(),
+      openFusionBaseDir: getOpenFusionBaseDir(),
       emit: broadcastTerminalEvent
     });
     agentTelemetry.ready.catch((error) => {
@@ -1136,6 +1144,17 @@ app.on("window-all-closed", () => {
 
 ipcMain.handle("app:get-cwd", () => getDefaultRuntimeCwd());
 
+ipcMain.handle("app:get-screenshot-fixture", () => {
+  if (!isScreenshotMode || process.env.VIBE_SCREENSHOT_SEED_OPEN_FUSION !== "1") {
+    return null;
+  }
+
+  return {
+    mode: "openfusion",
+    cwd: getDefaultRuntimeCwd()
+  };
+});
+
 ipcMain.handle("updates:get-state", () => updateState);
 
 ipcMain.handle("updates:check", () => checkForAppUpdates());
@@ -1331,13 +1350,13 @@ ipcMain.handle("fusion-chat:set-mode", async (_event, payload) => {
     return { ok: false, error: "missing session id" };
   }
   const mode = normalizeFusionRunMode(payload.mode);
-  const sent = sendToFusionChatHost({ type: "mode", payload: { id: payload.id, mode } });
-  if (!sent) {
-    return { ok: false, mode, error: "Fusion chat host is not running." };
-  }
   const adapterResult = await getAgentTelemetry().setFusionSessionMode(payload.id, mode);
   if (adapterResult.status === "failed") {
     return { ok: false, mode, error: adapterResult.error || "could not set Fusion mode" };
+  }
+  const sent = sendToFusionChatHost({ type: "mode", payload: { id: payload.id, mode } });
+  if (!sent) {
+    return { ok: false, mode, error: "Fusion chat host is not running." };
   }
   return { ok: true, mode };
 });

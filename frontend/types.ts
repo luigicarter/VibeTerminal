@@ -31,11 +31,6 @@ export type FusionRunMode = "auto" | "plan";
 
 export type OpenFusionModel = string;
 
-export interface OpenFusionSettings {
-  plannerModel: OpenFusionModel;
-  executorModel: OpenFusionModel;
-}
-
 export interface FusionSettings {
   mode: FusionRunMode;
   model: FusionClaudeModel;

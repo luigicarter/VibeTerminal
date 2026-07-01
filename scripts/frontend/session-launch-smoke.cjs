@@ -56,7 +56,6 @@ openFusionModule.filename = openFusionPath;
 openFusionModule.paths = Module._nodeModulePaths(path.dirname(openFusionPath));
 openFusionModule._compile(compiledOpenFusion, openFusionPath);
 const {
-  parseOpenFusionSlashCommand,
   validateOpenFusionModel
 } = openFusionModule.exports;
 
@@ -242,72 +241,23 @@ const openFusionCurrent = {
   plannerModel: "anthropic/claude-sonnet-4-5",
   executorModel: "opencode/gpt-5.1-codex"
 };
-let openFusionCommand = parseOpenFusionSlashCommand(
-  "/brain openai/gpt-5.1",
-  openFusionCurrent
-);
-assert.strictEqual(openFusionCommand.ok, true, "/brain should parse");
-assert.strictEqual(
-  openFusionCommand.settings.plannerModel,
-  "openai/gpt-5.1",
-  "/brain should update planner model"
-);
-assert.strictEqual(
-  openFusionCommand.settings.executorModel,
-  openFusionCurrent.executorModel,
-  "/brain should leave executor unchanged"
-);
-openFusionCommand = parseOpenFusionSlashCommand(
-  "/body google/gemini-3-pro-preview",
-  openFusionCurrent
-);
-assert.strictEqual(openFusionCommand.ok, true, "/body should parse");
-assert.strictEqual(
-  openFusionCommand.settings.executorModel,
-  "google/gemini-3-pro-preview",
-  "/body should update executor model"
-);
-openFusionCommand = parseOpenFusionSlashCommand(
-  "/models openai/gpt-5.1 opencode/gpt-5.1-codex",
-  openFusionCurrent
-);
-assert.strictEqual(openFusionCommand.ok, true, "/models should parse positional pair");
-assert.strictEqual(openFusionCommand.settings.plannerModel, "openai/gpt-5.1");
-assert.strictEqual(openFusionCommand.settings.executorModel, "opencode/gpt-5.1-codex");
-openFusionCommand = parseOpenFusionSlashCommand(
-  "/models brain=openai/gpt-5.1 body=google/gemini-3-pro-preview",
-  openFusionCurrent
-);
-assert.strictEqual(openFusionCommand.ok, true, "/models should parse key/value pair");
-assert.strictEqual(openFusionCommand.settings.plannerModel, "openai/gpt-5.1");
-assert.strictEqual(openFusionCommand.settings.executorModel, "google/gemini-3-pro-preview");
-openFusionCommand = parseOpenFusionSlashCommand("/swap", openFusionCurrent);
-assert.strictEqual(openFusionCommand.ok, true, "/swap should parse");
-assert.strictEqual(openFusionCommand.settings.plannerModel, openFusionCurrent.executorModel);
-assert.strictEqual(openFusionCommand.settings.executorModel, openFusionCurrent.plannerModel);
-openFusionCommand = parseOpenFusionSlashCommand("/reset", {
-  plannerModel: "openai/gpt-5.1",
-  executorModel: "google/gemini-3-pro-preview"
-});
-assert.strictEqual(openFusionCommand.ok, true, "/reset should parse");
-assert.strictEqual(openFusionCommand.settings.plannerModel, openFusionCurrent.plannerModel);
-assert.strictEqual(openFusionCommand.settings.executorModel, openFusionCurrent.executorModel);
-assert.strictEqual(
-  parseOpenFusionSlashCommand("brain openai/gpt-5.1", openFusionCurrent).ok,
-  false,
-  "Open Fusion commands should require a slash"
-);
-assert.strictEqual(
-  parseOpenFusionSlashCommand("/brain bad model", openFusionCurrent).ok,
-  false,
-  "Open Fusion one-role commands should reject model ids with spaces"
-);
 assert.strictEqual(
   validateOpenFusionModel("auto") !== null &&
     validateOpenFusionModel("bad model") !== null &&
     validateOpenFusionModel("openai/gpt-5.1") === null,
   true,
   "Open Fusion model validator should reject placeholders/spaces and allow provider ids"
+);
+assert.deepStrictEqual(
+  {
+    plannerModel: validateOpenFusionModel(openFusionCurrent.plannerModel),
+    executorModel: validateOpenFusionModel(openFusionCurrent.executorModel)
+  },
+  {
+    plannerModel: null,
+    executorModel: null
+  },
+  "Open Fusion default launch models should validate"
 );
 assert.strictEqual(
   buildLaunchCommand(
@@ -356,6 +306,12 @@ const terminalPaneSource = fs.readFileSync(terminalPanePath, "utf8");
 assert(
   terminalPaneSource.includes("launchCommand"),
   "TerminalPane should still build a launch command"
+);
+assert(
+  !terminalPaneSource.includes("open-fusion-control-strip") &&
+    !terminalPaneSource.includes("parseOpenFusionSlashCommand") &&
+    terminalPaneSource.includes("providerLogoSrc"),
+  "Open Fusion panes should not render app-level model controls over the OpenCode TUI"
 );
 
 const lifecycleIdx = terminalPaneSource.indexOf("terminal.dispose()");

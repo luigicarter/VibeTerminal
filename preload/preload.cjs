@@ -31,13 +31,27 @@ function getPathForDroppedFile(file) {
   }
 }
 
+const screenshotFixture =
+  process.env.VIBE_SCREENSHOT_SEED_OPEN_FUSION === "1"
+    ? {
+        mode: "openfusion",
+        cwd: process.env.VIBE_SCREENSHOT_FIXTURE_CWD || process.cwd(),
+        openCodeCommand: process.env.VIBE_SCREENSHOT_OPENCODE_COMMAND || ""
+      }
+    : null;
+
 contextBridge.exposeInMainWorld("vibe", {
   // The launch command is typed into the platform shell (PowerShell on Windows,
   // the login shell on POSIX), so the renderer needs the platform to quote args
   // for the right shell.
   platform: process.platform,
   app: {
-    getCwd: () => ipcRenderer.invoke("app:get-cwd")
+    getCwd: () => ipcRenderer.invoke("app:get-cwd"),
+    screenshotFixture,
+    getScreenshotFixture: () =>
+      screenshotFixture
+        ? Promise.resolve(screenshotFixture)
+        : ipcRenderer.invoke("app:get-screenshot-fixture")
   },
   clipboard: {
     readText: () => clipboard.readText(),

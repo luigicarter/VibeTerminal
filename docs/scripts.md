@@ -28,7 +28,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 
 ## QA Scripts
 
-- `scripts/qa/screenshot.cjs` - Starts the Vite frontend and Electron in screenshot mode, captures the visible app window, verifies the PNG exists, and writes `artifacts/vibe-terminal-screenshot.png`.
+- `scripts/qa/screenshot.cjs` - Starts the Vite frontend and Electron in screenshot mode, captures the visible app window, verifies the PNG exists, and writes `artifacts/vibe-terminal-screenshot.png`. Pass `--openfusion` to seed a deterministic Open Fusion pane and write `artifacts/vibe-terminal-openfusion-screenshot.png`.
 
 ## npm Commands
 
@@ -42,6 +42,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `npm run pack:win` - Prepares the embedded Codex binary, builds the renderer, and creates an unpacked Windows app in `release/win-unpacked`.
 - `npm run dist:win` - Prepares the embedded Codex binary, builds the renderer, and creates the Windows NSIS installer plus update metadata in `release/`.
 - `npm run screenshot` - Visual QA screenshot pass.
+- `npm run screenshot:openfusion` - Visual QA screenshot pass for the embedded Open Fusion CLI fixture.
 - `npm run smoke:backend:codex-discovery` - Backend smoke test for Codex thread discovery.
 - `npm run smoke:backend:claude-discovery` - Backend smoke test for Claude thread discovery.
 - `npm run smoke:backend:agent-telemetry` - Backend smoke test for vibeTerminal-owned agent telemetry shims.

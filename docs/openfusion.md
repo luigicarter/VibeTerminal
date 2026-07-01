@@ -3,8 +3,10 @@
 > **Status: embedded terminal mode implemented.** vibeTerminal now has an Open Fusion
 > launcher/pane that runs OpenCode with pane-scoped `OPENCODE_CONFIG`,
 > `OPENCODE_CONFIG_DIR`, `OPENCODE_CONFIG_CONTENT`, and `OPENCODE_TUI_CONFIG`,
-> plus Brain/Body model pickers and pane-level slash commands in the app UI. The
-> headless OpenCode server / SDK custom chat UI path remains design work. See
+> with Brain/Body roles defined inside the generated OpenCode config. The
+> visible interaction surface is the embedded OpenCode TUI/CLI, not a separate
+> app-level model bar. The headless OpenCode server / SDK custom chat UI path
+> remains design work. See
 > `docs/fusion-terminal.md` and `docs/fusion-unification.md` for the shipped
 > Fusion (Claude + Codex) it generalizes.
 
@@ -63,8 +65,9 @@ transcript ordering (the coherence seam Fusion fights in
 ## Architecture sketch
 
 - **Current engine:** embedded OpenCode **TUI/CLI** in a vibeTerminal PTY. The
-  app writes per-pane OpenCode config/theme/prompt files into its runtime session
-  directory and exposes them only to that terminal process via `OPENCODE_*`
+  app writes per-pane OpenCode config/theme/prompt files under vibeTerminal's
+  user-data directory (`%APPDATA%\vibeTerminal\openfusion\sessions\...` on
+  Windows) and exposes them only to that terminal process via `OPENCODE_*`
   environment variables. It sets both file paths and `OPENCODE_CONFIG_CONTENT`
   with inline prompts so the pane's role config wins even when the project has
   its own OpenCode config. It does not write Open Fusion config into the user's
@@ -77,7 +80,19 @@ transcript ordering (the coherence seam Fusion fights in
 ```jsonc
 // simplified from the generated config
 {
+  "default_agent": "planner",
   "model": "<user pick A>",
+  "command": {
+    "delegate": {
+      "agent": "executor",
+      "model": "<user pick B>",
+      "subtask": true
+    },
+    "review": {
+      "agent": "planner",
+      "model": "<user pick A>"
+    }
+  },
   "agent": {
     "planner": {
       "mode": "primary",
@@ -99,7 +114,10 @@ transcript ordering (the coherence seam Fusion fights in
 ```
 
 - **Delegation:** the planner calls the executor through the native **`task`**
-  tool — no adapter.
+  tool — no adapter. The generated `/delegate <task>` OpenCode command is a
+  native command configured with `agent: "executor"` and `subtask: true`, so it
+  appears in OpenCode slash autocomplete and runs through OpenCode's normal
+  subagent path.
 - **Review gate:** the executor can self-review its work and return findings,
   diffs, test results, and a recommendation, but the final **done vs guide a
   correction pass** decision belongs to the Planner/intelligence layer. If the
@@ -108,24 +126,35 @@ transcript ordering (the coherence seam Fusion fights in
 - **Work ownership:** the Planner stays in the loop as the observer/steerer. The
   Executor performs the concrete implementation work: code edits, shell commands,
   command-result analysis, fixes, and self-review.
-- **Launcher/UI:** the ribbon has an "Open Fusion" variant. The pane shows
-  custom-colored OpenCode controls for **Brain** (Planner) and **Body**
-  (Executor) model IDs. The same controls accept pane-level slash commands:
-  - `/brain <model>` / `/planner <model>` / `/primary <model>`
-  - `/body <model>` / `/executor <model>` / `/secondary <model>`
-  - `/model brain <model>` / `/model body <model>`
-  - `/models <brain-model> <body-model>`
-  - `/models brain=<model> body=<model>`
-  - `/swap`
-  - `/reset`
+- **Launcher/UI:** the ribbon has an "Open Fusion" variant. After launch, the
+  pane is a normal OpenCode TUI with the generated `planner` primary agent and
+  `executor` subagent selected through OpenCode config. Model and command
+  affordances must remain native to OpenCode's CLI/TUI surface (for example its
+  status line, `/models`, agent selector, and command palette), not a React
+  overlay that can drift from the running session.
 
-  A future catalog-backed picker should populate model suggestions from
-  OpenCode's provider + model catalog and flag providers the user is authed for.
+  The generated config dir also contains a pane-scoped OpenCode TUI plugin with
+  native slash commands:
+
+  - `/brain-model` (`/brain`) prompts for the pane-scoped Brain/Planner model
+    and saves it under the Open Fusion session directory for the next pane
+    restart.
+  - `/executor-model` (`/executor`, `/body`, `/body-model`) prompts for the
+    pane-scoped Executor model and saves it for the next pane restart.
+  - `/brain-model-live` opens OpenCode's own `/models` selector for the current
+    Brain turn.
+  - `/openfusion` shows the pane-scoped Brain/Executor model state.
+
+  A future catalog-backed picker can choose the launch-time Brain/Body model
+  pair before the OpenCode process starts and should flag providers the user is
+  authed for. Live role-model switching should use an OpenCode-native server/TUI
+  capability if one is added; app-side controls must not pretend to mutate an
+  already-running OpenCode session independently. Until OpenCode exposes live
+  subagent model mutation in the TUI/server API, Executor model changes are
+  restart-applied pane settings.
 
 ```
 ┌─ Open Fusion pane ────────────────────────────────────────┐
-│  Planner  [ model A ▾ ]     Executor  [ model B ▾ ]        │
-│                                                            │
 │  OpenCode TUI/CLI (one runtime)                            │
 │    planner  (primary,  read-only)  ──task──▶  executor     │
 │                     ▲                          (subagent,  │
@@ -162,9 +191,10 @@ transcript ordering (the coherence seam Fusion fights in
 
 - **Reused now:** the read-only-lock idea, the ribbon launcher pattern,
   OpenCode terminal/session plumbing, and pane-scoped runtime files.
-- **New now:** the two-model Brain/Body controls, slash command parser,
-  per-pane **`opencode.json` generation**, and Planner-owned review/correction
-  prompts.
+- **New now:** per-pane **`opencode.json` generation** for Brain/Body role
+  models, Planner-owned review/correction prompts, generated OpenCode command
+  files, and a pane-scoped TUI plugin for `/brain-model` and
+  `/executor-model`.
 - **Future:** OpenCode **server lifecycle + SDK driving**, a richer
   `FusionChatPane`-style transcript, catalog-backed model picker, and optional
   third verifier subagent.
@@ -184,8 +214,8 @@ work.
 Direction: **build Open Fusion as a mode separate from Fusion**. Current shipped
 slice = embedded OpenCode terminal, roles = two user-picked model IDs mapped to
 primary(planner, read-only) + subagent(executor) via generated per-pane
-OpenCode config, delegation via the native `task` tool, UI = custom-colored
-OpenCode terminal controls with Brain/Body pickers and slash commands. Future
+OpenCode config, delegation via the native `task` tool, UI = the embedded
+OpenCode terminal itself. Future
 slice = optional `FusionChatPane`-style UI driven by OpenCode server/SDK. The
 completion/review gate belongs to the Planner/intelligence layer: executor
 self-review is allowed, but it reports back to the Planner, which decides done
@@ -201,4 +231,5 @@ third verifier subagent that reports to the Planner.
 **Verify before building the future server slice** (surfaces churn fast; notes
 current to early 2026): the OpenCode server/SDK surface and the model-catalog
 API. The current embedded terminal slice is covered by smoke tests for launch,
-workspace restore, parser edge cases, generated config, and runtime env wiring.
+workspace restore, generated config, runtime env wiring, and ensuring the React
+pane does not render app-level Open Fusion model controls over the TUI.

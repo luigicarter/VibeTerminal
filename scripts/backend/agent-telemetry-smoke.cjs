@@ -27,6 +27,7 @@ const root = path.join(
 const fakeBin = path.join(root, "fake-bin");
 const cmdOnlyFakeBin = path.join(root, "fake-cmd-bin");
 const shimBase = path.join(root, "shims");
+const openFusionBase = path.join(root, "openfusion");
 
 function assert(condition, message) {
   if (!condition) {
@@ -322,6 +323,7 @@ function postTelemetry(callbackUrl, token, payload) {
 
     manager = createAgentTelemetryManager({
       baseDir: shimBase,
+      openFusionBaseDir: openFusionBase,
       emit: (event) => events.push(event),
       runId: "current-run",
       token: "test-token",
@@ -405,15 +407,20 @@ function postTelemetry(callbackUrl, token, payload) {
     });
     assert(openFusionFiles, "Open Fusion files should be prepared");
     assert(
-      openFusionFiles.configPath.startsWith(`${manager.runDir}${path.sep}`) &&
-        openFusionFiles.configDir.startsWith(`${manager.runDir}${path.sep}`),
-      "Open Fusion config must stay inside the telemetry run dir"
+      openFusionFiles.configPath.startsWith(`${manager.openFusionBaseDir}${path.sep}`) &&
+        openFusionFiles.configDir.startsWith(`${manager.openFusionBaseDir}${path.sep}`) &&
+        !openFusionFiles.configPath.startsWith(`${manager.runDir}${path.sep}`),
+      "Open Fusion config must stay inside the dedicated Open Fusion user-data dir"
     );
     assert(
       openFusionFiles.env.OPENCODE_CONFIG === openFusionFiles.configPath &&
         openFusionFiles.env.OPENCODE_CONFIG_DIR === openFusionFiles.configDir &&
         typeof openFusionFiles.env.OPENCODE_CONFIG_CONTENT === "string" &&
-        openFusionFiles.env.OPENCODE_TUI_CONFIG === openFusionFiles.tuiConfigPath,
+        openFusionFiles.env.OPENCODE_TUI_CONFIG === openFusionFiles.tuiConfigPath &&
+        openFusionFiles.env.VIBE_TERMINAL_OPEN_FUSION_DIR === openFusionFiles.openFusionDir &&
+        openFusionFiles.env.VIBE_TERMINAL_OPEN_FUSION_MODEL_STATE === openFusionFiles.modelStatePath &&
+        openFusionFiles.env.VIBE_TERMINAL_OPEN_FUSION_PLANNER_MODEL === "openai/gpt-5.1" &&
+        openFusionFiles.env.VIBE_TERMINAL_OPEN_FUSION_EXECUTOR_MODEL === "opencode/gpt-5.1-codex",
       "Open Fusion env should point at the pane-scoped config files"
     );
     const openFusionEnvConfig = JSON.parse(
@@ -423,7 +430,8 @@ function postTelemetry(callbackUrl, token, payload) {
       fs.readFileSync(openFusionFiles.configPath, "utf8")
     );
     assert(
-      openFusionConfig.agent?.planner?.mode === "primary" &&
+      openFusionConfig.default_agent === "planner" &&
+        openFusionConfig.agent?.planner?.mode === "primary" &&
         openFusionConfig.agent?.planner?.model === "openai/gpt-5.1" &&
         openFusionConfig.agent?.planner?.permission?.bash === "deny" &&
         openFusionConfig.agent?.planner?.permission?.edit === "deny" &&
@@ -437,16 +445,41 @@ function postTelemetry(callbackUrl, token, payload) {
       "Open Fusion executor should be a model-pinned subagent"
     );
     assert(
+      openFusionConfig.command?.delegate?.agent === "executor" &&
+        openFusionConfig.command?.delegate?.model === "opencode/gpt-5.1-codex" &&
+        openFusionConfig.command?.delegate?.subtask === true &&
+        openFusionConfig.command?.review?.agent === "planner" &&
+        openFusionConfig.command?.fusion?.model === "openai/gpt-5.1",
+      "Open Fusion should expose native OpenCode slash commands for delegation and review"
+    );
+    assert(
       openFusionEnvConfig.agent?.planner?.prompt.includes("Open Fusion Planner") &&
-        openFusionEnvConfig.agent?.executor?.prompt.includes("Open Fusion Executor"),
-      "Open Fusion inline config should carry prompts so env config can override project config"
+        openFusionEnvConfig.agent?.executor?.prompt.includes("Open Fusion Executor") &&
+        openFusionEnvConfig.command?.delegate?.template.includes("$ARGUMENTS"),
+      "Open Fusion inline config should carry prompts and commands so env config can override project config"
     );
     assert(
       fs.existsSync(openFusionFiles.plannerPromptPath) &&
         fs.existsSync(openFusionFiles.executorPromptPath) &&
         fs.existsSync(openFusionFiles.themePath) &&
-        fs.existsSync(openFusionFiles.tuiConfigPath),
-      "Open Fusion prompt/theme/TUI files should be written"
+        fs.existsSync(openFusionFiles.tuiConfigPath) &&
+        fs.existsSync(openFusionFiles.modelStatePath) &&
+        fs.existsSync(openFusionFiles.tuiPluginPath) &&
+        fs.existsSync(path.join(openFusionFiles.commandsDir, "delegate.md")),
+      "Open Fusion prompt/theme/TUI command/plugin files should be written"
+    );
+    const openFusionTuiPlugin = fs.readFileSync(openFusionFiles.tuiPluginPath, "utf8");
+    assert(
+      openFusionTuiPlugin.includes("slashName: 'brain-model'") &&
+        openFusionTuiPlugin.includes("slashName: 'executor-model'") &&
+        openFusionTuiPlugin.includes("api.keymap.dispatchCommand('model.list')") &&
+        openFusionTuiPlugin.includes("api.command.register(() => commands)"),
+      "Open Fusion TUI plugin should register native Brain/Executor model slash commands"
+    );
+    assert(
+      JSON.parse(fs.readFileSync(openFusionFiles.modelStatePath, "utf8"))
+        .executorModel === "opencode/gpt-5.1-codex",
+      "Open Fusion model state should persist pane-scoped model settings"
     );
     assert(
       openFusionConfigContents({ plannerModel: "bad model id" }).agent.planner

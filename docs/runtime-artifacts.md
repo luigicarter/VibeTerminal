@@ -9,7 +9,8 @@ Runtime artifacts are generated during install, build, development, smoke tests,
 - `release/` - Windows packaged app and installer artifacts from `npm run pack:win` or `npm run dist:win`.
 - `.tmp/` - Temporary user data and smoke-test working directories.
   - `.tmp/vibe-agent-shims/` - vibeTerminal-owned runtime command shims for agent telemetry. Each removable directory contains a `.vibe-agent-shims.json` ownership marker.
-- `artifacts/` - QA outputs such as `artifacts/vibe-terminal-screenshot.png`.
+  - Open Fusion smoke tests use a sibling `openfusion/` runtime directory for generated pane-scoped OpenCode config, commands, TUI plugin, and pane model state.
+- `artifacts/` - QA outputs such as `artifacts/vibe-terminal-screenshot.png` and `artifacts/vibe-terminal-openfusion-screenshot.png`.
 
 ## Cleanup Policy
 

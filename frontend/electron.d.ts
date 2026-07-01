@@ -28,6 +28,16 @@ declare global {
       platform: string;
       app: {
         getCwd: () => Promise<string>;
+        screenshotFixture?: {
+          mode: "openfusion";
+          cwd: string;
+          openCodeCommand?: string;
+        } | null;
+        getScreenshotFixture?: () => Promise<{
+          mode: "openfusion";
+          cwd: string;
+          openCodeCommand?: string;
+        } | null>;
       };
       clipboard: {
         readText: () => string;
