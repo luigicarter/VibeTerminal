@@ -554,10 +554,11 @@ function restoreSession(session: AgentSession): AgentSession {
   const restoredKind: AgentKind = isFusion ? "claude" : session.kind;
   const profile = getProfile(isFusion ? "fusion" : restoredKind);
   const createdAt = finiteNumber(session.createdAt, Date.now());
+  // A completed Fusion turn still leaves a reusable chat host while the app is
+  // open, so restore the host intent whenever the pane itself was started.
   const shouldAutoStart =
     session.started === true &&
-    previousStatus !== "done" &&
-    previousStatus !== "failed";
+    (isFusion || (previousStatus !== "done" && previousStatus !== "failed"));
 
   // Reopening the app restores each pane as a FRESH terminal, never an
   // auto-resumed chat. The previously running thread is preserved as `resumeRef`

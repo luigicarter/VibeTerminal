@@ -291,6 +291,10 @@ assert(
   "Fusion add/duplicate and completion attention should use the app attention path"
 );
 assert(
+  appSource.includes('isFusion || (previousStatus !== "done" && previousStatus !== "failed")'),
+  "Fusion restore should relaunch a persisted pane even after the previous turn completed"
+);
+assert(
   appSource.includes('event.type === "activity" && event.kind === "warmup_error"') &&
     appSource.includes("applyFusionAttention(event.id") &&
     appSource.includes("Fusion execution bridge failed to start."),
