@@ -134,14 +134,16 @@ export function buildLaunchCommand(
   }
 
   if (session.kind === "opencode") {
+    const openFusionAgentArg = session.openFusion ? " --agent planner" : "";
     if (mode === "resume") {
       const ref = resumeArg(session);
       if (ref) {
-        return `opencode --session ${commandArg(ref, platform)}`;
+        return `opencode --session ${commandArg(ref, platform)}${openFusionAgentArg}`;
       }
     }
 
-    return session.command.trim() || "opencode";
+    const command = session.command.trim() || "opencode";
+    return `${command}${openFusionAgentArg}`;
   }
 
   if (session.kind === "cursor") {

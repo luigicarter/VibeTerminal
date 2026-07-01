@@ -799,6 +799,15 @@ button {
   color: var(--agent-accent);
 }
 
+.agent-launcher-logo {
+  display: block;
+  width: 17px;
+  height: 17px;
+  flex: 0 0 auto;
+  border-radius: 5px;
+  object-fit: cover;
+}
+
 .code-line-summary {
   display: inline-flex;
   min-width: 0;
@@ -1071,6 +1080,13 @@ button {
     0 16px 34px rgba(0, 0, 0, 0.38);
 }
 
+.terminal-pane-open-fusion {
+  border-color: color-mix(in srgb, var(--pane-accent) 52%, #293b36);
+  background:
+    linear-gradient(180deg, rgba(37, 217, 255, 0.08), transparent 22%),
+    #101614;
+}
+
 /* "Done working" glow: pulse the pane border so you can tell at a glance which
    terminal finished. Keyed to the unread attention flag (shouldShowAttentionDot),
    so it clears the moment you focus the pane. Colors match the status pills:
@@ -1156,6 +1172,15 @@ button {
 .pane-title svg {
   flex: 0 0 auto;
   color: var(--pane-accent);
+}
+
+.pane-provider-logo {
+  display: block;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  border-radius: 5px;
+  object-fit: cover;
 }
 
 .pane-title span {
@@ -1263,6 +1288,130 @@ button {
   flex: 0 0 auto;
   max-width: 120px;
   color: var(--pane-accent);
+}
+
+.open-fusion-control-strip {
+  display: flex;
+  min-height: 42px;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid rgba(46, 232, 190, 0.2);
+  border-bottom: 1px solid #293834;
+  background:
+    linear-gradient(90deg, rgba(37, 217, 255, 0.08), rgba(98, 230, 111, 0.07)),
+    #101816;
+  padding: 7px 10px;
+}
+
+.open-fusion-control-strip label {
+  display: grid;
+  min-width: 240px;
+  flex: 1 1 260px;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.open-fusion-control-strip label span {
+  color: #9fb4ad;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.open-fusion-control-strip input {
+  min-width: 0;
+  height: 28px;
+  border: 1px solid rgba(46, 232, 190, 0.28);
+  border-radius: 6px;
+  outline: none;
+  background: #0c1110;
+  color: #f4f3ea;
+  padding: 0 9px;
+  font-family:
+    "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+  font-size: 12px;
+}
+
+.open-fusion-control-strip input:focus {
+  border-color: #2ee8be;
+  box-shadow: 0 0 0 2px rgba(46, 232, 190, 0.15);
+}
+
+.open-fusion-command-form {
+  display: grid;
+  min-width: 220px;
+  flex: 1 1 260px;
+  grid-template-columns: minmax(0, 1fr) 30px;
+  gap: 6px;
+}
+
+.open-fusion-command-form input {
+  border-color: rgba(245, 185, 68, 0.3);
+}
+
+.open-fusion-command-form button,
+.open-fusion-apply {
+  display: inline-flex;
+  width: 30px;
+  height: 28px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(46, 232, 190, 0.32);
+  border-radius: 6px;
+  background: #10201d;
+  color: #78f2d2;
+  cursor: pointer;
+}
+
+.open-fusion-command-form button {
+  border-color: rgba(245, 185, 68, 0.36);
+  background: #201b10;
+  color: #f5c96d;
+}
+
+.open-fusion-command-form button:hover:not(:disabled),
+.open-fusion-command-form button:focus-visible,
+.open-fusion-apply:hover:not(:disabled),
+.open-fusion-apply:focus-visible {
+  border-color: #2ee8be;
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(46, 232, 190, 0.15);
+}
+
+.open-fusion-command-form button:hover:not(:disabled),
+.open-fusion-command-form button:focus-visible {
+  border-color: #f5b944;
+  box-shadow: 0 0 0 2px rgba(245, 185, 68, 0.15);
+}
+
+.open-fusion-command-form button:disabled,
+.open-fusion-apply:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.open-fusion-command-status {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  flex: 1 1 100%;
+  color: #9fb4ad;
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.open-fusion-command-status.is-ok {
+  color: #88e0b5;
+}
+
+.open-fusion-command-status.is-error {
+  color: #ff9aa0;
 }
 
 .terminal-surface {

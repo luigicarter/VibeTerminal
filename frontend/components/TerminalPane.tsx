@@ -1,9 +1,18 @@
-import { useEffect, useMemo, useRef } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent as ReactFormEvent,
+  type KeyboardEvent as ReactKeyboardEvent
+} from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import {
+  Check,
   CopyPlus,
+  CornerDownLeft,
   GripVertical,
   Maximize2,
   Minimize2,
@@ -26,11 +35,18 @@ import {
   isTerminalCopyShortcut,
   isTerminalPasteShortcut
 } from "../terminalClipboard";
+import {
+  DEFAULT_OPEN_FUSION_EXECUTOR_MODEL,
+  DEFAULT_OPEN_FUSION_PLANNER_MODEL,
+  parseOpenFusionSlashCommand,
+  validateOpenFusionModel
+} from "../openFusion";
 import type {
   AgentProfile,
   AgentSession,
   AgentThreadRef,
   AgentThreadLookupStatus,
+  OpenFusionSettings,
   SessionStatus
 } from "../types";
 
@@ -59,6 +75,7 @@ interface ThreadLookupPatch {
 interface TerminalPaneProps {
   session: AgentSession;
   profile: AgentProfile;
+  openFusionControls?: OpenFusionControls;
   claimedThreadIds: string[];
   isMaximized: boolean;
   isArranging: boolean;
@@ -74,6 +91,19 @@ interface TerminalPaneProps {
   onThreadLookupChange: (patch: ThreadLookupPatch) => void;
   onStatusChange: (status: SessionStatus) => void;
 }
+
+interface OpenFusionControls extends OpenFusionSettings {
+  logoSrc: string;
+  onSettingsChange: (settings: OpenFusionSettings) => void;
+}
+
+const OPEN_FUSION_MODEL_SUGGESTIONS = [
+  "anthropic/claude-sonnet-4-5",
+  "anthropic/claude-opus-4-5",
+  "opencode/gpt-5.1-codex",
+  "openai/gpt-5.1",
+  "google/gemini-3-pro-preview"
+];
 
 function statusLabel(status: SessionStatus) {
   switch (status) {
@@ -95,6 +125,7 @@ function statusLabel(status: SessionStatus) {
 export default function TerminalPane({
   session,
   profile,
+  openFusionControls,
   claimedThreadIds,
   isMaximized,
   isArranging,
@@ -135,17 +166,45 @@ export default function TerminalPane({
   const lookupInFlightRef = useRef(false);
   const claimedThreadIdsRef = useRef(claimedThreadIds);
   const forceThreadLookupTokenRef = useRef<number | null>(null);
+  const [draftPlannerModel, setDraftPlannerModel] = useState(
+    openFusionControls?.plannerModel ?? ""
+  );
+  const [draftExecutorModel, setDraftExecutorModel] = useState(
+    openFusionControls?.executorModel ?? ""
+  );
+  const [openFusionCommand, setOpenFusionCommand] = useState("");
+  const [openFusionCommandStatus, setOpenFusionCommandStatus] = useState<{
+    kind: "ok" | "error";
+    text: string;
+  } | null>(null);
 
   const platform = window.vibe?.platform;
+  const openFusionModelListId = `${session.id}-open-fusion-models`;
 
   const launchCommand = useMemo(
     () => buildLaunchCommand(session, { platform }),
     [session, platform]
   );
+  const openFusionDraftChanged = Boolean(
+    openFusionControls &&
+      ((draftPlannerModel.trim() || openFusionControls.plannerModel) !==
+        openFusionControls.plannerModel ||
+        (draftExecutorModel.trim() || openFusionControls.executorModel) !==
+          openFusionControls.executorModel)
+  );
 
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
+
+  useEffect(() => {
+    if (!openFusionControls) {
+      return;
+    }
+
+    setDraftPlannerModel(openFusionControls.plannerModel);
+    setDraftExecutorModel(openFusionControls.executorModel);
+  }, [openFusionControls?.plannerModel, openFusionControls?.executorModel]);
 
   useEffect(() => {
     onStatusChangeRef.current = onStatusChange;
@@ -305,6 +364,112 @@ export default function TerminalPane({
   function pasteClipboardText() {
     const text = window.vibe?.clipboard?.readText() ?? "";
     return pasteText(text);
+  }
+
+  function commitOpenFusionSettings() {
+    if (!openFusionControls) {
+      return;
+    }
+
+    const plannerModel =
+      draftPlannerModel.trim() || openFusionControls.plannerModel;
+    const executorModel =
+      draftExecutorModel.trim() || openFusionControls.executorModel;
+    const plannerError = validateOpenFusionModel(plannerModel);
+    if (plannerError) {
+      setOpenFusionCommandStatus({ kind: "error", text: plannerError });
+      return;
+    }
+
+    const executorError = validateOpenFusionModel(executorModel);
+    if (executorError) {
+      setOpenFusionCommandStatus({ kind: "error", text: executorError });
+      return;
+    }
+
+    setDraftPlannerModel(plannerModel);
+    setDraftExecutorModel(executorModel);
+
+    if (
+      plannerModel === openFusionControls.plannerModel &&
+      executorModel === openFusionControls.executorModel
+    ) {
+      setOpenFusionCommandStatus({
+        kind: "ok",
+        text: "Open Fusion models already selected."
+      });
+      return;
+    }
+
+    setOpenFusionCommandStatus({
+      kind: "ok",
+      text: "Open Fusion models updated."
+    });
+    openFusionControls.onSettingsChange({
+      plannerModel,
+      executorModel
+    });
+  }
+
+  function resetOpenFusionDrafts() {
+    if (!openFusionControls) {
+      return;
+    }
+
+    setDraftPlannerModel(openFusionControls.plannerModel);
+    setDraftExecutorModel(openFusionControls.executorModel);
+    setOpenFusionCommandStatus(null);
+  }
+
+  function handleOpenFusionModelKeyDown(
+    event: ReactKeyboardEvent<HTMLInputElement>
+  ) {
+    if (event.key === "Enter") {
+      commitOpenFusionSettings();
+      event.currentTarget.blur();
+    }
+
+    if (event.key === "Escape") {
+      resetOpenFusionDrafts();
+      event.currentTarget.blur();
+    }
+  }
+
+  function applyOpenFusionSlashCommand(command: string) {
+    if (!openFusionControls) {
+      return;
+    }
+
+    const result = parseOpenFusionSlashCommand(
+      command,
+      {
+        plannerModel: openFusionControls.plannerModel,
+        executorModel: openFusionControls.executorModel
+      },
+      {
+        plannerModel: DEFAULT_OPEN_FUSION_PLANNER_MODEL,
+        executorModel: DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
+      }
+    );
+
+    if (!result.ok) {
+      setOpenFusionCommandStatus({ kind: "error", text: result.error });
+      return;
+    }
+
+    setDraftPlannerModel(result.settings.plannerModel);
+    setDraftExecutorModel(result.settings.executorModel);
+    setOpenFusionCommand("");
+    setOpenFusionCommandStatus({ kind: "ok", text: result.message });
+
+    if (result.changed) {
+      openFusionControls.onSettingsChange(result.settings);
+    }
+  }
+
+  function submitOpenFusionSlashCommand(event: ReactFormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    applyOpenFusionSlashCommand(openFusionCommand);
   }
 
   function handlePanePointerDown(event: React.PointerEvent<HTMLElement>) {
@@ -691,6 +856,9 @@ export default function TerminalPane({
         command,
         launchToken,
         fusion: session.fusion,
+        openFusion: session.openFusion,
+        openFusionPlannerModel: session.openFusionPlannerModel,
+        openFusionExecutorModel: session.openFusionExecutorModel,
         cols: terminalRef.current.cols,
         rows: terminalRef.current.rows
       });
@@ -892,6 +1060,7 @@ export default function TerminalPane({
     <article
       className={clsx(
         "terminal-pane",
+        openFusionControls && "terminal-pane-open-fusion",
         isArranging && "terminal-pane-arranging",
         showAttention && "terminal-pane-attention",
         showAttention &&
@@ -904,7 +1073,15 @@ export default function TerminalPane({
       <header className="pane-header pane-drag-zone" title="Drag header to move pane">
         <div className="pane-title">
           <GripVertical className="drag-grip" size={15} />
-          <TerminalSquare size={15} />
+          {openFusionControls ? (
+            <img
+              className="pane-provider-logo"
+              src={openFusionControls.logoSrc}
+              alt=""
+            />
+          ) : (
+            <TerminalSquare size={15} />
+          )}
           <span>{session.name}</span>
           <small>{profile.label}</small>
         </div>
@@ -949,6 +1126,70 @@ export default function TerminalPane({
         <span>{launchCommand || "shell"}</span>
         <span>{session.cwd}</span>
       </div>
+
+      {openFusionControls && (
+        <div className="open-fusion-control-strip">
+          <datalist id={openFusionModelListId}>
+            {OPEN_FUSION_MODEL_SUGGESTIONS.map((model) => (
+              <option key={model} value={model} />
+            ))}
+          </datalist>
+          <label>
+            <span>Brain</span>
+            <input
+              list={openFusionModelListId}
+              value={draftPlannerModel}
+              onChange={(event) => setDraftPlannerModel(event.target.value)}
+              onKeyDown={handleOpenFusionModelKeyDown}
+              spellCheck={false}
+            />
+          </label>
+          <label>
+            <span>Body</span>
+            <input
+              list={openFusionModelListId}
+              value={draftExecutorModel}
+              onChange={(event) => setDraftExecutorModel(event.target.value)}
+              onKeyDown={handleOpenFusionModelKeyDown}
+              spellCheck={false}
+            />
+          </label>
+          <button
+            className="open-fusion-apply"
+            title="Apply Open Fusion models"
+            onClick={commitOpenFusionSettings}
+            disabled={!openFusionDraftChanged}
+          >
+            <Check size={14} />
+          </button>
+          <form
+            className="open-fusion-command-form"
+            onSubmit={submitOpenFusionSlashCommand}
+          >
+            <input
+              value={openFusionCommand}
+              onChange={(event) => setOpenFusionCommand(event.target.value)}
+              placeholder="/brain model"
+              aria-label="Open Fusion slash command"
+              spellCheck={false}
+            />
+            <button title="Run Open Fusion command" disabled={!openFusionCommand.trim()}>
+              <CornerDownLeft size={14} />
+            </button>
+          </form>
+          {openFusionCommandStatus && (
+            <span
+              className={clsx(
+                "open-fusion-command-status",
+                `is-${openFusionCommandStatus.kind}`
+              )}
+              title={openFusionCommandStatus.text}
+            >
+              {openFusionCommandStatus.text}
+            </span>
+          )}
+        </div>
+      )}
 
       <div
         className="terminal-surface"

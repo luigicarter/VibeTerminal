@@ -32,8 +32,13 @@ assert(
     appSource.includes("normalizeFusionModel(session.fusionModel)") &&
     appSource.includes("normalizeFusionCodexModel(session.fusionCodexModel)") &&
     appSource.includes("normalizeFusionEffort(session.fusionClaudeEffort ?? session.fusionEffort)") &&
-    appSource.includes("normalizeFusionEffort(session.fusionCodexEffort ?? session.fusionEffort)"),
-  "workspace restore should skip corrupt saved entries and normalize Fusion settings"
+    appSource.includes("normalizeFusionEffort(session.fusionCodexEffort ?? session.fusionEffort)") &&
+    appSource.includes('session.openFusion === true || session.kind === "openfusion"') &&
+    appSource.includes('isOpenFusion') &&
+    appSource.includes('restoredKind: AgentKind = isFusion') &&
+    appSource.includes('openFusionPlannerModel: isOpenFusion') &&
+    appSource.includes('openFusionExecutorModel: isOpenFusion'),
+  "workspace restore should skip corrupt saved entries and normalize Fusion/Open Fusion settings"
 );
 
 assert(

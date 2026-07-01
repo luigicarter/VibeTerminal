@@ -286,9 +286,9 @@ assert(
 );
 assert(
   appSource.includes("function sessionCreationKind") &&
-    appSource.includes('session.fusion ? "fusion" : session.kind') &&
+    appSource.includes('session.fusion ? "fusion" : session.openFusion ? "openfusion" : session.kind') &&
     appSource.includes("applyAgentAttention(session.id, attention)"),
-  "Fusion add/duplicate and completion attention should use the app attention path"
+  "Fusion/Open Fusion add/duplicate and completion attention should use the app attention path"
 );
 assert(
   appSource.includes('isFusion || (previousStatus !== "done" && previousStatus !== "failed")'),

@@ -10,7 +10,12 @@ export type AgentKind =
   // `kind: "claude"` session with `fusion: true`, so all claude behavior
   // (telemetry, resume, working-state) applies unchanged. No session is ever
   // persisted with kind "fusion".
-  | "fusion";
+  | "fusion"
+  // Selection-only kind for the ribbon: an Open Fusion launch creates a real
+  // `kind: "opencode"` session with `openFusion: true`, so OpenCode terminal
+  // behavior and thread discovery stay unchanged while the app injects a
+  // pane-scoped OpenCode config.
+  | "openfusion";
 
 export type AgentThreadProvider = "codex" | "claude" | "opencode" | "cursor";
 
@@ -23,6 +28,13 @@ export type FusionCodexModel = string;
 export type FusionEffort = "auto" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export type FusionRunMode = "auto" | "plan";
+
+export type OpenFusionModel = string;
+
+export interface OpenFusionSettings {
+  plannerModel: OpenFusionModel;
+  executorModel: OpenFusionModel;
+}
 
 export interface FusionSettings {
   mode: FusionRunMode;
@@ -106,6 +118,8 @@ export interface AgentProfile {
   accent: string;
   // Marks the ribbon's Fusion launcher (Opus architect + Codex executor).
   fusion?: boolean;
+  // Marks the ribbon's Open Fusion launcher (OpenCode planner + executor).
+  openFusion?: boolean;
 }
 
 export interface AgentThreadRef {
@@ -167,6 +181,11 @@ export interface AgentSession {
   // Legacy shared effort field from older saved Fusion panes. New panes store
   // separate Opus/Codex effort values but keep this readable for migration.
   fusionEffort?: FusionEffort;
+  // Open Fusion panes are persisted as kind === "opencode" with app-scoped
+  // planner/executor config generated at launch time.
+  openFusion?: boolean;
+  openFusionPlannerModel?: OpenFusionModel;
+  openFusionExecutorModel?: OpenFusionModel;
   cwd: string;
   createdAt: number;
   threadRef?: AgentThreadRef;
@@ -225,6 +244,11 @@ export interface TerminalLaunchPayload {
   // When true, the main process provisions Fusion instrumentation for this pane
   // (architect system prompt + Codex delegation). See backend/agentTelemetry.cjs.
   fusion?: boolean;
+  // When true, the main process writes a pane-scoped OpenCode config and TUI
+  // theme, then exposes it through OPENCODE_* env vars for this terminal only.
+  openFusion?: boolean;
+  openFusionPlannerModel?: OpenFusionModel | string;
+  openFusionExecutorModel?: OpenFusionModel | string;
 }
 
 export type UpdateStatus =

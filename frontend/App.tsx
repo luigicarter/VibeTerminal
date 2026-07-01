@@ -22,6 +22,12 @@ import {
 } from "lucide-react";
 import clsx from "clsx";
 import vibeTerminalLogo from "./assets/vibeterminal-logo.png";
+import openFusionLogo from "./assets/openfusion-logo.png";
+import {
+  DEFAULT_OPEN_FUSION_EXECUTOR_MODEL,
+  DEFAULT_OPEN_FUSION_PLANNER_MODEL,
+  normalizeOpenFusionModel
+} from "./openFusion";
 import {
   EMPTY_ATTENTION,
   attentionFromEvent,
@@ -60,6 +66,7 @@ import type {
   FusionChatEvent,
   FusionSettings,
   LayoutBox,
+  OpenFusionSettings,
   ProjectWorkspace,
   UpdateState
 } from "./types";
@@ -143,6 +150,13 @@ const agentProfiles: AgentProfile[] = [
     command: "claude",
     accent: "#b98bff",
     fusion: true
+  },
+  {
+    kind: "openfusion",
+    label: "Open Fusion",
+    command: "opencode",
+    accent: "#2ee8be",
+    openFusion: true
   },
   {
     kind: "cursor",
@@ -500,7 +514,13 @@ function createSession(
   // `fusion` so every existing claude path (telemetry, resume, working-state,
   // thread discovery) applies unchanged; only the launch gets Fusion wiring.
   const isFusion = profile.fusion === true;
-  const effectiveKind: AgentKind = isFusion ? "claude" : kind;
+  // "openfusion" follows the same pattern but persists as OpenCode.
+  const isOpenFusion = profile.openFusion === true;
+  const effectiveKind: AgentKind = isFusion
+    ? "claude"
+    : isOpenFusion
+      ? "opencode"
+      : kind;
   const sessionName = name ?? `${profile.label} ${existingSessions.length + 1}`;
 
   return {
@@ -514,6 +534,13 @@ function createSession(
     fusionCodexEffort: isFusion ? "auto" : undefined,
     fusionRunMode: isFusion ? DEFAULT_FUSION_RUN_MODE : undefined,
     fusionEffort: undefined,
+    openFusion: isOpenFusion || undefined,
+    openFusionPlannerModel: isOpenFusion
+      ? DEFAULT_OPEN_FUSION_PLANNER_MODEL
+      : undefined,
+    openFusionExecutorModel: isOpenFusion
+      ? DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
+      : undefined,
     command: profile.command,
     cwd,
     createdAt: Date.now(),
@@ -551,8 +578,15 @@ function restoreSession(session: AgentSession): AgentSession {
   const launchToken = finiteNumber(session.launchToken, 0);
   const previousStatus = normalizeSessionStatus(session.status);
   const isFusion = session.fusion === true || session.kind === "fusion";
-  const restoredKind: AgentKind = isFusion ? "claude" : session.kind;
-  const profile = getProfile(isFusion ? "fusion" : restoredKind);
+  const isOpenFusion = session.openFusion === true || session.kind === "openfusion";
+  const restoredKind: AgentKind = isFusion
+    ? "claude"
+    : isOpenFusion
+      ? "opencode"
+      : session.kind;
+  const profile = getProfile(
+    isFusion ? "fusion" : isOpenFusion ? "openfusion" : restoredKind
+  );
   const createdAt = finiteNumber(session.createdAt, Date.now());
   // A completed Fusion turn still leaves a reusable chat host while the app is
   // open, so restore the host intent whenever the pane itself was started.
@@ -593,6 +627,7 @@ function restoreSession(session: AgentSession): AgentSession {
     kind: restoredKind,
     command: typeof session.command === "string" ? session.command : profile.command,
     fusion: isFusion || undefined,
+    openFusion: isOpenFusion || undefined,
     createdAt,
     started: shouldAutoStart,
     launchToken,
@@ -619,6 +654,18 @@ function restoreSession(session: AgentSession): AgentSession {
     fusionEffort: isFusion
       ? undefined
       : session.fusionEffort,
+    openFusionPlannerModel: isOpenFusion
+      ? normalizeOpenFusionModel(
+          session.openFusionPlannerModel,
+          DEFAULT_OPEN_FUSION_PLANNER_MODEL
+        )
+      : session.openFusionPlannerModel,
+    openFusionExecutorModel: isOpenFusion
+      ? normalizeOpenFusionModel(
+          session.openFusionExecutorModel,
+          DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
+        )
+      : session.openFusionExecutorModel,
     threadLookupStartedAt: undefined,
     threadLookupStatus: "idle",
     threadLookupMessage: undefined,
@@ -1304,7 +1351,7 @@ export default function App() {
   }
 
   function sessionCreationKind(session: AgentSession): AgentKind {
-    return session.fusion ? "fusion" : session.kind;
+    return session.fusion ? "fusion" : session.openFusion ? "openfusion" : session.kind;
   }
 
   async function addSession(kind: AgentKind) {
@@ -1336,6 +1383,18 @@ export default function App() {
         ...createSession(sessionCreationKind(session), session.cwd, sessions),
         name: `${session.name} copy`,
         command: session.command,
+        openFusionPlannerModel: session.openFusion
+          ? normalizeOpenFusionModel(
+              session.openFusionPlannerModel,
+              DEFAULT_OPEN_FUSION_PLANNER_MODEL
+            )
+          : undefined,
+        openFusionExecutorModel: session.openFusion
+          ? normalizeOpenFusionModel(
+              session.openFusionExecutorModel,
+              DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
+            )
+          : undefined,
         resumeRef: sourceThread
       }
     ]);
@@ -1861,6 +1920,76 @@ export default function App() {
     };
 
     if (session.started && requiresRestart) {
+      stopSessionProcess(session).then(applySettings);
+    } else {
+      applySettings();
+    }
+  }
+
+  function updateOpenFusionSettings(
+    scope: SessionScope,
+    session: AgentSession,
+    settings: OpenFusionSettings
+  ) {
+    if (!session.openFusion) {
+      return;
+    }
+
+    const nextPlannerModel = normalizeOpenFusionModel(
+      settings.plannerModel,
+      DEFAULT_OPEN_FUSION_PLANNER_MODEL
+    );
+    const nextExecutorModel = normalizeOpenFusionModel(
+      settings.executorModel,
+      DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
+    );
+    const currentPlannerModel = normalizeOpenFusionModel(
+      session.openFusionPlannerModel,
+      DEFAULT_OPEN_FUSION_PLANNER_MODEL
+    );
+    const currentExecutorModel = normalizeOpenFusionModel(
+      session.openFusionExecutorModel,
+      DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
+    );
+
+    if (
+      nextPlannerModel === currentPlannerModel &&
+      nextExecutorModel === currentExecutorModel
+    ) {
+      return;
+    }
+
+    const applySettings = () => {
+      updateScopeSessions(scope, (sessions) =>
+        sessions.map((item) => {
+          if (item.id !== session.id) {
+            return item;
+          }
+
+          const activeRef = activeSessionThreadRef(item);
+          return {
+            ...item,
+            openFusionPlannerModel: nextPlannerModel,
+            openFusionExecutorModel: nextExecutorModel,
+            ...(item.started
+              ? {
+                  started: true,
+                  launchToken: item.launchToken + 1,
+                  nextLaunchMode: activeRef?.id ? "resume" : "new",
+                  threadLookupStartedAt: undefined,
+                  threadLookupStatus: activeRef?.id ? "found" : "idle",
+                  threadLookupMessage: undefined,
+                  status: "idle" as const,
+                  attention: EMPTY_ATTENTION,
+                  backgroundActivity: undefined
+                }
+              : {})
+          };
+        })
+      );
+    };
+
+    if (session.started) {
       stopSessionProcess(session).then(applySettings);
     } else {
       applySettings();
@@ -2482,7 +2611,11 @@ export default function App() {
                 onClick={() => addSession(profile.kind)}
                 style={{ "--agent-accent": profile.accent } as React.CSSProperties}
               >
-                <Plus size={14} />
+                {profile.openFusion ? (
+                  <img className="agent-launcher-logo" src={openFusionLogo} alt="" />
+                ) : (
+                  <Plus size={14} />
+                )}
                 {profile.label}
               </button>
             ))}
@@ -2585,7 +2718,32 @@ export default function App() {
                   <TerminalPane
                     session={session}
                     profile={
-                      session.fusion ? getProfile("fusion") : getProfile(session.kind)
+                      session.openFusion
+                        ? getProfile("openfusion")
+                        : session.fusion
+                          ? getProfile("fusion")
+                          : getProfile(session.kind)
+                    }
+                    openFusionControls={
+                      session.openFusion
+                        ? {
+                            logoSrc: openFusionLogo,
+                            plannerModel: normalizeOpenFusionModel(
+                              session.openFusionPlannerModel,
+                              DEFAULT_OPEN_FUSION_PLANNER_MODEL
+                            ),
+                            executorModel: normalizeOpenFusionModel(
+                              session.openFusionExecutorModel,
+                              DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
+                            ),
+                            onSettingsChange: (settings) =>
+                              updateOpenFusionSettings(
+                                activeScope,
+                                session,
+                                settings
+                              )
+                          }
+                        : undefined
                     }
                     claimedThreadIds={claimedThreadIds(session.id)}
                     isMaximized={session.id === maximizedSessionId}
@@ -2639,7 +2797,11 @@ export default function App() {
                       key={profile.kind}
                       onClick={() => addSession(profile.kind)}
                     >
-                      <Plus size={16} />
+                      {profile.openFusion ? (
+                        <img className="agent-launcher-logo" src={openFusionLogo} alt="" />
+                      ) : (
+                        <Plus size={16} />
+                      )}
                       {profile.label}
                     </button>
                   ))}

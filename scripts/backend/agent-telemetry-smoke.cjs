@@ -11,6 +11,7 @@ const {
   installOpenCodePlugin,
   mapTelemetryToAttention,
   mergeCursorHooks,
+  openFusionConfigContents,
   openCodePluginSource,
   stripCursorHooks
 } = require("../../backend/agentTelemetry.cjs");
@@ -396,6 +397,61 @@ function postTelemetry(callbackUrl, token, payload) {
     assert(
       (process.env[pathKey] || "") === fakeBin,
       "global process PATH should not be mutated by instrumentation"
+    );
+
+    const openFusionFiles = await manager.prepareOpenFusionFiles("pane-one", {
+      plannerModel: "openai/gpt-5.1",
+      executorModel: "opencode/gpt-5.1-codex"
+    });
+    assert(openFusionFiles, "Open Fusion files should be prepared");
+    assert(
+      openFusionFiles.configPath.startsWith(`${manager.runDir}${path.sep}`) &&
+        openFusionFiles.configDir.startsWith(`${manager.runDir}${path.sep}`),
+      "Open Fusion config must stay inside the telemetry run dir"
+    );
+    assert(
+      openFusionFiles.env.OPENCODE_CONFIG === openFusionFiles.configPath &&
+        openFusionFiles.env.OPENCODE_CONFIG_DIR === openFusionFiles.configDir &&
+        typeof openFusionFiles.env.OPENCODE_CONFIG_CONTENT === "string" &&
+        openFusionFiles.env.OPENCODE_TUI_CONFIG === openFusionFiles.tuiConfigPath,
+      "Open Fusion env should point at the pane-scoped config files"
+    );
+    const openFusionEnvConfig = JSON.parse(
+      openFusionFiles.env.OPENCODE_CONFIG_CONTENT
+    );
+    const openFusionConfig = JSON.parse(
+      fs.readFileSync(openFusionFiles.configPath, "utf8")
+    );
+    assert(
+      openFusionConfig.agent?.planner?.mode === "primary" &&
+        openFusionConfig.agent?.planner?.model === "openai/gpt-5.1" &&
+        openFusionConfig.agent?.planner?.permission?.bash === "deny" &&
+        openFusionConfig.agent?.planner?.permission?.edit === "deny" &&
+        openFusionConfig.agent?.planner?.permission?.task?.executor === "allow" &&
+        openFusionConfig.agent?.planner?.permission?.task?.["*"] === "deny",
+      "Open Fusion planner should be a read-only primary agent with task access"
+    );
+    assert(
+      openFusionConfig.agent?.executor?.mode === "subagent" &&
+        openFusionConfig.agent?.executor?.model === "opencode/gpt-5.1-codex",
+      "Open Fusion executor should be a model-pinned subagent"
+    );
+    assert(
+      openFusionEnvConfig.agent?.planner?.prompt.includes("Open Fusion Planner") &&
+        openFusionEnvConfig.agent?.executor?.prompt.includes("Open Fusion Executor"),
+      "Open Fusion inline config should carry prompts so env config can override project config"
+    );
+    assert(
+      fs.existsSync(openFusionFiles.plannerPromptPath) &&
+        fs.existsSync(openFusionFiles.executorPromptPath) &&
+        fs.existsSync(openFusionFiles.themePath) &&
+        fs.existsSync(openFusionFiles.tuiConfigPath),
+      "Open Fusion prompt/theme/TUI files should be written"
+    );
+    assert(
+      openFusionConfigContents({ plannerModel: "bad model id" }).agent.planner
+        .model === "anthropic/claude-sonnet-4-5",
+      "invalid Open Fusion model ids should fall back before writing config"
     );
 
     const badTokenStatus = await postWithBadToken(manager.callbackUrl());

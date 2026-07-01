@@ -11,9 +11,143 @@ const OWNER_MARKER = ".vibe-agent-shims.json";
 const MAX_EVENT_BYTES = 64 * 1024;
 const MAX_SESSION_ID_BYTES = 512;
 const PROVIDERS = ["codex", "claude", "opencode", "cursor-agent"];
+const OPEN_FUSION_MODEL_ID_PATTERN = /^[A-Za-z0-9._:/@+-]+$/;
+const DEFAULT_OPEN_FUSION_PLANNER_MODEL = "anthropic/claude-sonnet-4-5";
+const DEFAULT_OPEN_FUSION_EXECUTOR_MODEL = "opencode/gpt-5.1-codex";
 
 function normalizeFusionRunMode(value) {
   return String(value || "").trim().toLowerCase() === "plan" ? "plan" : "auto";
+}
+
+function normalizeOpenFusionModel(value, fallback) {
+  const model = typeof value === "string" ? value.trim() : "";
+  const normalizedFallback = fallback || DEFAULT_OPEN_FUSION_EXECUTOR_MODEL;
+  if (
+    !model ||
+    model.length > 96 ||
+    !OPEN_FUSION_MODEL_ID_PATTERN.test(model) ||
+    model.toLowerCase() === "auto" ||
+    model.toLowerCase() === "default"
+  ) {
+    return normalizedFallback;
+  }
+
+  return model;
+}
+
+function openFusionPlannerPrompt() {
+  return [
+    "# Open Fusion Planner",
+    "",
+    "You are the primary Planner/intelligence layer inside vibeTerminal Open Fusion.",
+    "You are the human-facing agent. Stay in the loop as the observer and steerer.",
+    "",
+    "Responsibilities:",
+    "- Understand the user's goal and decide the next step.",
+    "- Use the task tool to delegate concrete implementation work to the executor subagent.",
+    "- Do not perform code edits or shell commands yourself.",
+    "- Review the executor's summary, diffs, command results, tests, and self-review.",
+    "- Decide whether the task is done or whether the executor needs a better corrective instruction.",
+    "- If more work is needed, write a specific follow-up task for the executor.",
+    "",
+    "Completion rule:",
+    "The executor may recommend that work is complete, but you own the final done/not-done decision.",
+    "Only present completion to the user after you have reviewed the evidence and are satisfied."
+  ].join("\n");
+}
+
+function openFusionExecutorPrompt() {
+  return [
+    "# Open Fusion Executor",
+    "",
+    "You are the executor subagent inside vibeTerminal Open Fusion.",
+    "The Planner delegates concrete work to you and owns the final completion decision.",
+    "",
+    "Responsibilities:",
+    "- Implement code changes.",
+    "- Run shell commands, tests, builds, and inspections needed to validate the work.",
+    "- Interpret command results and fix issues you find.",
+    "- Self-review your changes before returning control.",
+    "- Report changed files, commands run, validation results, remaining risks, and a recommendation.",
+    "",
+    "Do not claim final completion directly to the user. Return evidence to the Planner so it can decide done vs another correction pass."
+  ].join("\n");
+}
+
+function openFusionTheme() {
+  return {
+    $schema: "https://opencode.ai/theme.json",
+    defs: {
+      bg: "#0d1110",
+      panel: "#101817",
+      panel2: "#17211f",
+      text: "#f3f2ea",
+      muted: "#9aa9a3",
+      cyan: "#25d9ff",
+      green: "#62e66f",
+      amber: "#f5b944",
+      red: "#ff6571"
+    },
+    theme: {
+      primary: { dark: "cyan", light: "#007b9b" },
+      secondary: { dark: "green", light: "#267338" },
+      accent: { dark: "amber", light: "#946214" },
+      error: { dark: "red", light: "#bf2738" },
+      warning: { dark: "amber", light: "#946214" },
+      success: { dark: "green", light: "#267338" },
+      text: { dark: "text", light: "#111814" },
+      muted: { dark: "muted", light: "#53615b" },
+      background: { dark: "bg", light: "#f8faf6" },
+      surface: { dark: "panel", light: "#ffffff" },
+      panel: { dark: "panel2", light: "#eef5f1" }
+    }
+  };
+}
+
+function openFusionConfigContents(options = {}) {
+  const plannerModel = normalizeOpenFusionModel(
+    options.plannerModel,
+    DEFAULT_OPEN_FUSION_PLANNER_MODEL
+  );
+  const executorModel = normalizeOpenFusionModel(
+    options.executorModel,
+    DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
+  );
+  const inlinePrompts = options.inlinePrompts === true;
+
+  return {
+    $schema: "https://opencode.ai/config.json",
+    model: plannerModel,
+    agent: {
+      planner: {
+        description:
+          "Primary Open Fusion planner. Observes, delegates to executor, reviews evidence, and gates completion.",
+        mode: "primary",
+        model: plannerModel,
+        prompt: inlinePrompts
+          ? openFusionPlannerPrompt()
+          : "{file:./openfusion-planner.md}",
+        permission: {
+          edit: "deny",
+          bash: "deny",
+          task: {
+            "*": "deny",
+            executor: "allow"
+          }
+        }
+      },
+      executor: {
+        description:
+          "Open Fusion executor. Implements code, runs commands, fixes issues, self-reviews, and reports evidence to the planner.",
+        mode: "subagent",
+        model: executorModel,
+        hidden: false,
+        prompt: inlinePrompts
+          ? openFusionExecutorPrompt()
+          : "{file:./openfusion-executor.md}"
+      }
+    }
+  };
 }
 
 function pathEnvKey(env = process.env, platform = process.platform) {
@@ -1529,6 +1663,74 @@ function createAgentTelemetryManager(options = {}) {
     return instrumentation;
   }
 
+  async function prepareOpenFusionFiles(sessionId, opts = {}) {
+    await ready;
+    const normalizedSessionId = normalizeSessionId(sessionId);
+    if (!normalizedSessionId) {
+      return null;
+    }
+
+    const instrumentation = await prepareSession(normalizedSessionId);
+    const session = sessions.get(normalizedSessionId);
+    if (!instrumentation || !session?.dir) {
+      return null;
+    }
+
+    const openFusionDir = path.join(session.dir, "openfusion");
+    const configDir = path.join(openFusionDir, "config");
+    const themesDir = path.join(configDir, "themes");
+    fs.mkdirSync(themesDir, { recursive: true });
+
+    const configPath = path.join(configDir, "opencode.json");
+    const tuiConfigPath = path.join(openFusionDir, "tui.json");
+    const themePath = path.join(themesDir, "vibeterminal-openfusion.json");
+    const plannerPromptPath = path.join(configDir, "openfusion-planner.md");
+    const executorPromptPath = path.join(configDir, "openfusion-executor.md");
+
+    fs.writeFileSync(plannerPromptPath, `${openFusionPlannerPrompt()}\n`);
+    fs.writeFileSync(executorPromptPath, `${openFusionExecutorPrompt()}\n`);
+    const fileConfig = openFusionConfigContents(opts);
+    const envConfig = openFusionConfigContents({ ...opts, inlinePrompts: true });
+    fs.writeFileSync(configPath, `${JSON.stringify(fileConfig, null, 2)}\n`);
+    fs.writeFileSync(themePath, `${JSON.stringify(openFusionTheme(), null, 2)}\n`);
+    fs.writeFileSync(
+      tuiConfigPath,
+      `${JSON.stringify(
+        {
+          $schema: "https://opencode.ai/tui.json",
+          theme: "vibeterminal-openfusion",
+          mouse: true,
+          diff_style: "auto",
+          attention: {
+            enabled: false
+          }
+        },
+        null,
+        2
+      )}\n`
+    );
+
+    return {
+      configPath,
+      configDir,
+      tuiConfigPath,
+      themePath,
+      plannerPromptPath,
+      executorPromptPath,
+      env: {
+        OPENCODE_CONFIG: configPath,
+        OPENCODE_CONFIG_DIR: configDir,
+        OPENCODE_CONFIG_CONTENT: JSON.stringify(envConfig),
+        OPENCODE_TUI_CONFIG: tuiConfigPath,
+        OPENCODE_CLIENT: "vibeterminal-openfusion",
+        OPENCODE_DISABLE_AUTOUPDATE: "true",
+        VIBE_TERMINAL_OPEN_FUSION: "1",
+        VIBE_TERMINAL_OPEN_FUSION_CONFIG: configPath,
+        VIBE_TERMINAL_OPEN_FUSION_TUI_CONFIG: tuiConfigPath
+      }
+    };
+  }
+
   function fusionRunModePathForSession(normalizedSessionId) {
     return path.join(runDir, sessionDirName(normalizedSessionId), "fusion-run-mode.txt");
   }
@@ -1837,6 +2039,7 @@ function createAgentTelemetryManager(options = {}) {
     cleanup,
     ensureCursorProjectHooks,
     prepareSession,
+    prepareOpenFusionFiles,
     prepareFusionFiles,
     updateFusionSettings,
     ready,
@@ -1854,6 +2057,10 @@ function createAgentTelemetryManager(options = {}) {
 module.exports = {
   buildClaudeSettingsJson,
   buildFusionSystemPrompt,
+  openFusionConfigContents,
+  openFusionExecutorPrompt,
+  openFusionPlannerPrompt,
+  openFusionTheme,
   cleanupStaleShimDirs,
   createAgentTelemetryManager,
   cursorHookEntries,

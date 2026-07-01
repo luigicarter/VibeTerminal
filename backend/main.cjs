@@ -120,6 +120,8 @@ let updateState = {
   updatedAt: Date.now()
 };
 const FUSION_MODEL_ID_PATTERN = /^[A-Za-z0-9._:/@+-]+$/;
+const DEFAULT_OPEN_FUSION_PLANNER_MODEL = "anthropic/claude-sonnet-4-5";
+const DEFAULT_OPEN_FUSION_EXECUTOR_MODEL = "opencode/gpt-5.1-codex";
 const FUSION_CODEX_BRIDGE_TOOLS = [
   "mcp__fusion-codex__codex_investigate",
   "mcp__fusion-codex__codex_implement",
@@ -870,6 +872,12 @@ function normalizeFusionCodexModel(value) {
   return lower === "auto" || lower === "default" ? undefined : model;
 }
 
+function normalizeOpenFusionModel(value, fallback) {
+  const model = normalizeFusionModelId(value, fallback);
+  const lower = model.toLowerCase();
+  return lower === "auto" || lower === "default" ? fallback : model;
+}
+
 function normalizeFusionEffort(value) {
   const effort = normalizeFusionString(value)?.toLowerCase();
   return ["low", "medium", "high", "xhigh", "max"].includes(effort)
@@ -1177,7 +1185,39 @@ ipcMain.handle("terminal:create", async (_event, payload) => {
   startPtyHost();
   const telemetry = getAgentTelemetry();
   // Fusion panes do NOT use the PTY path — they run headless via fusion-chat:start.
-  const instrumentation = await telemetry.prepareSession(payload?.id);
+  let instrumentation = await telemetry.prepareSession(payload?.id);
+
+  if (payload?.openFusion) {
+    const openFusionFiles = await telemetry.prepareOpenFusionFiles(payload.id, {
+      plannerModel: normalizeOpenFusionModel(
+        payload.openFusionPlannerModel,
+        DEFAULT_OPEN_FUSION_PLANNER_MODEL
+      ),
+      executorModel: normalizeOpenFusionModel(
+        payload.openFusionExecutorModel,
+        DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
+      )
+    });
+
+    if (!openFusionFiles) {
+      if (payload?.id) {
+        broadcastTerminalEvent({
+          id: payload.id,
+          type: "error",
+          message: "Could not prepare Open Fusion app-scoped OpenCode config."
+        });
+      }
+      return false;
+    }
+
+    instrumentation = {
+      ...instrumentation,
+      env: {
+        ...(instrumentation?.env || {}),
+        ...openFusionFiles.env
+      }
+    };
+  }
 
   // Cursor's stop hook lives in the project's .cursor/hooks.json, so install it
   // (idempotently) whenever a cursor-agent pane launches and the cwd is known.
