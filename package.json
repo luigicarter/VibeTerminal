@@ -33,6 +33,7 @@
     "smoke:frontend:attention": "node scripts/frontend/attention-smoke.cjs",
     "smoke:frontend:workspace": "node scripts/frontend/workspace-smoke.cjs",
     "smoke:frontend:session-launch": "node scripts/frontend/session-launch-smoke.cjs",
+    "smoke:frontend:fusion-settings": "node scripts/frontend/fusion-settings-smoke.cjs",
     "smoke:frontend:tiled-resize": "node scripts/frontend/tiled-board-resize-smoke.cjs",
     "smoke:codex-discovery": "npm run smoke:backend:codex-discovery",
     "typecheck": "tsc --noEmit",

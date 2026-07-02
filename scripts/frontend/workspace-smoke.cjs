@@ -32,7 +32,9 @@ assert(
     appSource.includes("normalizeFusionModel(session.fusionModel)") &&
     appSource.includes("normalizeFusionCodexModel(session.fusionCodexModel)") &&
     appSource.includes("normalizeFusionEffort(session.fusionClaudeEffort ?? session.fusionEffort)") &&
-    appSource.includes("normalizeFusionEffort(session.fusionCodexEffort ?? session.fusionEffort)") &&
+    // Codex effort restores through its OWN normalizer (enum minimal..ultra,
+    // legacy "max" coerced to "xhigh") — never the Claude one.
+    appSource.includes("normalizeFusionCodexEffort(session.fusionCodexEffort ?? session.fusionEffort)") &&
     appSource.includes('session.openFusion === true || session.kind === "openfusion"') &&
     appSource.includes('isOpenFusion') &&
     appSource.includes('restoredKind: AgentKind = isFusion') &&

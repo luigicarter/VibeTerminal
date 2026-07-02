@@ -25,7 +25,20 @@ export type FusionClaudeModel = string;
 
 export type FusionCodexModel = string;
 
+// Claude-side effort: the exact `claude --effort` enum plus "auto" (= omit the
+// flag). Codex speaks a DIFFERENT enum — verified against the codex 0.142
+// binary: minimal|low|medium|high|xhigh|ultra, with NO "max". Sharing one type
+// let the UI offer Codex a "max" it rejects, which broke every delegation.
 export type FusionEffort = "auto" | "low" | "medium" | "high" | "xhigh" | "max";
+
+export type FusionCodexEffort =
+  | "auto"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "ultra";
 
 export type FusionRunMode = "auto" | "plan";
 
@@ -36,7 +49,7 @@ export interface FusionSettings {
   model: FusionClaudeModel;
   codexModel: FusionCodexModel;
   claudeEffort: FusionEffort;
-  codexEffort: FusionEffort;
+  codexEffort: FusionCodexEffort;
 }
 
 export type AgentThreadLookupStatus =
@@ -174,7 +187,7 @@ export interface AgentSession {
   fusionModel?: FusionClaudeModel;
   fusionCodexModel?: FusionCodexModel;
   fusionClaudeEffort?: FusionEffort;
-  fusionCodexEffort?: FusionEffort;
+  fusionCodexEffort?: FusionCodexEffort;
   fusionRunMode?: FusionRunMode;
   // Legacy shared effort field from older saved Fusion panes. New panes store
   // separate Opus/Codex effort values but keep this readable for migration.

@@ -28,6 +28,7 @@ import type {
   AgentThreadRef,
   ChatMessage,
   FusionClaudeModel,
+  FusionCodexEffort,
   FusionCodexModel,
   FusionChatEvent,
   FusionEffort,
@@ -56,11 +57,14 @@ interface FusionChatPaneProps {
 }
 
 const OPUS_LABEL = "Opus 4.8";
+const SONNET_LABEL = "Sonnet 4.5";
 const DEFAULT_FUSION_MODEL: FusionClaudeModel = "opus";
 const DEFAULT_FUSION_CODEX_MODEL: FusionCodexModel = "auto";
 const DEFAULT_FUSION_EFFORT: FusionEffort = "auto";
+const DEFAULT_FUSION_CODEX_EFFORT: FusionCodexEffort = "auto";
 const DEFAULT_FUSION_RUN_MODE: FusionRunMode = "auto";
 const FUSION_MODEL_ID_PATTERN = /^[A-Za-z0-9._:/@+-]+$/;
+// Planning-side effort: the exact `claude --effort` enum ("auto" = omit).
 const FUSION_EFFORT_LABELS: Record<FusionEffort, string> = {
   auto: "Auto",
   low: "Low",
@@ -69,11 +73,43 @@ const FUSION_EFFORT_LABELS: Record<FusionEffort, string> = {
   xhigh: "XHigh",
   max: "Max"
 };
+// Execution-side effort: codex's OWN enum (verified against the 0.142 binary:
+// minimal|low|medium|high|xhigh|ultra). It has NO "max" — offering one poisoned
+// every delegation with an unknown-variant error until the user changed it.
+const CODEX_EFFORT_LABELS: Record<FusionCodexEffort, string> = {
+  auto: "Auto",
+  minimal: "Minimal",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "XHigh",
+  ultra: "Ultra"
+};
 const FUSION_RUN_MODE_LABELS: Record<FusionRunMode, string> = {
   auto: "Auto",
   plan: "Plan"
 };
 const FUSION_EFFORT_VALUES = Object.keys(FUSION_EFFORT_LABELS) as FusionEffort[];
+const CODEX_EFFORT_VALUES = Object.keys(CODEX_EFFORT_LABELS) as FusionCodexEffort[];
+// Curated model catalogs — the Fusion analogue of Open Fusion's provider
+// catalog. Claude's CLI accepts the aliases below (or full claude-* ids);
+// Codex ids were read out of the shipped 0.142 binary. Custom ids stay
+// possible via free text, but they are validated before anything restarts.
+const CLAUDE_MODEL_OPTIONS: { id: FusionClaudeModel; label: string; desc: string }[] = [
+  { id: "opus", label: `Model ${OPUS_LABEL}`, desc: "Deep planning and review (default)" },
+  { id: "sonnet", label: `Model ${SONNET_LABEL}`, desc: "Faster, lighter planning" }
+];
+const CODEX_MODEL_OPTIONS: { id: FusionCodexModel; label: string; desc: string }[] = [
+  { id: "auto", label: "Model Codex default", desc: "Use the configured execution model (default)" },
+  { id: "gpt-5.5", label: "Model GPT-5.5", desc: "Latest general Codex model" },
+  { id: "gpt-5.3-codex", label: "Model GPT-5.3 Codex", desc: "Coding-tuned" },
+  { id: "gpt-5.1-codex-max", label: "Model GPT-5.1 Codex Max", desc: "Deep agentic coding (supports XHigh)" },
+  { id: "gpt-5.1-codex-mini", label: "Model GPT-5.1 Codex Mini", desc: "Fast and inexpensive" }
+];
+// Claude model ids we allow through to `claude --model`: the known aliases or
+// a full claude-* id. Anything else previously restarted the pane into a
+// claude process that exited immediately — a dead pane with no explanation.
+const CLAUDE_MODEL_ALIAS_PATTERN = /^(opus|sonnet|fast|claude-[a-z0-9.:-]+)$/i;
 const FUSION_COMPOSER_MAX_PX = 160;
 const MAX_COMPOSER_PATHS = 32;
 const IMPLEMENT_PLAN_PROMPT = "Implement the plan.";
@@ -235,10 +271,20 @@ const roleName = (scope: FusionRoleScope) =>
 const scopeCommand = (scope: FusionRoleScope) =>
   scope === "harness" ? "fusion" : scope;
 
+// Each role lists ITS engine's effort vocabulary: planning = the claude CLI
+// enum, execution = codex's (which adds minimal/ultra and lacks max). The
+// harness scope uses the shared subset both engines accept.
 const effortItems = (prefix: string, scope: FusionRoleScope = "harness"): SlashMenuItem[] =>
-  FUSION_EFFORT_VALUES.map((effort) => ({
+  (scope === "execution"
+    ? (CODEX_EFFORT_VALUES as string[])
+    : (FUSION_EFFORT_VALUES as string[])
+  ).map((effort) => ({
     key: `${prefix}-${scope}-effort-${effort}`,
-    label: `${roleName(scope)} ${FUSION_EFFORT_LABELS[effort]}`,
+    label: `${roleName(scope)} ${
+      scope === "execution"
+        ? CODEX_EFFORT_LABELS[effort as FusionCodexEffort]
+        : FUSION_EFFORT_LABELS[effort as FusionEffort]
+    }`,
     desc:
       scope === "harness"
         ? effort === "auto"
@@ -320,12 +366,12 @@ function buildSlashMenu(input: string): SlashMenu {
 
   if (lower === "/opus" || lower.startsWith("/opus ")) {
     return submenu("/opus", "Planning Role", [
-      {
-        key: "opus-model",
-        label: "Model Opus 4.8",
-        desc: "Planning and review model",
-        command: "/opus model"
-      },
+      ...CLAUDE_MODEL_OPTIONS.map((model) => ({
+        key: `opus-model-${model.id}`,
+        label: model.label,
+        desc: model.desc,
+        command: `/claude ${model.id}`
+      })),
       {
         key: "opus-speed",
         label: "Speed",
@@ -342,14 +388,29 @@ function buildSlashMenu(input: string): SlashMenu {
     ]);
   }
 
+  // "/claude " is the fill the command palette itself inserts for "set the
+  // planning model" — it MUST land in a model submenu. Before this branch it
+  // fell through to the full command list with /plan highlighted, so the
+  // natural confirm keystroke silently switched modes.
+  if (lower === "/claude" || lower.startsWith("/claude ")) {
+    return submenu("/claude", "Planning Model", [
+      ...CLAUDE_MODEL_OPTIONS.map((model) => ({
+        key: `claude-model-${model.id}`,
+        label: model.label,
+        desc: model.desc,
+        command: `/claude ${model.id}`
+      }))
+    ]);
+  }
+
   if (lower === "/codex" || lower.startsWith("/codex ")) {
     return submenu("/codex", "Execution Role", [
-      {
-        key: "codex-auto",
-        label: "Default model",
-        desc: "Use the configured execution model",
-        command: "/codex auto"
-      },
+      ...CODEX_MODEL_OPTIONS.map((model) => ({
+        key: `codex-model-${model.id}`,
+        label: model.label,
+        desc: model.desc,
+        command: `/codex ${model.id}`
+      })),
       {
         key: "codex-custom",
         label: "Custom model",
@@ -444,6 +505,14 @@ function buildSlashMenu(input: string): SlashMenu {
     ]);
   }
 
+  // A command with an argument in progress ("/something …") that no submenu
+  // above claimed must NOT fall back to the full command list: Enter would
+  // activate whatever sits at index 0 (historically /plan — a silent mode
+  // switch). No matching context → no menu.
+  if (/\s/.test(trimmed)) {
+    return { title: "", items: [] };
+  }
+
   const token = input.startsWith("/") && !/\s/.test(input) ? input.slice(1).toLowerCase() : "";
   const commands = FUSION_SLASH_COMMANDS.filter((cmd) => cmd.name.slice(1).startsWith(token));
   return {
@@ -491,13 +560,29 @@ function normalizeFusionEffort(value: unknown): FusionEffort {
     : DEFAULT_FUSION_EFFORT;
 }
 
+function normalizeFusionCodexEffort(value: unknown): FusionCodexEffort {
+  // Legacy saved panes (and old fusion-settings.json files) carry "max",
+  // which codex rejects as an unknown variant: coerce to its nearest real
+  // level instead of letting it fail every delegation.
+  if (value === "max") {
+    return "xhigh";
+  }
+  return CODEX_EFFORT_VALUES.includes(value as FusionCodexEffort)
+    ? (value as FusionCodexEffort)
+    : DEFAULT_FUSION_CODEX_EFFORT;
+}
+
+function isValidClaudeModelId(value: string) {
+  return CLAUDE_MODEL_ALIAS_PATTERN.test(value.trim());
+}
+
 function normalizeFusionRunMode(value: unknown): FusionRunMode {
   return String(value || "").trim().toLowerCase() === "plan" ? "plan" : DEFAULT_FUSION_RUN_MODE;
 }
 
 function fusionClaudeModelLabel(value: FusionClaudeModel) {
   if (value === "opus") return OPUS_LABEL;
-  if (value === "sonnet") return "Fast";
+  if (value === "sonnet") return SONNET_LABEL;
   return value;
 }
 
@@ -510,7 +595,7 @@ function fusionRunModeLabel(value: FusionRunMode) {
 }
 
 function fusionSettingsSummary(settings: FusionSettings) {
-  return `Mode ${fusionRunModeLabel(settings.mode)} · Planning ${fusionClaudeModelLabel(settings.model)} · Planning effort ${FUSION_EFFORT_LABELS[settings.claudeEffort]} · Execution ${fusionCodexModelLabel(settings.codexModel)} · Execution effort ${FUSION_EFFORT_LABELS[settings.codexEffort]}`;
+  return `Mode ${fusionRunModeLabel(settings.mode)} · Planning ${fusionClaudeModelLabel(settings.model)} · Planning effort ${FUSION_EFFORT_LABELS[settings.claudeEffort]} · Execution ${fusionCodexModelLabel(settings.codexModel)} · Execution effort ${CODEX_EFFORT_LABELS[settings.codexEffort]}`;
 }
 
 interface ToolMeta {
@@ -790,7 +875,7 @@ export default function FusionChatPane({
   const fusionModel = normalizeFusionModel(session.fusionModel);
   const fusionCodexModel = normalizeFusionCodexModel(session.fusionCodexModel);
   const fusionClaudeEffort = normalizeFusionEffort(session.fusionClaudeEffort ?? session.fusionEffort);
-  const fusionCodexEffort = normalizeFusionEffort(session.fusionCodexEffort ?? session.fusionEffort);
+  const fusionCodexEffort = normalizeFusionCodexEffort(session.fusionCodexEffort ?? session.fusionEffort);
   const fusionRunMode = normalizeFusionRunMode(session.fusionRunMode);
   const fusionRunModeText = fusionRunModeLabel(fusionRunMode);
   const fusionModelLabel = fusionClaudeModelLabel(fusionModel);
@@ -929,9 +1014,13 @@ export default function FusionChatPane({
     }
     const restartNotice = pendingRestartNoticeRef.current;
     pendingRestartNoticeRef.current = null;
-    setMessages(
+    // A settings restart resumes the same Claude thread — keep the visible
+    // transcript and append the notice. Wiping it read as data loss for what
+    // is conceptually the same conversation. Fresh starts still clear.
+    setMessages((prev) =>
       restartNotice
         ? [
+            ...prev,
             {
               key: nextKey(),
               role: "opus",
@@ -1320,12 +1409,26 @@ export default function FusionChatPane({
   }, [messages]);
 
   function applySettings(settings: Partial<FusionSettings>, label = "settings") {
+    // Validate BEFORE anything restarts: an unknown planning model previously
+    // relaunched the pane into `claude --model <typo>`, which exits
+    // immediately — a dead pane with the transcript replaced by a notice.
+    if (
+      typeof settings.model === "string" &&
+      !isValidClaudeModelId(settings.model)
+    ) {
+      push({
+        role: "opus",
+        kind: "error",
+        text: `'${settings.model}' is not a Claude model this pane can launch. Use opus, sonnet, or a full claude-* model id.`
+      });
+      return;
+    }
     const nextSettings = {
       mode: normalizeFusionRunMode(settings.mode ?? fusionRunMode),
       model: normalizeFusionModel(settings.model ?? fusionModel),
       codexModel: normalizeFusionCodexModel(settings.codexModel ?? fusionCodexModel),
       claudeEffort: normalizeFusionEffort(settings.claudeEffort ?? fusionClaudeEffort),
-      codexEffort: normalizeFusionEffort(settings.codexEffort ?? fusionCodexEffort)
+      codexEffort: normalizeFusionCodexEffort(settings.codexEffort ?? fusionCodexEffort)
     };
     if (
       nextSettings.mode === fusionRunMode &&
@@ -1438,7 +1541,8 @@ export default function FusionChatPane({
       } else if (preset === "deep") {
         applySettings({ codexEffort: "high" }, "execution speed");
       } else {
-        applySettings({ codexEffort: "max" }, "execution speed");
+        // Codex has no "max" — xhigh is its top standard level.
+        applySettings({ codexEffort: "xhigh" }, "execution speed");
       }
       return;
     }
@@ -1450,22 +1554,42 @@ export default function FusionChatPane({
     } else if (preset === "deep") {
       applySettings({ model: "opus", claudeEffort: "high", codexEffort: "high" }, "Fusion speed");
     } else {
-      applySettings({ model: "opus", claudeEffort: "max", codexEffort: "max" }, "Fusion speed");
+      applySettings({ model: "opus", claudeEffort: "max", codexEffort: "xhigh" }, "Fusion speed");
     }
   }
 
-  function applyEffortLevel(scope: FusionRoleScope, effort: FusionEffort) {
+  function applyEffortLevel(scope: FusionRoleScope, effort: string) {
     if (scope === "planning") {
-      applySettings({ claudeEffort: effort }, "planning effort");
+      if (!FUSION_EFFORT_VALUES.includes(effort as FusionEffort)) {
+        pushCommandStatus(
+          `Planning effort supports ${FUSION_EFFORT_VALUES.join(", ")} — '${effort}' is execution-only.`
+        );
+        return;
+      }
+      applySettings({ claudeEffort: effort as FusionEffort }, "planning effort");
       return;
     }
 
     if (scope === "execution") {
-      applySettings({ codexEffort: effort }, "execution effort");
+      applySettings({ codexEffort: normalizeFusionCodexEffort(effort) }, "execution effort");
       return;
     }
 
-    applySettings({ claudeEffort: effort, codexEffort: effort }, "Fusion effort");
+    // Whole-harness: apply to both, translating per engine (Claude "max" has
+    // no Codex equivalent → xhigh; Codex-only levels don't reach this scope).
+    if (!FUSION_EFFORT_VALUES.includes(effort as FusionEffort)) {
+      pushCommandStatus(
+        `Whole-harness effort supports ${FUSION_EFFORT_VALUES.join(", ")}. Use /effort execution for ${effort}.`
+      );
+      return;
+    }
+    applySettings(
+      {
+        claudeEffort: effort as FusionEffort,
+        codexEffort: normalizeFusionCodexEffort(effort)
+      },
+      "Fusion effort"
+    );
   }
 
   function normalizeRoleScope(value: string | undefined): FusionRoleScope {
@@ -1583,7 +1707,7 @@ export default function FusionChatPane({
 
     if (normalized === "/opus model") {
       setInput("");
-      applySettings({ model: "opus" }, "speed");
+      applySettings({ model: "opus" }, "planning model");
       return true;
     }
 
@@ -1640,24 +1764,32 @@ export default function FusionChatPane({
         return true;
       }
 
-      const nextModel = normalizeFusionModel(value);
+      // Previously an unknown preset was silently reinterpreted as a planning
+      // MODEL and restarted the pane — a typo like "/speed maxx" killed it.
       setInput("");
-      applySettings({ model: nextModel }, "planning model");
+      pushCommandStatus(
+        `Unknown speed preset '${value}'. Use ${FUSION_SPEED_VALUES.join(", ")}.`
+      );
       return true;
     }
 
     const claudeMatch = raw.match(/^\/(?:claude|model\s+claude)\s+(.+)$/i);
     if (claudeMatch) {
-      const nextModel = normalizeFusionModel(claudeMatch[1]);
       setInput("");
-      applySettings({ model: nextModel }, "Claude model");
+      // Raw value on purpose: applySettings validates against the known
+      // aliases/claude-* pattern and refuses instead of silently launching a
+      // doomed process (or silently snapping a typo back to the default).
+      applySettings({ model: claudeMatch[1].trim() }, "Claude model");
       return true;
     }
 
-    const codexEffortMatch = normalized.match(/^\/codex\s+effort\s+(auto|low|medium|high|xhigh|max)$/);
+    const codexEffortMatch = normalized.match(/^\/codex\s+effort\s+(auto|minimal|low|medium|high|xhigh|ultra|max)$/);
     if (codexEffortMatch) {
       setInput("");
-      applySettings({ codexEffort: codexEffortMatch[1] as FusionEffort }, "Codex effort");
+      applySettings(
+        { codexEffort: normalizeFusionCodexEffort(codexEffortMatch[1]) },
+        "Codex effort"
+      );
       return true;
     }
 
@@ -1676,10 +1808,10 @@ export default function FusionChatPane({
       return true;
     }
 
-    const effortMatch = normalized.match(/^\/effort(?:\s+(fusion|harness|planning|planner|claude|opus|execution|executor|codex))?\s+(auto|low|medium|high|xhigh|max)$/);
+    const effortMatch = normalized.match(/^\/effort(?:\s+(fusion|harness|planning|planner|claude|opus|execution|executor|codex))?\s+(auto|minimal|low|medium|high|xhigh|ultra|max)$/);
     if (effortMatch) {
       setInput("");
-      applyEffortLevel(normalizeRoleScope(effortMatch[1]), effortMatch[2] as FusionEffort);
+      applyEffortLevel(normalizeRoleScope(effortMatch[1]), effortMatch[2]);
       return true;
     }
 
@@ -1991,7 +2123,7 @@ export default function FusionChatPane({
                 </span>
                 <span className="fusion-setting">
                   <span className="fusion-setting-key">Execution</span>
-                  {codexModelLabel} / {FUSION_EFFORT_LABELS[fusionCodexEffort]}
+                  {codexModelLabel} / {CODEX_EFFORT_LABELS[fusionCodexEffort]}
                 </span>
               </>
             )}
@@ -2200,7 +2332,10 @@ export default function FusionChatPane({
               onDrop={handleComposerDrop}
               onDragOver={handleComposerDragOver}
               onKeyDown={(e) => {
-                if (e.key === "Tab" && e.shiftKey) {
+                // Shift+Tab flips Plan/Auto — but never while the slash menu
+                // is open, where Tab means "select" and a stray Shift+Tab
+                // used to silently switch modes mid-navigation.
+                if (e.key === "Tab" && e.shiftKey && !slashMenuOpen) {
                   e.preventDefault();
                   toggleRunMode();
                   return;

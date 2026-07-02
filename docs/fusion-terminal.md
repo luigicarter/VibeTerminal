@@ -15,6 +15,26 @@
 > binary booting `app-server`, + `fusion-chat-parse`) + clean boot. Remaining: a
 > live turn needs `claude login` + `codex login`; transcript ephemeral (Resume
 > via `claude --resume`); per-platform binaries + code-signing for release.
+>
+> **Settings layer rewrite (2026-07-02):** model/effort selection is now
+> catalog-backed and validated, mirroring Open Fusion's native feel. Curated
+> model catalogs (Claude: Opus 4.8 / Sonnet 4.5 aliases + validated `claude-*`
+> ids; Codex: ids read from the shipped 0.142 binary + custom escape hatch);
+> **per-engine effort enums** — planning uses the `claude --effort` enum
+> (low..max), execution uses codex's own (minimal..ultra — codex has NO "max";
+> the old shared enum let the UI set `codexEffort:"max"`, which codex rejected
+> as an unknown variant and every delegation failed until changed; legacy
+> "max" now coerces to "xhigh" in the pane, App restore, main, and the
+> adapter's settings-file read). Unknown planning models are refused before
+> anything restarts (previously `claude --model <typo>` exited instantly and
+> left a dead pane); unknown `/speed` values error instead of being
+> reinterpreted as a model. Menu traps fixed: `/claude ` opens a Planning
+> Model submenu (it used to fall back to the full command list with `/plan`
+> highlighted, so Enter silently switched modes), unmatched command+argument
+> input yields an empty menu, and Shift+Tab no longer toggles Plan/Auto while
+> the slash menu is open. Settings restarts keep the visible transcript and
+> append the notice (same Claude thread resumes). Locked by
+> `scripts/frontend/fusion-settings-smoke.cjs`.
 
 Goal: a **Fusion** terminal that fuses the *capabilities* of two coding agents
 behind one surface — Claude (Opus or Sonnet 5) as the orchestrator/architect/designer and

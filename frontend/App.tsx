@@ -63,6 +63,7 @@ import type {
   AgentThreadLookupStatus,
   CodeChangeSummary,
   FusionClaudeModel,
+  FusionCodexEffort,
   FusionCodexModel,
   FusionEffort,
   FusionRunMode,
@@ -107,6 +108,18 @@ const FUSION_EFFORT_VALUES: FusionEffort[] = [
   "high",
   "xhigh",
   "max"
+];
+// Codex speaks its own enum (verified against the codex 0.142 binary):
+// minimal..ultra, and crucially NO "max" — legacy saved "max" coerces to
+// "xhigh" so old panes stop poisoning delegations.
+const FUSION_CODEX_EFFORT_VALUES: FusionCodexEffort[] = [
+  "auto",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "ultra"
 ];
 
 type AppView = "multi" | "project";
@@ -352,6 +365,15 @@ function normalizeFusionCodexModel(value: unknown): FusionCodexModel {
 function normalizeFusionEffort(value: unknown): FusionEffort {
   return FUSION_EFFORT_VALUES.includes(value as FusionEffort)
     ? (value as FusionEffort)
+    : "auto";
+}
+
+function normalizeFusionCodexEffort(value: unknown): FusionCodexEffort {
+  if (value === "max") {
+    return "xhigh";
+  }
+  return FUSION_CODEX_EFFORT_VALUES.includes(value as FusionCodexEffort)
+    ? (value as FusionCodexEffort)
     : "auto";
 }
 
@@ -656,7 +678,7 @@ function restoreSession(session: AgentSession): AgentSession {
       ? normalizeFusionEffort(session.fusionClaudeEffort ?? session.fusionEffort)
       : session.fusionClaudeEffort,
     fusionCodexEffort: isFusion
-      ? normalizeFusionEffort(session.fusionCodexEffort ?? session.fusionEffort)
+      ? normalizeFusionCodexEffort(session.fusionCodexEffort ?? session.fusionEffort)
       : session.fusionCodexEffort,
     fusionRunMode: isFusion
       ? normalizeFusionRunMode(session.fusionRunMode)
@@ -1513,7 +1535,7 @@ export default function App() {
               fusionClaudeEffort: normalizeFusionEffort(
                 session.fusionClaudeEffort ?? session.fusionEffort
               ),
-              fusionCodexEffort: normalizeFusionEffort(
+              fusionCodexEffort: normalizeFusionCodexEffort(
                 session.fusionCodexEffort ?? session.fusionEffort
               ),
               fusionRunMode: normalizeFusionRunMode(session.fusionRunMode)
@@ -2160,14 +2182,14 @@ export default function App() {
     const nextFusionModel = normalizeFusionModel(settings.model);
     const nextFusionCodexModel = normalizeFusionCodexModel(settings.codexModel);
     const nextFusionClaudeEffort = normalizeFusionEffort(settings.claudeEffort);
-    const nextFusionCodexEffort = normalizeFusionEffort(settings.codexEffort);
+    const nextFusionCodexEffort = normalizeFusionCodexEffort(settings.codexEffort);
     const nextFusionRunMode = normalizeFusionRunMode(settings.mode);
     const currentFusionModel = normalizeFusionModel(session.fusionModel);
     const currentFusionCodexModel = normalizeFusionCodexModel(session.fusionCodexModel);
     const currentFusionClaudeEffort = normalizeFusionEffort(
       session.fusionClaudeEffort ?? session.fusionEffort
     );
-    const currentFusionCodexEffort = normalizeFusionEffort(
+    const currentFusionCodexEffort = normalizeFusionCodexEffort(
       session.fusionCodexEffort ?? session.fusionEffort
     );
     const requiresRestart =

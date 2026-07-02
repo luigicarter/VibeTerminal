@@ -304,10 +304,19 @@ function cleanCodexSetting(value) {
   return normalized === "auto" || normalized === "default" ? null : text;
 }
 
+// Codex's effort enum is minimal..ultra with NO "max". Stale settings files
+// and env values from before the per-engine effort split still carry "max";
+// coerce here so they degrade to xhigh instead of failing every turn with an
+// unknown-variant error.
+function cleanCodexEffort(value) {
+  const effort = cleanCodexSetting(value);
+  return effort && effort.toLowerCase() === "max" ? "xhigh" : effort;
+}
+
 function readCodexSettings() {
   const fallback = {
     model: cleanCodexSetting(ENV_CODEX_MODEL),
-    effort: cleanCodexSetting(ENV_CODEX_EFFORT),
+    effort: cleanCodexEffort(ENV_CODEX_EFFORT),
     source: "env"
   };
   if (!SETTINGS_FILE) return fallback;
@@ -315,7 +324,7 @@ function readCodexSettings() {
     const parsed = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8"));
     return {
       model: cleanCodexSetting(parsed?.codexModel),
-      effort: cleanCodexSetting(parsed?.codexEffort),
+      effort: cleanCodexEffort(parsed?.codexEffort),
       source: "file"
     };
   } catch (error) {

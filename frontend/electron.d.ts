@@ -3,6 +3,7 @@ import type {
   AgentThreadLookupResult,
   AgentThreadRef,
   CodeChangeSummary,
+  FusionCodexEffort,
   FusionCodexModel,
   FusionEffort,
   FusionRunMode,
@@ -92,13 +93,13 @@ declare global {
           codexModel?: FusionCodexModel | string;
           mode?: FusionRunMode | string;
           effort?: Exclude<FusionEffort, "auto"> | string;
-          codexEffort?: Exclude<FusionEffort, "auto"> | string;
+          codexEffort?: Exclude<FusionCodexEffort, "auto"> | string;
         }) => Promise<{ ok: boolean; error?: string }>;
         updateSettings: (
           id: string,
           settings: {
             codexModel?: FusionCodexModel | string;
-            codexEffort?: FusionEffort | string;
+            codexEffort?: FusionCodexEffort | string;
           }
         ) => Promise<{ ok: boolean; error?: string }>;
         sendUserTurn: (id: string, text: string) => void;

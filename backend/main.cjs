@@ -984,6 +984,17 @@ function normalizeFusionEffort(value) {
     : undefined;
 }
 
+// Codex speaks its own effort enum (verified against the codex 0.142 binary):
+// minimal..ultra, NO "max". Legacy "max" (from panes saved before the
+// per-engine split) coerces to xhigh instead of failing every delegation.
+function normalizeFusionCodexEffort(value) {
+  const effort = normalizeFusionString(value)?.toLowerCase();
+  if (effort === "max") return "xhigh";
+  return ["minimal", "low", "medium", "high", "xhigh", "ultra"].includes(effort)
+    ? effort
+    : undefined;
+}
+
 function normalizeFusionRunMode(value) {
   return normalizeFusionString(value)?.trim().toLowerCase() === "plan" ? "plan" : "auto";
 }
@@ -1399,7 +1410,7 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
         : process.env.VIBE_FUSION_CODEX_MODEL;
     const fusionCodexModel = normalizeFusionCodexModel(rawCodexModel);
     const fusionClaudeEffort = normalizeFusionEffort(payload.effort);
-    const fusionCodexEffort = normalizeFusionEffort(payload.codexEffort ?? payload.effort);
+    const fusionCodexEffort = normalizeFusionCodexEffort(payload.codexEffort ?? payload.effort);
     const fusionRunMode = normalizeFusionRunMode(payload.mode);
     const telemetry = getAgentTelemetry();
     const files = await telemetry.prepareFusionFiles(id, {
@@ -1453,7 +1464,7 @@ ipcMain.handle("fusion-chat:update-settings", async (_event, payload) => {
       ? payloadCodexModel
       : process.env.VIBE_FUSION_CODEX_MODEL;
   const fusionCodexModel = normalizeFusionCodexModel(rawCodexModel);
-  const fusionCodexEffort = normalizeFusionEffort(payload.codexEffort);
+  const fusionCodexEffort = normalizeFusionCodexEffort(payload.codexEffort);
   const result = await getAgentTelemetry().updateFusionSettings(payload.id, {
     codexModel: fusionCodexModel,
     codexEffort: fusionCodexEffort

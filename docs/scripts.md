@@ -26,6 +26,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `scripts/frontend/attention-smoke.cjs` - Validates the shared terminal attention helpers used to decide whether sidebar workspace dots should appear and when unread attention is cleared.
 - `scripts/frontend/workspace-smoke.cjs` - Validates empty-install workspace startup, project folder removal wiring, and sidebar remove control styling.
 - `scripts/frontend/session-launch-smoke.cjs` - Validates launch/resume command construction and launch-mode gating, and guards that the terminal-creation effect stays decoupled from the command string so a resume id discovered mid-session cannot blank a live pane.
+- `scripts/frontend/fusion-settings-smoke.cjs` - Locks the Fusion settings layer: per-engine effort enums (codex minimal..ultra, no "max"), legacy max→xhigh coercion at every layer, planning-model validation before restart, menu-activation trap fixes (/claude submenu, empty fallback, Shift+Tab gate), curated catalogs, and transcript preservation across settings restarts.
 - `scripts/frontend/tiled-board-resize-smoke.cjs` - Validates tiled-board resize geometry for directional neighbor pushes, edge detaching, multi-neighbor clamping, and no-overlap release behavior.
 
 ## QA Scripts
@@ -56,6 +57,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `npm run smoke:backend:fusion-chat-parse` - Backend smoke test for Fusion headless Claude stream parsing.
 - `npm run smoke:backend:openfusion-chat-parse` - Backend smoke test for Open Fusion OpenCode SSE parsing.
 - `npm run smoke:backend:openfusion-isolation` - Backend smoke test for Open Fusion data ownership (app-owned OpenCode home, threads-only migration, no default models, discovery env overrides).
+- `npm run smoke:frontend:fusion-settings` - Frontend smoke test for the Fusion settings layer (per-engine efforts, model validation, menu trap fixes).
 - `npm run smoke:backend:fusion-appserver` - Backend smoke test for Codex app-server initialize over stdio, with optional PATH fallback.
 - `npm run smoke:backend:fusion-appserver:embedded` - Backend smoke test requiring the embedded Codex binary.
 - `npm run smoke:frontend:attention` - Frontend smoke test for terminal attention helper behavior.

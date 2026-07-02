@@ -625,7 +625,7 @@ assert(
     fusionChatPaneSource.includes('if (normalized === "/plan")') &&
     fusionChatPaneSource.includes('if (normalized === "/auto")') &&
     fusionChatPaneSource.includes('applySpeedPreset("execution"') &&
-    fusionChatPaneSource.includes('applyEffortLevel(normalizeRoleScope(effortMatch[1]), effortMatch[2] as FusionEffort)') &&
+    fusionChatPaneSource.includes('applyEffortLevel(normalizeRoleScope(effortMatch[1]), effortMatch[2])') &&
     fusionChatPaneSource.includes('"Planning role"') &&
     fusionChatPaneSource.includes('"Execution role"') &&
     fusionChatPaneSource.includes('const FUSION_SPEAKER_LABEL = "Fusion"') &&
