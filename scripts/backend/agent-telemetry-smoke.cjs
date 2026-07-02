@@ -515,10 +515,16 @@ function postTelemetry(callbackUrl, token, payload) {
         .executorModel === "opencode/gpt-5.1-codex",
       "Open Fusion model state should persist pane-scoped model settings"
     );
+    // No default models by design: an invalid (or missing) model id resolves
+    // to "unset" and the generated config OMITS the model fields entirely —
+    // opencode must never silently pick a vendor the user didn't choose.
+    const unsetModelConfig = openFusionConfigContents({ plannerModel: "bad model id" });
     assert(
-      openFusionConfigContents({ plannerModel: "bad model id" }).agent.planner
-        .model === "anthropic/claude-sonnet-4-5",
-      "invalid Open Fusion model ids should fall back before writing config"
+      unsetModelConfig.agent.planner.model === undefined &&
+        unsetModelConfig.model === undefined &&
+        unsetModelConfig.agent.executor.model === undefined &&
+        !JSON.stringify(unsetModelConfig).includes('"model"'),
+      "invalid or missing Open Fusion model ids must leave the generated config model-less, not fall back to a default"
     );
 
     // Saved pane models win over launch opts (the TUI pickers own them between

@@ -34,11 +34,7 @@ import type {
   OpenFusionProvider,
   SessionStatus
 } from "../types";
-import {
-  DEFAULT_OPEN_FUSION_EXECUTOR_MODEL,
-  DEFAULT_OPEN_FUSION_PLANNER_MODEL,
-  validateOpenFusionModel
-} from "../openFusion";
+import { validateOpenFusionModel } from "../openFusion";
 
 export interface OpenFusionSettingsChange {
   plannerModel?: string;
@@ -283,17 +279,23 @@ export default function OpenFusionChatPane({
   const onStatusChangeRef = useRef(onStatusChange);
   const onAttentionRef = useRef(onAttention);
 
+  // No default models: "" = not chosen yet. The pane gates the first turn on
+  // connect-a-provider + explicit Brain/Executor picks instead of assuming a
+  // vendor pair the app-owned (initially empty) credential store can't serve.
   const plannerModel =
     validateOpenFusionModel(session.openFusionPlannerModel) === null
       ? String(session.openFusionPlannerModel).trim()
-      : DEFAULT_OPEN_FUSION_PLANNER_MODEL;
+      : "";
   const executorModel =
     validateOpenFusionModel(session.openFusionExecutorModel) === null
       ? String(session.openFusionExecutorModel).trim()
-      : DEFAULT_OPEN_FUSION_EXECUTOR_MODEL;
-  const brainLabel = shortModelLabel(plannerModel, DEFAULT_OPEN_FUSION_PLANNER_MODEL);
-  const executorLabel = shortModelLabel(executorModel, DEFAULT_OPEN_FUSION_EXECUTOR_MODEL);
-  const modelsLine = `Brain ${plannerModel} · Executor ${executorModel}`;
+      : "";
+  const modelsReady = Boolean(plannerModel && executorModel);
+  const brainLabel = plannerModel ? shortModelLabel(plannerModel, "") : "not set";
+  const executorLabel = executorModel
+    ? shortModelLabel(executorModel, "")
+    : "not set";
+  const modelsLine = `Brain ${plannerModel || "not set"} · Executor ${executorModel || "not set"}`;
   const showAttention = shouldShowAttentionDot(session);
   const canResume =
     session.resumeRef?.provider === "opencode" && Boolean(session.resumeRef.id);
@@ -462,7 +464,9 @@ export default function OpenFusionChatPane({
             const confirm = await window.vibe.agentThreads.findLatest({
               provider: "opencode",
               cwd: session.cwd,
-              confirmId: resumeId
+              confirmId: resumeId,
+              // Look in the app-owned OpenCode store, not the user's global one.
+              openFusion: true
             });
             if (confirm?.status === "missing") {
               effectiveResumeId = undefined;
@@ -548,6 +552,10 @@ export default function OpenFusionChatPane({
         case "session":
           threadIdRef.current = event.sessionId;
           publishThreadRef();
+          // The engine is ready: load the provider catalog now so the
+          // first-run gate and needs-auth labels have real data, instead of
+          // waiting for the user to open a picker.
+          void window.vibe?.openFusionChat?.requestProviders(session.id);
           break;
         case "user":
           if (!threadTitleRef.current) {
@@ -959,6 +967,30 @@ export default function OpenFusionChatPane({
   ) {
     const providerId = providerIdRaw.trim();
     if (!providerId) return;
+    // Honesty guard (opencode's own dialog warns here too): a key stored for
+    // an id outside the catalog would never be used — Open Fusion generates
+    // the pane config, so there is no opencode.json for the user to wire a
+    // custom provider into. Refuse instead of reporting a useless "connected".
+    const catalog = names ?? [...availableProviders, ...(providers ?? [])];
+    if (catalog.length && !catalog.some((entry) => entry.id === providerId)) {
+      const needle = providerId.toLowerCase();
+      const close = catalog
+        .filter(
+          (entry) =>
+            entry.id.toLowerCase().includes(needle) ||
+            entry.name.toLowerCase().includes(needle)
+        )
+        .slice(0, 3)
+        .map((entry) => entry.id);
+      push({
+        role: "brain",
+        kind: "error",
+        text: `'${providerId}' is not a provider in the OpenCode catalog, so a stored key would never be used.${
+          close.length ? ` Did you mean: ${close.join(", ")}?` : ""
+        } Pick a provider from /brain-model instead.`
+      });
+      return;
+    }
     const map = methodsMap ?? providerAuthMethods;
     const methods = map[providerId]?.length ? map[providerId] : DEFAULT_AUTH_METHODS;
     const flow: AuthFlow = {
@@ -1195,6 +1227,19 @@ export default function OpenFusionChatPane({
         setInput("");
         return;
       }
+    }
+    // First-run gate: no turn leaves the pane until both roles have an
+    // explicitly picked model (slash commands above stay usable — they ARE the
+    // setup path).
+    if (!modelsReady) {
+      push({
+        role: "brain",
+        kind: "activity",
+        text: !plannerModel
+          ? "Pick a Brain model first (/brain-model — connect a provider if the list is empty)."
+          : "Pick an Executor model first (/executor-model)."
+      });
+      return;
     }
     setInput("");
     setFailed(false);
@@ -1884,6 +1929,76 @@ export default function OpenFusionChatPane({
               )}
             </div>
           )}
+          {/* First-run gate: Open Fusion assumes nothing — no provider, no
+              models. The gate walks connect → pick and only then frees the
+              first turn. Hidden while an auth flow or picker is open so it
+              never stacks under those panels. */}
+          {session.started && !modelsReady && !authFlow && !picker && providers !== null && (
+            <div
+              className="fusion-decision-panel openfusion-gate"
+              role="group"
+              aria-label="Finish Open Fusion setup"
+            >
+              <div className="fusion-decision-copy">
+                <span className="fusion-decision-kind">
+                  {providers.length === 0
+                    ? "Connect a provider to start"
+                    : "Pick your models to start"}
+                </span>
+                <span className="fusion-decision-detail">
+                  {providers.length === 0
+                    ? "Open Fusion assumes nothing: connect a model provider first (keys live in vibeTerminal's own store, never in your personal OpenCode setup), then pick the Brain and Executor models."
+                    : !plannerModel && !executorModel
+                      ? "Choose the Brain (planner) and Executor models for this pane."
+                      : !plannerModel
+                        ? "Choose the Brain (planner) model for this pane."
+                        : "Choose the Executor model for this pane."}
+                </span>
+              </div>
+              <div className="fusion-decision-actions">
+                {providers.length === 0 ? (
+                  <button
+                    className="fusion-decision-button is-primary"
+                    type="button"
+                    title="Pick a provider to connect"
+                    onClick={() => {
+                      authReturnRoleRef.current = "brain";
+                      openModelPicker("brain");
+                    }}
+                  >
+                    <KeyRound size={14} />
+                    <span>Connect a provider</span>
+                  </button>
+                ) : (
+                  <>
+                    {!plannerModel && (
+                      <button
+                        className="fusion-decision-button is-primary"
+                        type="button"
+                        onClick={() => openModelPicker("brain")}
+                      >
+                        <Check size={14} />
+                        <span>Pick Brain model</span>
+                      </button>
+                    )}
+                    {!executorModel && (
+                      <button
+                        className={clsx(
+                          "fusion-decision-button",
+                          Boolean(plannerModel) && "is-primary"
+                        )}
+                        type="button"
+                        onClick={() => openModelPicker("executor")}
+                      >
+                        <Check size={14} />
+                        <span>Pick Executor model</span>
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
+            </div>
+          )}
           <div className="fusion-composer">
             <textarea
               ref={composerRef}
@@ -1893,7 +2008,9 @@ export default function OpenFusionChatPane({
                   ? "Answer the request above to continue…"
                   : busy
                     ? "Queue the next instruction… (Esc interrupts)"
-                    : "Ask Open Fusion to build, fix, or explain…"
+                    : !modelsReady
+                      ? "Finish setup first — connect a provider and pick models…"
+                      : "Ask Open Fusion to build, fix, or explain…"
               }
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {

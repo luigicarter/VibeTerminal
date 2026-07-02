@@ -1,6 +1,7 @@
 # Open Fusion
 
-> **Status: native chat pane over a headless OpenCode server (2026-07-01).**
+> **Status: native chat pane over a headless OpenCode server (2026-07-01),
+> full data ownership (2026-07-02).**
 > An Open Fusion pane is now a vibeTerminal-native chat UI
 > (`frontend/components/OpenFusionChatPane.tsx`) driven by a per-pane
 > `opencode serve` child managed by `backend/openFusionChatHost.cjs` — the
@@ -18,6 +19,43 @@
 > config, so it restart-applies). See `docs/fusion-terminal.md` and
 > `docs/fusion-unification.md` for the shipped Fusion (Claude + Codex) it
 > generalizes.
+>
+> **Data ownership (2026-07-02):** Open Fusion owns ALL of its data. Every
+> pane's `opencode serve` runs with `XDG_DATA_HOME`/`XDG_CONFIG_HOME` pointed
+> at an app-owned OpenCode home (`%APPDATA%\vibe-terminal\openfusion\
+> opencode-home\{data,config}` on Windows, created by
+> `agentTelemetry.ensureOpenFusionOpencodeHome`, shared across panes, exempt
+> from the stale-pane-dir sweep). opencode 1.17 resolves its entire data tree
+> from those vars (verified in the shipped binary; there is no `OPENCODE_DATA`
+> escape hatch), so conversation threads (`opencode.db`), provider credentials
+> (`auth.json`), snapshots, tool output, and logs all live inside vibeTerminal
+> — and the user's personal OpenCode install (`~/.config/opencode/*`,
+> `~/.local/share/opencode/*`) is **never read or written**. Thread
+> discovery/resume for Open Fusion panes carries an `openFusion: true` flag on
+> `agent-thread:latest`; main injects the matching XDG env so the discovery
+> host's `opencode session list` spawns list the app store (plain opencode
+> terminal panes keep the user's global store). A one-time best-effort
+> migration seeds the app store with a copy of the global `opencode.db` (+wal)
+> so pre-isolation Open Fusion threads stay resumable; credentials are
+> deliberately NOT copied — providers are reconnected inside the app.
+> Personal CLI threads ride along inside the db snapshot but never surface
+> (discovery filters by launch-time cutoff, resume only confirms app-saved
+> ids). Known documented leak: executor shell commands inherit the XDG
+> overrides (benign on Windows). Locked by
+> `scripts/backend/openfusion-isolation-smoke.cjs`.
+>
+> **No default models (2026-07-02):** the pane assumes nothing on open. The
+> old hardcoded Planner/Executor defaults are gone everywhere (backend
+> `agentTelemetry.cjs`/`main.cjs`, renderer `openFusion.ts`); `""` means "not
+> chosen yet", generated configs omit `model` fields entirely, and
+> `openFusionChatHost.input()` refuses turns without an explicit Brain model.
+> First-run gate in the pane: with zero connected providers it walks
+> connect-a-provider (keys go to the app-owned store), then Brain/Executor
+> picks from actually-connected providers; the composer blocks non-slash turns
+> until both are set. `/connect` refuses provider ids that are not in the
+> OpenCode catalog (a stored key for an unknown id would never be used —
+> opencode's own dialog warns here; since Open Fusion generates the pane
+> config, there is no user opencode.json to wire a custom provider into).
 >
 > **Engine contract (live-verified against OpenCode 1.17.11):**
 > `opencode serve --port 0 --hostname 127.0.0.1` (stdout line reports the

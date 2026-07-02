@@ -18,6 +18,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `scripts/backend/fusion-adapter-smoke.cjs` - Validates the Fusion adapter MCP surface exposed to Claude.
 - `scripts/backend/fusion-chat-parse-smoke.cjs` - Validates headless Claude stream-json normalization used by the Fusion chat host.
 - `scripts/backend/openfusion-chat-parse-smoke.cjs` - Validates OpenCode `/event` SSE normalization used by the Open Fusion chat host (delta/snapshot dedupe, task child-session roles, permission round-trip, abort suppression, resume rehydration, model-id splitting, serve spawn env), against event shapes recorded live from OpenCode 1.17.11.
+- `scripts/backend/openfusion-isolation-smoke.cjs` - Locks Open Fusion data ownership: app-owned OpenCode home layout + XDG env in the pane spawn, one-time threads-only migration from the global store (credentials never copied, global store never written), model-less generated configs (no default models), discovery-spawn env overrides, and the pane/host first-run gate + unknown-provider refusal source contracts.
 - `scripts/backend/fusion-appserver-smoke.cjs` - Boots Codex `app-server` over stdio, validates the initialize handshake, and exercises native `thread/goal/set|get|clear`; `--require-embedded` requires `vendor/codex-bin` and is used by release checks.
 
 ## Frontend Scripts
@@ -54,6 +55,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `npm run smoke:backend:fusion-adapter` - Backend smoke test for the Fusion adapter MCP tools.
 - `npm run smoke:backend:fusion-chat-parse` - Backend smoke test for Fusion headless Claude stream parsing.
 - `npm run smoke:backend:openfusion-chat-parse` - Backend smoke test for Open Fusion OpenCode SSE parsing.
+- `npm run smoke:backend:openfusion-isolation` - Backend smoke test for Open Fusion data ownership (app-owned OpenCode home, threads-only migration, no default models, discovery env overrides).
 - `npm run smoke:backend:fusion-appserver` - Backend smoke test for Codex app-server initialize over stdio, with optional PATH fallback.
 - `npm run smoke:backend:fusion-appserver:embedded` - Backend smoke test requiring the embedded Codex binary.
 - `npm run smoke:frontend:attention` - Frontend smoke test for terminal attention helper behavior.

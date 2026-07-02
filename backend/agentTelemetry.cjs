@@ -13,8 +13,11 @@ const MAX_EVENT_BYTES = 64 * 1024;
 const MAX_SESSION_ID_BYTES = 512;
 const PROVIDERS = ["codex", "claude", "opencode", "cursor-agent"];
 const OPEN_FUSION_MODEL_ID_PATTERN = /^[A-Za-z0-9._:/@+-]+$/;
-const DEFAULT_OPEN_FUSION_PLANNER_MODEL = "anthropic/claude-sonnet-4-5";
-const DEFAULT_OPEN_FUSION_EXECUTOR_MODEL = "opencode/gpt-5.1-codex";
+// Open Fusion deliberately ships with NO default models: assuming a vendor pair
+// on pane open fails the moment the app-owned credential store is empty, and it
+// second-guesses the user. "" means "not chosen yet" — the pane gates the first
+// turn on connect-a-provider + pick instead.
+const OPEN_FUSION_MODEL_UNSET = "";
 
 function normalizeFusionRunMode(value) {
   return String(value || "").trim().toLowerCase() === "plan" ? "plan" : "auto";
@@ -32,7 +35,7 @@ function isValidOpenFusionModel(value) {
 }
 
 function normalizeOpenFusionModel(value, fallback) {
-  const normalizedFallback = fallback || DEFAULT_OPEN_FUSION_EXECUTOR_MODEL;
+  const normalizedFallback = fallback || OPEN_FUSION_MODEL_UNSET;
   return isValidOpenFusionModel(value) ? value.trim() : normalizedFallback;
 }
 
@@ -102,11 +105,11 @@ function openFusionResolvedModels(options = {}) {
   return {
     plannerModel: normalizeOpenFusionModel(
       options.plannerModel,
-      DEFAULT_OPEN_FUSION_PLANNER_MODEL
+      OPEN_FUSION_MODEL_UNSET
     ),
     executorModel: normalizeOpenFusionModel(
       options.executorModel,
-      DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
+      OPEN_FUSION_MODEL_UNSET
     )
   };
 }
@@ -118,7 +121,7 @@ function openFusionCommandContents(options = {}) {
     delegate: {
       description: "Delegate work to the Open Fusion executor subagent",
       agent: "executor",
-      model: executorModel,
+      model: executorModel || undefined,
       subtask: true,
       template: [
         "Execute this Open Fusion task as the executor subagent.",
@@ -131,7 +134,7 @@ function openFusionCommandContents(options = {}) {
     investigate: {
       description: "Run a read-only Open Fusion investigation pass",
       agent: "investigator",
-      model: executorModel,
+      model: executorModel || undefined,
       subtask: true,
       template: [
         "Investigate this read-only as the Open Fusion investigator subagent.",
@@ -144,7 +147,7 @@ function openFusionCommandContents(options = {}) {
     review: {
       description: "Ask the Open Fusion Planner to review executor evidence",
       agent: "planner",
-      model: plannerModel,
+      model: plannerModel || undefined,
       template: [
         "Review the executor evidence below as the Open Fusion Planner.",
         "",
@@ -156,7 +159,7 @@ function openFusionCommandContents(options = {}) {
     fusion: {
       description: "Show the Open Fusion roles and native CLI controls",
       agent: "planner",
-      model: plannerModel,
+      model: plannerModel || undefined,
       template: [
         "Briefly explain the active Open Fusion operating model to the user.",
         "",
@@ -503,14 +506,18 @@ function openFusionConfigContents(options = {}) {
   return {
     $schema: "https://opencode.ai/config.json",
     default_agent: "planner",
-    model: plannerModel,
+    // Unset models are OMITTED (JSON.stringify drops undefined) rather than
+    // defaulted: with the app-owned credential store there is no vendor pair
+    // to assume, and a missing model must surface as "pick one", not as
+    // opencode silently choosing on the user's behalf.
+    model: plannerModel || undefined,
     command: openFusionCommandContents({ plannerModel, executorModel }),
     agent: {
       planner: {
         description:
           "Primary Open Fusion planner. Observes, delegates to executor, reviews evidence, and gates completion.",
         mode: "primary",
-        model: plannerModel,
+        model: plannerModel || undefined,
         prompt: inlinePrompts
           ? openFusionPlannerPrompt()
           : "{file:./openfusion-planner.md}",
@@ -528,7 +535,7 @@ function openFusionConfigContents(options = {}) {
         description:
           "Open Fusion executor. Implements code, runs commands, fixes issues, self-reviews, and reports evidence to the planner.",
         mode: "subagent",
-        model: executorModel,
+        model: executorModel || undefined,
         hidden: false,
         prompt: inlinePrompts
           ? openFusionExecutorPrompt()
@@ -538,7 +545,7 @@ function openFusionConfigContents(options = {}) {
         description:
           "Open Fusion read-only investigator. Scouts repo context for the planner; cannot edit, run commands, or delegate.",
         mode: "subagent",
-        model: executorModel,
+        model: executorModel || undefined,
         hidden: false,
         prompt: inlinePrompts
           ? openFusionInvestigatorPrompt()
@@ -713,6 +720,83 @@ function cleanupStaleOpenFusionDirs(openFusionBaseDir, maxAgeMs = OPEN_FUSION_ST
   }
 
   return removed;
+}
+
+// ---- app-owned OpenCode home (Open Fusion data ownership) ----
+// Open Fusion owns ALL of its data: conversation threads (opencode.db),
+// credentials (auth.json), and config live under vibeTerminal's userData —
+// never in the user's personal OpenCode install. opencode 1.17 resolves its
+// data tree from XDG_DATA_HOME and its global-config dir from XDG_CONFIG_HOME
+// (verified in the shipped binary; there is no OPENCODE_DATA escape hatch), so
+// pointing both at this home isolates threads, auth, snapshots, and logs in
+// one move — and stops ~/.config/opencode/* from loading into pane servers.
+// The home is app-level (shared by every pane), NOT per-pane: /connect in one
+// pane must serve them all, and it must survive the stale-pane-dir sweep.
+function openFusionOpencodeHomePaths(openFusionBaseDir) {
+  const homeDir = path.join(openFusionBaseDir, "opencode-home");
+  return {
+    homeDir,
+    dataDir: path.join(homeDir, "data"),
+    configDir: path.join(homeDir, "config")
+  };
+}
+
+function globalOpencodeDataDir(env = process.env) {
+  const xdgData = env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share");
+  return path.join(xdgData, "opencode");
+}
+
+// One-time migration: threads created before isolation live in the user's
+// global store (opencode 1.17 keeps sessions/messages in opencode.db at the
+// data-dir root). Seed the app store with a best-effort copy of the db files
+// so existing panes stay resumable. Credentials are deliberately NOT copied —
+// the user's personal auth.json is not ours to replicate; providers are
+// reconnected inside the app. Personal CLI threads ride along inside the db
+// snapshot but never surface: discovery filters by launch-time cutoff and
+// resume only confirms ids the app itself saved.
+function migrateOpenFusionThreadsFromGlobal(dataDir, env = process.env) {
+  const markerPath = path.join(dataDir, "opencode", ".vibe-migrated-from-global.json");
+  if (fs.existsSync(markerPath)) {
+    return { migrated: false, copied: [] };
+  }
+  const globalDir = globalOpencodeDataDir(env);
+  const targetDir = path.join(dataDir, "opencode");
+  fs.mkdirSync(targetDir, { recursive: true });
+  const copied = [];
+  // Copy -wal/-shm alongside the db: SQLite recovers a WAL snapshot via frame
+  // checksums, so a mid-write copy degrades to "some tail turns missing", not
+  // a corrupt store.
+  for (const name of ["opencode.db", "opencode.db-wal", "opencode.db-shm"]) {
+    const source = path.join(globalDir, name);
+    try {
+      if (fs.existsSync(source) && !fs.existsSync(path.join(targetDir, name))) {
+        fs.copyFileSync(source, path.join(targetDir, name));
+        copied.push(name);
+      }
+    } catch {
+      // Best-effort: an unreadable global store means a fresh app store.
+    }
+  }
+  try {
+    fs.writeFileSync(
+      markerPath,
+      `${JSON.stringify({ migratedAt: new Date().toISOString(), copied, from: globalDir }, null, 2)}\n`
+    );
+  } catch {
+    // Marker write failed — the existsSync guards above keep this idempotent.
+  }
+  return { migrated: copied.length > 0, copied };
+}
+
+function ensureOpenFusionOpencodeHome(openFusionBaseDir, env = process.env) {
+  const paths = openFusionOpencodeHomePaths(openFusionBaseDir);
+  // Pre-create $XDG_CONFIG_HOME/opencode empty: the app's role config arrives
+  // per-pane via OPENCODE_CONFIG/OPENCODE_CONFIG_CONTENT, and an empty global
+  // config dir is what keeps the user's ~/.config/opencode out of the loop.
+  fs.mkdirSync(path.join(paths.configDir, "opencode"), { recursive: true });
+  fs.mkdirSync(path.join(paths.dataDir, "opencode"), { recursive: true });
+  migrateOpenFusionThreadsFromGlobal(paths.dataDir, env);
+  return paths;
 }
 
 function quoteCmd(value) {
@@ -2246,6 +2330,10 @@ function createAgentTelemetryManager(options = {}) {
       return null;
     }
 
+    // App-owned OpenCode home: threads, credentials, and global config for
+    // every Open Fusion pane live here, never in the user's personal install.
+    const opencodeHome = ensureOpenFusionOpencodeHome(openFusionBaseDir);
+
     const openFusionDir = path.join(
       openFusionBaseDir,
       "sessions",
@@ -2346,6 +2434,7 @@ function createAgentTelemetryManager(options = {}) {
       plannerPromptPath,
       executorPromptPath,
       investigatorPromptPath,
+      opencodeHome,
       env: {
         OPENCODE_CONFIG: configPath,
         OPENCODE_CONFIG_DIR: configDir,
@@ -2353,6 +2442,13 @@ function createAgentTelemetryManager(options = {}) {
         OPENCODE_TUI_CONFIG: tuiConfigPath,
         OPENCODE_CLIENT: "vibeterminal-openfusion",
         OPENCODE_DISABLE_AUTOUPDATE: "true",
+        // Full data ownership: opencode's entire data tree (threads in
+        // opencode.db, auth.json, snapshots, logs) and its global-config
+        // lookup resolve inside the app's own home. Known leak, documented:
+        // executor shell commands inherit these XDG overrides (benign on
+        // Windows, where nothing standard consumes them).
+        XDG_DATA_HOME: opencodeHome.dataDir,
+        XDG_CONFIG_HOME: opencodeHome.configDir,
         VIBE_TERMINAL_OPEN_FUSION: "1",
         VIBE_TERMINAL_OPEN_FUSION_DIR: openFusionDir,
         VIBE_TERMINAL_OPEN_FUSION_CONFIG: configPath,
@@ -2729,6 +2825,9 @@ function createAgentTelemetryManager(options = {}) {
     callbackUrl: () => callbackUrl,
     cleanup,
     ensureCursorProjectHooks,
+    // Sync on purpose: thread-discovery lookups need the app-owned OpenCode
+    // home paths without awaiting the telemetry bootstrap.
+    getOpenFusionOpencodeHome: () => ensureOpenFusionOpencodeHome(openFusionBaseDir),
     prepareSession,
     prepareOpenFusionFiles,
     prepareFusionFiles,
@@ -2749,10 +2848,13 @@ function createAgentTelemetryManager(options = {}) {
 module.exports = {
   buildClaudeSettingsJson,
   buildFusionSystemPrompt,
+  ensureOpenFusionOpencodeHome,
+  migrateOpenFusionThreadsFromGlobal,
   openFusionCommandContents,
   openFusionConfigContents,
   openFusionExecutorPrompt,
   openFusionInvestigatorPrompt,
+  openFusionOpencodeHomePaths,
   openFusionPlannerPrompt,
   openFusionTuiPluginSource,
   openFusionTheme,

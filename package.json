@@ -28,6 +28,7 @@
     "smoke:backend:fusion-launch": "node scripts/backend/fusion-launch-smoke.cjs",
     "smoke:backend:fusion-chat-parse": "node scripts/backend/fusion-chat-parse-smoke.cjs",
     "smoke:backend:openfusion-chat-parse": "node scripts/backend/openfusion-chat-parse-smoke.cjs",
+    "smoke:backend:openfusion-isolation": "node scripts/backend/openfusion-isolation-smoke.cjs",
     "smoke:backend:fusion-adapter": "node scripts/backend/fusion-adapter-smoke.cjs",
     "smoke:frontend:attention": "node scripts/frontend/attention-smoke.cjs",
     "smoke:frontend:workspace": "node scripts/frontend/workspace-smoke.cjs",

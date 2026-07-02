@@ -123,8 +123,10 @@ let updateState = {
   updatedAt: Date.now()
 };
 const FUSION_MODEL_ID_PATTERN = /^[A-Za-z0-9._:/@+-]+$/;
-const DEFAULT_OPEN_FUSION_PLANNER_MODEL = "anthropic/claude-sonnet-4-5";
-const DEFAULT_OPEN_FUSION_EXECUTOR_MODEL = "opencode/gpt-5.1-codex";
+// Open Fusion has NO default models: "" = not chosen yet. The pane gates the
+// first turn on connecting a provider and picking Brain/Executor instead of
+// assuming a vendor pair the (app-owned, initially empty) store can't serve.
+const OPEN_FUSION_MODEL_UNSET = "";
 const FUSION_CODEX_BRIDGE_TOOLS = [
   "mcp__fusion-codex__codex_investigate",
   "mcp__fusion-codex__codex_implement",
@@ -1282,9 +1284,27 @@ ipcMain.handle("files:describe-paths", (_event, payload) =>
   describeFilePaths(payload)
 );
 
-ipcMain.handle("agent-thread:latest", (_event, payload) =>
-  findLatestAgentThread(payload)
-);
+ipcMain.handle("agent-thread:latest", (_event, payload) => {
+  // Open Fusion threads live in the app-owned OpenCode home, not the user's
+  // global store: point the discovery host's `opencode session list` spawns at
+  // it. Plain opencode terminal panes (no openFusion flag) keep the global one.
+  if (payload?.provider === "opencode" && payload.openFusion) {
+    try {
+      const home = getAgentTelemetry().getOpenFusionOpencodeHome();
+      payload = {
+        ...payload,
+        opencodeEnv: {
+          XDG_DATA_HOME: home.dataDir,
+          XDG_CONFIG_HOME: home.configDir
+        }
+      };
+    } catch {
+      // Home unavailable — fall through to a global lookup rather than block
+      // the pane; the serve-side confirm remains the final authority.
+    }
+  }
+  return findLatestAgentThread(payload);
+});
 
 ipcMain.handle("terminal:create", async (_event, payload) => {
   const launchCwd = resolveLaunchCwd(payload?.cwd, getDefaultRuntimeCwd());
@@ -1308,11 +1328,11 @@ ipcMain.handle("terminal:create", async (_event, payload) => {
     const openFusionFiles = await telemetry.prepareOpenFusionFiles(payload.id, {
       plannerModel: normalizeOpenFusionModel(
         payload.openFusionPlannerModel,
-        DEFAULT_OPEN_FUSION_PLANNER_MODEL
+        OPEN_FUSION_MODEL_UNSET
       ),
       executorModel: normalizeOpenFusionModel(
         payload.openFusionExecutorModel,
-        DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
+        OPEN_FUSION_MODEL_UNSET
       )
     });
 
@@ -1530,11 +1550,11 @@ ipcMain.handle("openfusion-chat:start", async (_event, payload) => {
     const files = await telemetry.prepareOpenFusionFiles(id, {
       plannerModel: normalizeOpenFusionModel(
         payload.plannerModel,
-        DEFAULT_OPEN_FUSION_PLANNER_MODEL
+        OPEN_FUSION_MODEL_UNSET
       ),
       executorModel: normalizeOpenFusionModel(
         payload.executorModel,
-        DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
+        OPEN_FUSION_MODEL_UNSET
       )
     });
     if (!files) {

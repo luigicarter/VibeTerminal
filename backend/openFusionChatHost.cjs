@@ -758,10 +758,20 @@ function runHost() {
       return;
     }
 
-    emitSessionEvent(id, state, { type: "user", text });
-    const body = { agent: "planner", parts: [{ type: "text", text }] };
     const model = splitModelId(state.plannerModel);
-    if (model) body.model = model;
+    // No default models by design: without an explicit Brain pick, refuse the
+    // turn instead of letting opencode silently choose a model. The pane gates
+    // this in the UI; this is the backstop.
+    if (!model) {
+      emitSessionEvent(id, state, {
+        type: "error",
+        message: "No Brain model is set. Pick one with /brain-model (connect a provider first if the list is empty)."
+      });
+      return;
+    }
+
+    emitSessionEvent(id, state, { type: "user", text });
+    const body = { agent: "planner", parts: [{ type: "text", text }], model };
     request(state, "POST", `/session/${encodeURIComponent(state.sessionId)}/prompt_async`, body).catch(
       (error) => {
         if (sessions.get(id) !== state) return;

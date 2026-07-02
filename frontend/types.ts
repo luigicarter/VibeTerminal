@@ -135,6 +135,9 @@ export interface AgentThreadLookupPayload {
   // no persisted session exists for the id, so the launcher starts fresh rather
   // than hard-failing on `--resume`.
   confirmId?: string;
+  // Open Fusion panes look up threads in the app-owned OpenCode store, not the
+  // user's global one; main injects the matching env for the discovery host.
+  openFusion?: boolean;
 }
 
 export type AgentThreadLookupResult =

@@ -1,9 +1,11 @@
 import type { OpenFusionModel } from "./types";
 
-export const DEFAULT_OPEN_FUSION_PLANNER_MODEL: OpenFusionModel =
-  "anthropic/claude-sonnet-4-5";
-export const DEFAULT_OPEN_FUSION_EXECUTOR_MODEL: OpenFusionModel =
-  "opencode/gpt-5.1-codex";
+// Open Fusion ships with NO default models: assuming a vendor pair on pane
+// open fails against the app-owned (initially empty) credential store and
+// second-guesses the user. "" means "not chosen yet" — the pane gates the
+// first turn on connecting a provider and picking Brain/Executor models.
+export const DEFAULT_OPEN_FUSION_PLANNER_MODEL: OpenFusionModel = "";
+export const DEFAULT_OPEN_FUSION_EXECUTOR_MODEL: OpenFusionModel = "";
 
 const OPEN_FUSION_MODEL_ID_PATTERN = /^[A-Za-z0-9._:/@+-]+$/;
 const MAX_OPEN_FUSION_MODEL_ID_LENGTH = 96;

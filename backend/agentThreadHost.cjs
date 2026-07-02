@@ -333,7 +333,23 @@ function confirmClaudeThread(cwd, id) {
   return { status: "missing" };
 }
 
-function findLatestOpenCodeThread(cwd, after = 0, excludeIds = []) {
+// Open Fusion panes pass envOverrides (XDG_DATA_HOME/XDG_CONFIG_HOME) so the
+// CLI lists the app-owned OpenCode store instead of the user's global one —
+// the two must never bleed into each other's discovery.
+function opencodeSpawnEnv(envOverrides) {
+  if (!envOverrides || typeof envOverrides !== "object") {
+    return undefined;
+  }
+  const cleaned = {};
+  for (const [key, value] of Object.entries(envOverrides)) {
+    if (typeof value === "string") {
+      cleaned[key] = value;
+    }
+  }
+  return Object.keys(cleaned).length ? { ...process.env, ...cleaned } : undefined;
+}
+
+function findLatestOpenCodeThread(cwd, after = 0, excludeIds = [], envOverrides) {
   const result = spawn("opencode", [
     "session",
     "list",
@@ -343,6 +359,7 @@ function findLatestOpenCodeThread(cwd, after = 0, excludeIds = []) {
     "100"
   ], {
     cwd,
+    env: opencodeSpawnEnv(envOverrides),
     shell: process.platform === "win32",
     windowsHide: true
   });
@@ -410,7 +427,7 @@ function placeholderOpenCodeRef(id) {
 // exhaustive). A truncated page without the id stays "found".
 const OPENCODE_CONFIRM_LIST_MAX = 1000;
 
-function confirmOpenCodeThread(cwd, id) {
+function confirmOpenCodeThread(cwd, id, envOverrides) {
   const target = String(id || "");
   if (!target) {
     return Promise.resolve({ status: "missing" });
@@ -425,6 +442,7 @@ function confirmOpenCodeThread(cwd, id) {
     String(OPENCODE_CONFIRM_LIST_MAX)
   ], {
     cwd,
+    env: opencodeSpawnEnv(envOverrides),
     shell: process.platform === "win32",
     windowsHide: true
   });
@@ -740,13 +758,14 @@ async function findLatestAgentThread(payload) {
     // Confirm whether a specific session id is still resumable so the launcher
     // can self-heal instead of running a doomed `opencode --session <id>`.
     if (payload.confirmId) {
-      return confirmOpenCodeThread(cwd, payload.confirmId);
+      return confirmOpenCodeThread(cwd, payload.confirmId, payload.opencodeEnv);
     }
 
     const threadRef = await findLatestOpenCodeThread(
       cwd,
       after,
-      payload.excludeIds
+      payload.excludeIds,
+      payload.opencodeEnv
     );
     return threadRef
       ? { status: "found", threadRef }
@@ -856,6 +875,7 @@ module.exports = {
   findLatestOpenCodeThread,
   isSamePath,
   normalizePathForCompare,
+  opencodeSpawnEnv,
   parseClaudeTranscript,
   parseCursorTranscriptTitle
 };
