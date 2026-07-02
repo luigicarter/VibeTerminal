@@ -45,6 +45,9 @@ import {
 } from "./attention";
 import TerminalPane from "./components/TerminalPane";
 import FusionChatPane from "./components/FusionChatPane";
+import OpenFusionChatPane, {
+  type OpenFusionSettingsChange
+} from "./components/OpenFusionChatPane";
 import TiledBoard from "./components/TiledBoard";
 import {
   createThreadRef,
@@ -66,6 +69,7 @@ import type {
   FusionChatEvent,
   FusionSettings,
   LayoutBox,
+  OpenFusionChatEvent,
   ProjectWorkspace,
   UpdateState
 } from "./types";
@@ -856,7 +860,7 @@ export default function App() {
         "openfusion",
         screenshotFixture.cwd,
         [],
-        "Open Fusion CLI"
+        "Open Fusion"
       );
       const screenshotSession: AgentSession = {
         ...session,
@@ -1143,6 +1147,17 @@ export default function App() {
       }
 
       applyFusionChatLifecycle(event);
+    });
+  }, []);
+
+  useEffect(() => {
+    return window.vibe?.openFusionChat?.onEvent((event: OpenFusionChatEvent) => {
+      if (event.type === "host-error") {
+        setShellMessage(event.message);
+        return;
+      }
+
+      applyOpenFusionChatLifecycle(event);
     });
   }, []);
 
@@ -1526,6 +1541,10 @@ export default function App() {
       return window.vibe?.fusionChat?.stop(session.id) ?? Promise.resolve(false);
     }
 
+    if (session.openFusion) {
+      return window.vibe?.openFusionChat?.stop(session.id) ?? Promise.resolve(false);
+    }
+
     return window.vibe?.terminal.kill(session.id) ?? Promise.resolve(false);
   }
 
@@ -1613,17 +1632,22 @@ export default function App() {
             return item;
           }
 
-          const currentClaudeRef = hasClaudeThreadId(item.threadRef)
-            ? item.threadRef
-            : undefined;
-          const previousClaudeRef = sessionResumeRef(item);
-          const canResume = !item.fusion && canResumeSessionThread(item);
+          const currentChatRef = item.fusion
+            ? hasClaudeThreadId(item.threadRef)
+              ? item.threadRef
+              : undefined
+            : activeSessionThreadRef(item);
+          const previousChatRef = sessionResumeRef(item);
+          // Chat panes (Fusion, Open Fusion) restart FRESH; their old thread is
+          // stashed as resumeRef so Resume stays a deliberate action.
+          const isChatPane = Boolean(item.fusion || item.openFusion);
+          const canResume = !isChatPane && canResumeSessionThread(item);
           return {
             ...item,
-            ...(item.fusion
+            ...(isChatPane
               ? {
                   threadRef: undefined,
-                  resumeRef: currentClaudeRef ?? previousClaudeRef
+                  resumeRef: currentChatRef ?? previousChatRef
                 }
               : {}),
             started: true,
@@ -1869,6 +1893,159 @@ export default function App() {
     });
   }
 
+  function applyOpenFusionAttention(
+    sessionId: string,
+    attentionEvent: AgentAttentionEvent
+  ) {
+    const attentionStatus = statusFromAttentionState(attentionEvent.state);
+    updateAnySession(sessionId, (session) => {
+      if (!session.openFusion) {
+        return session;
+      }
+
+      return {
+        ...session,
+        status: attentionStatus
+          ? reconcileStatus(session.status, attentionStatus)
+          : session.status,
+        attention: attentionFromEvent(
+          attentionEvent,
+          shouldMarkFusionAttentionUnread(sessionId, attentionEvent)
+        )
+      };
+    });
+  }
+
+  // App-level mirror of the Open Fusion pane's lifecycle so the sidebar status
+  // pill and attention dot stay correct even while the pane is unmounted
+  // (project switched away). Same contract as applyFusionChatLifecycle.
+  function applyOpenFusionChatLifecycle(event: OpenFusionChatEvent) {
+    if (!("id" in event) || typeof event.id !== "string") {
+      return;
+    }
+
+    if (event.type === "turn-start") {
+      updateAnySession(event.id, (session) =>
+        session.openFusion
+          ? { ...session, status: "running", attention: EMPTY_ATTENTION }
+          : session
+      );
+      return;
+    }
+
+    if (event.type === "permission") {
+      applyOpenFusionAttention(event.id, {
+        state: "waiting",
+        reason: "approval",
+        source: "provider",
+        updatedAt: Date.now(),
+        message: `Permission requested: ${event.permission}`
+      });
+      return;
+    }
+
+    if (event.type === "permission-resolved") {
+      updateAnySession(event.id, (session) =>
+        session.openFusion && session.status === "waiting"
+          ? { ...session, status: "running", attention: EMPTY_ATTENTION }
+          : session
+      );
+      return;
+    }
+
+    if (event.type === "result") {
+      if (event.subtype === "restored") {
+        return;
+      }
+      updateAnySession(event.id, (session) => {
+        if (!session.openFusion) {
+          return session;
+        }
+
+        if (session.status === "waiting") {
+          return session;
+        }
+
+        const attentionEvent: AgentAttentionEvent = {
+          state: "completed",
+          reason: "done",
+          source: "provider",
+          updatedAt: Date.now()
+        };
+
+        return {
+          ...session,
+          status: reconcileStatus(session.status, "done"),
+          attention: attentionFromEvent(
+            attentionEvent,
+            shouldMarkFusionAttentionUnread(event.id, attentionEvent)
+          )
+        };
+      });
+      return;
+    }
+
+    if (event.type === "interrupted") {
+      updateAnySession(event.id, (session) =>
+        session.openFusion ? { ...session, status: "waiting" } : session
+      );
+      return;
+    }
+
+    if (event.type === "error") {
+      applyOpenFusionAttention(event.id, {
+        state: "failed",
+        reason: "error",
+        source: "provider",
+        updatedAt: Date.now(),
+        message: event.message
+      });
+      return;
+    }
+
+    if (event.type === "closed") {
+      updateAnySession(event.id, (session) => {
+        if (!session.openFusion) {
+          return session;
+        }
+
+        // A dead engine strands any in-flight state — "waiting" especially (a
+        // pending permission can never be answered) — so it must fail rather
+        // than sit waiting. done/idle stay put: that is a normal shutdown.
+        const inFlight =
+          session.status === "running" ||
+          session.status === "waiting" ||
+          session.status === "starting";
+        if (!inFlight) {
+          return session;
+        }
+
+        const message =
+          event.code != null && event.code !== 0
+            ? `Open Fusion engine exited with code ${event.code}.`
+            : session.status === "waiting"
+              ? "Open Fusion engine closed while a request was still pending."
+              : "Open Fusion engine closed before returning a result.";
+        const attentionEvent: AgentAttentionEvent = {
+          state: "failed",
+          reason: "exit",
+          source: "provider",
+          updatedAt: Date.now(),
+          message
+        };
+
+        return {
+          ...session,
+          status: "failed",
+          attention: attentionFromEvent(
+            attentionEvent,
+            shouldMarkFusionAttentionUnread(event.id, attentionEvent)
+          )
+        };
+      });
+    }
+  }
+
   // Deliberately resume the pane's previous conversation. Mirrors restartSession
   // but forces nextLaunchMode "resume" against the stashed resumeRef. The
   // outgoing active thread becomes the next resumeRef so switching back does not
@@ -1934,7 +2111,7 @@ export default function App() {
   }
 
   function clearFusionSession(scope: SessionScope, session: AgentSession) {
-    if (!session.fusion) {
+    if (!session.fusion && !session.openFusion) {
       return;
     }
 
@@ -1945,10 +2122,12 @@ export default function App() {
             return item;
           }
 
-          const currentClaudeRef = hasClaudeThreadId(item.threadRef)
-            ? item.threadRef
-            : undefined;
-          const previousClaudeRef = sessionResumeRef(item);
+          const currentChatRef = item.fusion
+            ? hasClaudeThreadId(item.threadRef)
+              ? item.threadRef
+              : undefined
+            : activeSessionThreadRef(item);
+          const previousChatRef = sessionResumeRef(item);
 
           return {
             ...item,
@@ -1956,7 +2135,7 @@ export default function App() {
             launchToken: item.launchToken + 1,
             nextLaunchMode: "new",
             threadRef: undefined,
-            resumeRef: currentClaudeRef ?? previousClaudeRef,
+            resumeRef: currentChatRef ?? previousChatRef,
             threadLookupStartedAt: undefined,
             threadLookupStatus: "idle",
             threadLookupMessage: undefined,
@@ -2040,6 +2219,77 @@ export default function App() {
                   nextLaunchMode: relaunchResumeRef?.id ? "resume" : "new",
                   threadLookupStartedAt: undefined,
                   threadLookupStatus: relaunchResumeRef?.id ? "found" : "idle",
+                  threadLookupMessage: undefined,
+                  status: "idle" as const,
+                  attention: EMPTY_ATTENTION
+                }
+              : {})
+          };
+        })
+      );
+    };
+
+    if (session.started && requiresRestart) {
+      stopSessionProcess(session).then(applySettings);
+    } else {
+      applySettings();
+    }
+  }
+
+  // Open Fusion model changes: the pane already persisted models.json through
+  // the host; here we mirror the pick into the session (so restore/duplicate
+  // keep it) and restart the pane when the Executor changed — that model is
+  // baked into the generated OpenCode config, unlike the live-switching Brain.
+  function updateOpenFusionSettings(
+    scope: SessionScope,
+    session: AgentSession,
+    settings: OpenFusionSettingsChange
+  ) {
+    if (!session.openFusion) {
+      return;
+    }
+
+    const nextPlannerModel = normalizeOpenFusionModel(
+      settings.plannerModel ?? session.openFusionPlannerModel,
+      DEFAULT_OPEN_FUSION_PLANNER_MODEL
+    );
+    const nextExecutorModel = normalizeOpenFusionModel(
+      settings.executorModel ?? session.openFusionExecutorModel,
+      DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
+    );
+    const currentExecutorModel = normalizeOpenFusionModel(
+      session.openFusionExecutorModel,
+      DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
+    );
+    const requiresRestart = nextExecutorModel !== currentExecutorModel;
+
+    const applySettings = () => {
+      updateScopeSessions(scope, (sessions) =>
+        sessions.map((item) => {
+          if (item.id !== session.id) {
+            return item;
+          }
+
+          const currentChatRef = activeSessionThreadRef(item);
+          const previousChatRef = sessionResumeRef(item);
+          const relaunchResumeRef = currentChatRef ?? previousChatRef;
+          return {
+            ...item,
+            openFusionPlannerModel: nextPlannerModel,
+            openFusionExecutorModel: nextExecutorModel,
+            ...(requiresRestart && item.started
+              ? {
+                  threadRef: relaunchResumeRef,
+                  resumeRef: currentChatRef ? previousChatRef : undefined,
+                  started: true,
+                  launchToken: item.launchToken + 1,
+                  nextLaunchMode: (relaunchResumeRef?.id ? "resume" : "new") as
+                    | "resume"
+                    | "new",
+                  threadLookupStartedAt: undefined,
+                  threadLookupStatus: (relaunchResumeRef?.id ? "found" : "idle") as
+                    | "found"
+                    | "idle",
                   threadLookupMessage: undefined,
                   status: "idle" as const,
                   attention: EMPTY_ATTENTION
@@ -2782,17 +3032,45 @@ export default function App() {
                       applyAgentAttention(session.id, attention)
                     }
                   />
+                ) : session.openFusion ? (
+                  <OpenFusionChatPane
+                    session={session}
+                    profile={getProfile("openfusion")}
+                    isMaximized={session.id === maximizedSessionId}
+                    isSelected={session.id === selectedSessionId}
+                    onClose={() => closeSession(activeScope, session)}
+                    onDuplicate={() => duplicateSession(activeScope, session)}
+                    onRestart={() => restartSession(activeScope, session)}
+                    onResume={() => resumeSession(activeScope, session)}
+                    onClear={() => clearFusionSession(activeScope, session)}
+                    onSettingsChange={(settings) =>
+                      updateOpenFusionSettings(activeScope, session, settings)
+                    }
+                    onAdd={() =>
+                      addSessionForCwd(activeScope, sessionCreationKind(session), session.cwd)
+                    }
+                    onSelect={() => selectSession(session.id)}
+                    onMaximize={() =>
+                      setMaximizedSessionId((current) =>
+                        current === session.id ? null : session.id
+                      )
+                    }
+                    onThreadRefChange={(threadRef) =>
+                      updateSessionThreadRef(activeScope, session.id, threadRef)
+                    }
+                    onStatusChange={(status) =>
+                      updateSessionStatus(activeScope, session.id, status)
+                    }
+                    onAttention={(attention) =>
+                      applyAgentAttention(session.id, attention)
+                    }
+                  />
                 ) : (
                   <TerminalPane
                     session={session}
                     profile={
-                      session.openFusion
-                        ? getProfile("openfusion")
-                        : session.fusion
-                          ? getProfile("fusion")
-                          : getProfile(session.kind)
+                      session.fusion ? getProfile("fusion") : getProfile(session.kind)
                     }
-                    providerLogoSrc={session.openFusion ? openFusionLogo : undefined}
                     claimedThreadIds={claimedThreadIds(session.id)}
                     isMaximized={session.id === maximizedSessionId}
                     isArranging={isArranging}

@@ -118,5 +118,24 @@ contextBridge.exposeInMainWorld("vibe", {
       ipcRenderer.on("fusion-chat:event", listener);
       return () => ipcRenderer.removeListener("fusion-chat:event", listener);
     }
+  },
+  // Headless OpenCode chat for Open Fusion panes (no PTY, no TUI). `start`
+  // spawns a per-pane `opencode serve`; `sendUserTurn` posts a planner prompt;
+  // `onEvent` streams normalized chat events shared with the Fusion pane shape.
+  openFusionChat: {
+    start: (payload) => ipcRenderer.invoke("openfusion-chat:start", payload),
+    saveModels: (id, models) =>
+      ipcRenderer.invoke("openfusion-chat:save-models", { id, ...models }),
+    requestProviders: (id) => ipcRenderer.invoke("openfusion-chat:providers", { id }),
+    sendUserTurn: (id, text) => ipcRenderer.send("openfusion-chat:input", { id, text }),
+    permission: (id, requestId, reply) =>
+      ipcRenderer.invoke("openfusion-chat:permission", { id, requestId, reply }),
+    interrupt: (id) => ipcRenderer.invoke("openfusion-chat:interrupt", { id }),
+    stop: (id) => ipcRenderer.invoke("openfusion-chat:stop", { id }),
+    onEvent: (callback) => {
+      const listener = (_event, payload) => callback(payload);
+      ipcRenderer.on("openfusion-chat:event", listener);
+      return () => ipcRenderer.removeListener("openfusion-chat:event", listener);
+    }
   }
 });

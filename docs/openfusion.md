@@ -1,17 +1,39 @@
 # Open Fusion
 
-> **Status: embedded terminal mode implemented, incl. native model pickers.**
-> vibeTerminal has an Open Fusion launcher/pane that runs OpenCode with
-> pane-scoped `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`,
-> `OPENCODE_CONFIG_CONTENT`, and `OPENCODE_TUI_CONFIG`, with Brain/Body roles
-> defined inside the generated OpenCode config. Users pick the Brain and
-> Executor provider/model through native in-TUI catalog pickers
-> (`/brain-model`, `/executor-model`) that flag provider auth at pick time.
-> The visible interaction surface is the embedded OpenCode TUI/CLI, not a
-> separate app-level model bar. The headless OpenCode server / SDK custom chat
-> UI path remains design work. See `docs/fusion-terminal.md` and
+> **Status: native chat pane over a headless OpenCode server (2026-07-01).**
+> An Open Fusion pane is now a vibeTerminal-native chat UI
+> (`frontend/components/OpenFusionChatPane.tsx`) driven by a per-pane
+> `opencode serve` child managed by `backend/openFusionChatHost.cjs` — the
+> OpenCode TUI is no longer rendered. This replaced the embedded-TUI slice
+> because the TUI's branding surface is closed: its tui.json schema has no
+> logo/splash override and its plugin API stops at dialogs/toasts/commands
+> (verified against the 1.17.11 binary), so an Open Fusion pane could never
+> stop looking like stock opencode. The server slice also unlocks what the TUI
+> could not: in-pane permission approvals (`/permission/{id}/reply`) and a
+> live-switchable Brain model (per-prompt `model` override on `prompt_async`).
+> The pane keeps the same generated pane-scoped `OPENCODE_CONFIG` /
+> `OPENCODE_CONFIG_CONTENT` role config (planner primary + executor +
+> read-only investigator subagents). Model picks persist in the same
+> `models.json` (Brain applies live; Executor is baked into the generated
+> config, so it restart-applies). See `docs/fusion-terminal.md` and
 > `docs/fusion-unification.md` for the shipped Fusion (Claude + Codex) it
 > generalizes.
+>
+> **Engine contract (live-verified against OpenCode 1.17.11):**
+> `opencode serve --port 0 --hostname 127.0.0.1` (stdout line reports the
+> port; basic auth via a per-pane random `OPENCODE_SERVER_PASSWORD`);
+> `POST /session`, `POST /session/{id}/prompt_async` (agent + parts +
+> optional per-prompt model), `POST /session/{id}/abort`,
+> `GET /session/{id}/message` (resume rehydration),
+> `POST /permission/{requestID}/reply` `{reply: once|always|reject}`,
+> `GET /config/providers` (connected) + `GET /provider` (full catalog), and
+> the `/event` SSE feed (`message.part.delta` streaming, `message.part.updated`
+> snapshots, tool parts with `state.status` pending→running→completed,
+> task-spawned child sessions on the same feed via `session.created.parentID`,
+> `session.status busy` / `session.idle`, `permission.asked`). The normalizer
+> in `backend/openFusionChatHost.cjs` dedupes delta-vs-snapshot text by
+> tracking emitted length per part id and is fixture-tested by
+> `scripts/backend/openfusion-chat-parse-smoke.cjs`.
 
 ## The idea
 
@@ -257,27 +279,37 @@ transcript ordering (the coherence seam Fusion fights in
   `FusionChatPane`-style transcript, an app-side launch-time model pair picker,
   and optional third verifier subagent.
 
-Today's Open Fusion implementation extends the existing **CLI-only** OpenCode
-integration: vibeTerminal launches `opencode --agent planner` as a terminal agent,
-discovers threads via `opencode session list --format json`, and injects
-pane-scoped config through environment variables including
-`OPENCODE_CONFIG_CONTENT` (see
-`backend/agentTelemetry.cjs`, `backend/main.cjs`, `frontend/sessionLaunch.ts`,
-`frontend/openFusion.ts`, and `frontend/components/TerminalPane.tsx`). It does
-**not** drive the OpenCode server. The server/SDK path is still new integration
-work.
+Today's Open Fusion implementation drives the **OpenCode server**: the
+singleton helper `backend/openFusionChatHost.cjs` spawns one `opencode serve`
+per pane (pane-scoped `OPENCODE_*` env from
+`agentTelemetry.prepareOpenFusionFiles`, per-pane basic-auth password),
+normalizes the `/event` SSE feed into the same high-level chat-event vocabulary
+the Fusion pane uses, and speaks JSONL with `backend/main.cjs`
+(`openfusion-chat:*` IPC channels; renderer surface
+`window.vibe.openFusionChat` in `preload/preload.cjs`). The pane
+(`frontend/components/OpenFusionChatPane.tsx`) renders Brain/Executor/Scout
+voices, delegation cards, in-pane permission approvals, model pickers backed by
+`GET /config/providers` + `/provider`, and resume via
+`GET /session/{id}/message` rehydration. Thread discovery still uses the
+existing `opencode` provider (server sessions are ordinary OpenCode sessions on
+disk). The old embedded-TUI launch path (`opencode --agent planner` inside a
+PTY with `OPENCODE_TUI_CONFIG`, TUI plugin pickers) is superseded; the config
+generator still writes the theme/tui/plugin files, which stock `opencode` runs
+in that directory can pick up, but no pane launches the TUI anymore.
 
 ## Decision status
 
 Direction: **build Open Fusion as a mode separate from Fusion**. Current shipped
-slice = embedded OpenCode terminal, roles = two user-picked model IDs mapped to
-primary(planner, read-only) + subagent(executor) via generated per-pane
-OpenCode config, delegation via the native `task` tool, UI = the embedded
-OpenCode terminal itself, model choice = native in-TUI catalog pickers
-(`/brain-model`, `/executor-model`) persisted per pane in `models.json`.
-Saved pane models win over launch defaults on restart (the pickers own them);
-invalid saved values fall back to the launch opts, never to hard defaults.
-Future slice = optional `FusionChatPane`-style UI driven by OpenCode server/SDK. The
+slice = the `FusionChatPane`-style UI driven by the OpenCode server (the former
+"future slice"), roles = two user-picked model IDs mapped to primary(planner,
+read-only) + subagent(executor) via generated per-pane OpenCode config,
+delegation via the native `task` tool, UI = `OpenFusionChatPane` (branded hero,
+role-voiced transcript, delegation cards, permission panel), model choice =
+in-pane pickers (`/brain-model`, `/executor-model`) persisted per pane in
+`models.json`. Saved pane models win over launch defaults on restart (the
+pickers own them); invalid saved values fall back to the launch opts, never to
+hard defaults. Brain picks apply live (per-prompt model override); Executor
+picks restart the pane (the model is baked into the generated config). The
 completion/review gate belongs to the Planner/intelligence layer: executor
 self-review is allowed, but it reports back to the Planner, which decides done
 vs another guided executor pass. The Planner remains the observer/steerer, while

@@ -353,6 +353,94 @@ export type FusionChatEvent =
   | { id: string; type: "closed"; code?: number }
   | { type: "host-error"; message: string };
 
+// Normalized events from the headless OpenCode chat host
+// (backend/openFusionChatHost.cjs), broadcast on "openfusion-chat:event". The
+// vocabulary mirrors FusionChatEvent with Open Fusion roles: "brain" is the
+// planner primary agent; "executor"/"investigator" are its task subagents.
+export type OpenFusionChatRole = "brain" | "executor" | "investigator";
+
+export type OpenFusionChatEvent =
+  | { id: string; type: "session"; sessionId: string; resumed?: boolean }
+  | { id: string; type: "user"; text: string }
+  | { id: string; type: "turn-start" }
+  | { id: string; type: "assistant-text"; role: OpenFusionChatRole; delta: string }
+  | { id: string; type: "thinking"; role: OpenFusionChatRole; delta: string }
+  | {
+      id: string;
+      type: "tool-call";
+      toolId: string;
+      name: string;
+      role: OpenFusionChatRole;
+      title?: string;
+      input: unknown;
+    }
+  | {
+      id: string;
+      type: "tool-result";
+      toolId: string;
+      name: string;
+      role: OpenFusionChatRole;
+      ok: boolean;
+      title?: string;
+      text: string;
+    }
+  | {
+      id: string;
+      type: "permission";
+      requestId: string;
+      role: OpenFusionChatRole;
+      permission: string;
+      patterns: string[];
+      title?: string;
+    }
+  | { id: string; type: "permission-resolved"; requestId: string; reply: string }
+  | {
+      id: string;
+      type: "providers";
+      ok: boolean;
+      message?: string;
+      connected?: OpenFusionProvider[];
+      available?: { id: string; name: string }[];
+    }
+  | {
+      id: string;
+      type: "result";
+      subtype?: string;
+      costUsd?: number;
+      tokens?: { input: number; output: number; reasoning: number };
+    }
+  | { id: string; type: "interrupted" }
+  | { id: string; type: "stderr"; text: string }
+  | { id: string; type: "error"; message: string; role?: OpenFusionChatRole }
+  | { id: string; type: "closed"; code?: number }
+  | { type: "host-error"; message: string };
+
+export interface OpenFusionProvider {
+  id: string;
+  name: string;
+  models: { id: string; name: string }[];
+}
+
+// One rendered entry in an Open Fusion pane's chat transcript.
+export interface OpenFusionChatMessage {
+  key: string;
+  role: "user" | OpenFusionChatRole;
+  kind:
+    | "text"
+    | "tool-call"
+    | "tool-result"
+    | "thinking"
+    | "activity"
+    | "result"
+    | "error";
+  text: string;
+  toolId?: string;
+  ts: number;
+  streaming?: boolean;
+  // Tool mechanics hidden unless the Details toggle is enabled.
+  internal?: boolean;
+}
+
 export type ChatRole = "user" | "opus" | "codex";
 
 // One rendered entry in a Fusion pane's chat transcript (ephemeral view-model

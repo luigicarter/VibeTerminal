@@ -17,6 +17,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `scripts/backend/fusion-launch-smoke.cjs` - Validates Fusion per-pane prompt/MCP file generation and confirms the adapter receives the embedded Codex binary path.
 - `scripts/backend/fusion-adapter-smoke.cjs` - Validates the Fusion adapter MCP surface exposed to Claude.
 - `scripts/backend/fusion-chat-parse-smoke.cjs` - Validates headless Claude stream-json normalization used by the Fusion chat host.
+- `scripts/backend/openfusion-chat-parse-smoke.cjs` - Validates OpenCode `/event` SSE normalization used by the Open Fusion chat host (delta/snapshot dedupe, task child-session roles, permission round-trip, abort suppression, resume rehydration, model-id splitting, serve spawn env), against event shapes recorded live from OpenCode 1.17.11.
 - `scripts/backend/fusion-appserver-smoke.cjs` - Boots Codex `app-server` over stdio, validates the initialize handshake, and exercises native `thread/goal/set|get|clear`; `--require-embedded` requires `vendor/codex-bin` and is used by release checks.
 
 ## Frontend Scripts
@@ -42,7 +43,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `npm run pack:win` - Prepares the embedded Codex binary, builds the renderer, and creates an unpacked Windows app in `release/win-unpacked`.
 - `npm run dist:win` - Prepares the embedded Codex binary, builds the renderer, and creates the Windows NSIS installer plus update metadata in `release/`.
 - `npm run screenshot` - Visual QA screenshot pass.
-- `npm run screenshot:openfusion` - Visual QA screenshot pass for the embedded Open Fusion CLI fixture.
+- `npm run screenshot:openfusion` - Visual QA screenshot pass for the Open Fusion chat pane fixture.
 - `npm run smoke:backend:codex-discovery` - Backend smoke test for Codex thread discovery.
 - `npm run smoke:backend:claude-discovery` - Backend smoke test for Claude thread discovery.
 - `npm run smoke:backend:agent-telemetry` - Backend smoke test for vibeTerminal-owned agent telemetry shims.
@@ -52,6 +53,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `npm run smoke:backend:fusion-launch` - Backend smoke test for Fusion prompt/MCP launch files.
 - `npm run smoke:backend:fusion-adapter` - Backend smoke test for the Fusion adapter MCP tools.
 - `npm run smoke:backend:fusion-chat-parse` - Backend smoke test for Fusion headless Claude stream parsing.
+- `npm run smoke:backend:openfusion-chat-parse` - Backend smoke test for Open Fusion OpenCode SSE parsing.
 - `npm run smoke:backend:fusion-appserver` - Backend smoke test for Codex app-server initialize over stdio, with optional PATH fallback.
 - `npm run smoke:backend:fusion-appserver:embedded` - Backend smoke test requiring the embedded Codex binary.
 - `npm run smoke:frontend:attention` - Frontend smoke test for terminal attention helper behavior.

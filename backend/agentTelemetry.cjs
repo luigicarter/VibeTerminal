@@ -2364,6 +2364,42 @@ function createAgentTelemetryManager(options = {}) {
     };
   }
 
+  // Persist pane-scoped Open Fusion Brain/Executor picks (the same models.json
+  // the TUI-plugin pickers wrote). prepareOpenFusionFiles re-reads it on the
+  // next pane start, so executor changes are restart-applied by construction.
+  async function updateOpenFusionModels(sessionId, opts = {}) {
+    await ready;
+    const normalizedSessionId = normalizeSessionId(sessionId);
+    if (!normalizedSessionId) {
+      return { status: "failed", error: "missing session id" };
+    }
+    try {
+      const openFusionDir = path.join(
+        openFusionBaseDir,
+        "sessions",
+        sessionDirName(normalizedSessionId)
+      );
+      const modelStatePath = path.join(openFusionDir, "models.json");
+      const current = readOpenFusionModelState(modelStatePath);
+      const next = {
+        plannerModel:
+          typeof opts.plannerModel === "string" && opts.plannerModel.trim()
+            ? opts.plannerModel.trim()
+            : current.plannerModel || null,
+        executorModel:
+          typeof opts.executorModel === "string" && opts.executorModel.trim()
+            ? opts.executorModel.trim()
+            : current.executorModel || null,
+        updatedAt: new Date().toISOString()
+      };
+      fs.mkdirSync(openFusionDir, { recursive: true });
+      fs.writeFileSync(modelStatePath, `${JSON.stringify(next, null, 2)}\n`);
+      return { status: "ok", modelStatePath, models: next };
+    } catch (error) {
+      return { status: "failed", error: error?.message || String(error) };
+    }
+  }
+
   function fusionRunModePathForSession(normalizedSessionId) {
     return path.join(runDir, sessionDirName(normalizedSessionId), "fusion-run-mode.txt");
   }
@@ -2697,6 +2733,7 @@ function createAgentTelemetryManager(options = {}) {
     prepareOpenFusionFiles,
     prepareFusionFiles,
     updateFusionSettings,
+    updateOpenFusionModels,
     ready,
     releaseSession,
     steerFusionSession,

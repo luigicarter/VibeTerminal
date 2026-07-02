@@ -427,15 +427,16 @@ assert(
 assert(
   appSource.includes("function stopSessionProcess(session") &&
     appSource.includes("window.vibe?.fusionChat?.stop(session.id)") &&
+    appSource.includes("window.vibe?.openFusionChat?.stop(session.id)") &&
     appSource.includes("window.vibe?.terminal.kill(session.id)") &&
     appSource.includes("void stopSessionProcess(session)") &&
     appSource.includes("stopSessionProcess(session).then("),
-  "Fusion should stop only through explicit close/restart/resume actions"
+  "Fusion/Open Fusion should stop only through explicit close/restart/resume actions"
 );
 assert(
   appSource.includes("function clearFusionSession(") &&
     appSource.includes("threadRef: undefined") &&
-    appSource.includes("resumeRef: currentClaudeRef ?? previousClaudeRef") &&
+    appSource.includes("resumeRef: currentChatRef ?? previousChatRef") &&
     appSource.includes("function updateFusionSettings(") &&
     appSource.includes("const codexSettingsChanged =") &&
     appSource.includes("?.updateSettings(session.id") &&
@@ -443,6 +444,15 @@ assert(
     appSource.includes("nextFusionClaudeEffort !== currentFusionClaudeEffort") &&
     appSource.includes('nextLaunchMode: relaunchResumeRef?.id ? "resume" : "new"'),
   "Fusion clear/planning settings should restart and resume Claude, while Codex-only settings update live"
+);
+assert(
+  appSource.includes("function updateOpenFusionSettings(") &&
+    appSource.includes("nextExecutorModel !== currentExecutorModel") &&
+    appSource.includes("function applyOpenFusionChatLifecycle(") &&
+    appSource.includes("applyOpenFusionAttention(event.id") &&
+    appSource.includes("window.vibe?.openFusionChat?.onEvent(") &&
+    appSource.includes("<OpenFusionChatPane"),
+  "Open Fusion chat pane should mirror lifecycle app-side and restart only on Executor changes"
 );
 assert(
   appSource.includes('event.type === "agent-running"') &&

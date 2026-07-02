@@ -8,6 +8,8 @@ import type {
   FusionRunMode,
   FusionChatEvent,
   FusionClaudeModel,
+  OpenFusionChatEvent,
+  OpenFusionModel,
   TerminalEvent,
   TerminalLaunchPayload,
   UpdateActionResult,
@@ -105,6 +107,41 @@ declare global {
         interrupt: (id: string) => Promise<boolean>;
         stop: (id: string) => Promise<boolean>;
         onEvent: (callback: (event: FusionChatEvent) => void) => () => void;
+      };
+      openFusionChat: {
+        start: (payload: {
+          id: string;
+          cwd: string;
+          resumeId?: string;
+          plannerModel?: OpenFusionModel | string;
+          executorModel?: OpenFusionModel | string;
+        }) => Promise<{
+          ok: boolean;
+          error?: string;
+          plannerModel?: string;
+          executorModel?: string;
+        }>;
+        saveModels: (
+          id: string,
+          models: {
+            plannerModel?: OpenFusionModel | string;
+            executorModel?: OpenFusionModel | string;
+          }
+        ) => Promise<{
+          ok: boolean;
+          error?: string;
+          models?: { plannerModel?: string | null; executorModel?: string | null };
+        }>;
+        requestProviders: (id: string) => Promise<{ ok: boolean; error?: string }>;
+        sendUserTurn: (id: string, text: string) => void;
+        permission: (
+          id: string,
+          requestId: string,
+          reply: "once" | "always" | "reject"
+        ) => Promise<{ ok: boolean; error?: string }>;
+        interrupt: (id: string) => Promise<boolean>;
+        stop: (id: string) => Promise<boolean>;
+        onEvent: (callback: (event: OpenFusionChatEvent) => void) => () => void;
       };
     };
   }

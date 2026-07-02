@@ -15,6 +15,8 @@ The `frontend/` folder contains the Vite React renderer that users see inside th
 ## Components
 
 - `frontend/components/TerminalPane.tsx` - Owns the xterm instance for a session (pinned to the session id so it survives launch-command changes), sends terminal input/resize IPC calls, receives PTY events, relaunches the PTY only on a launchToken bump, and polls for agent thread metadata. Renders a "Resume last chat" control (wired to `onResume`) only when the pane has a `resumeRef`.
+- `frontend/components/FusionChatPane.tsx` - The Fusion (Claude + Codex) chat pane: renders the normalized `fusion-chat:event` stream as a role-voiced transcript with decision panels, plan-accept bar, and a local slash palette.
+- `frontend/components/OpenFusionChatPane.tsx` - The Open Fusion chat pane over `window.vibe.openFusionChat` (headless per-pane `opencode serve`; the OpenCode TUI is not rendered). Brands the pane with its own hero/empty state, voices Brain/Executor/Scout roles distinctly, renders `task` delegations as visible cards (other tool traffic folds into the Details lane), answers OpenCode permission asks in-pane (Allow / Allow session / Reject), and hosts `/brain-model` + `/executor-model` pickers fed by the server's provider catalog — Brain picks apply live, Executor picks restart the pane via `onSettingsChange`.
 - `frontend/components/TiledBoard.tsx` - Drag/resize layout engine for terminal panes, including collision handling, swaps, adjacent resize behavior, and persisted fluid layouts.
 
 ## Working / done signals

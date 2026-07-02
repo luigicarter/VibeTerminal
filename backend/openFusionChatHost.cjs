@@ -1,0 +1,852 @@
+// Headless OpenCode chat host for Open Fusion panes.
+//
+// A child process of main (mirrors backend/fusionChatHost.cjs): it spawns ONE
+// `opencode serve` per Open Fusion pane with that pane's OPENCODE_* env, creates
+// (or resumes) the pane session over the server HTTP API, subscribes to the
+// server's /event SSE feed, and normalizes OpenCode's event vocabulary into the
+// same high-level chat events the Fusion pane speaks — so the renderer never
+// sees OpenCode's wire format.
+//
+// Control IN (from main, one JSON per line on stdin):
+//   {type:"start",      payload:{id, cwd, env, plannerModel, executorModel, resumeId?}}
+//   {type:"input",      payload:{id, text}}
+//   {type:"permission", payload:{id, requestId, reply}}   ← "once"|"always"|"reject"
+//   {type:"planner-model", payload:{id, model}}           ← live Brain switch (next prompt)
+//   {type:"providers",  payload:{id}}                     ← replies with a "providers" event
+//   {type:"interrupt",  payload:{id}}                     ← abort the current turn, keep the server
+//   {type:"stop",       payload:{id}}                     ← kill the pane's server
+//   {type:"shutdown"}
+// Events OUT (to main, one JSON per line on stdout): {type:"event", id, event}
+//   plus {type:"ready"} on boot. Session exits are event.type === "closed".
+//
+// The SSE normalizer is exported (createOpenCodeEventNormalizer) so the parser
+// smoke can replay a recorded event fixture — no OpenCode, no auth, no cost.
+
+const { spawn, execFileSync } = require("child_process");
+const crypto = require("crypto");
+const http = require("http");
+const { windowsCmdArg } = require("./fusionChatHost.cjs");
+
+const isWin = process.platform === "win32";
+const OPENCODE_BIN = process.env.VIBE_OPENCODE_BIN || "opencode";
+const MAX_HISTORY_EVENTS = 20_000;
+const MAX_TOOL_OUTPUT_CHARS = 20_000;
+const PORT_TIMEOUT_MS = 30_000;
+const SSE_RETRY_MS = 1_500;
+const SSE_MAX_RETRIES = 5;
+
+function clipText(value, max = MAX_TOOL_OUTPUT_CHARS) {
+  const text = String(value ?? "");
+  return text.length > max ? `${text.slice(0, max)}\n… [truncated]` : text;
+}
+
+function splitModelId(model) {
+  const raw = String(model || "").trim();
+  const slash = raw.indexOf("/");
+  if (slash <= 0 || slash === raw.length - 1) return null;
+  // Model ids may themselves contain "/" (openrouter/google/gemini-…): the
+  // provider is only the FIRST segment.
+  return { providerID: raw.slice(0, slash), modelID: raw.slice(slash + 1) };
+}
+
+// ---- SSE normalizer (pure, per-session state) ----
+// Turns parsed OpenCode /event objects into high-level chat events. Only events
+// belonging to the pane's session tree (root session + task-spawned child
+// sessions) are surfaced; server-wide noise (catalog.updated, plugin.added,
+// session.diff, heartbeats) is dropped here.
+function createOpenCodeEventNormalizer(rootSessionId) {
+  const root = String(rootSessionId || "");
+  const tree = new Map(); // sessionID -> {agent, title}
+  tree.set(root, { agent: "planner", title: "" });
+  const messageInfo = new Map(); // messageID -> {role, agent, sessionID}
+  const partProgress = new Map(); // partID -> {text: emittedLen, reasoning: emittedLen}
+  const toolStatus = new Map(); // callID -> last status emitted
+  let busy = false;
+  let turnStats = { input: 0, output: 0, reasoning: 0, cost: 0 };
+
+  function roleFor(sessionID) {
+    if (sessionID === root) return "brain";
+    const info = tree.get(sessionID);
+    return info && info.agent === "investigator" ? "investigator" : "executor";
+  }
+
+  function inTree(sessionID) {
+    return tree.has(String(sessionID || ""));
+  }
+
+  function progressFor(partID) {
+    let entry = partProgress.get(partID);
+    if (!entry) {
+      entry = { text: 0, reasoning: 0 };
+      partProgress.set(partID, entry);
+      if (partProgress.size > 4_000) {
+        const oldest = partProgress.keys().next().value;
+        partProgress.delete(oldest);
+      }
+    }
+    return entry;
+  }
+
+  // Streamed fields arrive twice: incremental message.part.delta while the
+  // model runs AND full-text message.part.updated snapshots. Tracking the
+  // emitted length per part dedupes both directions (and models that never
+  // stream still surface through the snapshot path).
+  function emitStreamField(events, sessionID, part, field, fullText) {
+    const info = messageInfo.get(String(part.messageID || ""));
+    if (!info || info.role !== "assistant") return;
+    const progress = progressFor(String(part.id || ""));
+    const text = String(fullText ?? "");
+    if (text.length <= progress[field]) return;
+    const delta = text.slice(progress[field]);
+    progress[field] = text.length;
+    events.push({
+      type: field === "reasoning" ? "thinking" : "assistant-text",
+      role: roleFor(sessionID),
+      delta
+    });
+  }
+
+  return function normalize(raw) {
+    const event = raw && typeof raw === "object" ? raw : {};
+    const type = String(event.type || "");
+    const props = event.properties && typeof event.properties === "object" ? event.properties : {};
+    const sessionID = String(props.sessionID || "");
+    const events = [];
+
+    switch (type) {
+      case "session.created": {
+        const info = props.info && typeof props.info === "object" ? props.info : {};
+        const parentID = String(info.parentID || "");
+        if (inTree(parentID)) {
+          tree.set(String(info.id || sessionID), {
+            agent: String(info.agent || "executor"),
+            title: String(info.title || "")
+          });
+        }
+        break;
+      }
+      case "message.updated": {
+        if (!inTree(sessionID)) break;
+        const info = props.info && typeof props.info === "object" ? props.info : {};
+        if (info.id) {
+          messageInfo.set(String(info.id), {
+            role: String(info.role || ""),
+            agent: String(info.agent || ""),
+            sessionID
+          });
+          if (messageInfo.size > 4_000) {
+            const oldest = messageInfo.keys().next().value;
+            messageInfo.delete(oldest);
+          }
+        }
+        break;
+      }
+      case "message.part.delta": {
+        if (!inTree(sessionID)) break;
+        const field = String(props.field || "");
+        if (field !== "text" && field !== "reasoning") break;
+        const info = messageInfo.get(String(props.messageID || ""));
+        if (!info || info.role !== "assistant") break;
+        const progress = progressFor(String(props.partID || ""));
+        const delta = String(props.delta ?? "");
+        if (!delta) break;
+        progress[field] += delta.length;
+        events.push({
+          type: field === "reasoning" ? "thinking" : "assistant-text",
+          role: roleFor(sessionID),
+          delta
+        });
+        break;
+      }
+      case "message.part.updated": {
+        if (!inTree(sessionID)) break;
+        const part = props.part && typeof props.part === "object" ? props.part : {};
+        const partType = String(part.type || "");
+        if (partType === "text") {
+          emitStreamField(events, sessionID, part, "text", part.text);
+          break;
+        }
+        if (partType === "reasoning") {
+          emitStreamField(events, sessionID, part, "reasoning", part.text);
+          break;
+        }
+        if (partType === "step-finish") {
+          const tokens = part.tokens && typeof part.tokens === "object" ? part.tokens : {};
+          turnStats.input += Number(tokens.input) || 0;
+          turnStats.output += Number(tokens.output) || 0;
+          turnStats.reasoning += Number(tokens.reasoning) || 0;
+          turnStats.cost += Number(part.cost) || 0;
+          break;
+        }
+        if (partType !== "tool") break;
+        const state = part.state && typeof part.state === "object" ? part.state : {};
+        const status = String(state.status || "");
+        const callID = String(part.callID || part.id || "");
+        const role = roleFor(sessionID);
+        const name = String(part.tool || "tool");
+        const metadata = state.metadata && typeof state.metadata === "object" ? state.metadata : {};
+        // Register task-spawned child sessions from tool metadata too — the
+        // session.created event can arrive after the first child part.
+        if (name === "task" && metadata.sessionId && !inTree(metadata.sessionId)) {
+          const input = state.input && typeof state.input === "object" ? state.input : {};
+          tree.set(String(metadata.sessionId), {
+            agent: String(input.subagent_type || "executor"),
+            title: String(state.title || "")
+          });
+        }
+        const previous = toolStatus.get(callID);
+        if (status === "pending" || status === "running") {
+          if (previous === "called" || previous === "done") break;
+          toolStatus.set(callID, "called");
+          events.push({
+            type: "tool-call",
+            toolId: callID,
+            name,
+            role,
+            title: String(state.title || ""),
+            input: state.input && typeof state.input === "object" ? state.input : {}
+          });
+          break;
+        }
+        if (status === "completed" || status === "error") {
+          if (previous === "done") break;
+          if (previous !== "called") {
+            // Snapshot-only path (rehydration or missed pending event).
+            events.push({
+              type: "tool-call",
+              toolId: callID,
+              name,
+              role,
+              title: String(state.title || ""),
+              input: state.input && typeof state.input === "object" ? state.input : {}
+            });
+          }
+          toolStatus.set(callID, "done");
+          if (toolStatus.size > 4_000) {
+            const oldest = toolStatus.keys().next().value;
+            toolStatus.delete(oldest);
+          }
+          events.push({
+            type: "tool-result",
+            toolId: callID,
+            name,
+            role,
+            ok: status === "completed",
+            title: String(state.title || ""),
+            text: clipText(status === "completed" ? state.output : state.error || state.output)
+          });
+          break;
+        }
+        break;
+      }
+      case "session.status": {
+        if (sessionID !== root) break;
+        const statusType = String((props.status && props.status.type) || "");
+        if (statusType === "busy" && !busy) {
+          busy = true;
+          turnStats = { input: 0, output: 0, reasoning: 0, cost: 0 };
+          events.push({ type: "turn-start" });
+        }
+        break;
+      }
+      case "session.idle": {
+        if (sessionID !== root || !busy) break;
+        busy = false;
+        events.push({
+          type: "result",
+          tokens: {
+            input: turnStats.input,
+            output: turnStats.output,
+            reasoning: turnStats.reasoning
+          },
+          costUsd: turnStats.cost
+        });
+        break;
+      }
+      case "session.error": {
+        if (!inTree(sessionID)) break;
+        const error = props.error && typeof props.error === "object" ? props.error : {};
+        const data = error.data && typeof error.data === "object" ? error.data : {};
+        const message = String(data.message || error.name || "OpenCode session error");
+        // Aborts surface as session.error too; the interrupt path already
+        // emits "interrupted", so keep those out of the error lane.
+        if (/abort/i.test(String(error.name || "")) || /abort/i.test(message)) break;
+        events.push({ type: "error", message, role: roleFor(sessionID) });
+        break;
+      }
+      case "permission.asked": {
+        if (!inTree(sessionID)) break;
+        events.push({
+          type: "permission",
+          requestId: String(props.id || ""),
+          role: roleFor(sessionID),
+          permission: String(props.permission || ""),
+          patterns: Array.isArray(props.patterns) ? props.patterns.map(String) : [],
+          title: String(props.title || "")
+        });
+        break;
+      }
+      case "permission.replied": {
+        if (!inTree(sessionID)) break;
+        events.push({
+          type: "permission-resolved",
+          requestId: String(props.requestID || ""),
+          reply: String(props.reply || "")
+        });
+        break;
+      }
+      default:
+        break;
+    }
+    return events;
+  };
+}
+
+// Rehydrate a resumed session's transcript from GET /session/{id}/message into
+// normalized events (no streaming — full snapshots).
+function rehydrateMessages(messages, rootSessionId) {
+  const events = [];
+  for (const entry of Array.isArray(messages) ? messages : []) {
+    const info = entry && entry.info && typeof entry.info === "object" ? entry.info : {};
+    const parts = Array.isArray(entry && entry.parts) ? entry.parts : [];
+    const role = String(info.role || "");
+    if (role === "user") {
+      const text = parts
+        .filter((part) => part && part.type === "text")
+        .map((part) => String(part.text || ""))
+        .join("\n")
+        .trim();
+      if (text) events.push({ type: "user", text });
+      continue;
+    }
+    if (role !== "assistant") continue;
+    for (const part of parts) {
+      if (!part || typeof part !== "object") continue;
+      if (part.type === "text" && String(part.text || "").trim()) {
+        events.push({ type: "assistant-text", role: "brain", delta: String(part.text) });
+      } else if (part.type === "tool") {
+        const state = part.state && typeof part.state === "object" ? part.state : {};
+        const callID = String(part.callID || part.id || "");
+        const name = String(part.tool || "tool");
+        events.push({
+          type: "tool-call",
+          toolId: callID,
+          name,
+          role: "brain",
+          title: String(state.title || ""),
+          input: state.input && typeof state.input === "object" ? state.input : {}
+        });
+        if (state.status === "completed" || state.status === "error") {
+          events.push({
+            type: "tool-result",
+            toolId: callID,
+            name,
+            role: "brain",
+            ok: state.status === "completed",
+            title: String(state.title || ""),
+            text: clipText(state.status === "completed" ? state.output : state.error || state.output)
+          });
+        }
+      }
+    }
+  }
+  return events;
+}
+
+function buildServeSpawn(extraEnv, cwd, password) {
+  const args = ["serve", "--port", "0", "--hostname", "127.0.0.1"];
+  const env = {
+    ...process.env,
+    ...extraEnv,
+    OPENCODE_SERVER_PASSWORD: password
+  };
+  if (isWin) {
+    return {
+      command: process.env.ComSpec || "cmd.exe",
+      args: ["/d", "/s", "/c", [OPENCODE_BIN, ...args].map(windowsCmdArg).join(" ")],
+      options: { cwd: cwd || undefined, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true }
+    };
+  }
+  return {
+    command: OPENCODE_BIN,
+    args,
+    options: { cwd: cwd || undefined, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true }
+  };
+}
+
+// ---- the host (only runs when executed as a process, not when required) ----
+function runHost() {
+  const sessions = new Map(); // paneId -> state
+
+  function emit(obj) {
+    process.stdout.write(`${JSON.stringify(obj)}\n`);
+  }
+
+  function killChild(child) {
+    if (!child || child.killed) return;
+    if (isWin && child.pid) {
+      try {
+        execFileSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
+        return;
+      } catch {
+        // fall through
+      }
+    }
+    try {
+      child.kill();
+    } catch {
+      // ignore
+    }
+  }
+
+  function cloneEvent(event) {
+    try {
+      return JSON.parse(JSON.stringify(event));
+    } catch {
+      return event;
+    }
+  }
+
+  function emitSessionEvent(id, state, event) {
+    state.history.push(cloneEvent(event));
+    if (state.history.length > MAX_HISTORY_EVENTS) {
+      state.history.splice(0, state.history.length - MAX_HISTORY_EVENTS);
+    }
+    emit({ type: "event", id, event });
+  }
+
+  function emitDirectSessionEvent(id, event) {
+    if (id) emit({ type: "event", id, event });
+  }
+
+  function replaySession(id, state) {
+    for (const event of state.history) {
+      emit({ type: "event", id, event });
+    }
+  }
+
+  function authHeader(state) {
+    return `Basic ${Buffer.from(`opencode:${state.password}`).toString("base64")}`;
+  }
+
+  function request(state, method, path, body) {
+    return new Promise((resolve, reject) => {
+      const payload = body === undefined ? null : JSON.stringify(body);
+      const req = http.request(
+        {
+          hostname: "127.0.0.1",
+          port: state.port,
+          path,
+          method,
+          timeout: 30_000,
+          headers: {
+            authorization: authHeader(state),
+            "content-type": "application/json",
+            ...(payload ? { "content-length": Buffer.byteLength(payload) } : {})
+          }
+        },
+        (response) => {
+          let text = "";
+          response.on("data", (chunk) => {
+            text += chunk.toString("utf8");
+          });
+          response.on("end", () => {
+            if (response.statusCode && response.statusCode >= 400) {
+              reject(new Error(`${method} ${path} → HTTP ${response.statusCode}: ${text.slice(0, 300)}`));
+              return;
+            }
+            if (!text.trim()) {
+              resolve(null);
+              return;
+            }
+            try {
+              resolve(JSON.parse(text));
+            } catch {
+              resolve(text);
+            }
+          });
+        }
+      );
+      req.on("error", reject);
+      req.on("timeout", () => {
+        req.destroy(new Error(`${method} ${path} timed out`));
+      });
+      if (payload) req.write(payload);
+      req.end();
+    });
+  }
+
+  function connectEvents(id, state) {
+    const req = http.request(
+      {
+        hostname: "127.0.0.1",
+        port: state.port,
+        path: "/event",
+        method: "GET",
+        headers: { authorization: authHeader(state), accept: "text/event-stream" }
+      },
+      (response) => {
+        if (sessions.get(id) !== state) {
+          response.destroy();
+          return;
+        }
+        state.sseRetries = 0;
+        let buffer = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          if (sessions.get(id) !== state) {
+            response.destroy();
+            return;
+          }
+          buffer += chunk;
+          let index;
+          while ((index = buffer.indexOf("\n")) !== -1) {
+            const line = buffer.slice(0, index).trim();
+            buffer = buffer.slice(index + 1);
+            if (!line.startsWith("data: ")) continue;
+            let parsed;
+            try {
+              parsed = JSON.parse(line.slice(6));
+            } catch {
+              continue;
+            }
+            if (!state.normalizer) continue;
+            for (const event of state.normalizer(parsed)) {
+              emitSessionEvent(id, state, event);
+            }
+          }
+        });
+        response.on("end", () => scheduleSseReconnect(id, state));
+        response.on("error", () => scheduleSseReconnect(id, state));
+      }
+    );
+    req.on("error", () => scheduleSseReconnect(id, state));
+    req.end();
+    state.sseRequest = req;
+  }
+
+  function scheduleSseReconnect(id, state) {
+    if (sessions.get(id) !== state || state.stopping || !state.child) return;
+    state.sseRetries = (state.sseRetries || 0) + 1;
+    if (state.sseRetries > SSE_MAX_RETRIES) {
+      emitSessionEvent(id, state, {
+        type: "error",
+        message: "Lost the OpenCode event stream. Restart the pane to continue."
+      });
+      return;
+    }
+    setTimeout(() => {
+      if (sessions.get(id) === state && !state.stopping && state.child) {
+        connectEvents(id, state);
+      }
+    }, SSE_RETRY_MS * state.sseRetries).unref?.();
+  }
+
+  async function establishSession(id, state, resumeId) {
+    if (resumeId) {
+      try {
+        const existing = await request(state, "GET", `/session/${encodeURIComponent(resumeId)}`);
+        if (existing && existing.id === resumeId) {
+          state.sessionId = resumeId;
+          state.normalizer = createOpenCodeEventNormalizer(resumeId);
+          connectEvents(id, state);
+          emitSessionEvent(id, state, { type: "session", sessionId: resumeId, resumed: true });
+          const messages = await request(state, "GET", `/session/${encodeURIComponent(resumeId)}/message`);
+          for (const event of rehydrateMessages(messages, resumeId)) {
+            emitSessionEvent(id, state, event);
+          }
+          // Close any bubble the renderer opened while replaying the restored
+          // transcript (rehydrated turns are always complete).
+          emitSessionEvent(id, state, { type: "result", subtype: "restored" });
+          return;
+        }
+      } catch {
+        // fall through to a fresh session; the renderer already confirmed the
+        // id via thread discovery, but the server is the final authority.
+      }
+    }
+    const created = await request(state, "POST", "/session", { title: "vibeTerminal Open Fusion" });
+    if (!created || !created.id) throw new Error("OpenCode did not return a session id");
+    state.sessionId = String(created.id);
+    state.normalizer = createOpenCodeEventNormalizer(state.sessionId);
+    connectEvents(id, state);
+    emitSessionEvent(id, state, { type: "session", sessionId: state.sessionId });
+  }
+
+  function start(payload) {
+    const { id, cwd, env, resumeId } = payload || {};
+    if (!id) return;
+    if (sessions.has(id)) {
+      const existingState = sessions.get(id);
+      if (existingState?.child) {
+        existingState.plannerModel = String(payload.plannerModel || existingState.plannerModel || "");
+        replaySession(id, existingState);
+        return;
+      }
+      sessions.delete(id);
+    }
+
+    const password = crypto.randomBytes(24).toString("hex");
+    const launch = buildServeSpawn(env && typeof env === "object" ? env : {}, cwd, password);
+    let child;
+    try {
+      child = spawn(launch.command, launch.args, launch.options);
+    } catch (error) {
+      emitDirectSessionEvent(id, { type: "error", message: `Could not launch OpenCode: ${error.message}` });
+      emitDirectSessionEvent(id, { type: "closed", code: -1 });
+      return;
+    }
+
+    const state = {
+      child,
+      password,
+      port: 0,
+      sessionId: "",
+      normalizer: null,
+      sseRequest: null,
+      sseRetries: 0,
+      stopping: false,
+      stdoutBuffer: "",
+      history: [],
+      plannerModel: String(payload.plannerModel || ""),
+      executorModel: String(payload.executorModel || "")
+    };
+    sessions.set(id, state);
+
+    const portTimer = setTimeout(() => {
+      if (sessions.get(id) !== state || state.port) return;
+      emitSessionEvent(id, state, {
+        type: "error",
+        message: "OpenCode server did not report a port within 30s."
+      });
+      killChild(state.child);
+    }, PORT_TIMEOUT_MS);
+    portTimer.unref?.();
+
+    child.stdout.on("data", (chunk) => {
+      if (sessions.get(id) !== state) return;
+      state.stdoutBuffer += chunk.toString("utf8");
+      if (state.port) return;
+      const match = state.stdoutBuffer.match(/listening on https?:\/\/127\.0\.0\.1:(\d+)/);
+      if (!match) return;
+      state.port = Number(match[1]);
+      clearTimeout(portTimer);
+      establishSession(id, state, typeof resumeId === "string" && resumeId.trim() ? resumeId.trim() : "").catch(
+        (error) => {
+          if (sessions.get(id) !== state) return;
+          emitSessionEvent(id, state, {
+            type: "error",
+            message: `Could not open an OpenCode session: ${error.message}`
+          });
+        }
+      );
+    });
+    child.stderr.on("data", (chunk) => {
+      if (sessions.get(id) !== state) return;
+      const text = chunk.toString("utf8");
+      // opencode serve logs INFO lines to stderr under --print-logs only; keep
+      // real stderr visible in the Details lane.
+      emitSessionEvent(id, state, { type: "stderr", text });
+    });
+    child.on("error", (error) => {
+      if (sessions.get(id) !== state) return;
+      emitSessionEvent(id, state, { type: "error", message: error.message });
+    });
+    child.on("exit", (code) => {
+      if (sessions.get(id) !== state) return;
+      state.child = null;
+      try {
+        state.sseRequest?.destroy();
+      } catch {
+        // ignore
+      }
+      emitSessionEvent(id, state, { type: "closed", code });
+    });
+  }
+
+  function input(payload) {
+    const id = payload?.id;
+    const text = String(payload?.text ?? "");
+    const state = sessions.get(id);
+    if (!state) {
+      emitDirectSessionEvent(id, {
+        type: "error",
+        message: "Open Fusion session is not running. Restart the pane to continue."
+      });
+      return;
+    }
+    if (!state.child || !state.sessionId) {
+      emitSessionEvent(id, state, {
+        type: "error",
+        message: "Open Fusion engine is not ready yet. Wait a moment and try again."
+      });
+      return;
+    }
+
+    emitSessionEvent(id, state, { type: "user", text });
+    const body = { agent: "planner", parts: [{ type: "text", text }] };
+    const model = splitModelId(state.plannerModel);
+    if (model) body.model = model;
+    request(state, "POST", `/session/${encodeURIComponent(state.sessionId)}/prompt_async`, body).catch(
+      (error) => {
+        if (sessions.get(id) !== state) return;
+        emitSessionEvent(id, state, {
+          type: "error",
+          message: `Could not send the turn: ${error.message}`
+        });
+      }
+    );
+  }
+
+  function permission(payload) {
+    const id = payload?.id;
+    const state = sessions.get(id);
+    if (!state || !state.child) return;
+    const requestId = String(payload?.requestId || "");
+    const reply = ["once", "always", "reject"].includes(payload?.reply) ? payload.reply : "reject";
+    if (!requestId) return;
+    request(state, "POST", `/permission/${encodeURIComponent(requestId)}/reply`, { reply }).catch((error) => {
+      if (sessions.get(id) !== state) return;
+      emitSessionEvent(id, state, {
+        type: "error",
+        message: `Could not answer the permission request: ${error.message}`
+      });
+    });
+  }
+
+  function plannerModel(payload) {
+    const id = payload?.id;
+    const state = sessions.get(id);
+    if (!state) return;
+    state.plannerModel = String(payload?.model || "").trim();
+  }
+
+  function providers(payload) {
+    const id = payload?.id;
+    const state = sessions.get(id);
+    if (!state || !state.child || !state.port) {
+      emitDirectSessionEvent(id, {
+        type: "providers",
+        ok: false,
+        message: "Open Fusion engine is not ready yet."
+      });
+      return;
+    }
+    Promise.all([
+      request(state, "GET", "/config/providers"),
+      request(state, "GET", "/provider").catch(() => null)
+    ])
+      .then(([connectedInfo, catalog]) => {
+        if (sessions.get(id) !== state) return;
+        const connected = [];
+        const list = connectedInfo && Array.isArray(connectedInfo.providers) ? connectedInfo.providers : [];
+        for (const provider of list) {
+          if (!provider || typeof provider !== "object") continue;
+          const models = Object.values(provider.models || {})
+            .filter((model) => model && model.id)
+            .sort((a, b) => String(b.release_date || "").localeCompare(String(a.release_date || "")))
+            .map((model) => ({ id: String(model.id), name: String(model.name || model.id) }));
+          connected.push({ id: String(provider.id), name: String(provider.name || provider.id), models });
+        }
+        const connectedIds = new Set(connected.map((provider) => provider.id));
+        const available = [];
+        const all = catalog && Array.isArray(catalog.all) ? catalog.all : [];
+        for (const provider of all) {
+          if (!provider || typeof provider !== "object" || connectedIds.has(String(provider.id))) continue;
+          available.push({ id: String(provider.id), name: String(provider.name || provider.id) });
+        }
+        available.sort((a, b) => a.name.localeCompare(b.name));
+        emitDirectSessionEvent(id, { type: "providers", ok: true, connected, available });
+      })
+      .catch((error) => {
+        if (sessions.get(id) !== state) return;
+        emitDirectSessionEvent(id, {
+          type: "providers",
+          ok: false,
+          message: `Could not load the provider catalog: ${error.message}`
+        });
+      });
+  }
+
+  function interrupt(payload) {
+    const id = payload?.id;
+    const state = sessions.get(id);
+    if (!state || !state.child || !state.sessionId) return;
+    request(state, "POST", `/session/${encodeURIComponent(state.sessionId)}/abort`)
+      .then(() => {
+        if (sessions.get(id) !== state) return;
+        emitSessionEvent(id, state, { type: "interrupted" });
+      })
+      .catch(() => {
+        // best-effort; the user can still Restart as the hard stop.
+      });
+  }
+
+  function stop(payload) {
+    const state = sessions.get(payload?.id);
+    if (state) {
+      state.stopping = true;
+      try {
+        state.sseRequest?.destroy();
+      } catch {
+        // ignore
+      }
+      killChild(state.child);
+      sessions.delete(payload.id);
+    }
+  }
+
+  function shutdown() {
+    for (const state of sessions.values()) {
+      state.stopping = true;
+      try {
+        state.sseRequest?.destroy();
+      } catch {
+        // ignore
+      }
+      killChild(state.child);
+    }
+    sessions.clear();
+    process.exit(0);
+  }
+
+  let buffer = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => {
+    buffer += chunk;
+    let index;
+    while ((index = buffer.indexOf("\n")) !== -1) {
+      const line = buffer.slice(0, index).trim();
+      buffer = buffer.slice(index + 1);
+      if (!line) continue;
+      let msg;
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (msg.type === "start") start(msg.payload);
+      else if (msg.type === "input") input(msg.payload);
+      else if (msg.type === "permission") permission(msg.payload);
+      else if (msg.type === "planner-model") plannerModel(msg.payload);
+      else if (msg.type === "providers") providers(msg.payload);
+      else if (msg.type === "interrupt") interrupt(msg.payload);
+      else if (msg.type === "stop") stop(msg.payload);
+      else if (msg.type === "shutdown") shutdown();
+    }
+  });
+  process.stdin.on("end", shutdown);
+
+  emit({ type: "ready" });
+}
+
+module.exports = {
+  createOpenCodeEventNormalizer,
+  rehydrateMessages,
+  buildServeSpawn,
+  splitModelId
+};
+
+if (require.main === module) {
+  runHost();
+}

@@ -1949,3 +1949,149 @@ button {
   cursor: pointer;
 }
 .fusion-send:disabled { opacity: 0.4; cursor: default; }
+
+/* ---- Open Fusion chat pane -------------------------------------------------
+   Shares the fusion-chat frame; adds a two-voice identity: the Brain speaks in
+   the pane accent (teal), the Executor in periwinkle, the Scout in amber. */
+.openfusion-pane {
+  --of-brain: var(--pane-accent);
+  --of-executor: #8ea2ff;
+  --of-scout: #f3c96d;
+}
+
+.chat-brain .chat-author,
+.chat-brain .chat-tool-author { color: var(--of-brain); }
+.chat-brain .chat-gutter { color: var(--of-brain); }
+.chat-executor .chat-author,
+.chat-executor .chat-tool-author { color: var(--of-executor); }
+.chat-executor .chat-gutter { color: var(--of-executor); }
+.chat-investigator .chat-author,
+.chat-investigator .chat-tool-author { color: var(--of-scout); }
+.chat-investigator .chat-gutter { color: var(--of-scout); }
+
+.openfusion-role-chip {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border: 1px solid color-mix(in srgb, var(--of-brain) 45%, transparent);
+  color: var(--of-brain);
+  background: color-mix(in srgb, var(--of-brain) 12%, transparent);
+}
+.openfusion-role-chip.is-executor {
+  border-color: color-mix(in srgb, var(--of-executor) 45%, transparent);
+  color: var(--of-executor);
+  background: color-mix(in srgb, var(--of-executor) 12%, transparent);
+}
+.openfusion-role-chip.is-investigator {
+  border-color: color-mix(in srgb, var(--of-scout) 45%, transparent);
+  color: var(--of-scout);
+  background: color-mix(in srgb, var(--of-scout) 12%, transparent);
+}
+
+/* Empty-state hero: the pane's own splash, replacing the engine's branding. */
+.openfusion-hero {
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+  max-width: 520px;
+  padding: 24px 12px;
+}
+.openfusion-hero-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 54px;
+  height: 54px;
+  border-radius: 16px;
+  color: var(--of-brain);
+  border: 1px solid color-mix(in srgb, var(--of-brain) 40%, transparent);
+  background:
+    radial-gradient(
+      circle at 30% 30%,
+      color-mix(in srgb, var(--of-brain) 22%, transparent),
+      transparent 65%
+    ),
+    radial-gradient(
+      circle at 72% 70%,
+      color-mix(in srgb, var(--of-executor) 20%, transparent),
+      transparent 65%
+    ),
+    #141814;
+  box-shadow: 0 0 28px color-mix(in srgb, var(--of-brain) 18%, transparent);
+}
+.openfusion-hero-word {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: 0.34em;
+  color: #e6ebe6;
+}
+.openfusion-hero-word span { color: var(--of-brain); }
+.openfusion-hero-tag {
+  margin: 0;
+  color: #9aa39a;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.openfusion-hero-roles {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.openfusion-hero-role {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 170px;
+  padding: 9px 14px;
+  border-radius: 10px;
+  border: 1px solid #2e342e;
+  background: #151815;
+  text-align: left;
+}
+.openfusion-hero-role.is-brain {
+  border-color: color-mix(in srgb, var(--of-brain) 38%, #2e342e);
+}
+.openfusion-hero-role.is-executor {
+  border-color: color-mix(in srgb, var(--of-executor) 38%, #2e342e);
+}
+.openfusion-hero-role-key {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #8f968e;
+}
+.openfusion-hero-role.is-brain .openfusion-hero-role-key { color: var(--of-brain); }
+.openfusion-hero-role.is-executor .openfusion-hero-role-key { color: var(--of-executor); }
+.openfusion-hero-role-model {
+  font-size: 12px;
+  color: #e6ebe6;
+  word-break: break-all;
+}
+.openfusion-hero-hint {
+  margin: 4px 0 0;
+  color: #6f766f;
+  font-size: 11px;
+}
+
+/* Model pair readout in the input settings row. */
+.openfusion-pair {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.openfusion-pair-role.is-brain { color: var(--of-brain); }
+.openfusion-pair-role.is-executor { color: var(--of-executor); }
+.openfusion-pair-join { color: #6f766f; }

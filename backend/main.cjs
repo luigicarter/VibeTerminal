@@ -109,6 +109,8 @@ const pendingAgentThreadRequests = new Map();
 let agentTelemetry = null;
 let fusionChatHost = null;
 let fusionChatHostBuffer = "";
+let openFusionChatHost = null;
+let openFusionChatHostBuffer = "";
 let autoUpdater = null;
 let autoUpdaterConfigured = false;
 let checkedForUpdatesOnLaunch = false;
@@ -305,6 +307,10 @@ function getAgentThreadHostPath() {
 
 function getFusionChatHostPath() {
   return getHelperHostPath("fusionChatHost.cjs");
+}
+
+function getOpenFusionChatHostPath() {
+  return getHelperHostPath("openFusionChatHost.cjs");
 }
 
 // Resolve the embedded Codex binary each Fusion pane spawns its own instance of:
@@ -865,6 +871,77 @@ function sendToFusionChatHost(message) {
   return true;
 }
 
+function broadcastOpenFusionChatEvent(event) {
+  BrowserWindow.getAllWindows().forEach((window) => {
+    window.webContents.send("openfusion-chat:event", event);
+  });
+}
+
+function parseOpenFusionChatHostOutput(chunk) {
+  openFusionChatHostBuffer += chunk.toString("utf8");
+  let newlineIndex = openFusionChatHostBuffer.indexOf("\n");
+  while (newlineIndex !== -1) {
+    const line = openFusionChatHostBuffer.slice(0, newlineIndex).trim();
+    openFusionChatHostBuffer = openFusionChatHostBuffer.slice(newlineIndex + 1);
+    if (line) {
+      try {
+        const message = JSON.parse(line);
+        if (message.type === "event") {
+          broadcastOpenFusionChatEvent({ id: message.id, ...message.event });
+        }
+      } catch {
+        // Ignore non-JSON host noise.
+      }
+    }
+    newlineIndex = openFusionChatHostBuffer.indexOf("\n");
+  }
+}
+
+function startOpenFusionChatHost() {
+  if (openFusionChatHost) {
+    return;
+  }
+  const nodeBinary = getNodeHostCommand();
+  openFusionChatHost = spawn(nodeBinary, [getOpenFusionChatHostPath()], {
+    cwd: getDefaultRuntimeCwd(),
+    env: getNodeHostEnv(),
+    stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true
+  });
+  openFusionChatHost.stdout.on("data", parseOpenFusionChatHostOutput);
+  openFusionChatHost.stderr.on("data", (chunk) => {
+    const message = chunk.toString("utf8").trim();
+    if (message) {
+      broadcastOpenFusionChatEvent({
+        type: "host-error",
+        message: `Open Fusion chat host error: ${message}`
+      });
+    }
+  });
+  openFusionChatHost.on("error", (error) => {
+    broadcastOpenFusionChatEvent({
+      type: "host-error",
+      message: `Open Fusion chat host failed: ${error.message}`
+    });
+  });
+  openFusionChatHost.on("exit", (code, signal) => {
+    openFusionChatHost = null;
+    openFusionChatHostBuffer = "";
+    broadcastOpenFusionChatEvent({
+      type: "host-error",
+      message: `Open Fusion chat host exited (${code ?? signal ?? "unknown"}).`
+    });
+  });
+}
+
+function sendToOpenFusionChatHost(message) {
+  if (!openFusionChatHost || !openFusionChatHost.stdin.writable) {
+    return false;
+  }
+  openFusionChatHost.stdin.write(`${JSON.stringify(message)}\n`);
+  return true;
+}
+
 function normalizeFusionString(value) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
@@ -1152,6 +1229,11 @@ app.on("window-all-closed", () => {
     fusionChatHost.kill();
   }
 
+  if (openFusionChatHost && !openFusionChatHost.killed) {
+    sendToOpenFusionChatHost({ type: "shutdown" });
+    openFusionChatHost.kill();
+  }
+
   if (process.platform !== "darwin") {
     app.quit();
   }
@@ -1427,6 +1509,133 @@ ipcMain.on("fusion-chat:steer", (_event, payload) => {
         id: payload.id,
         type: "error",
         message: "Fusion chat host is not running. Restart Fusion to continue."
+      });
+    }
+  }
+});
+
+ipcMain.handle("openfusion-chat:start", async (_event, payload) => {
+  const id = payload?.id;
+  if (!id) {
+    return { ok: false, error: "missing session id" };
+  }
+  const launchCwd = resolveLaunchCwd(payload.cwd, getDefaultRuntimeCwd());
+  if (!launchCwd.ok) {
+    return { ok: false, error: launchCwd.message };
+  }
+  try {
+    startOpenFusionChatHost();
+    const telemetry = getAgentTelemetry();
+    const files = await telemetry.prepareOpenFusionFiles(id, {
+      plannerModel: normalizeOpenFusionModel(
+        payload.plannerModel,
+        DEFAULT_OPEN_FUSION_PLANNER_MODEL
+      ),
+      executorModel: normalizeOpenFusionModel(
+        payload.executorModel,
+        DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
+      )
+    });
+    if (!files) {
+      return { ok: false, error: "could not prepare Open Fusion config" };
+    }
+    const sent = sendToOpenFusionChatHost({
+      type: "start",
+      payload: {
+        id,
+        cwd: launchCwd.cwd,
+        env: files.env,
+        plannerModel: files.env.VIBE_TERMINAL_OPEN_FUSION_PLANNER_MODEL,
+        executorModel: files.env.VIBE_TERMINAL_OPEN_FUSION_EXECUTOR_MODEL,
+        resumeId: payload.resumeId || undefined
+      }
+    });
+    if (!sent) {
+      return { ok: false, error: "Open Fusion chat host is not running." };
+    }
+    return {
+      ok: true,
+      plannerModel: files.env.VIBE_TERMINAL_OPEN_FUSION_PLANNER_MODEL,
+      executorModel: files.env.VIBE_TERMINAL_OPEN_FUSION_EXECUTOR_MODEL
+    };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+});
+
+ipcMain.handle("openfusion-chat:save-models", async (_event, payload) => {
+  if (!payload?.id) {
+    return { ok: false, error: "missing session id" };
+  }
+  const plannerModel = normalizeFusionString(payload.plannerModel);
+  const executorModel = normalizeFusionString(payload.executorModel);
+  const result = await getAgentTelemetry().updateOpenFusionModels(payload.id, {
+    plannerModel,
+    executorModel
+  });
+  if (result.status === "failed") {
+    return { ok: false, error: result.error || "could not save Open Fusion models" };
+  }
+  // Brain switches apply live (per-prompt model override); Executor changes are
+  // baked into the generated config, so they need a pane restart.
+  if (plannerModel) {
+    sendToOpenFusionChatHost({
+      type: "planner-model",
+      payload: { id: payload.id, model: plannerModel }
+    });
+  }
+  return { ok: true, models: result.models };
+});
+
+ipcMain.handle("openfusion-chat:providers", (_event, payload) => {
+  if (!payload?.id) {
+    return { ok: false, error: "missing session id" };
+  }
+  const sent = sendToOpenFusionChatHost({ type: "providers", payload: { id: payload.id } });
+  return sent
+    ? { ok: true }
+    : { ok: false, error: "Open Fusion chat host is not running." };
+});
+
+ipcMain.handle("openfusion-chat:permission", (_event, payload) => {
+  if (!payload?.id || !payload?.requestId) {
+    return { ok: false, error: "missing permission request id" };
+  }
+  const sent = sendToOpenFusionChatHost({
+    type: "permission",
+    payload: { id: payload.id, requestId: payload.requestId, reply: payload.reply }
+  });
+  return sent
+    ? { ok: true }
+    : { ok: false, error: "Open Fusion chat host is not running." };
+});
+
+ipcMain.handle("openfusion-chat:interrupt", (_event, payload) => {
+  if (payload?.id) {
+    sendToOpenFusionChatHost({ type: "interrupt", payload: { id: payload.id } });
+  }
+  return true;
+});
+
+ipcMain.handle("openfusion-chat:stop", (_event, payload) => {
+  if (payload?.id) {
+    sendToOpenFusionChatHost({ type: "stop", payload: { id: payload.id } });
+    getAgentTelemetry().releaseSession(payload.id);
+  }
+  return true;
+});
+
+ipcMain.on("openfusion-chat:input", (_event, payload) => {
+  if (payload?.id && typeof payload.text === "string") {
+    const sent = sendToOpenFusionChatHost({
+      type: "input",
+      payload: { id: payload.id, text: payload.text }
+    });
+    if (!sent) {
+      broadcastOpenFusionChatEvent({
+        id: payload.id,
+        type: "error",
+        message: "Open Fusion chat host is not running. Restart the pane to continue."
       });
     }
   }

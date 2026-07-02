@@ -4,10 +4,10 @@ vibeTerminal ships to Windows users as an Electron Builder NSIS installer hosted
 
 ## Current Public Release
 
-The current public Windows release is `v0.1.33`:
+The current public Windows release is `v0.1.34`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.33`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.33/vibeTerminal-Setup-0.1.33.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.34`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.34/vibeTerminal-Setup-0.1.34.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
