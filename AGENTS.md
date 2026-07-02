@@ -10,7 +10,7 @@ vibeTerminal is an Electron + React desktop workspace for running local terminal
 - `docs/scripts.md` - Development, smoke test, and screenshot helper scripts.
 - `docs/windows-release.md` - Windows installer, GitHub Releases deployment, update behavior, and signing status.
 - `docs/fusion-terminal.md` - Shipped two-model Fusion architecture (Opus orchestrator + embedded per-pane Codex executor, the adapter, approval/verifier loop).
-- `docs/openfusion.md` - Open Fusion terminal mode: pane-scoped OpenCode config, Brain/Body model controls and slash commands, planner-owned review gate, and optional verifier-subagent decision.
+- `docs/openfusion.md` - Open Fusion terminal mode: pane-scoped OpenCode config, Brain/Body catalog model pickers and slash commands, hard read-only investigator subagent, planner-owned review gate, and optional verifier-subagent decision.
 - `docs/fusion-unification.md` - Analysis + verified design path for making Fusion read/behave as one unified agent (perceptual vs cognitive unity, seams, guarantee-preserving levers).
 - `docs/fusion-unification-handoff.md` - Pick-up note for the unification work: status, the exact first change, gotchas, and how to verify.
 - `docs/voice-dictation.md` - Proposed speech-to-text design sketch (not implemented): provider-agnostic mic→text→inject feature, engine options, open questions.

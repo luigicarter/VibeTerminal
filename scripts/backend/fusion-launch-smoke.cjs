@@ -164,8 +164,19 @@ async function main() {
       "Fusion allowlist should expose codex_investigate for Codex-fed exploration"
     );
     assert(
-      /disallowedTools:\s*"Bash"/.test(mainSource),
-      "Fusion Claude must hard-block Bash via --disallowedTools"
+      /disallowedTools:\s*fusionClaudeDisallowedTools\(\)/.test(mainSource) &&
+        /return \["Bash", \.\.\.FUSION_CLAUDE_WRITE_DENY_RULES\]\.join\(","\)/.test(mainSource),
+      "Fusion Claude must hard-block Bash plus write deny rules via --disallowedTools"
+    );
+    const writeDenyPaths = extractStringArrayConst(
+      mainSource,
+      "FUSION_CLAUDE_WRITE_DENY_PATHS"
+    );
+    assert(
+      [".git/**", ".github/workflows/**", ".husky/**"].every((pattern) =>
+        writeDenyPaths.includes(pattern)
+      ),
+      "Fusion Claude write deny rules must cover git hooks/config, CI workflows, and husky hooks"
     );
     assert(
       /tools:\s*fusionClaudeTools\(\)/.test(mainSource) && /strictMcpConfig:\s*true/.test(mainSource),

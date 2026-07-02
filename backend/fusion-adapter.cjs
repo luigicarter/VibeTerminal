@@ -82,6 +82,28 @@ function fusionCodexSandboxPolicy() {
   return { type: "dangerFullAccess" };
 }
 
+// codex_investigate turns are read-only by contract AND, where the OS sandbox
+// can actually bootstrap, by Codex's read-only sandbox. Live-verified
+// 2026-07-01 (codex 0.142.4, Windows 11): the Windows sandbox runner still
+// fails with CreateProcessAsUserW error 1312 before ANY command runs -
+// including pure reads - so win32 keeps the full-access path and stays
+// read-only by task contract only. VIBE_FUSION_INVESTIGATE_SANDBOX
+// (read-only | full) overrides the platform gate in either direction.
+function fusionCodexInvestigateSandboxPolicy() {
+  const override = String(process.env.VIBE_FUSION_INVESTIGATE_SANDBOX || "")
+    .trim()
+    .toLowerCase();
+  if (override === "full" || override === "danger-full-access") {
+    return fusionCodexSandboxPolicy();
+  }
+  if (override === "read-only" || override === "readonly") {
+    return { type: "readOnly" };
+  }
+  return process.platform === "win32"
+    ? fusionCodexSandboxPolicy()
+    : { type: "readOnly" };
+}
+
 function normalizeStringList(value) {
   if (!Array.isArray(value)) return [];
   return value
@@ -394,6 +416,10 @@ let activeThreadModel = null;
 const pendingReq = new Map(); // app-server request id -> {resolve, reject}
 const parked = new Map(); // pendingId -> {rpcId, method, params}
 let currentTurn = null; // {resolve, idleTimer, commandTimer} - fulfilled by turn/completed | turn/failed | an approval request
+// True while codex_implement/codex_investigate is between its currentTurn
+// check and awaitTurn (both await the thread first): a concurrent tool call in
+// that window must be rejected, not allowed to reset the turn buffers.
+let turnArming = false;
 let activeTurnId = null;
 let activeTurnKind = null;
 let latchedTurnResult = null;
@@ -1056,6 +1082,18 @@ function handleNotification(msg) {
   if (method === "turn/failed" || method === "error") {
     const message =
       (params.error && params.error.message) || params.message || "Fusion turn failed";
+    // Only latch failures tied to the in-flight turn. A stray global error with
+    // no turn waiter and no active turn (or an explicit id mismatch) must not
+    // park a stale failure that the next waiter would drain, nor clear live
+    // turn state via resolveOrLatchTurn.
+    const notificationTurnId = extractTurnId(params);
+    if (
+      !currentTurn &&
+      (!activeTurnId || (notificationTurnId && notificationTurnId !== activeTurnId))
+    ) {
+      logErr(`ignored non-turn ${method} notification: ${message}`);
+      return;
+    }
     resolveOrLatchTurn({ status: "failed", error: message });
   }
 }
@@ -1747,18 +1785,28 @@ async function codexImplement(task) {
   if (pendingDecision) {
     return pendingDecision;
   }
-  if (currentTurn) {
+  if (currentTurn || turnArming) {
     return {
       status: "error",
       error: "Fusion turn already in progress; wait for the active turn to surface a decision or complete."
     };
   }
-  await ensureThread();
-  const goalSetup = await ensureGoalForTask(task);
-  resetTurnBuffers();
-  latchedTurnResult = null;
-  relay({ role: "opus", kind: "delegate", text: task });
-  const done = awaitTurn();
+  // Held across the awaits below: a concurrent tool call passing the
+  // currentTurn check during ensureThread/ensureGoalForTask would otherwise
+  // reset this turn's accumulation buffers mid-flight.
+  turnArming = true;
+  let done;
+  let goalSetup;
+  try {
+    await ensureThread();
+    goalSetup = await ensureGoalForTask(task);
+    resetTurnBuffers();
+    latchedTurnResult = null;
+    relay({ role: "opus", kind: "delegate", text: task });
+    done = awaitTurn();
+  } finally {
+    turnArming = false;
+  }
   const params = {
     threadId,
     input: [{ type: "text", text: buildCodexVerifierTask(task), text_elements: [] }],
@@ -1785,22 +1833,28 @@ async function codexInvestigate(task) {
   if (pendingDecision) {
     return pendingDecision;
   }
-  if (currentTurn) {
+  if (currentTurn || turnArming) {
     return {
       status: "error",
       error: "Fusion turn already in progress; wait for the active turn to surface a decision or complete."
     };
   }
-  await ensureThread();
-  resetTurnBuffers();
-  latchedTurnResult = null;
-  relay({ role: "opus", kind: "delegate", text: `investigate: ${task}` });
-  const done = awaitTurn("investigate");
+  turnArming = true;
+  let done;
+  try {
+    await ensureThread();
+    resetTurnBuffers();
+    latchedTurnResult = null;
+    relay({ role: "opus", kind: "delegate", text: `investigate: ${task}` });
+    done = awaitTurn("investigate");
+  } finally {
+    turnArming = false;
+  }
   const params = {
     threadId,
     input: [{ type: "text", text: buildCodexInvestigationTask(task), text_elements: [] }],
     approvalPolicy: "never",
-    sandboxPolicy: fusionCodexSandboxPolicy()
+    sandboxPolicy: fusionCodexInvestigateSandboxPolicy()
   };
   applyCodexTurnSettings(params);
   rpc("turn/start", params)
@@ -1840,7 +1894,7 @@ function buildDecisionResult(method, params, decision, note) {
 }
 
 async function codexRespond(pendingId, decision, note) {
-  if (currentTurn) {
+  if (currentTurn || turnArming) {
     return (
       pendingDecisionResult({
         warning: "Fusion is still processing the active turn result."
@@ -1859,7 +1913,10 @@ async function codexRespond(pendingId, decision, note) {
   const result = buildDecisionResult(item.method, item.params, decision, note);
   relay({ role: "opus", kind: "decision", text: `${decision}` });
   const hasQueuedDecision = parked.size > 0;
-  const done = hasQueuedDecision ? null : awaitTurn();
+  // Preserve the parked turn's kind: resolveTurn keeps activeTurnKind across a
+  // needs_decision, so an investigate turn that parked a question must complete
+  // as an investigation result, not a verifier-verdict implement result.
+  const done = hasQueuedDecision ? null : awaitTurn(activeTurnKind || "implement");
   if (!codexSend({ id: item.rpcId, result })) {
     if (done) {
       resolveTurn({ status: "failed", error: "Fusion execution channel is not writable" });

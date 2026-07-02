@@ -535,8 +535,31 @@ function buildClaudeArgs(payload = {}) {
 function windowsCmdArg(value) {
   const raw = String(value);
   if (!raw) return '""';
-  const escaped = raw.replace(/([%^&|<>()"])/g, "^$1");
-  return /[\s%^&|<>()"]/.test(raw) ? `"${escaped}"` : escaped;
+  if (!/[\s%^&|<>()"]/.test(raw)) return raw;
+  // Quote instead of caret-escaping: cmd.exe keeps ^ & | < > ( ) literal inside
+  // double quotes, so a caret escape inside a quoted argument reaches the child
+  // verbatim and corrupts it (e.g. --add-dir D:\repos\app^(old^)). Only embedded
+  // quotes need escaping for the child's argv parser, along with the backslashes
+  // directly before a quote and at the end (so the closing quote survives).
+  // % cannot be escaped on a cmd command line at all; quoting at least keeps it
+  // from splitting the argument.
+  let escaped = "";
+  let backslashes = 0;
+  for (const ch of raw) {
+    if (ch === "\\") {
+      backslashes += 1;
+      continue;
+    }
+    if (ch === '"') {
+      escaped += "\\".repeat(backslashes * 2 + 1) + '"';
+      backslashes = 0;
+      continue;
+    }
+    escaped += "\\".repeat(backslashes) + ch;
+    backslashes = 0;
+  }
+  escaped += "\\".repeat(backslashes * 2);
+  return `"${escaped}"`;
 }
 
 function buildClaudeSpawn(payload = {}) {

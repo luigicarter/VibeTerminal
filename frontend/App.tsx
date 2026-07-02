@@ -589,9 +589,16 @@ function restoreSession(session: AgentSession): AgentSession {
   const createdAt = finiteNumber(session.createdAt, Date.now());
   // A completed Fusion turn still leaves a reusable chat host while the app is
   // open, so restore the host intent whenever the pane itself was started.
+  // Threaded agent kinds set status "done"/"failed" from per-turn telemetry
+  // while their process is still alive, so a finished TURN must not read as a
+  // finished PROCESS: they always restore as a fresh launch (the old chat is
+  // stashed in resumeRef either way). Only non-threaded panes treat done/failed
+  // as "the process exited; stay paused".
   const shouldAutoStart =
     session.started === true &&
-    (isFusion || (previousStatus !== "done" && previousStatus !== "failed"));
+    (isFusion ||
+      isThreadedAgentKind(restoredKind) ||
+      (previousStatus !== "done" && previousStatus !== "failed"));
 
   // Reopening the app restores each pane as a FRESH terminal, never an
   // auto-resumed chat. The previously running thread is preserved as `resumeRef`
@@ -1102,7 +1109,7 @@ export default function App() {
       }
 
       if (event.type === "agent-running") {
-        applyAgentRunning(event.id);
+        applyAgentRunning(event.id, event.turnStart !== false);
       }
 
       if (event.type === "agent-background-activity") {
@@ -1330,11 +1337,20 @@ export default function App() {
     });
   }
 
-  // A claude/opencode turn actually started (UserPromptSubmit / busy event), so
-  // force the pane to "running" even past the done/failed stickiness — a new turn
-  // legitimately supersedes the previous result — and drop any stale unread dot.
-  function applyAgentRunning(sessionId: string) {
+  // A claude/opencode/cursor turn signal. A genuine turn START (UserPromptSubmit
+  // / busy event / beforeSubmitPrompt) forces the pane to "running" even past
+  // the done/failed stickiness — a new turn legitimately supersedes the previous
+  // result — and drops any stale unread dot. Mid-turn tool activity (claude
+  // PreToolUse/PostToolUse, turnStart false) goes through reconcileStatus
+  // instead: the hook POSTs ride independent short-lived processes with no
+  // ordering guarantee, so a tool event that lands after the turn's Stop must
+  // not resurrect a finished pane's spinner (or clear its attention dot).
+  function applyAgentRunning(sessionId: string, turnStart = true) {
     updateAnySession(sessionId, (session) => {
+      if (!turnStart && reconcileStatus(session.status, "running") !== "running") {
+        return session;
+      }
+
       if (session.status === "running" && !session.attention?.unread && !session.backgroundActivity) {
         return session;
       }
@@ -1473,6 +1489,21 @@ export default function App() {
         ...createSession(sessionCreationKind(session), session.cwd, sessions),
         name: `${session.name} copy`,
         command: session.command,
+        // The copy keeps the source's Fusion model/effort/mode settings instead
+        // of silently reverting to defaults.
+        ...(session.fusion
+          ? {
+              fusionModel: normalizeFusionModel(session.fusionModel),
+              fusionCodexModel: normalizeFusionCodexModel(session.fusionCodexModel),
+              fusionClaudeEffort: normalizeFusionEffort(
+                session.fusionClaudeEffort ?? session.fusionEffort
+              ),
+              fusionCodexEffort: normalizeFusionEffort(
+                session.fusionCodexEffort ?? session.fusionEffort
+              ),
+              fusionRunMode: normalizeFusionRunMode(session.fusionRunMode)
+            }
+          : {}),
         openFusionPlannerModel: session.openFusion
           ? normalizeOpenFusionModel(
               session.openFusionPlannerModel,
@@ -1746,7 +1777,15 @@ export default function App() {
           return session;
         }
 
-        if (session.status !== "running") {
+        // Any in-flight state is stranded by a dead host: "waiting" especially
+        // (a pending needs_decision can never be answered), so it must fail
+        // too, not sit waiting on a process that is gone. done/idle stay put —
+        // that is a normal shutdown.
+        const inFlight =
+          session.status === "running" ||
+          session.status === "waiting" ||
+          session.status === "starting";
+        if (!inFlight) {
           return session.backgroundActivity
             ? { ...session, backgroundActivity: undefined }
             : session;
@@ -1755,7 +1794,9 @@ export default function App() {
         const message =
           event.code != null && event.code !== 0
             ? `Fusion process exited with code ${event.code}.`
-            : "Fusion process closed before returning a result.";
+            : session.status === "waiting"
+              ? "Fusion process closed while a decision was still pending."
+              : "Fusion process closed before returning a result.";
         const attentionEvent: AgentAttentionEvent = {
           state: "failed",
           reason: "exit",
@@ -2019,7 +2060,12 @@ export default function App() {
   function updateSessionStatus(
     scope: SessionScope,
     sessionId: string,
-    status: AgentSession["status"]
+    status: AgentSession["status"],
+    // force skips the done/failed latch. Reserved for the pane's human-input
+    // signal (statusAfterUserInput): a keystroke is the non-telemetry
+    // equivalent of a turn start, so it may release a latched pill where
+    // process output never can.
+    options?: { force?: boolean }
   ) {
     updateScopeSessions(scope, (sessions) => {
       let changed = false;
@@ -2028,7 +2074,9 @@ export default function App() {
           return session;
         }
 
-        const nextStatus = reconcileStatus(session.status, status);
+        const nextStatus = options?.force
+          ? status
+          : reconcileStatus(session.status, status);
         if (nextStatus === session.status) {
           return session;
         }
@@ -2776,6 +2824,11 @@ export default function App() {
                     }
                     onStatusChange={(status) =>
                       updateSessionStatus(activeScope, session.id, status)
+                    }
+                    onInputStatusRelease={(status) =>
+                      updateSessionStatus(activeScope, session.id, status, {
+                        force: true
+                      })
                     }
                   />
                 )

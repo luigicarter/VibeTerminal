@@ -108,9 +108,11 @@ function createSession(payload) {
     // dedup-to-snapshot path below would otherwise swallow the restart and leave
     // the pane running the pre-restart command. Supersede it: kill the old shell
     // and fall through to spawn the new one. (The old terminal's onExit is
-    // suppressed once the new session replaces it in the map.)
-    if (existingSession?.terminal && incomingToken > existingToken) {
-      existingSession.terminal.kill();
+    // suppressed once the new session replaces it in the map.) An already-exited
+    // session (terminal null) supersedes the same way — replaying its dead
+    // snapshot would swallow the relaunch entirely.
+    if (incomingToken > existingToken) {
+      existingSession?.terminal?.kill();
       sessions.delete(payload.id);
     } else {
       if (existingSession?.terminal && (payload.cols || payload.rows)) {

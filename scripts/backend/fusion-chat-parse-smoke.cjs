@@ -161,12 +161,21 @@ function main() {
 
   const escaped = windowsCmdArg("C:\\repo dir\\a&b|\"quoted\"");
   assert(escaped.startsWith('"') && escaped.endsWith('"'), "Windows special args should be quoted");
-  assert(escaped.includes("^&") && escaped.includes("^|") && escaped.includes('^"'), "Windows special chars should be escaped");
+  assert(!escaped.includes("^"), "cmd keeps ^ literal inside quotes, so quoting must not caret-escape");
+  assert(escaped.includes('\\"quoted\\"'), "embedded quotes should be escaped for the child argv parser");
+  assert(
+    windowsCmdArg("D:\\repos\\app(old)") === '"D:\\repos\\app(old)"',
+    "paths with parens should be quoted verbatim, not caret-mangled"
+  );
+  assert(
+    windowsCmdArg("C:\\repo dir\\").endsWith('\\\\"'),
+    "trailing backslashes must be doubled so the closing quote survives"
+  );
 
   const spawnPlan = buildClaudeSpawn({ cwd: "C:\\repo dir\\a&b" });
   if (process.platform === "win32") {
     assert(spawnPlan.command.toLowerCase().endsWith("cmd.exe"), "Windows should use cmd.exe for the global claude wrapper");
-    assert(spawnPlan.args[3].includes("^&"), "Windows launch command should escape shell metacharacters");
+    assert(spawnPlan.args[3].includes('"C:\\repo dir\\a&b"'), "Windows launch command should quote shell metacharacters without caret escapes");
   } else {
     assert(spawnPlan.command === "claude", "POSIX should spawn global claude directly");
     assert(spawnPlan.args.includes("C:\\repo dir\\a&b"), "POSIX spawn plan should keep cwd as argv");

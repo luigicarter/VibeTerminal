@@ -75,8 +75,12 @@ export function statusFromTerminalEvent(
   }
 
   if (terminalEvent.type === "snapshot") {
+    // A snapshot is a REPLAY of buffered output (pane remount / reattach), not
+    // fresh activity: a live process must not read as "working" from replayed
+    // bytes — that used to wipe a settled done/failed pill on every workspace
+    // switch. Only the exited form settles status.
     return terminalEvent.isRunning
-      ? "running"
+      ? null
       : terminalEvent.exitCode === 0
         ? "done"
         : "failed";
@@ -133,6 +137,62 @@ export function reconcileStatus(
   }
 
   return incoming;
+}
+
+// Terminal input that plausibly came from the user's keyboard: typed text,
+// Enter/Backspace/Ctrl chords, or a bracketed paste. Everything else that
+// arrives through onData starts with a bare ESC — focus reports (CSI I/O),
+// mouse reports (CSI M / CSI <...), arrow keys and other navigation — and must
+// NOT count as the user starting a turn, so merely clicking or focusing a
+// finished TUI pane never disturbs its "done" pill.
+export function isHumanTerminalInput(data: string) {
+  return !data.startsWith("\x1b") || data.startsWith("\x1b[200~");
+}
+
+// What a keystroke into the pane means for the status pill, or null to leave
+// it alone.
+//
+// - telemetry kinds "running" + a bare Esc: the TUI interrupt key (claude
+//   shows "esc to interrupt") — and NO hook fires for an interrupt, so
+//   without this the pill/spinner stays "working" until the ~60s idle
+//   notification. Settle to "waiting" immediately; if the Esc merely
+//   dismissed a menu, the next telemetry event re-asserts "running"
+//   (waiting -> running is never latched), so this self-heals.
+// - telemetry kinds waiting on an APPROVAL: the answer keystroke is the only
+//   signal there is (PreToolUse fired before the prompt, PostToolUse fires
+//   only when the tool ends), so flip to "running" immediately instead of
+//   reading "waiting" for the whole tool run. An idle/question wait stays
+//   put — composing a prompt is not working, and UserPromptSubmit will fire.
+// - codex/plain terminals (no turn telemetry): typing is their equivalent of
+//   claude's UserPromptSubmit — the one signal that legitimately supersedes a
+//   finished turn. Release the done/failed latch to "waiting" (it is the
+//   user's turn; the output-flow heuristic flips to "running" once real
+//   output follows). Without this a codex pane latched "done" by its turn-end
+//   telemetry could never show working/waiting again until restart.
+//
+// Callers must apply the returned status DIRECTLY (not through
+// reconcileStatus): releasing the latch is the point.
+export function statusAfterUserInput(
+  session: Pick<AgentSession, "kind" | "status" | "attention">,
+  data: string
+): SessionStatus | null {
+  if (isTurnTelemetryKind(session.kind)) {
+    if (session.status === "running" && data === "\x1b") {
+      return "waiting";
+    }
+
+    return isHumanTerminalInput(data) &&
+      session.status === "waiting" &&
+      session.attention?.state === "waiting" &&
+      session.attention.reason === "approval"
+      ? "running"
+      : null;
+  }
+
+  return isHumanTerminalInput(data) &&
+    (session.status === "done" || session.status === "failed")
+    ? "waiting"
+    : null;
 }
 
 export function attentionFromTerminalEvent(

@@ -30,7 +30,7 @@ itself (an LLM that decides when to delegate), not a static rule table.
 
 ## Roles and completion authority
 
-The two models have hard, enforced scopes. Claude is launched with `Read`/`Grep`/`Glob`, direct UI/design/frontend edit/write tools (`Edit`/`Write`), and the Codex bridge tools. `Bash` stays in `--disallowedTools`, and Claude is launched with a restricted built-in `--tools` surface plus a strict per-pane MCP config, so read-only command/environment checks go through `codex_investigate`, while tests, builds, debug runs, screenshots, browser control, image generation, and any mutating work are structurally forced through `codex_implement`. Codex remains the hard verifier for bugs and goal completion. Path-scope hardening via `VIBE_FUSION_UI_WRITE_GLOBS` is deferred and not enforced in this build; direct writes are limited to UI/design/frontend by the Fusion prompt and tool split, while Bash remains blocked. Reversible: remove `Edit`/`Write` from the Fusion helpers in `main.cjs` and restore the old Edit/Write/Bash denylist to return to read-only Claude.
+The two models have hard, enforced scopes. Claude is launched with `Read`/`Grep`/`Glob`, direct UI/design/frontend edit/write tools (`Edit`/`Write`), and the Codex bridge tools. `Bash` stays in `--disallowedTools`, and Claude is launched with a restricted built-in `--tools` surface plus a strict per-pane MCP config, so read-only command/environment checks go through `codex_investigate`, while tests, builds, debug runs, screenshots, browser control, image generation, and any mutating work are structurally forced through `codex_implement`. Codex remains the hard verifier for bugs and goal completion. `--disallowedTools` also carries write deny rules (`Edit(...)`/`Write(...)` for `.git/**`, `.github/workflows/**`, `.husky/**` — see `FUSION_CLAUDE_WRITE_DENY_PATHS` in `main.cjs`): deny rules override `acceptEdits`, closing the escalation where Bash-less Claude authors an executable side-effect (git hook, CI workflow, husky hook) that full-access Codex or the user would execute later. Broader path-scope hardening via `VIBE_FUSION_UI_WRITE_GLOBS` is deferred and not enforced in this build; direct writes are limited to UI/design/frontend by the Fusion prompt and tool split. Reversible: remove `Edit`/`Write` from the Fusion helpers in `main.cjs` and restore the old Edit/Write/Bash denylist to return to read-only Claude.
 
 | Opus 4.8 (Claude - orchestrator/architect/designer) | Codex GPT-5.5 (implementer/reviewer/verifier) |
 |---|---|
@@ -57,9 +57,16 @@ or redelegates with more guidance → Codex fixes and verifies again. Claude rev
 worktree isolation is a hardening option; the current implementation runs Codex
 implementation turns in the pane's workspace with `danger-full-access` and
 `approvalPolicy:"never"` so routine reads/writes do not bounce back through
-Claude as approval fights. `codex_investigate` uses the same full-access executor
-path so read-only command checks cannot fail in sandbox bootstrap; it remains
-read-only by task contract rather than by OS sandbox.
+Claude as approval fights. `codex_investigate` turns are platform-gated: on
+POSIX they run under Codex's **read-only OS sandbox**
+(`sandboxPolicy: {type:"readOnly"}`) so investigations are read-only by
+enforcement; on **Windows** they keep the full-access path and remain read-only
+by task contract only, because the Windows sandbox runner still fails to
+bootstrap before ANY command runs (live-verified 2026-07-01, codex 0.142.4:
+`CreateProcessAsUserW failed: 1312` on every exec, reads included).
+`VIBE_FUSION_INVESTIGATE_SANDBOX` (`read-only` | `full`) overrides the gate in
+either direction — flip it to `read-only` on Windows to re-test after a Codex
+sandbox fix.
 
 **Interrupting a turn:** the Fusion chat host control protocol has a dedicated
 `interrupt` message (distinct from `stop`, which kills the whole session). The
@@ -133,6 +140,8 @@ own embedded Codex child (south). It exposes a small tool surface:
 - `codex_implement(plan)` — run the approved plan on the pane's thread (edit, run
   tests, generate images, control browsers, fix, verify), streaming progress.
 - `codex_respond(pendingId, decision)` — answer a parked approval or question.
+- `codex_cancel()` — abort a stuck Codex turn locally (the wedge escape hatch);
+  the thread survives so Claude can re-delegate without a pane restart.
 
 Fusion starts the app-server thread with `config: { "features.goals": true }`,
 the verified app-server override for enabling goals on that pane without
@@ -174,9 +183,12 @@ clearing read/write prompts. `needs_decision` remains a protocol path for
 exceptional questions or permission requests, but it should not be part of the
 normal read/edit/debug loop.
 Read-only scouting is the exception to the thread default: `codex_investigate`
-uses the unrestricted executor path but is wrapped in a read-only investigation
-contract: gather context, run non-mutating checks, and do not edit files, install
-packages, launch apps, or make irreversible changes.
+runs under Codex's read-only OS sandbox per turn on POSIX (on Windows it stays
+on the full-access path — the read-only sandbox cannot bootstrap there yet) and
+is always wrapped in a read-only investigation contract: gather context, run
+non-mutating checks, and do not edit files, install packages, launch apps, or
+make irreversible changes. (`VIBE_FUSION_INVESTIGATE_SANDBOX` = `read-only` or
+`full` overrides the platform gate.)
 
 Completion is not free-form text only. The adapter wraps each Codex task with a
 verifier contract requiring a final `FUSION_VERDICT_JSON` line. The adapter

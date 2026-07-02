@@ -3,6 +3,7 @@ const fs = require("fs");
 const http = require("http");
 const os = require("os");
 const path = require("path");
+const url = require("url");
 
 const SHIM_BASE_DIR =
   process.env.VIBE_AGENT_SHIM_BASE_DIR ||
@@ -19,20 +20,20 @@ function normalizeFusionRunMode(value) {
   return String(value || "").trim().toLowerCase() === "plan" ? "plan" : "auto";
 }
 
-function normalizeOpenFusionModel(value, fallback) {
+function isValidOpenFusionModel(value) {
   const model = typeof value === "string" ? value.trim() : "";
-  const normalizedFallback = fallback || DEFAULT_OPEN_FUSION_EXECUTOR_MODEL;
-  if (
-    !model ||
-    model.length > 96 ||
-    !OPEN_FUSION_MODEL_ID_PATTERN.test(model) ||
-    model.toLowerCase() === "auto" ||
-    model.toLowerCase() === "default"
-  ) {
-    return normalizedFallback;
-  }
+  return Boolean(
+    model &&
+      model.length <= 96 &&
+      OPEN_FUSION_MODEL_ID_PATTERN.test(model) &&
+      model.toLowerCase() !== "auto" &&
+      model.toLowerCase() !== "default"
+  );
+}
 
-  return model;
+function normalizeOpenFusionModel(value, fallback) {
+  const normalizedFallback = fallback || DEFAULT_OPEN_FUSION_EXECUTOR_MODEL;
+  return isValidOpenFusionModel(value) ? value.trim() : normalizedFallback;
 }
 
 function openFusionPlannerPrompt() {
@@ -44,7 +45,10 @@ function openFusionPlannerPrompt() {
     "",
     "Responsibilities:",
     "- Understand the user's goal and decide the next step.",
-    "- Use the task tool to delegate concrete implementation work to the executor subagent.",
+    "- Use the task tool with the investigator subagent for read-only scouting:",
+    "  repo layout, relevant files, constraints, and facts you need before deciding.",
+    "  The investigator is permission-locked read-only, so it can never change state.",
+    "- Use the task tool with the executor subagent for concrete implementation work.",
     "- Do not perform code edits or shell commands yourself.",
     "- Review the executor's summary, diffs, command results, tests, and self-review.",
     "- Decide whether the task is done or whether the executor needs a better corrective instruction.",
@@ -71,6 +75,26 @@ function openFusionExecutorPrompt() {
     "- Report changed files, commands run, validation results, remaining risks, and a recommendation.",
     "",
     "Do not claim final completion directly to the user. Return evidence to the Planner so it can decide done vs another correction pass."
+  ].join("\n");
+}
+
+function openFusionInvestigatorPrompt() {
+  return [
+    "# Open Fusion Investigator",
+    "",
+    "You are the read-only investigator subagent inside vibeTerminal Open Fusion.",
+    "You do scouting passes so the Planner can make architecture, design, and delegation decisions.",
+    "Your permissions are locked read-only: file edits, shell commands, and further delegation are denied.",
+    "",
+    "Responsibilities:",
+    "- Gather the repo context the Planner asked for with read, glob, and grep.",
+    "- Prefer fast file discovery, targeted reads, and concise summaries over broad narration.",
+    "",
+    "Return a concise report with:",
+    "- Findings: concrete facts and constraints.",
+    "- Files: relevant file paths and why they matter.",
+    "- Snippets: short quoted code snippets only when they are essential.",
+    "- Suggested next step: what the Planner should decide or delegate next."
   ].join("\n");
 }
 
@@ -104,6 +128,19 @@ function openFusionCommandContents(options = {}) {
         "Return concise evidence for the Planner: changed files, commands run, validation results, risks, and whether you recommend another pass."
       ].join("\n")
     },
+    investigate: {
+      description: "Run a read-only Open Fusion investigation pass",
+      agent: "investigator",
+      model: executorModel,
+      subtask: true,
+      template: [
+        "Investigate this read-only as the Open Fusion investigator subagent.",
+        "",
+        "$ARGUMENTS",
+        "",
+        "Return findings, relevant files, essential snippets, and the suggested next step for the Planner."
+      ].join("\n")
+    },
     review: {
       description: "Ask the Open Fusion Planner to review executor evidence",
       agent: "planner",
@@ -126,7 +163,8 @@ function openFusionCommandContents(options = {}) {
         "Mention:",
         "- Brain/Planner is the primary, human-facing, read-only agent.",
         "- Executor is the delegated implementation subagent.",
-        "- Use /delegate <task> for executor work.",
+        "- Investigator is the permission-locked read-only scouting subagent.",
+        "- Use /delegate <task> for executor work and /investigate <question> for read-only scouting.",
         "- Use /brain-model or /executor-model for pane-scoped model settings.",
         "- Use OpenCode's native /models for live Brain model selection in the TUI."
       ].join("\n")
@@ -151,16 +189,15 @@ function commandMarkdown(command) {
 function readOpenFusionModelState(modelStatePath) {
   try {
     const data = JSON.parse(fs.readFileSync(modelStatePath, "utf8"));
-    const plannerModel =
-      typeof data?.plannerModel === "string" ? data.plannerModel : undefined;
-    const executorModel =
-      typeof data?.executorModel === "string" ? data.executorModel : undefined;
+    // Invalid saved values fall back to the launch opts (undefined here), not
+    // to the hard defaults, so a corrupt models.json cannot beat an explicit
+    // launch-time model.
     return {
-      plannerModel: plannerModel
-        ? normalizeOpenFusionModel(plannerModel, DEFAULT_OPEN_FUSION_PLANNER_MODEL)
+      plannerModel: isValidOpenFusionModel(data?.plannerModel)
+        ? data.plannerModel.trim()
         : undefined,
-      executorModel: executorModel
-        ? normalizeOpenFusionModel(executorModel, DEFAULT_OPEN_FUSION_EXECUTOR_MODEL)
+      executorModel: isValidOpenFusionModel(data?.executorModel)
+        ? data.executorModel.trim()
         : undefined
     };
   } catch {
@@ -221,34 +258,143 @@ function openFusionTuiPluginSource() {
     "  api.ui.toast({ title, message, variant, duration: 6000 });",
     "}",
     "",
-    "function promptModel(api, role) {",
-    "  const key = role === 'planner' ? 'plannerModel' : 'executorModel';",
-    "  const label = role === 'planner' ? 'Brain' : 'Executor';",
-    "  readState().then((state) => {",
-    "    api.ui.dialog.replace(() => api.ui.DialogPrompt({",
-    "      title: `${label} model`,",
-    "      placeholder: 'provider/model',",
-    "      value: state[key] || '',",
-    "      onConfirm: async (value) => {",
-    "        const model = String(value || '').trim();",
-    "        if (!validModel(model)) {",
-    "          toast(api, 'Open Fusion', 'Use an explicit provider/model id.', 'warning');",
+    "function roleKey(role) {",
+    "  return role === 'planner' ? 'plannerModel' : 'executorModel';",
+    "}",
+    "",
+    "function roleLabel(role) {",
+    "  return role === 'planner' ? 'Brain' : 'Executor';",
+    "}",
+    "",
+    "async function loadCatalog(api) {",
+    "  const result = await api.client.provider.list();",
+    "  const data = result && typeof result === 'object' && 'data' in result ? result.data : result;",
+    "  if (!data || !Array.isArray(data.all)) throw new Error('provider catalog unavailable');",
+    "  return {",
+    "    all: data.all,",
+    "    connected: new Set(Array.isArray(data.connected) ? data.connected : [])",
+    "  };",
+    "}",
+    "",
+    "async function saveModel(api, role, model, provider) {",
+    "  await writeState({ [roleKey(role)]: model });",
+    "  api.ui.dialog.clear();",
+    "  toast(api, 'Open Fusion', `${roleLabel(role)} model saved for the next pane restart: ${model}`, 'success');",
+    "  if (provider && provider.needsAuth) {",
+    "    toast(api, 'Open Fusion', `Provider '${provider.id}' is not connected. Run: opencode auth login ${provider.id}`, 'warning');",
+    "  }",
+    "}",
+    "",
+    "function promptCustomModel(api, role, current) {",
+    "  api.ui.dialog.replace(() => api.ui.DialogPrompt({",
+    "    title: `${roleLabel(role)} model`,",
+    "    placeholder: 'provider/model',",
+    "    value: current || '',",
+    "    onConfirm: (value) => {",
+    "      const model = String(value || '').trim();",
+    "      if (!validModel(model)) {",
+    "        toast(api, 'Open Fusion', 'Use an explicit provider/model id.', 'warning');",
+    "        return;",
+    "      }",
+    "      saveModel(api, role, model).catch((error) => {",
+    "        toast(api, 'Open Fusion', `Could not save model: ${error?.message || error}`, 'error');",
+    "      });",
+    "    },",
+    "    onCancel: () => api.ui.dialog.clear()",
+    "  }));",
+    "}",
+    "",
+    "function pickModel(api, role, provider, connected, current) {",
+    "  const models = Object.values(provider.models || {})",
+    "    .filter((model) => model && model.id && model.status !== 'deprecated')",
+    "    .sort((a, b) => String(b.release_date || '').localeCompare(String(a.release_date || '')));",
+    "  const options = models.map((model) => ({",
+    "    title: model.name || model.id,",
+    "    value: `${provider.id}/${model.id}`,",
+    "    description: model.id",
+    "  }));",
+    "  options.push({",
+    "    title: 'Custom model id...',",
+    "    value: '__custom__',",
+    "    description: 'Type any provider/model id'",
+    "  });",
+    "  api.ui.dialog.replace(() => api.ui.DialogSelect({",
+    "    title: `${roleLabel(role)} model - ${provider.name || provider.id}`,",
+    "    placeholder: 'Search models',",
+    "    options,",
+    "    current: current || undefined,",
+    "    onSelect: (option) => {",
+    "      if (!option) return;",
+    "      if (option.value === '__custom__') {",
+    "        promptCustomModel(api, role, current);",
+    "        return;",
+    "      }",
+    "      saveModel(api, role, option.value, {",
+    "        id: provider.id,",
+    "        needsAuth: !connected.has(provider.id)",
+    "      }).catch((error) => {",
+    "        toast(api, 'Open Fusion', `Could not save model: ${error?.message || error}`, 'error');",
+    "      });",
+    "    }",
+    "  }));",
+    "}",
+    "",
+    "function pickProvider(api, role) {",
+    "  Promise.all([readState(), loadCatalog(api)]).then(([state, catalog]) => {",
+    "    const current = state[roleKey(role)] || '';",
+    "    const providers = catalog.all.slice().sort((a, b) => {",
+    "      const rank = Number(!catalog.connected.has(a.id)) - Number(!catalog.connected.has(b.id));",
+    "      return rank || String(a.name || a.id).localeCompare(String(b.name || b.id));",
+    "    });",
+    "    const options = providers.map((provider) => ({",
+    "      title: provider.name || provider.id,",
+    "      value: provider.id,",
+    "      description: catalog.connected.has(provider.id)",
+    "        ? 'connected'",
+    "        : `needs auth: opencode auth login ${provider.id}`,",
+    "      category: catalog.connected.has(provider.id) ? 'Connected' : 'Available'",
+    "    }));",
+    "    options.push({",
+    "      title: 'Custom model id...',",
+    "      value: '__custom__',",
+    "      description: 'Type any provider/model id',",
+    "      category: 'Other'",
+    "    });",
+    "    api.ui.dialog.replace(() => api.ui.DialogSelect({",
+    "      title: `${roleLabel(role)} provider`,",
+    "      placeholder: 'Search providers',",
+    "      options,",
+    "      current: current.split('/')[0] || undefined,",
+    "      onSelect: (option) => {",
+    "        if (!option) return;",
+    "        if (option.value === '__custom__') {",
+    "          promptCustomModel(api, role, current);",
     "          return;",
     "        }",
-    "        await writeState({ [key]: model });",
-    "        api.ui.dialog.clear();",
-    "        toast(api, 'Open Fusion', `${label} model saved for the next pane restart: ${model}`, 'success');",
-    "      },",
-    "      onCancel: () => api.ui.dialog.clear()",
+    "        const provider = providers.find((entry) => entry.id === option.value);",
+    "        if (provider) pickModel(api, role, provider, catalog.connected, current);",
+    "      }",
     "    }));",
     "  }).catch((error) => {",
-    "    toast(api, 'Open Fusion', `Could not open model prompt: ${error?.message || error}`, 'error');",
+    "    toast(api, 'Open Fusion', `Could not load the provider catalog (${error?.message || error}); enter a model id instead.`, 'warning');",
+    "    readState().then((state) => promptCustomModel(api, role, state[roleKey(role)] || ''));",
     "  });",
     "}",
     "",
     "async function showStatus(api) {",
     "  const state = await readState();",
-    "  toast(api, 'Open Fusion', `Brain: ${state.plannerModel || 'unset'} | Executor: ${state.executorModel || 'unset'}`);",
+    "  let connected = null;",
+    "  try {",
+    "    connected = (await loadCatalog(api)).connected;",
+    "  } catch (_error) {",
+    "    connected = null;",
+    "  }",
+    "  const describe = (model) => {",
+    "    if (!model) return 'unset';",
+    "    const providerID = model.split('/')[0];",
+    "    return connected && providerID && !connected.has(providerID) ? `${model} (needs auth)` : model;",
+    "  };",
+    "  toast(api, 'Open Fusion', `Brain: ${describe(state.plannerModel)} | Executor: ${describe(state.executorModel)}`);",
     "}",
     "",
     "export default {",
@@ -260,21 +406,21 @@ function openFusionTuiPluginSource() {
     "          namespace: 'palette',",
     "          name: 'openfusion.brain_model',",
     "          title: 'Set Brain model',",
-    "          desc: 'Set the pane-scoped Open Fusion Brain model for the next restart',",
+    "          desc: 'Pick the pane-scoped Open Fusion Brain provider/model for the next restart',",
     "          category: 'Open Fusion',",
     "          slashName: 'brain-model',",
     "          slashAliases: ['brain'],",
-    "          run: () => promptModel(api, 'planner')",
+    "          run: () => pickProvider(api, 'planner')",
     "        },",
     "        {",
     "          namespace: 'palette',",
     "          name: 'openfusion.executor_model',",
     "          title: 'Set Executor model',",
-    "          desc: 'Set the pane-scoped Open Fusion Executor model for the next restart',",
+    "          desc: 'Pick the pane-scoped Open Fusion Executor provider/model for the next restart',",
     "          category: 'Open Fusion',",
     "          slashName: 'executor-model',",
     "          slashAliases: ['executor', 'body', 'body-model'],",
-    "          run: () => promptModel(api, 'executor')",
+    "          run: () => pickProvider(api, 'executor')",
     "        },",
     "        {",
     "          namespace: 'palette',",
@@ -294,7 +440,7 @@ function openFusionTuiPluginSource() {
     "          category: 'Open Fusion',",
     "          slashName: 'openfusion',",
     "          slashAliases: ['fusion-status'],",
-    "          run: () => showStatus(api)",
+    "          run: () => showStatus(api).catch(() => {})",
     "        }",
     "      ];",
     "    if (typeof api.keymap?.registerLayer === 'function') {",
@@ -302,7 +448,15 @@ function openFusionTuiPluginSource() {
     "      return;",
     "    }",
     "    if (typeof api.command?.register === 'function') {",
-    "      api.command.register(() => commands);",
+    "      // Legacy v1 command API expects { value, description, slash, onSelect }.",
+    "      api.command.register(() => commands.map((command) => ({",
+    "        title: command.title,",
+    "        value: command.name,",
+    "        description: command.desc,",
+    "        category: command.category,",
+    "        slash: { name: command.slashName, aliases: command.slashAliases },",
+    "        onSelect: () => command.run()",
+    "      })));",
     "      return;",
     "    }",
     "    toast(api, 'Open Fusion', 'This OpenCode TUI build does not expose plugin command registration.', 'warning');",
@@ -365,7 +519,8 @@ function openFusionConfigContents(options = {}) {
           bash: "deny",
           task: {
             "*": "deny",
-            executor: "allow"
+            executor: "allow",
+            investigator: "allow"
           }
         }
       },
@@ -378,6 +533,25 @@ function openFusionConfigContents(options = {}) {
         prompt: inlinePrompts
           ? openFusionExecutorPrompt()
           : "{file:./openfusion-executor.md}"
+      },
+      investigator: {
+        description:
+          "Open Fusion read-only investigator. Scouts repo context for the planner; cannot edit, run commands, or delegate.",
+        mode: "subagent",
+        model: executorModel,
+        hidden: false,
+        prompt: inlinePrompts
+          ? openFusionInvestigatorPrompt()
+          : "{file:./openfusion-investigator.md}",
+        // Hard read-only: no edits, no shell, and no task laundering (it must
+        // not be able to reach the executor to write on its behalf).
+        permission: {
+          edit: "deny",
+          bash: "deny",
+          task: {
+            "*": "deny"
+          }
+        }
       }
     }
   };
@@ -485,6 +659,56 @@ function cleanupStaleShimDirs(options = {}) {
 
     if (safeRemoveDir(entryPath, baseDir)) {
       removed.push(entryPath);
+    }
+  }
+
+  return removed;
+}
+
+// Open Fusion per-pane dirs must OUTLIVE the run (models.json carries the TUI
+// picker choices to the next pane restart), so unlike shim dirs they cannot be
+// GC'd by runId/pid. Instead, sweep dirs whose files have not been touched for
+// a month: every pane launch rewrites its config, so any pane still in the
+// workspace refreshes itself long before the cutoff.
+const OPEN_FUSION_STALE_DIR_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+function cleanupStaleOpenFusionDirs(openFusionBaseDir, maxAgeMs = OPEN_FUSION_STALE_DIR_MAX_AGE_MS) {
+  const sessionsDir = path.join(openFusionBaseDir, "sessions");
+  let entries;
+  try {
+    entries = fs.readdirSync(sessionsDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const removed = [];
+  const cutoff = Date.now() - maxAgeMs;
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+
+    const dir = path.join(sessionsDir, entry.name);
+    let newest = 0;
+    for (const probe of ["models.json", "tui.json"]) {
+      try {
+        newest = Math.max(newest, fs.statSync(path.join(dir, probe)).mtimeMs);
+      } catch {
+        // probe file missing; fall back to the dir mtime below
+      }
+    }
+    if (!newest) {
+      try {
+        newest = fs.statSync(dir).mtimeMs;
+      } catch {
+        continue;
+      }
+    }
+    if (newest >= cutoff) {
+      continue;
+    }
+    if (safeRemoveDir(dir, sessionsDir)) {
+      removed.push(dir);
     }
   }
 
@@ -924,16 +1148,24 @@ function powershellCommand() {
 })();`;
 }
 
+// The optional second notify argument. Whitelisted because the argument slot is
+// not always ours: codex appends its own JSON payload after the type, so an
+// unknown value must be dropped, never forwarded.
+const NOTIFY_KNOWN_DETAILS = ["turn-start", "tool", "approval", "question"];
+
 // Tiny Node script (POSIX) that POSTs a single attention event to the local
 // telemetry callback. Invoked by the per-provider hooks as
-// `node notify-hook.cjs <agent.completed|agent.waiting|agent.failed>`. It reads
-// the pane id and callback details from the env the shim injected, ignores any
-// extra args (codex appends a JSON payload) and stdin (claude pipes hook JSON),
-// and exits quietly when run outside vibeTerminal.
+// `node notify-hook.cjs <agent.completed|agent.waiting|agent.failed> [detail]`.
+// It reads the pane id and callback details from the env the shim injected,
+// ignores unknown extra args (codex appends a JSON payload) and stdin (claude
+// pipes hook JSON), and exits quietly when run outside vibeTerminal.
 function notifyHookSource() {
   return String.raw`const http = require("http");
 
+const KNOWN_DETAILS = new Set(${JSON.stringify(NOTIFY_KNOWN_DETAILS)});
 const type = process.argv[2];
+const detailArg = process.argv[3] || "";
+const detail = KNOWN_DETAILS.has(detailArg) ? detailArg : "";
 const callbackUrl = process.env.VIBE_TERMINAL_CALLBACK_URL;
 const token = process.env.VIBE_TERMINAL_TELEMETRY_TOKEN;
 const sessionId = process.env.VIBE_TERMINAL_SESSION_ID;
@@ -942,7 +1174,11 @@ if (!type || !callbackUrl || !token || !sessionId) {
   process.exit(0);
 }
 
-const body = JSON.stringify({ type, sessionId, timestamp: Date.now() });
+const body = JSON.stringify(
+  detail
+    ? { type, detail, sessionId, timestamp: Date.now() }
+    : { type, sessionId, timestamp: Date.now() }
+);
 
 let url;
 try {
@@ -981,11 +1217,18 @@ request.end(body);
 
 // Windows notify program body (PowerShell). Same contract as notifyHookSource
 // but implemented without Node so it works regardless of whether the user has
-// `node` on PATH. `$args[0]` is the attention type.
+// `node` on PATH. `$args[0]` is the attention type, `$args[1]` the optional
+// whitelisted detail (codex appends its own JSON payload there, hence the guard).
 function windowsNotifyPs1Source() {
+  const knownDetails = NOTIFY_KNOWN_DETAILS.map((d) => `'${d}'`).join(", ");
   return [
     "$ErrorActionPreference = 'SilentlyContinue'",
     "$Type = $args[0]",
+    `$KnownDetails = @(${knownDetails})`,
+    "$Detail = ''",
+    "if ($args.Count -ge 2 -and $KnownDetails -contains [string]$args[1]) {",
+    "  $Detail = [string]$args[1]",
+    "}",
     "if ([string]::IsNullOrEmpty($Type) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_CALLBACK_URL) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_TELEMETRY_TOKEN) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_SESSION_ID)) {",
     "  exit 0",
     "}",
@@ -994,6 +1237,9 @@ function windowsNotifyPs1Source() {
     "    type = $Type",
     "    sessionId = $env:VIBE_TERMINAL_SESSION_ID",
     "    timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()",
+    "  }",
+    "  if ($Detail) {",
+    "    $payload['detail'] = $Detail",
     "  }",
     "  $body = $payload | ConvertTo-Json -Compress",
     "  $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)",
@@ -1032,7 +1278,8 @@ function posixNotifyShSource(nodePath, notifyHookPath) {
 //     (`... agent.running`) so we never have to parse the prompt payload;
 //   * turn END (stop) passes no argument, and the type is derived from the
 //     `status` (completed|aborted|error) the hook pipes on stdin, so a single
-//     `stop` reports both done and failed.
+//     `stop` reports done, failed, AND user-aborted — an interrupted turn is
+//     not "done"; it is the user's turn, i.e. waiting.
 // stdin is always drained (even when the type comes from the argument) so Cursor
 // never blocks writing a large hook payload to a program that isn't reading it.
 // The env guard makes the project hook inert for plain `cursor-agent` runs and
@@ -1041,10 +1288,22 @@ const CURSOR_HOOK_MARKER = "vibeterminal-cursor-notify";
 const CURSOR_RUNNING_TYPE = "agent.running";
 // The only types the notify program is ever allowed to POST. A bad/unknown
 // argument or unparseable stdin therefore stays silent instead of POSTing junk.
-const CURSOR_KNOWN_TYPES = ["agent.running", "agent.completed", "agent.failed"];
+const CURSOR_KNOWN_TYPES = [
+  "agent.running",
+  "agent.completed",
+  "agent.waiting",
+  "agent.failed"
+];
 
 function cursorTypeFromStatus(status) {
-  return String(status || "") === "error" ? "agent.failed" : "agent.completed";
+  const normalized = String(status || "");
+  if (normalized === "error") {
+    return "agent.failed";
+  }
+  if (normalized === "aborted") {
+    return "agent.waiting";
+  }
+  return "agent.completed";
 }
 
 // Windows notify program (PowerShell). Type comes from the first argument (turn
@@ -1066,7 +1325,7 @@ function windowsCursorNotifyPs1Source() {
     "} else {",
     "  $status = ''",
     "  try { $status = [string]((($raw | ConvertFrom-Json)).status) } catch { $status = '' }",
-    "  $type = if ($status -eq 'error') { 'agent.failed' } else { 'agent.completed' }",
+    "  $type = if ($status -eq 'error') { 'agent.failed' } elseif ($status -eq 'aborted') { 'agent.waiting' } else { 'agent.completed' }",
     "}",
     `if (${knownTypeGuard}) { exit 0 }`,
     "try {",
@@ -1127,7 +1386,12 @@ function finish() {
     } catch {
       status = "";
     }
-    type = status === "error" ? "agent.failed" : "agent.completed";
+    type =
+      status === "error"
+        ? "agent.failed"
+        : status === "aborted"
+          ? "agent.waiting"
+          : "agent.completed";
   }
   if (!KNOWN_TYPES.has(type)) {
     process.exit(0);
@@ -1452,6 +1716,11 @@ function buildFusionSystemPrompt() {
     '- `{status:"failed", error}` - diagnose; if Codex is unavailable / not',
     "  authenticated, tell the user to run `codex login`.",
     "",
+    "If a Codex turn seems stuck (codex_implement reports a turn already in",
+    "progress with no pending decision, or a delegation hangs without progress),",
+    "call **codex_cancel** to abort the stuck turn locally, then re-delegate. The",
+    "Codex thread survives a cancel.",
+    "",
     "## Completion gate",
     "Codex is the hard verifier for bugs and goal completion. If Codex says the",
     "goal is not reached, continue unless the human explicitly tells you to stop",
@@ -1474,34 +1743,50 @@ function buildFusionSystemPrompt() {
 // needs the user (Notification). `--settings` merges over the user's own
 // settings without mutating ~/.claude.
 function buildClaudeSettingsJson(scriptPath, isWin) {
-  const hook = (type) => {
+  const hook = (type, detail) => {
     // Keep the command shell-agnostic so it works whatever shell claude runs
     // hooks under: on Windows invoke powershell explicitly against the .ps1
     // (forward slashes dodge backslash-escaping in any shell); on POSIX run the
-    // executable notify wrapper directly.
+    // executable notify wrapper directly. The optional detail rides as a second
+    // argument (whitelisted by the notify program).
+    const args = detail ? `${type} ${detail}` : type;
     const command = isWin
       ? `powershell -NoProfile -ExecutionPolicy Bypass -File "${scriptPath.replace(
           /\\/g,
           "/"
-        )}" ${type}`
-      : `'${scriptPath}' '${type}'`;
+        )}" ${args}`
+      : `'${scriptPath}' '${type}'${detail ? ` '${detail}'` : ""}`;
     return { type: "command", command, timeout: 5 };
   };
 
   const settings = {
     hooks: {
-      // Turn START: the user submitted a prompt, or the agent is running a tool
-      // (PreToolUse/PostToolUse also re-assert "working" right after a permission
-      // approval). This is the interaction-proof signal behind the sidebar
-      // "working" spinner, so typing or clicking the pane never reads as working.
+      // Turn START: the user submitted a prompt. This is the interaction-proof
+      // signal behind the sidebar "working" spinner, so typing or clicking the
+      // pane never reads as working. Only THIS running event may override a
+      // finished (done/failed) pill: a new turn legitimately supersedes the
+      // previous result.
       UserPromptSubmit: [{ matcher: "*", hooks: [hook("agent.running")] }],
-      PreToolUse: [{ matcher: "*", hooks: [hook("agent.running")] }],
-      PostToolUse: [{ matcher: "*", hooks: [hook("agent.running")] }],
+      // Tool activity: re-asserts "working" mid-turn (e.g. after a permission
+      // approval). Tagged "tool" so the renderer routes it through the
+      // done/failed latch — the hooks POST from independent short-lived
+      // processes with no ordering guarantee, so a tool hook that lands AFTER
+      // the turn's Stop must not resurrect a completed pane's spinner.
+      PreToolUse: [{ matcher: "*", hooks: [hook("agent.running", "tool")] }],
+      PostToolUse: [{ matcher: "*", hooks: [hook("agent.running", "tool")] }],
       Stop: [{ matcher: "*", hooks: [hook("agent.completed")] }],
+      // Split so the pill can tell an approval prompt from an idle "your turn":
+      // answering an approval has no hook of its own (PreToolUse fires before
+      // the prompt, PostToolUse only when the tool ends), so the renderer flips
+      // waiting->running on the user's answer keystroke for approvals only.
       Notification: [
         {
-          matcher: "permission_prompt|idle_prompt",
-          hooks: [hook("agent.waiting")]
+          matcher: "permission_prompt",
+          hooks: [hook("agent.waiting", "approval")]
+        },
+        {
+          matcher: "idle_prompt",
+          hooks: [hook("agent.waiting", "question")]
         }
       ]
     }
@@ -1510,7 +1795,9 @@ function buildClaudeSettingsJson(scriptPath, isWin) {
   return `${JSON.stringify(settings, null, 2)}\n`;
 }
 
-const OPENCODE_PLUGIN_VERSION = "vibeterminal-notify-2";
+// Bump on ANY plugin-source change: installOpenCodePlugin only rewrites an
+// installed copy when its version string differs.
+const OPENCODE_PLUGIN_VERSION = "vibeterminal-notify-4";
 
 // opencode cannot take a per-invocation hook, so we install one small plugin in
 // the user's opencode config. It is guarded: it only POSTs when the
@@ -1519,7 +1806,18 @@ const OPENCODE_PLUGIN_VERSION = "vibeterminal-notify-2";
 // Turn START (`agent.running`, the sidebar "working" spinner) is inferred from
 // message-stream events: while the assistant is generating, opencode emits a
 // burst of `message.*` events, so the FIRST one after idle reports "working" and
-// the rest are throttled by the per-turn `busy` latch (reset on idle/error).
+// the rest are throttled by the per-turn `busy` latch (reset on every mapped
+// event: idle/error end the turn, permission prompts pause it).
+//
+// Child sessions (task-tool subagents, e.g. the Open Fusion executor) also emit
+// `session.idle`/`session.error`, and a child finishing is NOT the pane's turn
+// ending — the root session is still driving. Children are recognized by the
+// `parentID` their session.created/updated info carries (payload shapes
+// verified against opencode 1.17.11: session.idle={sessionID},
+// session.created/updated={sessionID,info}, permission.*={...sessionID});
+// unknown shapes leave the child set empty, so this fails OPEN to the old
+// behavior. Permission asks are never filtered — the user answers them in this
+// TUI whichever session raised them.
 // NOTE: the exact `message.*` event names are LIVE-VERIFY pending; if they differ
 // in a given opencode version the spinner simply won't show (no false positive),
 // while done/waiting still flow from session.idle/permission events.
@@ -1529,6 +1827,14 @@ function openCodePluginSource() {
     "// Safe no-op outside vibeTerminal: only POSTs when VIBE_TERMINAL_* env vars are set.",
     "export const VibeTerminalNotify = async () => {",
     "  let busy = false;",
+    "  const childSessions = new Set();",
+    "  const eventSessionId = (event) => {",
+    "    const props = event.properties;",
+    '    if (!props || typeof props !== "object") return undefined;',
+    '    if (typeof props.sessionID === "string") return props.sessionID;',
+    '    if (props.info && typeof props.info.sessionID === "string") return props.info.sessionID;',
+    "    return undefined;",
+    "  };",
     "  return {",
     "    event: async ({ event }) => {",
     "      const url = process.env.VIBE_TERMINAL_CALLBACK_URL;",
@@ -1537,7 +1843,7 @@ function openCodePluginSource() {
     '      if (!url || !token || !sessionId || !event || typeof event.type !== "string") {',
     "        return;",
     "      }",
-    "      const send = async (type) => {",
+    "      const send = async (type, detail) => {",
     "        try {",
     "          await fetch(url, {",
     '            method: "POST",',
@@ -1545,12 +1851,21 @@ function openCodePluginSource() {
     '              "content-type": "application/json",',
     '              "x-vibe-telemetry-token": token',
     "            },",
-    '            body: JSON.stringify({ type, sessionId, provider: "opencode", timestamp: Date.now() })',
+    "            // JSON.stringify drops an undefined detail.",
+    '            body: JSON.stringify({ type, detail, sessionId, provider: "opencode", timestamp: Date.now() })',
     "          });",
     "        } catch (_error) {",
     "          // Telemetry is best-effort; ignore delivery failures.",
     "        }",
     "      };",
+    "      // Track task-tool child sessions from the parentID their info carries.",
+    '      if (event.type === "session.created" || event.type === "session.updated") {',
+    "        const info = event.properties && event.properties.info;",
+    '        if (info && typeof info.id === "string" && info.parentID) {',
+    "          childSessions.add(info.id);",
+    "        }",
+    "        return;",
+    "      }",
     '      if (event.type.startsWith("message.")) {',
     "        if (!busy) {",
     "          busy = true;",
@@ -1568,10 +1883,21 @@ function openCodePluginSource() {
     "      if (!type) {",
     "        return;",
     "      }",
-    '      if (event.type === "session.idle" || event.type === "session.error") {',
-    "        busy = false;",
+    "      // A child session going idle/erroring is not the pane's turn ending",
+    "      // (the root session is still driving) - it must not flash done/failed",
+    "      // or drop the busy latch mid-delegation. Permission asks always pass.",
+    "      if (",
+    '        (event.type === "session.idle" || event.type === "session.error") &&',
+    "        childSessions.has(eventSessionId(event))",
+    "      ) {",
+    "        return;",
     "      }",
-    "      await send(type);",
+    "      // Every mapped event ends the current working stretch: idle/error end",
+    "      // the turn, and a permission prompt pauses it with NO event of its own",
+    "      // for the approval that resumes it - dropping the latch here lets the",
+    "      // next message.* burst re-assert agent.running after the user approves.",
+    "      busy = false;",
+    '      await send(type, type === "agent.waiting" ? "approval" : undefined);',
     "    }",
     "  };",
     "};",
@@ -1629,9 +1955,13 @@ function mapTelemetryToAttention(event) {
   }
 
   if (event.type === "agent.waiting") {
+    // The claude Notification hooks tag the wait: "approval" (permission
+    // prompt) vs "question" (idle prompt). The renderer uses the distinction to
+    // flip waiting->running on the user's answer keystroke for approvals.
+    const reason = event.detail || event.reason;
     return {
       state: "waiting",
-      reason: event.reason === "approval" ? "approval" : "question",
+      reason: reason === "approval" ? "approval" : "question",
       source: "provider",
       message: event.message,
       updatedAt: Date.now()
@@ -1701,6 +2031,7 @@ function createAgentTelemetryManager(options = {}) {
     try {
       fs.mkdirSync(baseDir, { recursive: true });
       cleanupStaleShimDirs({ baseDir, currentRunId: runId });
+      cleanupStaleOpenFusionDirs(openFusionBaseDir);
       writeMarker(runDir, { runId, type: "run" });
       fs.writeFileSync(runnerPath, shimRunnerSource());
 
@@ -1812,12 +2143,17 @@ function createAgentTelemetryManager(options = {}) {
               });
             } else if (event.type === "agent.running") {
               // A turn started (claude UserPromptSubmit/tool use, opencode busy
-              // event). This drives the pane's "working" state only; it is not an
-              // attention/unread signal, so it rides a dedicated event.
+              // event, cursor beforeSubmitPrompt). This drives the pane's
+              // "working" state only; it is not an attention/unread signal, so
+              // it rides a dedicated event. Only a genuine turn START may
+              // override a finished (done/failed) pill; mid-turn tool activity
+              // (detail "tool") must respect it, so a tool hook that races past
+              // the turn's Stop cannot resurrect the spinner.
               emit({
                 id: event.sessionId,
                 type: "agent-running",
-                provider: event.provider
+                provider: event.provider,
+                turnStart: event.detail !== "tool"
               });
             } else {
               const attention = mapTelemetryToAttention(event);
@@ -1918,7 +2254,10 @@ function createAgentTelemetryManager(options = {}) {
     const configDir = path.join(openFusionDir, "config");
     const themesDir = path.join(configDir, "themes");
     const commandsDir = path.join(configDir, "commands");
-    const pluginsDir = path.join(configDir, "plugins");
+    // Outside configDir on purpose: the TUI loads this plugin via the tui.json
+    // "plugin" entry, while anything under configDir/plugins is also picked up
+    // by the server-side loader, which rejects tui-only modules.
+    const pluginsDir = path.join(openFusionDir, "plugins");
     fs.mkdirSync(themesDir, { recursive: true });
     fs.mkdirSync(commandsDir, { recursive: true });
     fs.mkdirSync(pluginsDir, { recursive: true });
@@ -1928,6 +2267,7 @@ function createAgentTelemetryManager(options = {}) {
     const themePath = path.join(themesDir, "vibeterminal-openfusion.json");
     const plannerPromptPath = path.join(configDir, "openfusion-planner.md");
     const executorPromptPath = path.join(configDir, "openfusion-executor.md");
+    const investigatorPromptPath = path.join(configDir, "openfusion-investigator.md");
     const modelStatePath = path.join(openFusionDir, "models.json");
     const tuiPluginPath = path.join(pluginsDir, "vibeterminal-openfusion-tui.js");
     const savedModels = readOpenFusionModelState(modelStatePath);
@@ -1940,6 +2280,7 @@ function createAgentTelemetryManager(options = {}) {
 
     fs.writeFileSync(plannerPromptPath, `${openFusionPlannerPrompt()}\n`);
     fs.writeFileSync(executorPromptPath, `${openFusionExecutorPrompt()}\n`);
+    fs.writeFileSync(investigatorPromptPath, `${openFusionInvestigatorPrompt()}\n`);
     const fileConfig = openFusionConfigContents({ plannerModel, executorModel });
     const envConfig = openFusionConfigContents({
       plannerModel,
@@ -1954,6 +2295,11 @@ function createAgentTelemetryManager(options = {}) {
       fs.writeFileSync(path.join(commandsDir, `${name}.md`), commandMarkdown(command));
     }
     fs.writeFileSync(tuiPluginPath, openFusionTuiPluginSource());
+    // Drop the pre-picker copy inside configDir: the server-side loader scans
+    // that dir and rejects tui-only modules with a load error on every start.
+    fs.rmSync(path.join(configDir, "plugins", "vibeterminal-openfusion-tui.js"), {
+      force: true
+    });
     fs.writeFileSync(
       modelStatePath,
       `${JSON.stringify(
@@ -1973,6 +2319,9 @@ function createAgentTelemetryManager(options = {}) {
         {
           $schema: "https://opencode.ai/tui.json",
           theme: "vibeterminal-openfusion",
+          // The TUI plugin host only loads plugins declared in the TUI config;
+          // config-dir discovery feeds the server-side loader instead.
+          plugin: [url.pathToFileURL(tuiPluginPath).href],
           mouse: true,
           diff_style: "auto",
           attention: {
@@ -1996,6 +2345,7 @@ function createAgentTelemetryManager(options = {}) {
       tuiPluginPath,
       plannerPromptPath,
       executorPromptPath,
+      investigatorPromptPath,
       env: {
         OPENCODE_CONFIG: configPath,
         OPENCODE_CONFIG_DIR: configDir,
@@ -2201,13 +2551,34 @@ function createAgentTelemetryManager(options = {}) {
       return Promise.resolve({ status: "skipped", reason: "invalid_session" });
     }
     const runMode = normalizeFusionRunMode(mode);
+    const previousMode = fusionAdapterModes.get(normalizedSessionId);
     fusionAdapterModes.set(normalizedSessionId, runMode);
     try {
       writeFusionRunModeFile(normalizedSessionId, runMode);
     } catch (error) {
+      if (previousMode) {
+        fusionAdapterModes.set(normalizedSessionId, previousMode);
+      } else {
+        fusionAdapterModes.delete(normalizedSessionId);
+      }
       return Promise.resolve({ status: "failed", error: error.message || "could not write Fusion mode" });
     }
-    return postFusionAdapterControl(normalizedSessionId, "/mode", { mode: runMode });
+    return postFusionAdapterControl(normalizedSessionId, "/mode", { mode: runMode }).then(
+      (result) => {
+        if (result && result.status === "failed" && previousMode) {
+          // The mode file is what the adapter re-reads per tool call, so a
+          // failed control POST must not leave it ahead of what the renderer
+          // committed (it keeps the old mode on ok:false).
+          try {
+            fusionAdapterModes.set(normalizedSessionId, previousMode);
+            writeFusionRunModeFile(normalizedSessionId, previousMode);
+          } catch {
+            // keep the failed result; the next successful set-mode rewrites it
+          }
+        }
+        return result;
+      }
+    );
   }
 
   function interruptFusionSession(sessionId) {
@@ -2344,9 +2715,11 @@ module.exports = {
   openFusionCommandContents,
   openFusionConfigContents,
   openFusionExecutorPrompt,
+  openFusionInvestigatorPrompt,
   openFusionPlannerPrompt,
   openFusionTuiPluginSource,
   openFusionTheme,
+  cleanupStaleOpenFusionDirs,
   cleanupStaleShimDirs,
   createAgentTelemetryManager,
   cursorHookEntries,

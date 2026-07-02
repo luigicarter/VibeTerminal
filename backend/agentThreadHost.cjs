@@ -401,8 +401,15 @@ function placeholderOpenCodeRef(id) {
 // knows about. confirmOpenCodeThread answers "does this id still exist?" so the
 // launcher can self-heal to a fresh session instead of erroring in the live shell.
 // Mirrors confirmClaudeThread's conservative contract: report "missing" only when
-// the CLI succeeds and the id is absent; on any spawn/parse failure stay "found"
-// (let the resume try) rather than discard a session that may well exist.
+// the CLI succeeds and the id is provably absent; on any spawn/parse failure stay
+// "found" (let the resume try) rather than discard a session that may well exist.
+//
+// `session list` is capped by --max-count, so an id absent from a FULL page may
+// simply have fallen off the newest-N window rather than been deleted. Absence is
+// only provable when the CLI returned fewer sessions than requested (the list was
+// exhaustive). A truncated page without the id stays "found".
+const OPENCODE_CONFIRM_LIST_MAX = 1000;
+
 function confirmOpenCodeThread(cwd, id) {
   const target = String(id || "");
   if (!target) {
@@ -415,7 +422,7 @@ function confirmOpenCodeThread(cwd, id) {
     "--format",
     "json",
     "--max-count",
-    "100"
+    String(OPENCODE_CONFIRM_LIST_MAX)
   ], {
     cwd,
     shell: process.platform === "win32",
@@ -452,6 +459,17 @@ function confirmOpenCodeThread(cwd, id) {
               updatedAt: Number(match.updated || 0)
             }
           });
+          return;
+        }
+
+        if (
+          !Array.isArray(sessions) ||
+          sessions.length >= OPENCODE_CONFIRM_LIST_MAX
+        ) {
+          // A full page means the id may exist beyond the newest-N window; a
+          // non-array response proves nothing. Resume rather than silently
+          // replace the user's conversation with a fresh one.
+          resolve({ status: "found", threadRef: placeholderOpenCodeRef(target) });
           return;
         }
 

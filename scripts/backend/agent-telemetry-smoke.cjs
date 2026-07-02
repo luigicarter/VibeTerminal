@@ -1,9 +1,11 @@
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
+const url = require("url");
 const { spawn } = require("child_process");
 const {
   buildClaudeSettingsJson,
+  cleanupStaleOpenFusionDirs,
   cleanupStaleShimDirs,
   createAgentTelemetryManager,
   cursorHookEntries,
@@ -445,6 +447,16 @@ function postTelemetry(callbackUrl, token, payload) {
       "Open Fusion executor should be a model-pinned subagent"
     );
     assert(
+      openFusionConfig.agent?.planner?.permission?.task?.investigator === "allow" &&
+        openFusionConfig.agent?.investigator?.mode === "subagent" &&
+        openFusionConfig.agent?.investigator?.permission?.edit === "deny" &&
+        openFusionConfig.agent?.investigator?.permission?.bash === "deny" &&
+        openFusionConfig.agent?.investigator?.permission?.task?.["*"] === "deny" &&
+        openFusionConfig.command?.investigate?.agent === "investigator" &&
+        openFusionConfig.command?.investigate?.subtask === true,
+      "Open Fusion investigator must be a hard read-only subagent (no edit/bash/task) reachable from the planner and /investigate"
+    );
+    assert(
       openFusionConfig.command?.delegate?.agent === "executor" &&
         openFusionConfig.command?.delegate?.model === "opencode/gpt-5.1-codex" &&
         openFusionConfig.command?.delegate?.subtask === true &&
@@ -461,20 +473,42 @@ function postTelemetry(callbackUrl, token, payload) {
     assert(
       fs.existsSync(openFusionFiles.plannerPromptPath) &&
         fs.existsSync(openFusionFiles.executorPromptPath) &&
+        fs.existsSync(openFusionFiles.investigatorPromptPath) &&
         fs.existsSync(openFusionFiles.themePath) &&
         fs.existsSync(openFusionFiles.tuiConfigPath) &&
         fs.existsSync(openFusionFiles.modelStatePath) &&
         fs.existsSync(openFusionFiles.tuiPluginPath) &&
-        fs.existsSync(path.join(openFusionFiles.commandsDir, "delegate.md")),
+        fs.existsSync(path.join(openFusionFiles.commandsDir, "delegate.md")) &&
+        fs.existsSync(path.join(openFusionFiles.commandsDir, "investigate.md")),
       "Open Fusion prompt/theme/TUI command/plugin files should be written"
+    );
+    const openFusionTuiConfig = JSON.parse(
+      fs.readFileSync(openFusionFiles.tuiConfigPath, "utf8")
+    );
+    assert(
+      Array.isArray(openFusionTuiConfig.plugin) &&
+        openFusionTuiConfig.plugin[0] ===
+          url.pathToFileURL(openFusionFiles.tuiPluginPath).href &&
+        !openFusionFiles.tuiPluginPath.startsWith(
+          `${openFusionFiles.configDir}${path.sep}`
+        ),
+      "tui.json must declare the TUI plugin (the TUI only loads declared plugins) and the plugin must live outside configDir so the server-side loader does not reject it"
     );
     const openFusionTuiPlugin = fs.readFileSync(openFusionFiles.tuiPluginPath, "utf8");
     assert(
       openFusionTuiPlugin.includes("slashName: 'brain-model'") &&
         openFusionTuiPlugin.includes("slashName: 'executor-model'") &&
         openFusionTuiPlugin.includes("api.keymap.dispatchCommand('model.list')") &&
-        openFusionTuiPlugin.includes("api.command.register(() => commands)"),
+        openFusionTuiPlugin.includes("api.command.register(() => commands.map"),
       "Open Fusion TUI plugin should register native Brain/Executor model slash commands"
+    );
+    assert(
+      openFusionTuiPlugin.includes("api.client.provider.list()") &&
+        openFusionTuiPlugin.includes("api.ui.DialogSelect({") &&
+        openFusionTuiPlugin.includes("connected: new Set(") &&
+        openFusionTuiPlugin.includes("opencode auth login") &&
+        openFusionTuiPlugin.includes("value: '__custom__'"),
+      "Open Fusion TUI plugin should pick Brain/Executor models from the provider catalog with auth flags"
     );
     assert(
       JSON.parse(fs.readFileSync(openFusionFiles.modelStatePath, "utf8"))
@@ -485,6 +519,46 @@ function postTelemetry(callbackUrl, token, payload) {
       openFusionConfigContents({ plannerModel: "bad model id" }).agent.planner
         .model === "anthropic/claude-sonnet-4-5",
       "invalid Open Fusion model ids should fall back before writing config"
+    );
+
+    // Saved pane models win over launch opts (the TUI pickers own them between
+    // restarts), but invalid saved values must fall back to the launch opts.
+    const paneTwoFirst = await manager.prepareOpenFusionFiles("pane-two", {
+      plannerModel: "openai/gpt-5.1",
+      executorModel: "opencode/gpt-5.1-codex"
+    });
+    fs.writeFileSync(
+      paneTwoFirst.modelStatePath,
+      `${JSON.stringify({ plannerModel: "auto", executorModel: "xai/grok-4" })}\n`
+    );
+    const paneTwoSecond = await manager.prepareOpenFusionFiles("pane-two", {
+      plannerModel: "openai/gpt-5.1",
+      executorModel: "opencode/gpt-5.1-codex"
+    });
+    assert(
+      paneTwoSecond.env.VIBE_TERMINAL_OPEN_FUSION_PLANNER_MODEL === "openai/gpt-5.1" &&
+        paneTwoSecond.env.VIBE_TERMINAL_OPEN_FUSION_EXECUTOR_MODEL === "xai/grok-4",
+      "valid saved pane models should win over launch opts; invalid saved values should fall back to opts"
+    );
+
+    // Age-based GC: a pane dir untouched for over the max age is swept; a
+    // fresh pane dir (its files are rewritten every launch) is preserved so
+    // models.json keeps carrying TUI picker choices across restarts.
+    const openFusionSessionsDir = path.dirname(paneTwoSecond.openFusionDir);
+    const staleOpenFusionDir = path.join(openFusionSessionsDir, "session-stale-pane");
+    fs.mkdirSync(staleOpenFusionDir, { recursive: true });
+    fs.writeFileSync(path.join(staleOpenFusionDir, "models.json"), "{}\n");
+    const staleStamp = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
+    fs.utimesSync(path.join(staleOpenFusionDir, "models.json"), staleStamp, staleStamp);
+    fs.utimesSync(staleOpenFusionDir, staleStamp, staleStamp);
+    const sweptOpenFusionDirs = cleanupStaleOpenFusionDirs(
+      path.dirname(openFusionSessionsDir)
+    );
+    assert(
+      sweptOpenFusionDirs.includes(staleOpenFusionDir) &&
+        !fs.existsSync(staleOpenFusionDir) &&
+        fs.existsSync(paneTwoSecond.modelStatePath),
+      "stale Open Fusion pane dirs should be swept while fresh panes keep their saved models"
     );
 
     const badTokenStatus = await postWithBadToken(manager.callbackUrl());
@@ -701,6 +775,77 @@ function postTelemetry(callbackUrl, token, payload) {
       ),
       "agent.running must not raise an attention/unread event"
     );
+    assert(
+      events.some(
+        (event) =>
+          event.type === "agent-running" &&
+          event.id === "pane-running" &&
+          event.turnStart === true
+      ),
+      "an undetailed agent.running is a genuine turn start (may override done/failed)"
+    );
+
+    // Mid-turn tool activity (claude PreToolUse/PostToolUse) carries the "tool"
+    // detail and must be flagged turnStart:false so a hook POST racing past the
+    // turn's Stop cannot resurrect a finished pane's spinner.
+    const runNotify = (sessionId, args) =>
+      process.platform === "win32"
+        ? run(
+            powershellCommand(),
+            [
+              "-NoProfile",
+              "-ExecutionPolicy",
+              "Bypass",
+              "-File",
+              notifyProgram,
+              ...args
+            ],
+            { cwd: root, env: { ...notifyEnv, VIBE_TERMINAL_SESSION_ID: sessionId } }
+          )
+        : run(notifyProgram, args, {
+            cwd: root,
+            env: { ...notifyEnv, VIBE_TERMINAL_SESSION_ID: sessionId }
+          });
+
+    await runNotify("pane-tool", ["agent.running", "tool"]);
+    assert(
+      events.some(
+        (event) =>
+          event.type === "agent-running" &&
+          event.id === "pane-tool" &&
+          event.turnStart === false
+      ),
+      "a tool-detailed agent.running should be flagged turnStart:false"
+    );
+
+    // The claude permission Notification hook tags its wait "approval" so the
+    // renderer can flip waiting->running on the user's answer keystroke.
+    await runNotify("pane-approval", ["agent.waiting", "approval"]);
+    assert(
+      events.some(
+        (event) =>
+          event.type === "agent-attention" &&
+          event.id === "pane-approval" &&
+          event.attention.state === "waiting" &&
+          event.attention.reason === "approval"
+      ),
+      "an approval-detailed agent.waiting should carry reason approval"
+    );
+
+    // codex invokes the same notify program and appends its own JSON payload as
+    // the second argument; an unknown detail must be dropped, not forwarded.
+    await runNotify("pane-codex-junk", [
+      "agent.completed",
+      '{"type":"agent-turn-complete"}'
+    ]);
+    const codexJunkEvent = events.find(
+      (event) =>
+        event.type === "agent-attention" && event.id === "pane-codex-junk"
+    );
+    assert(
+      codexJunkEvent && codexJunkEvent.attention.state === "completed",
+      "codex's appended JSON arg must not break the completed notification"
+    );
 
     const backgroundStatus = await postTelemetry(manager.callbackUrl(), "test-token", {
       type: "agent.backgroundActivity",
@@ -783,6 +928,9 @@ function postTelemetry(callbackUrl, token, payload) {
     await runCursorNotify("pane-cursor-fail", {
       stdin: JSON.stringify({ hook_event_name: "stop", status: "error" })
     });
+    await runCursorNotify("pane-cursor-abort", {
+      stdin: JSON.stringify({ hook_event_name: "stop", status: "aborted" })
+    });
     // The notify program POSTs and waits for the response, so the events have
     // landed by the time the child exits; a small grace window covers slack.
     await new Promise((resolve) => setTimeout(resolve, 300));
@@ -820,14 +968,25 @@ function postTelemetry(callbackUrl, token, payload) {
       ),
       "cursor stop status=error should map to a failed attention event"
     );
+    // A user-aborted turn is not "done": it is the user's turn, i.e. waiting.
+    assert(
+      events.some(
+        (event) =>
+          event.type === "agent-attention" &&
+          event.id === "pane-cursor-abort" &&
+          event.provider === "cursor" &&
+          event.attention.state === "waiting"
+      ),
+      "cursor stop status=aborted should map to a waiting attention event"
+    );
 
     // The status->type mapping helper backs the stop behaviour.
     assert(
       cursorTypeFromStatus("completed") === "agent.completed" &&
-        cursorTypeFromStatus("aborted") === "agent.completed" &&
+        cursorTypeFromStatus("aborted") === "agent.waiting" &&
         cursorTypeFromStatus(undefined) === "agent.completed" &&
         cursorTypeFromStatus("error") === "agent.failed",
-      "cursorTypeFromStatus should only treat error as a failure"
+      "cursorTypeFromStatus should map error->failed, aborted->waiting, else completed"
     );
 
     // ensureCursorProjectHooks merges our env-guarded running + stop hooks into
@@ -980,6 +1139,39 @@ function postTelemetry(callbackUrl, token, payload) {
         pluginSource.includes("busy"),
       "opencode plugin should infer agent.running from the throttled message stream"
     );
+    // The busy latch must drop on EVERY mapped event, not only idle/error: the
+    // approval that resumes a permission-paused turn has no event of its own,
+    // so only the next message.* burst can re-assert "working" — and it can't
+    // while the latch is still up. Version must bump with any source change or
+    // installed copies never update.
+    assert(
+      pluginSource.includes("vibeterminal-notify-4") &&
+        !pluginSource.includes("vibeterminal-notify-3") &&
+        !pluginSource.includes("vibeterminal-notify-2") &&
+        pluginSource.includes("busy = false;") &&
+        !pluginSource.includes(
+          'if (event.type === "session.idle" || event.type === "session.error") {'
+        ),
+      "opencode plugin should drop the busy latch on every mapped event (permission prompts included)"
+    );
+    assert(
+      pluginSource.includes(
+        'send(type, type === "agent.waiting" ? "approval" : undefined)'
+      ),
+      "opencode permission waits should be tagged as approvals"
+    );
+    // Child sessions (task-tool subagents, e.g. the Open Fusion executor) going
+    // idle/erroring must not read as the pane's turn ending: they are tracked by
+    // the parentID on session.created/updated info and filtered from the
+    // idle/error mapping (fail-open: unknown payload shapes filter nothing).
+    // Permission asks are never filtered.
+    assert(
+      pluginSource.includes("childSessions") &&
+        pluginSource.includes("info.parentID") &&
+        pluginSource.includes("childSessions.has(eventSessionId(event))") &&
+        !pluginSource.includes('"permission.asked" ||'),
+      "opencode plugin should ignore child-session idle/error but never filter permission asks"
+    );
 
     // The claude settings builder targets the notify program on both platforms.
     const winCmd = JSON.parse(
@@ -998,12 +1190,48 @@ function postTelemetry(callbackUrl, token, payload) {
       posixCmd.includes("/x/notify.sh") && posixCmd.includes("agent.waiting"),
       `posix claude hook should invoke the notify wrapper; got ${posixCmd}`
     );
-    const runningCmd = JSON.parse(
+    const claudeHooks = JSON.parse(
       buildClaudeSettingsJson("/x/notify.sh", false)
-    ).hooks.UserPromptSubmit[0].hooks[0].command;
+    ).hooks;
+    const runningCmd = claudeHooks.UserPromptSubmit[0].hooks[0].command;
     assert(
       runningCmd.includes("/x/notify.sh") && runningCmd.includes("agent.running"),
       `claude turn-start hook should fire agent.running; got ${runningCmd}`
+    );
+    // Only the turn START may override a finished pill; tool activity carries
+    // the "tool" detail so the renderer routes it through the done/failed latch.
+    assert(
+      !runningCmd.includes("tool"),
+      `claude UserPromptSubmit must be an undetailed (latch-overriding) turn start; got ${runningCmd}`
+    );
+    for (const hookEvent of ["PreToolUse", "PostToolUse"]) {
+      const toolCmd = claudeHooks[hookEvent][0].hooks[0].command;
+      assert(
+        toolCmd.includes("'agent.running' 'tool'"),
+        `claude ${hookEvent} should fire agent.running with the tool detail; got ${toolCmd}`
+      );
+    }
+    // The Notification hook is split so approvals and idle prompts are
+    // distinguishable: answering an approval flips waiting->running in the
+    // renderer, composing after an idle prompt does not.
+    assert(
+      claudeHooks.Notification.length === 2 &&
+        claudeHooks.Notification[0].matcher === "permission_prompt" &&
+        claudeHooks.Notification[0].hooks[0].command.includes(
+          "'agent.waiting' 'approval'"
+        ) &&
+        claudeHooks.Notification[1].matcher === "idle_prompt" &&
+        claudeHooks.Notification[1].hooks[0].command.includes(
+          "'agent.waiting' 'question'"
+        ),
+      "claude Notification hooks should tag approval vs idle waits"
+    );
+    const winToolCmd = JSON.parse(
+      buildClaudeSettingsJson("C:\\x\\notify.ps1", true)
+    ).hooks.PostToolUse[0].hooks[0].command;
+    assert(
+      winToolCmd.includes("agent.running tool"),
+      `windows claude tool hook should pass the tool detail; got ${winToolCmd}`
     );
     const signaledAttention = mapTelemetryToAttention({
       type: "agent.process.exited",

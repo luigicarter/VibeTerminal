@@ -128,10 +128,21 @@ const FUSION_CODEX_BRIDGE_TOOLS = [
   "mcp__fusion-codex__codex_respond",
   "mcp__fusion-codex__codex_goal_set",
   "mcp__fusion-codex__codex_goal_get",
-  "mcp__fusion-codex__codex_goal_clear"
+  "mcp__fusion-codex__codex_goal_clear",
+  // The wedge escape hatch: without it on the strict --tools/--allowedTools
+  // surface, a stuck Codex turn leaves pane-restart as the only recovery.
+  "mcp__fusion-codex__codex_cancel"
 ];
 const FUSION_CLAUDE_UI_WRITE_TOOLS = ["Edit", "Write"];
 const FUSION_CLAUDE_BUILTIN_TOOLS = ["Read", "Glob", "Grep", ...FUSION_CLAUDE_UI_WRITE_TOOLS];
+// Claude has no Bash, but an unscoped Edit/Write could still author executable
+// side-effects (git hooks, CI workflows, husky hooks) that full-access Codex or
+// the user would run later. Deny rules override acceptEdits, closing that
+// escalation while keeping direct UI/design file edits.
+const FUSION_CLAUDE_WRITE_DENY_PATHS = [".git/**", ".github/workflows/**", ".husky/**"];
+const FUSION_CLAUDE_WRITE_DENY_RULES = FUSION_CLAUDE_WRITE_DENY_PATHS.flatMap((pattern) =>
+  FUSION_CLAUDE_UI_WRITE_TOOLS.map((tool) => `${tool}(${pattern})`)
+);
 
 function pathFromFileUrl(value) {
   try {
@@ -904,6 +915,10 @@ function fusionClaudeTools() {
 function fusionClaudeAllowedTools() {
   return [...FUSION_CODEX_BRIDGE_TOOLS, ...FUSION_CLAUDE_BUILTIN_TOOLS].join(",");
 }
+
+function fusionClaudeDisallowedTools() {
+  return ["Bash", ...FUSION_CLAUDE_WRITE_DENY_RULES].join(",");
+}
 function resolveAgentThreadRequest(requestId, result) {
   const pending = pendingAgentThreadRequests.get(requestId);
   if (!pending) {
@@ -1308,7 +1323,7 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
         // execution and final bug/goal verification.
         tools: fusionClaudeTools(),
         allowedTools: fusionClaudeAllowedTools(),
-        disallowedTools: "Bash",
+        disallowedTools: fusionClaudeDisallowedTools(),
         strictMcpConfig: true,
         resumeId: payload.resumeId || undefined
       }

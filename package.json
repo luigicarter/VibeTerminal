@@ -1,6 +1,6 @@
 {
   "name": "vibe-terminal",
-  "version": "0.1.32",
+  "version": "0.1.33",
   "private": true,
   "description": "A tiled local workspace for running multiple coding agents side by side.",
   "author": "vibeTerminal contributors",

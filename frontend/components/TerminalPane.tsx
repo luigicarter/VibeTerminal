@@ -24,7 +24,8 @@ import {
   isTurnTelemetryKind,
   reconcileStatus,
   shouldSettleStatusOnPaneUnmount,
-  shouldShowAttentionDot
+  shouldShowAttentionDot,
+  statusAfterUserInput
 } from "../attention";
 import { buildLaunchCommand, isThreadedAgentKind } from "../sessionLaunch";
 import {
@@ -54,6 +55,13 @@ const IDLE_AFTER_MS = 1500;
 // working. Ignore output this soon after the last input so typing in or clicking
 // a pane never reads as "working".
 const INPUT_GRACE_MS = 450;
+// Stale-"running" watchdog for telemetry kinds: a turn can end without its
+// hook firing (claude's Stop does not fire on an Esc interrupt; a notify POST
+// can be lost). While genuinely working these TUIs repaint their spinner
+// constantly, so this much TOTAL output silence while "running" means the turn
+// is over — settle to "waiting". If a turn really is alive but silent, the
+// next telemetry event re-asserts "running".
+const TELEMETRY_RUNNING_QUIET_MS = 12_000;
 
 interface ThreadLookupPatch {
   threadLookupStartedAt?: number;
@@ -79,6 +87,9 @@ interface TerminalPaneProps {
   onFreshLaunchFallback: (patch: ThreadLookupPatch) => void;
   onThreadLookupChange: (patch: ThreadLookupPatch) => void;
   onStatusChange: (status: SessionStatus) => void;
+  // Human keyboard input decided the status (statusAfterUserInput). Applied
+  // WITHOUT reconcileStatus — releasing the done/failed latch is the point.
+  onInputStatusRelease: (status: SessionStatus) => void;
 }
 
 function statusLabel(status: SessionStatus) {
@@ -115,7 +126,8 @@ export default function TerminalPane({
   onThreadRefChange,
   onFreshLaunchFallback,
   onThreadLookupChange,
-  onStatusChange
+  onStatusChange,
+  onInputStatusRelease
 }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -124,6 +136,7 @@ export default function TerminalPane({
   const createdRef = useRef(false);
   const lastLaunchTokenRef = useRef(0);
   const onStatusChangeRef = useRef(onStatusChange);
+  const onInputStatusReleaseRef = useRef(onInputStatusRelease);
   const onThreadRefChangeRef = useRef(onThreadRefChange);
   const onFreshLaunchFallbackRef = useRef(onFreshLaunchFallback);
   const onThreadLookupChangeRef = useRef(onThreadLookupChange);
@@ -158,6 +171,10 @@ export default function TerminalPane({
   useEffect(() => {
     onStatusChangeRef.current = onStatusChange;
   }, [onStatusChange]);
+
+  useEffect(() => {
+    onInputStatusReleaseRef.current = onInputStatusRelease;
+  }, [onInputStatusRelease]);
 
   useEffect(() => {
     onThreadRefChangeRef.current = onThreadRefChange;
@@ -232,15 +249,17 @@ export default function TerminalPane({
     }, IDLE_AFTER_MS);
   }
 
-  // Decide whether a chunk of PTY output should read as the agent "working".
-  function markActiveFromOutput() {
-    // claude/opencode own their working state through turn telemetry
-    // (UserPromptSubmit / busy events), so their output never sets "running" —
-    // otherwise a focus/click redraw or a keystroke echo would look like work.
-    // The first quiet gap after boot still settles the "starting" pill to
-    // "waiting" so a freshly launched agent doesn't read as starting forever.
+  // (Re)arm the settle-to-waiting timer for a telemetry-kind pane in a state
+  // that must not outlive fresh output: a booting pane ("starting" settles
+  // after the first quiet gap so a freshly launched agent doesn't read as
+  // starting forever) and a possibly-stale "running" (see
+  // TELEMETRY_RUNNING_QUIET_MS). Settles only if the status is unchanged when
+  // the timer fires — a starting->running transition mid-wait must not settle
+  // a fresh turn after the shorter boot delay.
+  function armTelemetrySettle() {
     if (isTurnTelemetryKind(sessionRef.current.kind)) {
-      if (sessionRef.current.status !== "starting") {
+      const armedFor = sessionRef.current.status;
+      if (armedFor !== "starting" && armedFor !== "running") {
         return;
       }
       clearIdleTimer();
@@ -248,11 +267,22 @@ export default function TerminalPane({
         idleTimerRef.current = null;
         if (
           !terminalExitedRef.current &&
-          sessionRef.current.status === "starting"
+          sessionRef.current.status === armedFor
         ) {
           setStatus("waiting");
         }
-      }, IDLE_AFTER_MS);
+      }, armedFor === "starting" ? IDLE_AFTER_MS : TELEMETRY_RUNNING_QUIET_MS);
+    }
+  }
+
+  // Decide whether a chunk of PTY output should read as the agent "working".
+  function markActiveFromOutput() {
+    // claude/opencode/cursor own their working state through turn telemetry
+    // (UserPromptSubmit / busy events), so their output never sets "running" —
+    // otherwise a focus/click redraw or a keystroke echo would look like work.
+    // Output only feeds their quiescence watchdog.
+    if (isTurnTelemetryKind(sessionRef.current.kind)) {
+      armTelemetrySettle();
       return;
     }
 
@@ -481,6 +511,26 @@ export default function TerminalPane({
       }
 
       onSelect();
+
+      // Keyboard input can decide the status where no hook or output can: a
+      // human keystroke releases a done/failed pill latched by the previous
+      // turn (codex/plain terminals, whose output alone must never unlatch)
+      // and answers a pending approval (claude); a bare Esc while a telemetry
+      // turn is "running" is the TUI interrupt key, which fires no hook.
+      // Applied directly — bypassing the latch is the point — and mirrored
+      // into sessionRef so the heuristic reconciles against the released
+      // status before the next re-render.
+      if (!terminalExitedRef.current) {
+        const releasedStatus = statusAfterUserInput(sessionRef.current, data);
+        if (releasedStatus && releasedStatus !== sessionRef.current.status) {
+          sessionRef.current = {
+            ...sessionRef.current,
+            status: releasedStatus
+          };
+          onInputStatusReleaseRef.current(releasedStatus);
+        }
+      }
+
       window.vibe?.terminal.input(session.id, data);
       // User interaction (keys, paste, mouse/focus reports) is not the agent
       // working, so it must not mark the pane active. Record when it happened so
@@ -517,7 +567,13 @@ export default function TerminalPane({
         }
 
         if (event.isRunning) {
-          markActiveFromOutput();
+          // A snapshot is a REPLAY of buffered output (remount/reattach), not
+          // fresh activity, so it never marks the pane "working" — that used
+          // to wipe a settled done/failed pill on every workspace switch. It
+          // only re-arms the telemetry quiescence settle so a stale
+          // "starting"/"running" pill can't outlive the remount; live output
+          // then drives the heuristic kinds normally.
+          armTelemetrySettle();
         } else {
           terminalExitedRef.current = true;
           terminal.writeln("");
@@ -663,7 +719,15 @@ export default function TerminalPane({
     terminalExitedRef.current = false;
     terminal.clear();
     clearIdleTimer();
-    setStatus("starting");
+    // Only a genuine (re)launch shows "starting": every launch path (create,
+    // restart, resume, settings change) resets the status to "idle" first. A
+    // REMOUNT of a live pane (workspace switch, maximize) re-runs this effect
+    // too — the backend dedups the create into a snapshot — and must not
+    // disturb a settled pill (done/failed would be unlatched by
+    // "starting", then degraded to "waiting" by the settle timers).
+    if (sessionRef.current.status === "idle") {
+      setStatus("starting");
+    }
     lastSentSizeRef.current = {
       cols: terminal.cols,
       rows: terminal.rows

@@ -164,12 +164,16 @@ function main() {
                 source.includes('approvalPolicy: "never"') &&
                 source.includes("function fusionCodexSandboxPolicy") &&
                 source.includes('return { type: "dangerFullAccess" };') &&
-                (source.match(/sandboxPolicy: fusionCodexSandboxPolicy\(\)/g) || []).length >= 2,
-              "adapter should run Fusion Codex with full access and no routine approval prompts"
+                (source.match(/sandboxPolicy: fusionCodexSandboxPolicy\(\)/g) || []).length >= 1,
+              "adapter should run Fusion Codex implementation turns with full access and no routine approval prompts"
             );
             assert(
-              !source.includes('sandboxPolicy: { type: "readOnly" }'),
-              "codex_investigate should not use Codex's read-only OS sandbox because it can fail before read-only commands run"
+              source.includes("function fusionCodexInvestigateSandboxPolicy") &&
+                source.includes('return { type: "readOnly" };') &&
+                source.includes("sandboxPolicy: fusionCodexInvestigateSandboxPolicy()") &&
+                source.includes("VIBE_FUSION_INVESTIGATE_SANDBOX") &&
+                /return process\.platform === "win32"\s*\?\s*fusionCodexSandboxPolicy\(\)\s*:\s*\{ type: "readOnly" \}/.test(source),
+              "codex_investigate must use Codex's read-only OS sandbox on POSIX but keep full access on win32 (read-only sandbox bootstrap still fails there: CreateProcessAsUserW 1312 on codex 0.142.4), with VIBE_FUSION_INVESTIGATE_SANDBOX overriding either way"
             );
             assert(
               source.includes("function resetCodexProcessState") &&

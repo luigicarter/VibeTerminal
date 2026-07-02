@@ -5,6 +5,12 @@ const { spawn } = require("child_process");
 const GIT_STATUS_TIMEOUT_MS = 5_000;
 const MAX_GIT_OUTPUT_BYTES = 1024 * 1024;
 const MAX_UNTRACKED_LINE_COUNT_BYTES = 2 * 1024 * 1024;
+// Untracked line-counting reads files synchronously on the Electron main
+// process on every poll tick, so the whole scan needs hard budgets: without
+// them one workspace with a large unignored tree (a fresh dist/, vendored
+// deps) stalls terminal input and IPC app-wide every refresh.
+const MAX_UNTRACKED_FILES_SCANNED = 2_000;
+const MAX_UNTRACKED_SCAN_TOTAL_BYTES = 16 * 1024 * 1024;
 
 function emptyCounts() {
   return {
@@ -140,10 +146,41 @@ function countUntrackedInsertions(root, stdout) {
     return 0;
   }
 
-  return parseNullSeparatedPaths(stdout).reduce((total, relativePath) => {
+  const paths = parseNullSeparatedPaths(stdout).slice(
+    0,
+    MAX_UNTRACKED_FILES_SCANNED
+  );
+  let remainingBytes = MAX_UNTRACKED_SCAN_TOTAL_BYTES;
+  let total = 0;
+
+  for (const relativePath of paths) {
+    if (remainingBytes <= 0) {
+      break;
+    }
+
     const filePath = path.join(root, relativePath);
-    return total + countTextFileLines(filePath);
-  }, 0);
+    let size = 0;
+    try {
+      const stat = fs.statSync(filePath);
+      if (!stat.isFile()) {
+        continue;
+      }
+      size = stat.size;
+    } catch {
+      continue;
+    }
+
+    // Files past the per-file cap contribute 0 lines either way; only files we
+    // will actually read draw down the scan budget.
+    if (size > MAX_UNTRACKED_LINE_COUNT_BYTES) {
+      continue;
+    }
+
+    remainingBytes -= size;
+    total += countTextFileLines(filePath);
+  }
+
+  return total;
 }
 
 function parseCodeChangeStatus(stdout, options = {}) {

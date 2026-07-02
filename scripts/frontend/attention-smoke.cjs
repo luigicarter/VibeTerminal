@@ -43,6 +43,7 @@ const {
   attentionFromTerminalEvent,
   attentionFromEvent,
   clearUnreadAttention,
+  isHumanTerminalInput,
   isSessionWorking,
   isTurnTelemetryKind,
   normalizeAttention,
@@ -51,6 +52,7 @@ const {
   shouldMarkAttentionUnread,
   shouldShowAttentionDot,
   shouldUseTerminalEventAttention,
+  statusAfterUserInput,
   statusFromAttentionState,
   statusFromTerminalEvent
 } = testModule.exports;
@@ -117,7 +119,10 @@ assert.strictEqual(attentionFromEvent(completed, true).unread, true);
 assert.strictEqual(attentionFromEvent(completed, false).unread, false);
 assert.strictEqual(attentionFromEvent(none, true).unread, false);
 assert.strictEqual(statusFromTerminalEvent(terminalData), "running");
-assert.strictEqual(statusFromTerminalEvent(terminalRunningSnapshot), "running");
+// A snapshot is a REPLAY (remount/reattach), not fresh activity: a live
+// process must not read as "working" from replayed bytes — that used to wipe
+// a settled done/failed pill on every workspace switch.
+assert.strictEqual(statusFromTerminalEvent(terminalRunningSnapshot), null);
 assert.strictEqual(statusFromTerminalEvent(terminalCompletedSnapshot), "done");
 assert.strictEqual(statusFromTerminalEvent(terminalFailedExit), "failed");
 assert.strictEqual(
@@ -272,6 +277,116 @@ assert.strictEqual(reconcileStatus("failed", "running"), "failed");
 assert.strictEqual(reconcileStatus("done", "starting"), "starting");
 assert.strictEqual(reconcileStatus("done", "done"), "done");
 
+// Human keyboard input vs terminal-generated reports: typed text, Enter, and a
+// bracketed paste count; focus reports, mouse reports, and arrow keys do not —
+// clicking or focusing a finished TUI pane must never disturb its pill.
+assert.strictEqual(isHumanTerminalInput("h"), true);
+assert.strictEqual(isHumanTerminalInput("\r"), true);
+assert.strictEqual(isHumanTerminalInput("\x1b[200~pasted prompt\x1b[201~"), true);
+assert.strictEqual(isHumanTerminalInput("\x1b[I"), false); // focus in
+assert.strictEqual(isHumanTerminalInput("\x1b[O"), false); // focus out
+assert.strictEqual(isHumanTerminalInput("\x1b[<35;10;5M"), false); // mouse
+assert.strictEqual(isHumanTerminalInput("\x1b[A"), false); // arrow key
+
+// A human keystroke is the non-telemetry pane's turn-start signal: it releases
+// a done/failed pill latched by turn-end telemetry (codex) or a finished
+// process (plain terminal) to "waiting" — output alone must never do that.
+assert.strictEqual(
+  statusAfterUserInput({ kind: "codex", status: "done" }, "h"),
+  "waiting"
+);
+assert.strictEqual(
+  statusAfterUserInput({ kind: "codex", status: "failed" }, "\r"),
+  "waiting"
+);
+assert.strictEqual(
+  statusAfterUserInput({ kind: "terminal", status: "done" }, "h"),
+  "waiting"
+);
+assert.strictEqual(
+  statusAfterUserInput({ kind: "codex", status: "running" }, "h"),
+  null
+);
+assert.strictEqual(
+  statusAfterUserInput({ kind: "codex", status: "waiting" }, "h"),
+  null
+);
+// Terminal-generated reports and the Esc key never release a latched pill.
+assert.strictEqual(
+  statusAfterUserInput({ kind: "codex", status: "done" }, "\x1b[I"),
+  null
+);
+assert.strictEqual(
+  statusAfterUserInput({ kind: "codex", status: "done" }, "\x1b"),
+  null
+);
+
+// For telemetry kinds the keystroke only matters while an APPROVAL is pending:
+// answering it has no hook of its own (PreToolUse fired before the prompt,
+// PostToolUse fires when the tool ends), so the answer flips waiting->running.
+// An idle "your turn" wait stays put — UserPromptSubmit will report the turn.
+assert.strictEqual(
+  statusAfterUserInput(
+    {
+      kind: "claude",
+      status: "waiting",
+      attention: { ...waiting, reason: "approval", unread: false }
+    },
+    "y"
+  ),
+  "running"
+);
+assert.strictEqual(
+  statusAfterUserInput(
+    {
+      kind: "claude",
+      status: "waiting",
+      attention: { ...waiting, reason: "question", unread: false }
+    },
+    "y"
+  ),
+  null
+);
+assert.strictEqual(
+  statusAfterUserInput({ kind: "claude", status: "done" }, "h"),
+  null
+);
+assert.strictEqual(
+  statusAfterUserInput({ kind: "opencode", status: "failed" }, "h"),
+  null
+);
+
+// A bare Esc while a telemetry-kind turn is "running" is the TUI interrupt key
+// (no hook fires for an interrupt), so it settles the pill to "waiting"
+// immediately; any other state, kind, or key ignores it.
+assert.strictEqual(
+  statusAfterUserInput({ kind: "claude", status: "running" }, "\x1b"),
+  "waiting"
+);
+assert.strictEqual(
+  statusAfterUserInput({ kind: "opencode", status: "running" }, "\x1b"),
+  "waiting"
+);
+assert.strictEqual(
+  statusAfterUserInput({ kind: "claude", status: "running" }, "h"),
+  null
+);
+assert.strictEqual(
+  statusAfterUserInput(
+    {
+      kind: "claude",
+      status: "waiting",
+      attention: { ...waiting, reason: "approval", unread: false }
+    },
+    "\x1b"
+  ),
+  null
+);
+assert.strictEqual(
+  statusAfterUserInput({ kind: "codex", status: "running" }, "\x1b"),
+  null
+);
+
 const appSource = fs.readFileSync(appPath, "utf8");
 assert(
   appSource.includes("statusFromTerminalEvent(event)") &&
@@ -291,8 +406,9 @@ assert(
   "Fusion/Open Fusion add/duplicate and completion attention should use the app attention path"
 );
 assert(
-  appSource.includes('isFusion || (previousStatus !== "done" && previousStatus !== "failed")'),
-  "Fusion restore should relaunch a persisted pane even after the previous turn completed"
+  appSource.includes("isThreadedAgentKind(restoredKind) ||") &&
+    appSource.includes('(previousStatus !== "done" && previousStatus !== "failed"));'),
+  "Fusion and threaded-agent restore should relaunch a persisted pane even after the previous turn completed"
 );
 assert(
   appSource.includes('event.type === "activity" && event.kind === "warmup_error"') &&
@@ -387,6 +503,60 @@ assert(
     terminalPaneSource.includes('event.id && event.id !== session.id') &&
     terminalPaneSource.includes('setStatus("failed")'),
   "terminal pane should render host-level PTY failures instead of ignoring id-less events"
+);
+// Keyboard input decides status where no hook or output can: a human keystroke
+// releases a latched done/failed pill (codex has no turn-start telemetry, so
+// without this a completed codex pane could never show working/waiting again),
+// answers a pending claude approval, and a bare Esc settles an interrupted
+// telemetry turn. It must bypass reconcileStatus (the dedicated release
+// callback, not onStatusChange); statusAfterUserInput itself filters
+// terminal-generated input reports.
+assert(
+  terminalPaneSource.includes("statusAfterUserInput(sessionRef.current, data)") &&
+    terminalPaneSource.includes("onInputStatusReleaseRef.current(releasedStatus)"),
+  "terminal pane should let keyboard input release/settle the status pill"
+);
+// A telemetry-kind "running" that lost its turn-end hook (Esc interrupt fires
+// no Stop; a notify POST can be lost) must not stay "working" forever: total
+// output silence settles it to waiting. The settle only fires if the status is
+// unchanged since arming (a starting->running transition must not settle a
+// fresh turn after the shorter boot delay).
+assert(
+  terminalPaneSource.includes("TELEMETRY_RUNNING_QUIET_MS") &&
+    terminalPaneSource.includes("function armTelemetrySettle()") &&
+    terminalPaneSource.includes("sessionRef.current.status === armedFor"),
+  "terminal pane should settle a stale telemetry 'running' after prolonged output silence"
+);
+// A snapshot is a replay (remount/reattach): it must not mark the pane working
+// (markActiveFromOutput is called for live "data" only — 1 definition + 1 call
+// site) and the launch effect must not reset a settled pill to "starting" on
+// remount (every genuine launch path resets status to "idle" first).
+assert(
+  terminalPaneSource.includes("armTelemetrySettle();") &&
+    terminalPaneSource.split("markActiveFromOutput(").length === 3 &&
+    terminalPaneSource.includes('if (sessionRef.current.status === "idle") {'),
+  "remounts (snapshot replays) must not disturb a settled status pill"
+);
+assert(
+  appSource.includes("onInputStatusRelease={(status)") &&
+    appSource.includes("options?.force") &&
+    appSource.includes("force: true"),
+  "app should apply the pane's human-input status release without reconcileStatus"
+);
+// Mid-turn tool activity (turnStart false) must respect the done/failed latch:
+// hook POSTs race, so a PostToolUse landing after Stop cannot resurrect the
+// spinner. Only a genuine turn start forces "running".
+assert(
+  appSource.includes("applyAgentRunning(event.id, event.turnStart !== false)") &&
+    appSource.includes('!turnStart && reconcileStatus(session.status, "running") !== "running"'),
+  "tool-driven agent-running events should go through the done/failed latch"
+);
+// A dead Fusion host strands any in-flight state — waiting especially (the
+// pending decision can never be answered) — so closed must fail those too.
+assert(
+  appSource.includes('session.status === "waiting" ||') &&
+    appSource.includes("Fusion process closed while a decision was still pending."),
+  "Fusion closed while waiting/starting should mark the pane failed"
 );
 
 const fusionChatPaneSource = fs.readFileSync(fusionChatPanePath, "utf8");

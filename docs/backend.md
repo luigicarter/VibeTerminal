@@ -35,18 +35,38 @@ reports `sessionId = VIBE_TERMINAL_SESSION_ID` (the pane id), not the agent's ow
 A separate `agent.running` type reports turn **start** (the sidebar "working" spinner). The server does
 not turn it into attention/unread; it emits a dedicated `agent-running` event the renderer maps onto
 `session.status = "running"` (see `docs/frontend.md`). claude, opencode, and cursor produce it — they have
-a turn-start signal; codex does not, so its working state stays on the output heuristic.
+a turn-start signal; codex does not, so its working state stays on the output heuristic (a human
+keystroke into the pane is what releases a done/failed pill there — see `statusAfterUserInput` in
+`docs/frontend.md`).
+
+Hooks may pass a whitelisted second argument (`detail`: `tool`/`approval`/`question`/`turn-start`) that
+the notify program forwards. `agent.running` with detail `tool` is emitted as `turnStart:false`: the
+hook POSTs ride independent short-lived processes with no ordering guarantee, so only a genuine turn
+start may override a finished done/failed pill — a tool hook racing past the turn's `Stop` cannot
+resurrect the spinner. `agent.waiting` details become the attention `reason` (`approval` vs `question`).
 
 - **claude** - launched with `--settings <runDir>/claude-settings.json` (injected by the shim).
-  `UserPromptSubmit`/`PreToolUse`/`PostToolUse` fire `agent.running` (turn start + tool activity, which
-  re-asserts running after a permission approval); `Stop` fires `agent.completed`; `Notification`
-  (`permission_prompt|idle_prompt`) fires `agent.waiting`.
+  `UserPromptSubmit` fires `agent.running` (undetailed = genuine turn start);
+  `PreToolUse`/`PostToolUse` fire `agent.running tool` (mid-turn activity, latch-respecting);
+  `Stop` fires `agent.completed`; `Notification` is split — `permission_prompt` fires
+  `agent.waiting approval`, `idle_prompt` fires `agent.waiting question` — so the renderer can flip
+  waiting->running on the user's answer keystroke for approvals only (approving has no hook of its
+  own: PreToolUse fires before the prompt, PostToolUse only when the tool ends).
 - **codex** - launched with `-c notify=[...]` (injected by the shim) pointing at the per-run notify
   program. codex only emits turn-complete, so it maps to `agent.completed` (no `agent.running`).
+  codex appends its own JSON payload as an extra argument; the detail whitelist drops it.
 - **opencode** - a guarded global plugin in the user's opencode config dir (installed idempotently;
-  no-ops unless the `VIBE_TERMINAL_*` env vars are set). Maps `session.idle`->`agent.completed`,
-  `permission.asked`->`agent.waiting`, `session.error`->`agent.failed`, and infers `agent.running`
-  from the first `message.*` stream event per turn (throttled by a `busy` latch reset on idle/error).
+  rewritten only when `OPENCODE_PLUGIN_VERSION` changes — bump it with ANY source change; no-ops
+  unless the `VIBE_TERMINAL_*` env vars are set). Maps `session.idle`->`agent.completed`,
+  `permission.asked/updated`->`agent.waiting` (detail `approval`), `session.error`->`agent.failed`,
+  and infers `agent.running` from the first `message.*` stream event per turn, throttled by a `busy`
+  latch. The latch drops on EVERY mapped event — the approval that resumes a permission-paused turn
+  has no event of its own, so the next `message.*` burst must be free to re-assert "working".
+  Child sessions (task-tool subagents, e.g. the Open Fusion executor) are tracked via the `parentID`
+  on `session.created/updated` info and their `session.idle`/`session.error` are ignored — a child
+  finishing is not the pane's turn ending (payload shapes verified against opencode 1.17.11;
+  unknown shapes fail open to no filtering). Permission asks are never filtered: the user answers
+  them in this TUI whichever session raised them.
   The exact `message.*` names are live-verify pending: if they differ the spinner just won't show (no
   false positive) while done/waiting still flow.
 - **cursor** - Cursor's CLI hooks only load from `~/.cursor/hooks.json` or a project
@@ -56,8 +76,9 @@ a turn-start signal; codex does not, so its working state stays on the output he
   `stop` hooks into the project `.cursor/hooks.json`, preserving the user's own hooks. Both invoke one
   notify program (`vibeterminal-cursor-notify.ps1`/`.sh`): `beforeSubmitPrompt` passes the type as an
   argument (`agent.running`, the turn-start spinner) while `stop` passes none and the program derives
-  `agent.completed`/`agent.failed` from the JSON `status` (completed/aborted/error) piped on stdin
-  (stdin is always drained so a large payload never blocks the hook). Entries are tagged by the marker
+  the type from the JSON `status` piped on stdin — `completed`->`agent.completed`,
+  `error`->`agent.failed`, `aborted`->`agent.waiting` (an interrupted turn is not "done"; it is the
+  user's turn) — stdin is always drained so a large payload never blocks the hook. Entries are tagged by the marker
   in the notify filename so they are refreshed (not duplicated) across runs and stripped on cleanup (a
   file we created is removed outright). `agent.waiting` is intentionally **not** wired: Cursor's only
   permission hooks (`beforeShellExecution`) *decide* permission, so observing them for a "waiting"

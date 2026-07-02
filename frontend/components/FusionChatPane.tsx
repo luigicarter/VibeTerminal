@@ -76,6 +76,7 @@ const FUSION_RUN_MODE_LABELS: Record<FusionRunMode, string> = {
 const FUSION_EFFORT_VALUES = Object.keys(FUSION_EFFORT_LABELS) as FusionEffort[];
 const FUSION_COMPOSER_MAX_PX = 160;
 const MAX_COMPOSER_PATHS = 32;
+const IMPLEMENT_PLAN_PROMPT = "Implement the plan.";
 
 interface ComposerFileRef {
   path: string;
@@ -537,6 +538,15 @@ function isCodexGoalTool(name: string): boolean {
   return /codex_goal_(?:set|get|clear)/.test(name);
 }
 
+// Claude Code's plan-ready signal. ExitPlanMode is only registered when the
+// session runs in a real plan permission mode; the host relays it as a tool call
+// by name, so we can treat it as the definitive "plan presented" event alongside
+// the prose heuristic.
+function isExitPlanTool(name: string): boolean {
+  const base = name.replace(/^mcp__[^_]+__/, "");
+  return base === "ExitPlanMode" || base === "exit_plan_mode";
+}
+
 function isInternalActivity(kind: string): boolean {
   return ["delegate", "decision", "goal", "warmup"].includes(kind);
 }
@@ -766,6 +776,10 @@ export default function FusionChatPane({
   const claudeThreadTitleRef = useRef("");
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [verbose, setVerbose] = useState(false);
+  const [planActionReady, setPlanActionReady] = useState(false);
+  const [implementingPlan, setImplementingPlan] = useState(false);
+  const [modeSwitching, setModeSwitching] = useState(false);
+  const [modeFlash, setModeFlash] = useState(false);
   const toggleExpanded = (key: string) =>
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -801,10 +815,31 @@ export default function FusionChatPane({
   const slashMenuOpen = slashMenu.items.length > 0;
   const visibleMessages = verbose ? messages : messages.filter((message) => !message.internal);
   const pendingDecisionIsQuestion = pendingDecision?.kind === "question";
+  const showPlanActionBar =
+    planActionReady && fusionRunMode === "plan" && !busy && !waiting && !pendingDecision;
+  const fusionRunModeRef = useRef(fusionRunMode);
+  const planResponseModeRef = useRef<FusionRunMode>("auto");
+  const planResponseHadTextRef = useRef(false);
+  const planExitSignaledRef = useRef(false);
+  const previousRunModeRef = useRef(fusionRunMode);
 
   useEffect(() => {
     inputRef.current = input;
   }, [input]);
+
+  useEffect(() => {
+    fusionRunModeRef.current = fusionRunMode;
+  }, [fusionRunMode]);
+
+  useEffect(() => {
+    if (previousRunModeRef.current === fusionRunMode) {
+      return undefined;
+    }
+    previousRunModeRef.current = fusionRunMode;
+    setModeFlash(true);
+    const timer = window.setTimeout(() => setModeFlash(false), 650);
+    return () => window.clearTimeout(timer);
+  }, [fusionRunMode]);
 
   useEffect(() => {
     onThreadRefChangeRef.current = onThreadRefChange;
@@ -914,6 +949,11 @@ export default function FusionChatPane({
     setInterruptingState(false);
     setBusyState(false);
     setFailed(false);
+    setPlanActionReady(false);
+    setImplementingPlan(false);
+    planResponseModeRef.current = fusionRunModeRef.current;
+    planResponseHadTextRef.current = false;
+    planExitSignaledRef.current = false;
     onStatusChangeRef.current("starting");
     let cancelled = false;
     const resumeThreadRef =
@@ -938,10 +978,44 @@ export default function FusionChatPane({
           return;
         }
 
+        // A Fusion resume id is only resumable once Claude has persisted a
+        // transcript for it (at least one exchanged message). Resuming a stale
+        // or never-persisted id makes the headless `claude --resume` child exit
+        // immediately, which surfaces here as "Fusion process exited with code
+        // 1" and a dead pane. Confirm the id first and self-heal to a fresh
+        // chat — the same contract TerminalPane's resolveLaunchCommand uses.
+        let effectiveResumeId = resumeId;
+        if (resumeId && window.vibe?.agentThreads) {
+          try {
+            const confirm = await window.vibe.agentThreads.findLatest({
+              provider: "claude",
+              cwd: session.cwd,
+              confirmId: resumeId
+            });
+            if (confirm?.status === "missing") {
+              effectiveResumeId = undefined;
+              claudeSessionIdRef.current = "";
+              claudeThreadTitleRef.current = "";
+              push({
+                role: "opus",
+                kind: "activity",
+                text: "The saved Fusion chat is no longer available to resume. Starting a fresh chat instead."
+              });
+            }
+          } catch {
+            // Confirmation unavailable (host down/timeout): attempt the resume
+            // rather than discard a conversation that may well exist.
+          }
+        }
+
+        if (cancelled) {
+          return;
+        }
+
         const startPayload = {
           id: session.id,
           cwd: session.cwd,
-          resumeId,
+          resumeId: effectiveResumeId,
           mode: fusionRunMode,
           model: fusionModel,
           ...(fusionCodexModel === "auto" ? {} : { codexModel: fusionCodexModel }),
@@ -1009,6 +1083,12 @@ export default function FusionChatPane({
           publishClaudeThreadRef();
           break;
         case "user":
+          if (!event.steer) {
+            setPlanActionReady(false);
+            planResponseModeRef.current = fusionRunModeRef.current;
+            planResponseHadTextRef.current = false;
+            planExitSignaledRef.current = false;
+          }
           if (
             !event.steer &&
             !decisionTurnLabelsRef.current.has(event.text) &&
@@ -1055,6 +1135,9 @@ export default function FusionChatPane({
           break;
         case "assistant-text":
           setActiveRole("claude");
+          if (event.delta.trim()) {
+            planResponseHadTextRef.current = true;
+          }
           appendStreaming("text", event.delta);
           break;
         case "thinking":
@@ -1067,6 +1150,12 @@ export default function FusionChatPane({
           const isCodexBridge = isCodexBridgeTool(event.name);
           const isGoalTool = isCodexGoalTool(event.name);
           setActiveRole(isCodexBridge ? "codex" : "claude");
+          // Honor Claude Code's ExitPlanMode as a first-class plan-ready trigger.
+          // Dormant under the current acceptEdits mode (the tool isn't registered),
+          // exact the moment a real plan permission mode is enabled.
+          if (isExitPlanTool(event.name)) {
+            planExitSignaledRef.current = true;
+          }
           toolRoleRef.current.set(event.toolId, {
             name: event.name,
             isCodexBridge,
@@ -1147,6 +1236,14 @@ export default function FusionChatPane({
           if (waitingForDecisionRef.current) {
             onStatusChangeRef.current("waiting");
           } else {
+            if (
+              fusionRunModeRef.current === "plan" &&
+              (planExitSignaledRef.current ||
+                (planResponseModeRef.current === "plan" &&
+                  planResponseHadTextRef.current))
+            ) {
+              setPlanActionReady(true);
+            }
             emitAttention("completed", "done");
           }
           break;
@@ -1157,6 +1254,7 @@ export default function FusionChatPane({
           setWaitingState(false);
           setFailed(false);
           clearPendingDecision();
+          setPlanActionReady(false);
           setBusyState(false);
           onStatusChangeRef.current("waiting");
           setInterruptStatus("Interrupted by user.");
@@ -1177,6 +1275,7 @@ export default function FusionChatPane({
           setBusyState(false);
           setFailed(true);
           clearPendingDecision();
+          setPlanActionReady(false);
           emitAttention("failed", "error", event.message);
           break;
         case "closed":
@@ -1188,6 +1287,7 @@ export default function FusionChatPane({
             setBusyState(false);
             setFailed(true);
             clearPendingDecision();
+            setPlanActionReady(false);
             push({ role: "opus", kind: "error", text: message });
             emitAttention("failed", "exit", message);
           } else if (busyRef.current) {
@@ -1195,6 +1295,7 @@ export default function FusionChatPane({
             setBusyState(false);
             setFailed(true);
             clearPendingDecision();
+            setPlanActionReady(false);
             push({ role: "opus", kind: "error", text: message });
             emitAttention("failed", "exit", message);
           } else {
@@ -1249,10 +1350,10 @@ export default function FusionChatPane({
     onSettingsChange(nextSettings);
   }
 
-  function applyRunMode(nextMode: FusionRunMode) {
+  async function applyRunMode(nextMode: FusionRunMode) {
     const mode = normalizeFusionRunMode(nextMode);
     if (mode === fusionRunMode) {
-      return;
+      return true;
     }
 
     const nextSettings = {
@@ -1263,32 +1364,39 @@ export default function FusionChatPane({
       codexEffort: fusionCodexEffort
     };
 
+    setPlanActionReady(false);
+
     if (session.started) {
       const setMode = window.vibe?.fusionChat?.setMode;
       if (!setMode) {
         push({ role: "opus", kind: "error", text: "Fusion unavailable: mode bridge is not available." });
-        return;
+        return false;
       }
-      setMode(session.id, mode)
-        .then((result) => {
-          if (result && result.ok === false) {
-            push({ role: "opus", kind: "error", text: `Could not set Fusion mode: ${result.error || "unknown error"}` });
-            return;
-          }
-          onSettingsChange(nextSettings);
-          pushCommandStatus(`Mode: ${mode === "plan" ? "Plan" : "Auto"}.`);
-        })
-        .catch((error) => {
-          push({ role: "opus", kind: "error", text: `Could not set Fusion mode: ${error?.message || "unknown error"}` });
-        });
-      return;
+      setModeSwitching(true);
+      try {
+        const result = await setMode(session.id, mode);
+        if (result && result.ok === false) {
+          push({ role: "opus", kind: "error", text: `Could not set Fusion mode: ${result.error || "unknown error"}` });
+          return false;
+        }
+        onSettingsChange(nextSettings);
+        return true;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "unknown error";
+        push({ role: "opus", kind: "error", text: `Could not set Fusion mode: ${message}` });
+        return false;
+      } finally {
+        setModeSwitching(false);
+      }
     }
 
     onSettingsChange(nextSettings);
+    return true;
   }
 
   function toggleRunMode() {
-    applyRunMode(fusionRunMode === "plan" ? "auto" : "plan");
+    if (modeSwitching || implementingPlan) return;
+    void applyRunMode(fusionRunMode === "plan" ? "auto" : "plan");
   }
 
   function applySlashSelection(item: SlashMenuItem | undefined) {
@@ -1437,6 +1545,7 @@ export default function FusionChatPane({
     if (normalized === "/clear") {
       setInput("");
       setMessages([]);
+      setPlanActionReady(false);
       setInterruptingState(false);
       setBusyState(false);
       onClear();
@@ -1692,6 +1801,7 @@ export default function FusionChatPane({
       setInterruptingState(false);
       return;
     }
+    setPlanActionReady(false);
     setWaitingState(false);
     clearPendingDecision();
     window.vibe.fusionChat.sendUserTurn(session.id, text);
@@ -1699,6 +1809,34 @@ export default function FusionChatPane({
     setInterruptingState(false);
     setBusyState(true);
     onStatusChangeRef.current("running");
+  }
+
+  async function handleImplementPlan() {
+    if (busyRef.current || implementingPlan) return;
+    if (!window.vibe?.fusionChat?.sendUserTurn) {
+      const message = "Fusion unavailable: fusion chat bridge is not available.";
+      push({ role: "opus", kind: "error", text: message });
+      emitAttention("failed", "error", message);
+      return;
+    }
+
+    setImplementingPlan(true);
+    setPlanActionReady(false);
+    const switched = await applyRunMode("auto");
+    if (!switched) {
+      setImplementingPlan(false);
+      return;
+    }
+
+    setWaitingState(false);
+    clearPendingDecision();
+    window.vibe.fusionChat.sendUserTurn(session.id, IMPLEMENT_PLAN_PROMPT);
+    setInput("");
+    inputRef.current = "";
+    setInterruptingState(false);
+    setBusyState(true);
+    onStatusChangeRef.current("running");
+    setImplementingPlan(false);
   }
 
   function submitPendingDecision(
@@ -2020,6 +2158,23 @@ export default function FusionChatPane({
               )}
             </div>
           )}
+          {showPlanActionBar && (
+            <div className="fusion-plan-action-bar" role="group" aria-label="Plan actions">
+              <span className="fusion-plan-action-label">Implement this plan?</span>
+              <button
+                className="fusion-plan-action-button is-primary"
+                type="button"
+                title="Switch to Auto and send: Implement the plan."
+                disabled={implementingPlan || modeSwitching}
+                onClick={() => {
+                  void handleImplementPlan();
+                }}
+              >
+                <Play size={14} />
+                <span>Implement plan</span>
+              </button>
+            </div>
+          )}
           <div className="fusion-composer">
             <textarea
               ref={composerRef}
@@ -2033,7 +2188,9 @@ export default function FusionChatPane({
                         ? "Type the answer for Fusion…"
                         : "Choose an approval action or add guidance…"
                       : "Answer Fusion to continue…"
-                    : "Ask Fusion to build, fix, or design…"
+                    : showPlanActionBar
+                      ? "Implement the plan, or type to refine it…"
+                      : "Ask Fusion to build, fix, or design…"
               }
               onChange={(e) => {
                 inputRef.current = e.target.value;
@@ -2097,9 +2254,20 @@ export default function FusionChatPane({
             </button>
           </div>
           <div className="fusion-input-settings" title={`${fusionSettingsLine} · Shift+Tab toggles mode`}>
-            <span className={clsx("fusion-mode-indicator", `is-${fusionRunMode}`)}>
+            <button
+              type="button"
+              className={clsx(
+                "fusion-mode-indicator",
+                `is-${fusionRunMode}`,
+                modeFlash && "is-flashing"
+              )}
+              title={`Switch to ${fusionRunMode === "plan" ? "Auto" : "Plan"} mode`}
+              aria-pressed={fusionRunMode === "plan"}
+              disabled={modeSwitching || implementingPlan}
+              onClick={toggleRunMode}
+            >
               Mode: {fusionRunModeText}
-            </span>
+            </button>
             <span className="fusion-mode-shortcut">Shift+Tab</span>
             <span className="fusion-settings-detail">{fusionSettingsLine}</span>
           </div>
