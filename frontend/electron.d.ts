@@ -133,6 +133,32 @@ declare global {
           models?: { plannerModel?: string | null; executorModel?: string | null };
         }>;
         requestProviders: (id: string) => Promise<{ ok: boolean; error?: string }>;
+        setProviderKey: (
+          id: string,
+          providerId: string,
+          key: string,
+          metadata?: Record<string, string>,
+          nonce?: string
+        ) => Promise<{ ok: boolean; error?: string }>;
+        removeProviderKey: (
+          id: string,
+          providerId: string
+        ) => Promise<{ ok: boolean; error?: string }>;
+        oauthAuthorize: (
+          id: string,
+          providerId: string,
+          method: number,
+          inputs?: Record<string, string>,
+          nonce?: string
+        ) => Promise<{ ok: boolean; error?: string }>;
+        oauthCallback: (
+          id: string,
+          providerId: string,
+          method: number,
+          code?: string,
+          nonce?: string
+        ) => Promise<{ ok: boolean; error?: string }>;
+        openExternal: (url: string) => Promise<{ ok: boolean; error?: string }>;
         sendUserTurn: (id: string, text: string) => void;
         permission: (
           id: string,

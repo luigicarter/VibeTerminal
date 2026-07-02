@@ -396,11 +396,34 @@ export type OpenFusionChatEvent =
   | { id: string; type: "permission-resolved"; requestId: string; reply: string }
   | {
       id: string;
+      type: "auth-result";
+      ok: boolean;
+      providerId: string;
+      action: "connect" | "disconnect";
+      nonce?: string;
+      message?: string;
+    }
+  | {
+      id: string;
+      type: "oauth-authorize";
+      ok: boolean;
+      providerId: string;
+      nonce?: string;
+      flow?: "code" | "auto";
+      url?: string;
+      instructions?: string;
+      message?: string;
+    }
+  | {
+      id: string;
       type: "providers";
       ok: boolean;
       message?: string;
       connected?: OpenFusionProvider[];
       available?: { id: string; name: string }[];
+      // Per-provider auth methods from GET /provider/auth. Providers absent
+      // from this map connect with the default single API-key method.
+      authMethods?: Record<string, OpenFusionAuthMethod[]>;
     }
   | {
       id: string;
@@ -419,6 +442,23 @@ export interface OpenFusionProvider {
   id: string;
   name: string;
   models: { id: string; name: string }[];
+}
+
+// Mirrors OpenCode's provider auth-method metadata (GET /provider/auth):
+// prompts are extra fields a method needs before it can run (e.g. Cloudflare
+// accountId for API-key auth, GitHub deployment type for OAuth).
+export interface OpenFusionAuthPrompt {
+  type: "text" | "select";
+  key: string;
+  message: string;
+  placeholder?: string;
+  options?: { label: string; value: string; hint?: string }[];
+}
+
+export interface OpenFusionAuthMethod {
+  type: "api" | "oauth";
+  label: string;
+  prompts?: OpenFusionAuthPrompt[];
 }
 
 // One rendered entry in an Open Fusion pane's chat transcript.

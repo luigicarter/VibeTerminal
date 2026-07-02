@@ -2095,3 +2095,54 @@ button {
 .openfusion-pair-role.is-brain { color: var(--of-brain); }
 .openfusion-pair-role.is-executor { color: var(--of-executor); }
 .openfusion-pair-join { color: #6f766f; }
+
+/* Provider connect (API key entry) row inside the decision panel. */
+.openfusion-auth-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.openfusion-auth-input {
+  flex: 1 1 220px;
+  min-width: 160px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid #343b34;
+  background: #12160f;
+  color: #e6ebe6;
+  font-family: "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+  font-size: 12px;
+}
+.openfusion-auth-input:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--pane-accent) 55%, #343b34);
+}
+.openfusion-auth-input::placeholder { color: #6f766f; }
+.openfusion-auth-input:disabled { opacity: 0.5; }
+
+/* OAuth link + waiting rows in the provider connect panel. */
+.openfusion-auth-link {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.openfusion-auth-url {
+  flex: 1 1 220px;
+  min-width: 0;
+  color: #9fd8c8;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+.openfusion-auth-waiting {
+  flex: 1 1 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #9aa39a;
+  font-size: 12px;
+}

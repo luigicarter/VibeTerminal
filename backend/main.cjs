@@ -5,7 +5,8 @@ const {
   clipboard,
   dialog,
   ipcMain,
-  screen
+  screen,
+  shell
 } = require("electron");
 const fs = require("fs");
 const os = require("os");
@@ -1592,6 +1593,109 @@ ipcMain.handle("openfusion-chat:providers", (_event, payload) => {
     return { ok: false, error: "missing session id" };
   }
   const sent = sendToOpenFusionChatHost({ type: "providers", payload: { id: payload.id } });
+  return sent
+    ? { ok: true }
+    : { ok: false, error: "Open Fusion chat host is not running." };
+});
+
+ipcMain.handle("openfusion-chat:auth-set", (_event, payload) => {
+  const providerId =
+    typeof payload?.providerId === "string" ? payload.providerId.trim() : "";
+  const key = typeof payload?.key === "string" ? payload.key.trim() : "";
+  if (!payload?.id || !providerId || !key) {
+    return { ok: false, error: "missing provider id or key" };
+  }
+  // The key is relayed to the host verbatim and must never be logged or echoed.
+  const sent = sendToOpenFusionChatHost({
+    type: "auth-set",
+    payload: {
+      id: payload.id,
+      providerId,
+      key,
+      metadata:
+        payload.metadata && typeof payload.metadata === "object"
+          ? payload.metadata
+          : undefined,
+      nonce: typeof payload.nonce === "string" ? payload.nonce : undefined
+    }
+  });
+  return sent
+    ? { ok: true }
+    : { ok: false, error: "Open Fusion chat host is not running." };
+});
+
+ipcMain.handle("openfusion-chat:oauth-authorize", (_event, payload) => {
+  const providerId =
+    typeof payload?.providerId === "string" ? payload.providerId.trim() : "";
+  if (!payload?.id || !providerId || !Number.isInteger(payload.method)) {
+    return { ok: false, error: "missing provider id or auth method" };
+  }
+  const sent = sendToOpenFusionChatHost({
+    type: "oauth-authorize",
+    payload: {
+      id: payload.id,
+      providerId,
+      method: payload.method,
+      inputs:
+        payload.inputs && typeof payload.inputs === "object"
+          ? payload.inputs
+          : undefined,
+      nonce: typeof payload.nonce === "string" ? payload.nonce : undefined
+    }
+  });
+  return sent
+    ? { ok: true }
+    : { ok: false, error: "Open Fusion chat host is not running." };
+});
+
+ipcMain.handle("openfusion-chat:oauth-callback", (_event, payload) => {
+  const providerId =
+    typeof payload?.providerId === "string" ? payload.providerId.trim() : "";
+  if (!payload?.id || !providerId || !Number.isInteger(payload.method)) {
+    return { ok: false, error: "missing provider id or auth method" };
+  }
+  const sent = sendToOpenFusionChatHost({
+    type: "oauth-callback",
+    payload: {
+      id: payload.id,
+      providerId,
+      method: payload.method,
+      code: typeof payload.code === "string" ? payload.code : undefined,
+      nonce: typeof payload.nonce === "string" ? payload.nonce : undefined
+    }
+  });
+  return sent
+    ? { ok: true }
+    : { ok: false, error: "Open Fusion chat host is not running." };
+});
+
+// Open an OAuth authorization URL in the user's default browser. Restricted to
+// http(s) so a hostile URL can never launch arbitrary protocol handlers.
+ipcMain.handle("app:open-external", (_event, payload) => {
+  const raw = typeof payload?.url === "string" ? payload.url.trim() : "";
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    return { ok: false, error: "invalid url" };
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    return { ok: false, error: "only http(s) links can be opened" };
+  }
+  shell.openExternal(url.toString()).catch(() => {});
+  return { ok: true };
+});
+
+ipcMain.handle("openfusion-chat:auth-remove", (_event, payload) => {
+  const providerId =
+    typeof payload?.providerId === "string" ? payload.providerId.trim() : "";
+  if (!payload?.id || !providerId) {
+    return { ok: false, error: "missing provider id" };
+  }
+  const sent = sendToOpenFusionChatHost({
+    type: "auth-remove",
+    payload: { id: payload.id, providerId }
+  });
   return sent
     ? { ok: true }
     : { ok: false, error: "Open Fusion chat host is not running." };

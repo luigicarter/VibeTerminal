@@ -4,8 +4,11 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Copy,
   CopyPlus,
+  ExternalLink,
   GripVertical,
+  KeyRound,
   Maximize2,
   Minimize2,
   Orbit,
@@ -24,6 +27,7 @@ import type {
   AgentProfile,
   AgentSession,
   AgentThreadRef,
+  OpenFusionAuthMethod,
   OpenFusionChatEvent,
   OpenFusionChatMessage,
   OpenFusionChatRole,
@@ -76,6 +80,38 @@ interface PendingPermission {
   title?: string;
 }
 
+// The connect flow mirrors OpenCode's own "Connect a provider" dialog: pick an
+// auth method when a provider registers more than one, answer the method's
+// prompt fields, then either store an API key (+ prompt answers as credential
+// metadata) or run the OAuth authorize/callback pair.
+type AuthFlowStage =
+  | { stage: "method" }
+  | { stage: "prompts"; methodIndex: number; promptIndex: number; values: Record<string, string> }
+  | { stage: "key"; methodIndex: number; metadata?: Record<string, string> }
+  | { stage: "oauth-start"; methodIndex: number }
+  | {
+      stage: "oauth";
+      methodIndex: number;
+      flow: "code" | "auto";
+      url: string;
+      instructions: string;
+    }
+  | { stage: "waiting"; methodIndex: number };
+
+interface AuthFlow {
+  providerId: string;
+  name: string;
+  nonce: string;
+  methods: OpenFusionAuthMethod[];
+  step: AuthFlowStage;
+}
+
+const DEFAULT_AUTH_METHODS: OpenFusionAuthMethod[] = [{ type: "api", label: "API key" }];
+
+function deviceCodeFromInstructions(instructions: string) {
+  return /[A-Z0-9]{4}-[A-Z0-9]{4,5}/.exec(instructions || "")?.[0] ?? "";
+}
+
 interface SlashMenuItem {
   key: string;
   label: string;
@@ -96,6 +132,8 @@ type PickerState =
 const SLASH_COMMANDS = [
   { name: "/brain-model", desc: "Pick the Brain (planner) model" },
   { name: "/executor-model", desc: "Pick the Executor model" },
+  { name: "/connect", desc: "Connect a provider with an API key" },
+  { name: "/disconnect", desc: "Remove a provider's stored credential" },
   { name: "/models", desc: "Show the current Brain and Executor models" },
   { name: "/resume", desc: "Resume the last Open Fusion chat" },
   { name: "/clear", desc: "Clear this conversation" },
@@ -215,6 +253,22 @@ export default function OpenFusionChatPane({
   const [picker, setPicker] = useState<PickerState>(null);
   const [providers, setProviders] = useState<OpenFusionProvider[] | null>(null);
   const [availableProviders, setAvailableProviders] = useState<{ id: string; name: string }[]>([]);
+  const [authFlow, setAuthFlow] = useState<AuthFlow | null>(null);
+  // Shared text field for the auth flow's current input (key, prompt answer,
+  // or pasted OAuth code). Never echoed into the transcript.
+  const [authText, setAuthText] = useState("");
+  const [providerAuthMethods, setProviderAuthMethods] = useState<
+    Record<string, OpenFusionAuthMethod[]>
+  >({});
+  // The picker role that led into a connect flow, so a successful connect can
+  // drop the user back into the model pick they were doing.
+  const authReturnRoleRef = useRef<"brain" | "executor" | null>(null);
+  const authInputRef = useRef<HTMLInputElement | null>(null);
+  const authFlowRef = useRef<AuthFlow | null>(null);
+  const authNonceRef = useRef(0);
+  // /connect issued before the provider catalog arrived: open the flow as soon
+  // as the providers event lands.
+  const pendingConnectRef = useRef<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
@@ -274,6 +328,22 @@ export default function OpenFusionChatPane({
   useEffect(() => {
     setSlashIndex(0);
   }, [input, picker]);
+
+  useEffect(() => {
+    authFlowRef.current = authFlow;
+  }, [authFlow]);
+
+  useEffect(() => {
+    if (!authFlow) return;
+    const step = authFlow.step;
+    if (
+      step.stage === "key" ||
+      step.stage === "prompts" ||
+      (step.stage === "oauth" && step.flow === "code")
+    ) {
+      authInputRef.current?.focus();
+    }
+  }, [authFlow]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -577,10 +647,108 @@ export default function OpenFusionChatPane({
             onStatusChangeRef.current("running");
           }
           break;
+        case "auth-result": {
+          const flow = authFlowRef.current;
+          const mine = Boolean(flow && event.nonce && event.nonce === flow.nonce);
+          if (event.ok && event.action === "connect") {
+            if (mine) {
+              setAuthFlow(null);
+              setAuthText("");
+            }
+            push({
+              role: "brain",
+              kind: "activity",
+              text: `Provider '${event.providerId}' connected.`
+            });
+            const returnRole = mine ? authReturnRoleRef.current : null;
+            authReturnRoleRef.current = null;
+            if (returnRole) {
+              // The refreshed catalog arrives as the next providers event; the
+              // reopened picker will list the provider under Connected.
+              setPicker({ role: returnRole });
+            }
+          } else if (event.ok) {
+            push({
+              role: "brain",
+              kind: "activity",
+              text: `Provider '${event.providerId}' disconnected.`
+            });
+          } else {
+            // Failures from a cancelled/superseded flow stay quiet; everything
+            // else (including nonce-less disconnect errors) surfaces.
+            if (event.nonce && !mine) break;
+            push({
+              role: "brain",
+              kind: "error",
+              text: event.message || `Could not update provider '${event.providerId}'.`
+            });
+            if (mine) {
+              setAuthFlow(null);
+              setAuthText("");
+            }
+          }
+          break;
+        }
+        case "oauth-authorize": {
+          const flow = authFlowRef.current;
+          if (!flow || event.nonce !== flow.nonce) break;
+          if (!event.ok) {
+            push({
+              role: "brain",
+              kind: "error",
+              text: event.message || "Could not start the OAuth flow."
+            });
+            setAuthFlow(null);
+            break;
+          }
+          const methodIndex =
+            "methodIndex" in flow.step ? flow.step.methodIndex : 0;
+          const flowKind = event.flow === "code" ? "code" : "auto";
+          setAuthFlow({
+            ...flow,
+            step: {
+              stage: "oauth",
+              methodIndex,
+              flow: flowKind,
+              url: event.url || "",
+              instructions: event.instructions || ""
+            }
+          });
+          setAuthText("");
+          if (event.url) {
+            void window.vibe?.openFusionChat?.openExternal(event.url);
+          }
+          if (flowKind === "auto") {
+            // Device flow: the server blocks in the callback until the browser
+            // side finishes, then the result arrives as auth-result.
+            void window.vibe?.openFusionChat
+              ?.oauthCallback(session.id, flow.providerId, methodIndex, undefined, flow.nonce)
+              .then((result) => {
+                if (result && result.ok === false) {
+                  push({
+                    role: "brain",
+                    kind: "error",
+                    text: result.error || "Could not complete the OAuth flow."
+                  });
+                  setAuthFlow(null);
+                }
+              });
+          }
+          break;
+        }
         case "providers":
           if (event.ok) {
             setProviders(event.connected ?? []);
             setAvailableProviders(event.available ?? []);
+            setProviderAuthMethods(event.authMethods ?? {});
+            const pendingConnect = pendingConnectRef.current;
+            if (pendingConnect) {
+              pendingConnectRef.current = null;
+              openAuthFlow(pendingConnect, event.authMethods ?? {}, [
+                ...(event.available ?? []),
+                ...(event.connected ?? [])
+              ]);
+            }
           } else {
             setProviders([]);
             setAvailableProviders([]);
@@ -745,8 +913,198 @@ export default function OpenFusionChatPane({
     composerRef.current?.focus();
   }
 
+  function nextAuthNonce() {
+    authNonceRef.current += 1;
+    return `${session.id}-auth-${authNonceRef.current}`;
+  }
+
+  function stepForMethod(
+    methods: OpenFusionAuthMethod[],
+    methodIndex: number
+  ): AuthFlowStage {
+    const method = methods[methodIndex];
+    if (method?.prompts?.length) {
+      return { stage: "prompts", methodIndex, promptIndex: 0, values: {} };
+    }
+    return method?.type === "oauth"
+      ? { stage: "oauth-start", methodIndex }
+      : { stage: "key", methodIndex };
+  }
+
+  function requestOauthAuthorize(
+    flow: AuthFlow,
+    methodIndex: number,
+    inputs: Record<string, string>
+  ) {
+    void window.vibe?.openFusionChat
+      ?.oauthAuthorize(session.id, flow.providerId, methodIndex, inputs, flow.nonce)
+      .then((result) => {
+        if (result && result.ok === false) {
+          push({
+            role: "brain",
+            kind: "error",
+            text: result.error || "Could not start the OAuth flow."
+          });
+          setAuthFlow(null);
+        }
+      });
+  }
+
+  // methodsMap/names let the providers-event handler open a queued /connect
+  // with the payload it just received instead of a stale state closure.
+  function openAuthFlow(
+    providerIdRaw: string,
+    methodsMap?: Record<string, OpenFusionAuthMethod[]>,
+    names?: { id: string; name: string }[]
+  ) {
+    const providerId = providerIdRaw.trim();
+    if (!providerId) return;
+    const map = methodsMap ?? providerAuthMethods;
+    const methods = map[providerId]?.length ? map[providerId] : DEFAULT_AUTH_METHODS;
+    const flow: AuthFlow = {
+      providerId,
+      name:
+        (names ?? availableProviders).find((provider) => provider.id === providerId)
+          ?.name || providerId,
+      nonce: nextAuthNonce(),
+      methods,
+      step: methods.length > 1 ? { stage: "method" } : stepForMethod(methods, 0)
+    };
+    setPicker(null);
+    setInput("");
+    setAuthText("");
+    setAuthFlow(flow);
+    if (flow.step.stage === "oauth-start") {
+      requestOauthAuthorize(flow, flow.step.methodIndex, {});
+    }
+  }
+
+  function selectAuthMethod(methodIndex: number) {
+    const flow = authFlow;
+    if (!flow || flow.step.stage !== "method") return;
+    const step = stepForMethod(flow.methods, methodIndex);
+    const next = { ...flow, step };
+    setAuthText("");
+    setAuthFlow(next);
+    if (step.stage === "oauth-start") {
+      requestOauthAuthorize(next, step.methodIndex, {});
+    }
+  }
+
+  function finishAuthPrompts(
+    flow: AuthFlow,
+    methodIndex: number,
+    values: Record<string, string>
+  ) {
+    const method = flow.methods[methodIndex];
+    if (method?.type === "oauth") {
+      const next: AuthFlow = { ...flow, step: { stage: "oauth-start", methodIndex } };
+      setAuthFlow(next);
+      requestOauthAuthorize(next, methodIndex, values);
+    } else {
+      setAuthFlow({ ...flow, step: { stage: "key", methodIndex, metadata: values } });
+    }
+  }
+
+  function advanceAuthPrompt(value: string) {
+    const flow = authFlow;
+    if (!flow || flow.step.stage !== "prompts") return;
+    const method = flow.methods[flow.step.methodIndex];
+    const prompt = method?.prompts?.[flow.step.promptIndex];
+    const trimmed = value.trim();
+    if (!prompt || !trimmed) return;
+    const values = { ...flow.step.values, [prompt.key]: trimmed };
+    const nextIndex = flow.step.promptIndex + 1;
+    setAuthText("");
+    if (method?.prompts && nextIndex < method.prompts.length) {
+      setAuthFlow({
+        ...flow,
+        step: { ...flow.step, promptIndex: nextIndex, values }
+      });
+    } else {
+      finishAuthPrompts(flow, flow.step.methodIndex, values);
+    }
+  }
+
+  function submitAuthKey() {
+    const flow = authFlow;
+    if (!flow || flow.step.stage !== "key") return;
+    const key = authText.trim();
+    if (!key) return;
+    const { methodIndex, metadata } = flow.step;
+    setAuthFlow({ ...flow, step: { stage: "waiting", methodIndex } });
+    setAuthText("");
+    void window.vibe?.openFusionChat
+      ?.setProviderKey(session.id, flow.providerId, key, metadata, flow.nonce)
+      .then((result) => {
+        if (result && result.ok === false) {
+          push({
+            role: "brain",
+            kind: "error",
+            text: result.error || "Could not store the provider key."
+          });
+          setAuthFlow(null);
+        }
+      });
+  }
+
+  function submitOauthCode() {
+    const flow = authFlow;
+    if (!flow || flow.step.stage !== "oauth" || flow.step.flow !== "code") return;
+    const code = authText.trim();
+    if (!code) return;
+    const { methodIndex } = flow.step;
+    setAuthFlow({ ...flow, step: { stage: "waiting", methodIndex } });
+    setAuthText("");
+    void window.vibe?.openFusionChat
+      ?.oauthCallback(session.id, flow.providerId, methodIndex, code, flow.nonce)
+      .then((result) => {
+        if (result && result.ok === false) {
+          push({
+            role: "brain",
+            kind: "error",
+            text: result.error || "Could not complete the OAuth flow."
+          });
+          setAuthFlow(null);
+        }
+      });
+  }
+
+  function cancelAuthFlow() {
+    setAuthFlow(null);
+    setAuthText("");
+    authReturnRoleRef.current = null;
+  }
+
+  function disconnectProvider(providerId: string) {
+    const id = providerId.trim();
+    if (!id) return;
+    void window.vibe?.openFusionChat
+      ?.removeProviderKey(session.id, id)
+      .then((result) => {
+        if (result && result.ok === false) {
+          push({
+            role: "brain",
+            kind: "error",
+            text: result.error || "Could not remove the provider credential."
+          });
+        }
+      });
+  }
+
   function showModels() {
-    push({ role: "brain", kind: "activity", text: modelsLine });
+    const connectedIds = providers ? new Set(providers.map((entry) => entry.id)) : null;
+    const describe = (model: string) => {
+      const providerID = model.split("/")[0];
+      return connectedIds && providerID && !connectedIds.has(providerID)
+        ? `${model} (needs auth — /connect ${providerID})`
+        : model;
+    };
+    push({
+      role: "brain",
+      kind: "activity",
+      text: `Brain ${describe(plannerModel)} · Executor ${describe(executorModel)}`
+    });
   }
 
   function showHelp() {
@@ -772,6 +1130,44 @@ export default function OpenFusionChatPane({
       case "/body":
         if (arg) applyModelPick("executor", arg);
         else openModelPicker("executor");
+        return true;
+      case "/connect":
+      case "/auth":
+      case "/login":
+        if (arg) {
+          const providerId = arg.split(/\s+/)[0];
+          if (providers === null) {
+            // Method metadata comes with the provider catalog; open the flow
+            // as soon as it lands.
+            pendingConnectRef.current = providerId;
+            void window.vibe?.openFusionChat?.requestProviders(session.id);
+            push({
+              role: "brain",
+              kind: "activity",
+              text: "Loading the provider catalog…"
+            });
+          } else {
+            openAuthFlow(providerId);
+          }
+        } else {
+          push({
+            role: "brain",
+            kind: "activity",
+            text: "Usage: /connect <provider-id> — or pick a 'needs auth' provider from /brain-model."
+          });
+        }
+        return true;
+      case "/disconnect":
+      case "/logout":
+        if (arg) {
+          disconnectProvider(arg.split(/\s+/)[0]);
+        } else {
+          push({
+            role: "brain",
+            kind: "activity",
+            text: "Usage: /disconnect <provider-id>"
+          });
+        }
         return true;
       case "/models":
       case "/openfusion":
@@ -846,7 +1242,7 @@ export default function OpenFusionChatPane({
           items.push({
             key: `avail-${provider.id}`,
             label: provider.name,
-            desc: `needs auth: opencode auth login ${provider.id}`,
+            desc: "needs auth — select to enter an API key",
             command: `__needs-auth:${provider.id}`
           });
         }
@@ -919,13 +1315,8 @@ export default function OpenFusionChatPane({
     }
     if (item.command.startsWith("__needs-auth:")) {
       const providerId = item.command.slice("__needs-auth:".length);
-      push({
-        role: "brain",
-        kind: "activity",
-        text: `Provider '${providerId}' is not connected. Run: opencode auth login ${providerId}, then pick again.`
-      });
-      setPicker(null);
-      setInput("");
+      authReturnRoleRef.current = picker?.role ?? null;
+      openAuthFlow(providerId);
       return;
     }
     if (item.command.startsWith("__model:")) {
@@ -1195,6 +1586,302 @@ export default function OpenFusionChatPane({
                   <span>Reject</span>
                 </button>
               </div>
+            </div>
+          )}
+          {authFlow && (
+            <div className="fusion-decision-panel" role="group" aria-label="Connect provider">
+              <div className="fusion-decision-copy">
+                <span className="fusion-decision-kind">Connect {authFlow.name}</span>
+                <span className="fusion-decision-detail">
+                  {authFlow.step.stage === "method" &&
+                    "Choose how to sign in. Credentials are stored by OpenCode's own credential store, never by vibeTerminal."}
+                  {authFlow.step.stage === "prompts" &&
+                    (authFlow.methods[authFlow.step.methodIndex]?.prompts?.[
+                      authFlow.step.promptIndex
+                    ]?.message ??
+                      "Provide the requested value.")}
+                  {authFlow.step.stage === "key" &&
+                    `${
+                      authFlow.methods[authFlow.step.methodIndex]?.label || "API key"
+                    } for '${authFlow.providerId}' — stored by OpenCode's credential store, never by vibeTerminal.`}
+                  {authFlow.step.stage === "oauth-start" && "Starting the sign-in flow…"}
+                  {authFlow.step.stage === "oauth" &&
+                    (authFlow.step.instructions ||
+                      "Finish signing in with the opened browser page.")}
+                  {authFlow.step.stage === "waiting" && "Connecting…"}
+                </span>
+              </div>
+
+              {authFlow.step.stage === "method" && (
+                <div className="fusion-decision-actions">
+                  {authFlow.methods.map((method, index) => (
+                    <button
+                      key={`${method.type}-${index}`}
+                      className={clsx(
+                        "fusion-decision-button",
+                        index === 0 && "is-primary"
+                      )}
+                      type="button"
+                      onClick={() => selectAuthMethod(index)}
+                    >
+                      <KeyRound size={14} />
+                      <span>{method.label}</span>
+                    </button>
+                  ))}
+                  <button
+                    className="fusion-decision-button"
+                    type="button"
+                    title="Cancel"
+                    onClick={cancelAuthFlow}
+                  >
+                    <Ban size={14} />
+                    <span>Cancel</span>
+                  </button>
+                </div>
+              )}
+
+              {authFlow.step.stage === "prompts" &&
+                (() => {
+                  const step = authFlow.step;
+                  const prompt =
+                    authFlow.methods[step.methodIndex]?.prompts?.[step.promptIndex];
+                  if (!prompt) return null;
+                  if (prompt.type === "select") {
+                    return (
+                      <div className="fusion-decision-actions">
+                        {(prompt.options ?? []).map((option, index) => (
+                          <button
+                            key={option.value}
+                            className={clsx(
+                              "fusion-decision-button",
+                              index === 0 && "is-primary"
+                            )}
+                            type="button"
+                            title={option.hint || option.value}
+                            onClick={() => advanceAuthPrompt(option.value)}
+                          >
+                            <Check size={14} />
+                            <span>{option.label}</span>
+                          </button>
+                        ))}
+                        <button
+                          className="fusion-decision-button"
+                          type="button"
+                          title="Cancel"
+                          onClick={cancelAuthFlow}
+                        >
+                          <Ban size={14} />
+                          <span>Cancel</span>
+                        </button>
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className="openfusion-auth-row">
+                      <input
+                        ref={authInputRef}
+                        className="openfusion-auth-input"
+                        type="text"
+                        autoComplete="off"
+                        spellCheck={false}
+                        placeholder={prompt.placeholder || prompt.key}
+                        value={authText}
+                        onChange={(e) => setAuthText(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            advanceAuthPrompt(authText);
+                          }
+                          if (e.key === "Escape") {
+                            e.preventDefault();
+                            cancelAuthFlow();
+                          }
+                        }}
+                      />
+                      <button
+                        className="fusion-decision-button is-primary"
+                        type="button"
+                        disabled={!authText.trim()}
+                        onClick={() => advanceAuthPrompt(authText)}
+                      >
+                        <Check size={14} />
+                        <span>Next</span>
+                      </button>
+                      <button
+                        className="fusion-decision-button"
+                        type="button"
+                        title="Cancel"
+                        onClick={cancelAuthFlow}
+                      >
+                        <Ban size={14} />
+                        <span>Cancel</span>
+                      </button>
+                    </div>
+                  );
+                })()}
+
+              {authFlow.step.stage === "key" && (
+                <div className="openfusion-auth-row">
+                  <input
+                    ref={authInputRef}
+                    className="openfusion-auth-input"
+                    type="password"
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder={`${authFlow.providerId} API key…`}
+                    value={authText}
+                    onChange={(e) => setAuthText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        submitAuthKey();
+                      }
+                      if (e.key === "Escape") {
+                        e.preventDefault();
+                        cancelAuthFlow();
+                      }
+                    }}
+                  />
+                  <button
+                    className="fusion-decision-button is-primary"
+                    type="button"
+                    title="Store the key and connect"
+                    disabled={!authText.trim()}
+                    onClick={submitAuthKey}
+                  >
+                    <KeyRound size={14} />
+                    <span>Connect</span>
+                  </button>
+                  <button
+                    className="fusion-decision-button"
+                    type="button"
+                    title="Cancel"
+                    onClick={cancelAuthFlow}
+                  >
+                    <Ban size={14} />
+                    <span>Cancel</span>
+                  </button>
+                </div>
+              )}
+
+              {authFlow.step.stage === "oauth" && (
+                <>
+                  <div className="openfusion-auth-link" title={authFlow.step.url}>
+                    <span className="openfusion-auth-url">{authFlow.step.url}</span>
+                    <button
+                      className="fusion-decision-button"
+                      type="button"
+                      title="Open in browser"
+                      onClick={() => {
+                        if (authFlow.step.stage === "oauth") {
+                          void window.vibe?.openFusionChat?.openExternal(
+                            authFlow.step.url
+                          );
+                        }
+                      }}
+                    >
+                      <ExternalLink size={14} />
+                      <span>Open</span>
+                    </button>
+                    <button
+                      className="fusion-decision-button"
+                      type="button"
+                      title="Copy link or device code"
+                      onClick={() => {
+                        if (authFlow.step.stage !== "oauth") return;
+                        const code = deviceCodeFromInstructions(
+                          authFlow.step.instructions
+                        );
+                        window.vibe?.clipboard.writeText(code || authFlow.step.url);
+                      }}
+                    >
+                      <Copy size={14} />
+                      <span>
+                        {deviceCodeFromInstructions(authFlow.step.instructions)
+                          ? "Copy code"
+                          : "Copy link"}
+                      </span>
+                    </button>
+                  </div>
+                  {authFlow.step.flow === "code" ? (
+                    <div className="openfusion-auth-row">
+                      <input
+                        ref={authInputRef}
+                        className="openfusion-auth-input"
+                        type="text"
+                        autoComplete="off"
+                        spellCheck={false}
+                        placeholder="Paste the code from the browser…"
+                        value={authText}
+                        onChange={(e) => setAuthText(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            submitOauthCode();
+                          }
+                          if (e.key === "Escape") {
+                            e.preventDefault();
+                            cancelAuthFlow();
+                          }
+                        }}
+                      />
+                      <button
+                        className="fusion-decision-button is-primary"
+                        type="button"
+                        disabled={!authText.trim()}
+                        onClick={submitOauthCode}
+                      >
+                        <Check size={14} />
+                        <span>Complete</span>
+                      </button>
+                      <button
+                        className="fusion-decision-button"
+                        type="button"
+                        title="Cancel"
+                        onClick={cancelAuthFlow}
+                      >
+                        <Ban size={14} />
+                        <span>Cancel</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="openfusion-auth-row">
+                      <span className="openfusion-auth-waiting">
+                        <span className="chat-spinner">✻</span> Waiting for the
+                        browser sign-in to finish…
+                      </span>
+                      <button
+                        className="fusion-decision-button"
+                        type="button"
+                        title="Cancel"
+                        onClick={cancelAuthFlow}
+                      >
+                        <Ban size={14} />
+                        <span>Cancel</span>
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {(authFlow.step.stage === "oauth-start" ||
+                authFlow.step.stage === "waiting") && (
+                <div className="openfusion-auth-row">
+                  <span className="openfusion-auth-waiting">
+                    <span className="chat-spinner">✻</span>{" "}
+                    {authFlow.step.stage === "waiting" ? "Connecting…" : "Starting…"}
+                  </span>
+                  <button
+                    className="fusion-decision-button"
+                    type="button"
+                    title="Cancel"
+                    onClick={cancelAuthFlow}
+                  >
+                    <Ban size={14} />
+                    <span>Cancel</span>
+                  </button>
+                </div>
+              )}
             </div>
           )}
           <div className="fusion-composer">

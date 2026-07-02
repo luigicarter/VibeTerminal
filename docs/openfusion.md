@@ -34,6 +34,43 @@
 > in `backend/openFusionChatHost.cjs` dedupes delta-vs-snapshot text by
 > tracking emitted length per part id and is fixture-tested by
 > `scripts/backend/openfusion-chat-parse-smoke.cjs`.
+>
+> **Provider auth (in-pane, OpenCode-parity, live-verified):** the pane
+> replicates OpenCode's own "Connect a provider" workflow over the same server
+> APIs its TUI dialog uses:
+>
+> - `GET /provider/auth` → per-provider auth-method list
+>   (`{type:"oauth"|"api", label, prompts?}`). Providers absent from the map
+>   (most of the catalog, e.g. openrouter) default to a single API-key method.
+>   On this install 10 providers register special methods (openai ChatGPT
+>   OAuth, github-copilot device flow, xai, digitalocean, poe, gitlab,
+>   snowflake-cortex, plus api-with-prompts cloudflare-workers-ai /
+>   cloudflare-ai-gateway / azure).
+> - Method `prompts` (text/select fields like Cloudflare `accountId`, Azure
+>   `resourceName`, GitHub `deploymentType`) are collected first. For api
+>   methods the answers ride the credential's `metadata` record:
+>   `PUT /auth/{providerID}` `{type:"api", key, metadata?}`.
+> - OAuth methods: `POST /provider/{id}/oauth/authorize` `{method, inputs?}` →
+>   `{method:"code"|"auto", url, instructions}`. The pane opens the URL
+>   (validated `shell.openExternal` via `app:open-external`), offers copy
+>   link/device-code, then `POST /provider/{id}/oauth/callback`
+>   `{method, code?}` — "code" sends the pasted code, "auto" sends none and
+>   BLOCKS server-side until the browser device flow finishes (host uses a
+>   10-minute timeout; failures surface as `ProviderAuthOauthCallbackFailed`).
+> - `DELETE /auth/{providerID}` disconnects. The running instance only
+>   reflects auth changes after `POST /instance/dispose` (the same
+>   dispose+bootstrap the TUI performs after its own connect flow) — and the
+>   dispose emits `server.instance.disposed` and then ORPHANS the `/event`
+>   stream (the connection stays open but silent), so the host reattaches its
+>   SSE subscription whenever it sees that event. Disk sessions survive; the
+>   next `prompt_async` works unchanged.
+>
+> In the pane: picking a "needs auth" provider (or `/connect <id>`) walks
+> method choice → prompt fields → key entry or browser OAuth; `/disconnect
+> <id>` removes the credential. Stale/cancelled flows are ignored via a
+> per-flow nonce echoed on `oauth-authorize`/`auth-result` events. Keys and
+> codes only transit memory; they are never logged or echoed into the
+> transcript.
 
 ## The idea
 

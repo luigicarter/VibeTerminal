@@ -13,6 +13,14 @@
 //   {type:"permission", payload:{id, requestId, reply}}   ← "once"|"always"|"reject"
 //   {type:"planner-model", payload:{id, model}}           ← live Brain switch (next prompt)
 //   {type:"providers",  payload:{id}}                     ← replies with a "providers" event
+//   {type:"auth-set",   payload:{id, providerId, key, metadata?, nonce?}}
+//                                                          ← store an API key (opencode auth store)
+//   {type:"auth-remove", payload:{id, providerId}}        ← disconnect a provider
+//   {type:"oauth-authorize", payload:{id, providerId, method, inputs?, nonce?}}
+//                                                          ← start an OAuth method; replies "oauth-authorize"
+//   {type:"oauth-callback", payload:{id, providerId, method, code?, nonce?}}
+//                                                          ← complete OAuth ("auto" blocks until the
+//                                                            device flow finishes); replies "auth-result"
 //   {type:"interrupt",  payload:{id}}                     ← abort the current turn, keep the server
 //   {type:"stop",       payload:{id}}                     ← kill the pane's server
 //   {type:"shutdown"}
@@ -353,6 +361,52 @@ function rehydrateMessages(messages, rootSessionId) {
   return events;
 }
 
+// Strip GET /provider/auth to the JSON-safe method metadata the pane renders:
+// method type/label plus prompt fields (text/select) a method needs up front.
+// Mirrors what OpenCode's own connect dialog consumes.
+function normalizeAuthMethods(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const result = {};
+  for (const [providerId, methods] of Object.entries(raw)) {
+    if (!Array.isArray(methods)) continue;
+    const cleaned = [];
+    for (const method of methods) {
+      if (!method || typeof method !== "object") continue;
+      const type = method.type === "oauth" ? "oauth" : method.type === "api" ? "api" : null;
+      if (!type) continue;
+      const prompts = [];
+      for (const prompt of Array.isArray(method.prompts) ? method.prompts : []) {
+        if (!prompt || typeof prompt !== "object" || !prompt.key) continue;
+        const promptType = prompt.type === "select" ? "select" : "text";
+        prompts.push({
+          type: promptType,
+          key: String(prompt.key),
+          message: String(prompt.message || prompt.key),
+          ...(prompt.placeholder ? { placeholder: String(prompt.placeholder) } : {}),
+          ...(promptType === "select" && Array.isArray(prompt.options)
+            ? {
+                options: prompt.options
+                  .filter((option) => option && typeof option === "object")
+                  .map((option) => ({
+                    label: String(option.label ?? option.value ?? ""),
+                    value: String(option.value ?? ""),
+                    ...(option.hint ? { hint: String(option.hint) } : {})
+                  }))
+              }
+            : {})
+        });
+      }
+      cleaned.push({
+        type,
+        label: String(method.label || (type === "api" ? "API key" : "OAuth login")),
+        ...(prompts.length ? { prompts } : {})
+      });
+    }
+    if (cleaned.length) result[String(providerId)] = cleaned;
+  }
+  return result;
+}
+
 function buildServeSpawn(extraEnv, cwd, password) {
   const args = ["serve", "--port", "0", "--hostname", "127.0.0.1"];
   const env = {
@@ -429,7 +483,7 @@ function runHost() {
     return `Basic ${Buffer.from(`opencode:${state.password}`).toString("base64")}`;
   }
 
-  function request(state, method, path, body) {
+  function request(state, method, path, body, timeoutMs) {
     return new Promise((resolve, reject) => {
       const payload = body === undefined ? null : JSON.stringify(body);
       const req = http.request(
@@ -438,7 +492,7 @@ function runHost() {
           port: state.port,
           path,
           method,
-          timeout: 30_000,
+          timeout: timeoutMs || 30_000,
           headers: {
             authorization: authHeader(state),
             "content-type": "application/json",
@@ -477,6 +531,10 @@ function runHost() {
   }
 
   function connectEvents(id, state) {
+    // Generation guard: every (re)connect orphans the previous stream's
+    // handlers so a deliberate reattach can never double-schedule reconnects.
+    const generation = (state.sseGeneration = (state.sseGeneration || 0) + 1);
+    const stale = () => sessions.get(id) !== state || state.sseGeneration !== generation;
     const req = http.request(
       {
         hostname: "127.0.0.1",
@@ -486,7 +544,7 @@ function runHost() {
         headers: { authorization: authHeader(state), accept: "text/event-stream" }
       },
       (response) => {
-        if (sessions.get(id) !== state) {
+        if (stale()) {
           response.destroy();
           return;
         }
@@ -494,7 +552,7 @@ function runHost() {
         let buffer = "";
         response.setEncoding("utf8");
         response.on("data", (chunk) => {
-          if (sessions.get(id) !== state) {
+          if (stale()) {
             response.destroy();
             return;
           }
@@ -510,17 +568,33 @@ function runHost() {
             } catch {
               continue;
             }
+            // An instance dispose (auth/config change) kills the event bus this
+            // stream is attached to; the connection stays open but goes silent
+            // (live-verified). Reattach immediately to the lazily re-created
+            // instance so the next turn's events keep flowing.
+            if (parsed && parsed.type === "server.instance.disposed") {
+              state.sseRetries = 0;
+              connectEvents(id, state);
+              response.destroy();
+              return;
+            }
             if (!state.normalizer) continue;
             for (const event of state.normalizer(parsed)) {
               emitSessionEvent(id, state, event);
             }
           }
         });
-        response.on("end", () => scheduleSseReconnect(id, state));
-        response.on("error", () => scheduleSseReconnect(id, state));
+        response.on("end", () => {
+          if (!stale()) scheduleSseReconnect(id, state);
+        });
+        response.on("error", () => {
+          if (!stale()) scheduleSseReconnect(id, state);
+        });
       }
     );
-    req.on("error", () => scheduleSseReconnect(id, state));
+    req.on("error", () => {
+      if (!stale()) scheduleSseReconnect(id, state);
+    });
     req.end();
     state.sseRequest = req;
   }
@@ -605,6 +679,7 @@ function runHost() {
       normalizer: null,
       sseRequest: null,
       sseRetries: 0,
+      sseGeneration: 0,
       stopping: false,
       stdoutBuffer: "",
       history: [],
@@ -734,9 +809,10 @@ function runHost() {
     }
     Promise.all([
       request(state, "GET", "/config/providers"),
-      request(state, "GET", "/provider").catch(() => null)
+      request(state, "GET", "/provider").catch(() => null),
+      request(state, "GET", "/provider/auth").catch(() => null)
     ])
-      .then(([connectedInfo, catalog]) => {
+      .then(([connectedInfo, catalog, authMethodsRaw]) => {
         if (sessions.get(id) !== state) return;
         const connected = [];
         const list = connectedInfo && Array.isArray(connectedInfo.providers) ? connectedInfo.providers : [];
@@ -756,7 +832,13 @@ function runHost() {
           available.push({ id: String(provider.id), name: String(provider.name || provider.id) });
         }
         available.sort((a, b) => a.name.localeCompare(b.name));
-        emitDirectSessionEvent(id, { type: "providers", ok: true, connected, available });
+        emitDirectSessionEvent(id, {
+          type: "providers",
+          ok: true,
+          connected,
+          available,
+          authMethods: normalizeAuthMethods(authMethodsRaw)
+        });
       })
       .catch((error) => {
         if (sessions.get(id) !== state) return;
@@ -764,6 +846,241 @@ function runHost() {
           type: "providers",
           ok: false,
           message: `Could not load the provider catalog: ${error.message}`
+        });
+      });
+  }
+
+  // Store an API key in OpenCode's own auth store (the same PUT the CLI's
+  // `opencode auth login` performs), then dispose the lazy instance so the next
+  // request rebuilds the provider list with the new credential (live-verified:
+  // /config/providers only reflects auth changes after /instance/dispose; disk
+  // sessions and the /event stream survive the dispose). The key only transits
+  // memory — it must never appear in emitted events or errors.
+  function cleanAuthInputs(raw) {
+    const inputs = {};
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      for (const [key, value] of Object.entries(raw)) {
+        if (typeof value === "string" && value.trim() && value.length <= 512) {
+          inputs[String(key)] = value.trim();
+        }
+      }
+    }
+    return inputs;
+  }
+
+  function authSet(payload) {
+    const id = payload?.id;
+    const state = sessions.get(id);
+    const providerId = String(payload?.providerId || "").trim();
+    const key = typeof payload?.key === "string" ? payload.key.trim() : "";
+    const nonce = typeof payload?.nonce === "string" ? payload.nonce : undefined;
+    if (!state || !state.child || !state.port) {
+      emitDirectSessionEvent(id, {
+        type: "auth-result",
+        ok: false,
+        providerId,
+        action: "connect",
+        nonce,
+        message: "Open Fusion engine is not ready yet."
+      });
+      return;
+    }
+    if (!/^[A-Za-z0-9._-]+$/.test(providerId) || !key || key.length > 512 || /[\r\n]/.test(key)) {
+      emitSessionEvent(id, state, {
+        type: "auth-result",
+        ok: false,
+        providerId,
+        action: "connect",
+        nonce,
+        message: "Provide a provider id and a single-line API key."
+      });
+      return;
+    }
+    // Prompt answers (e.g. Cloudflare accountId, Azure resourceName) ride the
+    // credential's metadata record — the same place `opencode auth login` puts
+    // them for api-type methods.
+    const metadata = cleanAuthInputs(payload?.metadata);
+    const credential = {
+      type: "api",
+      key,
+      ...(Object.keys(metadata).length ? { metadata } : {})
+    };
+    request(state, "PUT", `/auth/${encodeURIComponent(providerId)}`, credential)
+      .then(() => request(state, "POST", "/instance/dispose"))
+      .then(() => {
+        if (sessions.get(id) !== state) return;
+        emitSessionEvent(id, state, {
+          type: "auth-result",
+          ok: true,
+          providerId,
+          action: "connect",
+          nonce
+        });
+        providers({ id });
+      })
+      .catch((error) => {
+        if (sessions.get(id) !== state) return;
+        emitSessionEvent(id, state, {
+          type: "auth-result",
+          ok: false,
+          providerId,
+          action: "connect",
+          nonce,
+          message: `Could not store the key: ${error.message}`
+        });
+      });
+  }
+
+  // Start an OAuth method: POST /provider/{id}/oauth/authorize with the method
+  // index + collected prompt inputs. The reply carries the flow shape the TUI's
+  // own connect dialog renders — "code" (paste a code back) or "auto" (device
+  // flow the server completes in the blocking callback call).
+  function oauthAuthorize(payload) {
+    const id = payload?.id;
+    const state = sessions.get(id);
+    const providerId = String(payload?.providerId || "").trim();
+    const method = Number.isInteger(payload?.method) ? payload.method : -1;
+    const nonce = typeof payload?.nonce === "string" ? payload.nonce : undefined;
+    if (!state || !state.child || !state.port || !/^[A-Za-z0-9._-]+$/.test(providerId) || method < 0) {
+      emitDirectSessionEvent(id, {
+        type: "oauth-authorize",
+        ok: false,
+        providerId,
+        nonce,
+        message: "Open Fusion engine is not ready yet."
+      });
+      return;
+    }
+    const inputs = cleanAuthInputs(payload?.inputs);
+    request(state, "POST", `/provider/${encodeURIComponent(providerId)}/oauth/authorize`, {
+      method,
+      ...(Object.keys(inputs).length ? { inputs } : {})
+    })
+      .then((authorization) => {
+        if (sessions.get(id) !== state) return;
+        if (!authorization || typeof authorization !== "object" || !authorization.url) {
+          emitSessionEvent(id, state, {
+            type: "oauth-authorize",
+            ok: false,
+            providerId,
+            nonce,
+            message: "The provider did not return an authorization URL."
+          });
+          return;
+        }
+        emitSessionEvent(id, state, {
+          type: "oauth-authorize",
+          ok: true,
+          providerId,
+          nonce,
+          flow: authorization.method === "code" ? "code" : "auto",
+          url: String(authorization.url),
+          instructions: String(authorization.instructions || "")
+        });
+      })
+      .catch((error) => {
+        if (sessions.get(id) !== state) return;
+        emitSessionEvent(id, state, {
+          type: "oauth-authorize",
+          ok: false,
+          providerId,
+          nonce,
+          message: `Could not start the OAuth flow: ${error.message}`
+        });
+      });
+  }
+
+  // Complete an OAuth method. "auto" flows send no code and BLOCK server-side
+  // until the user finishes in the browser (device-flow polling), so this call
+  // gets a long timeout. On success the instance is disposed (auth changed) and
+  // the provider catalog re-emitted — the same dispose+bootstrap the TUI does.
+  function oauthCallback(payload) {
+    const id = payload?.id;
+    const state = sessions.get(id);
+    const providerId = String(payload?.providerId || "").trim();
+    const method = Number.isInteger(payload?.method) ? payload.method : -1;
+    const code = typeof payload?.code === "string" && payload.code.trim() ? payload.code.trim() : undefined;
+    const nonce = typeof payload?.nonce === "string" ? payload.nonce : undefined;
+    if (!state || !state.child || !state.port || !/^[A-Za-z0-9._-]+$/.test(providerId) || method < 0) {
+      emitDirectSessionEvent(id, {
+        type: "auth-result",
+        ok: false,
+        providerId,
+        action: "connect",
+        nonce,
+        message: "Open Fusion engine is not ready yet."
+      });
+      return;
+    }
+    request(
+      state,
+      "POST",
+      `/provider/${encodeURIComponent(providerId)}/oauth/callback`,
+      { method, ...(code ? { code } : {}) },
+      10 * 60_000
+    )
+      .then(() => request(state, "POST", "/instance/dispose"))
+      .then(() => {
+        if (sessions.get(id) !== state) return;
+        emitSessionEvent(id, state, {
+          type: "auth-result",
+          ok: true,
+          providerId,
+          action: "connect",
+          nonce
+        });
+        providers({ id });
+      })
+      .catch((error) => {
+        if (sessions.get(id) !== state) return;
+        const failed = /ProviderAuthOauthCallbackFailed/.test(error.message);
+        emitSessionEvent(id, state, {
+          type: "auth-result",
+          ok: false,
+          providerId,
+          action: "connect",
+          nonce,
+          message: failed
+            ? "OAuth authorization failed. Try connecting again."
+            : `Could not complete the OAuth flow: ${error.message}`
+        });
+      });
+  }
+
+  function authRemove(payload) {
+    const id = payload?.id;
+    const state = sessions.get(id);
+    const providerId = String(payload?.providerId || "").trim();
+    if (!state || !state.child || !state.port || !/^[A-Za-z0-9._-]+$/.test(providerId)) {
+      emitDirectSessionEvent(id, {
+        type: "auth-result",
+        ok: false,
+        providerId,
+        action: "disconnect",
+        message: "Open Fusion engine is not ready yet."
+      });
+      return;
+    }
+    request(state, "DELETE", `/auth/${encodeURIComponent(providerId)}`)
+      .then(() => request(state, "POST", "/instance/dispose"))
+      .then(() => {
+        if (sessions.get(id) !== state) return;
+        emitSessionEvent(id, state, {
+          type: "auth-result",
+          ok: true,
+          providerId,
+          action: "disconnect"
+        });
+        providers({ id });
+      })
+      .catch((error) => {
+        if (sessions.get(id) !== state) return;
+        emitSessionEvent(id, state, {
+          type: "auth-result",
+          ok: false,
+          providerId,
+          action: "disconnect",
+          message: `Could not remove the credential: ${error.message}`
         });
       });
   }
@@ -830,6 +1147,10 @@ function runHost() {
       else if (msg.type === "permission") permission(msg.payload);
       else if (msg.type === "planner-model") plannerModel(msg.payload);
       else if (msg.type === "providers") providers(msg.payload);
+      else if (msg.type === "auth-set") authSet(msg.payload);
+      else if (msg.type === "auth-remove") authRemove(msg.payload);
+      else if (msg.type === "oauth-authorize") oauthAuthorize(msg.payload);
+      else if (msg.type === "oauth-callback") oauthCallback(msg.payload);
       else if (msg.type === "interrupt") interrupt(msg.payload);
       else if (msg.type === "stop") stop(msg.payload);
       else if (msg.type === "shutdown") shutdown();
@@ -844,6 +1165,7 @@ module.exports = {
   createOpenCodeEventNormalizer,
   rehydrateMessages,
   buildServeSpawn,
+  normalizeAuthMethods,
   splitModelId
 };
 

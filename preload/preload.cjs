@@ -127,6 +127,33 @@ contextBridge.exposeInMainWorld("vibe", {
     saveModels: (id, models) =>
       ipcRenderer.invoke("openfusion-chat:save-models", { id, ...models }),
     requestProviders: (id) => ipcRenderer.invoke("openfusion-chat:providers", { id }),
+    setProviderKey: (id, providerId, key, metadata, nonce) =>
+      ipcRenderer.invoke("openfusion-chat:auth-set", {
+        id,
+        providerId,
+        key,
+        metadata,
+        nonce
+      }),
+    removeProviderKey: (id, providerId) =>
+      ipcRenderer.invoke("openfusion-chat:auth-remove", { id, providerId }),
+    oauthAuthorize: (id, providerId, method, inputs, nonce) =>
+      ipcRenderer.invoke("openfusion-chat:oauth-authorize", {
+        id,
+        providerId,
+        method,
+        inputs,
+        nonce
+      }),
+    oauthCallback: (id, providerId, method, code, nonce) =>
+      ipcRenderer.invoke("openfusion-chat:oauth-callback", {
+        id,
+        providerId,
+        method,
+        code,
+        nonce
+      }),
+    openExternal: (url) => ipcRenderer.invoke("app:open-external", { url }),
     sendUserTurn: (id, text) => ipcRenderer.send("openfusion-chat:input", { id, text }),
     permission: (id, requestId, reply) =>
       ipcRenderer.invoke("openfusion-chat:permission", { id, requestId, reply }),

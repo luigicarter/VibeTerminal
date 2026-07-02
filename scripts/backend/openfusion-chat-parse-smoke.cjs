@@ -12,6 +12,7 @@ const {
   createOpenCodeEventNormalizer,
   rehydrateMessages,
   buildServeSpawn,
+  normalizeAuthMethods,
   splitModelId
 } = require("../../backend/openFusionChatHost.cjs");
 
@@ -361,5 +362,58 @@ assert(
 );
 const joined = [spawnSpec.command, ...spawnSpec.args].join(" ");
 assert(joined.includes("serve"), "spawn should invoke opencode serve");
+
+// ---- normalizeAuthMethods (shape recorded live from GET /provider/auth) ----
+const methods = normalizeAuthMethods({
+  "github-copilot": [
+    {
+      type: "oauth",
+      label: "Login with GitHub Copilot",
+      prompts: [
+        {
+          type: "select",
+          key: "deploymentType",
+          message: "Select GitHub deployment type",
+          options: [
+            { label: "GitHub.com", value: "github.com", hint: "most users" },
+            { label: "Data residency", value: "data-residency" }
+          ]
+        }
+      ],
+      authorize: () => {}
+    }
+  ],
+  azure: [
+    {
+      type: "api",
+      label: "API key",
+      prompts: [
+        {
+          type: "text",
+          key: "resourceName",
+          message: "Enter Azure Resource Name",
+          placeholder: "e.g. my-models",
+          validate: () => true
+        }
+      ]
+    }
+  ],
+  bogus: [{ type: "carrier-pigeon", label: "nope" }]
+});
+assert(
+  methods["github-copilot"]?.[0].type === "oauth" &&
+    methods["github-copilot"][0].prompts?.[0].type === "select" &&
+    methods["github-copilot"][0].prompts[0].options?.[0].value === "github.com" &&
+    !("authorize" in methods["github-copilot"][0]),
+  "oauth methods should keep label/prompts/options and drop functions"
+);
+assert(
+  methods.azure?.[0].type === "api" &&
+    methods.azure[0].prompts?.[0].key === "resourceName" &&
+    methods.azure[0].prompts[0].placeholder === "e.g. my-models" &&
+    !("validate" in methods.azure[0].prompts[0]),
+  "api methods should keep prompt metadata and drop validators"
+);
+assert(!methods.bogus, "unknown method types are dropped entirely");
 
 console.log("Open Fusion chat parse smoke passed");
