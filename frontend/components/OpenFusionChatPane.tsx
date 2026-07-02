@@ -259,6 +259,13 @@ export default function OpenFusionChatPane({
   // The picker role that led into a connect flow, so a successful connect can
   // drop the user back into the model pick they were doing.
   const authReturnRoleRef = useRef<"brain" | "executor" | null>(null);
+  // Set on a successful connect: when the refreshed catalog lands, drill the
+  // picker straight into the newly connected provider's model list — the same
+  // connect → browse-models handoff opencode's own dialog performs.
+  const pendingModelBrowseRef = useRef<{
+    role: "brain" | "executor";
+    providerId: string;
+  } | null>(null);
   const authInputRef = useRef<HTMLInputElement | null>(null);
   const authFlowRef = useRef<AuthFlow | null>(null);
   const authNonceRef = useRef(0);
@@ -668,13 +675,21 @@ export default function OpenFusionChatPane({
               kind: "activity",
               text: `Provider '${event.providerId}' connected.`
             });
-            const returnRole = mine ? authReturnRoleRef.current : null;
-            authReturnRoleRef.current = null;
-            if (returnRole) {
-              // The refreshed catalog arrives as the next providers event; the
-              // reopened picker will list the provider under Connected.
+            if (mine) {
+              // Match opencode's connect → browse handoff: after a successful
+              // connect, open the new provider's model list for the role that
+              // led here (or the first unset role for a bare /connect). The
+              // drill-in happens when the refreshed providers event lands.
+              const returnRole =
+                authReturnRoleRef.current ??
+                (!plannerModel ? "brain" : !executorModel ? "executor" : "brain");
+              pendingModelBrowseRef.current = {
+                role: returnRole,
+                providerId: event.providerId
+              };
               setPicker({ role: returnRole });
             }
+            authReturnRoleRef.current = null;
           } else if (event.ok) {
             push({
               role: "brain",
@@ -749,6 +764,17 @@ export default function OpenFusionChatPane({
             setProviders(event.connected ?? []);
             setAvailableProviders(event.available ?? []);
             setProviderAuthMethods(event.authMethods ?? {});
+            const browse = pendingModelBrowseRef.current;
+            if (browse) {
+              pendingModelBrowseRef.current = null;
+              const provider = (event.connected ?? []).find(
+                (entry) => entry.id === browse.providerId
+              );
+              if (provider) {
+                setPicker({ role: browse.role, provider });
+                setInput("");
+              }
+            }
             const pendingConnect = pendingConnectRef.current;
             if (pendingConnect) {
               pendingConnectRef.current = null;
@@ -1262,19 +1288,44 @@ export default function OpenFusionChatPane({
         };
       }
       if (!picker.provider) {
-        const items: SlashMenuItem[] = providers
-          .filter(
-            (provider) =>
-              !filter ||
-              provider.name.toLowerCase().includes(filter) ||
-              provider.id.toLowerCase().includes(filter)
-          )
-          .map((provider) => ({
-            key: `prov-${provider.id}`,
-            label: provider.name,
-            desc: `connected · ${provider.models.length} models`,
-            command: `__provider:${provider.id}`
-          }));
+        // One-shot model search (opencode's /models feel): typing matches
+        // models across ALL connected providers directly, so picking a model
+        // never requires drilling into a provider first. Browsing by provider
+        // stays available when the filter is empty.
+        const modelMatches: SlashMenuItem[] = filter
+          ? providers
+              .flatMap((provider) =>
+                provider.models
+                  .filter(
+                    (model) =>
+                      model.name.toLowerCase().includes(filter) ||
+                      `${provider.id}/${model.id}`.toLowerCase().includes(filter)
+                  )
+                  .map((model) => ({
+                    key: `flat-${provider.id}/${model.id}`,
+                    label: model.name,
+                    desc: `${provider.id}/${model.id}`,
+                    command: `__model:${provider.id}/${model.id}`
+                  }))
+              )
+              .slice(0, 10)
+          : [];
+        const items: SlashMenuItem[] = [
+          ...modelMatches,
+          ...providers
+            .filter(
+              (provider) =>
+                !filter ||
+                provider.name.toLowerCase().includes(filter) ||
+                provider.id.toLowerCase().includes(filter)
+            )
+            .map((provider) => ({
+              key: `prov-${provider.id}`,
+              label: provider.name,
+              desc: `connected · ${provider.models.length} models`,
+              command: `__provider:${provider.id}`
+            }))
+        ];
         for (const provider of availableProviders) {
           if (items.length >= 14) break;
           if (
@@ -1297,7 +1348,10 @@ export default function OpenFusionChatPane({
           desc: "Type any provider/model id",
           fill: picker.role === "brain" ? "/brain-model " : "/executor-model "
         });
-        return { title: `${roleLabel} provider`, items };
+        return {
+          title: `${roleLabel} model — type to search all models, or pick a provider`,
+          items
+        };
       }
       const items: SlashMenuItem[] = picker.provider.models
         .filter(
