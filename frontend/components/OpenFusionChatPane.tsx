@@ -123,18 +123,63 @@ interface SlashMenu {
 
 type PickerState =
   | { role: "brain" | "executor"; provider?: OpenFusionProvider }
+  | { connect: "connect" | "disconnect" }
   | null;
 
 const SLASH_COMMANDS = [
   { name: "/brain-model", desc: "Pick the Brain (planner) model" },
   { name: "/executor-model", desc: "Pick the Executor model" },
-  { name: "/connect", desc: "Connect a provider with an API key" },
+  { name: "/connect", desc: "Connect a provider (API key or OAuth)" },
   { name: "/disconnect", desc: "Remove a provider's stored credential" },
   { name: "/models", desc: "Show the current Brain and Executor models" },
   { name: "/resume", desc: "Resume the last Open Fusion chat" },
   { name: "/clear", desc: "Clear this conversation" },
   { name: "/help", desc: "List the available commands" }
 ];
+
+// The connect picker surfaces well-known providers first (the order opencode's
+// own dialog uses for its "Popular" group), then the rest alphabetically —
+// otherwise a 149-provider alphabetical catalog buries openrouter at #93.
+const POPULAR_PROVIDERS = [
+  "anthropic",
+  "openai",
+  "google",
+  "openrouter",
+  "xai",
+  "groq",
+  "mistral",
+  "deepseek",
+  "github-copilot",
+  "amazon-bedrock",
+  "azure",
+  "opencode"
+];
+
+function popularRank(id: string) {
+  const index = POPULAR_PROVIDERS.indexOf(id);
+  return index === -1 ? POPULAR_PROVIDERS.length : index;
+}
+
+function sortProvidersForPicker<T extends { id: string; name: string }>(list: T[]): T[] {
+  return [...list].sort((a, b) => {
+    const rank = popularRank(a.id) - popularRank(b.id);
+    return rank !== 0 ? rank : a.name.localeCompare(b.name);
+  });
+}
+
+// Rows shown per picker page before the "N more — keep typing" hint row. The
+// list scrolls; this only bounds render size, and the hint row makes the
+// truncation VISIBLE (a hard silent cap of 14 was how "there isn't even an
+// option to connect OpenRouter" happened).
+const PICKER_PAGE_SIZE = 24;
+
+function moreRow(key: string, remaining: number): SlashMenuItem {
+  return {
+    key,
+    label: `… ${remaining} more`,
+    desc: "Keep typing to filter the list"
+  };
+}
 
 function clip(value: string, max: number) {
   const text = (value ?? "").trim();
@@ -246,9 +291,16 @@ export default function OpenFusionChatPane({
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [verbose, setVerbose] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
+  // Esc hides the input-derived command menu without erasing the typed text;
+  // any input change re-arms it.
+  const [menuDismissed, setMenuDismissed] = useState(false);
   const [picker, setPicker] = useState<PickerState>(null);
   const [providers, setProviders] = useState<OpenFusionProvider[] | null>(null);
   const [availableProviders, setAvailableProviders] = useState<{ id: string; name: string }[]>([]);
+  // False when the connected list loaded but the full catalog fetch failed —
+  // the pickers must say the list is partial instead of silently refusing
+  // providers as "not in the catalog".
+  const [catalogOk, setCatalogOk] = useState(true);
   const [authFlow, setAuthFlow] = useState<AuthFlow | null>(null);
   // Shared text field for the auth flow's current input (key, prompt answer,
   // or pasted OAuth code). Never echoed into the transcript.
@@ -267,6 +319,11 @@ export default function OpenFusionChatPane({
     providerId: string;
   } | null>(null);
   const authInputRef = useRef<HTMLInputElement | null>(null);
+  // First button of a buttons-only auth stage (method choice / select prompt):
+  // focused on entry so keyboard users aren't typing into the composer while
+  // the auth panel is open (that's how pasted API keys ended up in the chat
+  // input).
+  const authPrimaryButtonRef = useRef<HTMLButtonElement | null>(null);
   const authFlowRef = useRef<AuthFlow | null>(null);
   const authNonceRef = useRef(0);
   // /connect issued before the provider catalog arrived: open the flow as soon
@@ -275,6 +332,9 @@ export default function OpenFusionChatPane({
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  // Keeps the highlighted menu row visible now that picker lists scroll
+  // instead of being hard-capped.
+  const activeMenuItemRef = useRef<HTMLLIElement | null>(null);
   const keyRef = useRef(0);
   const busyRef = useRef(false);
   const interruptingRef = useRef(false);
@@ -298,6 +358,13 @@ export default function OpenFusionChatPane({
       ? String(session.openFusionExecutorModel).trim()
       : "";
   const modelsReady = Boolean(plannerModel && executorModel);
+  // Current picks, readable from the session-scoped event handler (its closure
+  // is frozen at first render, which used to misroute the post-connect
+  // drill-in to "brain" even when the Brain was already set).
+  const plannerModelRef = useRef(plannerModel);
+  const executorModelRef = useRef(executorModel);
+  plannerModelRef.current = plannerModel;
+  executorModelRef.current = executorModel;
   const brainLabel = plannerModel ? shortModelLabel(plannerModel, "") : "not set";
   const executorLabel = executorModel
     ? shortModelLabel(executorModel, "")
@@ -336,21 +403,34 @@ export default function OpenFusionChatPane({
 
   useEffect(() => {
     setSlashIndex(0);
+    setMenuDismissed(false);
   }, [input, picker]);
+
+  useEffect(() => {
+    activeMenuItemRef.current?.scrollIntoView({ block: "nearest" });
+  }, [slashIndex]);
 
   useEffect(() => {
     authFlowRef.current = authFlow;
   }, [authFlow]);
 
+  // Every auth stage takes keyboard focus: text stages focus their input,
+  // buttons-only stages (method choice, select prompts) focus their first
+  // button — otherwise keystrokes (like a pasted API key) land in the
+  // composer behind the panel.
   useEffect(() => {
     if (!authFlow) return;
     const step = authFlow.step;
     if (
       step.stage === "key" ||
-      step.stage === "prompts" ||
+      (step.stage === "prompts" &&
+        authFlow.methods[step.methodIndex]?.prompts?.[step.promptIndex]?.type !==
+          "select") ||
       (step.stage === "oauth" && step.flow === "code")
     ) {
       authInputRef.current?.focus();
+    } else if (step.stage === "method" || step.stage === "prompts") {
+      authPrimaryButtonRef.current?.focus();
     }
   }, [authFlow]);
 
@@ -680,14 +760,22 @@ export default function OpenFusionChatPane({
               // connect, open the new provider's model list for the role that
               // led here (or the first unset role for a bare /connect). The
               // drill-in happens when the refreshed providers event lands.
+              // Reads the CURRENT picks via refs — this closure is frozen at
+              // first render.
               const returnRole =
                 authReturnRoleRef.current ??
-                (!plannerModel ? "brain" : !executorModel ? "executor" : "brain");
+                (!plannerModelRef.current
+                  ? "brain"
+                  : !executorModelRef.current
+                    ? "executor"
+                    : "brain");
               pendingModelBrowseRef.current = {
                 role: returnRole,
                 providerId: event.providerId
               };
               setPicker({ role: returnRole });
+              setInput("");
+              composerRef.current?.focus();
             }
             authReturnRoleRef.current = null;
           } else if (event.ok) {
@@ -764,6 +852,7 @@ export default function OpenFusionChatPane({
             setProviders(event.connected ?? []);
             setAvailableProviders(event.available ?? []);
             setProviderAuthMethods(event.authMethods ?? {});
+            setCatalogOk(event.catalogOk !== false);
             const browse = pendingModelBrowseRef.current;
             if (browse) {
               pendingModelBrowseRef.current = null;
@@ -773,6 +862,7 @@ export default function OpenFusionChatPane({
               if (provider) {
                 setPicker({ role: browse.role, provider });
                 setInput("");
+                composerRef.current?.focus();
               }
             }
             const pendingConnect = pendingConnectRef.current;
@@ -784,14 +874,26 @@ export default function OpenFusionChatPane({
               ]);
             }
           } else {
-            setProviders([]);
-            setAvailableProviders([]);
-            push({
-              role: "brain",
-              kind: "activity",
-              text: event.message || "Could not load the provider catalog.",
-              internal: false
-            });
+            // Keep whatever catalog we already had (no state write) — wiping
+            // it on a failed refresh downgraded a working picker to an empty
+            // dead end.
+            // A queued /connect must not pop an auth panel minutes later when
+            // some future refresh succeeds.
+            if (pendingConnectRef.current) {
+              pendingConnectRef.current = null;
+              push({
+                role: "brain",
+                kind: "error",
+                text: `${event.message || "Could not load the provider catalog."} Run /connect again once the engine is ready.`
+              });
+            } else {
+              push({
+                role: "brain",
+                kind: "activity",
+                text: event.message || "Could not load the provider catalog.",
+                internal: false
+              });
+            }
           }
           break;
         case "result":
@@ -941,9 +1043,16 @@ export default function OpenFusionChatPane({
   function openModelPicker(role: "brain" | "executor") {
     setPicker({ role });
     setInput("");
-    if (!providers) {
-      void window.vibe?.openFusionChat?.requestProviders(session.id);
-    }
+    // Always refresh on open: the catalog and auth state may have changed
+    // since the last load (and a failed earlier load finally gets its retry).
+    void window.vibe?.openFusionChat?.requestProviders(session.id);
+    composerRef.current?.focus();
+  }
+
+  function openConnectPicker(mode: "connect" | "disconnect" = "connect") {
+    setPicker({ connect: mode });
+    setInput("");
+    void window.vibe?.openFusionChat?.requestProviders(session.id);
     composerRef.current?.focus();
   }
 
@@ -991,15 +1100,21 @@ export default function OpenFusionChatPane({
     methodsMap?: Record<string, OpenFusionAuthMethod[]>,
     names?: { id: string; name: string }[]
   ) {
-    const providerId = providerIdRaw.trim();
+    let providerId = providerIdRaw.trim();
     if (!providerId) return;
     // Honesty guard (opencode's own dialog warns here too): a key stored for
     // an id outside the catalog would never be used — Open Fusion generates
     // the pane config, so there is no opencode.json for the user to wire a
     // custom provider into. Refuse instead of reporting a useless "connected".
+    // Matching is case-insensitive ("/connect OpenRouter" should work); the
+    // catalog id is what gets stored. With a PARTIAL catalog (the full list
+    // failed to load) the guard can't be trusted, so the attempt proceeds.
     const catalog = names ?? [...availableProviders, ...(providers ?? [])];
-    if (catalog.length && !catalog.some((entry) => entry.id === providerId)) {
-      const needle = providerId.toLowerCase();
+    const needle = providerId.toLowerCase();
+    const match = catalog.find((entry) => entry.id.toLowerCase() === needle);
+    if (match) {
+      providerId = match.id;
+    } else if (catalog.length && catalogOk) {
       const close = catalog
         .filter(
           (entry) =>
@@ -1013,7 +1128,7 @@ export default function OpenFusionChatPane({
         kind: "error",
         text: `'${providerId}' is not a provider in the OpenCode catalog, so a stored key would never be used.${
           close.length ? ` Did you mean: ${close.join(", ")}?` : ""
-        } Pick a provider from /brain-model instead.`
+        } Run /connect to browse the provider list.`
       });
       return;
     }
@@ -1208,11 +1323,9 @@ export default function OpenFusionChatPane({
             openAuthFlow(providerId);
           }
         } else {
-          push({
-            role: "brain",
-            kind: "activity",
-            text: "Usage: /connect <provider-id> — or pick a 'needs auth' provider from /brain-model."
-          });
+          // Bare /connect opens the provider browser (it used to dead-end
+          // into a usage string — there was no way to DISCOVER providers).
+          openConnectPicker("connect");
         }
         return true;
       case "/disconnect":
@@ -1220,11 +1333,7 @@ export default function OpenFusionChatPane({
         if (arg) {
           disconnectProvider(arg.split(/\s+/)[0]);
         } else {
-          push({
-            role: "brain",
-            kind: "activity",
-            text: "Usage: /disconnect <provider-id>"
-          });
+          openConnectPicker("disconnect");
         }
         return true;
       case "/models":
@@ -1246,6 +1355,15 @@ export default function OpenFusionChatPane({
   }
 
   function send() {
+    // While a connect flow is open the keyboard belongs to it — pressing
+    // Enter in the composer must not fire the first-run gate message (and a
+    // key pasted here by mistake must not sit exposed): hand focus to the
+    // flow's input instead.
+    if (authFlow) {
+      authInputRef.current?.focus();
+      authPrimaryButtonRef.current?.focus();
+      return;
+    }
     const text = input.trim();
     if (!text) return;
     if (text.startsWith("/")) {
@@ -1276,9 +1394,81 @@ export default function OpenFusionChatPane({
     }
   }
 
-  // ---- slash palette / model picker menu ----
+  // ---- slash palette / model picker / connect picker menu ----
   const menu: SlashMenu = (() => {
     const filter = input.trim().toLowerCase();
+    const matchesFilter = (entry: { id: string; name: string }) =>
+      !filter ||
+      entry.name.toLowerCase().includes(filter) ||
+      entry.id.toLowerCase().includes(filter);
+    if (picker && "connect" in picker) {
+      const mode = picker.connect;
+      if (!providers) {
+        return {
+          title:
+            mode === "connect"
+              ? "Connect a provider — loading the catalog…"
+              : "Disconnect a provider — loading…",
+          items: []
+        };
+      }
+      const items: SlashMenuItem[] = [];
+      if (mode === "disconnect") {
+        const connected = sortProvidersForPicker(providers).filter(matchesFilter);
+        for (const provider of connected.slice(0, PICKER_PAGE_SIZE)) {
+          items.push({
+            key: `disc-${provider.id}`,
+            label: provider.name,
+            desc: "connected — select to remove its credential",
+            command: `__disconnect:${provider.id}`
+          });
+        }
+        if (connected.length > PICKER_PAGE_SIZE) {
+          items.push(moreRow("disc-more", connected.length - PICKER_PAGE_SIZE));
+        }
+        return { title: "Disconnect a provider — type to filter", items };
+      }
+      const connectedIds = new Set(providers.map((provider) => provider.id));
+      const candidates = sortProvidersForPicker([
+        ...availableProviders,
+        ...providers.map((provider) => ({ id: provider.id, name: provider.name }))
+      ]).filter(matchesFilter);
+      for (const provider of candidates.slice(0, PICKER_PAGE_SIZE)) {
+        items.push({
+          key: `conn-${provider.id}`,
+          label: provider.name,
+          desc: connectedIds.has(provider.id)
+            ? "connected ✓ — select to replace the credential"
+            : "select to connect (API key or OAuth)",
+          command: `__connect:${provider.id}`
+        });
+      }
+      if (candidates.length > PICKER_PAGE_SIZE) {
+        items.push(moreRow("conn-more", candidates.length - PICKER_PAGE_SIZE));
+      }
+      if (
+        filter &&
+        /^[a-z0-9._-]+$/.test(filter) &&
+        !candidates.some((entry) => entry.id.toLowerCase() === filter)
+      ) {
+        items.push({
+          key: "conn-typed",
+          label: `Connect '${filter}'`,
+          desc: catalogOk
+            ? "Not in the catalog list — attempt anyway"
+            : "Catalog unavailable — attempt this provider id",
+          command: `__connect:${filter}`
+        });
+      }
+      if (!catalogOk) {
+        items.push({
+          key: "conn-partial",
+          label: "Partial list",
+          desc: "The full provider catalog failed to load — showing connected providers only."
+        });
+      }
+      return { title: "Connect a provider — type to filter", items };
+    }
     if (picker) {
       const roleLabel = picker.role === "brain" ? "Brain" : "Executor";
       if (!providers) {
@@ -1291,82 +1481,90 @@ export default function OpenFusionChatPane({
         // One-shot model search (opencode's /models feel): typing matches
         // models across ALL connected providers directly, so picking a model
         // never requires drilling into a provider first. Browsing by provider
-        // stays available when the filter is empty.
-        const modelMatches: SlashMenuItem[] = filter
-          ? providers
-              .flatMap((provider) =>
-                provider.models
-                  .filter(
-                    (model) =>
-                      model.name.toLowerCase().includes(filter) ||
-                      `${provider.id}/${model.id}`.toLowerCase().includes(filter)
-                  )
-                  .map((model) => ({
-                    key: `flat-${provider.id}/${model.id}`,
-                    label: model.name,
-                    desc: `${provider.id}/${model.id}`,
-                    command: `__model:${provider.id}/${model.id}`
-                  }))
-              )
-              .slice(0, 10)
-          : [];
-        const items: SlashMenuItem[] = [
-          ...modelMatches,
-          ...providers
-            .filter(
-              (provider) =>
-                !filter ||
-                provider.name.toLowerCase().includes(filter) ||
-                provider.id.toLowerCase().includes(filter)
+        // stays available when the filter is empty. Provider rows always rank
+        // ABOVE flat model matches so a provider search ("openrouter") is
+        // never crowded out by incidental model-name hits.
+        const connectedRows = providers.filter(matchesFilter).map((provider) => ({
+          key: `prov-${provider.id}`,
+          label: provider.name,
+          desc: `connected · ${provider.models.length} models`,
+          command: `__provider:${provider.id}`
+        }));
+        const modelMatchesAll = filter
+          ? providers.flatMap((provider) =>
+              provider.models
+                .filter(
+                  (model) =>
+                    model.name.toLowerCase().includes(filter) ||
+                    `${provider.id}/${model.id}`.toLowerCase().includes(filter)
+                )
+                .map((model) => ({
+                  key: `flat-${provider.id}/${model.id}`,
+                  label: model.name,
+                  desc: `${provider.id}/${model.id}`,
+                  command: `__model:${provider.id}/${model.id}`
+                }))
             )
-            .map((provider) => ({
-              key: `prov-${provider.id}`,
-              label: provider.name,
-              desc: `connected · ${provider.models.length} models`,
-              command: `__provider:${provider.id}`
-            }))
-        ];
-        for (const provider of availableProviders) {
-          if (items.length >= 14) break;
-          if (
-            filter &&
-            !provider.name.toLowerCase().includes(filter) &&
-            !provider.id.toLowerCase().includes(filter)
-          ) {
-            continue;
-          }
+          : [];
+        const needsAuthAll = sortProvidersForPicker(availableProviders).filter(matchesFilter);
+        const items: SlashMenuItem[] = [...connectedRows];
+        items.push(...modelMatchesAll.slice(0, 8));
+        if (modelMatchesAll.length > 8) {
+          items.push(moreRow("flat-more", modelMatchesAll.length - 8));
+        }
+        const needsAuthBudget = Math.max(PICKER_PAGE_SIZE - items.length, 6);
+        for (const provider of needsAuthAll.slice(0, needsAuthBudget)) {
           items.push({
             key: `avail-${provider.id}`,
             label: provider.name,
-            desc: "needs auth — select to enter an API key",
+            desc: "needs auth — select to connect",
             command: `__needs-auth:${provider.id}`
           });
         }
+        if (needsAuthAll.length > needsAuthBudget) {
+          items.push(moreRow("avail-more", needsAuthAll.length - needsAuthBudget));
+        }
+        items.push({
+          key: "open-connect",
+          label: "Connect a provider…",
+          desc: "Browse the full provider catalog",
+          command: "__open-connect"
+        });
         items.push({
           key: "custom",
           label: "Custom model id…",
           desc: "Type any provider/model id",
           fill: picker.role === "brain" ? "/brain-model " : "/executor-model "
         });
+        if (!catalogOk) {
+          items.push({
+            key: "catalog-partial",
+            label: "Partial list",
+            desc: "The full provider catalog failed to load — showing connected providers only."
+          });
+        }
         return {
           title: `${roleLabel} model — type to search all models, or pick a provider`,
           items
         };
       }
-      const items: SlashMenuItem[] = picker.provider.models
-        .filter(
-          (model) =>
-            !filter ||
-            model.name.toLowerCase().includes(filter) ||
-            model.id.toLowerCase().includes(filter)
-        )
-        .slice(0, 16)
+      const providerModels = picker.provider.models.filter(
+        (model) =>
+          !filter ||
+          model.name.toLowerCase().includes(filter) ||
+          model.id.toLowerCase().includes(filter)
+      );
+      const items: SlashMenuItem[] = providerModels
+        .slice(0, PICKER_PAGE_SIZE)
         .map((model) => ({
           key: `model-${model.id}`,
           label: model.name,
           desc: model.id,
           command: `__model:${picker.provider!.id}/${model.id}`
         }));
+      if (providerModels.length > PICKER_PAGE_SIZE) {
+        items.push(moreRow("model-more", providerModels.length - PICKER_PAGE_SIZE));
+      }
       items.push({
         key: "custom",
         label: "Custom model id…",
@@ -1392,7 +1590,13 @@ export default function OpenFusionChatPane({
       }))
     };
   })();
-  const menuOpen = picker !== null || menu.items.length > 0;
+  const menuOpen =
+    picker !== null || (menu.items.length > 0 && !menuDismissed);
+  // "Connected" providers that never needed a key (the opencode zen free
+  // tier) don't count as the user having connected anything — the first-run
+  // gate must still lead with Connect.
+  const onlyKeylessProviders =
+    providers !== null && providers.every((provider) => provider.id === "opencode");
 
   function applyMenuSelection(item: SlashMenuItem | undefined) {
     if (!item) return;
@@ -1403,24 +1607,43 @@ export default function OpenFusionChatPane({
       return;
     }
     if (!item.command) return;
+    const pickerRole = picker && "role" in picker ? picker.role : null;
     if (item.command.startsWith("__provider:")) {
       const providerId = item.command.slice("__provider:".length);
       const provider = providers?.find((entry) => entry.id === providerId);
-      if (provider && picker) {
-        setPicker({ role: picker.role, provider });
+      if (provider && pickerRole) {
+        setPicker({ role: pickerRole, provider });
         setInput("");
       }
       return;
     }
     if (item.command.startsWith("__needs-auth:")) {
       const providerId = item.command.slice("__needs-auth:".length);
-      authReturnRoleRef.current = picker?.role ?? null;
+      authReturnRoleRef.current = pickerRole;
       openAuthFlow(providerId);
+      return;
+    }
+    if (item.command.startsWith("__connect:")) {
+      const providerId = item.command.slice("__connect:".length);
+      authReturnRoleRef.current = pickerRole;
+      openAuthFlow(providerId);
+      return;
+    }
+    if (item.command.startsWith("__disconnect:")) {
+      const providerId = item.command.slice("__disconnect:".length);
+      setPicker(null);
+      setInput("");
+      disconnectProvider(providerId);
+      return;
+    }
+    if (item.command === "__open-connect") {
+      authReturnRoleRef.current = pickerRole;
+      openConnectPicker("connect");
       return;
     }
     if (item.command.startsWith("__model:")) {
       const model = item.command.slice("__model:".length);
-      const role = picker?.role ?? "brain";
+      const role = pickerRole ?? "brain";
       setPicker(null);
       setInput("");
       applyModelPick(role, model);
@@ -1688,7 +1911,17 @@ export default function OpenFusionChatPane({
             </div>
           )}
           {authFlow && (
-            <div className="fusion-decision-panel" role="group" aria-label="Connect provider">
+            <div
+              className="fusion-decision-panel"
+              role="group"
+              aria-label="Connect provider"
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  cancelAuthFlow();
+                }
+              }}
+            >
               <div className="fusion-decision-copy">
                 <span className="fusion-decision-kind">Connect {authFlow.name}</span>
                 <span className="fusion-decision-detail">
@@ -1716,6 +1949,7 @@ export default function OpenFusionChatPane({
                   {authFlow.methods.map((method, index) => (
                     <button
                       key={`${method.type}-${index}`}
+                      ref={index === 0 ? authPrimaryButtonRef : undefined}
                       className={clsx(
                         "fusion-decision-button",
                         index === 0 && "is-primary"
@@ -1751,6 +1985,7 @@ export default function OpenFusionChatPane({
                         {(prompt.options ?? []).map((option, index) => (
                           <button
                             key={option.value}
+                            ref={index === 0 ? authPrimaryButtonRef : undefined}
                             className={clsx(
                               "fusion-decision-button",
                               index === 0 && "is-primary"
@@ -1995,13 +2230,13 @@ export default function OpenFusionChatPane({
             >
               <div className="fusion-decision-copy">
                 <span className="fusion-decision-kind">
-                  {providers.length === 0
+                  {onlyKeylessProviders
                     ? "Connect a provider to start"
                     : "Pick your models to start"}
                 </span>
                 <span className="fusion-decision-detail">
-                  {providers.length === 0
-                    ? "Open Fusion assumes nothing: connect a model provider first (keys live in vibeTerminal's own store, never in your personal OpenCode setup), then pick the Brain and Executor models."
+                  {onlyKeylessProviders
+                    ? "Open Fusion assumes nothing: connect a model provider (OpenRouter, Anthropic, OpenAI, …) — keys live in vibeTerminal's own store, never in your personal OpenCode setup. The free opencode zen models work without a key if you just pick models."
                     : !plannerModel && !executorModel
                       ? "Choose the Brain (planner) and Executor models for this pane."
                       : !plannerModel
@@ -2010,45 +2245,46 @@ export default function OpenFusionChatPane({
                 </span>
               </div>
               <div className="fusion-decision-actions">
-                {providers.length === 0 ? (
+                {/* Connect is ALWAYS reachable from the gate: the keyless zen
+                    provider means `providers` is never empty, so a
+                    connected-count check would hide this forever. */}
+                <button
+                  className={clsx(
+                    "fusion-decision-button",
+                    onlyKeylessProviders && "is-primary"
+                  )}
+                  type="button"
+                  title="Browse and connect a model provider"
+                  onClick={() => openConnectPicker("connect")}
+                >
+                  <KeyRound size={14} />
+                  <span>Connect a provider</span>
+                </button>
+                {!plannerModel && (
                   <button
-                    className="fusion-decision-button is-primary"
+                    className={clsx(
+                      "fusion-decision-button",
+                      !onlyKeylessProviders && "is-primary"
+                    )}
                     type="button"
-                    title="Pick a provider to connect"
-                    onClick={() => {
-                      authReturnRoleRef.current = "brain";
-                      openModelPicker("brain");
-                    }}
+                    onClick={() => openModelPicker("brain")}
                   >
-                    <KeyRound size={14} />
-                    <span>Connect a provider</span>
+                    <Check size={14} />
+                    <span>Pick Brain model</span>
                   </button>
-                ) : (
-                  <>
-                    {!plannerModel && (
-                      <button
-                        className="fusion-decision-button is-primary"
-                        type="button"
-                        onClick={() => openModelPicker("brain")}
-                      >
-                        <Check size={14} />
-                        <span>Pick Brain model</span>
-                      </button>
+                )}
+                {!executorModel && (
+                  <button
+                    className={clsx(
+                      "fusion-decision-button",
+                      !onlyKeylessProviders && Boolean(plannerModel) && "is-primary"
                     )}
-                    {!executorModel && (
-                      <button
-                        className={clsx(
-                          "fusion-decision-button",
-                          Boolean(plannerModel) && "is-primary"
-                        )}
-                        type="button"
-                        onClick={() => openModelPicker("executor")}
-                      >
-                        <Check size={14} />
-                        <span>Pick Executor model</span>
-                      </button>
-                    )}
-                  </>
+                    type="button"
+                    onClick={() => openModelPicker("executor")}
+                  >
+                    <Check size={14} />
+                    <span>Pick Executor model</span>
+                  </button>
                 )}
               </div>
             </div>
@@ -2083,15 +2319,33 @@ export default function OpenFusionChatPane({
                     );
                     return;
                   }
-                  if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+                  // Tab selects only inside a picker; elsewhere it keeps its
+                  // browser meaning so keyboard users can reach the auth
+                  // panel's buttons.
+                  if (
+                    (e.key === "Enter" && !e.shiftKey) ||
+                    (e.key === "Tab" && picker !== null)
+                  ) {
                     e.preventDefault();
                     applyMenuSelection(menu.items[slashIndex] ?? menu.items[0]);
                     return;
                   }
                   if (e.key === "Escape") {
+                    // One level up per press: provider's model list → provider
+                    // list → closed. The input-derived command menu hides but
+                    // KEEPS the typed text (it used to be wiped).
                     e.preventDefault();
-                    setPicker(null);
-                    setInput("");
+                    if (picker && "role" in picker && picker.provider) {
+                      setPicker({ role: picker.role });
+                      setInput("");
+                      return;
+                    }
+                    if (picker) {
+                      setPicker(null);
+                      setInput("");
+                      return;
+                    }
+                    setMenuDismissed(true);
                     return;
                   }
                 }
@@ -2131,10 +2385,11 @@ export default function OpenFusionChatPane({
                 {menu.items.map((item, i) => (
                   <li
                     key={item.key}
+                    ref={i === slashIndex ? activeMenuItemRef : undefined}
                     role="option"
                     aria-selected={i === slashIndex}
                     className={clsx("fusion-slash-item", i === slashIndex && "is-active")}
-                    onMouseEnter={() => setSlashIndex(i)}
+                    onMouseMove={() => setSlashIndex(i)}
                     onMouseDown={(e) => {
                       e.preventDefault();
                       applyMenuSelection(item);

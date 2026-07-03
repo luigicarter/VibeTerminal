@@ -570,6 +570,13 @@ assert(
 );
 
 const fusionChatPaneSource = fs.readFileSync(fusionChatPanePath, "utf8");
+// The pure slash-menu/catalog logic was extracted to fusionSlashMenu.ts so the
+// settings smoke can execute it; grep-contract checks for those pieces read
+// the module instead of the component.
+const fusionSlashMenuSource = fs.readFileSync(
+  path.join(__dirname, "..", "..", "frontend", "components", "fusionSlashMenu.ts"),
+  "utf8"
+);
 assert(
   fusionChatPaneSource.includes("onAttention") &&
     fusionChatPaneSource.includes('emitAttention("completed", "done")') &&
@@ -588,21 +595,21 @@ assert(
     fusionChatPaneSource.includes('normalized === "/resume"') &&
     fusionChatPaneSource.includes('normalized === "/fast"') &&
     fusionChatPaneSource.includes('normalized === "/speed"') &&
-    fusionChatPaneSource.includes('"Fusion Speed / Planning"') &&
-    fusionChatPaneSource.includes('"Fusion Speed / Execution"') &&
-    fusionChatPaneSource.includes('"Fusion Effort / Whole Harness"') &&
-    fusionChatPaneSource.includes('"Fusion Effort / Planning"') &&
-    fusionChatPaneSource.includes('"Fusion Effort / Execution"') &&
+    fusionSlashMenuSource.includes('"Fusion Speed / Planning"') &&
+    fusionSlashMenuSource.includes('"Fusion Speed / Execution"') &&
+    fusionSlashMenuSource.includes('"Fusion Effort / Whole Harness"') &&
+    fusionSlashMenuSource.includes('"Fusion Effort / Planning"') &&
+    fusionSlashMenuSource.includes('"Fusion Effort / Execution"') &&
     fusionChatPaneSource.includes('raw.match(/^\\/(?:claude|model\\s+claude)\\s+(.+)$/i)') &&
     fusionChatPaneSource.includes('raw.match(/^\\/(?:codex|model\\s+codex)\\s+(.+)$/i)') &&
     fusionChatPaneSource.includes("pendingRestartNoticeRef") &&
     fusionChatPaneSource.includes("Updated Fusion ${label} live") &&
     fusionChatPaneSource.includes("pendingRestartNoticeRef.current = session.started && requiresRestart ? notice : null") &&
-    fusionChatPaneSource.includes("const FUSION_SLASH_COMMANDS") &&
-    fusionChatPaneSource.includes("const FREE_TEXT_SLASH_COMMANDS") &&
-    fusionChatPaneSource.includes(".filter((cmd) => cmd.takesArg)") &&
-    fusionChatPaneSource.includes("function hasFreeTextSlashArgument") &&
-    fusionChatPaneSource.includes("if (hasFreeTextSlashArgument(input))") &&
+    fusionSlashMenuSource.includes("const FUSION_SLASH_COMMANDS") &&
+    fusionSlashMenuSource.includes("const FREE_TEXT_SLASH_COMMANDS") &&
+    fusionSlashMenuSource.includes('FREE_TEXT_SLASH_COMMANDS = ["/model claude", "/model codex"]') &&
+    fusionSlashMenuSource.includes("function hasFreeTextSlashArgument") &&
+    fusionSlashMenuSource.includes("if (hasFreeTextSlashArgument(input))") &&
     fusionChatPaneSource.includes('className="fusion-slash-menu"') &&
     fusionChatPaneSource.includes('className="fusion-settings-summary"') &&
     fusionChatPaneSource.includes("const startPayload =") &&
@@ -620,14 +627,14 @@ assert(
     fusionChatPaneSource.includes("function applyEffortLevel") &&
     fusionChatPaneSource.includes("function normalizeRoleScope") &&
     fusionChatPaneSource.includes("function normalizeSpeedPreset") &&
-    fusionChatPaneSource.includes('{ name: "/plan"') &&
-    fusionChatPaneSource.includes('{ name: "/auto"') &&
+    fusionSlashMenuSource.includes('{ name: "/plan"') &&
+    fusionSlashMenuSource.includes('{ name: "/auto"') &&
     fusionChatPaneSource.includes('if (normalized === "/plan")') &&
     fusionChatPaneSource.includes('if (normalized === "/auto")') &&
     fusionChatPaneSource.includes('applySpeedPreset("execution"') &&
     fusionChatPaneSource.includes('applyEffortLevel(normalizeRoleScope(effortMatch[1]), effortMatch[2])') &&
-    fusionChatPaneSource.includes('"Planning role"') &&
-    fusionChatPaneSource.includes('"Execution role"') &&
+    fusionSlashMenuSource.includes('"Planning role"') &&
+    fusionSlashMenuSource.includes('"Execution role"') &&
     fusionChatPaneSource.includes('const FUSION_SPEAKER_LABEL = "Fusion"') &&
     fusionChatPaneSource.includes("function fusionRoleLabel") &&
     fusionChatPaneSource.includes("return FUSION_SPEAKER_LABEL") &&
@@ -641,7 +648,7 @@ assert(
   "FusionChatPane should drive harness-specific speed/effort submenus, unified role labels, and empty-thinking suppression"
 );
 assert(
-  fusionChatPaneSource.includes("function normalizeFusionModel(value: unknown)") &&
+  fusionSlashMenuSource.includes("function normalizeFusionModel(value: unknown)") &&
     fusionChatPaneSource.includes('case "stderr"') &&
     fusionChatPaneSource.includes("busy && !inputIsSlashCommand"),
   "FusionChatPane should normalize restored settings, show stderr, and allow slash commands while busy"
@@ -665,7 +672,10 @@ assert(
     !fusionChatPaneSource.includes('className="fusion-stop"') &&
     !fusionChatPaneSource.includes("Stop the current turn") &&
     fusionChatPaneSource.includes("Steer current turn") &&
-    fusionChatPaneSource.includes('e.key === "Escape" && busy') &&
+    // Escape is now tiered (dismiss menu -> interrupt busy turn -> clear
+    // input); the busy branch still interrupts.
+    fusionChatPaneSource.includes('if (e.key === "Escape")') &&
+    fusionChatPaneSource.includes("interrupt();") &&
     fusionChatPaneSource.includes('e.key === "Enter" && !e.shiftKey') &&
     fusionChatPaneSource.includes('case "interrupted"') &&
     fusionChatPaneSource.includes('window.addEventListener("keydown", handleWindowKeyDown)') &&

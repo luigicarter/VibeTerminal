@@ -36,6 +36,23 @@ import type {
   FusionSettings,
   SessionStatus
 } from "../types";
+import {
+  buildSlashMenu,
+  CODEX_EFFORT_LABELS,
+  FUSION_EFFORT_LABELS,
+  FUSION_EFFORT_VALUES,
+  FUSION_SPEED_VALUES,
+  isValidClaudeModelId,
+  normalizeFusionCodexEffort,
+  normalizeFusionCodexModel,
+  normalizeFusionEffort,
+  normalizeFusionModel,
+  OPUS_LABEL,
+  SONNET_LABEL,
+  type FusionRoleScope,
+  type FusionSpeedPreset,
+  type SlashMenuItem
+} from "./fusionSlashMenu";
 
 interface FusionChatPaneProps {
   session: AgentSession;
@@ -56,60 +73,11 @@ interface FusionChatPaneProps {
   onAttention: (attention: AgentAttentionEvent) => void;
 }
 
-const OPUS_LABEL = "Opus 4.8";
-const SONNET_LABEL = "Sonnet 4.5";
-const DEFAULT_FUSION_MODEL: FusionClaudeModel = "opus";
-const DEFAULT_FUSION_CODEX_MODEL: FusionCodexModel = "auto";
-const DEFAULT_FUSION_EFFORT: FusionEffort = "auto";
-const DEFAULT_FUSION_CODEX_EFFORT: FusionCodexEffort = "auto";
 const DEFAULT_FUSION_RUN_MODE: FusionRunMode = "auto";
-const FUSION_MODEL_ID_PATTERN = /^[A-Za-z0-9._:/@+-]+$/;
-// Planning-side effort: the exact `claude --effort` enum ("auto" = omit).
-const FUSION_EFFORT_LABELS: Record<FusionEffort, string> = {
-  auto: "Auto",
-  low: "Low",
-  medium: "Medium",
-  high: "High",
-  xhigh: "XHigh",
-  max: "Max"
-};
-// Execution-side effort: codex's OWN enum (verified against the 0.142 binary:
-// minimal|low|medium|high|xhigh|ultra). It has NO "max" — offering one poisoned
-// every delegation with an unknown-variant error until the user changed it.
-const CODEX_EFFORT_LABELS: Record<FusionCodexEffort, string> = {
-  auto: "Auto",
-  minimal: "Minimal",
-  low: "Low",
-  medium: "Medium",
-  high: "High",
-  xhigh: "XHigh",
-  ultra: "Ultra"
-};
 const FUSION_RUN_MODE_LABELS: Record<FusionRunMode, string> = {
   auto: "Auto",
   plan: "Plan"
 };
-const FUSION_EFFORT_VALUES = Object.keys(FUSION_EFFORT_LABELS) as FusionEffort[];
-const CODEX_EFFORT_VALUES = Object.keys(CODEX_EFFORT_LABELS) as FusionCodexEffort[];
-// Curated model catalogs — the Fusion analogue of Open Fusion's provider
-// catalog. Claude's CLI accepts the aliases below (or full claude-* ids);
-// Codex ids were read out of the shipped 0.142 binary. Custom ids stay
-// possible via free text, but they are validated before anything restarts.
-const CLAUDE_MODEL_OPTIONS: { id: FusionClaudeModel; label: string; desc: string }[] = [
-  { id: "opus", label: `Model ${OPUS_LABEL}`, desc: "Deep planning and review (default)" },
-  { id: "sonnet", label: `Model ${SONNET_LABEL}`, desc: "Faster, lighter planning" }
-];
-const CODEX_MODEL_OPTIONS: { id: FusionCodexModel; label: string; desc: string }[] = [
-  { id: "auto", label: "Model Codex default", desc: "Use the configured execution model (default)" },
-  { id: "gpt-5.5", label: "Model GPT-5.5", desc: "Latest general Codex model" },
-  { id: "gpt-5.3-codex", label: "Model GPT-5.3 Codex", desc: "Coding-tuned" },
-  { id: "gpt-5.1-codex-max", label: "Model GPT-5.1 Codex Max", desc: "Deep agentic coding (supports XHigh)" },
-  { id: "gpt-5.1-codex-mini", label: "Model GPT-5.1 Codex Mini", desc: "Fast and inexpensive" }
-];
-// Claude model ids we allow through to `claude --model`: the known aliases or
-// a full claude-* id. Anything else previously restarted the pane into a
-// claude process that exited immediately — a dead pane with no explanation.
-const CLAUDE_MODEL_ALIAS_PATTERN = /^(opus|sonnet|fast|claude-[a-z0-9.:-]+)$/i;
 const FUSION_COMPOSER_MAX_PX = 160;
 const MAX_COMPOSER_PATHS = 32;
 const IMPLEMENT_PLAN_PROMPT = "Implement the plan.";
@@ -204,377 +172,6 @@ function padComposerInsertion(text: string, before: string, after: string) {
   return insertion;
 }
 
-interface SlashCommand {
-  name: string;
-  arg?: string;
-  desc: string;
-  takesArg?: boolean;
-  submenu?: boolean;
-}
-
-interface SlashMenuItem {
-  key: string;
-  label: string;
-  desc: string;
-  command?: string;
-  fill?: string;
-}
-
-interface SlashMenu {
-  title: string;
-  items: SlashMenuItem[];
-}
-
-// The "/" palette — the Fusion equivalent of the slash menu a real CLI draws
-// inside xterm. Every entry routes back through handleSlashCommand.
-const FUSION_SLASH_COMMANDS: SlashCommand[] = [
-  { name: "/plan", desc: "Switch Fusion to Plan mode" },
-  { name: "/auto", desc: "Switch Fusion to Auto mode" },
-  { name: "/mode", desc: "Toggle Auto/Plan mode" },
-  { name: "/speed", desc: "Fusion speed presets", submenu: true },
-  { name: "/effort", desc: "Fusion reasoning effort", submenu: true },
-  { name: "/opus", desc: "Advanced planning role settings", submenu: true },
-  { name: "/codex", desc: "Advanced execution role settings", submenu: true },
-  { name: "/fast", desc: "Switch Fusion to the fast preset" },
-  { name: "/claude", arg: "<model>", desc: "Set the planning model", takesArg: true },
-  { name: "/models", desc: "Show the current models and effort" },
-  { name: "/resume", desc: "Resume the last Claude Fusion chat" },
-  { name: "/clear", desc: "Clear this conversation" },
-  { name: "/help", desc: "List the available commands" }
-];
-
-const FREE_TEXT_SLASH_COMMANDS = [
-  ...FUSION_SLASH_COMMANDS.filter((cmd) => cmd.takesArg).map((cmd) => cmd.name),
-  "/model claude",
-  "/model codex"
-];
-
-type FusionRoleScope = "harness" | "planning" | "execution";
-type FusionSpeedPreset = "fast" | "balanced" | "deep" | "max";
-
-const FUSION_SPEED_LABELS: Record<FusionSpeedPreset, string> = {
-  fast: "Fast",
-  balanced: "Balanced",
-  deep: "Deep",
-  max: "Max"
-};
-
-const FUSION_SPEED_VALUES = Object.keys(FUSION_SPEED_LABELS) as FusionSpeedPreset[];
-
-const roleName = (scope: FusionRoleScope) =>
-  scope === "planning"
-    ? "Planning"
-    : scope === "execution"
-      ? "Execution"
-      : "Fusion";
-
-const scopeCommand = (scope: FusionRoleScope) =>
-  scope === "harness" ? "fusion" : scope;
-
-// Each role lists ITS engine's effort vocabulary: planning = the claude CLI
-// enum, execution = codex's (which adds minimal/ultra and lacks max). The
-// harness scope uses the shared subset both engines accept.
-const effortItems = (prefix: string, scope: FusionRoleScope = "harness"): SlashMenuItem[] =>
-  (scope === "execution"
-    ? (CODEX_EFFORT_VALUES as string[])
-    : (FUSION_EFFORT_VALUES as string[])
-  ).map((effort) => ({
-    key: `${prefix}-${scope}-effort-${effort}`,
-    label: `${roleName(scope)} ${
-      scope === "execution"
-        ? CODEX_EFFORT_LABELS[effort as FusionCodexEffort]
-        : FUSION_EFFORT_LABELS[effort as FusionEffort]
-    }`,
-    desc:
-      scope === "harness"
-        ? effort === "auto"
-          ? "Use runtime defaults across the harness"
-          : `Set both Fusion roles to ${effort}`
-        : effort === "auto"
-          ? `Use the runtime default for ${roleName(scope).toLowerCase()}`
-          : `Set ${roleName(scope).toLowerCase()} effort to ${effort}`,
-    command:
-      prefix === "/effort"
-        ? `${prefix} ${scopeCommand(scope)} ${effort}`
-        : `${prefix} effort ${effort}`
-  }));
-
-const speedItems = (scope: FusionRoleScope): SlashMenuItem[] =>
-  FUSION_SPEED_VALUES.map((preset) => ({
-    key: `speed-${scope}-${preset}`,
-    label: `${roleName(scope)} ${FUSION_SPEED_LABELS[preset]}`,
-    desc:
-      scope === "harness"
-        ? preset === "fast"
-          ? "Fast planning and low execution effort"
-          : preset === "balanced"
-            ? "Default Fusion balance"
-            : preset === "deep"
-              ? "High effort across Fusion"
-              : "Maximum effort across Fusion"
-        : scope === "planning"
-          ? preset === "fast"
-            ? "Fast planning model and low planning effort"
-            : preset === "balanced"
-              ? "Opus planning with automatic effort"
-              : preset === "deep"
-                ? "Opus planning with high effort"
-                : "Opus planning with max effort"
-          : preset === "fast"
-            ? "Low execution effort"
-            : preset === "balanced"
-              ? "Automatic execution effort"
-              : preset === "deep"
-                ? "High execution effort"
-                : "Max execution effort",
-    command: `/speed ${scopeCommand(scope)} ${preset}`
-  }));
-
-const filterSlashItems = (items: SlashMenuItem[], query: string) => {
-  const normalized = query.trim().toLowerCase();
-  if (!normalized) return items;
-  return items.filter((item) =>
-    `${item.label} ${item.desc}`.toLowerCase().includes(normalized)
-  );
-};
-
-function hasFreeTextSlashArgument(input: string) {
-  const normalized = input.trim().replace(/\s+/g, " ").toLowerCase();
-  return FREE_TEXT_SLASH_COMMANDS.some((command) =>
-    normalized.startsWith(command + " ") &&
-      normalized.slice(command.length).trim().length > 0
-  );
-}
-
-function buildSlashMenu(input: string): SlashMenu {
-  if (!input.startsWith("/")) {
-    return { title: "", items: [] };
-  }
-
-  if (hasFreeTextSlashArgument(input)) {
-    return { title: "", items: [] };
-  }
-
-  const trimmed = input.trim();
-  const lower = trimmed.toLowerCase();
-  const submenu = (command: string, title: string, items: SlashMenuItem[]) => {
-    const query = lower.startsWith(`${command} `)
-      ? trimmed.slice(command.length).trim()
-      : "";
-    return { title, items: filterSlashItems(items, query) };
-  };
-
-  if (lower === "/opus" || lower.startsWith("/opus ")) {
-    return submenu("/opus", "Planning Role", [
-      ...CLAUDE_MODEL_OPTIONS.map((model) => ({
-        key: `opus-model-${model.id}`,
-        label: model.label,
-        desc: model.desc,
-        command: `/claude ${model.id}`
-      })),
-      {
-        key: "opus-speed",
-        label: "Speed",
-        desc: "Planning speed presets",
-        fill: "/speed planning "
-      },
-      {
-        key: "opus-effort",
-        label: "Effort",
-        desc: "Planning effort levels",
-        fill: "/effort planning "
-      },
-      ...effortItems("/opus", "planning")
-    ]);
-  }
-
-  // "/claude " is the fill the command palette itself inserts for "set the
-  // planning model" — it MUST land in a model submenu. Before this branch it
-  // fell through to the full command list with /plan highlighted, so the
-  // natural confirm keystroke silently switched modes.
-  if (lower === "/claude" || lower.startsWith("/claude ")) {
-    return submenu("/claude", "Planning Model", [
-      ...CLAUDE_MODEL_OPTIONS.map((model) => ({
-        key: `claude-model-${model.id}`,
-        label: model.label,
-        desc: model.desc,
-        command: `/claude ${model.id}`
-      }))
-    ]);
-  }
-
-  if (lower === "/codex" || lower.startsWith("/codex ")) {
-    return submenu("/codex", "Execution Role", [
-      ...CODEX_MODEL_OPTIONS.map((model) => ({
-        key: `codex-model-${model.id}`,
-        label: model.label,
-        desc: model.desc,
-        command: `/codex ${model.id}`
-      })),
-      {
-        key: "codex-custom",
-        label: "Custom model",
-        desc: "Type an execution model id",
-        fill: "/codex "
-      },
-      {
-        key: "codex-speed",
-        label: "Speed",
-        desc: "Execution speed presets",
-        fill: "/speed execution "
-      },
-      {
-        key: "codex-effort",
-        label: "Effort",
-        desc: "Execution effort levels",
-        fill: "/effort execution "
-      },
-      ...effortItems("/codex", "execution")
-    ]);
-  }
-
-  if (lower === "/speed planning" || lower.startsWith("/speed planning ")) {
-    return submenu("/speed planning", "Fusion Speed / Planning", speedItems("planning"));
-  }
-
-  if (lower === "/speed execution" || lower.startsWith("/speed execution ")) {
-    return submenu("/speed execution", "Fusion Speed / Execution", speedItems("execution"));
-  }
-
-  if (lower === "/speed fusion" || lower.startsWith("/speed fusion ")) {
-    return submenu("/speed fusion", "Fusion Speed / Whole Harness", speedItems("harness"));
-  }
-
-  if (lower === "/speed" || lower.startsWith("/speed ")) {
-    return submenu("/speed", "Fusion Speed", [
-      {
-        key: "speed-fusion",
-        label: "Whole harness",
-        desc: "Presets for planning and execution together",
-        fill: "/speed fusion "
-      },
-      {
-        key: "speed-planning",
-        label: "Planning role",
-        desc: "Planning and review speed",
-        fill: "/speed planning "
-      },
-      {
-        key: "speed-execution",
-        label: "Execution role",
-        desc: "Implementation and verification speed",
-        fill: "/speed execution "
-      },
-      ...speedItems("harness")
-    ]);
-  }
-
-  if (lower === "/effort planning" || lower.startsWith("/effort planning ")) {
-    return submenu("/effort planning", "Fusion Effort / Planning", effortItems("/effort", "planning"));
-  }
-
-  if (lower === "/effort execution" || lower.startsWith("/effort execution ")) {
-    return submenu("/effort execution", "Fusion Effort / Execution", effortItems("/effort", "execution"));
-  }
-
-  if (lower === "/effort fusion" || lower.startsWith("/effort fusion ")) {
-    return submenu("/effort fusion", "Fusion Effort / Whole Harness", effortItems("/effort", "harness"));
-  }
-
-  if (lower === "/effort" || lower.startsWith("/effort ")) {
-    return submenu("/effort", "Fusion Effort", [
-      {
-        key: "effort-fusion",
-        label: "Whole harness",
-        desc: "Set both Fusion roles together",
-        fill: "/effort fusion "
-      },
-      {
-        key: "effort-planning",
-        label: "Planning role",
-        desc: "Planning and review effort",
-        fill: "/effort planning "
-      },
-      {
-        key: "effort-execution",
-        label: "Execution role",
-        desc: "Implementation and verification effort",
-        fill: "/effort execution "
-      },
-      ...effortItems("/effort", "harness")
-    ]);
-  }
-
-  // A command with an argument in progress ("/something …") that no submenu
-  // above claimed must NOT fall back to the full command list: Enter would
-  // activate whatever sits at index 0 (historically /plan — a silent mode
-  // switch). No matching context → no menu.
-  if (/\s/.test(trimmed)) {
-    return { title: "", items: [] };
-  }
-
-  const token = input.startsWith("/") && !/\s/.test(input) ? input.slice(1).toLowerCase() : "";
-  const commands = FUSION_SLASH_COMMANDS.filter((cmd) => cmd.name.slice(1).startsWith(token));
-  return {
-    title: "Commands",
-    items: commands.map((cmd) => ({
-      key: cmd.name,
-      label: `${cmd.name}${cmd.arg ? ` ${cmd.arg}` : ""}`,
-      desc: cmd.desc,
-      command: cmd.takesArg || cmd.submenu ? undefined : cmd.name,
-      fill: cmd.takesArg || cmd.submenu ? `${cmd.name} ` : undefined
-    }))
-  };
-}
-
-function normalizeModelId(value: unknown, fallback: string) {
-  const trimmed = typeof value === "string" ? value.trim() : "";
-  if (
-    !trimmed ||
-    trimmed.length > 96 ||
-    !FUSION_MODEL_ID_PATTERN.test(trimmed)
-  ) {
-    return fallback;
-  }
-
-  return trimmed;
-}
-
-function normalizeFusionModel(value: unknown): FusionClaudeModel {
-  const model = normalizeModelId(value, DEFAULT_FUSION_MODEL);
-  const lower = model.toLowerCase();
-  if (lower === "fast") return "sonnet";
-  if (lower === "opus" || lower === "sonnet") return lower;
-  return model;
-}
-
-function normalizeFusionCodexModel(value: unknown): FusionCodexModel {
-  const model = normalizeModelId(value, DEFAULT_FUSION_CODEX_MODEL);
-  const lower = model.toLowerCase();
-  return lower === "auto" || lower === "default" ? DEFAULT_FUSION_CODEX_MODEL : model;
-}
-
-function normalizeFusionEffort(value: unknown): FusionEffort {
-  return FUSION_EFFORT_VALUES.includes(value as FusionEffort)
-    ? (value as FusionEffort)
-    : DEFAULT_FUSION_EFFORT;
-}
-
-function normalizeFusionCodexEffort(value: unknown): FusionCodexEffort {
-  // Legacy saved panes (and old fusion-settings.json files) carry "max",
-  // which codex rejects as an unknown variant: coerce to its nearest real
-  // level instead of letting it fail every delegation.
-  if (value === "max") {
-    return "xhigh";
-  }
-  return CODEX_EFFORT_VALUES.includes(value as FusionCodexEffort)
-    ? (value as FusionCodexEffort)
-    : DEFAULT_FUSION_CODEX_EFFORT;
-}
-
-function isValidClaudeModelId(value: string) {
-  return CLAUDE_MODEL_ALIAS_PATTERN.test(value.trim());
-}
 
 function normalizeFusionRunMode(value: unknown): FusionRunMode {
   return String(value || "").trim().toLowerCase() === "plan" ? "plan" : DEFAULT_FUSION_RUN_MODE;
@@ -844,8 +441,13 @@ export default function FusionChatPane({
   const [interrupting, setInterrupting] = useState(false);
   const [activeRole, setActiveRole] = useState<FusionActiveRole>("claude");
   const [slashIndex, setSlashIndex] = useState(0);
+  // Esc hides the menu for the CURRENT input without erasing what the user
+  // typed (it used to wipe the whole command). Any input change re-arms it.
+  const [slashMenuDismissed, setSlashMenuDismissed] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  // Keeps the highlighted slash-menu row visible when the list scrolls.
+  const activeMenuItemRef = useRef<HTMLLIElement | null>(null);
   const inputRef = useRef("");
   const keyRef = useRef(0);
   const interruptingRef = useRef(false);
@@ -896,8 +498,11 @@ export default function FusionChatPane({
       : null;
   const backgroundActivityTitle = formatBackgroundActivityTitle(backgroundActivity);
   const canResumeClaude = session.resumeRef?.provider === "claude" && Boolean(session.resumeRef.id);
-  const slashMenu = buildSlashMenu(input);
-  const slashMenuOpen = slashMenu.items.length > 0;
+  const slashMenu = buildSlashMenu(input, {
+    model: fusionModel,
+    codexModel: fusionCodexModel
+  });
+  const slashMenuOpen = slashMenu.items.length > 0 && !slashMenuDismissed;
   const visibleMessages = verbose ? messages : messages.filter((message) => !message.internal);
   const pendingDecisionIsQuestion = pendingDecision?.kind === "question";
   const showPlanActionBar =
@@ -952,10 +557,16 @@ export default function FusionChatPane({
     return () => observer.disconnect();
   }, [input, isMaximized]);
 
-  // Reset the highlighted command whenever the typed token changes.
+  // Reset the highlighted command (and re-arm a dismissed menu) whenever the
+  // typed token changes.
   useEffect(() => {
     setSlashIndex(0);
+    setSlashMenuDismissed(false);
   }, [input]);
+
+  useEffect(() => {
+    activeMenuItemRef.current?.scrollIntoView({ block: "nearest" });
+  }, [slashIndex]);
 
   const nextKey = () => `m${keyRef.current++}`;
   const push = (entry: Omit<ChatMessage, "key" | "ts"> & { ts?: number }) =>
@@ -1317,11 +928,38 @@ export default function FusionChatPane({
           // Keep the Opus bubble open across assistant-message seams; it is
           // closed on `result`/`closed` so the whole answer stays together.
           break;
+        case "turn-error":
+          // A non-streamed error (e.g. the picked model is unavailable for
+          // this account) — surface it instead of ending the turn silently,
+          // but keep the session alive: the next /claude pick can fix it.
+          setActiveRole("claude");
+          stopStreaming();
+          push({
+            role: "opus",
+            kind: "error",
+            text: /model/i.test(event.message)
+              ? `${event.message} — the planning model may be unavailable to this account. Pick another with /claude.`
+              : event.message
+          });
+          break;
         case "result":
           setActiveRole("claude");
           stopStreaming();
           setInterruptingState(false);
           setBusyState(false);
+          if (event.isError) {
+            if (event.resultText) {
+              push({
+                role: "opus",
+                kind: "error",
+                text: /model/i.test(event.resultText)
+                  ? `${event.resultText} — the planning model may be unavailable to this account. Pick another with /claude.`
+                  : event.resultText
+              });
+            }
+            emitAttention("failed", "error", event.resultText || "Turn failed.");
+            break;
+          }
           if (waitingForDecisionRef.current) {
             onStatusChangeRef.current("waiting");
           } else {
@@ -1519,16 +1157,20 @@ export default function FusionChatPane({
     push({ role: "opus", kind: "activity", text });
   }
 
+  // Speed presets are EFFORT presets and preserve the user's model picks.
+  // Only "fast" swaps the planning model (to Sonnet) — that's its advertised
+  // point. balanced/deep/max used to hard-reset the model to Opus, which read
+  // as "my model pick didn't stick".
   function applySpeedPreset(scope: FusionRoleScope, preset: FusionSpeedPreset) {
     if (scope === "planning") {
       if (preset === "fast") {
         applySettings({ model: "sonnet", claudeEffort: "low" }, "planning speed");
       } else if (preset === "balanced") {
-        applySettings({ model: "opus", claudeEffort: "auto" }, "planning speed");
+        applySettings({ claudeEffort: "auto" }, "planning speed");
       } else if (preset === "deep") {
-        applySettings({ model: "opus", claudeEffort: "high" }, "planning speed");
+        applySettings({ claudeEffort: "high" }, "planning speed");
       } else {
-        applySettings({ model: "opus", claudeEffort: "max" }, "planning speed");
+        applySettings({ claudeEffort: "max" }, "planning speed");
       }
       return;
     }
@@ -1550,11 +1192,11 @@ export default function FusionChatPane({
     if (preset === "fast") {
       applySettings({ model: "sonnet", claudeEffort: "low", codexEffort: "low" }, "Fusion speed");
     } else if (preset === "balanced") {
-      applySettings({ model: "opus", claudeEffort: "auto", codexEffort: "auto" }, "Fusion speed");
+      applySettings({ claudeEffort: "auto", codexEffort: "auto" }, "Fusion speed");
     } else if (preset === "deep") {
-      applySettings({ model: "opus", claudeEffort: "high", codexEffort: "high" }, "Fusion speed");
+      applySettings({ claudeEffort: "high", codexEffort: "high" }, "Fusion speed");
     } else {
-      applySettings({ model: "opus", claudeEffort: "max", codexEffort: "xhigh" }, "Fusion speed");
+      applySettings({ claudeEffort: "max", codexEffort: "xhigh" }, "Fusion speed");
     }
   }
 
@@ -1714,7 +1356,9 @@ export default function FusionChatPane({
     const opusEffortMatch = normalized.match(/^\/opus\s+effort\s+(auto|low|medium|high|xhigh|max)$/);
     if (opusEffortMatch) {
       setInput("");
-      applySettings({ model: "opus", claudeEffort: opusEffortMatch[1] as FusionEffort }, "Opus effort");
+      // Effort only — this used to also force model:"opus", silently
+      // reverting a Sonnet/custom pick ("my model didn't stick").
+      applySettings({ claudeEffort: opusEffortMatch[1] as FusionEffort }, "planning effort");
       return true;
     }
 
@@ -2333,11 +1977,15 @@ export default function FusionChatPane({
               onDragOver={handleComposerDragOver}
               onKeyDown={(e) => {
                 // Shift+Tab flips Plan/Auto — but never while the slash menu
-                // is open, where Tab means "select" and a stray Shift+Tab
-                // used to silently switch modes mid-navigation.
-                if (e.key === "Tab" && e.shiftKey && !slashMenuOpen) {
+                // is open OR a slash command is being typed (with the menu
+                // closed by filtering/dismissal a stray Shift+Tab used to
+                // silently switch modes mid-command). It is always swallowed
+                // so focus never escapes the composer backwards.
+                if (e.key === "Tab" && e.shiftKey) {
                   e.preventDefault();
-                  toggleRunMode();
+                  if (!slashMenuOpen && !inputIsSlashCommand) {
+                    toggleRunMode();
+                  }
                   return;
                 }
                 if (slashMenuOpen) {
@@ -2357,8 +2005,10 @@ export default function FusionChatPane({
                     return;
                   }
                   if (e.key === "Escape") {
+                    // Close the menu but KEEP the typed input (a second Esc
+                    // clears it below). It used to erase the whole command.
                     e.preventDefault();
-                    setInput("");
+                    setSlashMenuDismissed(true);
                     return;
                   }
                   if (e.key === "Enter" && !e.shiftKey) {
@@ -2367,10 +2017,23 @@ export default function FusionChatPane({
                     return;
                   }
                 }
-                if (e.key === "Escape" && busy) {
+                // Tab while typing a slash command (menu filtered closed):
+                // swallow it so completion attempts don't blur the composer.
+                if (e.key === "Tab" && inputIsSlashCommand) {
                   e.preventDefault();
-                  interrupt();
                   return;
+                }
+                if (e.key === "Escape") {
+                  if (busy) {
+                    e.preventDefault();
+                    interrupt();
+                    return;
+                  }
+                  if (input) {
+                    e.preventDefault();
+                    setInput("");
+                    return;
+                  }
                 }
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
@@ -2413,10 +2076,11 @@ export default function FusionChatPane({
                 {slashMenu.items.map((item, i) => (
                   <li
                     key={item.key}
+                    ref={i === slashIndex ? activeMenuItemRef : undefined}
                     role="option"
                     aria-selected={i === slashIndex}
                     className={clsx("fusion-slash-item", i === slashIndex && "is-active")}
-                    onMouseEnter={() => setSlashIndex(i)}
+                    onMouseMove={() => setSlashIndex(i)}
                     onMouseDown={(e) => {
                       e.preventDefault();
                       applySlashSelection(item);

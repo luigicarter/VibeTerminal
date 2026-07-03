@@ -16,24 +16,38 @@
 > live turn needs `claude login` + `codex login`; transcript ephemeral (Resume
 > via `claude --resume`); per-platform binaries + code-signing for release.
 >
-> **Settings layer rewrite (2026-07-02):** model/effort selection is now
-> catalog-backed and validated, mirroring Open Fusion's native feel. Curated
-> model catalogs (Claude: Opus 4.8 / Sonnet 4.5 aliases + validated `claude-*`
-> ids; Codex: ids read from the shipped 0.142 binary + custom escape hatch);
-> **per-engine effort enums** — planning uses the `claude --effort` enum
-> (low..max), execution uses codex's own (minimal..ultra — codex has NO "max";
-> the old shared enum let the UI set `codexEffort:"max"`, which codex rejected
-> as an unknown variant and every delegation failed until changed; legacy
-> "max" now coerces to "xhigh" in the pane, App restore, main, and the
-> adapter's settings-file read). Unknown planning models are refused before
-> anything restarts (previously `claude --model <typo>` exited instantly and
-> left a dead pane); unknown `/speed` values error instead of being
-> reinterpreted as a model. Menu traps fixed: `/claude ` opens a Planning
-> Model submenu (it used to fall back to the full command list with `/plan`
-> highlighted, so Enter silently switched modes), unmatched command+argument
-> input yields an empty menu, and Shift+Tab no longer toggles Plan/Auto while
-> the slash menu is open. Settings restarts keep the visible transcript and
-> append the notice (same Claude thread resumes). Locked by
+> **Settings layer rewrite (2026-07-02, hardened 2026-07-03):** model/effort
+> selection is catalog-backed and validated, mirroring Open Fusion's native
+> feel. The pure menu/catalog logic lives in
+> `frontend/components/fusionSlashMenu.ts` (extracted so the smoke executes
+> real behavior). Curated model catalogs (Claude: Opus 4.8 / Sonnet 4.5 /
+> fable aliases + validated `claude-*` ids; Codex: ids read from the shipped
+> 0.142 binary + custom escape hatch); **per-engine effort enums** — planning
+> uses the `claude --effort` enum (low..max), execution uses codex's own
+> (minimal..ultra — codex has NO "max"; legacy "max" coerces to "xhigh" at
+> every layer). The claude effort NEVER backfills the codex effort (main's old
+> `payload.codexEffort ?? payload.effort` fallback silently ran every
+> delegation at the claude level while the UI said "Execution Auto").
+> Selection semantics (the 2026-07-03 pass — each of these was a live "my
+> pick didn't stick" bug): the `/claude`/`/codex` submenus lead with the
+> CURRENT model marked `· current`, so Enter on the bare command is a no-op
+> instead of committing the default at index 0; typing after `/claude`
+> FILTERS the submenu (it used to close it) and an unmatched-but-launchable
+> id gets an explicit `Use '<id>'` row; `/opus effort <x>` and the
+> balanced/deep/max speed presets are effort-only (they used to force the
+> model back to Opus — only the "fast" presets, which advertise it, switch to
+> Sonnet); Esc closes the menu but keeps the typed input (second Esc clears);
+> Shift+Tab never flips Plan/Auto while a slash command is being typed; Tab
+> can't blur the composer mid-command; hover-highlight arms on real mouse
+> movement only. Unknown planning models are refused before anything
+> restarts; unknown `/speed` values error instead of being reinterpreted as a
+> model. Errors that arrive as complete (non-streamed) assistant messages —
+> e.g. a model the account can't use — surface as turn errors instead of
+> silently ending the turn with no output (`result.is_error` is forwarded
+> too). Model/effort picks persist app-wide: new Fusion panes start from the
+> last-used configuration (localStorage `vibe-terminal:last-fusion-settings`)
+> until changed. Settings restarts keep the visible transcript and append the
+> notice (same Claude thread resumes). Locked by
 > `scripts/frontend/fusion-settings-smoke.cjs`.
 
 Goal: a **Fusion** terminal that fuses the *capabilities* of two coding agents

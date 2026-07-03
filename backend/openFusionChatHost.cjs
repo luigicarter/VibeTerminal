@@ -580,6 +580,16 @@ function runHost() {
             }
             if (!state.normalizer) continue;
             for (const event of state.normalizer(parsed)) {
+              // Track turn state so auth changes never dispose an instance
+              // with a delegation in flight (dispose is safe for idle panes).
+              if (event.type === "turn-start") state.turnBusy = true;
+              else if (
+                event.type === "result" ||
+                event.type === "interrupted" ||
+                event.type === "error"
+              ) {
+                state.turnBusy = false;
+              }
               emitSessionEvent(id, state, event);
             }
           }
@@ -817,9 +827,14 @@ function runHost() {
       });
       return;
     }
+    // The full catalog and auth-method map are progressive enhancements: their
+    // failure must be VISIBLE (catalogOk:false), not silently collapse the
+    // connect picker to connected-only — that made "/connect openrouter" get
+    // refused as "not in the catalog" with no hint anything failed.
+    const CATALOG_FAILED = Symbol("catalog-failed");
     Promise.all([
       request(state, "GET", "/config/providers"),
-      request(state, "GET", "/provider").catch(() => null),
+      request(state, "GET", "/provider").catch(() => CATALOG_FAILED),
       request(state, "GET", "/provider/auth").catch(() => null)
     ])
       .then(([connectedInfo, catalog, authMethodsRaw]) => {
@@ -835,8 +850,9 @@ function runHost() {
           connected.push({ id: String(provider.id), name: String(provider.name || provider.id), models });
         }
         const connectedIds = new Set(connected.map((provider) => provider.id));
+        const catalogOk = catalog !== CATALOG_FAILED;
         const available = [];
-        const all = catalog && Array.isArray(catalog.all) ? catalog.all : [];
+        const all = catalogOk && catalog && Array.isArray(catalog.all) ? catalog.all : [];
         for (const provider of all) {
           if (!provider || typeof provider !== "object" || connectedIds.has(String(provider.id))) continue;
           available.push({ id: String(provider.id), name: String(provider.name || provider.id) });
@@ -847,6 +863,7 @@ function runHost() {
           ok: true,
           connected,
           available,
+          catalogOk,
           authMethods: normalizeAuthMethods(authMethodsRaw)
         });
       })
@@ -858,6 +875,28 @@ function runHost() {
           message: `Could not load the provider catalog: ${error.message}`
         });
       });
+  }
+
+  // The credential store is app-level and shared by every pane, but each pane
+  // runs its own `opencode serve` whose lazy instance only reflects auth
+  // changes after a dispose. After a connect/disconnect in ONE pane, dispose
+  // the other panes' idle instances too (never mid-turn — a dispose with a
+  // delegation in flight is not worth the risk; a busy pane picks the change
+  // up at its next dispose/restart) and re-emit providers everywhere so every
+  // open picker refreshes.
+  function refreshProvidersAfterAuthChange(originId) {
+    for (const [sid, s] of sessions) {
+      if (sid === originId || !s.child || !s.port || s.stopping) continue;
+      const refresh = () => {
+        if (sessions.get(sid) === s) providers({ id: sid });
+      };
+      if (s.turnBusy) {
+        refresh();
+      } else {
+        request(s, "POST", "/instance/dispose").catch(() => {}).then(refresh);
+      }
+    }
+    providers({ id: originId });
   }
 
   // Store an API key in OpenCode's own auth store (the same PUT the CLI's
@@ -926,7 +965,7 @@ function runHost() {
           action: "connect",
           nonce
         });
-        providers({ id });
+        refreshProvidersAfterAuthChange(id);
       })
       .catch((error) => {
         if (sessions.get(id) !== state) return;
@@ -1039,7 +1078,7 @@ function runHost() {
           action: "connect",
           nonce
         });
-        providers({ id });
+        refreshProvidersAfterAuthChange(id);
       })
       .catch((error) => {
         if (sessions.get(id) !== state) return;
@@ -1081,7 +1120,7 @@ function runHost() {
           providerId,
           action: "disconnect"
         });
-        providers({ id });
+        refreshProvidersAfterAuthChange(id);
       })
       .catch((error) => {
         if (sessions.get(id) !== state) return;

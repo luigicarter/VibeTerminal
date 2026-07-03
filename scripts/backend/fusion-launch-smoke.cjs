@@ -190,7 +190,11 @@ async function main() {
       "Fusion launch should normalize Claude model, Codex model, effort controls, and run mode"
     );
     assert(
-      /payload\.codexEffort \?\? payload\.effort/.test(mainSource) &&
+      // The codex effort must come ONLY from payload.codexEffort — the old
+      // `?? payload.effort` fallback silently applied the CLAUDE effort to
+      // every codex delegation whenever execution was on Auto.
+      !/payload\.codexEffort \?\? payload\.effort/.test(mainSource) &&
+        /normalizeFusionCodexEffort\(payload\.codexEffort\)/.test(mainSource) &&
         /codexEffort: fusionCodexEffort/.test(mainSource) &&
         /effort: fusionClaudeEffort/.test(mainSource),
       "Fusion launch should pass independent Claude and Codex effort settings"

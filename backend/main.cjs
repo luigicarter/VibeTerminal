@@ -1410,7 +1410,10 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
         : process.env.VIBE_FUSION_CODEX_MODEL;
     const fusionCodexModel = normalizeFusionCodexModel(rawCodexModel);
     const fusionClaudeEffort = normalizeFusionEffort(payload.effort);
-    const fusionCodexEffort = normalizeFusionCodexEffort(payload.codexEffort ?? payload.effort);
+    // No `?? payload.effort` fallback: the pane omits codexEffort when it's
+    // "auto", and the legacy shared-enum fallback silently applied the CLAUDE
+    // effort to every codex delegation while the UI said "Execution Auto".
+    const fusionCodexEffort = normalizeFusionCodexEffort(payload.codexEffort);
     const fusionRunMode = normalizeFusionRunMode(payload.mode);
     const telemetry = getAgentTelemetry();
     const files = await telemetry.prepareFusionFiles(id, {

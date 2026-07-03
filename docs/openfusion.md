@@ -49,13 +49,30 @@
 > `agentTelemetry.cjs`/`main.cjs`, renderer `openFusion.ts`); `""` means "not
 > chosen yet", generated configs omit `model` fields entirely, and
 > `openFusionChatHost.input()` refuses turns without an explicit Brain model.
-> First-run gate in the pane: with zero connected providers it walks
-> connect-a-provider (keys go to the app-owned store), then Brain/Executor
-> picks from actually-connected providers; the composer blocks non-slash turns
-> until both are set. `/connect` refuses provider ids that are not in the
-> OpenCode catalog (a stored key for an unknown id would never be used —
-> opencode's own dialog warns here; since Open Fusion generates the pane
-> config, there is no user opencode.json to wire a custom provider into).
+> First-run gate in the pane: a "Connect a provider" button is ALWAYS offered
+> (the keyless opencode zen provider counts as connected, so a
+> zero-connected-providers check would hide it forever — it did, until
+> 2026-07-03), alongside Brain/Executor picks from actually-connected
+> providers; the composer blocks non-slash turns until both are set. Once a
+> pair has been picked, it persists app-wide (localStorage
+> `vibe-terminal:last-openfusion-models`): new Open Fusion panes start from
+> the last-used pair instead of re-running the gate. `/connect` with no
+> argument opens a provider browser (popular providers first — anthropic,
+> openai, google, openrouter, … — then the ~149-provider catalog
+> alphabetically, scrollable with an explicit "N more" row; it used to be a
+> hard silent cap of 14 alphabetical rows, which is why OpenRouter never
+> appeared). `/connect <id>` matches case-insensitively and refuses provider
+> ids that are not in the OpenCode catalog (a stored key for an unknown id
+> would never be used) — unless the catalog itself failed to load
+> (`catalogOk:false` on the providers event), in which case the pickers say
+> the list is partial and the attempt proceeds. `/disconnect` with no
+> argument opens the same browser over connected providers. While a connect
+> flow is open, every stage takes keyboard focus (method buttons included)
+> and composer Enter hands focus to the flow — pasted API keys can no longer
+> land in the chat input. A connect/disconnect in one pane disposes the other
+> panes' idle server instances and re-emits their provider lists, so every
+> pane sees the credential immediately (busy panes pick it up at their next
+> dispose/restart).
 >
 > **Engine contract (live-verified against OpenCode 1.17.11):**
 > `opencode serve --port 0 --hostname 127.0.0.1` (stdout line reports the

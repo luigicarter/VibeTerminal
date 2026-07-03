@@ -122,6 +122,72 @@ const FUSION_CODEX_EFFORT_VALUES: FusionCodexEffort[] = [
   "ultra"
 ];
 
+// Last-used model configuration, per terminal mode. New panes start from the
+// previous session's picks instead of hard defaults — a model choice survives
+// closing the pane/app until the user changes it somewhere. Run mode is
+// deliberately NOT carried over (Plan vs Auto is situational).
+const LAST_FUSION_SETTINGS_KEY = "vibe-terminal:last-fusion-settings";
+const LAST_OPEN_FUSION_MODELS_KEY = "vibe-terminal:last-openfusion-models";
+
+function readStoredJson(key: string): Record<string, unknown> | null {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredJson(key: string, value: Record<string, unknown>) {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Persistence is best-effort; the session still works without it.
+  }
+}
+
+function rememberFusionSettings(settings: {
+  model: FusionClaudeModel;
+  codexModel: FusionCodexModel;
+  claudeEffort: FusionEffort;
+  codexEffort: FusionCodexEffort;
+}) {
+  writeStoredJson(LAST_FUSION_SETTINGS_KEY, settings);
+}
+
+function lastFusionSettings() {
+  const stored = readStoredJson(LAST_FUSION_SETTINGS_KEY);
+  return {
+    model: normalizeFusionModel(stored?.model),
+    codexModel: normalizeFusionCodexModel(stored?.codexModel),
+    claudeEffort: normalizeFusionEffort(stored?.claudeEffort),
+    codexEffort: normalizeFusionCodexEffort(stored?.codexEffort)
+  };
+}
+
+function rememberOpenFusionModels(models: {
+  plannerModel: string;
+  executorModel: string;
+}) {
+  writeStoredJson(LAST_OPEN_FUSION_MODELS_KEY, models);
+}
+
+function lastOpenFusionModels() {
+  const stored = readStoredJson(LAST_OPEN_FUSION_MODELS_KEY);
+  return {
+    plannerModel: normalizeOpenFusionModel(
+      stored?.plannerModel,
+      DEFAULT_OPEN_FUSION_PLANNER_MODEL
+    ),
+    executorModel: normalizeOpenFusionModel(
+      stored?.executorModel,
+      DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
+    )
+  };
+}
+
 type AppView = "multi" | "project";
 
 type SessionScope =
@@ -547,25 +613,25 @@ function createSession(
       ? "opencode"
       : kind;
   const sessionName = name ?? `${profile.label} ${existingSessions.length + 1}`;
+  // New panes inherit the last-used model configuration for their mode (the
+  // normalizers fall back to the stock defaults when nothing is stored yet).
+  const fusionSeed = isFusion ? lastFusionSettings() : null;
+  const openFusionSeed = isOpenFusion ? lastOpenFusionModels() : null;
 
   return {
     id: createId("session"),
     name: sessionName,
     kind: effectiveKind,
     fusion: isFusion || undefined,
-    fusionModel: isFusion ? DEFAULT_FUSION_CLAUDE_MODEL : undefined,
-    fusionCodexModel: isFusion ? DEFAULT_FUSION_CODEX_MODEL : undefined,
-    fusionClaudeEffort: isFusion ? "auto" : undefined,
-    fusionCodexEffort: isFusion ? "auto" : undefined,
+    fusionModel: fusionSeed?.model,
+    fusionCodexModel: fusionSeed?.codexModel,
+    fusionClaudeEffort: fusionSeed?.claudeEffort,
+    fusionCodexEffort: fusionSeed?.codexEffort,
     fusionRunMode: isFusion ? DEFAULT_FUSION_RUN_MODE : undefined,
     fusionEffort: undefined,
     openFusion: isOpenFusion || undefined,
-    openFusionPlannerModel: isOpenFusion
-      ? DEFAULT_OPEN_FUSION_PLANNER_MODEL
-      : undefined,
-    openFusionExecutorModel: isOpenFusion
-      ? DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
-      : undefined,
+    openFusionPlannerModel: openFusionSeed?.plannerModel,
+    openFusionExecutorModel: openFusionSeed?.executorModel,
     command: profile.command,
     cwd,
     createdAt: Date.now(),
@@ -2199,6 +2265,15 @@ export default function App() {
       nextFusionCodexModel !== currentFusionCodexModel ||
       nextFusionCodexEffort !== currentFusionCodexEffort;
 
+    // Carry the pick forward: the next NEW Fusion pane starts from this
+    // configuration instead of the stock defaults.
+    rememberFusionSettings({
+      model: nextFusionModel,
+      codexModel: nextFusionCodexModel,
+      claudeEffort: nextFusionClaudeEffort,
+      codexEffort: nextFusionCodexEffort
+    });
+
     if (session.started && !requiresRestart && codexSettingsChanged) {
       window.vibe?.fusionChat
         ?.updateSettings(session.id, {
@@ -2284,6 +2359,16 @@ export default function App() {
       DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
     );
     const requiresRestart = nextExecutorModel !== currentExecutorModel;
+
+    // Carry the pair forward for the next NEW Open Fusion pane (only once
+    // both roles are chosen — a half-configured pair shouldn't half-seed the
+    // first-run gate).
+    if (nextPlannerModel && nextExecutorModel) {
+      rememberOpenFusionModels({
+        plannerModel: nextPlannerModel,
+        executorModel: nextExecutorModel
+      });
+    }
 
     const applySettings = () => {
       updateScopeSessions(scope, (sessions) =>

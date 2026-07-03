@@ -116,6 +116,7 @@ function appendBackgroundActivity(events, activeBackgroundAgents) {
 // Turns the raw Anthropic stream-json line objects into high-level chat events.
 function createStreamNormalizer() {
   let block = null; // { kind: "text"|"thinking"|"tool_use", toolId?, name?, jsonBuf? }
+  let turnErrorEmitted = false;
   const activeBackgroundAgents = new Map();
 
   return function normalize(line) {
@@ -137,12 +138,44 @@ function createStreamNormalizer() {
         activeBackgroundAgents.clear();
         appendBackgroundActivity(events, activeBackgroundAgents);
       }
+      const isError = Boolean(msg.is_error);
       events.push({
         type: "result",
         subtype: msg.subtype,
         usage: msg.usage,
-        costUsd: msg.total_cost_usd
+        costUsd: msg.total_cost_usd,
+        isError,
+        // The error detail for failed turns rides in `result` (e.g. a model
+        // the account can't use). Skip it if the synthetic assistant error
+        // already surfaced this turn — one message is enough.
+        resultText:
+          isError && !turnErrorEmitted && typeof msg.result === "string"
+            ? msg.result
+            : undefined
       });
+      turnErrorEmitted = false;
+      return events;
+    }
+
+    // Errors like model_not_found arrive as a COMPLETE synthetic assistant
+    // message (never as stream_events), so without this branch the turn ends
+    // with no output at all — a silently dead pane.
+    if (msg.type === "assistant" && msg.message) {
+      const err = msg.error ?? msg.message.error;
+      if (err && !turnErrorEmitted) {
+        turnErrorEmitted = true;
+        const detail = Array.isArray(msg.message.content)
+          ? msg.message.content
+              .filter((part) => part && part.type === "text" && part.text)
+              .map((part) => part.text)
+              .join("\n")
+          : "";
+        const label = typeof err === "string" ? err : JSON.stringify(err);
+        events.push({
+          type: "turn-error",
+          message: detail ? `${label}: ${detail}` : `Claude error: ${label}`
+        });
+      }
       return events;
     }
 

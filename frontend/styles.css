@@ -1904,7 +1904,9 @@ button {
   margin: 0;
   padding: 0;
   list-style: none;
-  max-height: 180px;
+  /* Tall enough to browse a provider catalog page (the pickers show up to
+     ~25 rows plus a "N more" hint); arrow keys keep the active row in view. */
+  max-height: min(320px, 40vh);
   overflow-y: auto;
 }
 .fusion-slash-item {

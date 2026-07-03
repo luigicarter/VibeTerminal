@@ -362,7 +362,15 @@ export type FusionChatEvent =
   | { id: string; type: "activity"; role: "opus" | "codex"; kind: string; text?: string }
   | { id: string; type: "background-activity"; backgroundActivity: AgentBackgroundActivity }
   | { id: string; type: "turn-end" }
-  | { id: string; type: "result"; subtype?: string; costUsd?: number }
+  | { id: string; type: "turn-error"; message: string }
+  | {
+      id: string;
+      type: "result";
+      subtype?: string;
+      costUsd?: number;
+      isError?: boolean;
+      resultText?: string;
+    }
   | { id: string; type: "interrupted" }
   | { id: string; type: "stderr"; text: string }
   | { id: string; type: "error"; message: string }
@@ -437,6 +445,10 @@ export type OpenFusionChatEvent =
       message?: string;
       connected?: OpenFusionProvider[];
       available?: { id: string; name: string }[];
+      // False when GET /provider (the full catalog) failed even though the
+      // connected list loaded — the picker must say so instead of silently
+      // showing connected-only.
+      catalogOk?: boolean;
       // Per-provider auth methods from GET /provider/auth. Providers absent
       // from this map connect with the default single API-key method.
       authMethods?: Record<string, OpenFusionAuthMethod[]>;
