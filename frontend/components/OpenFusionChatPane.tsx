@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Ban,
   Check,
@@ -22,6 +22,8 @@ import {
 } from "lucide-react";
 import clsx from "clsx";
 import { shouldShowAttentionDot } from "../attention";
+import { cwdConflictChipLabel, cwdConflictTitle } from "../cwdConflicts";
+import type { CwdConflict } from "../cwdConflicts";
 import type {
   AgentAttentionEvent,
   AgentProfile,
@@ -44,6 +46,7 @@ export interface OpenFusionSettingsChange {
 interface OpenFusionChatPaneProps {
   session: AgentSession;
   profile: AgentProfile;
+  cwdConflict?: CwdConflict;
   isMaximized: boolean;
   isSelected: boolean;
   onClose: () => void;
@@ -194,6 +197,17 @@ function previewText(text: string): string {
   return line ? clip(line, 120) : "(no output)";
 }
 
+// Collapsed STREAMING rows tick along on their latest line — a first-line
+// preview would freeze the row the moment it starts. Only the tail is scanned:
+// this runs on every flush of a growing block, and splitting the whole text
+// each time would make long streams progressively slower.
+function lastLinePreview(text: string): string {
+  const tail = (text ?? "").slice(-600);
+  const lines = tail.split("\n").map((value) => value.trim()).filter(Boolean);
+  const line = lines[lines.length - 1];
+  return line ? clip(line, 120) : "…";
+}
+
 function titleFromFirstPrompt(text: string) {
   return clip(text.replace(/\s+/g, " ").trim(), 80);
 }
@@ -262,9 +276,94 @@ function permissionDetail(pending: PendingPermission) {
   return `${scope}${pending.permission}${patterns ? ` (${patterns})` : ""}`;
 }
 
+// One transcript row, memoized: a streaming delta re-renders ONLY the growing
+// bubble instead of reconciling every row of a long transcript per chunk —
+// that full-list churn is what made streaming feel choppy.
+const OpenFusionChatRow = memo(function OpenFusionChatRow({
+  m,
+  verbose,
+  isExpanded,
+  onToggle
+}: {
+  m: OpenFusionChatMessage;
+  verbose: boolean;
+  isExpanded: boolean;
+  onToggle: (key: string) => void;
+}) {
+  // Subagent text streams (the executor's code-in-progress, Scout's report
+  // drafts) are raw work product like tool output and reasoning — never
+  // full-width transcript prose.
+  const isSubagentStream = m.kind === "text" && m.role !== "user" && m.role !== "brain";
+  if ((m.kind === "thinking" || isSubagentStream) && !m.text.trim()) {
+    return null;
+  }
+
+  const author = ROLE_LABELS[m.role];
+  const className = clsx("chat-msg", `chat-${m.role}`, `chat-kind-${m.kind}`);
+
+  if (m.kind === "tool-result" || m.kind === "thinking" || isSubagentStream) {
+    // Raw work product stays ONE collapsed line — click expands and minimizes
+    // it again, opencode-style, streaming included. While collapsed and live
+    // it ticks along on its latest line instead of dumping the whole block
+    // into the transcript.
+    const preview = m.streaming ? lastLinePreview(m.text) : previewText(m.text);
+    const expandable = preview !== m.text.trim();
+    const open = verbose || isExpanded;
+    return (
+      <div className={className}>
+        <span className="chat-gutter">●</span>
+        <div className="chat-body">
+          <div
+            className={clsx("chat-tool", expandable && "chat-tool-expandable")}
+            onClick={expandable ? () => onToggle(m.key) : undefined}
+          >
+            <span className="chat-tool-author">{author}</span>
+            <span className="chat-tool-kind">
+              {m.kind === "thinking" ? "thinking" : isSubagentStream ? "✎" : "↳"}
+            </span>
+            {expandable && <span className="chat-tool-caret">{open ? "▾" : "▸"}</span>}
+            <span className="chat-tool-text">
+              {open ? m.text : preview}
+              {m.streaming && <span className="chat-caret">▋</span>}
+            </span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (m.kind === "tool-call" || m.kind === "activity") {
+    return (
+      <div className={className}>
+        <span className="chat-gutter">●</span>
+        <div className="chat-body">
+          <div className="chat-tool">
+            <span className="chat-tool-author">{author}</span>
+            <span className="chat-tool-text">{m.text}</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={className}>
+      <span className="chat-gutter">{m.role === "user" ? "›" : ""}</span>
+      <div className="chat-body">
+        {m.role !== "user" && <span className="chat-author">{author}</span>}
+        <span className="chat-text">
+          {m.text}
+          {m.streaming && <span className="chat-caret">▋</span>}
+        </span>
+      </div>
+    </div>
+  );
+});
+
 export default function OpenFusionChatPane({
   session,
   profile,
+  cwdConflict,
   isMaximized,
   isSelected,
   onClose,
@@ -287,6 +386,11 @@ export default function OpenFusionChatPane({
   const [failed, setFailed] = useState(false);
   const [interrupting, setInterrupting] = useState(false);
   const [pendingPermission, setPendingPermission] = useState<PendingPermission | null>(null);
+  // Messages sent mid-turn (steering). The server has them queued; they stay
+  // pinned above the composer — opencode's QUEUED badge mechanic — until the
+  // Brain's next step absorbs them into context, then they join the transcript
+  // at that point instead of drowning mid-stream.
+  const [steering, setSteering] = useState<{ key: string; text: string }[]>([]);
   const [activeRole, setActiveRole] = useState<OpenFusionChatRole>("brain");
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [verbose, setVerbose] = useState(false);
@@ -339,6 +443,19 @@ export default function OpenFusionChatPane({
   const busyRef = useRef(false);
   const interruptingRef = useRef(false);
   const waitingRef = useRef(false);
+  // Follow the stream only while the user is at the bottom — auto-scroll used
+  // to yank the view down on EVERY delta, which made reading scrollback during
+  // a turn impossible. Scrolling back to the bottom re-pins.
+  const pinnedToBottomRef = useRef(true);
+  // streamKey (streamId:kind) -> transcript message key, so concurrent streams
+  // each append to their own bubble.
+  const streamBubblesRef = useRef(new Map<string, string>());
+  // Event-handler mirror of `steering` (the handler closure is frozen at mount).
+  const steeringRef = useRef<{ key: string; text: string }[]>([]);
+  // An abort settles as session.idle → a trailing "result" event; this latch
+  // keeps that settle from overwriting the interrupted waiting-state with
+  // done/completed. Armed by "interrupted", cleared by the next turn-start.
+  const interruptSettledRef = useRef(false);
   const pendingRestartNoticeRef = useRef<string | null>(null);
   const threadIdRef = useRef("");
   const threadTitleRef = useRef("");
@@ -436,15 +553,44 @@ export default function OpenFusionChatPane({
 
   useEffect(() => {
     const el = scrollRef.current;
-    if (el) {
+    if (el && pinnedToBottomRef.current) {
       el.scrollTop = el.scrollHeight;
     }
   }, [messages, busy]);
+
+  const handleChatScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    pinnedToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+  }, []);
 
   const nextKey = () => `m${keyRef.current++}`;
   const push = (
     entry: Omit<OpenFusionChatMessage, "key" | "ts"> & { ts?: number }
   ) => setMessages((prev) => [...prev, { key: nextKey(), ts: Date.now(), ...entry }]);
+  const queueSteering = (text: string) => {
+    steeringRef.current = [...steeringRef.current, { key: nextKey(), text }];
+    setSteering(steeringRef.current);
+  };
+  // Move pinned steering messages into the transcript — at the absorption
+  // point (next Brain step) they land exactly where they entered the model's
+  // context; at a turn boundary they land last, right above the composer.
+  const flushSteering = () => {
+    const items = steeringRef.current;
+    if (!items.length) return;
+    steeringRef.current = [];
+    setSteering([]);
+    setMessages((prev) => [
+      ...prev,
+      ...items.map((item) => ({
+        key: item.key,
+        role: "user" as const,
+        kind: "text" as const,
+        text: item.text,
+        ts: Date.now()
+      }))
+    ]);
+  };
   const setBusyState = (next: boolean) => {
     busyRef.current = next;
     setBusy(next);
@@ -470,13 +616,17 @@ export default function OpenFusionChatPane({
       message
     });
   };
-  const toggleExpanded = (key: string) =>
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
+  // Stable identity so memoized rows don't re-render when the pane does.
+  const toggleExpanded = useCallback(
+    (key: string) =>
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        if (next.has(key)) next.delete(key);
+        else next.add(key);
+        return next;
+      }),
+    []
+  );
 
   function publishThreadRef() {
     const threadId = threadIdRef.current;
@@ -520,6 +670,10 @@ export default function OpenFusionChatPane({
     setBusyState(false);
     setFailed(false);
     setPicker(null);
+    streamBubblesRef.current.clear();
+    steeringRef.current = [];
+    setSteering([]);
+    interruptSettledRef.current = false;
     onStatusChangeRef.current("starting");
     let cancelled = false;
     const resumeThreadRef =
@@ -598,32 +752,106 @@ export default function OpenFusionChatPane({
 
   // Normalize the host event stream into the transcript view-model.
   useEffect(() => {
+    // Stream deltas are BATCHED: each one used to be its own setMessages (its
+    // own render + forced scroll layout), so a fast stream re-rendered the
+    // whole transcript dozens of times a second — the choppiness. Deltas now
+    // buffer and flush at most once per animation frame; every non-delta event
+    // flushes synchronously first so transcript ordering never changes.
+    const pendingDeltas: {
+      role: OpenFusionChatRole;
+      kind: "text" | "thinking";
+      delta: string;
+      streamId?: string;
+    }[] = [];
+    let deltaFlushHandle: number | null = null;
+    const applyDeltaBatch = () => {
+      if (!pendingDeltas.length) return;
+      const batch = pendingDeltas.splice(0, pendingDeltas.length);
+      setMessages((prev) => {
+        let next: OpenFusionChatMessage[] | null = null;
+        for (const { role, kind, delta, streamId } of batch) {
+          if (kind === "thinking" && !delta.trim()) continue;
+          const arr = (next ??= prev.slice());
+          // Bubbles are keyed by the producing OpenCode part (streamId):
+          // several parts can stream CONCURRENTLY on one feed (parallel Scout
+          // subagents, reasoning beside text), and merging by role alone
+          // interleaved them chunk-by-chunk into one garbled paragraph. Each
+          // stream appends to its OWN bubble wherever it sits in the
+          // transcript.
+          const streamKey = streamId ? `${streamId}:${kind}` : null;
+          if (streamKey) {
+            const messageKey = streamBubblesRef.current.get(streamKey);
+            let index = -1;
+            if (messageKey) {
+              for (let i = arr.length - 1; i >= 0; i -= 1) {
+                if (arr[i].key === messageKey) {
+                  index = i;
+                  break;
+                }
+              }
+            }
+            if (index !== -1 && arr[index].streaming) {
+              arr[index] = { ...arr[index], text: arr[index].text + delta };
+              continue;
+            }
+            const key = nextKey();
+            streamBubblesRef.current.set(streamKey, key);
+            // Streamed bubbles stay in the visible transcript: only Brain TEXT
+            // renders as prose — thinking and subagent streams (the executor's
+            // code-in-progress, Scout's reasoning trail) render as collapsed
+            // click-to-expand rows, so raw work product is reachable but never
+            // dumped full-length the way it briefly was.
+            arr.push({ key, role, kind, text: delta, ts: Date.now(), streaming: true });
+            continue;
+          }
+          // Legacy path (events without streamId, e.g. history replayed by an
+          // older host): append to the open bubble while it is the latest
+          // message; a role or kind switch starts a fresh bubble.
+          const last = arr[arr.length - 1];
+          if (last && last.role === role && last.kind === kind && last.streaming) {
+            arr[arr.length - 1] = { ...last, text: last.text + delta };
+            continue;
+          }
+          for (let i = 0; i < arr.length; i += 1) {
+            if (arr[i].streaming) arr[i] = { ...arr[i], streaming: false };
+          }
+          arr.push({
+            key: nextKey(),
+            role,
+            kind,
+            text: delta,
+            ts: Date.now(),
+            streaming: true
+          });
+        }
+        return next ?? prev;
+      });
+    };
+    const flushDeltas = () => {
+      if (deltaFlushHandle !== null) {
+        cancelAnimationFrame(deltaFlushHandle);
+        deltaFlushHandle = null;
+      }
+      applyDeltaBatch();
+    };
     const appendStreaming = (
       role: OpenFusionChatRole,
       kind: "text" | "thinking",
-      delta: string
-    ) =>
-      setMessages((prev) => {
-        if (kind === "thinking" && !delta.trim()) {
-          return prev;
-        }
-        // Append to the open bubble while it is the latest message so one
-        // content block streams as ONE paragraph. A role or kind switch starts
-        // a fresh bubble; only one caret is ever live.
-        const last = prev[prev.length - 1];
-        if (last && last.role === role && last.kind === kind && last.streaming) {
-          const copy = prev.slice();
-          copy[copy.length - 1] = { ...last, text: last.text + delta };
-          return copy;
-        }
-        const cleared = prev.map((m) => (m.streaming ? { ...m, streaming: false } : m));
-        return [
-          ...cleared,
-          { key: nextKey(), role, kind, text: delta, ts: Date.now(), streaming: true }
-        ];
-      });
-    const stopStreaming = () =>
+      delta: string,
+      streamId?: string
+    ) => {
+      pendingDeltas.push({ role, kind, delta, streamId });
+      if (deltaFlushHandle === null) {
+        deltaFlushHandle = requestAnimationFrame(() => {
+          deltaFlushHandle = null;
+          applyDeltaBatch();
+        });
+      }
+    };
+    const stopStreaming = () => {
+      streamBubblesRef.current.clear();
       setMessages((prev) => prev.map((m) => (m.streaming ? { ...m, streaming: false } : m)));
+    };
 
     const handleChat = (event: OpenFusionChatEvent) => {
       if (!("id" in event) || event.id !== session.id) {
@@ -634,6 +862,9 @@ export default function OpenFusionChatPane({
           emitAttention("failed", "error", event.message);
         }
         return;
+      }
+      if (event.type !== "assistant-text" && event.type !== "thinking") {
+        flushDeltas();
       }
       switch (event.type) {
         case "session":
@@ -649,9 +880,17 @@ export default function OpenFusionChatPane({
             threadTitleRef.current = titleFromFirstPrompt(event.text);
             publishThreadRef();
           }
-          push({ role: "user", kind: "text", text: event.text });
+          if (event.queued) {
+            queueSteering(event.text);
+          } else {
+            push({ role: "user", kind: "text", text: event.text });
+          }
           break;
         case "turn-start":
+          // A fresh turn reads the whole message list — anything still pinned
+          // is in its context now.
+          flushSteering();
+          interruptSettledRef.current = false;
           setActiveRole("brain");
           setInterruptingState(false);
           setWaitingState(false);
@@ -660,13 +899,17 @@ export default function OpenFusionChatPane({
           setBusyState(true);
           onStatusChangeRef.current("running");
           break;
+        case "step-start":
+          // The Brain started its next step: queued steering is absorbed.
+          flushSteering();
+          break;
         case "assistant-text":
           setActiveRole(event.role);
-          appendStreaming(event.role, "text", event.delta);
+          appendStreaming(event.role, "text", event.delta, event.streamId);
           break;
         case "thinking":
           setActiveRole(event.role);
-          appendStreaming(event.role, "thinking", event.delta);
+          appendStreaming(event.role, "thinking", event.delta, event.streamId);
           break;
         case "tool-call": {
           setActiveRole(event.role);
@@ -896,7 +1139,12 @@ export default function OpenFusionChatPane({
             }
           }
           break;
-        case "result":
+        case "result": {
+          // Aborts settle as session.idle → a trailing result; the
+          // "interrupted" lane owns status + attention for those, so this
+          // event must not re-brand the turn as done/completed.
+          const interruptSettle = interruptSettledRef.current || interruptingRef.current;
+          interruptSettledRef.current = false;
           setActiveRole("brain");
           stopStreaming();
           setInterruptingState(false);
@@ -905,20 +1153,32 @@ export default function OpenFusionChatPane({
             onStatusChangeRef.current("idle");
             break;
           }
+          if (interruptSettle) {
+            onStatusChangeRef.current("waiting");
+            flushSteering();
+            break;
+          }
           if (waitingRef.current) {
             onStatusChangeRef.current("waiting");
           } else {
             onStatusChangeRef.current("done");
             emitAttention("completed", "done");
           }
+          flushSteering();
           break;
+        }
         case "interrupted":
+          interruptSettledRef.current = true;
           stopStreaming();
           setInterruptingState(false);
           setBusyState(false);
           setWaitingState(false);
           setPendingPermission(null);
           push({ role: "brain", kind: "activity", text: "Turn interrupted." });
+          // A message queued before the interrupt is still in the session's
+          // history — surface it under the marker as the freshest entry so
+          // the user sees it will lead the next turn.
+          flushSteering();
           onStatusChangeRef.current("waiting");
           emitAttention("waiting", "question", "Turn interrupted — tell Open Fusion how to continue.");
           break;
@@ -935,6 +1195,7 @@ export default function OpenFusionChatPane({
           setPendingPermission(null);
           setFailed(true);
           push({ role: event.role ?? "brain", kind: "error", text: event.message });
+          flushSteering();
           onStatusChangeRef.current("failed");
           emitAttention("failed", "error", event.message);
           break;
@@ -942,6 +1203,7 @@ export default function OpenFusionChatPane({
         case "closed": {
           stopStreaming();
           setInterruptingState(false);
+          flushSteering();
           const wasBusy = busyRef.current;
           setBusyState(false);
           setWaitingState(false);
@@ -965,6 +1227,9 @@ export default function OpenFusionChatPane({
     const unsubscribe = window.vibe?.openFusionChat?.onEvent(handleChat);
     return () => {
       unsubscribe?.();
+      if (deltaFlushHandle !== null) {
+        cancelAnimationFrame(deltaFlushHandle);
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.id]);
@@ -1387,6 +1652,8 @@ export default function OpenFusionChatPane({
     }
     setInput("");
     setFailed(false);
+    // Sending implies following the conversation again.
+    pinnedToBottomRef.current = true;
     window.vibe?.openFusionChat?.sendUserTurn(session.id, text);
     if (!busyRef.current) {
       setBusyState(true);
@@ -1693,6 +1960,17 @@ export default function OpenFusionChatPane({
           <span className={clsx("openfusion-role-chip", `is-${activeRole}`)} title={modelsLine}>
             {activeRoleLabel}
           </span>
+          {cwdConflict && (
+            <span
+              className={clsx(
+                "pane-cwd-conflict-chip",
+                cwdConflict.active && "is-active"
+              )}
+              title={cwdConflictTitle(cwdConflict)}
+            >
+              {cwdConflictChipLabel(cwdConflict)}
+            </span>
+          )}
         </div>
         <div className="pane-status">
           {/* waiting outranks busy: a permission ask leaves the server turn
@@ -1762,7 +2040,7 @@ export default function OpenFusionChatPane({
       </div>
 
       <div className="fusion-chat" onPointerDown={onSelect}>
-        <div className="fusion-chat-scroll" ref={scrollRef}>
+        <div className="fusion-chat-scroll" ref={scrollRef} onScroll={handleChatScroll}>
           {visibleMessages.length === 0 ? (
             <div className="openfusion-hero">
               <div className="openfusion-hero-mark">
@@ -1791,70 +2069,15 @@ export default function OpenFusionChatPane({
               </p>
             </div>
           ) : (
-            visibleMessages.map((m) => {
-              if (m.kind === "thinking" && !m.text.trim()) {
-                return null;
-              }
-
-              const author = ROLE_LABELS[m.role];
-              const className = clsx("chat-msg", `chat-${m.role}`, `chat-kind-${m.kind}`);
-
-              if (m.kind === "tool-result" || m.kind === "thinking") {
-                const preview = previewText(m.text);
-                const expandable = !m.streaming && preview !== m.text.trim();
-                const open = m.streaming || verbose || expanded.has(m.key);
-                return (
-                  <div key={m.key} className={className}>
-                    <span className="chat-gutter">●</span>
-                    <div className="chat-body">
-                      <div
-                        className={clsx("chat-tool", expandable && "chat-tool-expandable")}
-                        onClick={expandable ? () => toggleExpanded(m.key) : undefined}
-                      >
-                        <span className="chat-tool-author">{author}</span>
-                        <span className="chat-tool-kind">
-                          {m.kind === "thinking" ? "thinking" : "↳"}
-                        </span>
-                        {expandable && (
-                          <span className="chat-tool-caret">{open ? "▾" : "▸"}</span>
-                        )}
-                        <span className="chat-tool-text">
-                          {open ? m.text : preview}
-                          {m.streaming && <span className="chat-caret">▋</span>}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                );
-              }
-
-              if (m.kind === "tool-call" || m.kind === "activity") {
-                return (
-                  <div key={m.key} className={className}>
-                    <span className="chat-gutter">●</span>
-                    <div className="chat-body">
-                      <div className="chat-tool">
-                        <span className="chat-tool-author">{author}</span>
-                        <span className="chat-tool-text">{m.text}</span>
-                      </div>
-                    </div>
-                  </div>
-                );
-              }
-
-              return (
-                <div key={m.key} className={className}>
-                  <span className="chat-gutter">{m.role === "user" ? "›" : ""}</span>
-                  <div className="chat-body">
-                    {m.role !== "user" && <span className="chat-author">{author}</span>}
-                    <span className="chat-text">
-                      {m.text}
-                      {m.streaming && <span className="chat-caret">▋</span>}
-                    </span>
-                  </div>
-                </div>
-              );
-            })
+            visibleMessages.map((m) => (
+              <OpenFusionChatRow
+                key={m.key}
+                m={m}
+                verbose={verbose}
+                isExpanded={expanded.has(m.key)}
+                onToggle={toggleExpanded}
+              />
+            ))
           )}
           {busy && !pendingPermission && (
             <div className={clsx("chat-msg", "chat-kind-status")}>
@@ -2287,6 +2510,19 @@ export default function OpenFusionChatPane({
                   </button>
                 )}
               </div>
+            </div>
+          )}
+          {steering.length > 0 && (
+            <div className="openfusion-steering" role="status" aria-label="Queued messages">
+              {steering.map((item) => (
+                <div key={item.key} className="openfusion-steering-item">
+                  <span className="openfusion-steering-badge">Queued</span>
+                  <span className="openfusion-steering-text">{clip(item.text, 400)}</span>
+                </div>
+              ))}
+              <span className="openfusion-steering-hint">
+                Held here until the Brain's next step picks it up · Esc interrupts now
+              </span>
             </div>
           )}
           <div className="fusion-composer">

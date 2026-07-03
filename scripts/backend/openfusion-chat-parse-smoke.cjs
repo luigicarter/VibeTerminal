@@ -195,6 +195,15 @@ const fixture = [
   // Turn end; a second idle must not double-emit.
   { type: "session.idle", properties: { sessionID: ROOT } },
   { type: "session.idle", properties: { sessionID: ROOT } },
+  // Post-turn assistant message traffic (e.g. title generation) must not emit
+  // a stray step-start — the absorption signal is busy-turn-only.
+  {
+    type: "message.updated",
+    properties: {
+      sessionID: ROOT,
+      info: { id: "msg_post", role: "assistant", sessionID: ROOT, agent: "planner" }
+    }
+  },
   // Aborts surface as session.error but must not reach the error lane.
   {
     type: "session.error",
@@ -216,6 +225,25 @@ const byType = (type) => events.filter((event) => event.type === type);
 
 // Exactly one turn-start despite repeated busy events.
 assert(byType("turn-start").length === 1, "expected exactly one turn-start");
+
+// Exactly one step-start: the NEW root assistant message (msg_a1). The user
+// message and the child session's assistant message must not emit one — it is
+// the queued-steering absorption signal, root-only by design.
+assert(byType("step-start").length === 1, "expected exactly one step-start for the root assistant message");
+
+// Every streamed event carries the producing part's streamId so concurrent
+// parts (parallel subagents, reasoning beside text) never share a bubble.
+const streamed = [...byType("assistant-text"), ...byType("thinking")];
+assert(
+  streamed.every((event) => typeof event.streamId === "string" && event.streamId.includes(":")),
+  "streamed events must carry a sessionID:partID streamId"
+);
+assert(
+  new Set(streamed.map((event) => event.streamId)).size === 3 &&
+    streamed.some((event) => event.streamId === `${ROOT}:prt_t2`) &&
+    streamed.some((event) => event.streamId === `${CHILD}:prt_c1`),
+  "root text, root reasoning, and child text must stream under distinct streamIds"
+);
 
 // Brain text streams and dedupes: deltas + snapshot suffix, never repeated text.
 const brainText = byType("assistant-text")
@@ -318,7 +346,7 @@ const rehydrated = rehydrateMessages(
           callID: "t1",
           state: { status: "completed", title: "Sub", input: {}, output: "done" }
         },
-        { type: "text", text: "All set." },
+        { type: "text", id: "prt_r1", text: "All set." },
         { type: "step-finish", tokens: { input: 1, output: 1 } }
       ]
     }
@@ -335,8 +363,13 @@ assert(
   "rehydration should replay tool pairs"
 );
 assert(
-  rehydrated.some((event) => event.type === "assistant-text" && event.delta === "All set."),
-  "rehydration should replay assistant text"
+  rehydrated.some(
+    (event) =>
+      event.type === "assistant-text" &&
+      event.delta === "All set." &&
+      event.streamId === `${ROOT}:prt_r1`
+  ),
+  "rehydration should replay assistant text with a per-part streamId"
 );
 
 // ---- splitModelId ----

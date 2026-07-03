@@ -66,6 +66,8 @@ itself (an LLM that decides when to delegate), not a static rule table.
 
 The two models have hard, enforced scopes. Claude is launched with `Read`/`Grep`/`Glob`, direct UI/design/frontend edit/write tools (`Edit`/`Write`), and the Codex bridge tools. `Bash` stays in `--disallowedTools`, and Claude is launched with a restricted built-in `--tools` surface plus a strict per-pane MCP config, so read-only command/environment checks go through `codex_investigate`, while tests, builds, debug runs, screenshots, browser control, image generation, and any mutating work are structurally forced through `codex_implement`. Codex remains the hard verifier for bugs and goal completion. `--disallowedTools` also carries write deny rules (`Edit(...)`/`Write(...)` for `.git/**`, `.github/workflows/**`, `.husky/**` — see `FUSION_CLAUDE_WRITE_DENY_PATHS` in `main.cjs`): deny rules override `acceptEdits`, closing the escalation where Bash-less Claude authors an executable side-effect (git hook, CI workflow, husky hook) that full-access Codex or the user would execute later. Broader path-scope hardening via `VIBE_FUSION_UI_WRITE_GLOBS` is deferred and not enforced in this build; direct writes are limited to UI/design/frontend by the Fusion prompt and tool split. Reversible: remove `Edit`/`Write` from the Fusion helpers in `main.cjs` and restore the old Edit/Write/Bash denylist to return to read-only Claude.
 
+The architect prompt also carries concurrent-edits guidance (locked by `fusion-launch-smoke`): an Edit/Write stale-rejection whose drift is not explained by Claude's own Codex delegation may mean another agent pane or tool is editing the same checkout — Claude should re-read, hold the edit, and surface the foreign drift to the user instead of silently retrying over it. The renderer's shared-folder chip (`frontend/cwdConflicts.ts`) shows the human the same overlap.
+
 | Opus 4.8 (Claude - orchestrator/architect/designer) | Codex GPT-5.5 (implementer/reviewer/verifier) |
 |---|---|
 | Architecture decisions | Editing files |
@@ -324,6 +326,15 @@ The renderer maps meaningful app-server item events (streamed via the telemetry
 callback server) to concise implementation lines; Opus's own turns are the
 Claude-tagged prose; goal updates, bridge calls, and raw tool results are kept as
 Details-only diagnostics.
+
+Mid-turn sends (steering) do not drop into the scrolling transcript, where the
+stream would bury them: the pane pins them above the composer with a QUEUED
+badge (same mechanic as the Open Fusion pane) until the next assistant message
+— the next API call, whose context includes the queued text — absorbs them,
+at which point they join the transcript as `Steer: …` right where Claude
+actually saw them. If the turn ends or is interrupted first, they flush as the
+freshest entry above the composer; the text is already in Claude's history and
+leads the next turn.
 
 ## Milestones
 

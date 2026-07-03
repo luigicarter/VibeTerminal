@@ -385,10 +385,17 @@ export type OpenFusionChatRole = "brain" | "executor" | "investigator";
 
 export type OpenFusionChatEvent =
   | { id: string; type: "session"; sessionId: string; resumed?: boolean }
-  | { id: string; type: "user"; text: string }
+  // queued: sent mid-turn — the server persisted it and the running loop
+  // absorbs it at its next step; the pane pins it above the composer until then.
+  | { id: string; type: "user"; text: string; queued?: boolean }
   | { id: string; type: "turn-start" }
-  | { id: string; type: "assistant-text"; role: OpenFusionChatRole; delta: string }
-  | { id: string; type: "thinking"; role: OpenFusionChatRole; delta: string }
+  // A new Brain step began (new root assistant message): any pinned queued
+  // message is now part of the model's context.
+  | { id: string; type: "step-start" }
+  // streamId identifies the producing OpenCode part: concurrent streams
+  // (parallel subagents, reasoning beside text) must not share a bubble.
+  | { id: string; type: "assistant-text"; role: OpenFusionChatRole; delta: string; streamId?: string }
+  | { id: string; type: "thinking"; role: OpenFusionChatRole; delta: string; streamId?: string }
   | {
       id: string;
       type: "tool-call";

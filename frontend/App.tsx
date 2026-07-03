@@ -43,6 +43,7 @@ import {
   statusFromAttentionState,
   statusFromTerminalEvent
 } from "./attention";
+import { computeCwdConflicts } from "./cwdConflicts";
 import TerminalPane from "./components/TerminalPane";
 import FusionChatPane from "./components/FusionChatPane";
 import OpenFusionChatPane, {
@@ -1060,6 +1061,18 @@ export default function App() {
     ...multiSessions,
     ...workspaces.flatMap((workspace) => workspace.sessions)
   ];
+  // Cross-scope on purpose: a pane in another workspace (or Multi) still
+  // writes to the same disk, so folder overlap spans every session, not just
+  // the visible board.
+  const cwdConflicts = computeCwdConflicts([
+    ...multiSessions.map((session) => ({ session, scopeLabel: "Multi" })),
+    ...workspaces.flatMap((workspace) =>
+      workspace.sessions.map((session) => ({
+        session,
+        scopeLabel: workspace.name
+      }))
+    )
+  ]);
   const workspaceClosePending =
     workspaces.find((workspace) => workspace.id === workspaceClosePendingId) ??
     null;
@@ -3110,6 +3123,7 @@ export default function App() {
                   <FusionChatPane
                     session={session}
                     profile={getProfile("fusion")}
+                    cwdConflict={cwdConflicts.get(session.id)}
                     isMaximized={session.id === maximizedSessionId}
                     isSelected={session.id === selectedSessionId}
                     onClose={() => closeSession(activeScope, session)}
@@ -3143,6 +3157,7 @@ export default function App() {
                   <OpenFusionChatPane
                     session={session}
                     profile={getProfile("openfusion")}
+                    cwdConflict={cwdConflicts.get(session.id)}
                     isMaximized={session.id === maximizedSessionId}
                     isSelected={session.id === selectedSessionId}
                     onClose={() => closeSession(activeScope, session)}
@@ -3179,6 +3194,7 @@ export default function App() {
                       session.fusion ? getProfile("fusion") : getProfile(session.kind)
                     }
                     claimedThreadIds={claimedThreadIds(session.id)}
+                    cwdConflict={cwdConflicts.get(session.id)}
                     isMaximized={session.id === maximizedSessionId}
                     isArranging={isArranging}
                     onClose={() => closeSession(activeScope, session)}

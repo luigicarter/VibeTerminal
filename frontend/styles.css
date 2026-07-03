@@ -1199,6 +1199,31 @@ button {
   font-size: 11px;
 }
 
+/* Two or more agent panes share (or nest inside) one working folder. Neutral
+   by design — side-by-side agents on one project is normal use; the amber
+   is-active tint marks only the real collision window (both mid-turn), since
+   the harnesses' stale-write checks don't coordinate across processes. The
+   descendant selector is required: `.pane-title span` (0,1,1) would otherwise
+   override a bare class's font-size/ellipsis rules. */
+.pane-title .pane-cwd-conflict-chip {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  border: 1px solid #4a514a;
+  border-radius: 999px;
+  color: #949a91;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.pane-title .pane-cwd-conflict-chip.is-active {
+  border-color: #66501f;
+  background: rgba(244, 207, 90, 0.12);
+  color: #f4cf5a;
+}
+
 .pane-status {
   min-width: 62px;
   text-align: right;
@@ -2147,4 +2172,54 @@ button {
   gap: 8px;
   color: #9aa39a;
   font-size: 12px;
+}
+
+/* Steering pin (Fusion + Open Fusion panes): messages sent mid-turn stay held
+   above the composer (the opencode QUEUED mechanic) until the engine's next
+   step absorbs them. */
+.fusion-steering,
+.openfusion-steering {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 9px;
+  border: 1px dashed color-mix(in srgb, var(--pane-accent) 45%, #3a403a);
+  border-radius: 8px;
+  background: #131712;
+}
+.fusion-steering-item,
+.openfusion-steering-item {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+.fusion-steering-badge,
+.openfusion-steering-badge {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--pane-accent) 30%, #1a1f1a);
+  color: var(--pane-accent);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.fusion-steering-text,
+.openfusion-steering-text {
+  min-width: 0;
+  color: #cfe6ff;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.fusion-steering-hint,
+.openfusion-steering-hint {
+  color: #6f766f;
+  font-size: 10px;
 }

@@ -88,7 +88,28 @@
 > `session.status busy` / `session.idle`, `permission.asked`). The normalizer
 > in `backend/openFusionChatHost.cjs` dedupes delta-vs-snapshot text by
 > tracking emitted length per part id and is fixture-tested by
-> `scripts/backend/openfusion-chat-parse-smoke.cjs`.
+> `scripts/backend/openfusion-chat-parse-smoke.cjs`. Every streamed
+> `assistant-text`/`thinking` event carries a `streamId` (`sessionID:partID`)
+> because several parts stream CONCURRENTLY on the one feed (parallel Scout
+> subagents, reasoning beside text) — the pane keys bubbles by it; bucketing by
+> role alone interleaved concurrent streams chunk-by-chunk into one garbled
+> paragraph (2026-07-03). Subagent text streams and all thinking render as
+> collapsed one-line click-to-expand rows (live last-line ticker while
+> streaming); only Brain text is transcript prose. The visible surface of a
+> delegation stays its card + extracted task report.
+>
+> **Mid-turn steering (verified against the 1.17.11 run loop):**
+> `prompt_async` during a busy turn is legal — the server persists the user
+> message immediately, `ensureRunning` merely awaits the in-flight run, and the
+> loop re-reads the message list each iteration (its exit check
+> `lastUser.id < lastAssistant.id` forces an extra iteration for a message that
+> arrived during the final step), so the queued message is absorbed at the next
+> Brain step. On abort the queued message survives in history and rides into
+> the next turn's context. The host tags such echoes `{type:"user",
+> queued:true}` (from its event-derived `turnBusy` latch) and emits
+> `{type:"step-start"}` on each NEW root assistant message; the pane pins
+> queued sends above the composer — opencode's own QUEUED badge mechanic —
+> until a step-start/turn boundary flushes them into the transcript.
 >
 > **Provider auth (in-pane, OpenCode-parity, live-verified):** the pane
 > replicates OpenCode's own "Connect a provider" workflow over the same server
@@ -188,7 +209,12 @@ transcript ordering (the coherence seam Fusion fights in
   environment variables. It sets both file paths and `OPENCODE_CONFIG_CONTENT`
   with inline prompts so the pane's role config wins even when the project has
   its own OpenCode config. It does not write Open Fusion config into the user's
-  global OpenCode config.
+  global OpenCode config. The generated executor/planner prompts carry
+  concurrent-edits guidance (locked by `agent-telemetry-smoke`): a stale-write
+  rejection whose drift is not the agent's own work may mean another agent pane
+  is editing the same checkout — report the overlap instead of overwriting it
+  (the renderer's shared-folder chip, `frontend/cwdConflicts.ts`, surfaces the
+  same overlap to the human).
 - **Future engine option:** an OpenCode **server** (`opencode serve` + its
   SDK/HTTP API), driven headlessly — the same shape as today's headless-Claude +
   codex-app-server Fusion, but *one* server hosts both roles.

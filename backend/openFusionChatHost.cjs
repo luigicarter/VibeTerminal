@@ -98,7 +98,10 @@ function createOpenCodeEventNormalizer(rootSessionId) {
   // Streamed fields arrive twice: incremental message.part.delta while the
   // model runs AND full-text message.part.updated snapshots. Tracking the
   // emitted length per part dedupes both directions (and models that never
-  // stream still surface through the snapshot path).
+  // stream still surface through the snapshot path). streamId identifies the
+  // producing part: several parts can stream CONCURRENTLY on one feed (parallel
+  // task children, reasoning beside text), and a renderer that buckets deltas
+  // by role alone interleaves them into one garbled paragraph.
   function emitStreamField(events, sessionID, part, field, fullText) {
     const info = messageInfo.get(String(part.messageID || ""));
     if (!info || info.role !== "assistant") return;
@@ -110,7 +113,8 @@ function createOpenCodeEventNormalizer(rootSessionId) {
     events.push({
       type: field === "reasoning" ? "thinking" : "assistant-text",
       role: roleFor(sessionID),
-      delta
+      delta,
+      streamId: `${sessionID}:${String(part.id || "")}`
     });
   }
 
@@ -137,7 +141,9 @@ function createOpenCodeEventNormalizer(rootSessionId) {
         if (!inTree(sessionID)) break;
         const info = props.info && typeof props.info === "object" ? props.info : {};
         if (info.id) {
-          messageInfo.set(String(info.id), {
+          const messageId = String(info.id);
+          const isNew = !messageInfo.has(messageId);
+          messageInfo.set(messageId, {
             role: String(info.role || ""),
             agent: String(info.agent || ""),
             sessionID
@@ -145,6 +151,15 @@ function createOpenCodeEventNormalizer(rootSessionId) {
           if (messageInfo.size > 4_000) {
             const oldest = messageInfo.keys().next().value;
             messageInfo.delete(oldest);
+          }
+          // A NEW root assistant message = the run loop started its next step
+          // with the full message list as context — this is the moment a
+          // prompt queued mid-turn is absorbed (verified against the 1.17.11
+          // run loop: each iteration re-reads messages, and its exit check
+          // `lastUser.id < lastAssistant.id` forces another iteration for any
+          // user message that arrived during the previous step).
+          if (isNew && sessionID === root && String(info.role || "") === "assistant" && busy) {
+            events.push({ type: "step-start" });
           }
         }
         break;
@@ -162,7 +177,8 @@ function createOpenCodeEventNormalizer(rootSessionId) {
         events.push({
           type: field === "reasoning" ? "thinking" : "assistant-text",
           role: roleFor(sessionID),
-          delta
+          delta,
+          streamId: `${sessionID}:${String(props.partID || "")}`
         });
         break;
       }
@@ -331,7 +347,12 @@ function rehydrateMessages(messages, rootSessionId) {
     for (const part of parts) {
       if (!part || typeof part !== "object") continue;
       if (part.type === "text" && String(part.text || "").trim()) {
-        events.push({ type: "assistant-text", role: "brain", delta: String(part.text) });
+        events.push({
+          type: "assistant-text",
+          role: "brain",
+          delta: String(part.text),
+          streamId: `${String(rootSessionId || "")}:${String(part.id || "")}`
+        });
       } else if (part.type === "tool") {
         const state = part.state && typeof part.state === "object" ? part.state : {};
         const callID = String(part.callID || part.id || "");
@@ -692,6 +713,7 @@ function runHost() {
       sseGeneration: 0,
       stopping: false,
       stdoutBuffer: "",
+      turnBusy: false,
       history: [],
       plannerModel: String(payload.plannerModel || ""),
       executorModel: String(payload.executorModel || "")
@@ -780,7 +802,12 @@ function runHost() {
       return;
     }
 
-    emitSessionEvent(id, state, { type: "user", text });
+    // Mid-turn sends are legal steering: the server persists the message
+    // immediately and the running loop absorbs it at its next step (verified
+    // 1.17.11 `ensureRunning` semantics). Tag the echo so the pane can pin it
+    // above the composer instead of burying it in the streaming transcript.
+    const queued = Boolean(state.turnBusy);
+    emitSessionEvent(id, state, queued ? { type: "user", text, queued: true } : { type: "user", text });
     const body = { agent: "planner", parts: [{ type: "text", text }], model };
     request(state, "POST", `/session/${encodeURIComponent(state.sessionId)}/prompt_async`, body).catch(
       (error) => {

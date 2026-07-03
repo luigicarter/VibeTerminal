@@ -471,6 +471,11 @@ function postTelemetry(callbackUrl, token, payload) {
       "Open Fusion inline config should carry prompts and commands so env config can override project config"
     );
     assert(
+      openFusionEnvConfig.agent?.executor?.prompt.includes("another agent may be editing this checkout") &&
+        openFusionEnvConfig.agent?.planner?.prompt.includes("files changing underneath it"),
+      "Open Fusion prompts should carry the concurrent-edits (foreign drift) guidance"
+    );
+    assert(
       fs.existsSync(openFusionFiles.plannerPromptPath) &&
         fs.existsSync(openFusionFiles.executorPromptPath) &&
         fs.existsSync(openFusionFiles.investigatorPromptPath) &&

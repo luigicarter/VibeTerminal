@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Ban,
   Check,
@@ -20,6 +20,8 @@ import {
 } from "lucide-react";
 import clsx from "clsx";
 import { shouldShowAttentionDot } from "../attention";
+import { cwdConflictChipLabel, cwdConflictTitle } from "../cwdConflicts";
+import type { CwdConflict } from "../cwdConflicts";
 import type {
   AgentAttentionEvent,
   AgentBackgroundActivity,
@@ -57,6 +59,7 @@ import {
 interface FusionChatPaneProps {
   session: AgentSession;
   profile: AgentProfile;
+  cwdConflict?: CwdConflict;
   isMaximized: boolean;
   isSelected: boolean;
   onClose: () => void;
@@ -414,9 +417,88 @@ function titleFromFirstPrompt(text: string) {
   return clip(text.replace(/\s+/g, " ").trim(), 80);
 }
 
+// One transcript row, memoized: a streaming delta re-renders ONLY the growing
+// bubble instead of reconciling every row of a long transcript per chunk —
+// that full-list churn is what made streaming feel choppy.
+const FusionChatRow = memo(function FusionChatRow({
+  m,
+  verbose,
+  isExpanded,
+  onToggle
+}: {
+  m: ChatMessage;
+  verbose: boolean;
+  isExpanded: boolean;
+  onToggle: (key: string) => void;
+}) {
+  if (m.kind === "thinking" && !m.text.trim()) {
+    return null;
+  }
+
+  const author = m.role === "user" ? "You" : FUSION_SPEAKER_LABEL;
+  const className = clsx("chat-msg", `chat-${m.role}`, `chat-kind-${m.kind}`);
+
+  // Collapsible detail: a tool result or Opus's thinking. Streams open
+  // (live), then folds to a one-line preview; click / Details expands.
+  if (m.kind === "tool-result" || m.kind === "thinking") {
+    const preview = previewToolResult(m.text);
+    const expandable = !m.streaming && preview !== m.text.trim();
+    const open = m.streaming || verbose || isExpanded;
+    return (
+      <div className={className}>
+        <span className="chat-gutter">●</span>
+        <div className="chat-body">
+          <div
+            className={clsx("chat-tool", expandable && "chat-tool-expandable")}
+            onClick={expandable ? () => onToggle(m.key) : undefined}
+          >
+            <span className="chat-tool-author">{author}</span>
+            <span className="chat-tool-kind">{m.kind === "thinking" ? "thinking" : "↳"}</span>
+            {expandable && <span className="chat-tool-caret">{open ? "▾" : "▸"}</span>}
+            <span className="chat-tool-text">
+              {open ? m.text : preview}
+              {m.streaming && <span className="chat-caret">▋</span>}
+            </span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Compact one-line chip: a tool call or side-channel activity.
+  if (m.kind === "tool-call" || m.kind === "activity") {
+    return (
+      <div className={className}>
+        <span className="chat-gutter">●</span>
+        <div className="chat-body">
+          <div className="chat-tool">
+            <span className="chat-tool-author">{author}</span>
+            <span className="chat-tool-text">{m.text}</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Prose: user message, Opus narration, or an error.
+  return (
+    <div className={className}>
+      <span className="chat-gutter">{m.role === "user" ? "›" : ""}</span>
+      <div className="chat-body">
+        {m.role !== "user" && <span className="chat-author">{author}</span>}
+        <span className="chat-text">
+          {m.text}
+          {m.streaming && <span className="chat-caret">▋</span>}
+        </span>
+      </div>
+    </div>
+  );
+});
+
 export default function FusionChatPane({
   session,
   profile,
+  cwdConflict,
   isMaximized,
   isSelected,
   onClose,
@@ -439,12 +521,22 @@ export default function FusionChatPane({
   const [failed, setFailed] = useState(false);
   const [pendingDecision, setPendingDecision] = useState<PendingFusionDecision | null>(null);
   const [interrupting, setInterrupting] = useState(false);
+  // Messages sent mid-turn (steering). Claude already has them on stdin; they
+  // stay pinned above the composer — the same QUEUED mechanic as the Open
+  // Fusion pane — until the next assistant message (the next API call, whose
+  // context includes them) absorbs them, then they join the transcript at that
+  // point instead of drowning mid-stream.
+  const [steering, setSteering] = useState<{ key: string; text: string }[]>([]);
   const [activeRole, setActiveRole] = useState<FusionActiveRole>("claude");
   const [slashIndex, setSlashIndex] = useState(0);
   // Esc hides the menu for the CURRENT input without erasing what the user
   // typed (it used to wipe the whole command). Any input change re-arms it.
   const [slashMenuDismissed, setSlashMenuDismissed] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  // Follow the stream only while the user is at the bottom — auto-scroll used
+  // to yank the view down on EVERY delta, which made reading scrollback during
+  // a turn impossible. Scrolling back to the bottom re-pins.
+  const pinnedToBottomRef = useRef(true);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   // Keeps the highlighted slash-menu row visible when the list scrolls.
   const activeMenuItemRef = useRef<HTMLLIElement | null>(null);
@@ -458,6 +550,8 @@ export default function FusionChatPane({
   const onStatusChangeRef = useRef(onStatusChange);
   const onAttentionRef = useRef(onAttention);
   const busyRef = useRef(false);
+  // Event-handler mirror of `steering` (the handler closure is frozen at mount).
+  const steeringRef = useRef<{ key: string; text: string }[]>([]);
   const toolRoleRef = useRef(new Map<string, ToolMeta>());
   const claudeSessionIdRef = useRef("");
   const claudeThreadTitleRef = useRef("");
@@ -467,13 +561,17 @@ export default function FusionChatPane({
   const [implementingPlan, setImplementingPlan] = useState(false);
   const [modeSwitching, setModeSwitching] = useState(false);
   const [modeFlash, setModeFlash] = useState(false);
-  const toggleExpanded = (key: string) =>
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
+  // Stable identity so memoized rows don't re-render when the pane does.
+  const toggleExpanded = useCallback(
+    (key: string) =>
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        if (next.has(key)) next.delete(key);
+        else next.add(key);
+        return next;
+      }),
+    []
+  );
   const fusionModel = normalizeFusionModel(session.fusionModel);
   const fusionCodexModel = normalizeFusionCodexModel(session.fusionCodexModel);
   const fusionClaudeEffort = normalizeFusionEffort(session.fusionClaudeEffort ?? session.fusionEffort);
@@ -571,6 +669,30 @@ export default function FusionChatPane({
   const nextKey = () => `m${keyRef.current++}`;
   const push = (entry: Omit<ChatMessage, "key" | "ts"> & { ts?: number }) =>
     setMessages((prev) => [...prev, { key: nextKey(), ts: Date.now(), ...entry }]);
+  const queueSteering = (text: string) => {
+    steeringRef.current = [...steeringRef.current, { key: nextKey(), text }];
+    setSteering(steeringRef.current);
+  };
+  // Move pinned steering into the transcript — at the absorption point (next
+  // assistant message) it lands exactly where it entered Claude's context; at
+  // a turn boundary it lands last, right above the composer. The "Steer:"
+  // prefix keeps the existing transcript labeling for mid-turn direction.
+  const flushSteering = () => {
+    const items = steeringRef.current;
+    if (!items.length) return;
+    steeringRef.current = [];
+    setSteering([]);
+    setMessages((prev) => [
+      ...prev,
+      ...items.map((item) => ({
+        key: item.key,
+        role: "user" as const,
+        kind: "text" as const,
+        text: `Steer: ${item.text}`,
+        ts: Date.now()
+      }))
+    ]);
+  };
   const setBusyState = (next: boolean) => {
     busyRef.current = next;
     setBusy(next);
@@ -625,6 +747,10 @@ export default function FusionChatPane({
     }
     const restartNotice = pendingRestartNoticeRef.current;
     pendingRestartNoticeRef.current = null;
+    // A restart drops the in-flight turn: anything still pinned as steering
+    // was already written to Claude's stdin, so surface it in the kept
+    // transcript instead of vanishing it (fresh starts clear everything below).
+    flushSteering();
     // A settings restart resumes the same Claude thread — keep the visible
     // transcript and append the notice. Wiping it read as data loss for what
     // is conceptually the same conversation. Fresh starts still clear.
@@ -741,29 +867,64 @@ export default function FusionChatPane({
 
   // Merge the Opus stream (fusion-chat) and the Codex side-channel (fusion-activity).
   useEffect(() => {
-    const appendStreaming = (kind: "text" | "thinking", delta: string) =>
+    // Stream deltas are BATCHED: each one used to be its own setMessages (its
+    // own render + forced scroll layout), so a fast stream re-rendered the
+    // whole transcript dozens of times a second — the choppiness. Deltas now
+    // buffer and flush at most once per animation frame; every non-delta event
+    // flushes synchronously first so transcript ordering never changes.
+    const pendingDeltas: { kind: "text" | "thinking"; delta: string }[] = [];
+    let deltaFlushHandle: number | null = null;
+    const applyDeltaBatch = () => {
+      if (!pendingDeltas.length) return;
+      const batch = pendingDeltas.splice(0, pendingDeltas.length);
       setMessages((prev) => {
-        if (kind === "thinking" && !delta.trim()) {
-          return prev;
+        let next: ChatMessage[] | null = null;
+        for (const { kind, delta } of batch) {
+          if (kind === "thinking" && !delta.trim()) continue;
+          const arr = (next ??= prev.slice());
+          // Append to the open bubble while it is the latest message, so a
+          // single content block streams as ONE coherent paragraph (no
+          // mid-call shred). A tool chip or a kind switch starts a fresh
+          // bubble — chronological, Claude-Code style. Close any other open
+          // bubble so only one caret shows.
+          const last = arr[arr.length - 1];
+          if (last && last.role === "opus" && last.kind === kind && last.streaming) {
+            arr[arr.length - 1] = { ...last, text: last.text + delta };
+            continue;
+          }
+          for (let i = 0; i < arr.length; i += 1) {
+            if (arr[i].role === "opus" && arr[i].streaming) {
+              arr[i] = { ...arr[i], streaming: false };
+            }
+          }
+          arr.push({
+            key: nextKey(),
+            role: "opus",
+            kind,
+            text: delta,
+            ts: Date.now(),
+            streaming: true
+          });
         }
-        // Append to the open bubble while it is the latest message, so a single
-        // content block streams as ONE coherent paragraph (no mid-call shred).
-        // A tool chip or a kind switch starts a fresh bubble — chronological,
-        // Claude-Code style. Close any other open bubble so only one caret shows.
-        const last = prev[prev.length - 1];
-        if (last && last.role === "opus" && last.kind === kind && last.streaming) {
-          const copy = prev.slice();
-          copy[copy.length - 1] = { ...last, text: last.text + delta };
-          return copy;
-        }
-        const cleared = prev.map((m) =>
-          m.role === "opus" && m.streaming ? { ...m, streaming: false } : m
-        );
-        return [
-          ...cleared,
-          { key: nextKey(), role: "opus", kind, text: delta, ts: Date.now(), streaming: true }
-        ];
+        return next ?? prev;
       });
+    };
+    const flushDeltas = () => {
+      if (deltaFlushHandle !== null) {
+        cancelAnimationFrame(deltaFlushHandle);
+        deltaFlushHandle = null;
+      }
+      applyDeltaBatch();
+    };
+    const appendStreaming = (kind: "text" | "thinking", delta: string) => {
+      pendingDeltas.push({ kind, delta });
+      if (deltaFlushHandle === null) {
+        deltaFlushHandle = requestAnimationFrame(() => {
+          deltaFlushHandle = null;
+          applyDeltaBatch();
+        });
+      }
+    };
     const stopStreaming = () =>
       setMessages((prev) => prev.map((m) => (m.streaming ? { ...m, streaming: false } : m)));
 
@@ -776,6 +937,9 @@ export default function FusionChatPane({
           emitAttention("failed", "error", event.message);
         }
         return;
+      }
+      if (event.type !== "assistant-text" && event.type !== "thinking") {
+        flushDeltas();
       }
       switch (event.type) {
         case "session":
@@ -802,11 +966,20 @@ export default function FusionChatPane({
             const label = decisionTurnLabelsRef.current.get(event.text) || "Decision sent.";
             decisionTurnLabelsRef.current.delete(event.text);
             push({ role: "user", kind: "text", text: label });
+          } else if (event.steer) {
+            // Mid-turn steering: pin above the composer until Claude's next
+            // assistant message absorbs it — pushed inline it drowned in the
+            // stream (the Open Fusion pane pins the same way).
+            queueSteering(event.text);
           } else {
-            push({ role: "user", kind: "text", text: event.steer ? `Steer: ${event.text}` : event.text });
+            push({ role: "user", kind: "text", text: event.text });
           }
           break;
         case "turn-start":
+          // Each assistant message is one API call; a steer written before it
+          // is in this call's context — absorbed, so it joins the transcript
+          // here.
+          flushSteering();
           setActiveRole("claude");
           setInterruptingState(false);
           setWaitingState(false);
@@ -945,6 +1118,10 @@ export default function FusionChatPane({
         case "result":
           setActiveRole("claude");
           stopStreaming();
+          // Steering that never got absorbed (turn ended first) still reached
+          // Claude's history — surface it as the freshest entry, right above
+          // the composer, instead of dropping it.
+          flushSteering();
           setInterruptingState(false);
           setBusyState(false);
           if (event.isError) {
@@ -977,6 +1154,10 @@ export default function FusionChatPane({
         case "interrupted":
           setActiveRole("claude");
           stopStreaming();
+          // A steer queued before the interrupt is still on Claude's stdin
+          // history — flush it under the marker as the freshest entry so the
+          // user sees it will lead the next turn.
+          flushSteering();
           setInterruptingState(false);
           setWaitingState(false);
           setFailed(false);
@@ -996,6 +1177,7 @@ export default function FusionChatPane({
         case "error":
           setActiveRole("claude");
           stopStreaming();
+          flushSteering();
           setInterruptingState(false);
           setWaitingState(false);
           push({ role: "opus", kind: "error", text: event.message });
@@ -1008,6 +1190,7 @@ export default function FusionChatPane({
         case "closed":
           setActiveRole("claude");
           stopStreaming();
+          flushSteering();
           setInterruptingState(false);
           if (event.code != null && event.code !== 0) {
             const message = `Fusion process exited with code ${event.code}.`;
@@ -1037,14 +1220,23 @@ export default function FusionChatPane({
     const offChat = window.vibe?.fusionChat?.onEvent(handleChat as (e: unknown) => void);
     return () => {
       offChat?.();
+      if (deltaFlushHandle !== null) {
+        cancelAnimationFrame(deltaFlushHandle);
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.id]);
 
   useEffect(() => {
     const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (el && pinnedToBottomRef.current) el.scrollTop = el.scrollHeight;
   }, [messages]);
+
+  const handleChatScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    pinnedToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+  }, []);
 
   function applySettings(settings: Partial<FusionSettings>, label = "settings") {
     // Validate BEFORE anything restarts: an unknown planning model previously
@@ -1556,6 +1748,8 @@ export default function FusionChatPane({
     const text = input.trim();
     if (!text) return;
     if (handleSlashCommand(text)) return;
+    // Sending implies following the conversation again.
+    pinnedToBottomRef.current = true;
     if (pendingDecisionIsQuestion && pendingDecision) {
       submitPendingDecision("accept", text);
       return;
@@ -1715,6 +1909,17 @@ export default function FusionChatPane({
               )}
             </span>
           )}
+          {cwdConflict && (
+            <span
+              className={clsx(
+                "pane-cwd-conflict-chip",
+                cwdConflict.active && "is-active"
+              )}
+              title={cwdConflictTitle(cwdConflict)}
+            >
+              {cwdConflictChipLabel(cwdConflict)}
+            </span>
+          )}
         </div>
         <div className="pane-status">
           <span
@@ -1787,7 +1992,7 @@ export default function FusionChatPane({
       </div>
 
       <div className="fusion-chat" onPointerDown={onSelect}>
-        <div className="fusion-chat-scroll" ref={scrollRef}>
+        <div className="fusion-chat-scroll" ref={scrollRef} onScroll={handleChatScroll}>
           {visibleMessages.length === 0 ? (
             <div className="fusion-chat-empty">
               <Sparkles size={26} />
@@ -1795,74 +2000,15 @@ export default function FusionChatPane({
               <p className="muted">Ask for a change to get started.</p>
             </div>
           ) : (
-            visibleMessages.map((m) => {
-              if (m.kind === "thinking" && !m.text.trim()) {
-                return null;
-              }
-
-              const author = m.role === "user" ? "You" : FUSION_SPEAKER_LABEL;
-              const className = clsx("chat-msg", `chat-${m.role}`, `chat-kind-${m.kind}`);
-
-              // Collapsible detail: a tool result or Opus's thinking. Streams open
-              // (live), then folds to a one-line preview; click / Details expands.
-              if (m.kind === "tool-result" || m.kind === "thinking") {
-                const preview = previewToolResult(m.text);
-                const expandable = !m.streaming && preview !== m.text.trim();
-                const open = m.streaming || verbose || expanded.has(m.key);
-                return (
-                  <div key={m.key} className={className}>
-                    <span className="chat-gutter">●</span>
-                    <div className="chat-body">
-                      <div
-                        className={clsx("chat-tool", expandable && "chat-tool-expandable")}
-                        onClick={expandable ? () => toggleExpanded(m.key) : undefined}
-                      >
-                        <span className="chat-tool-author">{author}</span>
-                        <span className="chat-tool-kind">
-                          {m.kind === "thinking" ? "thinking" : "↳"}
-                        </span>
-                        {expandable && (
-                          <span className="chat-tool-caret">{open ? "▾" : "▸"}</span>
-                        )}
-                        <span className="chat-tool-text">
-                          {open ? m.text : preview}
-                          {m.streaming && <span className="chat-caret">▋</span>}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                );
-              }
-
-              // Compact one-line chip: a tool call or side-channel activity.
-              if (m.kind === "tool-call" || m.kind === "activity") {
-                return (
-                  <div key={m.key} className={className}>
-                    <span className="chat-gutter">●</span>
-                    <div className="chat-body">
-                      <div className="chat-tool">
-                        <span className="chat-tool-author">{author}</span>
-                        <span className="chat-tool-text">{m.text}</span>
-                      </div>
-                    </div>
-                  </div>
-                );
-              }
-
-              // Prose: user message, Opus narration, or an error.
-              return (
-                <div key={m.key} className={className}>
-                  <span className="chat-gutter">{m.role === "user" ? "›" : ""}</span>
-                  <div className="chat-body">
-                    {m.role !== "user" && <span className="chat-author">{author}</span>}
-                    <span className="chat-text">
-                      {m.text}
-                      {m.streaming && <span className="chat-caret">▋</span>}
-                    </span>
-                  </div>
-                </div>
-              );
-            })
+            visibleMessages.map((m) => (
+              <FusionChatRow
+                key={m.key}
+                m={m}
+                verbose={verbose}
+                isExpanded={expanded.has(m.key)}
+                onToggle={toggleExpanded}
+              />
+            ))
           )}
           {busy && (
             <div className={clsx("chat-msg", "chat-kind-status")}>
@@ -1949,6 +2095,19 @@ export default function FusionChatPane({
                 <Play size={14} />
                 <span>Implement plan</span>
               </button>
+            </div>
+          )}
+          {steering.length > 0 && (
+            <div className="fusion-steering" role="status" aria-label="Queued steering">
+              {steering.map((item) => (
+                <div key={item.key} className="fusion-steering-item">
+                  <span className="fusion-steering-badge">Queued</span>
+                  <span className="fusion-steering-text">{clip(item.text, 400)}</span>
+                </div>
+              ))}
+              <span className="fusion-steering-hint">
+                Held here until Fusion's next step picks it up · Esc interrupts now
+              </span>
             </div>
           )}
           <div className="fusion-composer">

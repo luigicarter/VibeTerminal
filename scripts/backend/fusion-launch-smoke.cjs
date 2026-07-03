@@ -130,6 +130,12 @@ async function main() {
       buildFusionSystemPrompt().includes("Codex-managed blocked"),
       "buildFusionSystemPrompt is missing protected native goal status behavior"
     );
+    assert(
+      buildFusionSystemPrompt().includes("Concurrent edits (shared checkout)") &&
+        buildFusionSystemPrompt().includes("hold that") &&
+        buildFusionSystemPrompt().includes("Codex editing files"),
+      "buildFusionSystemPrompt is missing the concurrent-edits (foreign drift) guidance"
+    );
     const mainSource = fs.readFileSync(path.join(rootDir, "backend", "main.cjs"), "utf8");
     assert(/function fusionClaudeAllowedTools/.test(mainSource), "Fusion allowed tools helper not found in main.cjs");
     assert(/function fusionClaudeTools/.test(mainSource), "Fusion --tools helper not found in main.cjs");
