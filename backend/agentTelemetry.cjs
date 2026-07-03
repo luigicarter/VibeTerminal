@@ -53,7 +53,9 @@ function openFusionPlannerPrompt() {
     "  The investigator is permission-locked read-only, so it can never change state.",
     "- Use the task tool with the executor subagent for concrete implementation work.",
     "- Do not perform code edits or shell commands yourself.",
-    "- Review the executor's summary, diffs, command results, tests, and self-review.",
+    "- Review the executor's summary, diffs, command results, tests, and self-review findings.",
+    "  The executor self-reviews in a loop before reporting; treat that as evidence,",
+    "  not authority - your review is the independent second gate.",
     "- Decide whether the task is done or whether the executor needs a better corrective instruction.",
     "- If more work is needed, write a specific follow-up task for the executor.",
     "- If the executor reports files changing underneath it (another agent or tool",
@@ -77,8 +79,17 @@ function openFusionExecutorPrompt() {
     "- Implement code changes.",
     "- Run shell commands, tests, builds, and inspections needed to validate the work.",
     "- Interpret command results and fix issues you find.",
-    "- Self-review your changes before returning control.",
     "- Report changed files, commands run, validation results, remaining risks, and a recommendation.",
+    "",
+    "Self-review loop (mandatory before returning control):",
+    "1. Re-read your full diff as if reviewing another engineer's work: correctness,",
+    "   scope drift beyond the delegated task, missed edge cases, leftover debug or",
+    "   dead code, and validation gaps.",
+    "2. If the review pass found nothing, the loop is done.",
+    "3. Otherwise fix the findings, re-run the relevant validation, and review",
+    "   again. At most two fix passes: after the second, do one final review and",
+    "   report anything it still finds instead of fixing further.",
+    "Include what each review pass found and fixed in your report.",
     "",
     "Concurrent edits: the user may run other agent panes or tools against this",
     "same folder. If an edit is rejected because the file changed after you read",
@@ -137,7 +148,7 @@ function openFusionCommandContents(options = {}) {
         "",
         "$ARGUMENTS",
         "",
-        "Return concise evidence for the Planner: changed files, commands run, validation results, risks, and whether you recommend another pass."
+        "Return concise evidence for the Planner: changed files, commands run, validation results, self-review findings per pass, risks, and whether you recommend another pass."
       ].join("\n")
     },
     investigate: {
@@ -799,13 +810,66 @@ function migrateOpenFusionThreadsFromGlobal(dataDir, env = process.env) {
 
 function ensureOpenFusionOpencodeHome(openFusionBaseDir, env = process.env) {
   const paths = openFusionOpencodeHomePaths(openFusionBaseDir);
-  // Pre-create $XDG_CONFIG_HOME/opencode empty: the app's role config arrives
-  // per-pane via OPENCODE_CONFIG/OPENCODE_CONFIG_CONTENT, and an empty global
-  // config dir is what keeps the user's ~/.config/opencode out of the loop.
-  fs.mkdirSync(path.join(paths.configDir, "opencode"), { recursive: true });
+  // Pre-create $XDG_CONFIG_HOME/opencode: the app's role config arrives
+  // per-pane via OPENCODE_CONFIG/OPENCODE_CONFIG_CONTENT, and an app-owned
+  // global config dir is what keeps the user's ~/.config/opencode out of the
+  // loop. User-added custom providers land in its opencode.json (written by
+  // the pane's own server via PATCH /global/config).
+  const configDir = path.join(paths.configDir, "opencode");
+  fs.mkdirSync(configDir, { recursive: true });
   fs.mkdirSync(path.join(paths.dataDir, "opencode"), { recursive: true });
+  // Pin the global config FILENAME: with no file present, opencode creates
+  // opencode.jsonc on its first PATCH /global/config write; with opencode.json
+  // present it keeps using that. Seeding an empty {} (same as no config) makes
+  // the app-owned file deterministic for the custom-provider removal rewrite.
+  const configJson = path.join(configDir, "opencode.json");
+  if (!fs.existsSync(configJson) && !fs.existsSync(path.join(configDir, "opencode.jsonc"))) {
+    fs.writeFileSync(configJson, "{}\n");
+  }
   migrateOpenFusionThreadsFromGlobal(paths.dataDir, env);
   return paths;
+}
+
+// Drop a user-added custom provider from the app-owned global OpenCode config.
+// Additions go through the running server (PATCH /global/config merges and
+// live-applies), but a PATCH cannot DELETE a key — null values do not remove
+// entries (verified 1.17.11) — so removal rewrites the file directly; the
+// caller then nudges running servers with an empty PATCH, which re-reads the
+// file and refreshes their instances.
+function removeOpenFusionCustomProvider(openFusionBaseDir, providerId) {
+  const id = typeof providerId === "string" ? providerId.trim() : "";
+  if (!id) {
+    return { removed: false };
+  }
+  const configDir = path.join(
+    openFusionOpencodeHomePaths(openFusionBaseDir).configDir,
+    "opencode"
+  );
+  // Homes created before the opencode.json seeding got an opencode.jsonc from
+  // opencode's own first PATCH write (it emits plain JSON there), so the
+  // entry may live in either file.
+  for (const fileName of ["opencode.json", "opencode.jsonc"]) {
+    const configPath = path.join(configDir, fileName);
+    let config;
+    try {
+      config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    } catch {
+      continue;
+    }
+    if (
+      !config ||
+      typeof config !== "object" ||
+      !config.provider ||
+      typeof config.provider !== "object" ||
+      !Object.prototype.hasOwnProperty.call(config.provider, id)
+    ) {
+      continue;
+    }
+    delete config.provider[id];
+    fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+    return { removed: true };
+  }
+  return { removed: false };
 }
 
 function quoteCmd(value) {
@@ -2848,6 +2912,8 @@ function createAgentTelemetryManager(options = {}) {
     // Sync on purpose: thread-discovery lookups need the app-owned OpenCode
     // home paths without awaiting the telemetry bootstrap.
     getOpenFusionOpencodeHome: () => ensureOpenFusionOpencodeHome(openFusionBaseDir),
+    removeOpenFusionCustomProvider: (providerId) =>
+      removeOpenFusionCustomProvider(openFusionBaseDir, providerId),
     prepareSession,
     prepareOpenFusionFiles,
     prepareFusionFiles,
@@ -2877,6 +2943,7 @@ module.exports = {
   openFusionOpencodeHomePaths,
   openFusionPlannerPrompt,
   openFusionTuiPluginSource,
+  removeOpenFusionCustomProvider,
   openFusionTheme,
   cleanupStaleOpenFusionDirs,
   cleanupStaleShimDirs,

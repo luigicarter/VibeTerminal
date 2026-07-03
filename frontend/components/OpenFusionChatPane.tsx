@@ -36,7 +36,14 @@ import type {
   OpenFusionProvider,
   SessionStatus
 } from "../types";
-import { validateOpenFusionModel } from "../openFusion";
+import {
+  customProviderIdForName,
+  parseCustomProviderContextLimit,
+  validateCustomProviderBaseUrl,
+  validateCustomProviderModelId,
+  validateCustomProviderName,
+  validateOpenFusionModel
+} from "../openFusion";
 
 export interface OpenFusionSettingsChange {
   plannerModel?: string;
@@ -79,10 +86,26 @@ interface PendingPermission {
   title?: string;
 }
 
+// One model the user is adding to a custom provider: the id the endpoint
+// expects, the display name the pickers show, and an optional context window
+// (tokens). Without a context limit opencode treats the window as unknown —
+// calls still work, but auto-compaction is disabled for that model.
+interface CustomModelDraft {
+  id: string;
+  name: string;
+  contextLimit?: number;
+}
+
 // The connect flow mirrors OpenCode's own "Connect a provider" dialog: pick an
 // auth method when a provider registers more than one, answer the method's
 // prompt fields, then either store an API key (+ prompt answers as credential
 // metadata) or run the OAuth authorize/callback pair.
+//
+// The custom-* stages are the add-custom-provider walk (OpenAI-compatible
+// endpoint): name → base URL → optional key → one or more models (id +
+// display name) → review/save. They ride the same AuthFlow state so the
+// panel, focus trap, Esc-cancel, nonce, and auth-result plumbing all apply
+// unchanged; the collected fields travel inside the step objects.
 type AuthFlowStage =
   | { stage: "method" }
   | { stage: "prompts"; methodIndex: number; promptIndex: number; values: Record<string, string> }
@@ -95,7 +118,50 @@ type AuthFlowStage =
       url: string;
       instructions: string;
     }
-  | { stage: "waiting"; methodIndex: number };
+  | { stage: "waiting"; methodIndex: number }
+  | { stage: "custom-name" }
+  | { stage: "custom-url"; name: string }
+  | { stage: "custom-key"; name: string; baseURL: string }
+  | {
+      stage: "custom-model-id";
+      name: string;
+      baseURL: string;
+      key: string;
+      models: CustomModelDraft[];
+    }
+  | {
+      stage: "custom-model-name";
+      name: string;
+      baseURL: string;
+      key: string;
+      models: CustomModelDraft[];
+      modelId: string;
+    }
+  | {
+      stage: "custom-model-context";
+      name: string;
+      baseURL: string;
+      key: string;
+      models: CustomModelDraft[];
+      modelId: string;
+      modelName: string;
+    }
+  | {
+      stage: "custom-review";
+      name: string;
+      baseURL: string;
+      key: string;
+      models: CustomModelDraft[];
+    };
+
+const CUSTOM_TEXT_STAGES = new Set([
+  "custom-name",
+  "custom-url",
+  "custom-key",
+  "custom-model-id",
+  "custom-model-name",
+  "custom-model-context"
+]);
 
 interface AuthFlow {
   providerId: string;
@@ -133,6 +199,7 @@ const SLASH_COMMANDS = [
   { name: "/brain-model", desc: "Pick the Brain (planner) model" },
   { name: "/executor-model", desc: "Pick the Executor model" },
   { name: "/connect", desc: "Connect a provider (API key or OAuth)" },
+  { name: "/custom-provider", desc: "Add an OpenAI-compatible provider (your URL, key, and model names)" },
   { name: "/disconnect", desc: "Remove a provider's stored credential" },
   { name: "/models", desc: "Show the current Brain and Executor models" },
   { name: "/resume", desc: "Resume the last Open Fusion chat" },
@@ -540,13 +607,18 @@ export default function OpenFusionChatPane({
     const step = authFlow.step;
     if (
       step.stage === "key" ||
+      CUSTOM_TEXT_STAGES.has(step.stage) ||
       (step.stage === "prompts" &&
         authFlow.methods[step.methodIndex]?.prompts?.[step.promptIndex]?.type !==
           "select") ||
       (step.stage === "oauth" && step.flow === "code")
     ) {
       authInputRef.current?.focus();
-    } else if (step.stage === "method" || step.stage === "prompts") {
+    } else if (
+      step.stage === "method" ||
+      step.stage === "prompts" ||
+      step.stage === "custom-review"
+    ) {
       authPrimaryButtonRef.current?.focus();
     }
   }, [authFlow]);
@@ -634,7 +706,9 @@ export default function OpenFusionChatPane({
     onThreadRefChangeRef.current({
       provider: "opencode",
       id: threadId,
-      title: threadTitleRef.current || session.threadRef?.title || session.name,
+      // Never fall back to the pane's placeholder label ("Open Fusion 2") —
+      // the title stays empty until OpenCode generates a real one.
+      title: threadTitleRef.current || session.threadRef?.title,
       createdAt: session.threadRef?.createdAt ?? session.createdAt,
       updatedAt: Date.now()
     });
@@ -911,6 +985,28 @@ export default function OpenFusionChatPane({
           setActiveRole(event.role);
           appendStreaming(event.role, "thinking", event.delta, event.streamId);
           break;
+        case "stream-end": {
+          // The producing part finished — retire ITS bubble's caret now
+          // instead of leaving every finished row blinking until the turn
+          // settles. Pending deltas already flushed via the non-delta gate
+          // above. stopStreaming() stays the net for interrupts/aborts, whose
+          // parts never get a time.end.
+          const keys: string[] = [];
+          for (const kind of ["text", "thinking"] as const) {
+            const streamKey = `${event.streamId}:${kind}`;
+            const messageKey = streamBubblesRef.current.get(streamKey);
+            if (messageKey) {
+              keys.push(messageKey);
+              streamBubblesRef.current.delete(streamKey);
+            }
+          }
+          if (keys.length) {
+            setMessages((prev) =>
+              prev.map((m) => (keys.includes(m.key) && m.streaming ? { ...m, streaming: false } : m))
+            );
+          }
+          break;
+        }
         case "tool-call": {
           setActiveRole(event.role);
           const isDelegation = event.name === "task" && event.role === "brain";
@@ -1022,10 +1118,12 @@ export default function OpenFusionChatPane({
             }
             authReturnRoleRef.current = null;
           } else if (event.ok) {
+            // A custom-provider removal reports nuance (e.g. "only the
+            // credential was removed") through message.
             push({
               role: "brain",
               kind: "activity",
-              text: `Provider '${event.providerId}' disconnected.`
+              text: event.message || `Provider '${event.providerId}' disconnected.`
             });
           } else {
             // Failures from a cancelled/superseded flow stay quiet; everything
@@ -1417,6 +1515,171 @@ export default function OpenFusionChatPane({
     }
   }
 
+  // Add-custom-provider flow (OpenAI-compatible endpoint). Rides the AuthFlow
+  // state machine — its stages carry the collected fields, so cancelling at
+  // any point drops everything and nothing persists until Save.
+  function openCustomProviderFlow() {
+    setPicker(null);
+    setInput("");
+    setAuthText("");
+    setAuthFlow({
+      providerId: "",
+      name: "custom provider",
+      nonce: nextAuthNonce(),
+      methods: [],
+      step: { stage: "custom-name" }
+    });
+  }
+
+  function advanceCustomStage(value: string) {
+    const flow = authFlow;
+    if (!flow) return;
+    const step = flow.step;
+    const text = value.trim();
+    if (step.stage === "custom-name") {
+      const error = validateCustomProviderName(text);
+      if (error) {
+        push({ role: "brain", kind: "error", text: error });
+        return;
+      }
+      setAuthText("");
+      setAuthFlow({ ...flow, name: text, step: { stage: "custom-url", name: text } });
+    } else if (step.stage === "custom-url") {
+      const error = validateCustomProviderBaseUrl(text);
+      if (error) {
+        push({ role: "brain", kind: "error", text: error });
+        return;
+      }
+      setAuthText("");
+      setAuthFlow({
+        ...flow,
+        step: { stage: "custom-key", name: step.name, baseURL: new URL(text).href }
+      });
+    } else if (step.stage === "custom-key") {
+      // Empty is deliberate: keyless local endpoints (LM Studio, llama.cpp)
+      // are a first-class case, and a config-defined provider counts as
+      // connected without a credential.
+      setAuthText("");
+      setAuthFlow({
+        ...flow,
+        step: {
+          stage: "custom-model-id",
+          name: step.name,
+          baseURL: step.baseURL,
+          key: text,
+          models: []
+        }
+      });
+    } else if (step.stage === "custom-model-id") {
+      const error = validateCustomProviderModelId(text);
+      if (error) {
+        push({ role: "brain", kind: "error", text: error });
+        return;
+      }
+      setAuthText("");
+      setAuthFlow({
+        ...flow,
+        step: { ...step, stage: "custom-model-name", modelId: text }
+      });
+    } else if (step.stage === "custom-model-name") {
+      setAuthText("");
+      setAuthFlow({
+        ...flow,
+        step: {
+          ...step,
+          stage: "custom-model-context",
+          modelName: text || step.modelId
+        }
+      });
+    } else if (step.stage === "custom-model-context") {
+      const parsed = parseCustomProviderContextLimit(text);
+      if (!parsed.ok) {
+        push({ role: "brain", kind: "error", text: parsed.message });
+        return;
+      }
+      setAuthText("");
+      setAuthFlow({
+        ...flow,
+        step: {
+          stage: "custom-review",
+          name: step.name,
+          baseURL: step.baseURL,
+          key: step.key,
+          models: [
+            ...step.models,
+            {
+              id: step.modelId,
+              name: step.modelName,
+              ...(parsed.limit ? { contextLimit: parsed.limit } : {})
+            }
+          ]
+        }
+      });
+    }
+  }
+
+  function addAnotherCustomModel() {
+    const flow = authFlow;
+    if (!flow || flow.step.stage !== "custom-review") return;
+    setAuthText("");
+    setAuthFlow({
+      ...flow,
+      step: {
+        stage: "custom-model-id",
+        name: flow.step.name,
+        baseURL: flow.step.baseURL,
+        key: flow.step.key,
+        models: flow.step.models
+      }
+    });
+  }
+
+  function submitCustomProvider() {
+    const flow = authFlow;
+    if (!flow || flow.step.stage !== "custom-review") return;
+    const step = flow.step;
+    // The id comes from the display name. Reusing the slug of an existing
+    // custom (config-sourced) provider means redefining it; colliding with a
+    // catalog provider id instead gets a -custom suffix so the definition
+    // never merges into a stock provider by accident.
+    const providerId = customProviderIdForName(
+      step.name,
+      [
+        ...availableProviders.map((provider) => provider.id),
+        ...(providers ?? [])
+          .filter((provider) => provider.source !== "config")
+          .map((provider) => provider.id)
+      ],
+      (providers ?? [])
+        .filter((provider) => provider.source === "config")
+        .map((provider) => provider.id)
+    );
+    setAuthFlow({ ...flow, providerId, step: { stage: "waiting", methodIndex: 0 } });
+    setAuthText("");
+    void window.vibe?.openFusionChat
+      ?.customProviderSet(
+        session.id,
+        {
+          providerId,
+          name: step.name,
+          baseURL: step.baseURL,
+          models: step.models,
+          key: step.key || undefined
+        },
+        flow.nonce
+      )
+      .then((result) => {
+        if (result && result.ok === false) {
+          push({
+            role: "brain",
+            kind: "error",
+            text: result.error || "Could not save the custom provider."
+          });
+          setAuthFlow(null);
+        }
+      });
+  }
+
   function selectAuthMethod(methodIndex: number) {
     const flow = authFlow;
     if (!flow || flow.step.stage !== "method") return;
@@ -1517,17 +1780,24 @@ export default function OpenFusionChatPane({
   function disconnectProvider(providerId: string) {
     const id = providerId.trim();
     if (!id) return;
-    void window.vibe?.openFusionChat
-      ?.removeProviderKey(session.id, id)
-      .then((result) => {
-        if (result && result.ok === false) {
-          push({
-            role: "brain",
-            kind: "error",
-            text: result.error || "Could not remove the provider credential."
-          });
-        }
-      });
+    // Config-sourced providers are user-added custom definitions: removing
+    // one drops the definition from the app-owned OpenCode config, not just
+    // its stored credential.
+    const custom = (providers ?? []).some(
+      (provider) => provider.id === id && provider.source === "config"
+    );
+    const call = custom
+      ? window.vibe?.openFusionChat?.customProviderRemove(session.id, id)
+      : window.vibe?.openFusionChat?.removeProviderKey(session.id, id);
+    void call?.then((result) => {
+      if (result && result.ok === false) {
+        push({
+          role: "brain",
+          kind: "error",
+          text: result.error || "Could not remove the provider credential."
+        });
+      }
+    });
   }
 
   function showModels() {
@@ -1592,6 +1862,10 @@ export default function OpenFusionChatPane({
           // into a usage string — there was no way to DISCOVER providers).
           openConnectPicker("connect");
         }
+        return true;
+      case "/custom-provider":
+      case "/add-provider":
+        openCustomProviderFlow();
         return true;
       case "/disconnect":
       case "/logout":
@@ -1686,7 +1960,10 @@ export default function OpenFusionChatPane({
           items.push({
             key: `disc-${provider.id}`,
             label: provider.name,
-            desc: "connected — select to remove its credential",
+            desc:
+              provider.source === "config"
+                ? "custom provider — select to remove it (definition + key)"
+                : "connected — select to remove its credential",
             command: `__disconnect:${provider.id}`
           });
         }
@@ -1727,6 +2004,12 @@ export default function OpenFusionChatPane({
           command: `__connect:${filter}`
         });
       }
+      items.push({
+        key: "conn-custom-add",
+        label: "Add custom provider (OpenAI-compatible)…",
+        desc: "Your own base URL and key — name the provider and its models yourself",
+        command: "__custom-provider"
+      });
       if (!catalogOk) {
         items.push({
           key: "conn-partial",
@@ -1908,6 +2191,11 @@ export default function OpenFusionChatPane({
       openConnectPicker("connect");
       return;
     }
+    if (item.command === "__custom-provider") {
+      authReturnRoleRef.current = pickerRole;
+      openCustomProviderFlow();
+      return;
+    }
     if (item.command.startsWith("__model:")) {
       const model = item.command.slice("__model:".length);
       const role = pickerRole ?? "brain";
@@ -1956,7 +2244,9 @@ export default function OpenFusionChatPane({
         <div className="pane-title">
           <GripVertical className="drag-grip" size={15} />
           <Orbit size={15} />
-          <span>{session.name}</span>
+          <span title={session.threadRef?.title || session.name}>
+            {session.threadRef?.title || session.name}
+          </span>
           <span className={clsx("openfusion-role-chip", `is-${activeRole}`)} title={modelsLine}>
             {activeRoleLabel}
           </span>
@@ -2146,8 +2436,41 @@ export default function OpenFusionChatPane({
               }}
             >
               <div className="fusion-decision-copy">
-                <span className="fusion-decision-kind">Connect {authFlow.name}</span>
+                <span className="fusion-decision-kind">
+                  {authFlow.step.stage.startsWith("custom-")
+                    ? "Add custom provider"
+                    : `Connect ${authFlow.name}`}
+                </span>
                 <span className="fusion-decision-detail">
+                  {authFlow.step.stage === "custom-name" &&
+                    "Name this provider — it appears in the model pickers (e.g. 'My OpenRouter', 'Local LM Studio')."}
+                  {authFlow.step.stage === "custom-url" &&
+                    "OpenAI-compatible base URL (e.g. https://api.example.com/v1 or http://localhost:1234/v1)."}
+                  {authFlow.step.stage === "custom-key" &&
+                    `API key for '${authFlow.name}' — stored by OpenCode's credential store, never by vibeTerminal. Keyless local servers can skip this.`}
+                  {authFlow.step.stage === "custom-model-id" &&
+                    "Model id exactly as the endpoint expects it (e.g. llama-3.3-70b-versatile). You can add more afterwards."}
+                  {authFlow.step.stage === "custom-model-name" &&
+                    `Display name for '${authFlow.step.modelId}' — how it shows in the pickers. Enter keeps the id.`}
+                  {authFlow.step.stage === "custom-model-context" &&
+                    `Context window of '${authFlow.step.modelName}' in tokens (e.g. 128k) — used for auto-compaction and the usage display. Enter skips it (calls still work; compaction stays off).`}
+                  {authFlow.step.stage === "custom-review" &&
+                    `${authFlow.name} · ${authFlow.step.baseURL} · ${
+                      authFlow.step.key ? "key set" : "no key (local endpoint)"
+                    } · ${authFlow.step.models
+                      .map((model) => {
+                        const ctx = model.contextLimit
+                          ? `, ${
+                              model.contextLimit >= 1000
+                                ? `${Math.round(model.contextLimit / 1000)}k`
+                                : model.contextLimit
+                            } ctx`
+                          : "";
+                        return model.name === model.id
+                          ? `${model.id}${ctx}`
+                          : `${model.name} (${model.id}${ctx})`;
+                      })
+                      .join(", ")}`}
                   {authFlow.step.stage === "method" &&
                     "Choose how to sign in. Credentials are stored by OpenCode's own credential store, never by vibeTerminal."}
                   {authFlow.step.stage === "prompts" &&
@@ -2308,6 +2631,104 @@ export default function OpenFusionChatPane({
                   >
                     <KeyRound size={14} />
                     <span>Connect</span>
+                  </button>
+                  <button
+                    className="fusion-decision-button"
+                    type="button"
+                    title="Cancel"
+                    onClick={cancelAuthFlow}
+                  >
+                    <Ban size={14} />
+                    <span>Cancel</span>
+                  </button>
+                </div>
+              )}
+
+              {CUSTOM_TEXT_STAGES.has(authFlow.step.stage) && (
+                <div className="openfusion-auth-row">
+                  <input
+                    ref={authInputRef}
+                    className="openfusion-auth-input"
+                    type={authFlow.step.stage === "custom-key" ? "password" : "text"}
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder={
+                      authFlow.step.stage === "custom-name"
+                        ? "Provider name…"
+                        : authFlow.step.stage === "custom-url"
+                          ? "https://api.example.com/v1"
+                          : authFlow.step.stage === "custom-key"
+                            ? "API key (optional for local endpoints)…"
+                            : authFlow.step.stage === "custom-model-id"
+                              ? "Model id…"
+                              : authFlow.step.stage === "custom-model-context"
+                                ? "Context window, e.g. 128k (Enter skips)…"
+                                : "Model display name (Enter keeps the id)…"
+                    }
+                    value={authText}
+                    onChange={(e) => setAuthText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        advanceCustomStage(authText);
+                      }
+                      if (e.key === "Escape") {
+                        e.preventDefault();
+                        cancelAuthFlow();
+                      }
+                    }}
+                  />
+                  <button
+                    className="fusion-decision-button is-primary"
+                    type="button"
+                    disabled={
+                      !authText.trim() &&
+                      authFlow.step.stage !== "custom-key" &&
+                      authFlow.step.stage !== "custom-model-name" &&
+                      authFlow.step.stage !== "custom-model-context"
+                    }
+                    onClick={() => advanceCustomStage(authText)}
+                  >
+                    <Check size={14} />
+                    <span>
+                      {authFlow.step.stage === "custom-key" && !authText.trim()
+                        ? "Skip — no key"
+                        : authFlow.step.stage === "custom-model-context" && !authText.trim()
+                          ? "Skip"
+                          : "Next"}
+                    </span>
+                  </button>
+                  <button
+                    className="fusion-decision-button"
+                    type="button"
+                    title="Cancel"
+                    onClick={cancelAuthFlow}
+                  >
+                    <Ban size={14} />
+                    <span>Cancel</span>
+                  </button>
+                </div>
+              )}
+
+              {authFlow.step.stage === "custom-review" && (
+                <div className="fusion-decision-actions">
+                  <button
+                    ref={authPrimaryButtonRef}
+                    className="fusion-decision-button is-primary"
+                    type="button"
+                    title="Save the provider into Open Fusion's own OpenCode config"
+                    onClick={submitCustomProvider}
+                  >
+                    <Check size={14} />
+                    <span>Save provider</span>
+                  </button>
+                  <button
+                    className="fusion-decision-button"
+                    type="button"
+                    onClick={addAnotherCustomModel}
+                  >
+                    <Plus size={14} />
+                    <span>Add another model</span>
                   </button>
                   <button
                     className="fusion-decision-button"

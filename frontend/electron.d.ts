@@ -145,6 +145,21 @@ declare global {
           id: string,
           providerId: string
         ) => Promise<{ ok: boolean; error?: string }>;
+        customProviderSet: (
+          id: string,
+          provider: {
+            providerId: string;
+            name: string;
+            baseURL: string;
+            models: { id: string; name?: string; contextLimit?: number }[];
+            key?: string;
+          },
+          nonce?: string
+        ) => Promise<{ ok: boolean; error?: string }>;
+        customProviderRemove: (
+          id: string,
+          providerId: string
+        ) => Promise<{ ok: boolean; error?: string }>;
         oauthAuthorize: (
           id: string,
           providerId: string,

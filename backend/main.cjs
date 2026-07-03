@@ -1735,6 +1735,74 @@ ipcMain.handle("openfusion-chat:auth-remove", (_event, payload) => {
     : { ok: false, error: "Open Fusion chat host is not running." };
 });
 
+// Custom OpenAI-compatible providers. The definition is validated here and in
+// the host (buildCustomProviderPatch is the authority on shape); the host's
+// PATCH /global/config both persists it in the app-owned OpenCode config and
+// live-applies it. The optional key is relayed verbatim — never logged.
+ipcMain.handle("openfusion-chat:custom-provider-set", (_event, payload) => {
+  const providerId =
+    typeof payload?.providerId === "string" ? payload.providerId.trim() : "";
+  const name = typeof payload?.name === "string" ? payload.name.trim() : "";
+  const baseURL = typeof payload?.baseURL === "string" ? payload.baseURL.trim() : "";
+  const models = Array.isArray(payload?.models)
+    ? payload.models
+        .filter((entry) => entry && typeof entry === "object")
+        .map((entry) => ({
+          id: typeof entry.id === "string" ? entry.id.trim() : "",
+          name: typeof entry.name === "string" ? entry.name.trim() : "",
+          ...(Number.isInteger(entry.contextLimit) && entry.contextLimit > 0
+            ? { contextLimit: entry.contextLimit }
+            : {})
+        }))
+        .filter((entry) => entry.id)
+    : [];
+  if (!payload?.id || !providerId || !name || !baseURL || !models.length) {
+    return { ok: false, error: "missing provider id, name, base URL, or models" };
+  }
+  const key = typeof payload?.key === "string" ? payload.key.trim() : "";
+  const sent = sendToOpenFusionChatHost({
+    type: "custom-provider-set",
+    payload: {
+      id: payload.id,
+      providerId,
+      name,
+      baseURL,
+      models,
+      key: key || undefined,
+      nonce: typeof payload.nonce === "string" ? payload.nonce : undefined
+    }
+  });
+  return sent
+    ? { ok: true }
+    : { ok: false, error: "Open Fusion chat host is not running." };
+});
+
+ipcMain.handle("openfusion-chat:custom-provider-remove", (_event, payload) => {
+  const providerId =
+    typeof payload?.providerId === "string" ? payload.providerId.trim() : "";
+  if (!payload?.id || !providerId) {
+    return { ok: false, error: "missing provider id" };
+  }
+  // Drop the config entry first (a PATCH cannot delete a key, so this is a
+  // direct file rewrite), then let the host clear the credential and nudge the
+  // running servers to re-read the file.
+  let removedFromConfig = false;
+  try {
+    removedFromConfig = Boolean(
+      getAgentTelemetry().removeOpenFusionCustomProvider(providerId).removed
+    );
+  } catch {
+    // An unreadable config file means there is nothing to remove from it.
+  }
+  const sent = sendToOpenFusionChatHost({
+    type: "custom-provider-remove",
+    payload: { id: payload.id, providerId, removedFromConfig }
+  });
+  return sent
+    ? { ok: true }
+    : { ok: false, error: "Open Fusion chat host is not running." };
+});
+
 ipcMain.handle("openfusion-chat:permission", (_event, payload) => {
   if (!payload?.id || !payload?.requestId) {
     return { ok: false, error: "missing permission request id" };

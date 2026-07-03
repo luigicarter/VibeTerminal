@@ -102,13 +102,14 @@ assert.strictEqual(
     session({
       kind: "claude",
       command: "claude",
-      name: "Chat1",
+      name: "Claude 2",
       nextLaunchMode: "new",
       threadRef: { id: "uuid-2" }
     })
   ),
-  "claude --session-id uuid-2 --name Chat1",
-  "claude new with an id should pin the session id and name"
+  "claude --session-id uuid-2",
+  "claude new with an id should pin the session id and nothing else — forcing " +
+    "--name overrides the title Claude generates for its own /resume picker"
 );
 
 // A mode override forces a fresh launch even when the session is set to resume —
@@ -125,7 +126,7 @@ assert.strictEqual(
     }),
     { mode: "new" }
   ),
-  "claude --session-id uuid-2 --name Chat1",
+  "claude --session-id uuid-2",
   "a mode override should force a fresh claude launch even when resume is set"
 );
 
@@ -137,27 +138,25 @@ assert.strictEqual(
     session({
       kind: "claude",
       command: "claude",
-      name: "My Project",
-      nextLaunchMode: "new",
-      threadRef: { id: "uuid-3" }
+      nextLaunchMode: "resume",
+      threadRef: { id: "My Project" }
     }),
     { platform: "win32" }
   ),
-  "claude --session-id uuid-3 --name 'My Project'",
-  "a title with spaces should be single-quoted"
+  "claude --resume 'My Project'",
+  "an argument with spaces should be single-quoted"
 );
 assert.strictEqual(
   buildLaunchCommand(
     session({
       kind: "claude",
       command: "claude",
-      name: "It's mine",
-      nextLaunchMode: "new",
-      threadRef: { id: "uuid-4" }
+      nextLaunchMode: "resume",
+      threadRef: { id: "It's mine" }
     }),
     { platform: "win32" }
   ),
-  "claude --session-id uuid-4 --name 'It''s mine'",
+  "claude --resume 'It''s mine'",
   "embedded single quotes should be doubled for PowerShell"
 );
 assert.strictEqual(
@@ -165,13 +164,12 @@ assert.strictEqual(
     session({
       kind: "claude",
       command: "claude",
-      name: "It's mine",
-      nextLaunchMode: "new",
-      threadRef: { id: "uuid-5" }
+      nextLaunchMode: "resume",
+      threadRef: { id: "It's mine" }
     }),
     { platform: "linux" }
   ),
-  "claude --session-id uuid-5 --name 'It'\\''s mine'",
+  "claude --resume 'It'\\''s mine'",
   "embedded single quotes should be backslash-escaped for POSIX shells"
 );
 
@@ -183,13 +181,12 @@ assert.strictEqual(
     session({
       kind: "claude",
       command: "claude",
-      name: "Mike’s App",
-      nextLaunchMode: "new",
-      threadRef: { id: "uuid-6" }
+      nextLaunchMode: "resume",
+      threadRef: { id: "Mike’s App" }
     }),
     { platform: "win32" }
   ),
-  "claude --session-id uuid-6 --name 'Mike’’s App'",
+  "claude --resume 'Mike’’s App'",
   "typographic single quotes should be doubled for PowerShell"
 );
 assert.strictEqual(

@@ -19,6 +19,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `scripts/backend/fusion-chat-parse-smoke.cjs` - Validates headless Claude stream-json normalization used by the Fusion chat host.
 - `scripts/backend/openfusion-chat-parse-smoke.cjs` - Validates OpenCode `/event` SSE normalization used by the Open Fusion chat host (delta/snapshot dedupe, task child-session roles, permission round-trip, abort suppression, resume rehydration, model-id splitting, serve spawn env), against event shapes recorded live from OpenCode 1.17.11.
 - `scripts/backend/openfusion-isolation-smoke.cjs` - Locks Open Fusion data ownership: app-owned OpenCode home layout + XDG env in the pane spawn, one-time threads-only migration from the global store (credentials never copied, global store never written), model-less generated configs (no default models), discovery-spawn env overrides, and the pane/host first-run gate + unknown-provider refusal source contracts.
+- `scripts/backend/openfusion-custom-provider-smoke.cjs` - Locks the add-your-own OpenAI-compatible provider slice: the PATCH `/global/config` body shape (npm pin, base URL, user-named models, optional context window with the derived output cap that keeps opencode's compaction threshold sane for sub-32k models), the app-owned config removal rewrite (`.json` + `.jsonc`), the global-config filename seeding, the renderer's name→id and context-shorthand parsing, and the pane/preload/main/host wiring contracts.
 - `scripts/backend/fusion-appserver-smoke.cjs` - Boots Codex `app-server` over stdio, validates the initialize handshake, and exercises native `thread/goal/set|get|clear`; `--require-embedded` requires `vendor/codex-bin` and is used by release checks.
 
 ## Frontend Scripts
@@ -58,6 +59,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `npm run smoke:backend:fusion-chat-parse` - Backend smoke test for Fusion headless Claude stream parsing.
 - `npm run smoke:backend:openfusion-chat-parse` - Backend smoke test for Open Fusion OpenCode SSE parsing.
 - `npm run smoke:backend:openfusion-isolation` - Backend smoke test for Open Fusion data ownership (app-owned OpenCode home, threads-only migration, no default models, discovery env overrides).
+- `npm run smoke:backend:openfusion-custom-provider` - Backend smoke test for Open Fusion custom OpenAI-compatible providers (config patch shape, removal rewrite, id derivation, wiring contracts).
 - `npm run smoke:frontend:fusion-settings` - Frontend smoke test for the Fusion settings layer (per-engine efforts, model validation, menu trap fixes).
 - `npm run smoke:backend:fusion-appserver` - Backend smoke test for Codex app-server initialize over stdio, with optional PATH fallback.
 - `npm run smoke:backend:fusion-appserver:embedded` - Backend smoke test requiring the embedded Codex binary.

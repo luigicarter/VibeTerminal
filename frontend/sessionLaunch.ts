@@ -39,9 +39,11 @@ export function createUuid() {
   ].join("-");
 }
 
+// A fresh ref carries no title: threadRef.title holds only the provider's own
+// (generated or user-chosen) session title, harvested from local metadata once
+// the conversation exists — never the pane's placeholder label.
 export function createThreadRef(
   kind: AgentKind,
-  title: string,
   now = Date.now()
 ): AgentThreadRef | undefined {
   if (!isThreadedAgentKind(kind)) {
@@ -51,7 +53,6 @@ export function createThreadRef(
   return {
     provider: kind,
     id: kind === "claude" ? createUuid() : undefined,
-    title,
     createdAt: now,
     updatedAt: now
   };
@@ -125,12 +126,14 @@ export function buildLaunchCommand(
       }
     }
 
-    const title = session.threadRef?.title || session.name;
-    const namePart = title ? ` --name ${commandArg(title, platform)}` : "";
+    // Never pass --name: it stamps the pane's placeholder label ("Claude 2")
+    // onto the session, which overrides the title Claude generates from the
+    // first prompt in its own /resume picker. The pane harvests that generated
+    // title back from the transcript instead (TerminalPane title refresh).
     const idPart = session.threadRef?.id
       ? ` --session-id ${commandArg(session.threadRef.id, platform)}`
       : "";
-    return `claude${idPart}${namePart}`;
+    return `claude${idPart}`;
   }
 
   if (session.kind === "opencode") {

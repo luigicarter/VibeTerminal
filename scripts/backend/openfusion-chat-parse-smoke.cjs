@@ -4,9 +4,11 @@
 // recorded `opencode serve` /event sequence (session busy → planner deltas +
 // snapshots → a task delegation spawning an executor child session → child
 // output → tool completion → idle) and asserts it produces the right
-// high-level chat events. Shapes were captured live against OpenCode 1.17.11.
-// No OpenCode, no auth, no cost — this guards the parsing the
-// OpenFusionChatPane renders.
+// high-level chat events. Shapes verified against the OpenCode 1.17.11 source:
+// message.part.delta carries field:"text" for BOTH text and reasoning parts
+// (field is the part property being appended), part snapshots precede first
+// deltas, and finished parts snapshot with time.end. No OpenCode, no auth, no
+// cost — this guards the parsing the OpenFusionChatPane renders.
 
 const {
   createOpenCodeEventNormalizer,
@@ -47,7 +49,11 @@ const fixture = [
       part: { id: "prt_user", messageID: "msg_user", sessionID: ROOT, type: "text", text: "do the thing" }
     }
   },
-  // Assistant message streams deltas, then a full-text snapshot (dedup check).
+  // Assistant message streams deltas, then full-text snapshots (dedup check).
+  // Wire shape per OpenCode 1.17.11: text-start/reasoning-start emit a part
+  // snapshot BEFORE the first delta, and ALL deltas carry field:"text" — field
+  // names the part property being appended, so reasoning deltas are told apart
+  // only by the part's registered type. Finished parts snapshot with time.end.
   {
     type: "message.updated",
     properties: {
@@ -55,9 +61,45 @@ const fixture = [
       info: { id: "msg_a1", role: "assistant", sessionID: ROOT, agent: "planner" }
     }
   },
+  // Delta for a part whose type is not yet known (mid-stream attach): must be
+  // DROPPED without advancing the cursor — the snapshot below re-delivers it.
   {
     type: "message.part.delta",
-    properties: { sessionID: ROOT, messageID: "msg_a1", partID: "prt_t1", field: "reasoning", delta: "plan it" }
+    properties: { sessionID: ROOT, messageID: "msg_a1", partID: "prt_t1", field: "text", delta: "plan" }
+  },
+  {
+    type: "message.part.updated",
+    properties: {
+      sessionID: ROOT,
+      part: { id: "prt_t1", messageID: "msg_a1", sessionID: ROOT, type: "reasoning", text: "plan", time: { start: 1 } }
+    }
+  },
+  // Reasoning delta arrives with field:"text" — must surface as thinking.
+  {
+    type: "message.part.delta",
+    properties: { sessionID: ROOT, messageID: "msg_a1", partID: "prt_t1", field: "text", delta: " it" }
+  },
+  {
+    type: "message.part.updated",
+    properties: {
+      sessionID: ROOT,
+      part: { id: "prt_t1", messageID: "msg_a1", sessionID: ROOT, type: "reasoning", text: "plan it", time: { start: 1, end: 2 } }
+    }
+  },
+  // A repeated end snapshot must not double-emit stream-end.
+  {
+    type: "message.part.updated",
+    properties: {
+      sessionID: ROOT,
+      part: { id: "prt_t1", messageID: "msg_a1", sessionID: ROOT, type: "reasoning", text: "plan it", time: { start: 1, end: 2 } }
+    }
+  },
+  {
+    type: "message.part.updated",
+    properties: {
+      sessionID: ROOT,
+      part: { id: "prt_t2", messageID: "msg_a1", sessionID: ROOT, type: "text", text: "", time: { start: 3 } }
+    }
   },
   {
     type: "message.part.delta",
@@ -71,7 +113,7 @@ const fixture = [
     type: "message.part.updated",
     properties: {
       sessionID: ROOT,
-      part: { id: "prt_t2", messageID: "msg_a1", sessionID: ROOT, type: "text", text: "Delegating now. Done." }
+      part: { id: "prt_t2", messageID: "msg_a1", sessionID: ROOT, type: "text", text: "Delegating now. Done.", time: { start: 3, end: 5 } }
     }
   },
   // Task tool: pending → running (registers the child session) → completed.
@@ -129,8 +171,22 @@ const fixture = [
     }
   },
   {
+    type: "message.part.updated",
+    properties: {
+      sessionID: CHILD,
+      part: { id: "prt_c1", messageID: "msg_c1", sessionID: CHILD, type: "text", text: "", time: { start: 6 } }
+    }
+  },
+  {
     type: "message.part.delta",
     properties: { sessionID: CHILD, messageID: "msg_c1", partID: "prt_c1", field: "text", delta: "391" }
+  },
+  {
+    type: "message.part.updated",
+    properties: {
+      sessionID: CHILD,
+      part: { id: "prt_c1", messageID: "msg_c1", sessionID: CHILD, type: "text", text: "391", time: { start: 6, end: 7 } }
+    }
   },
   // Executor runs a tool of its own.
   {
@@ -254,9 +310,32 @@ assert(
   brainText === "Delegating now. Done.",
   `brain text should join deltas + snapshot suffix exactly once, got: ${JSON.stringify(brainText)}`
 );
+// Reasoning parts stream with field:"text" on the wire — the part's registered
+// type must route them to thinking, never assistant-text, and the pre-snapshot
+// delta ("plan") must not double-count (dropped, then re-delivered by snapshot).
+const thinking = byType("thinking");
 assert(
-  byType("thinking").length === 1 && byType("thinking")[0].role === "brain",
+  thinking.length > 0 && thinking.every((event) => event.role === "brain"),
   "reasoning deltas should surface as brain thinking"
+);
+assert(
+  thinking.map((event) => event.delta).join("") === "plan it",
+  `reasoning should join to "plan it" exactly once, got: ${JSON.stringify(thinking.map((e) => e.delta).join(""))}`
+);
+assert(
+  !byType("assistant-text").some((event) => event.streamId === `${ROOT}:prt_t1`),
+  "reasoning content must never surface as assistant-text"
+);
+
+// Finished parts (snapshot with time.end) emit stream-end exactly once each,
+// so the pane can retire that bubble's caret mid-turn.
+const streamEnds = byType("stream-end");
+assert(
+  streamEnds.length === 3 &&
+    streamEnds.filter((event) => event.streamId === `${ROOT}:prt_t1`).length === 1 &&
+    streamEnds.filter((event) => event.streamId === `${ROOT}:prt_t2`).length === 1 &&
+    streamEnds.filter((event) => event.streamId === `${CHILD}:prt_c1`).length === 1,
+  `each finished part should emit exactly one stream-end (repeat end snapshots are idempotent), got: ${JSON.stringify(streamEnds.map((e) => e.streamId))}`
 );
 
 // The user echo must not leak into assistant text.

@@ -85,15 +85,29 @@
 > the `/event` SSE feed (`message.part.delta` streaming, `message.part.updated`
 > snapshots, tool parts with `state.status` pending→running→completed,
 > task-spawned child sessions on the same feed via `session.created.parentID`,
-> `session.status busy` / `session.idle`, `permission.asked`). The normalizer
-> in `backend/openFusionChatHost.cjs` dedupes delta-vs-snapshot text by
-> tracking emitted length per part id and is fixture-tested by
-> `scripts/backend/openfusion-chat-parse-smoke.cjs`. Every streamed
+> `session.status busy` / `session.idle`, `permission.asked`). GOTCHA
+> (verified in the 1.17.11 source, 2026-07-03): `message.part.delta.field` is
+> the part PROPERTY being appended, not a content kind — BOTH text and
+> reasoning parts stream with `field:"text"` (reasoning content lives in
+> `part.text`; `field:"reasoning"` never occurs). The normalizer in
+> `backend/openFusionChatHost.cjs` therefore tracks partID→part.type from the
+> snapshot that `text-start`/`reasoning-start` always emit before the first
+> delta, routes deltas to `assistant-text`/`thinking` by that tracked type
+> (unknown-part deltas are dropped; the next snapshot re-delivers them), and
+> dedupes delta-vs-snapshot text by tracking emitted length per part id —
+> fixture-tested by `scripts/backend/openfusion-chat-parse-smoke.cjs`.
+> Classifying by `field` instead used to double-render every reasoning part as
+> a text + thinking bubble pair. Every streamed
 > `assistant-text`/`thinking` event carries a `streamId` (`sessionID:partID`)
 > because several parts stream CONCURRENTLY on the one feed (parallel Scout
 > subagents, reasoning beside text) — the pane keys bubbles by it; bucketing by
 > role alone interleaved concurrent streams chunk-by-chunk into one garbled
-> paragraph (2026-07-03). Subagent text streams and all thinking render as
+> paragraph (2026-07-03). A finished part's final snapshot carries `time.end`;
+> the normalizer surfaces it as a `stream-end` event so the pane retires that
+> bubble's live caret per-part instead of leaving every finished row blinking
+> until the turn settles (turn-wide clearing on result/interrupt/error stays
+> the net for aborted parts, which never get a `time.end`). Subagent text
+> streams and all thinking render as
 > collapsed one-line click-to-expand rows (live last-line ticker while
 > streaming); only Brain text is transcript prose. The visible surface of a
 > delegation stays its card + extracted task report.
@@ -147,6 +161,48 @@
 > per-flow nonce echoed on `oauth-authorize`/`auth-result` events. Keys and
 > codes only transit memory; they are never logged or echoed into the
 > transcript.
+>
+> **Custom OpenAI-compatible providers (2026-07-03):** "Add custom provider"
+> in the `/connect` browser (also `/custom-provider`) walks name → base URL →
+> optional API key → one or more models (endpoint model id + a display name +
+> an optional context window, Enter to skip) → review/save. A given context
+> window ("128k"/"1m" shorthand accepted) is written as the model's
+> `limit.context` plus a derived `limit.output` (min(32000, context/4),
+> floor 256) — derived because opencode's compaction threshold with an
+> unknown output limit is `context − 32000` (its default output cap, verified
+> in the 1.17.11 binary), which clamps to 0 for sub-32k models and would
+> re-compact on every step. Skipping the context leaves `limit.context` 0 =
+> unknown: calls still work (the endpoint enforces its real window; blowing
+> past it surfaces as a failed turn), but opencode disables auto-compaction
+> for that model (`if (limit.context === 0) return false`) and shows no
+> usage percentage. The definition lands in the app-owned
+> global config (`opencode-home/config/opencode/opencode.json`, filename
+> pinned by an empty-`{}` seed in `ensureOpenFusionOpencodeHome` — without it
+> opencode's first write creates `opencode.jsonc`), written by the pane's own
+> server via `PATCH /global/config` — live-verified 1.17.11: that PATCH
+> re-reads the file, merges the body, persists it, AND refreshes the running
+> instance, so the provider is usable immediately with no dispose or pane
+> restart. An EMPTY `{}` PATCH performs the same file re-read and is the
+> nudge other idle panes get (`reloadConfig` on the provider refresh),
+> because a bare `/instance/dispose` does NOT re-read config files while
+> `OPENCODE_CONFIG_CONTENT` is set. A PATCH can never DELETE a key (nulls
+> don't remove entries), so removal rewrites the file in main
+> (`agentTelemetry.removeOpenFusionCustomProvider`, checks both `.json` and
+> `.jsonc`) before the host drops the credential and nudges the servers. The
+> key is optional — a config-defined provider counts as connected without one
+> (keyless local endpoints like LM Studio / llama.cpp are first-class); when
+> present it goes through the same `PUT /auth/{id}` credential store as every
+> other provider. Connected entries now carry OpenCode's `source` field
+> ("config" = user-added custom, which the `/disconnect` browser offers to
+> remove definition-and-key). The provider id derives from the display name
+> (catalog collisions get a `-custom` suffix so a definition never silently
+> merges into a stock provider; re-using an existing custom slug redefines it
+> — PATCH merges, so shrinking a model list needs remove + re-add). Naming is
+> the point: the same underlying model id can live under two
+> differently-named providers and stay distinct Brain/Executor picks
+> (`provider/model`). Locked by
+> `scripts/backend/openfusion-custom-provider-smoke.cjs` plus a live host
+> E2E (add → connected picker entry → remove) run against 1.17.11.
 
 ## The idea
 
@@ -297,11 +353,16 @@ transcript ordering (the coherence seam Fusion fights in
   "brain answers the executor's permission requests" would require the future
   server/SDK slice (subscribe to `permission.asked`, reply via the permission
   API after consulting the Planner).
-- **Review gate:** the executor can self-review its work and return findings,
-  diffs, test results, and a recommendation, but the final **done vs guide a
-  correction pass** decision belongs to the Planner/intelligence layer. If the
-  work is not done, the Planner writes the next corrective instruction and sends
-  the executor another `task` call.
+- **Review gate (decided 2026-07-03):** two stages. The executor prompt mandates
+  a **capped self-review loop** before it returns control: re-read the full diff
+  as a reviewer (correctness, scope drift, edge cases, leftover debug code,
+  validation gaps), fix and re-validate, review again — stop on a clean pass;
+  after the second fix pass, one final review reports anything still unfixed
+  instead of looping.
+  The Planner then reviews that evidence as the **independent second gate**; the
+  final **done vs guide a correction pass** decision belongs to the
+  Planner/intelligence layer. If the work is not done, the Planner writes the
+  next corrective instruction and sends the executor another `task` call.
 - **Work ownership:** the Planner stays in the loop as the observer/steerer. The
   Executor performs the concrete implementation work: code edits, shell commands,
   command-result analysis, fixes, and self-review.
@@ -366,15 +427,16 @@ transcript ordering (the coherence seam Fusion fights in
 
 2. **Planner-owned completion gate.** Fusion's quality guarantee comes from Codex
    being a *hard, independent completion gate*. Open Fusion should not let the
-   executor close its own loop directly. The executor may perform self-review,
-   but that review is evidence for the Planner, not the final authority. The
+   executor close its own loop directly. The executor runs a mandatory capped
+   self-review loop, but that review is evidence for the Planner, not the final
+   authority. The
    Planner reviews the diff/findings and either declares done or writes a better
    corrective instruction for the executor.
 
-   Still open: whether the evidence comes from executor self-review plus Planner
-   diff review, or from a distinct third **`verifier` subagent** that reports
-   back to the Planner. In both versions, the Planner/intelligence layer owns the
-   decision to finish or re-delegate.
+   Decided 2026-07-03: the evidence comes from the executor's own capped
+   self-review loop plus Planner diff review — no third verifier subagent. The
+   Planner/intelligence layer owns the decision to finish or re-delegate, and
+   the investigator stays pinned to the Executor model by design.
 
 3. **Auth.** Each picked model needs credentials. OpenCode manages provider
    auth/keys itself, but the UX must surface "no key for this provider" at
@@ -394,8 +456,8 @@ transcript ordering (the coherence seam Fusion fights in
   `/executor-model` are **catalog-backed native pickers** with pick-time auth
   flags.
 - **Future:** OpenCode **server lifecycle + SDK driving**, a richer
-  `FusionChatPane`-style transcript, an app-side launch-time model pair picker,
-  and optional third verifier subagent.
+  `FusionChatPane`-style transcript, and an app-side launch-time model pair
+  picker.
 
 Today's Open Fusion implementation drives the **OpenCode server**: the
 singleton helper `backend/openFusionChatHost.cjs` spawns one `opencode serve`
@@ -428,16 +490,14 @@ in-pane pickers (`/brain-model`, `/executor-model`) persisted per pane in
 pickers own them); invalid saved values fall back to the launch opts, never to
 hard defaults. Brain picks apply live (per-prompt model override); Executor
 picks restart the pane (the model is baked into the generated config). The
-completion/review gate belongs to the Planner/intelligence layer: executor
-self-review is allowed, but it reports back to the Planner, which decides done
-vs another guided executor pass. The Planner remains the observer/steerer, while
-the Executor performs code edits, shell commands, command-result analysis, fixes,
-and self-review.
-
-**Future decision:** the embedded terminal path gates completion through the
-Planner prompt and OpenCode `task` delegation. A future server/custom-chat path
-can decide whether to keep executor self-review as the evidence source or add a
-third verifier subagent that reports to the Planner.
+completion/review gate belongs to the Planner/intelligence layer: the executor
+runs a mandatory capped self-review loop (stop on a clean pass; after two fix
+passes a final review reports unfixed findings honestly), and its report is
+evidence for the
+Planner, which decides done vs another guided executor pass as the independent
+second gate — no third verifier subagent (decided 2026-07-03). The Planner
+remains the observer/steerer, while the Executor performs code edits, shell
+commands, command-result analysis, fixes, and self-review.
 
 **Verify before building the future server slice** (surfaces churn fast; notes
 current to early 2026): the OpenCode server/SDK surface and the model-catalog

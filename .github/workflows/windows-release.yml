@@ -53,6 +53,8 @@ jobs:
           npm run smoke:backend:fusion-launch
           npm run smoke:backend:fusion-adapter
           npm run smoke:backend:fusion-chat-parse
+          npm run smoke:backend:openfusion-chat-parse
+          npm run smoke:backend:openfusion-custom-provider
           npm run smoke:backend:fusion-appserver:embedded
           npm run smoke:frontend:attention
           npm run smoke:frontend:workspace

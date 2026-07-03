@@ -146,7 +146,8 @@ export interface AgentThreadLookupPayload {
   // When set, the host confirms whether this exact pre-assigned id is safe to
   // resume (Claude) instead of discovering the latest thread. "missing" means
   // no persisted session exists for the id, so the launcher starts fresh rather
-  // than hard-failing on `--resume`.
+  // than hard-failing on `--resume`. A "found" result carries a titled
+  // threadRef, which doubles as the pane's generated-title refresh.
   confirmId?: string;
   // Open Fusion panes look up threads in the app-owned OpenCode store, not the
   // user's global one; main injects the matching env for the discovery host.
@@ -396,6 +397,9 @@ export type OpenFusionChatEvent =
   // (parallel subagents, reasoning beside text) must not share a bubble.
   | { id: string; type: "assistant-text"; role: OpenFusionChatRole; delta: string; streamId?: string }
   | { id: string; type: "thinking"; role: OpenFusionChatRole; delta: string; streamId?: string }
+  // The producing part finished (snapshot arrived with time.end): the pane
+  // retires that bubble's live caret without waiting for the turn to settle.
+  | { id: string; type: "stream-end"; role: OpenFusionChatRole; streamId: string }
   | {
       id: string;
       type: "tool-call";
@@ -476,6 +480,10 @@ export type OpenFusionChatEvent =
 export interface OpenFusionProvider {
   id: string;
   name: string;
+  // OpenCode's provider source: "config" marks a definition from an
+  // opencode.json — for Open Fusion panes that is the app-owned global config,
+  // i.e. a user-added custom provider (removable, not just disconnectable).
+  source?: string;
   models: { id: string; name: string }[];
 }
 

@@ -3,7 +3,11 @@ const os = require("os");
 const path = require("path");
 const readline = require("readline");
 const { spawn } = require("child_process");
-const { findCodexThread, confirmCodexThread } = require("./agentThreads.cjs");
+const {
+  findCodexThread,
+  confirmCodexThread,
+  normalizeThreadTitle
+} = require("./agentThreads.cjs");
 
 const MAX_TRANSCRIPT_HEAD_BYTES = 256 * 1024;
 const DEFAULT_TRANSCRIPT_LIMIT = 5000;
@@ -152,6 +156,22 @@ function claudeProjectsDir() {
   return path.join(claudeHome, "projects");
 }
 
+// Titles this app itself once forced onto sessions via `claude --name`
+// ("Claude 2", "Fusion 1 copy"). They carry no information about the
+// conversation, so harvesting falls through to the first real prompt; a
+// deliberately renamed session keeps its custom title.
+const GENERIC_CUSTOM_TITLE = /^(?:claude|fusion)\s+\d+(?:\s+copy)*$/i;
+
+// Transcript texts that read as user messages but are not the user's prompt:
+// slash-command envelopes, local command output, and the resume caveat banner.
+function isClaudeMetaText(text) {
+  return (
+    text.startsWith("<command-") ||
+    text.startsWith("<local-command-") ||
+    text.startsWith("Caveat:")
+  );
+}
+
 // Parse a single Claude transcript, harvesting the session identity only from
 // lines that belong to (or do not contradict) the target cwd, so the id/title/
 // timestamp we claim provably came from this project — never from a foreign-cwd
@@ -164,6 +184,7 @@ function parseClaudeTranscript(filePath, cwd) {
     let sessionId = "";
     let createdAt = 0;
     let title = "";
+    let customTitle = "";
     let sawMatchingCwd = false;
 
     for (const line of lines) {
@@ -189,10 +210,31 @@ function parseClaudeTranscript(filePath, cwd) {
       }
 
       sessionId = sessionId || event.sessionId || "";
-      if (!title) {
-        title =
+      // A deliberate rename (`--name` / in-session rename) wins over the
+      // first-prompt title — it is what Claude's own /resume picker shows.
+      // Generic pane labels this app once forced are skipped instead.
+      if (
+        !customTitle &&
+        event.type === "custom-title" &&
+        typeof event.customTitle === "string" &&
+        !GENERIC_CUSTOM_TITLE.test(event.customTitle.trim())
+      ) {
+        customTitle = normalizeThreadTitle(event.customTitle);
+      }
+      // First-prompt title: mirrors how Claude titles untitled sessions in its
+      // picker. Assistant/summary/meta lines never title a thread.
+      if (
+        !title &&
+        event.type !== "assistant" &&
+        event.type !== "summary" &&
+        !event.isMeta
+      ) {
+        const text =
           (typeof event.lastPrompt === "string" ? event.lastPrompt : "") ||
           extractClaudeText(event.message?.content);
+        if (text && !isClaudeMetaText(text.trim())) {
+          title = normalizeThreadTitle(text);
+        }
       }
       if (!createdAt) {
         createdAt = Date.parse(
@@ -209,7 +251,7 @@ function parseClaudeTranscript(filePath, cwd) {
     return {
       provider: "claude",
       id: sessionId,
-      title,
+      title: customTitle || title,
       createdAt: Number.isFinite(createdAt) ? createdAt : 0,
       updatedAt: stat.mtimeMs
     };

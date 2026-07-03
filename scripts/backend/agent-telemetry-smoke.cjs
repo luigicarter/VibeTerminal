@@ -476,6 +476,13 @@ function postTelemetry(callbackUrl, token, payload) {
       "Open Fusion prompts should carry the concurrent-edits (foreign drift) guidance"
     );
     assert(
+      openFusionEnvConfig.agent?.executor?.prompt?.includes("Self-review loop (mandatory before returning control)") &&
+        openFusionEnvConfig.agent?.executor?.prompt?.includes("one final review") &&
+        openFusionEnvConfig.agent?.planner?.prompt?.includes("independent second gate") &&
+        openFusionEnvConfig.command?.delegate?.template?.includes("self-review findings per pass"),
+      "Open Fusion executor should carry the capped self-review loop with the planner as the independent second gate"
+    );
+    assert(
       fs.existsSync(openFusionFiles.plannerPromptPath) &&
         fs.existsSync(openFusionFiles.executorPromptPath) &&
         fs.existsSync(openFusionFiles.investigatorPromptPath) &&

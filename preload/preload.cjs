@@ -137,6 +137,18 @@ contextBridge.exposeInMainWorld("vibe", {
       }),
     removeProviderKey: (id, providerId) =>
       ipcRenderer.invoke("openfusion-chat:auth-remove", { id, providerId }),
+    customProviderSet: (id, provider, nonce) =>
+      ipcRenderer.invoke("openfusion-chat:custom-provider-set", {
+        id,
+        providerId: provider?.providerId,
+        name: provider?.name,
+        baseURL: provider?.baseURL,
+        models: provider?.models,
+        key: provider?.key,
+        nonce
+      }),
+    customProviderRemove: (id, providerId) =>
+      ipcRenderer.invoke("openfusion-chat:custom-provider-remove", { id, providerId }),
     oauthAuthorize: (id, providerId, method, inputs, nonce) =>
       ipcRenderer.invoke("openfusion-chat:oauth-authorize", {
         id,

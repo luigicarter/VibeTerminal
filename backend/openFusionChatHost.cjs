@@ -21,6 +21,14 @@
 //   {type:"oauth-callback", payload:{id, providerId, method, code?, nonce?}}
 //                                                          ← complete OAuth ("auto" blocks until the
 //                                                            device flow finishes); replies "auth-result"
+//   {type:"custom-provider-set", payload:{id, providerId, name, baseURL, models, key?, nonce?}}
+//                                                          ← define an OpenAI-compatible provider in the
+//                                                            app-owned global OpenCode config (live via
+//                                                            PATCH /global/config); replies "auth-result"
+//   {type:"custom-provider-remove", payload:{id, providerId, removedFromConfig?}}
+//                                                          ← main already dropped the config entry; this
+//                                                            removes the credential and nudges servers to
+//                                                            reload the file; replies "auth-result"
 //   {type:"interrupt",  payload:{id}}                     ← abort the current turn, keep the server
 //   {type:"stop",       payload:{id}}                     ← kill the pane's server
 //   {type:"shutdown"}
@@ -67,7 +75,8 @@ function createOpenCodeEventNormalizer(rootSessionId) {
   const tree = new Map(); // sessionID -> {agent, title}
   tree.set(root, { agent: "planner", title: "" });
   const messageInfo = new Map(); // messageID -> {role, agent, sessionID}
-  const partProgress = new Map(); // partID -> {text: emittedLen, reasoning: emittedLen}
+  const partProgress = new Map(); // partID -> {emitted: length, ended: bool}
+  const partTypes = new Map(); // partID -> "text" | "reasoning"
   const toolStatus = new Map(); // callID -> last status emitted
   let busy = false;
   let turnStats = { input: 0, output: 0, reasoning: 0, cost: 0 };
@@ -85,7 +94,7 @@ function createOpenCodeEventNormalizer(rootSessionId) {
   function progressFor(partID) {
     let entry = partProgress.get(partID);
     if (!entry) {
-      entry = { text: 0, reasoning: 0 };
+      entry = { emitted: 0, ended: false };
       partProgress.set(partID, entry);
       if (partProgress.size > 4_000) {
         const oldest = partProgress.keys().next().value;
@@ -95,27 +104,51 @@ function createOpenCodeEventNormalizer(rootSessionId) {
     return entry;
   }
 
-  // Streamed fields arrive twice: incremental message.part.delta while the
+  // text-start/reasoning-start always emit a part snapshot BEFORE the first
+  // delta, so within an attached stream the type is known when deltas arrive.
+  function registerPartType(partID, type) {
+    if (!partID || partTypes.has(partID)) return;
+    partTypes.set(partID, type);
+    if (partTypes.size > 4_000) {
+      const oldest = partTypes.keys().next().value;
+      partTypes.delete(oldest);
+    }
+  }
+
+  // Streamed content arrives twice: incremental message.part.delta while the
   // model runs AND full-text message.part.updated snapshots. Tracking the
   // emitted length per part dedupes both directions (and models that never
   // stream still surface through the snapshot path). streamId identifies the
   // producing part: several parts can stream CONCURRENTLY on one feed (parallel
   // task children, reasoning beside text), and a renderer that buckets deltas
-  // by role alone interleaves them into one garbled paragraph.
-  function emitStreamField(events, sessionID, part, field, fullText) {
+  // by role alone interleaves them into one garbled paragraph. A snapshot with
+  // part.time.end is the part's completion signal — stream-end lets the pane
+  // retire that bubble's live caret without waiting for the whole turn.
+  function emitStreamField(events, sessionID, part, partType, fullText) {
     const info = messageInfo.get(String(part.messageID || ""));
     if (!info || info.role !== "assistant") return;
-    const progress = progressFor(String(part.id || ""));
+    const partId = String(part.id || "");
+    const progress = progressFor(partId);
     const text = String(fullText ?? "");
-    if (text.length <= progress[field]) return;
-    const delta = text.slice(progress[field]);
-    progress[field] = text.length;
-    events.push({
-      type: field === "reasoning" ? "thinking" : "assistant-text",
-      role: roleFor(sessionID),
-      delta,
-      streamId: `${sessionID}:${String(part.id || "")}`
-    });
+    if (text.length > progress.emitted) {
+      const delta = text.slice(progress.emitted);
+      progress.emitted = text.length;
+      events.push({
+        type: partType === "reasoning" ? "thinking" : "assistant-text",
+        role: roleFor(sessionID),
+        delta,
+        streamId: `${sessionID}:${partId}`
+      });
+    }
+    const time = part.time && typeof part.time === "object" ? part.time : null;
+    if (time && time.end && !progress.ended) {
+      progress.ended = true;
+      events.push({
+        type: "stream-end",
+        role: roleFor(sessionID),
+        streamId: `${sessionID}:${partId}`
+      });
+    }
   }
 
   return function normalize(raw) {
@@ -166,19 +199,28 @@ function createOpenCodeEventNormalizer(rootSessionId) {
       }
       case "message.part.delta": {
         if (!inTree(sessionID)) break;
-        const field = String(props.field || "");
-        if (field !== "text" && field !== "reasoning") break;
+        // `field` names the part PROPERTY being appended, not a content kind:
+        // opencode publishes field:"text" for BOTH text-delta and
+        // reasoning-delta (reasoning content lives in part.text; a
+        // field:"reasoning" delta does not exist in 1.17.11). The kind comes
+        // from the part's registered type.
+        if (String(props.field || "") !== "text") break;
         const info = messageInfo.get(String(props.messageID || ""));
         if (!info || info.role !== "assistant") break;
-        const progress = progressFor(String(props.partID || ""));
+        const partId = String(props.partID || "");
+        const partType = partTypes.get(partId);
+        // Unknown part (attached mid-stream): drop the delta WITHOUT advancing
+        // the cursor — the next full snapshot re-delivers this content with
+        // the right kind through the length dedupe.
+        if (!partType) break;
         const delta = String(props.delta ?? "");
         if (!delta) break;
-        progress[field] += delta.length;
+        progressFor(partId).emitted += delta.length;
         events.push({
-          type: field === "reasoning" ? "thinking" : "assistant-text",
+          type: partType === "reasoning" ? "thinking" : "assistant-text",
           role: roleFor(sessionID),
           delta,
-          streamId: `${sessionID}:${String(props.partID || "")}`
+          streamId: `${sessionID}:${partId}`
         });
         break;
       }
@@ -186,12 +228,9 @@ function createOpenCodeEventNormalizer(rootSessionId) {
         if (!inTree(sessionID)) break;
         const part = props.part && typeof props.part === "object" ? props.part : {};
         const partType = String(part.type || "");
-        if (partType === "text") {
-          emitStreamField(events, sessionID, part, "text", part.text);
-          break;
-        }
-        if (partType === "reasoning") {
-          emitStreamField(events, sessionID, part, "reasoning", part.text);
+        if (partType === "text" || partType === "reasoning") {
+          registerPartType(String(part.id || ""), partType);
+          emitStreamField(events, sessionID, part, partType, part.text);
           break;
         }
         if (partType === "step-finish") {
@@ -426,6 +465,111 @@ function normalizeAuthMethods(raw) {
     if (cleaned.length) result[String(providerId)] = cleaned;
   }
   return result;
+}
+
+// ---- custom OpenAI-compatible providers ----
+// The definition lives in the app-owned GLOBAL OpenCode config
+// ($XDG_CONFIG_HOME/opencode/opencode.json — every pane points there), written
+// by the pane's own server via PATCH /global/config. Live-verified against
+// 1.17.11: the PATCH re-reads the file, merges the body, writes the result
+// back, and refreshes the running instance in place — no dispose, no pane
+// restart. An EMPTY {} patch performs the same file re-read, which is the
+// reload nudge other panes need for changes they didn't make themselves
+// (dispose alone does NOT re-read config files while OPENCODE_CONFIG_CONTENT
+// is set). A config-defined provider counts as connected even with no stored
+// key (source:"config" on /config/providers), which is exactly right for
+// keyless local endpoints (LM Studio, llama.cpp).
+const CUSTOM_PROVIDER_NPM = "@ai-sdk/openai-compatible";
+const CUSTOM_PROVIDER_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const CUSTOM_MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,95}$/;
+const MAX_CUSTOM_PROVIDER_MODELS = 32;
+const MIN_CUSTOM_MODEL_CONTEXT = 1_024;
+const MAX_CUSTOM_MODEL_CONTEXT = 100_000_000;
+// opencode's per-response cap when a model's output limit is unknown
+// (maxOutputTokens = min(limit.output, 32000) || 32000, verified 1.17.11).
+const OPENCODE_DEFAULT_OUTPUT_TOKENS = 32_000;
+
+function cleanDisplayName(value, max = 64) {
+  return String(value ?? "")
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
+// Validate + shape a custom-provider definition into the PATCH /global/config
+// body. Pure and exported so the smoke can lock the config shape without a
+// server. Returns {ok:true, providerId, patch} or {ok:false, message}.
+function buildCustomProviderPatch(payload) {
+  const providerId = String(payload?.providerId || "").trim();
+  if (!CUSTOM_PROVIDER_ID_PATTERN.test(providerId)) {
+    return { ok: false, message: "Provider id must be lowercase letters, numbers, '.', '_' or '-'." };
+  }
+  const name = cleanDisplayName(payload?.name);
+  if (!name) {
+    return { ok: false, message: "Provide a display name for the provider." };
+  }
+  let baseURL;
+  try {
+    baseURL = new URL(String(payload?.baseURL || "").trim());
+  } catch {
+    return { ok: false, message: "Provide a valid base URL (e.g. https://api.example.com/v1)." };
+  }
+  if ((baseURL.protocol !== "https:" && baseURL.protocol !== "http:") || baseURL.href.length > 200) {
+    return { ok: false, message: "The base URL must be http(s) and at most 200 characters." };
+  }
+  const rawModels = Array.isArray(payload?.models) ? payload.models : [];
+  const models = {};
+  for (const entry of rawModels.slice(0, MAX_CUSTOM_PROVIDER_MODELS)) {
+    const modelId = String(entry?.id || "").trim();
+    if (!CUSTOM_MODEL_ID_PATTERN.test(modelId)) {
+      return { ok: false, message: `Model id '${clipText(modelId, 60)}' is not a valid model id.` };
+    }
+    const model = { name: cleanDisplayName(entry?.name) || modelId };
+    const contextLimit = entry?.contextLimit;
+    if (contextLimit !== undefined && contextLimit !== null && contextLimit !== 0) {
+      if (
+        !Number.isInteger(contextLimit) ||
+        contextLimit < MIN_CUSTOM_MODEL_CONTEXT ||
+        contextLimit > MAX_CUSTOM_MODEL_CONTEXT
+      ) {
+        return {
+          ok: false,
+          message: `Context window for '${clipText(modelId, 60)}' must be an integer between ${MIN_CUSTOM_MODEL_CONTEXT} and ${MAX_CUSTOM_MODEL_CONTEXT} tokens.`
+        };
+      }
+      // A known context with an unknown output limit is a live trap: opencode's
+      // compaction threshold is context − 32000 (its unknown-output default),
+      // which clamps to 0 for models smaller than 32k and would re-compact on
+      // every step. Deriving a conservative output cap keeps the threshold
+      // sane AND keeps maxOutputTokens below the model's real window.
+      model.limit = {
+        context: contextLimit,
+        output: Math.max(
+          256,
+          Math.min(OPENCODE_DEFAULT_OUTPUT_TOKENS, Math.floor(contextLimit / 4))
+        )
+      };
+    }
+    models[modelId] = model;
+  }
+  if (!Object.keys(models).length) {
+    return { ok: false, message: "Add at least one model id." };
+  }
+  return {
+    ok: true,
+    providerId,
+    patch: {
+      provider: {
+        [providerId]: {
+          npm: CUSTOM_PROVIDER_NPM,
+          name,
+          options: { baseURL: baseURL.href },
+          models
+        }
+      }
+    }
+  };
 }
 
 function buildServeSpawn(extraEnv, cwd, password) {
@@ -874,7 +1018,16 @@ function runHost() {
             .filter((model) => model && model.id)
             .sort((a, b) => String(b.release_date || "").localeCompare(String(a.release_date || "")))
             .map((model) => ({ id: String(model.id), name: String(model.name || model.id) }));
-          connected.push({ id: String(provider.id), name: String(provider.name || provider.id), models });
+          connected.push({
+            id: String(provider.id),
+            name: String(provider.name || provider.id),
+            // "config" marks a definition from an opencode.json — for Open
+            // Fusion that is the app-owned global config, i.e. a user-added
+            // custom provider the pane can offer to remove (not just
+            // disconnect). The keyless zen provider reports "custom".
+            source: String(provider.source || ""),
+            models
+          });
         }
         const connectedIds = new Set(connected.map((provider) => provider.id));
         const catalogOk = catalog !== CATALOG_FAILED;
@@ -911,7 +1064,11 @@ function runHost() {
   // delegation in flight is not worth the risk; a busy pane picks the change
   // up at its next dispose/restart) and re-emit providers everywhere so every
   // open picker refreshes.
-  function refreshProvidersAfterAuthChange(originId) {
+  // reloadConfig additionally nudges each idle pane's server with an empty
+  // PATCH /global/config first: that re-reads the shared config FILE and
+  // refreshes the instance (custom-provider adds/removes), which a bare
+  // dispose does not do while OPENCODE_CONFIG_CONTENT is set.
+  function refreshProvidersAfterAuthChange(originId, { reloadConfig = false } = {}) {
     for (const [sid, s] of sessions) {
       if (sid === originId || !s.child || !s.port || s.stopping) continue;
       const refresh = () => {
@@ -920,7 +1077,12 @@ function runHost() {
       if (s.turnBusy) {
         refresh();
       } else {
-        request(s, "POST", "/instance/dispose").catch(() => {}).then(refresh);
+        const nudge = reloadConfig
+          ? request(s, "PATCH", "/global/config", {}).catch(() => {})
+          : Promise.resolve();
+        nudge
+          .then(() => request(s, "POST", "/instance/dispose").catch(() => {}))
+          .then(refresh);
       }
     }
     providers({ id: originId });
@@ -1161,6 +1323,119 @@ function runHost() {
       });
   }
 
+  // Define (or redefine) a custom OpenAI-compatible provider. The pane's own
+  // server PATCHes the app-owned global config — live-applied and persisted in
+  // one call — then the optional API key goes through the same auth store PUT
+  // + dispose the normal connect flow uses. The key only transits memory.
+  function customProviderSet(payload) {
+    const id = payload?.id;
+    const state = sessions.get(id);
+    const nonce = typeof payload?.nonce === "string" ? payload.nonce : undefined;
+    const shaped = buildCustomProviderPatch(payload);
+    const providerId = shaped.ok ? shaped.providerId : String(payload?.providerId || "").trim();
+    if (!state || !state.child || !state.port) {
+      emitDirectSessionEvent(id, {
+        type: "auth-result",
+        ok: false,
+        providerId,
+        action: "connect",
+        nonce,
+        message: "Open Fusion engine is not ready yet."
+      });
+      return;
+    }
+    const key = typeof payload?.key === "string" ? payload.key.trim() : "";
+    if (!shaped.ok || key.length > 512 || /[\r\n]/.test(key)) {
+      emitSessionEvent(id, state, {
+        type: "auth-result",
+        ok: false,
+        providerId,
+        action: "connect",
+        nonce,
+        message: shaped.ok ? "Provide a single-line API key (or none)." : shaped.message
+      });
+      return;
+    }
+    request(state, "PATCH", "/global/config", shaped.patch)
+      .then(() =>
+        key
+          ? request(state, "PUT", `/auth/${encodeURIComponent(providerId)}`, { type: "api", key }).then(() =>
+              request(state, "POST", "/instance/dispose")
+            )
+          : null
+      )
+      .then(() => {
+        if (sessions.get(id) !== state) return;
+        emitSessionEvent(id, state, {
+          type: "auth-result",
+          ok: true,
+          providerId,
+          action: "connect",
+          nonce
+        });
+        refreshProvidersAfterAuthChange(id, { reloadConfig: true });
+      })
+      .catch((error) => {
+        if (sessions.get(id) !== state) return;
+        emitSessionEvent(id, state, {
+          type: "auth-result",
+          ok: false,
+          providerId,
+          action: "connect",
+          nonce,
+          message: `Could not save the custom provider: ${error.message}`
+        });
+      });
+  }
+
+  // Remove a custom provider. Main already rewrote the config file (a PATCH
+  // cannot delete a key); here the credential is dropped (best-effort — a
+  // keyless local endpoint has none) and the empty PATCH makes the origin's
+  // server re-read the rewritten file so the provider disappears live.
+  function customProviderRemove(payload) {
+    const id = payload?.id;
+    const state = sessions.get(id);
+    const providerId = String(payload?.providerId || "").trim();
+    const removedFromConfig = Boolean(payload?.removedFromConfig);
+    if (!state || !state.child || !state.port || !CUSTOM_PROVIDER_ID_PATTERN.test(providerId)) {
+      emitDirectSessionEvent(id, {
+        type: "auth-result",
+        ok: false,
+        providerId,
+        action: "disconnect",
+        message: "Open Fusion engine is not ready yet."
+      });
+      return;
+    }
+    request(state, "DELETE", `/auth/${encodeURIComponent(providerId)}`)
+      .catch(() => null)
+      .then(() => request(state, "PATCH", "/global/config", {}))
+      .then(() => request(state, "POST", "/instance/dispose"))
+      .then(() => {
+        if (sessions.get(id) !== state) return;
+        emitSessionEvent(id, state, {
+          type: "auth-result",
+          ok: true,
+          providerId,
+          action: "disconnect",
+          message: removedFromConfig
+            ? undefined
+            : `'${providerId}' was not an Open Fusion custom provider; only its stored credential (if any) was removed.`
+        });
+        refreshProvidersAfterAuthChange(id, { reloadConfig: true });
+      })
+      .catch((error) => {
+        if (sessions.get(id) !== state) return;
+        emitSessionEvent(id, state, {
+          type: "auth-result",
+          ok: false,
+          providerId,
+          action: "disconnect",
+          message: `Could not remove the custom provider: ${error.message}`
+        });
+      });
+  }
+
   function interrupt(payload) {
     const id = payload?.id;
     const state = sessions.get(id);
@@ -1227,6 +1502,8 @@ function runHost() {
       else if (msg.type === "auth-remove") authRemove(msg.payload);
       else if (msg.type === "oauth-authorize") oauthAuthorize(msg.payload);
       else if (msg.type === "oauth-callback") oauthCallback(msg.payload);
+      else if (msg.type === "custom-provider-set") customProviderSet(msg.payload);
+      else if (msg.type === "custom-provider-remove") customProviderRemove(msg.payload);
       else if (msg.type === "interrupt") interrupt(msg.payload);
       else if (msg.type === "stop") stop(msg.payload);
       else if (msg.type === "shutdown") shutdown();
@@ -1240,6 +1517,7 @@ function runHost() {
 module.exports = {
   createOpenCodeEventNormalizer,
   rehydrateMessages,
+  buildCustomProviderPatch,
   buildServeSpawn,
   normalizeAuthMethods,
   splitModelId

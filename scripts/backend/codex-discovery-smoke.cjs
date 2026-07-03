@@ -35,15 +35,18 @@ function writeRollout(id, options = {}) {
       id,
       session_id: id,
       cwd: options.cwd ?? cwd,
-      name: options.name ?? `Thread ${id}`,
+      // Pass an explicit `name: undefined` to mimic real rollouts, which
+      // essentially never carry one.
+      name: "name" in options ? options.name : `Thread ${id}`,
       timestamp,
       originator: options.originator ?? "Codex CLI"
     }
   };
 
+  const lines = [line, ...(options.lines ?? [])];
   fs.writeFileSync(
     path.join(dayDir, `rollout-2026-06-26T16-00-01-${id}.jsonl`),
-    `${JSON.stringify(line)}\n`
+    `${lines.map((entry) => JSON.stringify(entry)).join("\n")}\n`
   );
 }
 
@@ -113,6 +116,60 @@ try {
   assert(
     confirmMissing.status === "missing",
     "an absent rollout id should confirm missing so the launcher starts fresh"
+  );
+
+  // Codex generates no session title: harvest falls back to the first real
+  // user_message in the rollout (instruction/environment envelopes that start
+  // with "<" are skipped, and only the first line is used).
+  writeRollout("three", {
+    name: undefined,
+    cwd: otherCwd,
+    lines: [
+      { type: "event_msg", payload: { type: "task_started", turn_id: "t1" } },
+      {
+        type: "event_msg",
+        payload: {
+          type: "user_message",
+          message: "<user_instructions>ignore me</user_instructions>"
+        }
+      },
+      {
+        type: "event_msg",
+        payload: {
+          type: "user_message",
+          message: "refactor the login flow\nand its tests"
+        }
+      }
+    ]
+  });
+  const confirmTitled = confirmCodexThread(cwd, "three", { codexHome });
+  assert(
+    confirmTitled.status === "found" &&
+      confirmTitled.threadRef.title === "refactor the login flow",
+    `confirm should harvest the first real user message as the title, got: ${JSON.stringify(confirmTitled.threadRef.title)}`
+  );
+
+  // Discovery publishes the same fallback title, and internal bookkeeping
+  // fields never leak into the published ref.
+  writeRollout("four", {
+    name: undefined,
+    lines: [
+      {
+        type: "event_msg",
+        payload: { type: "user_message", message: "ship the release" }
+      }
+    ]
+  });
+  result = discover({ excludeIds: ["one", "two"] });
+  assert(
+    result.status === "found" &&
+      result.threadRef.id === "four" &&
+      result.threadRef.title === "ship the release",
+    `discovery should fall back to the rollout's first user message, got: ${JSON.stringify(result.threadRef && result.threadRef.title)}`
+  );
+  assert(
+    !("rolloutPath" in result.threadRef) && !("cwd" in result.threadRef),
+    "internal fields must not leak into published threadRefs"
   );
 
   const limitedFiles = collectJsonlFiles(path.join(codexHome, "sessions"), 2);

@@ -29,6 +29,29 @@ function readFirstLine(filePath) {
   return newlineIndex === -1 ? content : content.slice(0, newlineIndex);
 }
 
+const MAX_THREAD_TITLE_LENGTH = 120;
+
+// Reduce harvested prompt text to a picker-style one-liner: first non-empty
+// line, whitespace collapsed, capped. Empty string means "no usable title".
+function normalizeThreadTitle(value) {
+  if (typeof value !== "string") {
+    return "";
+  }
+
+  const line = value
+    .split(/\r?\n/)
+    .map((part) => part.trim())
+    .find(Boolean);
+  if (!line) {
+    return "";
+  }
+
+  const collapsed = line.replace(/\s+/g, " ");
+  return collapsed.length > MAX_THREAD_TITLE_LENGTH
+    ? `${collapsed.slice(0, MAX_THREAD_TITLE_LENGTH - 1)}…`
+    : collapsed;
+}
+
 function readFileHead(filePath, maxBytes) {
   const fd = fs.openSync(filePath, "r");
   try {
@@ -114,6 +137,68 @@ function codexHome(options = {}) {
   );
 }
 
+// Codex generates no session title: its own `codex resume` picker previews the
+// first user message from the rollout. Harvest the same text (bounded to the
+// head read) so panes can show it. Instruction/environment envelopes start
+// with "<" and are skipped. Returns "" when the rollout has no prompt yet.
+const MAX_TITLE_SCAN_LINES = 200;
+
+function parseCodexRolloutTitle(filePath) {
+  let lines;
+  try {
+    lines = readFileHead(filePath, MAX_TRANSCRIPT_HEAD_BYTES)
+      .split(/\r?\n/)
+      .slice(0, MAX_TITLE_SCAN_LINES);
+  } catch {
+    return "";
+  }
+
+  for (const line of lines) {
+    if (!line.trim()) {
+      continue;
+    }
+
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    if (event?.type !== "event_msg") {
+      continue;
+    }
+
+    const payload = event.payload;
+    if (payload?.type !== "user_message" || typeof payload.message !== "string") {
+      continue;
+    }
+
+    const text = payload.message.trim();
+    if (!text || text.startsWith("<")) {
+      continue;
+    }
+
+    return normalizeThreadTitle(text);
+  }
+
+  return "";
+}
+
+// Fill a candidate's title from its rollout when session_meta carried none.
+// Deliberately lazy — discovery parses metas for MANY files; only the refs we
+// actually return are worth a second head read.
+function withRolloutTitle(thread) {
+  if (!thread || thread.title) {
+    return thread;
+  }
+
+  return {
+    ...thread,
+    title: parseCodexRolloutTitle(thread.rolloutPath) || undefined
+  };
+}
+
 function parseCodexSessionMeta(filePath) {
   try {
     const line = readFirstLine(filePath);
@@ -176,8 +261,17 @@ function findCodexThread(payload = {}, options = {}) {
         !excludeIds.has(thread.id)
       );
     })
-    .sort((a, b) => a.createdAt - b.createdAt || a.updatedAt - b.updatedAt)
-    .map(({ cwd: _cwd, originator: _originator, rolloutPath: _rolloutPath, ...thread }) => thread);
+    .sort((a, b) => a.createdAt - b.createdAt || a.updatedAt - b.updatedAt);
+
+  const publish = (thread) => {
+    const {
+      cwd: _cwd,
+      originator: _originator,
+      rolloutPath: _rolloutPath,
+      ...threadRef
+    } = withRolloutTitle(thread);
+    return threadRef;
+  };
 
   if (candidates.length === 0) {
     return {
@@ -189,14 +283,14 @@ function findCodexThread(payload = {}, options = {}) {
   if (candidates.length > 1) {
     return {
       status: "ambiguous",
-      candidates,
+      candidates: candidates.map(publish),
       message: `Found ${candidates.length} matching Codex threads; not guessing.`
     };
   }
 
   return {
     status: "found",
-    threadRef: candidates[0]
+    threadRef: publish(candidates[0])
   };
 }
 
@@ -274,7 +368,9 @@ function confirmCodexThread(cwd, id, options = {}) {
       threadRef: {
         provider: "codex",
         id: target,
-        title: meta?.title,
+        // session_meta virtually never carries a name, so fall back to the
+        // first user prompt — the same text Codex's own resume picker shows.
+        title: meta?.title || parseCodexRolloutTitle(located.path) || undefined,
         createdAt: meta?.createdAt ?? 0,
         updatedAt: meta?.updatedAt ?? 0
       }
@@ -298,5 +394,7 @@ module.exports = {
   isSamePath,
   locateCodexRollout,
   normalizePathForCompare,
+  normalizeThreadTitle,
+  parseCodexRolloutTitle,
   parseCodexSessionMeta
 };

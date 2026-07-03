@@ -108,12 +108,82 @@ try {
     `title must come from the matching-cwd line, got: ${JSON.stringify(result.title)}`
   );
 
+  // Title harvesting mirrors Claude's own /resume picker:
+  // - the generic pane label this app once forced via --name is ignored,
+  // - slash-command envelopes never title a thread,
+  // - only the first line of the first real prompt is used.
+  writeTranscript("delta-titles", [
+    { type: "custom-title", customTitle: "Claude 7", sessionId: "delta-titles" },
+    { type: "agent-name", agentName: "Claude 7", sessionId: "delta-titles" },
+    {
+      sessionId: "delta-titles",
+      cwd,
+      timestamp: iso(after + 6000),
+      message: { content: "<command-name>/plan</command-name>" }
+    },
+    {
+      sessionId: "delta-titles",
+      cwd,
+      timestamp: iso(after + 6100),
+      type: "user",
+      message: { content: "fix the flaky test\nplease" }
+    }
+  ]);
+
+  result = find({ excludeIds: ["alpha", "gamma"] });
+  assert(
+    result && result.id === "delta-titles" && result.title === "fix the flaky test",
+    `a generic custom-title must fall through to the first real prompt, got: ${JSON.stringify(result && result.title)}`
+  );
+
+  // A deliberate rename (non-generic custom-title) wins over the first prompt —
+  // it is what Claude's own picker shows for that session.
+  writeTranscript("epsilon-renamed", [
+    {
+      type: "custom-title",
+      customTitle: "My renamed chat",
+      sessionId: "epsilon-renamed"
+    },
+    {
+      sessionId: "epsilon-renamed",
+      cwd,
+      timestamp: iso(after + 7000),
+      message: { content: "first prompt text" }
+    }
+  ]);
+
+  result = find({ excludeIds: ["alpha", "gamma", "delta-titles"] });
+  assert(
+    result && result.id === "epsilon-renamed" && result.title === "My renamed chat",
+    `a deliberate custom title must win over the first prompt, got: ${JSON.stringify(result && result.title)}`
+  );
+
+  // Harvested titles are capped to a picker-style one-liner.
+  writeTranscript("zeta-long", [
+    {
+      sessionId: "zeta-long",
+      cwd,
+      timestamp: iso(after + 8000),
+      message: { content: "x".repeat(300) }
+    }
+  ]);
+
+  result = find({
+    excludeIds: ["alpha", "gamma", "delta-titles", "epsilon-renamed"]
+  });
+  assert(
+    result && result.id === "zeta-long" && result.title.length <= 120,
+    `harvested titles should be capped, got length ${result && result.title.length}`
+  );
+
   // Sessions created before the cutoff are ignored.
   writeTranscript("old", [
     { sessionId: "old", cwd, timestamp: iso(after - 1000) }
   ]);
 
-  result = find({ excludeIds: ["alpha", "gamma"] });
+  result = find({
+    excludeIds: ["alpha", "gamma", "delta-titles", "epsilon-renamed", "zeta-long"]
+  });
   assert(result === null, "sessions older than the after cutoff should be ignored");
 
   // confirmClaudeThread underpins self-healing resume: only `claude --resume` an
@@ -122,6 +192,15 @@ try {
   assert(
     confirmClaudeThread(cwd, "alpha").status === "found",
     "an id with a persisted transcript should confirm as found"
+  );
+  // Confirm doubles as the pane's title refresh: it must carry the harvested
+  // title back so an untitled pane can adopt the generated one.
+  const confirmedTitle = confirmClaudeThread(cwd, "epsilon-renamed");
+  assert(
+    confirmedTitle.status === "found" &&
+      confirmedTitle.threadRef &&
+      confirmedTitle.threadRef.title === "My renamed chat",
+    `confirm should return the harvested title, got: ${JSON.stringify(confirmedTitle.threadRef && confirmedTitle.threadRef.title)}`
   );
   assert(
     confirmClaudeThread(cwd, "does-not-exist").status === "missing",

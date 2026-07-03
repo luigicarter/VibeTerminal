@@ -271,6 +271,29 @@ const launcherAgentProfiles = agentProfiles.filter(
   (profile) => profile.kind !== "gemini" && profile.kind !== "aider"
 );
 
+// Pane labels the app itself minted ("Claude 2", "Fusion 1 copy"). Older builds
+// copied them into threadRef.title and forced them onto Claude via --name, so
+// stored refs may still carry them. They say nothing about the conversation:
+// restore strips them so the provider's own generated title can take over.
+const genericSessionTitlePattern = new RegExp(
+  `^(?:${agentProfiles.map((profile) => profile.label).join("|")})\\s+\\d+(?:\\s+copy)*$`,
+  "i"
+);
+
+function isGenericSessionTitle(title: string | undefined) {
+  return Boolean(title && genericSessionTitlePattern.test(title.trim()));
+}
+
+function sanitizeThreadRefTitle(
+  ref: AgentThreadRef | undefined
+): AgentThreadRef | undefined {
+  if (!ref?.title || !isGenericSessionTitle(ref.title)) {
+    return ref;
+  }
+
+  return { ...ref, title: undefined };
+}
+
 function createId(prefix: string) {
   return `${prefix}_${Math.random().toString(36).slice(2, 9)}_${Date.now().toString(36)}`;
 }
@@ -636,7 +659,7 @@ function createSession(
     command: profile.command,
     cwd,
     createdAt: Date.now(),
-    threadRef: isFusion ? undefined : createThreadRef(effectiveKind, sessionName),
+    threadRef: isFusion ? undefined : createThreadRef(effectiveKind),
     threadLookupStatus: "idle",
     nextLaunchMode: "new",
     started: true,
@@ -716,9 +739,11 @@ function restoreSession(session: AgentSession): AgentSession {
       ? session.resumeRef
       : undefined
     : resumableThreadRefForKind(restoredKind, session.resumeRef);
-  const resumeRef = activeThreadRef?.id
-    ? activeThreadRef
-    : storedResumeRef;
+  // Stored refs from older builds carry the pane's placeholder label as their
+  // title; strip it so the harvested (generated) title can replace it.
+  const resumeRef = sanitizeThreadRefTitle(
+    activeThreadRef?.id ? activeThreadRef : storedResumeRef
+  );
 
   return {
     ...session,
@@ -731,9 +756,7 @@ function restoreSession(session: AgentSession): AgentSession {
     started: shouldAutoStart,
     launchToken,
     nextLaunchMode: normalizeLaunchMode("new"),
-    threadRef: isFusion
-      ? undefined
-      : createThreadRef(restoredKind, session.threadRef?.title ?? session.name),
+    threadRef: isFusion ? undefined : createThreadRef(restoredKind),
     resumeRef,
     fusionModel: isFusion
       ? normalizeFusionModel(session.fusionModel)

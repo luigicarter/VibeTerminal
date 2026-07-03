@@ -729,10 +729,9 @@ export default function FusionChatPane({
     onThreadRefChangeRef.current({
       provider: "claude",
       id: claudeSessionId,
-      title:
-        claudeThreadTitleRef.current ||
-        session.threadRef?.title ||
-        session.name,
+      // Never fall back to the pane's placeholder label ("Fusion 2") — the
+      // title stays empty until a real prompt-derived one exists.
+      title: claudeThreadTitleRef.current || session.threadRef?.title,
       createdAt: session.threadRef?.createdAt ?? session.createdAt,
       updatedAt: Date.now()
     });
@@ -1893,7 +1892,9 @@ export default function FusionChatPane({
         <div className="pane-title">
           <GripVertical className="drag-grip" size={15} />
           <Sparkles size={15} />
-          <span>{session.name}</span>
+          <span title={session.threadRef?.title || session.name}>
+            {session.threadRef?.title || session.name}
+          </span>
           <span className="fusion-chip" title={fusionSettingsLine}>
             {activeRoleLabel}
           </span>

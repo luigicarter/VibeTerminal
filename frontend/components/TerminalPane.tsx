@@ -64,6 +64,13 @@ const INPUT_GRACE_MS = 450;
 // is over — settle to "waiting". If a turn really is alive but silent, the
 // next telemetry event re-asserts "running".
 const TELEMETRY_RUNNING_QUIET_MS = 12_000;
+// Generated-title harvest: providers whose session titles can be read back
+// from local metadata with a cheap bounded file read. opencode/cursor already
+// bind their discovery refs with titles, and opencode's confirm path spawns a
+// CLI per call — too heavy to poll.
+const TITLE_REFRESH_PROVIDERS = new Set<string>(["claude", "codex"]);
+const TITLE_REFRESH_DELAY_MS = 4000;
+const TITLE_REFRESH_MAX_ATTEMPTS = 5;
 
 interface ThreadLookupPatch {
   threadLookupStartedAt?: number;
@@ -159,6 +166,9 @@ export default function TerminalPane({
   const lookupInFlightRef = useRef(false);
   const claimedThreadIdsRef = useRef(claimedThreadIds);
   const forceThreadLookupTokenRef = useRef<number | null>(null);
+  const titleRefreshTimeoutRef = useRef<number | null>(null);
+  const titleRefreshAttemptsRef = useRef(0);
+  const titleRefreshInFlightRef = useRef(false);
   const [terminalReadyToken, setTerminalReadyToken] = useState(0);
 
   const platform = window.vibe?.platform;
@@ -207,8 +217,20 @@ export default function TerminalPane({
       if (threadLookupTimeoutRef.current) {
         window.clearTimeout(threadLookupTimeoutRef.current);
       }
+      if (titleRefreshTimeoutRef.current !== null) {
+        window.clearTimeout(titleRefreshTimeoutRef.current);
+      }
     };
   }, []);
+
+  // Harvest the provider-generated title once a thread id exists without one:
+  // fires on mount for restored/resumed panes, when discovery binds a codex
+  // id, and on every relaunch. Once a title lands the guard goes quiet.
+  useEffect(() => {
+    if (session.threadRef?.id && !session.threadRef.title) {
+      scheduleTitleRefresh(true);
+    }
+  }, [session.threadRef?.id, session.threadRef?.title, session.launchToken]);
 
   useEffect(() => {
     isArrangingRef.current = isArranging;
@@ -540,6 +562,13 @@ export default function TerminalPane({
       // working, so it must not mark the pane active. Record when it happened so
       // the echo/redraw that follows can be told apart from real output.
       lastInputAtRef.current = Date.now();
+
+      // Enter on an untitled thread likely just submitted its first prompt —
+      // the provider is about to write the metadata the title harvest reads,
+      // so restart the backoff chain. No-ops once a title exists.
+      if (data.includes("\r") || data.includes("\n")) {
+        scheduleTitleRefresh(true);
+      }
     });
 
     const removeListener = window.vibe?.terminal.onEvent((event) => {
@@ -964,6 +993,104 @@ export default function TerminalPane({
     }
   }
 
+  // ── Generated-title harvest ─────────────────────────────────────────────
+  // The pane label starts as a placeholder ("Claude 2"). The provider titles
+  // the real conversation itself — Claude from the first prompt (or a custom
+  // rename), Codex from the first user message — in its local metadata. Once
+  // a thread id exists without a title, poll the confirm path (it returns a
+  // titled threadRef) on a bounded backoff; an Enter keystroke restarts the
+  // chain because a prompt was likely just submitted.
+  function canRefreshTitle(currentSession: AgentSession) {
+    return (
+      TITLE_REFRESH_PROVIDERS.has(currentSession.kind) &&
+      Boolean(currentSession.threadRef?.id) &&
+      !currentSession.threadRef?.title &&
+      Boolean(window.vibe?.agentThreads)
+    );
+  }
+
+  function scheduleTitleRefresh(restart: boolean) {
+    if (!canRefreshTitle(sessionRef.current)) {
+      return;
+    }
+
+    if (restart) {
+      titleRefreshAttemptsRef.current = 0;
+      if (titleRefreshTimeoutRef.current !== null) {
+        window.clearTimeout(titleRefreshTimeoutRef.current);
+        titleRefreshTimeoutRef.current = null;
+      }
+    } else if (titleRefreshTimeoutRef.current !== null) {
+      // A chain is already pending; let it run.
+      return;
+    }
+
+    const attempt = titleRefreshAttemptsRef.current;
+    if (attempt >= TITLE_REFRESH_MAX_ATTEMPTS) {
+      return;
+    }
+
+    titleRefreshAttemptsRef.current = attempt + 1;
+    titleRefreshTimeoutRef.current = window.setTimeout(() => {
+      titleRefreshTimeoutRef.current = null;
+      void runTitleRefresh();
+    }, TITLE_REFRESH_DELAY_MS * 2 ** attempt);
+  }
+
+  async function runTitleRefresh() {
+    const currentSession = sessionRef.current;
+    const provider = currentSession.kind;
+    const threadId = currentSession.threadRef?.id;
+    const launchToken = currentSession.launchToken;
+
+    if (
+      titleRefreshInFlightRef.current ||
+      !threadId ||
+      (provider !== "claude" && provider !== "codex") ||
+      !canRefreshTitle(currentSession)
+    ) {
+      return;
+    }
+
+    titleRefreshInFlightRef.current = true;
+    try {
+      const result = await window.vibe?.agentThreads.findLatest({
+        provider,
+        cwd: currentSession.cwd,
+        confirmId: threadId
+      });
+
+      // The pane may have relaunched or rebound its thread while we read.
+      const latest = sessionRef.current;
+      if (
+        latest.launchToken !== launchToken ||
+        latest.threadRef?.id !== threadId ||
+        latest.threadRef?.title
+      ) {
+        return;
+      }
+
+      if (
+        result?.status === "found" &&
+        result.threadRef.id === threadId &&
+        result.threadRef.title
+      ) {
+        onThreadRefChangeRef.current({
+          ...latest.threadRef,
+          ...result.threadRef
+        });
+        return;
+      }
+
+      // No metadata (or no prompt) on disk yet — continue the backoff chain.
+      scheduleTitleRefresh(false);
+    } catch {
+      scheduleTitleRefresh(false);
+    } finally {
+      titleRefreshInFlightRef.current = false;
+    }
+  }
+
   // Glow the pane border when this terminal has finished a turn but hasn't been
   // looked at yet (same unread rule as the sidebar folder dot). Selecting or
   // typing into the pane clears the unread flag, which drops the glow.
@@ -995,7 +1122,9 @@ export default function TerminalPane({
           ) : (
             <TerminalSquare size={15} />
           )}
-          <span>{session.name}</span>
+          <span title={session.threadRef?.title || session.name}>
+            {session.threadRef?.title || session.name}
+          </span>
           <small>{profile.label}</small>
           {cwdConflict && (
             <span
