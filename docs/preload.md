@@ -17,6 +17,7 @@ The `preload/` folder contains the context-isolated bridge between the renderer 
 - `window.vibe.workspace.selectFolder()` - Opens the native folder picker.
 - `window.vibe.workspace.getCodeChanges(cwd)` - Returns a read-only Git code-change summary for a workspace folder.
 - `window.vibe.agentThreads.findLatest(payload)` - Asks the backend to discover a matching local agent thread.
+- `window.vibe.agentThreads.list(payload)` - Lists every saved Open Fusion chat for a folder (newest first) from the app-owned OpenCode store, for the resume picker. Open Fusion payloads only; fails closed otherwise.
 - `window.vibe.terminal.create(payload)` - Creates or restores a PTY-backed session.
 - `window.vibe.terminal.input(id, data)` - Sends user terminal input to the PTY host.
 - `window.vibe.terminal.resize(id, cols, rows)` - Resizes the PTY session.

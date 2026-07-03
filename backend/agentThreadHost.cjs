@@ -391,22 +391,52 @@ function opencodeSpawnEnv(envOverrides) {
   return Object.keys(cleaned).length ? { ...process.env, ...cleaned } : undefined;
 }
 
-function findLatestOpenCodeThread(cwd, after = 0, excludeIds = [], envOverrides) {
-  const result = spawn("opencode", [
+// `opencode session list --format json` emits flat fields with millisecond
+// (`Date.now()`) `created`/`updated`, so they compare directly against the
+// millisecond `after` cutoff. Shared by latest-thread discovery and the
+// resume-picker history listing so the two can never disagree on which
+// sessions belong to a pane's folder.
+function selectOpenCodeThreadRefs(sessions, cwd, after = 0, excludeIds = []) {
+  const excluded = toExcludedSet(excludeIds);
+  if (!Array.isArray(sessions)) {
+    return [];
+  }
+  return sessions
+    .filter(
+      (session) =>
+        session.id &&
+        !excluded.has(String(session.id)) &&
+        isSamePath(session.directory, cwd) &&
+        Number(session.created || 0) >= after
+    )
+    .sort((a, b) => Number(b.updated || 0) - Number(a.updated || 0))
+    .map((session) => ({
+      provider: "opencode",
+      id: session.id,
+      title: session.title,
+      createdAt: Number(session.created || 0),
+      updatedAt: Number(session.updated || 0)
+    }));
+}
+
+function spawnOpenCodeSessionList(cwd, envOverrides, maxCount) {
+  return spawn("opencode", [
     "session",
     "list",
     "--format",
     "json",
     "--max-count",
-    "100"
+    String(maxCount)
   ], {
     cwd,
     env: opencodeSpawnEnv(envOverrides),
     shell: process.platform === "win32",
     windowsHide: true
   });
+}
 
-  const excluded = toExcludedSet(excludeIds);
+function findLatestOpenCodeThread(cwd, after = 0, excludeIds = [], envOverrides) {
+  const result = spawnOpenCodeSessionList(cwd, envOverrides, 100);
 
   return new Promise((resolve) => {
     let stdout = "";
@@ -419,34 +449,69 @@ function findLatestOpenCodeThread(cwd, after = 0, excludeIds = [], envOverrides)
     result.on("exit", () => {
       try {
         const sessions = JSON.parse(stdout);
-        // `opencode session list --format json` emits flat fields with
-        // millisecond (`Date.now()`) `created`/`updated`, so they compare
-        // directly against the millisecond `after` cutoff.
-        const latest =
-          sessions
-            .filter(
-              (session) =>
-                session.id &&
-                !excluded.has(String(session.id)) &&
-                isSamePath(session.directory, cwd) &&
-                Number(session.created || 0) >= after
-            )
-            .sort((a, b) => Number(b.updated || 0) - Number(a.updated || 0))[0] ||
-          null;
-
         resolve(
-          latest
-            ? {
-                provider: "opencode",
-                id: latest.id,
-                title: latest.title,
-                createdAt: Number(latest.created || 0),
-                updatedAt: Number(latest.updated || 0)
-              }
-            : null
+          selectOpenCodeThreadRefs(sessions, cwd, after, excludeIds)[0] || null
         );
       } catch {
         resolve(null);
+      }
+    });
+  });
+}
+
+// Every app-created session for a folder, newest first — the Open Fusion
+// resume picker's data source. Unlike latest-discovery this FAILS rather than
+// degrades: an empty-or-error listing must read as "could not list", never as
+// "no saved chats". The `after` cutoff carries the migration timestamp so
+// personal CLI threads that rode along in the seeded db snapshot never
+// surface (see migrateOpenFusionThreadsFromGlobal).
+const OPENCODE_HISTORY_LIST_MAX = 200;
+
+function listOpenCodeThreads(cwd, after = 0, excludeIds = [], envOverrides) {
+  const result = spawnOpenCodeSessionList(
+    cwd,
+    envOverrides,
+    OPENCODE_HISTORY_LIST_MAX
+  );
+
+  return new Promise((resolve) => {
+    let stdout = "";
+
+    result.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+
+    result.on("error", () =>
+      resolve({
+        status: "failed",
+        message: "Could not run `opencode session list` to read saved chats."
+      })
+    );
+    result.on("exit", (code) => {
+      // A store with zero sessions prints NOTHING (exit 0) rather than "[]" —
+      // that is a real empty history, not a read failure.
+      if (!stdout.trim()) {
+        resolve(
+          code === 0
+            ? { status: "found", threads: [] }
+            : {
+                status: "failed",
+                message: "Could not read the saved-chat list from OpenCode."
+              }
+        );
+        return;
+      }
+      try {
+        const sessions = JSON.parse(stdout);
+        resolve({
+          status: "found",
+          threads: selectOpenCodeThreadRefs(sessions, cwd, after, excludeIds)
+        });
+      } catch {
+        resolve({
+          status: "failed",
+          message: "Could not read the saved-chat list from OpenCode."
+        });
       }
     });
   });
@@ -475,19 +540,11 @@ function confirmOpenCodeThread(cwd, id, envOverrides) {
     return Promise.resolve({ status: "missing" });
   }
 
-  const result = spawn("opencode", [
-    "session",
-    "list",
-    "--format",
-    "json",
-    "--max-count",
-    String(OPENCODE_CONFIRM_LIST_MAX)
-  ], {
+  const result = spawnOpenCodeSessionList(
     cwd,
-    env: opencodeSpawnEnv(envOverrides),
-    shell: process.platform === "win32",
-    windowsHide: true
-  });
+    envOverrides,
+    OPENCODE_CONFIRM_LIST_MAX
+  );
 
   return new Promise((resolve) => {
     let stdout = "";
@@ -803,6 +860,17 @@ async function findLatestAgentThread(payload) {
       return confirmOpenCodeThread(cwd, payload.confirmId, payload.opencodeEnv);
     }
 
+    // History listing for the resume picker: every session for this folder,
+    // newest first, behind the same env overrides as latest-discovery.
+    if (payload.list) {
+      return listOpenCodeThreads(
+        cwd,
+        after,
+        payload.excludeIds,
+        payload.opencodeEnv
+      );
+    }
+
     const threadRef = await findLatestOpenCodeThread(
       cwd,
       after,
@@ -916,8 +984,10 @@ module.exports = {
   findLatestCursorThread,
   findLatestOpenCodeThread,
   isSamePath,
+  listOpenCodeThreads,
   normalizePathForCompare,
   opencodeSpawnEnv,
+  selectOpenCodeThreadRefs,
   parseClaudeTranscript,
   parseCursorTranscriptTitle
 };

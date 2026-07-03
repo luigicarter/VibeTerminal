@@ -1,9 +1,9 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   Ban,
   Check,
-  ChevronDown,
-  ChevronRight,
   Copy,
   CopyPlus,
   ExternalLink,
@@ -16,8 +16,6 @@ import {
   Plus,
   RefreshCcw,
   RotateCcw,
-  Send,
-  ShieldCheck,
   X
 } from "lucide-react";
 import clsx from "clsx";
@@ -34,6 +32,7 @@ import type {
   OpenFusionChatMessage,
   OpenFusionChatRole,
   OpenFusionProvider,
+  OpenFusionToolMeta,
   SessionStatus
 } from "../types";
 import {
@@ -53,13 +52,18 @@ export interface OpenFusionSettingsChange {
 interface OpenFusionChatPaneProps {
   session: AgentSession;
   profile: AgentProfile;
+  // Thread ids active in OTHER panes: the resume picker marks them and refuses
+  // to open the same conversation twice (two panes writing one session id).
+  claimedThreadIds?: string[];
   cwdConflict?: CwdConflict;
   isMaximized: boolean;
   isSelected: boolean;
   onClose: () => void;
   onDuplicate: () => void;
   onRestart: () => void;
-  onResume: () => void;
+  // Bare call resumes the stashed last chat; with a threadRef it resumes that
+  // specific saved chat (the resume picker's selection).
+  onResume: (threadRef?: AgentThreadRef) => void;
   onClear: () => void;
   onSettingsChange: (settings: OpenFusionSettingsChange) => void;
   onAdd: () => void;
@@ -77,6 +81,22 @@ const ROLE_LABELS: Record<"user" | OpenFusionChatRole, string> = {
   executor: "Executor",
   investigator: "Scout"
 };
+
+// OpenCode's home-screen placeholder examples, verbatim.
+const PROMPT_EXAMPLES = [
+  "Fix a TODO in the codebase",
+  "What is the tech stack of this project?",
+  "Fix broken tests"
+];
+
+// Compact duration like OpenCode's Locale.duration: "12s", "1m 23s", "1h 2m".
+function formatDurationShort(ms: number) {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
 
 interface PendingPermission {
   requestId: string;
@@ -193,6 +213,9 @@ interface SlashMenu {
 type PickerState =
   | { role: "brain" | "executor"; provider?: OpenFusionProvider }
   | { connect: "connect" | "disconnect" }
+  // Saved-chat resume picker: null = list still loading. `error` renders as
+  // "couldn't read" — an error must never masquerade as "no saved chats".
+  | { resume: AgentThreadRef[] | null; error?: string }
   | null;
 
 const SLASH_COMMANDS = [
@@ -202,7 +225,9 @@ const SLASH_COMMANDS = [
   { name: "/custom-provider", desc: "Add an OpenAI-compatible provider (your URL, key, and model names)" },
   { name: "/disconnect", desc: "Remove a provider's stored credential" },
   { name: "/models", desc: "Show the current Brain and Executor models" },
-  { name: "/resume", desc: "Resume the last Open Fusion chat" },
+  { name: "/resume", desc: "Pick a saved chat from this folder to resume" },
+  { name: "/details", desc: "Toggle tool execution details" },
+  { name: "/new", desc: "Start a fresh conversation" },
   { name: "/clear", desc: "Clear this conversation" },
   { name: "/help", desc: "List the available commands" }
 ];
@@ -256,6 +281,23 @@ function clip(value: string, max: number) {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
+// Ages for the resume picker rows ("just now", "5m ago", "3d ago").
+function formatThreadAge(updatedAt: number): string {
+  const timestamp = Number(updatedAt) || 0;
+  const age = Date.now() - timestamp;
+  if (!timestamp || !Number.isFinite(age) || age < 0) {
+    return "";
+  }
+  const minutes = Math.floor(age / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(timestamp).toLocaleDateString();
+}
+
 function previewText(text: string): string {
   const line = (text ?? "")
     .split("\n")
@@ -298,37 +340,145 @@ function firstString(...values: unknown[]) {
   return "";
 }
 
-// One human line per tool call, OpenCode tool vocabulary. Delegations get their
-// own non-internal treatment in the event handler; everything here is the
-// Details lane.
-function formatToolCall(name: string, title: string, input: unknown): string {
+// ── OpenCode TUI parity: tool icons, labels, and row shapes ─────────────────
+// Mirrors packages/tui/src/routes/session/index.tsx (v1.17.11): the same icon
+// glyphs, pending texts, and label formats the real OpenCode TUI renders.
+
+const TOOL_ICONS: Record<string, string> = {
+  bash: "$",
+  read: "→",
+  glob: "✱",
+  grep: "✱",
+  list: "✱",
+  webfetch: "%",
+  websearch: "◈",
+  write: "←",
+  edit: "←",
+  apply_patch: "%",
+  task: "│",
+  question: "→",
+  skill: "→"
+};
+
+const TOOL_PENDING: Record<string, string> = {
+  bash: "Writing command...",
+  read: "Reading file...",
+  glob: "Finding files...",
+  grep: "Searching content...",
+  webfetch: "Fetching from the web...",
+  websearch: "Searching web...",
+  write: "Preparing write...",
+  edit: "Preparing edit...",
+  apply_patch: "Preparing patch...",
+  task: "Delegating...",
+  todowrite: "Updating todos...",
+  question: "Asking questions...",
+  skill: "Loading skill..."
+};
+
+function toolIcon(name: string, status: OpenFusionChatMessage["toolStatus"]) {
+  if (name === "task" && status === "done") return "✓";
+  return TOOL_ICONS[name] ?? "⚙";
+}
+
+function titlecase(value: string) {
+  const text = (value || "").trim();
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
+}
+
+// opencode's `input()` helper: primitive args rendered as [k=v, …].
+function inputSummary(input: unknown, omit: string[] = []): string {
+  const data = asRecord(input);
+  const primitives = Object.entries(data).filter(([key, value]) => {
+    if (omit.includes(key)) return false;
+    return (
+      typeof value === "string" || typeof value === "number" || typeof value === "boolean"
+    );
+  });
+  if (!primitives.length) return "";
+  return `[${primitives.map(([key, value]) => `${key}=${clip(String(value), 60)}`).join(", ")}]`;
+}
+
+// The one-line row text per tool, matching OpenCode's InlineTool children.
+function toolLabel(name: string, input: unknown, meta?: OpenFusionToolMeta): string {
   const data = asRecord(input);
   switch (name) {
     case "read":
-      return `Read ${firstString(data.filePath, data.path) || "file"}`;
+      return `Read ${firstString(data.filePath, data.path) || "file"} ${inputSummary(input, ["filePath", "path"])}`.trimEnd();
     case "edit":
       return `Edit ${firstString(data.filePath, data.path) || "file"}`;
     case "write":
       return `Write ${firstString(data.filePath, data.path) || "file"}`;
     case "bash":
-      return `Run ${clip(firstString(data.command, data.description) || "command", 120)}`;
-    case "glob":
-      return `Find files ${firstString(data.pattern)}`;
-    case "grep":
-      return `Search ${clip(firstString(data.pattern), 80)}`;
+      return firstString(data.command, data.description) || "command";
+    case "glob": {
+      const where = firstString(data.path);
+      const count = meta?.count;
+      return `Glob "${firstString(data.pattern)}"${where ? ` in ${where}` : ""}${
+        typeof count === "number" ? ` (${count} ${count === 1 ? "match" : "matches"})` : ""
+      }`;
+    }
+    case "grep": {
+      const where = firstString(data.path);
+      const matches = meta?.matches;
+      return `Grep "${clip(firstString(data.pattern), 80)}"${where ? ` in ${where}` : ""}${
+        typeof matches === "number" ? ` (${matches} ${matches === 1 ? "match" : "matches"})` : ""
+      }`;
+    }
     case "webfetch":
-      return `Fetch ${clip(firstString(data.url), 100)}`;
+      return `WebFetch ${clip(firstString(data.url), 100)}`;
+    case "websearch":
+      return `WebSearch "${clip(firstString(data.query), 80)}"`;
     case "todowrite":
-      return "Update the task list";
+      return "Todos";
     case "todoread":
       return "Read the task list";
-    case "task":
-      return `Delegate: ${clip(firstString(title, data.description) || "subtask", 120)}`;
+    case "skill":
+      return `Skill "${firstString(data.name)}"`;
     default:
-      return title
-        ? `${name}: ${clip(title, 100)}`
-        : `${name}${Object.keys(data).length ? ` ${clip(JSON.stringify(data), 100)}` : ""}`;
+      return `${name} ${inputSummary(input)}`.trimEnd();
   }
+}
+
+// OpenCode's formatSubagentTitle: "Executor Task — description".
+function subagentTitle(input: unknown, fallbackTitle: string) {
+  const data = asRecord(input);
+  const agent = titlecase(firstString(data.subagent_type) || "executor");
+  const description = firstString(data.description, fallbackTitle) || "subtask";
+  return `${agent} Task — ${clip(description, 160)}`;
+}
+
+interface TodoEntry {
+  status: string;
+  content: string;
+}
+
+function parseTodos(value: unknown): TodoEntry[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    const todo = asRecord(item);
+    const status = firstString(todo.status);
+    const content = firstString(todo.content);
+    return status && content ? [{ status, content }] : [];
+  });
+}
+
+// OpenCode treats permission-rejected tool errors as "denied" (strikethrough).
+function isDeniedError(text: string) {
+  return (
+    text.includes("QuestionRejectedError") ||
+    text.includes("rejected permission") ||
+    text.includes("specified a rule") ||
+    text.includes("user dismissed")
+  );
+}
+
+const OUTPUT_COLLAPSE_LINES = 10;
+
+function collapseOutput(text: string, maxLines: number) {
+  const lines = (text ?? "").split("\n");
+  if (lines.length <= maxLines) return { output: text, overflow: false };
+  return { output: lines.slice(0, maxLines).join("\n"), overflow: true };
 }
 
 // The executor's task report comes back wrapped in <task …><task_result>…</…>.
@@ -343,17 +493,151 @@ function permissionDetail(pending: PendingPermission) {
   return `${scope}${pending.permission}${patterns ? ` (${patterns})` : ""}`;
 }
 
+// OpenCode's "blocks" busy spinner: a knight-rider sweep of block cells,
+// animated in CSS (styles.css .oc-spinner).
+function OcSpinner() {
+  return (
+    <span className="oc-spinner" aria-hidden="true">
+      <i />
+      <i />
+      <i />
+      <i />
+    </span>
+  );
+}
+
+// Brain prose renders as markdown like the OpenCode TUI. Links must open in
+// the system browser — a plain anchor would navigate the Electron window.
+const Markdown = memo(function Markdown({ text }: { text: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        a: ({ href, children }) => (
+          <a
+            href={href}
+            onClick={(event) => {
+              event.preventDefault();
+              if (href) void window.vibe?.openFusionChat?.openExternal(href);
+            }}
+          >
+            {children}
+          </a>
+        )
+      }}
+    >
+      {text}
+    </ReactMarkdown>
+  );
+});
+
+// Unified-diff body for Edit tool rows, colored like OpenCode's diff view.
+// File headers are dropped — the block title already names the file.
+const DiffBlock = memo(function DiffBlock({ diff }: { diff: string }) {
+  const lines = diff.replace(/\n+$/, "").split("\n");
+  return (
+    <div className="oc-diff">
+      {lines.map((line, i) => {
+        if (
+          line.startsWith("+++") ||
+          line.startsWith("---") ||
+          line.startsWith("diff ") ||
+          line.startsWith("Index:") ||
+          line.startsWith("\\ No newline")
+        ) {
+          return null;
+        }
+        const kind = line.startsWith("@@")
+          ? "hunk"
+          : line.startsWith("+")
+            ? "add"
+            : line.startsWith("-")
+              ? "del"
+              : "ctx";
+        return (
+          <div key={i} className={`oc-diff-line is-${kind}`}>
+            {line || " "}
+          </div>
+        );
+      })}
+    </div>
+  );
+});
+
+// Block-letter wordmark in OpenCode's exact logo technique (left word muted,
+// right word bold, "_/^/~" shadow cells), spelling OPEN FUSION. Letter shapes
+// reuse OpenCode's glyph font; F/U/S/I are derived in the same style.
+const LOGO_LEFT = [
+  "                   ",
+  "█▀▀█ █▀▀█ █▀▀█ █▀▀▄",
+  "█__█ █__█ █^^^ █__█",
+  "▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀~~▀"
+];
+const LOGO_RIGHT = [
+  "                          ",
+  "█▀▀▀ █__█ █▀▀▀ █ █▀▀█ █▀▀▄",
+  "█^^^ █__█ ^^^█ █ █__█ █__█",
+  "▀    ▀▀▀▀ ▀▀▀▀ ▀ ▀▀▀▀ ▀~~▀"
+];
+
+function LogoLine({ line, bold }: { line: string; bold?: boolean }) {
+  return (
+    <span className={clsx("oc-logo-word", bold && "is-bold")}>
+      {Array.from(line).map((ch, i) => {
+        if (ch === "_") {
+          return (
+            <span key={i} className="oc-logo-shbg">
+              {" "}
+            </span>
+          );
+        }
+        if (ch === "^") {
+          return (
+            <span key={i} className="oc-logo-shbg">
+              ▀
+            </span>
+          );
+        }
+        if (ch === "~") {
+          return (
+            <span key={i} className="oc-logo-sh">
+              ▀
+            </span>
+          );
+        }
+        return <span key={i}>{ch}</span>;
+      })}
+    </span>
+  );
+}
+
+function OpenFusionLogo() {
+  return (
+    <div className="oc-logo" role="img" aria-label="Open Fusion">
+      {LOGO_LEFT.map((line, i) => (
+        <div key={i} className="oc-logo-row">
+          <LogoLine line={line} />
+          <LogoLine line={LOGO_RIGHT[i]} bold />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // One transcript row, memoized: a streaming delta re-renders ONLY the growing
 // bubble instead of reconciling every row of a long transcript per chunk —
 // that full-list churn is what made streaming feel choppy.
+//
+// Row shapes mirror OpenCode's TUI part renderers (v1.17.11): user blocks with
+// a colored left bar, markdown prose, inline tool rows with icon glyphs, block
+// panels for bash output / diffs / todos, "+ Thought" collapsibles, and
+// "Agent Task — description" delegation rows with a "↳" progress line.
 const OpenFusionChatRow = memo(function OpenFusionChatRow({
   m,
-  verbose,
   isExpanded,
   onToggle
 }: {
   m: OpenFusionChatMessage;
-  verbose: boolean;
   isExpanded: boolean;
   onToggle: (key: string) => void;
 }) {
@@ -365,64 +649,208 @@ const OpenFusionChatRow = memo(function OpenFusionChatRow({
     return null;
   }
 
-  const author = ROLE_LABELS[m.role];
-  const className = clsx("chat-msg", `chat-${m.role}`, `chat-kind-${m.kind}`);
+  if (m.kind === "tool") {
+    const name = m.toolName ?? "tool";
+    const status = m.toolStatus ?? "running";
+    const data = asRecord(m.toolInput);
+    const denied = status === "error" && isDeniedError(m.toolOutput ?? "");
+    const failed = status === "error" && !denied;
 
-  if (m.kind === "tool-result" || m.kind === "thinking" || isSubagentStream) {
-    // Raw work product stays ONE collapsed line — click expands and minimizes
-    // it again, opencode-style, streaming included. While collapsed and live
-    // it ticks along on its latest line instead of dumping the whole block
-    // into the transcript.
+    // Delegations: OpenCode's Task row — spinner/│ while running, ✓ when done,
+    // "Executor Task — description" + "↳ current work / N toolcalls · 12s".
+    // Click reveals the subagent's report.
+    if (name === "task") {
+      const report = (m.toolOutput ?? "").trim();
+      return (
+        <div className={clsx("oc-tool", "oc-task", `is-${status}`, denied && "is-denied", failed && "is-failed")}>
+          <div
+            className={clsx("oc-tool-row", report && "oc-clickable")}
+            onClick={report ? () => onToggle(m.key) : undefined}
+          >
+            <span className="oc-tool-icon">
+              {status === "running" ? <OcSpinner /> : toolIcon(name, status)}
+            </span>
+            <span className="oc-tool-label">
+              {subagentTitle(m.toolInput, m.text)}
+              {m.taskDetail && <span className="oc-task-detail">{"\n"}↳ {m.taskDetail}</span>}
+            </span>
+          </div>
+          {isExpanded && report && (
+            <div className="oc-task-report">
+              <Markdown text={report} />
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // Bash: OpenCode's block panel — "$ command" plus output, collapsed at 10
+    // lines with the TUI's "Click to expand" affordance.
+    if (name === "bash") {
+      const command = firstString(data.command, data.description) || "command";
+      const output = (m.toolOutput ?? "").trim();
+      if (status === "running") {
+        return (
+          <div className="oc-tool is-running">
+            <div className="oc-tool-row">
+              <span className="oc-tool-icon">
+                <OcSpinner />
+              </span>
+              <span className="oc-tool-label">{command}</span>
+            </div>
+          </div>
+        );
+      }
+      const collapsed = collapseOutput(output, OUTPUT_COLLAPSE_LINES);
+      const shown = isExpanded || !collapsed.overflow ? output : collapsed.output;
+      return (
+        <div
+          className={clsx("oc-block", failed && "is-failed", collapsed.overflow && "oc-clickable")}
+          onClick={collapsed.overflow ? () => onToggle(m.key) : undefined}
+        >
+          <div className="oc-block-cmd">$ {command}</div>
+          {shown && <pre className={clsx("oc-block-output", failed && "is-error")}>{shown}</pre>}
+          {collapsed.overflow && (
+            <div className="oc-block-hint">{isExpanded ? "Click to collapse" : "Click to expand"}</div>
+          )}
+        </div>
+      );
+    }
+
+    // Edits that came back with a diff: OpenCode's "← Edit path" diff panel.
+    if (name === "edit" && status === "done" && m.meta?.diff) {
+      return (
+        <div className="oc-block">
+          <div className="oc-block-title">← Edit {firstString(data.filePath, data.path) || "file"}</div>
+          <DiffBlock diff={m.meta.diff} />
+        </div>
+      );
+    }
+
+    // Todos: OpenCode's "# Todos" checklist panel.
+    if (name === "todowrite" && status !== "error") {
+      const todos = parseTodos(data.todos);
+      if (todos.length) {
+        return (
+          <div className="oc-block">
+            <div className="oc-block-title"># Todos</div>
+            <div className="oc-todos">
+              {todos.map((todo, i) => (
+                <div key={i} className={clsx("oc-todo", `is-${todo.status}`)}>
+                  [{todo.status === "completed" ? "✓" : todo.status === "in_progress" ? "•" : " "}]{" "}
+                  {todo.content}
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      }
+    }
+
+    // Everything else: OpenCode's inline one-liner. "~ pending" before the
+    // input arrives, bright while running, muted once complete, red + click-
+    // to-expand on failure, strikethrough when the user denied it.
+    const hasInput = Object.keys(data).length > 0;
+    const error = (m.toolOutput ?? "").trim();
+    return (
+      <div className={clsx("oc-tool", `is-${status}`, denied && "is-denied", failed && "is-failed")}>
+        <div
+          className={clsx("oc-tool-row", failed && error && "oc-clickable")}
+          onClick={failed && error ? () => onToggle(m.key) : undefined}
+        >
+          {!hasInput && status === "running" ? (
+            <span className="oc-tool-pending">~ {TOOL_PENDING[name] ?? "Working..."}</span>
+          ) : (
+            <>
+              <span className="oc-tool-icon">
+                {status === "running" && name === "read" ? <OcSpinner /> : toolIcon(name, status)}
+              </span>
+              <span className="oc-tool-label">{toolLabel(name, m.toolInput, m.meta)}</span>
+            </>
+          )}
+        </div>
+        {failed && isExpanded && error && <pre className="oc-tool-error">{error}</pre>}
+      </div>
+    );
+  }
+
+  // Reasoning: OpenCode's spinner-while-thinking, then a "+ Thought: title"
+  // one-liner that expands to the full trace.
+  if (m.kind === "thinking") {
+    const content = m.text.replace("[REDACTED]", "").trim();
+    if (m.streaming) {
+      return (
+        <div className="oc-thought">
+          <span className="oc-thought-head">
+            <OcSpinner /> Thinking
+          </span>
+        </div>
+      );
+    }
+    const title = clip(content.split("\n").find((line) => line.trim()) ?? "", 100);
+    return (
+      <div className="oc-thought">
+        <span className="oc-thought-head oc-clickable" onClick={() => onToggle(m.key)}>
+          {isExpanded ? "- " : "+ "}Thought: {title}
+        </span>
+        {isExpanded && <pre className="oc-thought-body">{content}</pre>}
+      </div>
+    );
+  }
+
+  // Subagent work product: a muted "↳" ticker line (OpenCode keeps subagent
+  // internals out of the parent transcript; the Details toggle reveals these).
+  if (isSubagentStream) {
     const preview = m.streaming ? lastLinePreview(m.text) : previewText(m.text);
     const expandable = preview !== m.text.trim();
-    const open = verbose || isExpanded;
     return (
-      <div className={className}>
-        <span className="chat-gutter">●</span>
-        <div className="chat-body">
-          <div
-            className={clsx("chat-tool", expandable && "chat-tool-expandable")}
-            onClick={expandable ? () => onToggle(m.key) : undefined}
-          >
-            <span className="chat-tool-author">{author}</span>
-            <span className="chat-tool-kind">
-              {m.kind === "thinking" ? "thinking" : isSubagentStream ? "✎" : "↳"}
-            </span>
-            {expandable && <span className="chat-tool-caret">{open ? "▾" : "▸"}</span>}
-            <span className="chat-tool-text">
-              {open ? m.text : preview}
-              {m.streaming && <span className="chat-caret">▋</span>}
-            </span>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (m.kind === "tool-call" || m.kind === "activity") {
-    return (
-      <div className={className}>
-        <span className="chat-gutter">●</span>
-        <div className="chat-body">
-          <div className="chat-tool">
-            <span className="chat-tool-author">{author}</span>
-            <span className="chat-tool-text">{m.text}</span>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className={className}>
-      <span className="chat-gutter">{m.role === "user" ? "›" : ""}</span>
-      <div className="chat-body">
-        {m.role !== "user" && <span className="chat-author">{author}</span>}
-        <span className="chat-text">
-          {m.text}
-          {m.streaming && <span className="chat-caret">▋</span>}
+      <div className={clsx("oc-workline", `oc-role-${m.role}`)}>
+        <span
+          className={clsx("oc-workline-text", expandable && "oc-clickable")}
+          onClick={expandable ? () => onToggle(m.key) : undefined}
+        >
+          ↳ {isExpanded ? m.text : preview}
+          {m.streaming && <span className="oc-caret">▋</span>}
         </span>
       </div>
+    );
+  }
+
+  // Turn completion: OpenCode's "▣ Mode · model · duration" line.
+  if (m.kind === "result") {
+    return (
+      <div className="oc-turnend">
+        <span className="oc-turnend-mark">▣ </span>
+        <span className="oc-turnend-mode">{m.text}</span>
+        {m.taskDetail && <span className="oc-turnend-meta"> · {m.taskDetail}</span>}
+      </div>
+    );
+  }
+
+  // Errors: OpenCode's left-bordered error panel.
+  if (m.kind === "error") {
+    return <div className="oc-errorblock">{m.text}</div>;
+  }
+
+  // System notices ("Provider connected.", "Turn interrupted.").
+  if (m.kind === "activity" || m.kind === "tool-call" || m.kind === "tool-result") {
+    return <div className="oc-note">{m.text}</div>;
+  }
+
+  // User prompt: OpenCode's accent-barred panel block.
+  if (m.role === "user") {
+    return (
+      <div className="oc-user">
+        <div className="oc-user-text">{m.text}</div>
+      </div>
+    );
+  }
+
+  // Brain prose: markdown, OpenCode's TextPart.
+  return (
+    <div className={clsx("oc-md", m.streaming && "is-streaming")}>
+      <Markdown text={m.text} />
+      {m.streaming && <span className="oc-caret">▋</span>}
     </div>
   );
 });
@@ -430,6 +858,7 @@ const OpenFusionChatRow = memo(function OpenFusionChatRow({
 export default function OpenFusionChatPane({
   session,
   profile,
+  claimedThreadIds,
   cwdConflict,
   isMaximized,
   isSelected,
@@ -460,12 +889,26 @@ export default function OpenFusionChatPane({
   const [steering, setSteering] = useState<{ key: string; text: string }[]>([]);
   const [activeRole, setActiveRole] = useState<OpenFusionChatRole>("brain");
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
-  const [verbose, setVerbose] = useState(false);
+  // OpenCode's /details defaults ON: tool rows are part of the transcript.
+  const [verbose, setVerbose] = useState(true);
+  // Last turn's usage — the composer status row's right-side readout, like
+  // OpenCode's context/cost line.
+  const [usage, setUsage] = useState<{
+    costUsd?: number;
+    tokens?: { input: number; output: number; reasoning: number };
+  } | null>(null);
+  // Cycling composer placeholder, OpenCode's "Ask anything..." examples.
+  const [placeholderIndex, setPlaceholderIndex] = useState(() =>
+    Math.floor(Math.random() * PROMPT_EXAMPLES.length)
+  );
   const [slashIndex, setSlashIndex] = useState(0);
   // Esc hides the input-derived command menu without erasing the typed text;
   // any input change re-arms it.
   const [menuDismissed, setMenuDismissed] = useState(false);
   const [picker, setPicker] = useState<PickerState>(null);
+  // Serializes saved-chat list requests: a stale response (picker closed and
+  // reopened, or closed outright) must not repopulate the menu.
+  const resumeListRequestRef = useRef(0);
   const [providers, setProviders] = useState<OpenFusionProvider[] | null>(null);
   const [availableProviders, setAvailableProviders] = useState<{ id: string; name: string }[]>([]);
   // False when the connected list loaded but the full catalog fetch failed —
@@ -524,6 +967,15 @@ export default function OpenFusionChatPane({
   // done/completed. Armed by "interrupted", cleared by the next turn-start.
   const interruptSettledRef = useRef(false);
   const pendingRestartNoticeRef = useRef<string | null>(null);
+  // Turn wall-clock start, for the "▣ Brain · model · 32s" completion line.
+  const turnStartRef = useRef(0);
+  // Running delegations: task toolId -> row key + stats, plus an index from
+  // subagent kind to the task currently owning that kind's child events —
+  // powers the Task rows' "↳ current work / N toolcalls · 12s" line.
+  const tasksByToolIdRef = useRef(
+    new Map<string, { key: string; startTs: number; toolcalls: number }>()
+  );
+  const taskRoleIndexRef = useRef(new Map<string, string>());
   const threadIdRef = useRef("");
   const threadTitleRef = useRef("");
   const onThreadRefChangeRef = useRef(onThreadRefChange);
@@ -554,12 +1006,45 @@ export default function OpenFusionChatPane({
     ? shortModelLabel(executorModel, "")
     : "not set";
   const modelsLine = `Brain ${plannerModel || "not set"} · Executor ${executorModel || "not set"}`;
+  // Composer status readout, like OpenCode's context/cost line.
+  const usageLabel = (() => {
+    if (!usage) return "";
+    const total = usage.tokens
+      ? usage.tokens.input + usage.tokens.output + usage.tokens.reasoning
+      : 0;
+    return [
+      total > 0 ? `${total >= 1000 ? `${(total / 1000).toFixed(1)}k` : total} tokens` : "",
+      typeof usage.costUsd === "number" && usage.costUsd > 0
+        ? `$${usage.costUsd.toFixed(2)}`
+        : ""
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  })();
+  // Footer path, OpenCode-style: parent muted, folder name bright.
+  const cwdSplit = (() => {
+    const norm = String(session.cwd || "")
+      .replace(/\\/g, "/")
+      .replace(/\/+$/, "");
+    const idx = norm.lastIndexOf("/");
+    return idx > 0
+      ? { parent: norm.slice(0, idx + 1), name: norm.slice(idx + 1) }
+      : { parent: "", name: norm };
+  })();
   const showAttention = shouldShowAttentionDot(session);
   const canResume =
     session.resumeRef?.provider === "opencode" && Boolean(session.resumeRef.id);
+  // OpenCode's /details-off rule: successful completed tool rows disappear,
+  // running/failed rows stay, delegations (task) stay. Everything tagged
+  // internal (subagent work product, stderr) needs details on.
   const visibleMessages = verbose
     ? messages
-    : messages.filter((message) => !message.internal);
+    : messages.filter((message) => {
+        if (message.kind === "tool") {
+          return message.toolName === "task" || message.toolStatus !== "done";
+        }
+        return !message.internal;
+      });
 
   useEffect(() => {
     onThreadRefChangeRef.current = onThreadRefChange;
@@ -589,6 +1074,15 @@ export default function OpenFusionChatPane({
     setSlashIndex(0);
     setMenuDismissed(false);
   }, [input, picker]);
+
+  // Rotate the composer's example placeholder like OpenCode's home prompt.
+  useEffect(() => {
+    const timer = window.setInterval(
+      () => setPlaceholderIndex((index) => (index + 1) % PROMPT_EXAMPLES.length),
+      10_000
+    );
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     activeMenuItemRef.current?.scrollIntoView({ block: "nearest" });
@@ -639,7 +1133,11 @@ export default function OpenFusionChatPane({
   const nextKey = () => `m${keyRef.current++}`;
   const push = (
     entry: Omit<OpenFusionChatMessage, "key" | "ts"> & { ts?: number }
-  ) => setMessages((prev) => [...prev, { key: nextKey(), ts: Date.now(), ...entry }]);
+  ) => {
+    const key = nextKey();
+    setMessages((prev) => [...prev, { key, ts: Date.now(), ...entry }]);
+    return key;
+  };
   const queueSteering = (text: string) => {
     steeringRef.current = [...steeringRef.current, { key: nextKey(), text }];
     setSteering(steeringRef.current);
@@ -870,12 +1368,20 @@ export default function OpenFusionChatPane({
             }
             const key = nextKey();
             streamBubblesRef.current.set(streamKey, key);
-            // Streamed bubbles stay in the visible transcript: only Brain TEXT
-            // renders as prose — thinking and subagent streams (the executor's
-            // code-in-progress, Scout's reasoning trail) render as collapsed
-            // click-to-expand rows, so raw work product is reachable but never
-            // dumped full-length the way it briefly was.
-            arr.push({ key, role, kind, text: delta, ts: Date.now(), streaming: true });
+            // Streamed bubbles stay in the transcript: only Brain TEXT renders
+            // as prose — thinking renders as OpenCode's "+ Thought" line, and
+            // subagent streams (the executor's code-in-progress, Scout's
+            // drafts) are Details-lane work product like OpenCode keeps
+            // subagent internals out of the parent transcript.
+            arr.push({
+              key,
+              role,
+              kind,
+              text: delta,
+              ts: Date.now(),
+              streaming: true,
+              internal: kind === "text" && role !== "brain"
+            });
             continue;
           }
           // Legacy path (events without streamId, e.g. history replayed by an
@@ -895,7 +1401,8 @@ export default function OpenFusionChatPane({
             kind,
             text: delta,
             ts: Date.now(),
-            streaming: true
+            streaming: true,
+            internal: kind === "text" && role !== "brain"
           });
         }
         return next ?? prev;
@@ -925,6 +1432,36 @@ export default function OpenFusionChatPane({
     const stopStreaming = () => {
       streamBubblesRef.current.clear();
       setMessages((prev) => prev.map((m) => (m.streaming ? { ...m, streaming: false } : m)));
+    };
+    // An abort/exit leaves tool rows spinning forever — settle them as aborted
+    // (OpenCode's server marks aborted tool parts as errors the same way).
+    const settleRunningTools = () => {
+      tasksByToolIdRef.current.clear();
+      taskRoleIndexRef.current.clear();
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.kind === "tool" && m.toolStatus === "running"
+            ? { ...m, toolStatus: "error" as const, toolOutput: m.toolOutput || "aborted" }
+            : m
+        )
+      );
+    };
+    // OpenCode's turn-completion line: "▣ Brain · model · 32s".
+    const pushTurnEnd = (interrupted: boolean) => {
+      const duration = turnStartRef.current ? Date.now() - turnStartRef.current : 0;
+      turnStartRef.current = 0;
+      push({
+        role: "brain",
+        kind: "result",
+        text: "Brain",
+        taskDetail: [
+          shortModelLabel(plannerModelRef.current, "model"),
+          duration ? formatDurationShort(duration) : "",
+          interrupted ? "interrupted" : ""
+        ]
+          .filter(Boolean)
+          .join(" · ")
+      });
     };
 
     const handleChat = (event: OpenFusionChatEvent) => {
@@ -965,6 +1502,9 @@ export default function OpenFusionChatPane({
           // is in its context now.
           flushSteering();
           interruptSettledRef.current = false;
+          turnStartRef.current = Date.now();
+          tasksByToolIdRef.current.clear();
+          taskRoleIndexRef.current.clear();
           setActiveRole("brain");
           setInterruptingState(false);
           setWaitingState(false);
@@ -1010,46 +1550,100 @@ export default function OpenFusionChatPane({
         case "tool-call": {
           setActiveRole(event.role);
           const isDelegation = event.name === "task" && event.role === "brain";
-          push({
+          // One OpenCode-style row per call; the matching tool-result updates
+          // it in place (status → done/error, output, meta).
+          const key = push({
             role: event.role,
-            kind: isDelegation ? "activity" : "tool-call",
-            text: isDelegation
-              ? `Delegating to ${clip(
-                  firstString(asRecord(event.input).subagent_type) || "executor",
-                  24
-                )}: ${clip(
-                  firstString(event.title, asRecord(event.input).description) || "subtask",
-                  160
-                )}`
-              : formatToolCall(event.name, event.title ?? "", event.input),
+            kind: "tool",
+            text: event.title ?? "",
             toolId: event.toolId,
-            internal: !isDelegation
+            toolName: event.name,
+            toolStatus: "running",
+            toolInput: event.input
           });
+          if (isDelegation) {
+            const agentKind =
+              firstString(asRecord(event.input).subagent_type) === "investigator"
+                ? "investigator"
+                : "executor";
+            tasksByToolIdRef.current.set(event.toolId, {
+              key,
+              startTs: Date.now(),
+              toolcalls: 0
+            });
+            taskRoleIndexRef.current.set(agentKind, event.toolId);
+          } else if (event.role !== "brain") {
+            // A subagent's tool: tick the owning Task row's "↳ …" line, like
+            // OpenCode's live "↳ Read path" under a running task.
+            const taskId = taskRoleIndexRef.current.get(event.role);
+            const task = taskId ? tasksByToolIdRef.current.get(taskId) : undefined;
+            if (task) {
+              task.toolcalls += 1;
+              const detail = event.title
+                ? `${titlecase(event.name)} ${clip(event.title, 80)}`
+                : clip(toolLabel(event.name, event.input), 80);
+              setMessages((prev) =>
+                prev.map((row) => (row.key === task.key ? { ...row, taskDetail: detail } : row))
+              );
+            }
+          }
           break;
         }
         case "tool-result": {
           setActiveRole(event.role);
-          const isDelegation = event.name === "task" && event.role === "brain";
-          push({
-            role: isDelegation ? "executor" : event.role,
-            kind: isDelegation ? "tool-result" : "tool-result",
-            text: isDelegation
-              ? extractTaskResult(event.text)
-              : clip(event.text ?? "", 8000) || "(no output)",
-            toolId: event.toolId,
-            internal: !isDelegation && event.ok
-          });
-          if (!event.ok && !isDelegation) {
-            // Failed tools stay visible so the user sees why the Brain pivots.
-            setMessages((prev) => {
-              const copy = prev.slice();
-              const last = copy[copy.length - 1];
-              if (last && last.toolId === event.toolId) {
-                copy[copy.length - 1] = { ...last, internal: false };
-              }
-              return copy;
-            });
+          const isDelegation = event.name === "task";
+          const text = isDelegation
+            ? extractTaskResult(event.text)
+            : clip(event.text ?? "", 8000);
+          // Completed delegations get OpenCode's "↳ N toolcalls · 12s" line.
+          const task = tasksByToolIdRef.current.get(event.toolId);
+          let taskDetail: string | undefined;
+          if (task) {
+            const duration = formatDurationShort(Date.now() - task.startTs);
+            taskDetail =
+              task.toolcalls > 0
+                ? `${task.toolcalls} toolcall${task.toolcalls === 1 ? "" : "s"} · ${duration}`
+                : duration;
+            tasksByToolIdRef.current.delete(event.toolId);
+            for (const [kind, id] of taskRoleIndexRef.current) {
+              if (id === event.toolId) taskRoleIndexRef.current.delete(kind);
+            }
           }
+          setMessages((prev) => {
+            let found = false;
+            const next = prev.map((row) => {
+              if (row.kind !== "tool" || row.toolId !== event.toolId || row.toolStatus !== "running") {
+                return row;
+              }
+              found = true;
+              return {
+                ...row,
+                toolStatus: event.ok ? ("done" as const) : ("error" as const),
+                toolOutput: text || undefined,
+                meta: event.meta ?? row.meta,
+                taskDetail: taskDetail ?? row.taskDetail
+              };
+            });
+            if (found) return next;
+            // Result without a matching call (snapshot edge): synthesize.
+            return [
+              ...next,
+              {
+                key: nextKey(),
+                ts: Date.now(),
+                role: event.role,
+                kind: "tool" as const,
+                toolId: event.toolId,
+                toolName: event.name,
+                toolStatus: event.ok ? ("done" as const) : ("error" as const),
+                toolInput: undefined,
+                toolOutput: text || undefined,
+                meta: event.meta,
+                text: event.title ?? "",
+                taskDetail
+              }
+            ];
+          });
           break;
         }
         case "permission": {
@@ -1247,15 +1841,20 @@ export default function OpenFusionChatPane({
           stopStreaming();
           setInterruptingState(false);
           setBusyState(false);
+          if (event.tokens || typeof event.costUsd === "number") {
+            setUsage({ costUsd: event.costUsd, tokens: event.tokens });
+          }
           if (event.subtype === "restored") {
             onStatusChangeRef.current("idle");
             break;
           }
           if (interruptSettle) {
+            pushTurnEnd(true);
             onStatusChangeRef.current("waiting");
             flushSteering();
             break;
           }
+          pushTurnEnd(false);
           if (waitingRef.current) {
             onStatusChangeRef.current("waiting");
           } else {
@@ -1268,11 +1867,11 @@ export default function OpenFusionChatPane({
         case "interrupted":
           interruptSettledRef.current = true;
           stopStreaming();
+          settleRunningTools();
           setInterruptingState(false);
           setBusyState(false);
           setWaitingState(false);
           setPendingPermission(null);
-          push({ role: "brain", kind: "activity", text: "Turn interrupted." });
           // A message queued before the interrupt is still in the session's
           // history — surface it under the marker as the freshest entry so
           // the user sees it will lead the next turn.
@@ -1287,6 +1886,7 @@ export default function OpenFusionChatPane({
           break;
         case "error": {
           stopStreaming();
+          settleRunningTools();
           setInterruptingState(false);
           setBusyState(false);
           setWaitingState(false);
@@ -1300,6 +1900,7 @@ export default function OpenFusionChatPane({
         }
         case "closed": {
           stopStreaming();
+          settleRunningTools();
           setInterruptingState(false);
           flushSteering();
           const wasBusy = busyRef.current;
@@ -1417,6 +2018,46 @@ export default function OpenFusionChatPane({
     setInput("");
     void window.vibe?.openFusionChat?.requestProviders(session.id);
     composerRef.current?.focus();
+  }
+
+  // List every saved chat for this folder from the app-owned OpenCode store
+  // (newest first) so the user can resume the one they want — not just the
+  // stashed last chat. The current conversation is excluded: "resuming" it
+  // would only restart the pane.
+  function openResumePicker() {
+    const requestToken = ++resumeListRequestRef.current;
+    setPicker({ resume: null });
+    setInput("");
+    composerRef.current?.focus();
+    const applyResult = (threads: AgentThreadRef[], error?: string) => {
+      if (resumeListRequestRef.current !== requestToken) return;
+      setPicker((current) =>
+        current && "resume" in current
+          ? error
+            ? { resume: threads, error }
+            : { resume: threads }
+          : current
+      );
+    };
+    const list = window.vibe?.agentThreads?.list;
+    if (!list) {
+      applyResult([], "Saved-chat history is unavailable in this build.");
+      return;
+    }
+    list({
+      provider: "opencode",
+      cwd: session.cwd,
+      openFusion: true,
+      excludeIds: threadIdRef.current ? [threadIdRef.current] : undefined
+    })
+      .then((result) => {
+        if (result?.status === "found") {
+          applyResult(result.threads ?? []);
+        } else {
+          applyResult([], result?.message || "Could not read the saved chats.");
+        }
+      })
+      .catch(() => applyResult([], "Could not read the saved chats."));
   }
 
   function nextAuthNonce() {
@@ -1880,10 +2521,20 @@ export default function OpenFusionChatPane({
         showModels();
         return true;
       case "/resume":
-        onResume();
+      case "/sessions":
+        openResumePicker();
         return true;
       case "/clear":
+      case "/new":
         onClear();
+        return true;
+      case "/details":
+        setVerbose((value) => !value);
+        push({
+          role: "brain",
+          kind: "activity",
+          text: `Tool execution details ${verbose ? "hidden" : "shown"}.`
+        });
         return true;
       case "/help":
         showHelp();
@@ -1942,6 +2593,60 @@ export default function OpenFusionChatPane({
       !filter ||
       entry.name.toLowerCase().includes(filter) ||
       entry.id.toLowerCase().includes(filter);
+    if (picker && "resume" in picker) {
+      if (picker.resume === null) {
+        return { title: "Resume a chat — reading saved chats…", items: [] };
+      }
+      const claimed = new Set(claimedThreadIds ?? []);
+      const threads = picker.resume.filter(
+        (thread) =>
+          thread.id &&
+          thread.id !== threadIdRef.current &&
+          (!filter ||
+            (thread.title ?? "").toLowerCase().includes(filter) ||
+            thread.id.toLowerCase().includes(filter))
+      );
+      const items: SlashMenuItem[] = threads
+        .slice(0, PICKER_PAGE_SIZE)
+        .map((thread) => ({
+          key: `resume-${thread.id}`,
+          label: clip(thread.title?.trim() || "Untitled chat", 80),
+          desc: claimed.has(thread.id!)
+            ? "open in another pane"
+            : formatThreadAge(thread.updatedAt),
+          command: `__resume:${thread.id}`
+        }));
+      if (threads.length > PICKER_PAGE_SIZE) {
+        items.push(moreRow("resume-more", threads.length - PICKER_PAGE_SIZE));
+      }
+      // Listing failed but the pane still stashes its last chat: offer that
+      // directly instead of a dead end.
+      if (picker.error && canResume) {
+        items.push({
+          key: "resume-last",
+          label: "Resume last chat",
+          desc: clip(
+            session.resumeRef?.title?.trim() || "the most recent saved chat",
+            60
+          ),
+          command: "__resume-last"
+        });
+      }
+      if (!items.length) {
+        items.push({
+          key: "resume-empty",
+          label: picker.error
+            ? "Couldn't read saved chats"
+            : filter
+              ? "No saved chats match"
+              : "No saved chats for this folder",
+          desc:
+            picker.error ??
+            "Chats appear here once a conversation has started."
+        });
+      }
+      return { title: "Resume a chat — type to filter", items };
+    }
     if (picker && "connect" in picker) {
       const mode = picker.connect;
       if (!providers) {
@@ -2158,6 +2863,32 @@ export default function OpenFusionChatPane({
     }
     if (!item.command) return;
     const pickerRole = picker && "role" in picker ? picker.role : null;
+    if (item.command.startsWith("__resume:")) {
+      const threadId = item.command.slice("__resume:".length);
+      const thread =
+        picker && "resume" in picker && picker.resume
+          ? picker.resume.find((entry) => entry.id === threadId)
+          : undefined;
+      setPicker(null);
+      setInput("");
+      if (!thread) return;
+      if (claimedThreadIds?.includes(threadId)) {
+        push({
+          role: "brain",
+          kind: "activity",
+          text: "That chat is already open in another pane."
+        });
+        return;
+      }
+      onResume(thread);
+      return;
+    }
+    if (item.command === "__resume-last") {
+      setPicker(null);
+      setInput("");
+      onResume();
+      return;
+    }
     if (item.command.startsWith("__provider:")) {
       const providerId = item.command.slice("__provider:".length);
       const provider = providers?.find((entry) => entry.id === providerId);
@@ -2217,14 +2948,42 @@ export default function OpenFusionChatPane({
     if (!busy || !isSelected) return undefined;
     const handleWindowKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
+      // A pending permission owns Esc (OpenCode's reject key); interrupting
+      // instead would abort the whole turn the user was asked to unblock.
+      if (pendingPermission) {
+        answerPermission("reject");
+        return;
+      }
       interrupt();
     };
     window.addEventListener("keydown", handleWindowKeyDown);
     return () => window.removeEventListener("keydown", handleWindowKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [busy, isSelected, session.id]);
+  }, [busy, isSelected, session.id, pendingPermission]);
 
   const activeRoleLabel = ROLE_LABELS[activeRole];
+
+  // The local flags only know the live lane (a turn in flight); how the pane
+  // SETTLED — finished a turn, interrupted and waiting on the user, failed —
+  // lives in the app-reconciled session.status, the same source the sidebar
+  // reads. Without it every settled pane collapses into "ready", so a pane
+  // that is just waiting for input is indistinguishable from one that
+  // finished a task.
+  const settledStatus =
+    session.status === "done" ||
+    session.status === "waiting" ||
+    session.status === "failed"
+      ? session.status
+      : null;
+  const pillStatus = waiting
+    ? "waiting"
+    : busy
+      ? "running"
+      : failed
+        ? "failed"
+        : (settledStatus ?? "idle");
+  const pillLabel =
+    pillStatus === "running" ? "working" : pillStatus === "idle" ? "ready" : pillStatus;
 
   return (
     <article
@@ -2265,13 +3024,7 @@ export default function OpenFusionChatPane({
         <div className="pane-status">
           {/* waiting outranks busy: a permission ask leaves the server turn
               busy, but the pane is blocked on the human. */}
-          <span
-            className={`status-pill status-${
-              waiting ? "waiting" : busy ? "running" : failed ? "failed" : "idle"
-            }`}
-          >
-            {waiting ? "waiting" : busy ? "working" : failed ? "failed" : "ready"}
-          </span>
+          <span className={`status-pill status-${pillStatus}`}>{pillLabel}</span>
         </div>
         <div className="pane-actions">
           <button title="Add matching pane" onClick={onAdd}>
@@ -2286,11 +3039,9 @@ export default function OpenFusionChatPane({
           >
             {session.started ? <RefreshCcw size={14} /> : <Play size={14} />}
           </button>
-          {canResume && (
-            <button title="Resume last Open Fusion chat" onClick={onResume}>
-              <RotateCcw size={14} />
-            </button>
-          )}
+          <button title="Resume a saved chat" onClick={openResumePicker}>
+            <RotateCcw size={14} />
+          </button>
           <button title={isMaximized ? "Restore pane" : "Maximize pane"} onClick={onMaximize}>
             {isMaximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
           </button>
@@ -2299,63 +3050,26 @@ export default function OpenFusionChatPane({
           </button>
         </div>
       </header>
-      <div className="fusion-control-strip">
-        <span className="fusion-control-path">{session.cwd}</span>
-        <div className="fusion-controls">
-          <span
-            className="fusion-settings-summary"
-            title="Type /brain-model or /executor-model to change these"
-          >
-            <span className="fusion-setting">
-              <span className="fusion-setting-key">Brain</span>
-              {brainLabel}
-            </span>
-            <span className="fusion-setting">
-              <span className="fusion-setting-key">Executor</span>
-              {executorLabel}
-            </span>
-            <span className="fusion-settings-hint">/help</span>
-          </span>
-          <button
-            type="button"
-            className={clsx("fusion-verbose-toggle", verbose && "is-on")}
-            title={verbose ? "Hide internal tool details" : "Show internal tool details"}
-            aria-pressed={verbose}
-            onClick={() => setVerbose((value) => !value)}
-          >
-            {verbose ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-            <span>Details</span>
-          </button>
-        </div>
-      </div>
-
       <div className="fusion-chat" onPointerDown={onSelect}>
         <div className="fusion-chat-scroll" ref={scrollRef} onScroll={handleChatScroll}>
           {visibleMessages.length === 0 ? (
-            <div className="openfusion-hero">
-              <div className="openfusion-hero-mark">
-                <Orbit size={30} />
-              </div>
-              <div className="openfusion-hero-word">
-                OPEN<span>FUSION</span>
-              </div>
-              <p className="openfusion-hero-tag">
+            <div className="oc-hero">
+              <OpenFusionLogo />
+              <p className="oc-hero-tag">
                 Two specialists, one loop — the Brain plans and reviews, the Executor
                 writes and runs.
               </p>
-              <div className="openfusion-hero-roles">
-                <div className="openfusion-hero-role is-brain">
-                  <span className="openfusion-hero-role-key">Brain</span>
-                  <span className="openfusion-hero-role-model">{plannerModel}</span>
-                </div>
-                <div className="openfusion-hero-role is-executor">
-                  <span className="openfusion-hero-role-key">Executor</span>
-                  <span className="openfusion-hero-role-model">{executorModel}</span>
-                </div>
-              </div>
-              <p className="openfusion-hero-hint">
-                Ask for a change to get started · /brain-model and /executor-model swap
-                the pair
+              <p className="oc-hero-hint">
+                {modelsReady ? (
+                  <>
+                    Ask anything to get started <span className="oc-hero-sep">·</span>{" "}
+                    <span className="oc-hero-key">/help</span> commands
+                  </>
+                ) : (
+                  <>
+                    Get started <span className="oc-hero-key">/connect</span>
+                  </>
+                )}
               </p>
             </div>
           ) : (
@@ -2363,62 +3077,27 @@ export default function OpenFusionChatPane({
               <OpenFusionChatRow
                 key={m.key}
                 m={m}
-                verbose={verbose}
                 isExpanded={expanded.has(m.key)}
                 onToggle={toggleExpanded}
               />
             ))
           )}
-          {busy && !pendingPermission && (
-            <div className={clsx("chat-msg", "chat-kind-status")}>
-              <span className="chat-gutter chat-spinner">✻</span>
-              <div className="chat-body">
-                <span className="chat-text muted">
-                  {interrupting ? "Interrupting…" : `${activeRoleLabel} working…`}
-                </span>
-              </div>
-            </div>
-          )}
         </div>
 
         <div className="fusion-input-area">
           {pendingPermission && (
-            <div className="fusion-decision-panel" role="group" aria-label="Permission request">
-              <div className="fusion-decision-copy">
-                <span className="fusion-decision-kind">
-                  {ROLE_LABELS[pendingPermission.role]} permission
-                </span>
-                <span className="fusion-decision-detail">
-                  {permissionDetail(pendingPermission)}
-                </span>
-              </div>
-              <div className="fusion-decision-actions">
-                <button
-                  className="fusion-decision-button is-primary"
-                  type="button"
-                  title="Allow once"
-                  onClick={() => answerPermission("once")}
-                >
-                  <Check size={14} />
-                  <span>Allow</span>
+            <div className="oc-permission" role="group" aria-label="Permission request">
+              <div className="oc-permission-title">Permission required</div>
+              <div className="oc-permission-body">{permissionDetail(pendingPermission)}</div>
+              <div className="oc-permission-options">
+                <button type="button" className="is-primary" onClick={() => answerPermission("once")}>
+                  Allow once <span className="oc-key">enter</span>
                 </button>
-                <button
-                  className="fusion-decision-button"
-                  type="button"
-                  title="Allow similar requests for this session"
-                  onClick={() => answerPermission("always")}
-                >
-                  <ShieldCheck size={14} />
-                  <span>Allow session</span>
+                <button type="button" onClick={() => answerPermission("always")}>
+                  Allow always
                 </button>
-                <button
-                  className="fusion-decision-button"
-                  type="button"
-                  title="Reject this request"
-                  onClick={() => answerPermission("reject")}
-                >
-                  <Ban size={14} />
-                  <span>Reject</span>
+                <button type="button" onClick={() => answerPermission("reject")}>
+                  Reject <span className="oc-key">esc</span>
                 </button>
               </div>
             </div>
@@ -2946,94 +3625,129 @@ export default function OpenFusionChatPane({
               </span>
             </div>
           )}
-          <div className="fusion-composer">
-            <textarea
-              ref={composerRef}
-              value={input}
-              placeholder={
-                waiting
-                  ? "Answer the request above to continue…"
-                  : busy
-                    ? "Queue the next instruction… (Esc interrupts)"
-                    : !modelsReady
-                      ? "Finish setup first — connect a provider and pick models…"
-                      : "Ask Open Fusion to build, fix, or explain…"
-              }
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (menuOpen) {
-                  if (e.key === "ArrowDown") {
-                    e.preventDefault();
-                    setSlashIndex((i) => (menu.items.length ? (i + 1) % menu.items.length : 0));
-                    return;
-                  }
-                  if (e.key === "ArrowUp") {
-                    e.preventDefault();
-                    setSlashIndex((i) =>
-                      menu.items.length
-                        ? (i - 1 + menu.items.length) % menu.items.length
-                        : 0
-                    );
-                    return;
-                  }
-                  // Tab selects only inside a picker; elsewhere it keeps its
-                  // browser meaning so keyboard users can reach the auth
-                  // panel's buttons.
-                  if (
-                    (e.key === "Enter" && !e.shiftKey) ||
-                    (e.key === "Tab" && picker !== null)
-                  ) {
-                    e.preventDefault();
-                    applyMenuSelection(menu.items[slashIndex] ?? menu.items[0]);
-                    return;
-                  }
-                  if (e.key === "Escape") {
-                    // One level up per press: provider's model list → provider
-                    // list → closed. The input-derived command menu hides but
-                    // KEEPS the typed text (it used to be wiped).
-                    e.preventDefault();
-                    if (picker && "role" in picker && picker.provider) {
-                      setPicker({ role: picker.role });
-                      setInput("");
+          <div className="oc-prompt">
+            <div className="oc-prompt-box">
+              <textarea
+                className="oc-prompt-input"
+                ref={composerRef}
+                value={input}
+                placeholder={
+                  waiting
+                    ? "Answer the request above to continue…"
+                    : busy
+                      ? "Queue the next instruction…"
+                      : !modelsReady
+                        ? "Connect a provider and pick models to start…"
+                        : `Ask anything... "${PROMPT_EXAMPLES[placeholderIndex % PROMPT_EXAMPLES.length]}"`
+                }
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (menuOpen) {
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      setSlashIndex((i) => (menu.items.length ? (i + 1) % menu.items.length : 0));
                       return;
                     }
-                    if (picker) {
-                      setPicker(null);
-                      setInput("");
+                    if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      setSlashIndex((i) =>
+                        menu.items.length
+                          ? (i - 1 + menu.items.length) % menu.items.length
+                          : 0
+                      );
                       return;
                     }
-                    setMenuDismissed(true);
+                    // Tab selects only inside a picker; elsewhere it keeps its
+                    // browser meaning so keyboard users can reach the auth
+                    // panel's buttons.
+                    if (
+                      (e.key === "Enter" && !e.shiftKey) ||
+                      (e.key === "Tab" && picker !== null)
+                    ) {
+                      e.preventDefault();
+                      applyMenuSelection(menu.items[slashIndex] ?? menu.items[0]);
+                      return;
+                    }
+                    if (e.key === "Escape") {
+                      // One level up per press: provider's model list → provider
+                      // list → closed. The input-derived command menu hides but
+                      // KEEPS the typed text (it used to be wiped).
+                      e.preventDefault();
+                      if (picker && "role" in picker && picker.provider) {
+                        setPicker({ role: picker.role });
+                        setInput("");
+                        return;
+                      }
+                      if (picker) {
+                        setPicker(null);
+                        setInput("");
+                        return;
+                      }
+                      setMenuDismissed(true);
+                      return;
+                    }
+                  }
+                  // OpenCode's permission dialog keys: enter allows (when not
+                  // sending text), esc rejects.
+                  if (pendingPermission) {
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      answerPermission("reject");
+                      return;
+                    }
+                    if (e.key === "Enter" && !e.shiftKey && !input.trim()) {
+                      e.preventDefault();
+                      answerPermission("once");
+                      return;
+                    }
+                  }
+                  if (e.key === "Escape" && busy) {
+                    e.preventDefault();
+                    interrupt();
                     return;
                   }
-                }
-                if (e.key === "Escape" && busy) {
-                  e.preventDefault();
-                  interrupt();
-                  return;
-                }
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  send();
-                }
-              }}
-              rows={1}
-            />
-            <button
-              className="fusion-send"
-              title="Send (Enter)"
-              disabled={!input.trim()}
-              onClick={send}
-            >
-              <Send size={15} />
-            </button>
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    send();
+                  }
+                }}
+                rows={1}
+              />
+              <div className="oc-prompt-meta" title={modelsLine}>
+                <span className="oc-prompt-agent">Brain</span>
+                <span className="oc-prompt-sep">·</span>
+                <span className="oc-prompt-model">{brainLabel}</span>
+                <span className="oc-prompt-pair">⇄</span>
+                <span className="oc-prompt-model is-executor">{executorLabel}</span>
+              </div>
+            </div>
           </div>
-          <div className="fusion-input-settings" title={modelsLine}>
-            <span className="openfusion-pair">
-              <span className="openfusion-pair-role is-brain">{brainLabel}</span>
-              <span className="openfusion-pair-join">⇄</span>
-              <span className="openfusion-pair-role is-executor">{executorLabel}</span>
-            </span>
-            <span className="fusion-settings-detail">Open Fusion · OpenCode engine</span>
+          <div className="oc-prompt-status">
+            <div className="oc-prompt-status-left">
+              {busy && (
+                <>
+                  <OcSpinner />
+                  {interrupting && <span className="oc-status-note">interrupting…</span>}
+                </>
+              )}
+            </div>
+            <div className="oc-prompt-status-right">
+              {busy ? (
+                <span className="oc-hint">
+                  <span className="oc-hint-key">esc</span> interrupt
+                </span>
+              ) : (
+                <>
+                  {usageLabel && <span className="oc-usage">{usageLabel}</span>}
+                  <span className="oc-hint">
+                    <span className="oc-hint-key">/help</span> commands
+                  </span>
+                  <span className="oc-hint">
+                    <span className="oc-hint-key">enter</span> send
+                  </span>
+                </>
+              )}
+            </div>
           </div>
           {menuOpen && (
             <div className="fusion-slash-panel" aria-label="Slash command options">
@@ -3066,6 +3780,27 @@ export default function OpenFusionChatPane({
           )}
         </div>
       </div>
+      <footer className="oc-footer">
+        <span className="oc-footer-path" title={session.cwd}>
+          <span className="oc-footer-parent">{cwdSplit.parent}</span>
+          <span className="oc-footer-name">{cwdSplit.name}</span>
+        </span>
+        <div className="oc-footer-right">
+          {pendingPermission && <span className="oc-footer-perm">△ 1 Permission</span>}
+          <button
+            type="button"
+            className={clsx("oc-footer-details", verbose && "is-on")}
+            aria-pressed={verbose}
+            title="Toggle tool execution details (/details)"
+            onClick={() => setVerbose((value) => !value)}
+          >
+            /details {verbose ? "on" : "off"}
+          </button>
+          <span className="oc-footer-brand">
+            <span className="oc-footer-dot">•</span> Open<b>Fusion</b>
+          </span>
+        </div>
+      </footer>
     </article>
   );
 }

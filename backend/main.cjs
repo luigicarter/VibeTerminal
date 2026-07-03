@@ -1317,6 +1317,40 @@ ipcMain.handle("agent-thread:latest", (_event, payload) => {
   return findLatestAgentThread(payload);
 });
 
+ipcMain.handle("agent-thread:list", (_event, payload) => {
+  // Saved-chat history for the Open Fusion resume picker. Unlike the latest
+  // lookup this must FAIL CLOSED: listing may only ever run against the
+  // app-owned OpenCode store — falling through to the user's global store
+  // would surface their personal CLI threads in the picker.
+  if (payload?.provider !== "opencode" || !payload.openFusion) {
+    return {
+      status: "failed",
+      message: "Saved-chat listing is only available for Open Fusion panes."
+    };
+  }
+  try {
+    const telemetry = getAgentTelemetry();
+    const home = telemetry.getOpenFusionOpencodeHome();
+    // The migration cutoff hides personal CLI threads that rode along in the
+    // seeded db snapshot; app-created threads all post-date it.
+    const cutoff = telemetry.getOpenFusionThreadCutoffMs();
+    return findLatestAgentThread({
+      ...payload,
+      list: true,
+      after: Math.max(Number(payload.after) || 0, cutoff),
+      opencodeEnv: {
+        XDG_DATA_HOME: home.dataDir,
+        XDG_CONFIG_HOME: home.configDir
+      }
+    });
+  } catch {
+    return {
+      status: "failed",
+      message: "The Open Fusion chat store is unavailable."
+    };
+  }
+});
+
 ipcMain.handle("terminal:create", async (_event, payload) => {
   const launchCwd = resolveLaunchCwd(payload?.cwd, getDefaultRuntimeCwd());
   if (!launchCwd.ok) {

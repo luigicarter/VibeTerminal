@@ -1,4 +1,5 @@
 import type {
+  AgentThreadListResult,
   AgentThreadLookupPayload,
   AgentThreadLookupResult,
   AgentThreadRef,
@@ -69,6 +70,11 @@ declare global {
         findLatest: (
           payload: AgentThreadLookupPayload
         ) => Promise<AgentThreadLookupResult>;
+        // Saved-chat history for the Open Fusion resume picker (app-owned
+        // OpenCode store only). Optional: older preloads may not expose it.
+        list?: (
+          payload: AgentThreadLookupPayload
+        ) => Promise<AgentThreadListResult>;
       };
       terminal: {
         create: (payload: TerminalLaunchPayload) => Promise<boolean>;

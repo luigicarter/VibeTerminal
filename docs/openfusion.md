@@ -106,11 +106,36 @@
 > the normalizer surfaces it as a `stream-end` event so the pane retires that
 > bubble's live caret per-part instead of leaving every finished row blinking
 > until the turn settles (turn-wide clearing on result/interrupt/error stays
-> the net for aborted parts, which never get a `time.end`). Subagent text
-> streams and all thinking render as
-> collapsed one-line click-to-expand rows (live last-line ticker while
-> streaming); only Brain text is transcript prose. The visible surface of a
-> delegation stays its card + extracted task report.
+> the net for aborted parts, which never get a `time.end`).
+>
+> **Transcript rendering (OpenCode-TUI parity, 2026-07-03):** the pane renders
+> the same row shapes as OpenCode's own TUI (verified against the v1.17.11
+> `packages/tui` source) wearing Open Fusion's palette. Tool calls are ONE row
+> per callID — created on `tool-call`, updated in place by the matching
+> `tool-result` — with OpenCode's icon glyphs (`$` bash, `→` read, `✱`
+> glob/grep, `←` edit/write, `%` webfetch, `◈` websearch, `⚙` generic, `│`/`✓`
+> task) and states ("~ pending" before input, bright while running, muted when
+> done, red + click-to-expand error on failure, strikethrough when
+> permission-denied). Bash renders as a block panel (`$ command` + output
+> collapsed at 10 lines, "Click to expand"); Edit renders the host-forwarded
+> `meta.diff` as a colored unified diff; `todowrite` renders OpenCode's
+> "# Todos" `[✓]/[•]/[ ]` checklist; delegations render as OpenCode Task rows
+> ("Executor Task — description" + a live "↳ current tool / N toolcalls" line,
+> completed as "↳ N toolcalls · 12s"; click reveals the extracted task report).
+> Brain text is markdown prose (react-markdown + GFM); thinking renders as
+> OpenCode's "Thinking" spinner → "+ Thought: title" collapsible; subagent text
+> streams are Details-lane worklines ("↳ …" last-line tickers). Each turn ends
+> with OpenCode's "▣ Brain · model · duration" line ("· interrupted" on
+> aborts). The Details toggle (`/details`, default ON like OpenCode) hides
+> completed-successful tool rows and subagent worklines; running/failed rows
+> and Task rows stay. The composer is OpenCode's prompt box (accent left bar,
+> "Ask anything..." cycling placeholders, agent · model meta row inside, a
+> status row with the knight-rider block spinner + "esc interrupt" while busy
+> and token/cost + hints when idle — no send button, Enter sends), and the pane
+> footer is OpenCode's status bar: cwd (parent muted, name bright) left; "△ 1
+> Permission", `/details`, and the "• OpenFusion" brand right. The empty state
+> is OpenCode's home: a block-letter OPEN FUSION logo in OpenCode's exact glyph
+> style (left word muted, right word bold in the pane accent).
 >
 > **Mid-turn steering (verified against the 1.17.11 run loop):**
 > `prompt_async` during a busy turn is legal — the server persists the user
@@ -472,7 +497,32 @@ voices, delegation cards, in-pane permission approvals, model pickers backed by
 `GET /config/providers` + `/provider`, and resume via
 `GET /session/{id}/message` rehydration. Thread discovery still uses the
 existing `opencode` provider (server sessions are ordinary OpenCode sessions on
-disk). The old embedded-TUI launch path (`opencode --agent planner` inside a
+disk).
+
+**Resume picker (2026-07-03):** `/resume` (and the header's RotateCcw button)
+no longer jumps straight to the stashed last chat — it opens a saved-chat
+picker listing EVERY app-created session for the pane's folder, newest first
+with generated titles and ages, filterable by typing (the same slash-menu
+picker chassis as `/connect`). Data comes from `agent-thread:list`
+(`window.vibe.agentThreads.list`), a `list: true` lookup on the discovery host
+that shares `selectOpenCodeThreadRefs` with latest-discovery and runs ONLY
+against the app-owned store — main fails the request closed rather than fall
+through to the user's global OpenCode store, and raises the cutoff to the
+migration marker's `migratedAt` so personal CLI threads inside the seeded db
+snapshot never surface (pre-isolation Open Fusion threads stay resumable via
+their stashed `resumeRef`s, but do not appear in the list — same rule
+latest-discovery already applied). An empty store lists as "No saved chats";
+a listing FAILURE renders as "Couldn't read saved chats" plus a
+"Resume last chat" fallback row against the stashed `resumeRef` — an error
+must never masquerade as an empty history. Rows whose session id is active in
+another pane are marked "open in another pane" and refused on selection (two
+panes must never drive one session id); the pane's own current conversation is
+excluded. Selection hands the full threadRef to `App.resumeSession(scope,
+session, targetRef)`, which reuses the deliberate-resume plumbing (stop →
+relaunch with `nextLaunchMode: "resume"`, confirm-before-resume self-heal,
+`GET /session/{id}/message` rehydration), stashing the outgoing conversation
+as the next `resumeRef`. Locked by
+`scripts/backend/openfusion-isolation-smoke.cjs`. The old embedded-TUI launch path (`opencode --agent planner` inside a
 PTY with `OPENCODE_TUI_CONFIG`, TUI plugin pickers) is superseded; the config
 generator still writes the theme/tui/plugin files, which stock `opencode` runs
 in that directory can pick up, but no pane launches the TUI anymore.
@@ -483,8 +533,10 @@ Direction: **build Open Fusion as a mode separate from Fusion**. Current shipped
 slice = the `FusionChatPane`-style UI driven by the OpenCode server (the former
 "future slice"), roles = two user-picked model IDs mapped to primary(planner,
 read-only) + subagent(executor) via generated per-pane OpenCode config,
-delegation via the native `task` tool, UI = `OpenFusionChatPane` (branded hero,
-role-voiced transcript, delegation cards, permission panel), model choice =
+delegation via the native `task` tool, UI = `OpenFusionChatPane` (OpenCode-TUI
+parity skin: block-letter hero, OpenCode tool rows/diff blocks/Task rows,
+prompt box + status footer, permission options — in Open Fusion's palette and
+branding), model choice =
 in-pane pickers (`/brain-model`, `/executor-model`) persisted per pane in
 `models.json`. Saved pane models win over launch defaults on restart (the
 pickers own them); invalid saved values fall back to the launch opts, never to

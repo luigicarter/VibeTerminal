@@ -22,6 +22,14 @@ const fusionChatPanePath = path.join(
   "components",
   "FusionChatPane.tsx"
 );
+const openFusionChatPanePath = path.join(
+  __dirname,
+  "..",
+  "..",
+  "frontend",
+  "components",
+  "OpenFusionChatPane.tsx"
+);
 const preloadPath = path.join(__dirname, "..", "..", "preload", "preload.cjs");
 const mainPath = path.join(__dirname, "..", "..", "backend", "main.cjs");
 const stylesPath = path.join(__dirname, "..", "..", "frontend", "styles.css");
@@ -709,10 +717,28 @@ assert(
     fusionChatPaneSource.includes("const [failed, setFailed] = useState(false)") &&
     fusionChatPaneSource.includes('event.kind === "warmup_error"') &&
     fusionChatPaneSource.includes('onStatusChangeRef.current("failed")') &&
-    fusionChatPaneSource.includes('failed ? "failed" : "idle"') &&
     fusionChatPaneSource.includes("Answer Fusion to continue"),
   "FusionChatPane should render distinct waiting and failed states for approval/question turns and warmup errors"
 );
+// The chat panes' local flags only cover a turn in flight; how the pane
+// settled (done / waiting-on-the-user / failed) must come from the
+// app-reconciled session.status — otherwise a finished turn and a pane merely
+// waiting for input both read "ready" in the header pill.
+const openFusionChatPaneSource = fs.readFileSync(openFusionChatPanePath, "utf8");
+for (const [label, chatPaneSource] of [
+  ["FusionChatPane", fusionChatPaneSource],
+  ["OpenFusionChatPane", openFusionChatPaneSource]
+]) {
+  assert(
+    chatPaneSource.includes('session.status === "done"') &&
+      chatPaneSource.includes('session.status === "waiting"') &&
+      chatPaneSource.includes('session.status === "failed"') &&
+      chatPaneSource.includes("const pillStatus = ") &&
+      chatPaneSource.includes("status-${pillStatus}") &&
+      !chatPaneSource.includes('failed ? "failed" : "idle"'),
+    `${label} pill should mirror settled done/waiting/failed from session.status instead of collapsing to "ready"`
+  );
+}
 
 const preloadSource = fs.readFileSync(preloadPath, "utf8");
 assert(

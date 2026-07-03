@@ -79,7 +79,8 @@ contextBridge.exposeInMainWorld("vibe", {
     describePaths: (payload) => ipcRenderer.invoke("files:describe-paths", payload)
   },
   agentThreads: {
-    findLatest: (payload) => ipcRenderer.invoke("agent-thread:latest", payload)
+    findLatest: (payload) => ipcRenderer.invoke("agent-thread:latest", payload),
+    list: (payload) => ipcRenderer.invoke("agent-thread:list", payload)
   },
   terminal: {
     create: (payload) => ipcRenderer.invoke("terminal:create", payload),

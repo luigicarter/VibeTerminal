@@ -1875,6 +1875,28 @@ export default function FusionChatPane({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busy, isSelected, session.id]);
 
+  // The local flags only know the live lane (a turn in flight); how the pane
+  // SETTLED — finished a turn, interrupted and waiting on the user, failed —
+  // lives in the app-reconciled session.status, the same source the sidebar
+  // reads. Without it every settled pane collapses into "ready", so a pane
+  // that is just waiting for input is indistinguishable from one that
+  // finished a task.
+  const settledStatus =
+    session.status === "done" ||
+    session.status === "waiting" ||
+    session.status === "failed"
+      ? session.status
+      : null;
+  const pillStatus = busy
+    ? "running"
+    : waiting
+      ? "waiting"
+      : failed
+        ? "failed"
+        : (settledStatus ?? "idle");
+  const pillLabel =
+    pillStatus === "running" ? "working" : pillStatus === "idle" ? "ready" : pillStatus;
+
   return (
     <article
       className={clsx(
@@ -1923,13 +1945,7 @@ export default function FusionChatPane({
           )}
         </div>
         <div className="pane-status">
-          <span
-            className={`status-pill status-${
-              busy ? "running" : waiting ? "waiting" : failed ? "failed" : "idle"
-            }`}
-          >
-            {busy ? "working" : waiting ? "waiting" : failed ? "failed" : "ready"}
-          </span>
+          <span className={`status-pill status-${pillStatus}`}>{pillLabel}</span>
         </div>
         <div className="pane-actions">
           <button title="Add matching pane" onClick={onAdd}>

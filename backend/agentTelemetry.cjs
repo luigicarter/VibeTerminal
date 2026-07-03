@@ -808,6 +808,39 @@ function migrateOpenFusionThreadsFromGlobal(dataDir, env = process.env) {
   return { migrated: copied.length > 0, copied };
 }
 
+// The migration snapshot can carry the user's personal CLI threads. Anything
+// created before the marker's migratedAt is not provably app-created, so
+// history LISTINGS hide it (resume of app-saved ids stays unaffected — the
+// confirm path never uses this cutoff). Returns 0 when nothing rode along:
+// no marker yet, or a marker recording an empty copy.
+function openFusionThreadListCutoffMs(dataDir) {
+  const markerPath = path.join(
+    dataDir,
+    "opencode",
+    ".vibe-migrated-from-global.json"
+  );
+  let stat;
+  try {
+    stat = fs.statSync(markerPath);
+  } catch {
+    return 0;
+  }
+  try {
+    const marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+    if (Array.isArray(marker.copied) && marker.copied.length === 0) {
+      return 0;
+    }
+    const migratedAt = Date.parse(marker.migratedAt);
+    if (Number.isFinite(migratedAt)) {
+      return migratedAt;
+    }
+  } catch {
+    // Unreadable marker: fall through to its mtime — written right after the
+    // copy, so it still fences off the migrated snapshot.
+  }
+  return Math.floor(stat.mtimeMs) || 0;
+}
+
 function ensureOpenFusionOpencodeHome(openFusionBaseDir, env = process.env) {
   const paths = openFusionOpencodeHomePaths(openFusionBaseDir);
   // Pre-create $XDG_CONFIG_HOME/opencode: the app's role config arrives
@@ -2912,6 +2945,10 @@ function createAgentTelemetryManager(options = {}) {
     // Sync on purpose: thread-discovery lookups need the app-owned OpenCode
     // home paths without awaiting the telemetry bootstrap.
     getOpenFusionOpencodeHome: () => ensureOpenFusionOpencodeHome(openFusionBaseDir),
+    getOpenFusionThreadCutoffMs: () =>
+      openFusionThreadListCutoffMs(
+        openFusionOpencodeHomePaths(openFusionBaseDir).dataDir
+      ),
     removeOpenFusionCustomProvider: (providerId) =>
       removeOpenFusionCustomProvider(openFusionBaseDir, providerId),
     prepareSession,
@@ -2942,6 +2979,7 @@ module.exports = {
   openFusionInvestigatorPrompt,
   openFusionOpencodeHomePaths,
   openFusionPlannerPrompt,
+  openFusionThreadListCutoffMs,
   openFusionTuiPluginSource,
   removeOpenFusionCustomProvider,
   openFusionTheme,

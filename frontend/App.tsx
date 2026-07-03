@@ -2170,12 +2170,17 @@ export default function App() {
     }
   }
 
-  // Deliberately resume the pane's previous conversation. Mirrors restartSession
-  // but forces nextLaunchMode "resume" against the stashed resumeRef. The
-  // outgoing active thread becomes the next resumeRef so switching back does not
-  // discard the current conversation pointer.
-  function resumeSession(scope: SessionScope, session: AgentSession) {
-    const resumeRef = sessionResumeRef(session);
+  // Deliberately resume a previous conversation. Mirrors restartSession but
+  // forces nextLaunchMode "resume" against the stashed resumeRef — or, when the
+  // Open Fusion resume picker hands over a specific saved chat, against that
+  // targetRef. The outgoing active thread becomes the next resumeRef so
+  // switching back does not discard the current conversation pointer.
+  function resumeSession(
+    scope: SessionScope,
+    session: AgentSession,
+    targetRef?: AgentThreadRef
+  ) {
+    const resumeRef = targetRef?.id ? targetRef : sessionResumeRef(session);
     if (!resumeRef?.id) {
       return;
     }
@@ -2202,7 +2207,9 @@ export default function App() {
             return item;
           }
 
-          const latestResumeRef = sessionResumeRef(item);
+          const latestResumeRef = targetRef?.id
+            ? targetRef
+            : sessionResumeRef(item);
           if (!latestResumeRef?.id) {
             return item;
           }
@@ -3180,13 +3187,16 @@ export default function App() {
                   <OpenFusionChatPane
                     session={session}
                     profile={getProfile("openfusion")}
+                    claimedThreadIds={claimedThreadIds(session.id)}
                     cwdConflict={cwdConflicts.get(session.id)}
                     isMaximized={session.id === maximizedSessionId}
                     isSelected={session.id === selectedSessionId}
                     onClose={() => closeSession(activeScope, session)}
                     onDuplicate={() => duplicateSession(activeScope, session)}
                     onRestart={() => restartSession(activeScope, session)}
-                    onResume={() => resumeSession(activeScope, session)}
+                    onResume={(threadRef) =>
+                      resumeSession(activeScope, session, threadRef)
+                    }
                     onClear={() => clearFusionSession(activeScope, session)}
                     onSettingsChange={(settings) =>
                       updateOpenFusionSettings(activeScope, session, settings)

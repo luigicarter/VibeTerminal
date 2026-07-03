@@ -154,6 +154,19 @@ export interface AgentThreadLookupPayload {
   openFusion?: boolean;
 }
 
+// Saved-chat history for the Open Fusion resume picker: every app-created
+// session for the pane's folder, newest first. A failure must read as "could
+// not list", never as "no saved chats" — the two render differently.
+export type AgentThreadListResult =
+  | {
+      status: "found";
+      threads: AgentThreadRef[];
+    }
+  | {
+      status: "failed";
+      message?: string;
+    };
+
 export type AgentThreadLookupResult =
   | {
       status: "found";
@@ -418,6 +431,9 @@ export type OpenFusionChatEvent =
       ok: boolean;
       title?: string;
       text: string;
+      // Slim slice of OpenCode's tool state.metadata: edit diffs, glob/grep
+      // hit counts — what the OpenCode-style tool rows render.
+      meta?: OpenFusionToolMeta;
     }
   | {
       id: string;
@@ -504,12 +520,21 @@ export interface OpenFusionAuthMethod {
   prompts?: OpenFusionAuthPrompt[];
 }
 
+export interface OpenFusionToolMeta {
+  diff?: string;
+  count?: number;
+  matches?: number;
+}
+
 // One rendered entry in an Open Fusion pane's chat transcript.
 export interface OpenFusionChatMessage {
   key: string;
   role: "user" | OpenFusionChatRole;
   kind:
     | "text"
+    // One OpenCode-style row per tool call: created on tool-call, updated in
+    // place by the matching tool-result (status/output/meta), like the TUI.
+    | "tool"
     | "tool-call"
     | "tool-result"
     | "thinking"
@@ -522,6 +547,15 @@ export interface OpenFusionChatMessage {
   streaming?: boolean;
   // Tool mechanics hidden unless the Details toggle is enabled.
   internal?: boolean;
+  // kind:"tool" fields (mirrors OpenCode's ToolPart state).
+  toolName?: string;
+  toolStatus?: "running" | "done" | "error";
+  toolInput?: unknown;
+  toolOutput?: string;
+  meta?: OpenFusionToolMeta;
+  // task rows: live progress line (current child tool / toolcall tally) and
+  // completion stats, rendered as the "↳ …" second line like OpenCode.
+  taskDetail?: string;
 }
 
 export type ChatRole = "user" | "opus" | "codex";

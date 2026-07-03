@@ -56,6 +56,17 @@ function clipText(value, max = MAX_TOOL_OUTPUT_CHARS) {
   return text.length > max ? `${text.slice(0, max)}\n… [truncated]` : text;
 }
 
+// The slice of OpenCode's tool state.metadata the pane renders: edit diffs and
+// glob/grep hit counts. Everything else in metadata stays server-side.
+function toolMeta(metadata) {
+  const source = metadata && typeof metadata === "object" ? metadata : {};
+  const meta = {};
+  if (typeof source.diff === "string" && source.diff.trim()) meta.diff = clipText(source.diff);
+  if (Number.isFinite(source.count)) meta.count = Number(source.count);
+  if (Number.isFinite(source.matches)) meta.matches = Number(source.matches);
+  return Object.keys(meta).length ? meta : undefined;
+}
+
 function splitModelId(model) {
   const raw = String(model || "").trim();
   const slash = raw.indexOf("/");
@@ -296,7 +307,8 @@ function createOpenCodeEventNormalizer(rootSessionId) {
             role,
             ok: status === "completed",
             title: String(state.title || ""),
-            text: clipText(status === "completed" ? state.output : state.error || state.output)
+            text: clipText(status === "completed" ? state.output : state.error || state.output),
+            meta: toolMeta(metadata)
           });
           break;
         }
@@ -412,7 +424,8 @@ function rehydrateMessages(messages, rootSessionId) {
             role: "brain",
             ok: state.status === "completed",
             title: String(state.title || ""),
-            text: clipText(state.status === "completed" ? state.output : state.error || state.output)
+            text: clipText(state.status === "completed" ? state.output : state.error || state.output),
+            meta: toolMeta(state.metadata)
           });
         }
       }

@@ -6,6 +6,11 @@
 // OpenCode store is seeded once (threads only) and never written, generated
 // configs carry NO default models, and the discovery host points its
 // `opencode session list` spawns at whatever env overrides the lookup carries.
+// Also locks the saved-chat history contract behind the resume picker: the
+// listing runs only against the app store (fail closed), hides everything
+// created before the migration marker's timestamp (personal CLI threads that
+// rode along in the seeded snapshot must never surface), and filters/sorts
+// sessions with the same folder rules as latest-discovery.
 //
 // No OpenCode binary, no network — pure file/config assertions.
 
@@ -15,9 +20,13 @@ const {
   createAgentTelemetryManager,
   ensureOpenFusionOpencodeHome,
   migrateOpenFusionThreadsFromGlobal,
-  openFusionOpencodeHomePaths
+  openFusionOpencodeHomePaths,
+  openFusionThreadListCutoffMs
 } = require("../../backend/agentTelemetry.cjs");
-const { opencodeSpawnEnv } = require("../../backend/agentThreadHost.cjs");
+const {
+  opencodeSpawnEnv,
+  selectOpenCodeThreadRefs
+} = require("../../backend/agentThreadHost.cjs");
 
 const rootDir = path.join(__dirname, "..", "..");
 const root = path.join(
@@ -121,6 +130,67 @@ async function main() {
     manager.cleanup();
   }
 
+  // ---- saved-chat history: migration cutoff fences off personal threads ----
+  // The migrated db snapshot can carry the user's personal CLI threads; the
+  // resume picker's listing hides everything created before the marker's
+  // migratedAt, so only provably app-created chats surface.
+  const marker = JSON.parse(
+    fs.readFileSync(
+      path.join(home.dataDir, "opencode", ".vibe-migrated-from-global.json"),
+      "utf8"
+    )
+  );
+  const cutoff = openFusionThreadListCutoffMs(home.dataDir);
+  assert(
+    marker.copied.length > 0 && cutoff === Date.parse(marker.migratedAt) && cutoff > 0,
+    "with a non-empty migrated snapshot the history cutoff must be the marker's migratedAt"
+  );
+  assert(
+    openFusionThreadListCutoffMs(path.join(root, "no-such-home")) === 0,
+    "no marker (nothing ever migrated) means no cutoff — every stored chat is app-created"
+  );
+  const emptyCopyBase = path.join(root, "openfusion-empty-copy");
+  const emptyHome = ensureOpenFusionOpencodeHome(emptyCopyBase, {
+    XDG_DATA_HOME: path.join(root, "no-global-store")
+  });
+  assert(
+    openFusionThreadListCutoffMs(emptyHome.dataDir) === 0,
+    "a marker recording an EMPTY copy means nothing rode along — no cutoff"
+  );
+  const brokenMarkerPath = path.join(
+    emptyHome.dataDir,
+    "opencode",
+    ".vibe-migrated-from-global.json"
+  );
+  fs.writeFileSync(brokenMarkerPath, "not-json");
+  assert(
+    openFusionThreadListCutoffMs(emptyHome.dataDir) > 0,
+    "an unreadable marker must fall back to its mtime, never to 'no cutoff'"
+  );
+
+  // ---- saved-chat history: folder filter shared with latest-discovery ----
+  const listSessions = [
+    { id: "old-personal", directory: "/proj", created: 50, updated: 999, title: "rode along" },
+    { id: "mid", directory: "/proj", created: 100, updated: 500, title: "Mid chat" },
+    { id: "new", directory: "/proj", created: 300, updated: 900, title: "New chat" },
+    { id: "elsewhere", directory: "/other", created: 400, updated: 950, title: "Other folder" },
+    { id: "active", directory: "/proj", created: 400, updated: 700, title: "Active pane chat" },
+    { directory: "/proj", created: 400, updated: 960 }
+  ];
+  const listed = selectOpenCodeThreadRefs(listSessions, "/proj", 100, ["active"]);
+  assert(
+    listed.map((thread) => thread.id).join(",") === "new,mid" &&
+      listed[0].title === "New chat" &&
+      listed[0].createdAt === 300 &&
+      listed[0].updatedAt === 900 &&
+      listed.every((thread) => thread.provider === "opencode"),
+    "history listing must keep only this folder's post-cutoff, non-excluded sessions, newest first"
+  );
+  assert(
+    selectOpenCodeThreadRefs(undefined, "/proj", 0, []).length === 0,
+    "a malformed session list must select nothing, not throw"
+  );
+
   // ---- discovery host: lookup env overrides reach the spawn env ----
   const spawnEnv = opencodeSpawnEnv({
     XDG_DATA_HOME: home.dataDir,
@@ -148,6 +218,12 @@ async function main() {
       paneSource.includes("is not a provider in the OpenCode catalog"),
     "pane must flag app-store lookups, gate the first turn on picked models, and refuse unknown /connect ids"
   );
+  assert(
+    paneSource.includes("function openResumePicker") &&
+      paneSource.includes("__resume:") &&
+      paneSource.includes("That chat is already open in another pane."),
+    "pane must offer the saved-chat resume picker and refuse chats claimed by another pane"
+  );
   const hostSource = fs.readFileSync(
     path.join(rootDir, "backend", "openFusionChatHost.cjs"),
     "utf8"
@@ -161,6 +237,22 @@ async function main() {
     mainSource.includes("getOpenFusionOpencodeHome()") &&
       !mainSource.includes("anthropic/claude-sonnet-4-5"),
     "main must inject the app-owned home into openFusion thread lookups and carry no default models"
+  );
+  assert(
+    mainSource.includes('ipcMain.handle("agent-thread:list"') &&
+      mainSource.includes(
+        "Saved-chat listing is only available for Open Fusion panes."
+      ) &&
+      mainSource.includes("getOpenFusionThreadCutoffMs"),
+    "saved-chat listing must fail closed (app store only) and apply the migration cutoff"
+  );
+  const preloadSource = fs.readFileSync(
+    path.join(rootDir, "preload", "preload.cjs"),
+    "utf8"
+  );
+  assert(
+    preloadSource.includes('"agent-thread:list"'),
+    "preload must expose the saved-chat listing to the renderer"
   );
 
   fs.rmSync(root, { recursive: true, force: true });
