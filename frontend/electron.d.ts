@@ -4,12 +4,9 @@ import type {
   AgentThreadLookupResult,
   AgentThreadRef,
   CodeChangeSummary,
-  FusionCodexEffort,
-  FusionCodexModel,
-  FusionEffort,
+  FusionFamily,
   FusionRunMode,
   FusionChatEvent,
-  FusionClaudeModel,
   OpenFusionChatEvent,
   OpenFusionModel,
   TerminalEvent,
@@ -95,17 +92,28 @@ declare global {
           id: string;
           cwd: string;
           resumeId?: string;
-          model?: FusionClaudeModel | string;
-          codexModel?: FusionCodexModel | string;
+          // Per-role families: the planner and executor each run Claude or
+          // Codex. "auto" model/effort values are omitted rather than sent.
+          plannerFamily?: FusionFamily | string;
+          executorFamily?: FusionFamily | string;
+          model?: string;
+          executorModel?: string;
           mode?: FusionRunMode | string;
-          effort?: Exclude<FusionEffort, "auto"> | string;
-          codexEffort?: Exclude<FusionCodexEffort, "auto"> | string;
+          effort?: string;
+          executorEffort?: string;
+          // Legacy field names (pre-family builds).
+          codexModel?: string;
+          codexEffort?: string;
         }) => Promise<{ ok: boolean; error?: string }>;
         updateSettings: (
           id: string,
           settings: {
-            codexModel?: FusionCodexModel | string;
-            codexEffort?: FusionCodexEffort | string;
+            executorFamily?: FusionFamily | string;
+            executorModel?: string;
+            executorEffort?: string;
+            // Legacy field names (pre-family builds).
+            codexModel?: string;
+            codexEffort?: string;
           }
         ) => Promise<{ ok: boolean; error?: string }>;
         sendUserTurn: (id: string, text: string) => void;
@@ -181,12 +189,22 @@ declare global {
           nonce?: string
         ) => Promise<{ ok: boolean; error?: string }>;
         openExternal: (url: string) => Promise<{ ok: boolean; error?: string }>;
-        sendUserTurn: (id: string, text: string) => void;
+        sendUserTurn: (id: string, text: string, mode?: FusionRunMode | string) => void;
         permission: (
           id: string,
           requestId: string,
           reply: "once" | "always" | "reject"
         ) => Promise<{ ok: boolean; error?: string }>;
+        answerQuestion: (
+          id: string,
+          requestId: string,
+          answers: string[][]
+        ) => Promise<{ ok: boolean; error?: string }>;
+        rejectQuestion: (
+          id: string,
+          requestId: string
+        ) => Promise<{ ok: boolean; error?: string }>;
+        compact: (id: string) => Promise<{ ok: boolean; error?: string }>;
         interrupt: (id: string) => Promise<boolean>;
         stop: (id: string) => Promise<boolean>;
         onEvent: (callback: (event: OpenFusionChatEvent) => void) => () => void;

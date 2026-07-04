@@ -29,12 +29,12 @@ assert(
     appSource.includes(".map(restoreStoredWorkspace)") &&
     appSource.includes(".map(restoreStoredSession)") &&
     appSource.includes("threadRef: isFusion") &&
-    appSource.includes("normalizeFusionModel(session.fusionModel)") &&
-    appSource.includes("normalizeFusionCodexModel(session.fusionCodexModel)") &&
-    appSource.includes("normalizeFusionEffort(session.fusionClaudeEffort ?? session.fusionEffort)") &&
-    // Codex effort restores through its OWN normalizer (enum minimal..ultra,
-    // legacy "max" coerced to "xhigh") — never the Claude one.
-    appSource.includes("normalizeFusionCodexEffort(session.fusionCodexEffort ?? session.fusionEffort)") &&
+    // Per-role family settings restore through the shared migration funnel
+    // (legacy model/claudeEffort → planner, codexModel/codexEffort → executor;
+    // codex "max" coerces to "xhigh" — never the Claude enum).
+    appSource.includes("function normalizedFusionSessionFields(session: AgentSession)") &&
+    appSource.includes("normalizeFusionRoleSettings({") &&
+    appSource.includes("...(isFusion ? normalizedFusionSessionFields(session) : {})") &&
     appSource.includes('session.openFusion === true || session.kind === "openfusion"') &&
     appSource.includes('isOpenFusion') &&
     appSource.includes('restoredKind: AgentKind = isFusion') &&

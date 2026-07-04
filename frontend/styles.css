@@ -2144,6 +2144,9 @@ button {
   color: var(--oc-primary);
 }
 .oc-skin .oc-key { margin-left: 6px; color: var(--oc-muted); font-size: 10px; }
+/* Question ask reuses the permission panel; the hint row flags free-text. */
+.oc-skin .oc-permission-hint { color: var(--oc-muted); font-size: 11px; }
+.oc-skin .oc-permission-options button:disabled { cursor: default; opacity: 0.5; }
 
 /* OpenCode-toned overrides for the shared slash palette / steering pin /
    auth panel inside this pane (the Fusion pane keeps its own look). */

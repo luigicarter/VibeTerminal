@@ -60,7 +60,22 @@ const fixture = [
       ]
     }
   },
-  { type: "result", subtype: "success", total_cost_usd: 0.012 }
+  { type: "result", subtype: "success", total_cost_usd: 0.012 },
+  // "/compact" sent as a stream-json user message — lines recorded VERBATIM
+  // from a live claude 2.1.200 session (fusion-compact-spike, 2026-07-04):
+  // status:"compacting" opens the pass, the follow-up status line carries
+  // compact_result + compact_error.
+  { type: "system", subtype: "status", status: "compacting", session_id: "sess-abc" },
+  {
+    type: "system",
+    subtype: "status",
+    status: null,
+    compact_result: "failed",
+    compact_error: "Not enough messages to compact.",
+    session_id: "sess-abc"
+  },
+  { type: "system", subtype: "status", status: "compacting", session_id: "sess-abc" },
+  { type: "system", subtype: "status", status: null, compact_result: "success", session_id: "sess-abc" }
 ];
 
 function main() {
@@ -117,6 +132,20 @@ function main() {
   assert(events.some((e) => e.type === "turn-end"), "missing turn-end");
   const result = events.find((e) => e.type === "result");
   assert(result && result.subtype === "success", "missing successful result event");
+
+  // /compact status lines → compact-start + compacted (ok mirrors
+  // compact_result; the error text rides along for the failed case).
+  const compactStarts = events.filter((e) => e.type === "compact-start");
+  const compacted = events.filter((e) => e.type === "compacted");
+  assert(compactStarts.length === 2, `expected two compact-start events, got ${compactStarts.length}`);
+  assert(
+    compacted.length === 2 &&
+      compacted[0].ok === false &&
+      compacted[0].error === "Not enough messages to compact." &&
+      compacted[1].ok === true &&
+      compacted[1].error === undefined,
+    `compacted events should mirror compact_result/compact_error: ${JSON.stringify(compacted)}`
+  );
 
   const claudeArgs = buildClaudeArgs({
     cwd: "C:\\repo dir\\a&b",
@@ -193,6 +222,10 @@ function main() {
   assert(
     hostSource.includes("function replaySession") &&
       hostSource.includes("replaySession(id, existingState);") &&
+      // Replayed history must be distinguishable from live activity so the
+      // renderer can rebuild the transcript without re-latching status or
+      // re-marking the acknowledged attention dot.
+      hostSource.includes("event: { ...event, replay: true }") &&
       hostSource.includes("emitSessionEvent(id, state, event)") &&
       hostSource.includes("emitDirectSessionEvent(id,") &&
       hostSource.includes("sessions.get(id) !== state") &&
@@ -204,6 +237,203 @@ function main() {
       hostSource.includes('type: "background-activity"') &&
       hostSource.includes('function isBackgroundAgentTool'),
     "Fusion host should replay live sessions, reject stale process events, and report closed-session input"
+  );
+
+  // ---- codex-brain planner normalizer (per-role families) ----
+  // Feed the pure normalizer real notification shapes recorded from the live
+  // codex-cli 0.142.5 probe (2026-07-03) and assert the pane-vocabulary
+  // events plus the elicitation auto-accept/decline replies.
+  const {
+    createCodexBrainNormalizer,
+    bridgeConfigFromMcpFile
+  } = require("../../backend/fusionCodexBrain.cjs");
+  const brain = createCodexBrainNormalizer();
+  const collect = (msg) => brain.normalize(msg);
+
+  const sessionOut = collect({
+    method: "thread/started",
+    params: { thread: { id: "thread-1" } }
+  });
+  assert(
+    sessionOut.events.length === 1 &&
+      sessionOut.events[0].type === "session" &&
+      sessionOut.events[0].sessionId === "thread-1",
+    "codex brain should emit one session event from thread/started"
+  );
+  assert(
+    collect({ method: "thread/started", params: { thread: { id: "thread-1" } } }).events.length === 0,
+    "codex brain session event should be emitted only once"
+  );
+
+  const turnStart = collect({
+    method: "turn/started",
+    params: { threadId: "thread-1", turn: { id: "turn-1", status: "inProgress" } }
+  });
+  assert(
+    turnStart.events[0].type === "turn-start" && brain.getActiveTurnId() === "turn-1",
+    "turn/started should emit turn-start and track the active turn id"
+  );
+
+  const delta = collect({
+    method: "item/agentMessage/delta",
+    params: { threadId: "thread-1", turnId: "turn-1", itemId: "msg-1", delta: "Hel" }
+  });
+  assert(
+    delta.events[0].type === "assistant-text" && delta.events[0].delta === "Hel",
+    "agentMessage deltas should stream as assistant-text"
+  );
+
+  const reasoning = collect({
+    method: "item/reasoningSummaryText/delta",
+    params: { delta: "thinking…" }
+  });
+  assert(
+    reasoning.events[0].type === "thinking" && reasoning.events[0].delta === "thinking…",
+    "reasoning deltas should stream as thinking"
+  );
+
+  const toolCall = collect({
+    method: "item/started",
+    params: {
+      item: {
+        type: "mcpToolCall",
+        id: "call-1",
+        server: "fusion-codex",
+        tool: "codex_implement",
+        arguments: { task: "add rate limiting" }
+      }
+    }
+  });
+  assert(
+    toolCall.events[0].type === "tool-call" &&
+      toolCall.events[0].name === "mcp__fusion-codex__codex_implement" &&
+      toolCall.events[0].input.task === "add rate limiting",
+    "bridge mcpToolCall items should surface with the claude-path tool name prefix"
+  );
+
+  const elicitation = collect({
+    id: 0,
+    method: "mcpServer/elicitation/request",
+    params: { serverName: "fusion-codex", mode: "form" }
+  });
+  assert(
+    elicitation.reply &&
+      elicitation.reply.id === 0 &&
+      elicitation.reply.result &&
+      elicitation.reply.result.action === "accept",
+    "fusion bridge elicitations must be auto-accepted (unanswered ones wedge the thread)"
+  );
+  const foreignElicitation = collect({
+    id: 1,
+    method: "mcpServer/elicitation/request",
+    params: { serverName: "node_repl" }
+  });
+  assert(
+    foreignElicitation.reply &&
+      foreignElicitation.reply.result &&
+      foreignElicitation.reply.result.action === "decline",
+    "non-bridge MCP elicitations must be declined"
+  );
+  const unsupported = collect({ id: 2, method: "account/chatgptAuthTokens/refresh", params: {} });
+  assert(
+    unsupported.reply && unsupported.reply.error,
+    "unsupported server requests must be answered with a JSON-RPC error (fail closed)"
+  );
+
+  const toolDone = collect({
+    method: "item/completed",
+    params: {
+      item: {
+        type: "mcpToolCall",
+        id: "call-1",
+        server: "fusion-codex",
+        tool: "codex_implement",
+        status: "completed",
+        result: { content: [{ type: "text", text: '{"status":"completed"}' }] },
+        error: null
+      }
+    }
+  });
+  assert(
+    toolDone.events[0].type === "tool-result" &&
+      toolDone.events[0].text === '{"status":"completed"}' &&
+      toolDone.events[0].isError === false,
+    "bridge tool results should surface their text content"
+  );
+
+  collect({
+    method: "thread/tokenUsage/updated",
+    params: { tokenUsage: { total: { totalTokens: 12939 } } }
+  });
+  const done = collect({
+    method: "turn/completed",
+    params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", error: null } }
+  });
+  assert(
+    done.events[0].type === "turn-end" &&
+      done.events[1].type === "result" &&
+      done.events[1].isError === false &&
+      done.events[1].usage &&
+      done.events[1].usage.total.totalTokens === 12939 &&
+      brain.getActiveTurnId() === null,
+    "turn/completed(completed) should emit turn-end + success result with usage"
+  );
+
+  collect({ method: "turn/started", params: { turn: { id: "turn-2" } } });
+  const failed = collect({
+    method: "turn/completed",
+    params: { turn: { id: "turn-2", status: "failed", error: { message: "model exploded" } } }
+  });
+  assert(
+    failed.events[0].type === "turn-error" &&
+      failed.events[0].message === "model exploded" &&
+      failed.events[1].type === "result" &&
+      failed.events[1].isError === true,
+    "turn/completed(failed) should emit turn-error + error result"
+  );
+
+  collect({ method: "turn/started", params: { turn: { id: "turn-3" } } });
+  const interrupted = collect({
+    method: "turn/completed",
+    params: { turn: { id: "turn-3", status: "interrupted", error: null } }
+  });
+  assert(
+    interrupted.events[0].type === "turn-end" &&
+      interrupted.events[1].type === "result" &&
+      interrupted.events[1].subtype === "aborted" &&
+      interrupted.events[1].isError === false,
+    "an interrupted turn must not read as a failure"
+  );
+
+  // bridgeConfigFromMcpFile: the claude-path --mcp-config file translates to
+  // a codex config override table keyed by the bridge server name.
+  const os = require("os");
+  const tmpMcp = path.join(os.tmpdir(), `fusion-brain-smoke-${process.pid}.json`);
+  fs.writeFileSync(
+    tmpMcp,
+    JSON.stringify({
+      mcpServers: {
+        "fusion-codex": { command: "node", args: ["adapter.cjs"], env: { A: "1" } }
+      }
+    })
+  );
+  try {
+    const config = bridgeConfigFromMcpFile(tmpMcp);
+    assert(
+      config.mcp_servers["fusion-codex"].command === "node" &&
+        config.mcp_servers["fusion-codex"].args[0] === "adapter.cjs" &&
+        config.mcp_servers["fusion-codex"].env.A === "1",
+      "bridgeConfigFromMcpFile should map the mcpServers entry to codex mcp_servers"
+    );
+  } finally {
+    fs.unlinkSync(tmpMcp);
+  }
+
+  assert(
+    hostSource.includes("startCodexBrain(payload)") &&
+      hostSource.includes('state.engine === "codex"') &&
+      hostSource.includes("createCodexBrainSession"),
+    "Fusion host should dispatch codex-family planners to the codex brain engine"
   );
 
   console.log("Fusion chat parse smoke passed");

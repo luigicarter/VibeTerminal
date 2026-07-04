@@ -9,18 +9,20 @@
 - **Analysis: done and verified.** 33-agent workflow + first-hand reads.
   Conclusion: ~80% of the "two agents" feeling is *presentation*, removable with
   zero risk to the hard guarantee; the rest is a real structural memory split.
-- **Code: partially implemented.** Fusion now includes direct Claude UI/frontend
-  `Edit`/`Write`, `codex_investigate` for read-only Codex scouting, autonomous
-  Codex executor settings, Plan/Auto controls, and Codex message/code-dump
-  summarization. Treat the remaining items below as historical handoff guidance,
+- **Code: partially implemented.** Fusion now includes `codex_investigate` for
+  read-only Codex scouting, autonomous Codex executor settings, Plan/Auto
+  controls, and Codex message/code-dump summarization. (A direct Claude
+  UI/frontend `Edit`/`Write` experiment shipped briefly and was reverted
+  2026-07-03 — the planner is read-only again; all code goes through Codex.)
+  Treat the remaining items below as historical handoff guidance,
   not as a statement that no code exists.
 - **Decision still open:** how far to go — Sense A only (one voice), or A + B
   (one memory). See "Open decisions" below.
 
 ## The mental model (90-second version)
 
-Fusion = Claude Opus/Sonnet 5 (orchestrator with direct UI/design/frontend `Edit`/`Write`, while `Bash` is blocked) → optional `codex_investigate` for repo scouting → `codex_implement` → embedded Codex GPT-5.5 (owns all execution, debugging, screenshots/browser checks, fixes/verifies with a `FUSION_VERDICT_JSON` gate). The
-two-model split is real and **deliberately enforced** (Claude has `Edit`/`Write` for UI/frontend work, while `Bash` remains blocked). The goal is **not** to merge the models — it's to stop the seams (label
+Fusion = Claude Opus/Sonnet 5 (read-only orchestrator: Read/Grep/Glob, with `Bash` and all edit tools blocked) → optional `codex_investigate` for repo scouting → `codex_implement` → embedded Codex GPT-5.5 (writes all code, owns all execution, debugging, screenshots/browser checks, fixes/verifies with a `FUSION_VERDICT_JSON` gate). The
+two-model split is real and **deliberately enforced**. The goal is **not** to merge the models — it's to stop the seams (label
 flips, "Codex wants to…" strings, JSON verdicts, blank-thread resume) from
 leaking the split to the user, **without** weakening the lock or the verdict gate.
 
@@ -50,11 +52,11 @@ guard **in the same change** or the smoke test fails.
 
 ## Guardrails (do not violate)
 
-1. **Never add shell/image-generation/browser-control execution tools to Claude.**
-   The Fusion helpers in `main.cjs`, backed by `disallowedTools='Bash'`, `--tools`, and `--strict-mcp-config`,
-   are the physical guarantee. UI/frontend edits may be direct through
-   `Edit`/`Write`; all execution, image/browser work, and verification stay in
-   `codex_implement`.
+1. **Never add shell/edit/image-generation/browser-control tools to Claude.**
+   The Fusion helpers in `main.cjs`, backed by
+   `disallowedTools='Bash,Edit,MultiEdit,Write,NotebookEdit'`, `--tools`, and
+   `--strict-mcp-config`, are the physical guarantee. ALL code writing,
+   execution, image/browser work, and verification stay in `codex_implement`.
 2. **Don't soften the gate language** in the system prompt rewrite (A3). Keep
    *"Bash is blocked"*, *"ALL execution work goes through Codex"*, and *"let the verifier verdict gate completion"* verbatim — the verdict gate is **behavioral only**, so the
    prompt is the only thing holding it.

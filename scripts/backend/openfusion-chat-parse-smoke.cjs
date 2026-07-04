@@ -18,7 +18,8 @@ const {
   splitModelId,
   buildPlannerTurnParts,
   OPEN_FUSION_GATE_MARKER,
-  OPEN_FUSION_GATE_REMINDER
+  OPEN_FUSION_GATE_REMINDER,
+  OPEN_FUSION_PLAN_REMINDER
 } = require("../../backend/openFusionChatHost.cjs");
 
 function assert(condition, message) {
@@ -265,6 +266,50 @@ const fixture = [
     properties: { id: "perm_1", sessionID: CHILD, permission: "read", patterns: ["*.env"] }
   },
   { type: "permission.replied", properties: { sessionID: CHILD, requestID: "perm_1", reply: "once" } },
+  // Question round-trip (V1 vocabulary: shape from the 1.17.13 source,
+  // string-confirmed in the 1.17.11 binary — payload IS the Request object:
+  // { id: "que_…", sessionID, questions: Info[], tool? }).
+  {
+    type: "question.asked",
+    properties: {
+      id: "que_1",
+      sessionID: ROOT,
+      questions: [
+        {
+          question: "Which database should the migration target?",
+          header: "Database",
+          options: [
+            { label: "PostgreSQL", description: "the prod default" },
+            { label: "SQLite", description: "local dev" }
+          ]
+        },
+        {
+          question: "Which environments apply?",
+          header: "Environments",
+          options: [
+            { label: "staging", description: "" },
+            { label: "prod", description: "" }
+          ],
+          multiple: true,
+          custom: false
+        }
+      ]
+    }
+  },
+  // A question from an unrelated session must be dropped.
+  {
+    type: "question.asked",
+    properties: {
+      id: "que_foreign",
+      sessionID: "ses_other",
+      questions: [{ question: "leak?", header: "leak", options: [] }]
+    }
+  },
+  { type: "question.replied", properties: { sessionID: ROOT, requestID: "que_1", answers: [["PostgreSQL"], ["staging", "prod"]] } },
+  // Server-side compaction marker (manual /compact and auto-compaction emit
+  // the same event); a child-session compaction must not surface.
+  { type: "session.compacted", properties: { sessionID: ROOT } },
+  { type: "session.compacted", properties: { sessionID: CHILD } },
   // Turn end; a second idle must not double-emit.
   { type: "session.idle", properties: { sessionID: ROOT } },
   { type: "session.idle", properties: { sessionID: ROOT } },
@@ -406,6 +451,35 @@ assert(
   "permission.replied should normalize to permission-resolved"
 );
 
+// Question round-trip: multi-question requests keep their array shape, the
+// requestId is the event's `id`, and options/multiple/custom survive
+// normalization (custom defaults to true when absent).
+const questions = byType("question");
+assert(
+  questions.length === 1 && questions[0].requestId === "que_1",
+  "question.asked should normalize once with the event id as requestId (foreign sessions dropped)"
+);
+assert(
+  questions[0].questions.length === 2 &&
+    questions[0].questions[0].options[0].label === "PostgreSQL" &&
+    questions[0].questions[0].custom === true &&
+    questions[0].questions[1].multiple === true &&
+    questions[0].questions[1].custom === false &&
+    questions[0].role === "brain",
+  "question payload should carry all questions with options, multiple, and defaulted custom"
+);
+assert(
+  byType("question-resolved").length === 1 &&
+    byType("question-resolved")[0].requestId === "que_1",
+  "question.replied should normalize to question-resolved"
+);
+
+// Compaction marker: root-only.
+assert(
+  byType("compacted").length === 1,
+  "session.compacted should surface exactly once (root session only)"
+);
+
 // Exactly one result carrying the step-finish token totals.
 const results = byType("result");
 assert(results.length === 1, "expected exactly one result for one turn");
@@ -438,6 +512,15 @@ assert(
     turnParts[1].text === OPEN_FUSION_GATE_REMINDER &&
     turnParts[1].text.startsWith(OPEN_FUSION_GATE_MARKER),
   "buildPlannerTurnParts should append the marked gate reminder as a separate part"
+);
+// Plan turns swap in the plan-variant reminder — SAME marker prefix, or
+// rehydration would render it as user text.
+const planParts = buildPlannerTurnParts("plan the migration", "plan");
+assert(
+  planParts[1].text === OPEN_FUSION_PLAN_REMINDER &&
+    planParts[1].text.startsWith(OPEN_FUSION_GATE_MARKER) &&
+    OPEN_FUSION_PLAN_REMINDER !== OPEN_FUSION_GATE_REMINDER,
+  "plan-mode turns must carry the plan-variant reminder under the same marker prefix"
 );
 
 // ---- rehydrateMessages ----
@@ -574,5 +657,20 @@ assert(
   "api methods should keep prompt metadata and drop validators"
 );
 assert(!methods.bogus, "unknown method types are dropped entirely");
+
+// ---- reattach replay contract ----
+// Replayed history must be distinguishable from live activity so the renderer
+// can rebuild the transcript without re-latching status or re-marking the
+// acknowledged attention dot.
+const hostSource = require("fs").readFileSync(
+  require("path").join(__dirname, "..", "..", "backend", "openFusionChatHost.cjs"),
+  "utf8"
+);
+assert(
+  hostSource.includes("function replaySession") &&
+    hostSource.includes("replaySession(id, existingState);") &&
+    hostSource.includes("event: { ...event, replay: true }"),
+  "Open Fusion host should tag reattach-replayed events with replay: true"
+);
 
 console.log("Open Fusion chat parse smoke passed");

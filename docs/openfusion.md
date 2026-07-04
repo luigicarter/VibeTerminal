@@ -74,6 +74,53 @@
 > pane sees the credential immediately (busy panes pick it up at their next
 > dispose/restart).
 >
+> **Plan mode (2026-07-04):** Shift+Tab / `/plan` / `/auto` / the footer chip
+> flip the pane between Auto and Plan. The mode is renderer-only state
+> (`session.openFusionRunMode`) that rides EVERY send —
+> `sendUserTurn(id, text, mode)` — and the host picks the opencode agent per
+> prompt (`agent: "plan" | "planner"` in the `prompt_async` body), so there is
+> no set-mode plumbing and no accept race. The generated config carries a
+> second read-only primary agent `plan` (same git-evidence bash allowlist as
+> the planner; `task {"*": deny, investigator: allow}` — the executor is
+> permission-DENIED while planning, the scout is not). A plan-mode turn that
+> settles cleanly with Brain prose arms an "Implement this plan?" bar (arming
+> ground truth = the host's user-echo `mode`, emitted by the same call that
+> chose the agent); accepting flips to Auto and sends "Implement the plan."
+> as one race-free planner turn. Two semantics to know: a message queued
+> mid-turn is absorbed by the RUNNING turn's agent regardless of the chip
+> (safe direction — plan is read-only), and panes launched from a build
+> without the plan agent get a friendly "restart the pane" error via the
+> `planAgent` start-payload capability flag. Prompt-side, plan turns swap the
+> standing gate reminder for a plan variant under the SAME
+> `OPEN_FUSION_GATE_MARKER` prefix (rehydration filters by that prefix).
+> Locked by `agent-telemetry-smoke` (agent shape, task-map key order, prompt
+> file) and `openfusion-chat-parse-smoke` (plan reminder variant).
+>
+> **/compact (2026-07-04):** `/compact` (alias `/summarize`) calls
+> `POST /session/{id}/summarize` `{providerID, modelID}` with the Brain model
+> — the same endpoint the OpenCode TUI's `/compact` uses. The host passes a
+> 300s timeout (the default 30s `request()` timeout would destroy the POST
+> mid-summarization). The server's `session.compacted` SSE event (root-only)
+> renders as a "Context compacted." activity row — server-side auto-compaction
+> (overflow-driven; only models with a known context limit get it) produces
+> the same marker for free. The pane blocks the command while busy and until
+> a Brain model is picked.
+>
+> **Questions (2026-07-04):** `question.asked` / `question.replied` /
+> `question.rejected` (the V1 question-service vocabulary used by opencode's
+> `ask` tool and `plan_exit`) previously fell through the normalizer's
+> `default` case — any tool question hung the turn invisibly. The pane now
+> renders a panel per request (requests queue FIFO; a pending permission takes
+> precedence and owns the keys): single-select buttons answer and advance,
+> `multiple` questions toggle + Submit, `custom` questions accept typed
+> composer text, Esc rejects the whole request
+> (`POST /question/{requestID}/reject`). Replies post
+> `{answers: string[][]}` to `POST /question/{requestID}/reply` — option
+> LABELS (or the typed string), one inner array per question, in request
+> order. Payload shape note: fields were read from the 1.17.13 source and
+> string-confirmed in the shipped 1.17.11 binary; the parse-smoke fixture
+> encodes that shape.
+>
 > **Engine contract (live-verified against OpenCode 1.17.11):**
 > `opencode serve --port 0 --hostname 127.0.0.1` (stdout line reports the
 > port; basic auth via a per-pane random `OPENCODE_SERVER_PASSWORD`);
@@ -440,6 +487,18 @@ transcript ordering (the coherence seam Fusion fights in
   4. **Verbatim evidence contract.** The executor prompt and `/delegate`
      template require verbatim primary artifacts (exact commands + exit status,
      verbatim final test-runner summary lines, the diff itself), not summaries.
+  5. **Checkpointed delegation.** Multi-stage work (multi-file features,
+     refactor + behavior changes, anything where an early wrong choice
+     cascades) must not go to the executor as one giant handoff: the planner
+     defines 2–5 independently verifiable milestones, delegates ONE milestone
+     per `task` call, and must run the same independent check (git evidence,
+     read the changed files, or an investigator pass) between milestones
+     before releasing the next — corrections fold into the next delegation.
+     The executor prompt and `/delegate` template carry the matching scope
+     discipline: implement only the named milestone, report impacts on later
+     milestones instead of acting on them. Micro-slicing is explicitly ruled
+     out — a milestone is a verifiable increment, and small single-stage tasks
+     stay one delegation.
 
   Locked by `agent-telemetry-smoke` (permission shape incl. key order + prompt
   anchors) and `openfusion-chat-parse-smoke` (reminder part + rehydration

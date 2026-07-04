@@ -1,9 +1,37 @@
 # Terminal Fusion
 
+> **Per-role families (2026-07-04):** the planner and executor each pick a
+> FAMILY — Claude (claude CLI) or Codex (codex app-server) — then a model
+> inside it, through an Open Fusion-style two-stage picker (`/planner-model`,
+> `/executor-model`, or clicking either model in the composer meta row; no
+> provider-connect/API-key flows — both families ride existing subscriptions).
+> All four quadrants run: claude+codex (classic), claude+claude,
+> codex+codex, codex+claude. Settings are per-role
+> (`plannerFamily/plannerModel/plannerEffort`,
+> `executorFamily/executorModel/executorEffort`) with legacy
+> `model/claudeEffort/codexModel/codexEffort` migration everywhere
+> (`normalizeFusionRoleSettings` in `frontend/components/fusionSlashMenu.ts`
+> is the single funnel). Planner changes restart the pane (same-family
+> restarts resume the thread; cross-family starts fresh, transcript kept);
+> executor changes apply live via `fusion-settings.json` (now carrying
+> `executorFamily/executorModel/executorEffort` + legacy mirrors). The codex
+> PLANNER runs `codex app-server` per pane with `thread/start
+> {sandbox:"read-only", approvalPolicy:"never", developerInstructions:<the
+> architect prompt>, config.mcp_servers["fusion-codex"]:<the same adapter>}`
+> — the read-only planner lock stays HARD (sandbox-enforced; live-verified
+> 2026-07-03 on codex 0.142.5 incl. per-thread MCP hosting and the
+> `mcpServer/elicitation/request` auto-accept the brain host must answer).
+> The claude EXECUTOR is a persistent headless `claude` child inside
+> fusion-adapter.cjs (bypassPermissions — parity with the codex executor's
+> dangerFullAccess/never), reusing the host's exported arg builder + stream
+> normalizer; goals are emulated adapter-locally for it, and the codex_*
+> bridge tool names stay unchanged regardless of engine (the system prompt
+> says so explicitly).
+
 > **Status: implemented (M2 engine + M3 headless chat UI + M4 embedded per-pane Codex).**
 > A Fusion pane is a custom **Claude-Code-style chat UI**: Claude runs HEADLESS
-> (stream-json) as **Opus or Sonnet 5** the orchestrator/architect with direct UI/design/frontend writes and delegates
-> execution plus verification to Codex (**GPT-5.5**) via a per-pane MCP
+> (stream-json) as **Opus or Sonnet 5** the read-only orchestrator/architect and delegates
+> ALL code writing, execution, and verification to Codex (**GPT-5.5**) via a per-pane MCP
 > adapter; exceptional decisions can route back to Opus. Each
 > Fusion terminal spawns its **OWN embedded** Codex `app-server` over **stdio**
 > (the bundled binary, `vendor/codex-bin/<plat>` → `resources/` via
@@ -51,9 +79,9 @@
 > `scripts/frontend/fusion-settings-smoke.cjs`.
 
 Goal: a **Fusion** terminal that fuses the *capabilities* of two coding agents
-behind one surface — Claude (Opus or Sonnet 5) as the orchestrator/architect/designer and
-long-horizon coding controller using Codex native goals with direct UI/design/frontend edit/write tools, and Codex (GPT-5.5) as
-executor, tester, bug reviewer, and completion verifier — so the user talks to
+behind one surface — Claude (Opus or Sonnet 5) as the read-only orchestrator/architect/designer and
+long-horizon coding controller using Codex native goals, and Codex (GPT-5.5) as
+the sole code writer, executor, tester, bug reviewer, and completion verifier — so the user talks to
 one terminal and the right model handles each sub-task. Think "OpenRouter, but for **complementary
 specialists** rather than interchangeable models": the router doesn't pick one
 engine for the whole prompt, it **decomposes** the task and routes sub-tasks by
@@ -64,9 +92,9 @@ itself (an LLM that decides when to delegate), not a static rule table.
 
 ## Roles and completion authority
 
-The two models have hard, enforced scopes. Claude is launched with `Read`/`Grep`/`Glob`, direct UI/design/frontend edit/write tools (`Edit`/`Write`), and the Codex bridge tools. `Bash` stays in `--disallowedTools`, and Claude is launched with a restricted built-in `--tools` surface plus a strict per-pane MCP config, so read-only command/environment checks go through `codex_investigate`, while tests, builds, debug runs, screenshots, browser control, image generation, and any mutating work are structurally forced through `codex_implement`. Codex remains the hard verifier for bugs and goal completion. `--disallowedTools` also carries write deny rules (`Edit(...)`/`Write(...)` for `.git/**`, `.github/workflows/**`, `.husky/**` — see `FUSION_CLAUDE_WRITE_DENY_PATHS` in `main.cjs`): deny rules override `acceptEdits`, closing the escalation where Bash-less Claude authors an executable side-effect (git hook, CI workflow, husky hook) that full-access Codex or the user would execute later. Broader path-scope hardening via `VIBE_FUSION_UI_WRITE_GLOBS` is deferred and not enforced in this build; direct writes are limited to UI/design/frontend by the Fusion prompt and tool split. Reversible: remove `Edit`/`Write` from the Fusion helpers in `main.cjs` and restore the old Edit/Write/Bash denylist to return to read-only Claude.
+The two models have hard, enforced scopes. Claude is launched read-only: `Read`/`Grep`/`Glob` plus the Codex bridge tools on the restricted built-in `--tools` surface with a strict per-pane MCP config. Every file-edit tool is hard-blocked via `--disallowedTools` (`Bash` plus `Edit`/`MultiEdit`/`Write`/`NotebookEdit` — see `FUSION_CLAUDE_EDIT_DENY_TOOLS` in `main.cjs`), so ALL code writing in every layer — frontend included — is structurally forced through `codex_implement`, read-only command/environment checks go through `codex_investigate`, and tests, builds, debug runs, screenshots, browser control, and image generation are Codex-owned. Codex remains the hard verifier for bugs and goal completion. Claude still owns UI/design *decisions*: it reads the relevant files, decides exactly what should change, and hands Codex the specification (2026-07-03: the interim direct-`Edit`/`Write`-for-UI experiment was reverted at the user's direction — the planner must not write code).
 
-The architect prompt also carries concurrent-edits guidance (locked by `fusion-launch-smoke`): an Edit/Write stale-rejection whose drift is not explained by Claude's own Codex delegation may mean another agent pane or tool is editing the same checkout — Claude should re-read, hold the edit, and surface the foreign drift to the user instead of silently retrying over it. The renderer's shared-folder chip (`frontend/cwdConflicts.ts`) shows the human the same overlap.
+The architect prompt also carries concurrent-edits guidance (locked by `fusion-launch-smoke`): file drift that is not explained by Claude's own Codex delegation may mean another agent pane or tool is editing the same checkout — Claude should re-read, hold the delegation, and surface the foreign drift to the user instead of silently letting Codex retry over it. The renderer's shared-folder chip (`frontend/cwdConflicts.ts`) shows the human the same overlap.
 
 | Opus 4.8 (Claude - orchestrator/architect/designer) | Codex GPT-5.5 (implementer/reviewer/verifier) |
 |---|---|
@@ -76,7 +104,7 @@ The architect prompt also carries concurrent-edits guidance (locked by `fusion-l
 | Reviewing a Codex plan before it touches a large repo | Refactors |
 | "What are we missing?" analysis | Repo navigation |
 | Tradeoff reasoning | Implementing from an approved plan |
-| Direct UI/design/frontend edits plus Read/Grep/Glob review | Iterative debugging loops |
+| UI/design direction (specify the change; Read/Grep/Glob review) | Iterative debugging loops |
 | Guiding Codex with constraints, UI intent, debugging direction, and corrections | Following Claude guidance while independently checking the result |
 | Human-facing override decisions | Bug review and goal-completion verification |
 | Deciding when image/browser work is needed | Picture/image generation and browser control |
@@ -89,7 +117,22 @@ not a substitute for Codex's independent verifier verdict.
 
 **The loop:** Opus plans/designs → Codex implements + runs tests + fixes → produces
 a diff and structured verifier verdict → if Codex says not done, Opus continues
-or redelegates with more guidance → Codex fixes and verifies again. Claude reviews diffs with Read/Grep/Glob and may directly adjust UI/design/frontend files before sending the result to Codex for execution and verification. Future
+or redelegates with more guidance → Codex fixes and verifies again. Claude reviews diffs with Read/Grep/Glob against its specification; any adjustment it wants goes back through `codex_implement`.
+
+**Checkpointed delegation** (locked by `fusion-launch-smoke` +
+`fusion-adapter-smoke`): multi-stage work is split into 2–5 independently
+verifiable milestones — ONE `codex_implement` call per milestone, and Claude
+must review the returned summary/files/verdict and Read the changed files
+against its spec BEFORE delegating the next milestone, folding corrections
+into that next delegation. The verifier contract tells Codex that a milestone
+task's `goalReached` refers to the LARGER goal, so mid-plan milestones come
+back `goalReached:false`/`nextAction:"continue"` (the expected checkpoint
+state) and the adapter's verdict→goal sync cannot mark the native Codex goal
+complete before the final milestone. Milestones don't license micro-slicing:
+within one milestone the fewer-larger-chunks delegation rule still applies,
+and small single-stage tasks stay one delegation.
+
+Future
 worktree isolation is a hardening option; the current implementation runs Codex
 implementation turns in the pane's workspace with `danger-full-access` and
 `approvalPolicy:"never"` so routine reads/writes do not bounce back through
@@ -293,7 +336,7 @@ env vars, each guarded so the surface no-ops when they are unset:
 With all three unset the adapter is a complete host-free MCP server, so the whole
 `codex_implement → needs_decision → codex_respond → verifier` loop can be driven by
 a plain `claude --mcp-config …` with `--allowedTools "…,Read,Glob,Grep"
---tools "Read,Glob,Grep,Edit,Write" --disallowedTools "Bash" --strict-mcp-config` (the execution lock is Bash denial plus the restricted built-in tool surface). This is kept as a **private validation/fallback hedge**, not a shipped
+--tools "Read,Glob,Grep" --disallowedTools "Bash,Edit,MultiEdit,Write,NotebookEdit" --strict-mcp-config` (the execution lock is the edit/Bash denial plus the restricted built-in tool surface). This is kept as a **private validation/fallback hedge**, not a shipped
 public skill — the capability has no moat, so publishing it would cannibalize the
 app. The only thing lost off-host is the renderer activity relay and external
 steer/stop (interrupt is native to `claude`).
@@ -316,9 +359,10 @@ split-lanes, **not** a side rail:
 
 - Opus prose is markdown; thinking folds into "+ Thought" collapsibles; every
   turn closes with a "▣ Fusion · model · duration" line.
-- Claude's own tools (Read/Glob/Grep/Edit/Write) are OpenCode-style one-liner
-  rows updated in place by their results — Edit shows a colored diff panel
-  derived from `old_string`/`new_string`.
+- Claude's own tools (Read/Glob/Grep) are OpenCode-style one-liner rows updated
+  in place by their results. (The kit still renders Edit rows with a colored
+  diff panel derived from `old_string`/`new_string` — unused in Fusion now that
+  the planner is read-only, but shared with Open Fusion.)
 - `codex_implement`/`codex_investigate` render as Task rows ("Executor/Scout
   Task — …") whose "↳ …" line ticks with the Codex side-channel's
   command/file/message activity; completed rows read "↳ N updates · 12s" and
@@ -328,6 +372,15 @@ split-lanes, **not** a side rail:
   completed-successful tool rows and internal worklines; running/failed/Task
   rows always stay. Pre-turn engine chatter (launch-time stderr, warmup notes)
   never enters the transcript — the FUSION hero owns a fresh pane.
+- `/compact` (2026-07-04) frees context by sending the literal `/compact` as a
+  stream-json user message — the claude CLI interprets it headlessly (verified
+  live by `scripts/backend/fusion-compact-spike.cjs` on 2.1.200: it emits
+  `system/status` `status:"compacting"` then a status line with
+  `compact_result` + `compact_error`). The host normalizes those to
+  `compact-start`/`compacted` events; the pane renders "Compacting context…" /
+  "Context compacted." activity rows (or the error, e.g. "Not enough messages
+  to compact."). Blocked while a turn is running. Fixture-locked in
+  `fusion-chat-parse-smoke`.
 
 Mid-turn sends (steering) do not drop into the scrolling transcript, where the
 stream would bury them: the pane pins them above the composer with a QUEUED

@@ -19,10 +19,15 @@
 // smoke can test it with a recorded fixture — no Claude, no auth, no cost.
 
 const { spawn, execFileSync } = require("child_process");
+const { createCodexBrainSession } = require("./fusionCodexBrain.cjs");
 
 const isWin = process.platform === "win32";
 const CLAUDE_BIN = process.env.VIBE_CLAUDE_BIN || "claude";
 const MAX_HISTORY_EVENTS = 20_000;
+
+function normalizeFusionPlannerFamily(value) {
+  return String(value || "").trim().toLowerCase() === "codex" ? "codex" : "claude";
+}
 
 function normalizeFusionRunMode(value) {
   return String(value || "").trim().toLowerCase() === "plan" ? "plan" : "auto";
@@ -130,6 +135,22 @@ function createStreamNormalizer() {
 
     if (msg.type === "system" && msg.subtype === "init") {
       if (msg.session_id) events.push({ type: "session", sessionId: msg.session_id });
+      return events;
+    }
+
+    if (msg.type === "system" && msg.subtype === "status") {
+      // Observed live (claude 2.1.200) when "/compact" is sent as a stream-json
+      // user message: status:"compacting" opens the pass, then a status line
+      // with compact_result ("success"/"failed") + compact_error closes it.
+      if (msg.status === "compacting") {
+        events.push({ type: "compact-start" });
+      } else if ("compact_result" in msg) {
+        events.push({
+          type: "compacted",
+          ok: msg.compact_result !== "failed",
+          error: typeof msg.compact_error === "string" ? msg.compact_error : undefined
+        });
+      }
       return events;
     }
 
@@ -320,27 +341,16 @@ function runHost() {
   }
 
   function replaySession(id, state) {
+    // Reattach replay is a transcript restore, not fresh activity: the flag
+    // lets the renderer rebuild the pane without re-latching status or
+    // re-marking the attention dot for turns the user already acknowledged.
     for (const event of state.history) {
-      emit({ type: "event", id, event });
+      emit({ type: "event", id, event: { ...event, replay: true } });
     }
   }
 
   function start(payload) {
-    const {
-      id,
-      cwd,
-      mcpConfig,
-      systemPromptFile,
-      model,
-      effort,
-      settingsFile,
-      tools,
-      allowedTools,
-      disallowedTools,
-      permissionMode,
-      strictMcpConfig,
-      resumeId
-    } = payload;
+    const { id, cwd } = payload;
     if (sessions.has(id)) {
       const existingState = sessions.get(id);
       if (existingState?.child) {
@@ -350,6 +360,13 @@ function runHost() {
       }
 
       sessions.delete(id);
+    }
+
+    // Per-role families: a codex planner runs `codex app-server` behind the
+    // same control protocol and event vocabulary as the headless claude.
+    if (normalizeFusionPlannerFamily(payload.plannerFamily) === "codex") {
+      startCodexBrain(payload);
+      return;
     }
 
     const launch = buildClaudeSpawn(payload);
@@ -402,6 +419,51 @@ function runHost() {
     });
   }
 
+  // Spawn and wire a codex-family planner: one `codex app-server` child per
+  // pane, MCP-hosting this pane's fusion-adapter, normalized onto the SAME
+  // event vocabulary as the claude stream path (history/replay included).
+  function startCodexBrain(payload) {
+    const { id, cwd } = payload;
+    const state = {
+      child: null,
+      brain: null,
+      engine: "codex",
+      history: [],
+      mode: normalizeFusionRunMode(payload.mode)
+    };
+    sessions.set(id, state);
+    const emitEvent = (event) => {
+      if (sessions.get(id) !== state) return;
+      emitSessionEvent(id, state, event);
+    };
+    let brain;
+    try {
+      brain = createCodexBrainSession({
+        cwd,
+        codexBin: payload.codexBin || "codex",
+        mcpConfigPath: payload.mcpConfig,
+        systemPromptFile: payload.systemPromptFile,
+        model: payload.model || undefined,
+        effort: payload.effort || undefined,
+        resumeId: payload.resumeId || undefined,
+        emitEvent
+      });
+    } catch (error) {
+      emitSessionEvent(id, state, {
+        type: "error",
+        message: `Fusion planner failed to start: ${error.message}`
+      });
+      return;
+    }
+    state.brain = brain;
+    state.child = brain.child;
+    brain.child.on("exit", (code) => {
+      if (sessions.get(id) !== state) return;
+      state.child = null;
+      emitSessionEvent(id, state, { type: "closed", code });
+    });
+  }
+
   function input(payload) {
     const id = payload?.id;
     const text = String(payload?.text ?? "");
@@ -419,6 +481,19 @@ function runHost() {
       emitSessionEvent(id, state, {
         type: "error",
         message: "Fusion process is closed. Restart Fusion to continue."
+      });
+      return;
+    }
+
+    if (state.engine === "codex") {
+      emitSessionEvent(id, state, { type: "user", text, steer });
+      const content = buildFusionInputContent(text, normalizeFusionRunMode(state.mode), steer);
+      state.brain.sendInput(content, steer).catch((error) => {
+        if (sessions.get(id) !== state) return;
+        emitSessionEvent(id, state, {
+          type: "error",
+          message: `Could not send Fusion turn: ${error.message || "planner is gone"}`
+        });
       });
       return;
     }
@@ -463,7 +538,20 @@ function runHost() {
   function interrupt(payload) {
     const id = payload?.id;
     const state = sessions.get(id);
-    if (!state || !state.child || !state.child.stdin.writable) return;
+    if (!state || !state.child) return;
+
+    if (state.engine === "codex") {
+      // turn/interrupt aborts only the active turn; the app-server (and its
+      // thread) stay up for the next input — same semantics as the claude
+      // control_request path.
+      emitSessionEvent(id, state, { type: "interrupted" });
+      state.brain.interrupt().catch(() => {
+        // best-effort; the user can still Restart as the hard stop.
+      });
+      return;
+    }
+
+    if (!state.child.stdin.writable) return;
     state.interruptSeq = (state.interruptSeq || 0) + 1;
     try {
       state.child.stdin.write(

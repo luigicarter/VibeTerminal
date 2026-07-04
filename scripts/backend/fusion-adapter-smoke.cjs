@@ -15,8 +15,10 @@ const adapterPath = path.join(__dirname, "..", "..", "backend", "fusion-adapter.
 const isWin = process.platform === "win32";
 const {
   VERDICT_MARKER,
+  buildClaudeExecutorArgs,
   buildCodexInvestigationTask,
   buildCodexVerifierTask,
+  cleanClaudeEffort,
   extractVerifierVerdict,
   goalStatusForVerdict,
   normalizeGoal,
@@ -1765,6 +1767,11 @@ function assertVerifierHelpers() {
       wrapped.includes("browser navigation/control/automation"),
     "wrapped task should tell Codex it owns image generation and browser control"
   );
+  assert(
+    wrapped.includes("one milestone of a larger plan") &&
+      wrapped.includes("judge `goalReached` against the LARGER goal"),
+    "wrapped task missing the milestone goalReached clause (mid-plan verdicts must stay continue)"
+  );
 
   const summary =
     "Implemented and tested.\n" +
@@ -1875,11 +1882,308 @@ function assertVerifierHelpers() {
   );
 }
 
+// ---- per-family executor settings + claude engine coverage ----
+
+// readCodexSettings captures VIBE_FUSION_CODEX_SETTINGS at module load, so
+// each parse case runs in a fresh node child with the env set before require.
+function readSettingsInChild(settingsFile) {
+  const out = execFileSync(
+    process.execPath,
+    ["-e", `process.stdout.write(JSON.stringify(require(${JSON.stringify(adapterPath)}).readCodexSettings()))`],
+    { env: { ...process.env, VIBE_FUSION_CODEX_SETTINGS: settingsFile } }
+  );
+  return JSON.parse(out.toString("utf8"));
+}
+
+function assertExecutorSettingsParsing() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-adapter-settings-"));
+  try {
+    const file = path.join(tempDir, "fusion-settings.json");
+
+    fs.writeFileSync(file, JSON.stringify({ executorFamily: "claude", executorModel: "fast", executorEffort: "ultra" }));
+    let parsed = readSettingsInChild(file);
+    assert(parsed.family === "claude", `family should parse claude: ${JSON.stringify(parsed)}`);
+    assert(parsed.model === "sonnet", `claude "fast" should coerce to sonnet: ${JSON.stringify(parsed)}`);
+    assert(parsed.effort === "max", `claude effort ultra should coerce to max: ${JSON.stringify(parsed)}`);
+
+    fs.writeFileSync(file, JSON.stringify({ executorFamily: "claude", executorEffort: "minimal" }));
+    parsed = readSettingsInChild(file);
+    assert(parsed.model === "sonnet", `claude executor should default to sonnet: ${JSON.stringify(parsed)}`);
+    assert(parsed.effort === "low", `claude effort minimal should coerce to low: ${JSON.stringify(parsed)}`);
+
+    // Legacy pre-family file: codexModel/codexEffort only.
+    fs.writeFileSync(file, JSON.stringify({ codexModel: "gpt-5.5", codexEffort: "max" }));
+    parsed = readSettingsInChild(file);
+    assert(parsed.family === "codex", `legacy file should stay codex: ${JSON.stringify(parsed)}`);
+    assert(parsed.model === "gpt-5.5", `legacy codexModel should parse: ${JSON.stringify(parsed)}`);
+    assert(parsed.effort === "xhigh", `legacy codex max should self-heal to xhigh: ${JSON.stringify(parsed)}`);
+
+    fs.writeFileSync(file, JSON.stringify({ executorFamily: "codex", executorModel: "auto", executorEffort: "" }));
+    parsed = readSettingsInChild(file);
+    assert(parsed.model === null, `codex auto model should clear to null: ${JSON.stringify(parsed)}`);
+
+    // In-process helper coverage (env-independent).
+    assert(cleanClaudeEffort("ultra") === "max", "cleanClaudeEffort should coerce ultra to max");
+    assert(cleanClaudeEffort("minimal") === "low", "cleanClaudeEffort should coerce minimal to low");
+    assert(cleanClaudeEffort("auto") === null, "cleanClaudeEffort should treat auto as unset");
+    assert(cleanClaudeEffort("bogus") === null, "cleanClaudeEffort should drop unknown levels");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+function assertClaudeExecutorArgs() {
+  const defaults = buildClaudeExecutorArgs({});
+  const flag = (args, name) => {
+    const index = args.indexOf(name);
+    return index === -1 ? undefined : args[index + 1];
+  };
+  assert(
+    flag(defaults, "--permission-mode") === "bypassPermissions",
+    `claude executor must run bypassPermissions (codex dangerFullAccess parity): ${defaults.join(" ")}`
+  );
+  assert(flag(defaults, "--model") === "sonnet", `claude executor default model should be sonnet: ${defaults.join(" ")}`);
+  assert(!defaults.includes("--effort"), `unset effort should omit the flag: ${defaults.join(" ")}`);
+  assert(defaults.includes("--input-format"), "claude executor must speak stream-json");
+  const custom = buildClaudeExecutorArgs({ model: "opus", effort: "high" });
+  assert(flag(custom, "--model") === "opus", `custom model should pass through: ${custom.join(" ")}`);
+  assert(flag(custom, "--effort") === "high", `custom effort should pass through: ${custom.join(" ")}`);
+}
+
+// A fake claude CLI: consumes one stream-json user message, replays a
+// Bash+Edit tool pass, streams a final text with the verifier verdict, then
+// emits the result line. Records its argv so the cmd.exe quoting path is
+// asserted end-to-end.
+function writeFakeClaudeExecutor(dir) {
+  const scriptPath = path.join(dir, "fake-claude.js");
+  fs.writeFileSync(
+    scriptPath,
+    `
+const fs = require("fs");
+const path = require("path");
+fs.writeFileSync(path.join(__dirname, "claude-argv.txt"), process.argv.slice(2).join("\\n"));
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+function send(obj) { process.stdout.write(JSON.stringify(obj) + "\\n"); }
+function ev(event) { send({ type: "stream_event", event }); }
+rl.on("line", (line) => {
+  if (!line.trim()) return;
+  let msg;
+  try { msg = JSON.parse(line); } catch { return; }
+  if (msg.type !== "user") return;
+  send({ type: "system", subtype: "init", session_id: "fake-claude-exec" });
+  ev({ type: "message_start" });
+  ev({ type: "content_block_start", content_block: { type: "tool_use", id: "t1", name: "Bash" } });
+  ev({ type: "content_block_delta", delta: { type: "input_json_delta", partial_json: JSON.stringify({ command: "echo hi" }) } });
+  ev({ type: "content_block_stop" });
+  ev({ type: "content_block_start", content_block: { type: "tool_use", id: "t2", name: "Edit" } });
+  ev({ type: "content_block_delta", delta: { type: "input_json_delta", partial_json: JSON.stringify({ file_path: "src/app.ts" }) } });
+  ev({ type: "content_block_stop" });
+  ev({ type: "content_block_start", content_block: { type: "text" } });
+  ev({ type: "content_block_delta", delta: { type: "text_delta", text: "Implemented via fake claude executor.\\n${VERDICT_MARKER} {\\"goalReached\\":true,\\"bugsFound\\":[],\\"missingRequirements\\":[],\\"nextAction\\":\\"done\\",\\"summary\\":\\"Fake done.\\"}" } });
+  ev({ type: "content_block_stop" });
+  ev({ type: "message_stop" });
+  send({ type: "result", subtype: "success", is_error: false });
+});
+`
+  );
+  if (isWin) {
+    const cmdPath = path.join(dir, "fake-claude.cmd");
+    fs.writeFileSync(cmdPath, `@"${process.execPath}" "%~dp0fake-claude.js" %*\r\n`);
+    return cmdPath;
+  }
+  const shPath = path.join(dir, "fake-claude");
+  fs.writeFileSync(shPath, `#!/bin/sh\nexec "${process.execPath}" "${scriptPath}" "$@"\n`);
+  fs.chmodSync(shPath, 0o755);
+  return shPath;
+}
+
+// Behavioral: executorFamily "claude" routes codex_implement through the
+// claude engine (fake app-server untouched), the local goal store fills the
+// native-goal contract, and flipping the settings file to codex re-routes the
+// NEXT call to the app-server engine.
+function callAdapterImplementWithFakeClaudeExecutor() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-adapter-claude-exec-"));
+  const markerFile = path.join(tempDir, "thread-started.txt");
+  writeFakeAppServer(tempDir, { markerFile });
+  const fakeClaudeBin = writeFakeClaudeExecutor(tempDir);
+  const settingsFile = path.join(tempDir, "fusion-settings.json");
+  fs.writeFileSync(settingsFile, JSON.stringify({ executorFamily: "claude", executorModel: "sonnet" }));
+  const child = spawn(process.execPath, [adapterPath], {
+    cwd: tempDir,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      VIBE_FUSION_CODEX_BIN: process.execPath,
+      VIBE_FUSION_CLAUDE_BIN: fakeClaudeBin,
+      VIBE_TERMINAL_FUSION_CWD: tempDir,
+      VIBE_TERMINAL_SESSION_ID: "fusion-adapter-claude-exec",
+      VIBE_FUSION_CODEX_SETTINGS: settingsFile,
+      VIBE_FUSION_TURN_IDLE_TIMEOUT_MS: "8000"
+    }
+  });
+
+  const responses = new Map();
+  let buffer = "";
+  let stderr = "";
+  let finished = false;
+
+  function cleanup() {
+    try {
+      child.stdin.end();
+    } catch {
+      // ignore
+    }
+    try {
+      child.kill();
+    } catch {
+      // ignore
+    }
+    if (isWin && child.pid) {
+      try {
+        execFileSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
+      } catch {
+        // best-effort
+      }
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      finished = true;
+      cleanup();
+      reject(new Error(`timed out waiting for claude executor result; stderr=${stderr}`));
+    }, 20000);
+
+    function fail(error) {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      cleanup();
+      reject(error);
+    }
+
+    child.on("error", fail);
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("exit", (code) => {
+      if (finished) return;
+      fail(new Error(`adapter exited before claude executor result: code=${code}; stderr=${stderr}`));
+    });
+
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      let index;
+      while ((index = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, index).trim();
+        buffer = buffer.slice(index + 1);
+        if (!line) continue;
+        let msg;
+        try {
+          msg = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (msg.id === undefined || !msg.result || !msg.result.content) continue;
+        responses.set(msg.id, msg);
+        try {
+          if (msg.id === 2) {
+            const text = msg.result.content[0].text;
+            const parsed = JSON.parse(text);
+            assert(parsed.status === "completed", `claude executor implement should complete: ${text}`);
+            assert(parsed.goalReached === true, `claude executor verdict should parse: ${text}`);
+            assert(
+              parsed.summary === "Implemented via fake claude executor.",
+              `claude executor summary should strip the verdict: ${text}`
+            );
+            assert(
+              Array.isArray(parsed.files) && parsed.files.includes("src/app.ts"),
+              `claude executor should record Edit file paths: ${text}`
+            );
+            assert(
+              !fs.existsSync(markerFile),
+              "claude-family implement must not boot the codex app-server"
+            );
+            const argvFile = path.join(tempDir, "claude-argv.txt");
+            assert(fs.existsSync(argvFile), "fake claude executor argv record missing");
+            const argv = fs.readFileSync(argvFile, "utf8");
+            assert(
+              argv.includes("bypassPermissions") && argv.includes("sonnet"),
+              `claude executor argv should carry bypassPermissions + model: ${argv}`
+            );
+            child.stdin.write(
+              `${JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "codex_goal_get", arguments: {} } })}\n`
+            );
+          } else if (msg.id === 3) {
+            const text = msg.result.content[0].text;
+            const parsed = JSON.parse(text);
+            assert(parsed.status === "ok", `local goal store should answer goal_get: ${text}`);
+            assert(
+              parsed.goal && parsed.goal.threadId === "claude-executor",
+              `claude executor goal should come from the local store: ${text}`
+            );
+            assert(
+              parsed.goal.status === "complete",
+              `done verdict should have synced the local goal to complete: ${text}`
+            );
+            // Flip the settings file to codex: the NEXT call must re-route to
+            // the app-server engine (fake app-server boots, thread marker).
+            fs.writeFileSync(settingsFile, JSON.stringify({ executorFamily: "codex" }));
+            child.stdin.write(
+              `${JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "codex_goal_get", arguments: {} } })}\n`
+            );
+          } else if (msg.id === 4) {
+            finished = true;
+            clearTimeout(timer);
+            const text = msg.result.content[0].text;
+            const parsed = JSON.parse(text);
+            assert(parsed.status === "ok", `codex goal_get after family flip should succeed: ${text}`);
+            assert(parsed.goal === null, `family flip should reset the goal store: ${text}`);
+            assert(
+              fs.existsSync(markerFile),
+              "family flip to codex should boot the app-server engine"
+            );
+            cleanup();
+            resolve();
+          }
+        } catch (error) {
+          fail(error);
+        }
+      }
+    });
+
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "fusion-adapter-claude-exec", version: "0.0.0" }
+        }
+      })}\n`
+    );
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "codex_implement", arguments: { task: "do executor work" } }
+      })}\n`
+    );
+  });
+}
+
 main()
   .then(async () => {
     assertGoalSchema();
     assertVerifierHelpers();
     assertPortabilityGuards();
+    assertExecutorSettingsParsing();
+    assertClaudeExecutorArgs();
     await assertEagerBootStartsThread();
     await callAdapterToolDuringEagerBootUsesOneThreadStart();
     await callAdapterToolWithFakeAppServer();
@@ -1891,6 +2195,7 @@ main()
     await callAdapterApprovalResumeWithFakeAppServer({ queueSecondApproval: true });
     await callAdapterClearsParkedApprovalWhenAppServerExits();
     await callAdapterCancelClearsWedge();
+    await callAdapterImplementWithFakeClaudeExecutor();
     console.log("Fusion adapter smoke passed");
   })
   .catch((error) => {

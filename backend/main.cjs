@@ -138,16 +138,12 @@ const FUSION_CODEX_BRIDGE_TOOLS = [
   // surface, a stuck Codex turn leaves pane-restart as the only recovery.
   "mcp__fusion-codex__codex_cancel"
 ];
-const FUSION_CLAUDE_UI_WRITE_TOOLS = ["Edit", "Write"];
-const FUSION_CLAUDE_BUILTIN_TOOLS = ["Read", "Glob", "Grep", ...FUSION_CLAUDE_UI_WRITE_TOOLS];
-// Claude has no Bash, but an unscoped Edit/Write could still author executable
-// side-effects (git hooks, CI workflows, husky hooks) that full-access Codex or
-// the user would run later. Deny rules override acceptEdits, closing that
-// escalation while keeping direct UI/design file edits.
-const FUSION_CLAUDE_WRITE_DENY_PATHS = [".git/**", ".github/workflows/**", ".husky/**"];
-const FUSION_CLAUDE_WRITE_DENY_RULES = FUSION_CLAUDE_WRITE_DENY_PATHS.flatMap((pattern) =>
-  FUSION_CLAUDE_UI_WRITE_TOOLS.map((tool) => `${tool}(${pattern})`)
-);
+// Claude is the read-only planner: every file modification goes through the
+// Codex executor. The edit tools are kept off the --tools surface AND
+// hard-blocked via --disallowedTools so a prompt or surface regression can't
+// silently re-open direct writes.
+const FUSION_CLAUDE_BUILTIN_TOOLS = ["Read", "Glob", "Grep"];
+const FUSION_CLAUDE_EDIT_DENY_TOOLS = ["Edit", "MultiEdit", "Write", "NotebookEdit"];
 
 function pathFromFileUrl(value) {
   try {
@@ -810,7 +806,9 @@ function parseFusionChatHostOutput(chunk) {
         if (message.type === "event") {
           const fusionEvent = { id: message.id, ...message.event };
           broadcastFusionChatEvent(fusionEvent);
-          if (message.event?.type === "background-activity") {
+          // Replayed history must not re-assert a stale background chip
+          // through the terminal channel; live tracking already settled it.
+          if (message.event?.type === "background-activity" && !message.event.replay) {
             broadcastTerminalEvent({
               id: message.id,
               type: "agent-background-activity",
@@ -971,6 +969,33 @@ function normalizeFusionCodexModel(value) {
   return lower === "auto" || lower === "default" ? undefined : model;
 }
 
+// Which CLI family backs a Fusion role. Either role can run either family.
+function normalizeFusionFamily(value, fallback) {
+  const lower = normalizeFusionString(value)?.toLowerCase();
+  return lower === "claude" || lower === "codex" ? lower : fallback;
+}
+
+// Claude-side effort for EITHER role: the claude --effort enum. Codex-only
+// levels coerce to the nearest real level so a family flip never launches
+// claude with an unknown variant.
+function normalizeFusionClaudeRoleEffort(value) {
+  const effort = normalizeFusionString(value)?.toLowerCase();
+  if (effort === "minimal") return "low";
+  if (effort === "ultra") return "max";
+  return ["low", "medium", "high", "xhigh", "max"].includes(effort)
+    ? effort
+    : undefined;
+}
+
+// Executor model for the claude family ("fast" shorthand maps to sonnet;
+// unknown/auto falls back to sonnet — the executor default for Claude).
+function normalizeFusionClaudeExecutorModel(value) {
+  const model = normalizeFusionModelId(value, "sonnet");
+  const lower = model.toLowerCase();
+  if (lower === "fast" || lower === "auto" || lower === "default") return "sonnet";
+  return model;
+}
+
 function normalizeOpenFusionModel(value, fallback) {
   const model = normalizeFusionModelId(value, fallback);
   const lower = model.toLowerCase();
@@ -1008,7 +1033,7 @@ function fusionClaudeAllowedTools() {
 }
 
 function fusionClaudeDisallowedTools() {
-  return ["Bash", ...FUSION_CLAUDE_WRITE_DENY_RULES].join(",");
+  return ["Bash", ...FUSION_CLAUDE_EDIT_DENY_TOOLS].join(",");
 }
 function resolveAgentThreadRequest(requestId, result) {
   const pending = pendingAgentThreadRequests.get(requestId);
@@ -1431,30 +1456,61 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
     return { ok: false, error: launchCwd.message };
   }
   try {
-    const codexBin = resolveCodexBin();
+    const plannerFamily = normalizeFusionFamily(payload.plannerFamily, "claude");
+    const executorFamily = normalizeFusionFamily(payload.executorFamily, "codex");
+    // The embedded codex binary is only REQUIRED when a role actually runs
+    // the Codex family; an all-Claude pane must not fail closed on it.
+    let codexBin;
+    try {
+      codexBin = resolveCodexBin();
+    } catch (error) {
+      if (plannerFamily === "codex" || executorFamily === "codex") {
+        throw error;
+      }
+      codexBin = "codex";
+    }
     startFusionChatHost();
-    const fusionModel = normalizeFusionModel(payload.model);
-    const payloadCodexModel =
-      typeof payload.codexModel === "string" ? payload.codexModel.trim() : "";
-    const rawCodexModel =
-      payloadCodexModel &&
-      payloadCodexModel.toLowerCase() !== "auto" &&
-      payloadCodexModel.toLowerCase() !== "default"
-        ? payloadCodexModel
-        : process.env.VIBE_FUSION_CODEX_MODEL;
-    const fusionCodexModel = normalizeFusionCodexModel(rawCodexModel);
-    const fusionClaudeEffort = normalizeFusionEffort(payload.effort);
-    // No `?? payload.effort` fallback: the pane omits codexEffort when it's
-    // "auto", and the legacy shared-enum fallback silently applied the CLAUDE
-    // effort to every codex delegation while the UI said "Execution Auto".
-    const fusionCodexEffort = normalizeFusionCodexEffort(payload.codexEffort);
+    const fusionModel =
+      plannerFamily === "codex"
+        ? normalizeFusionCodexModel(payload.model)
+        : normalizeFusionModel(payload.model);
+    const plannerEffort =
+      plannerFamily === "codex"
+        ? normalizeFusionCodexEffort(payload.effort)
+        : normalizeFusionEffort(payload.effort);
+    const rawExecutorModel =
+      typeof payload.executorModel === "string" && payload.executorModel.trim()
+        ? payload.executorModel.trim()
+        : typeof payload.codexModel === "string"
+          ? payload.codexModel.trim()
+          : "";
+    const fusionExecutorModel =
+      executorFamily === "claude"
+        ? normalizeFusionClaudeExecutorModel(rawExecutorModel)
+        : normalizeFusionCodexModel(
+            rawExecutorModel &&
+              rawExecutorModel.toLowerCase() !== "auto" &&
+              rawExecutorModel.toLowerCase() !== "default"
+              ? rawExecutorModel
+              : process.env.VIBE_FUSION_CODEX_MODEL
+          );
+    // No `?? payload.effort` fallback: the pane omits executor effort when
+    // it's "auto", and the legacy shared-enum fallback silently applied the
+    // PLANNER effort to every delegation while the UI said "Execution Auto".
+    const rawExecutorEffort = payload.executorEffort ?? payload.codexEffort;
+    const fusionExecutorEffort =
+      executorFamily === "claude"
+        ? normalizeFusionClaudeRoleEffort(rawExecutorEffort)
+        : normalizeFusionCodexEffort(rawExecutorEffort);
     const fusionRunMode = normalizeFusionRunMode(payload.mode);
     const telemetry = getAgentTelemetry();
     const files = await telemetry.prepareFusionFiles(id, {
       cwd: launchCwd.cwd,
       codexBin,
-      codexModel: fusionCodexModel,
-      codexEffort: fusionCodexEffort,
+      plannerFamily,
+      executorFamily,
+      executorModel: fusionExecutorModel,
+      executorEffort: fusionExecutorEffort,
       runMode: fusionRunMode
     });
     if (!files) {
@@ -1465,13 +1521,17 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
       payload: {
         id,
         cwd: launchCwd.cwd,
+        plannerFamily,
+        codexBin,
         mcpConfig: files.mcpConfig,
         systemPromptFile: files.systemPromptFile,
         model: fusionModel,
         mode: fusionRunMode,
-        effort: fusionClaudeEffort,
-        // Claude can directly write UI/design/frontend files; Codex owns all
-        // execution and final bug/goal verification.
+        effort: plannerEffort,
+        // The planner is read-only (Read/Glob/Grep + the executor bridge);
+        // the executor writes all code and owns execution and final bug/goal
+        // verification. The codex planner path enforces the same lock with
+        // its read-only sandbox.
         tools: fusionClaudeTools(),
         allowedTools: fusionClaudeAllowedTools(),
         disallowedTools: fusionClaudeDisallowedTools(),
@@ -1492,19 +1552,32 @@ ipcMain.handle("fusion-chat:update-settings", async (_event, payload) => {
   if (!payload?.id) {
     return { ok: false, error: "missing session id" };
   }
-  const payloadCodexModel =
-    typeof payload.codexModel === "string" ? payload.codexModel.trim() : "";
-  const rawCodexModel =
-    payloadCodexModel &&
-    payloadCodexModel.toLowerCase() !== "auto" &&
-    payloadCodexModel.toLowerCase() !== "default"
-      ? payloadCodexModel
-      : process.env.VIBE_FUSION_CODEX_MODEL;
-  const fusionCodexModel = normalizeFusionCodexModel(rawCodexModel);
-  const fusionCodexEffort = normalizeFusionCodexEffort(payload.codexEffort);
+  const executorFamily = normalizeFusionFamily(payload.executorFamily, "codex");
+  const rawExecutorModel =
+    typeof payload.executorModel === "string" && payload.executorModel.trim()
+      ? payload.executorModel.trim()
+      : typeof payload.codexModel === "string"
+        ? payload.codexModel.trim()
+        : "";
+  const fusionExecutorModel =
+    executorFamily === "claude"
+      ? normalizeFusionClaudeExecutorModel(rawExecutorModel)
+      : normalizeFusionCodexModel(
+          rawExecutorModel &&
+            rawExecutorModel.toLowerCase() !== "auto" &&
+            rawExecutorModel.toLowerCase() !== "default"
+            ? rawExecutorModel
+            : process.env.VIBE_FUSION_CODEX_MODEL
+        );
+  const rawExecutorEffort = payload.executorEffort ?? payload.codexEffort;
+  const fusionExecutorEffort =
+    executorFamily === "claude"
+      ? normalizeFusionClaudeRoleEffort(rawExecutorEffort)
+      : normalizeFusionCodexEffort(rawExecutorEffort);
   const result = await getAgentTelemetry().updateFusionSettings(payload.id, {
-    codexModel: fusionCodexModel,
-    codexEffort: fusionCodexEffort
+    executorFamily,
+    executorModel: fusionExecutorModel,
+    executorEffort: fusionExecutorEffort
   });
   if (result.status === "failed") {
     return { ok: false, error: result.error || "could not update Fusion settings" };
@@ -1616,7 +1689,10 @@ ipcMain.handle("openfusion-chat:start", async (_event, payload) => {
         env: files.env,
         plannerModel: files.env.VIBE_TERMINAL_OPEN_FUSION_PLANNER_MODEL,
         executorModel: files.env.VIBE_TERMINAL_OPEN_FUSION_EXECUTOR_MODEL,
-        resumeId: payload.resumeId || undefined
+        resumeId: payload.resumeId || undefined,
+        // Capability flag: this start's generated config includes the plan
+        // agent. Guards plan-mode turns against a stale serve without it.
+        planAgent: true
       }
     });
     if (!sent) {
@@ -1850,6 +1926,37 @@ ipcMain.handle("openfusion-chat:permission", (_event, payload) => {
     : { ok: false, error: "Open Fusion chat host is not running." };
 });
 
+ipcMain.handle("openfusion-chat:compact", (_event, payload) => {
+  if (!payload?.id) {
+    return { ok: false, error: "missing session id" };
+  }
+  const sent = sendToOpenFusionChatHost({
+    type: "compact",
+    payload: { id: payload.id }
+  });
+  return sent
+    ? { ok: true }
+    : { ok: false, error: "Open Fusion chat host is not running." };
+});
+
+ipcMain.handle("openfusion-chat:question", (_event, payload) => {
+  if (!payload?.id || !payload?.requestId) {
+    return { ok: false, error: "missing question request id" };
+  }
+  const sent = sendToOpenFusionChatHost({
+    type: "question",
+    payload: {
+      id: payload.id,
+      requestId: payload.requestId,
+      reject: payload.reject === true,
+      answers: Array.isArray(payload.answers) ? payload.answers : []
+    }
+  });
+  return sent
+    ? { ok: true }
+    : { ok: false, error: "Open Fusion chat host is not running." };
+});
+
 ipcMain.handle("openfusion-chat:interrupt", (_event, payload) => {
   if (payload?.id) {
     sendToOpenFusionChatHost({ type: "interrupt", payload: { id: payload.id } });
@@ -1869,7 +1976,11 @@ ipcMain.on("openfusion-chat:input", (_event, payload) => {
   if (payload?.id && typeof payload.text === "string") {
     const sent = sendToOpenFusionChatHost({
       type: "input",
-      payload: { id: payload.id, text: payload.text }
+      payload: {
+        id: payload.id,
+        text: payload.text,
+        mode: typeof payload.mode === "string" ? payload.mode : undefined
+      }
     });
     if (!sent) {
       broadcastOpenFusionChatEvent({

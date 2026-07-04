@@ -11,7 +11,7 @@
 
 ## TL;DR
 
-Fusion is a two-model **router→executor** pipeline (Claude Opus/Sonnet 5 plans/reviews and can write UI/design/frontend directly; Codex GPT-5.5 owns execution and self-verifies) presented behind one
+Fusion is a two-model **router→executor** pipeline (Claude Opus/Sonnet 5 plans/reviews read-only; Codex GPT-5.5 writes all code, owns execution, and self-verifies) presented behind one
 pane. It already *intends* to be one agent, but leaks the split at nearly every
 surface. **~80% of the "two agents" feeling is presentation, not architecture**,
 and can be removed with wording/label/color changes that touch the hard guarantee
@@ -51,14 +51,13 @@ You ──▶ Claude Opus/Sonnet 5 (headless `claude`, read + UI-write tools, Ba
 
 1. **Launch & lock** — `main.cjs` `fusion-chat:start` →
    `fusionChatHost.buildClaudeArgs`. Claude is spawned headless with `--tools`
-   limiting the built-in surface to `Read`, `Glob`, `Grep`, `Edit`, and `Write`,
+   limiting the built-in surface to `Read`, `Glob`, and `Grep`,
    `--allowedTools` exposing those plus the Fusion bridge,
-   `--disallowedTools Bash`, and `--strict-mcp-config`. Claude may directly
-   write UI/design/frontend code, while every command, test, build, debug run,
-   screenshot, browser action, image-generation task, and verification pass route
-   through `codex_implement`.
-   `VIBE_FUSION_UI_WRITE_GLOBS` path enforcement is deferred and not active
-   in this build; the current guard is Bash denial plus the restricted tool surface. This is the structural heart of Fusion.
+   `--disallowedTools Bash,Edit,MultiEdit,Write,NotebookEdit`, and
+   `--strict-mcp-config`. Claude is read-only: ALL code writing plus every
+   command, test, build, debug run, screenshot, browser action,
+   image-generation task, and verification pass routes through
+   `codex_implement`. This is the structural heart of Fusion.
 
 2. **The delegation loop** — `fusion-adapter.cjs` `codexInvestigate` /
    `codexImplement`. The adapter owns one private `codex app-server` child over

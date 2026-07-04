@@ -89,11 +89,22 @@ const OPEN_FUSION_GATE_REMINDER =
   `${OPEN_FUSION_GATE_MARKER} Executor reports are evidence, not verdicts: ` +
   "before presenting delegated work as done, verify it independently (git diff/status, " +
   "read the changed files, or an investigator pass) and state which check you ran.";
+// Plan-mode variant: the executor-verification copy is inapplicable while the
+// executor is permission-denied. Same marker prefix — rehydration filters
+// reminder parts by that prefix, so a new prefix would leak into resumed
+// transcripts as user text.
+const OPEN_FUSION_PLAN_REMINDER =
+  `${OPEN_FUSION_GATE_MARKER} Plan mode is active: stay read-only. Investigate ` +
+  "directly or via the investigator scout; the executor is permission-denied until " +
+  "the user accepts the plan. End your reply with the complete milestone plan.";
 
-function buildPlannerTurnParts(text) {
+function buildPlannerTurnParts(text, mode) {
   return [
     { type: "text", text: String(text ?? "") },
-    { type: "text", text: OPEN_FUSION_GATE_REMINDER }
+    {
+      type: "text",
+      text: mode === "plan" ? OPEN_FUSION_PLAN_REMINDER : OPEN_FUSION_GATE_REMINDER
+    }
   ];
 }
 
@@ -397,6 +408,57 @@ function createOpenCodeEventNormalizer(rootSessionId) {
         });
         break;
       }
+      case "question.asked": {
+        // V1 question-service shape (1.17.13 source, string-confirmed in the
+        // 1.17.11 binary): { id: "que_…", sessionID, questions: Info[], tool? }
+        // — the reply URL's requestID is this event's `id`, and `questions` is
+        // an ARRAY (multi-question requests are legal). Previously this fell
+        // through `default` and the turn hung invisibly.
+        if (!inTree(sessionID)) break;
+        const questions = (Array.isArray(props.questions) ? props.questions : [])
+          .map((entry) => {
+            const q = entry && typeof entry === "object" ? entry : {};
+            return {
+              question: String(q.question || ""),
+              header: String(q.header || ""),
+              options: (Array.isArray(q.options) ? q.options : []).map((opt) => {
+                const o = opt && typeof opt === "object" ? opt : {};
+                return {
+                  label: String(o.label || ""),
+                  description: String(o.description || "")
+                };
+              }),
+              multiple: q.multiple === true,
+              // opencode defaults free-text answers to allowed.
+              custom: q.custom !== false
+            };
+          })
+          .filter((q) => q.question || q.options.length);
+        if (!questions.length) break;
+        events.push({
+          type: "question",
+          requestId: String(props.id || ""),
+          role: roleFor(sessionID),
+          questions
+        });
+        break;
+      }
+      case "session.compacted": {
+        // Manual /compact AND server auto-compaction both land here — the
+        // pane gets its "Context compacted." marker for free either way.
+        if (sessionID !== root) break;
+        events.push({ type: "compacted" });
+        break;
+      }
+      case "question.replied":
+      case "question.rejected": {
+        if (sessionID && !inTree(sessionID)) break;
+        events.push({
+          type: "question-resolved",
+          requestId: String(props.requestID || props.id || "")
+        });
+        break;
+      }
       default:
         break;
     }
@@ -682,8 +744,11 @@ function runHost() {
   }
 
   function replaySession(id, state) {
+    // Reattach replay is a transcript restore, not fresh activity: the flag
+    // lets the renderer rebuild the pane without re-latching status or
+    // re-marking the attention dot for turns the user already acknowledged.
     for (const event of state.history) {
-      emit({ type: "event", id, event });
+      emit({ type: "event", id, event: { ...event, replay: true } });
     }
   }
 
@@ -903,7 +968,12 @@ function runHost() {
       turnBusy: false,
       history: [],
       plannerModel: String(payload.plannerModel || ""),
-      executorModel: String(payload.executorModel || "")
+      executorModel: String(payload.executorModel || ""),
+      // Capability flag from the start payload: the generated config this
+      // serve loaded includes the plan agent. Deliberately NOT set on the
+      // reattach path — reattached state keeps the flag of the start that
+      // actually launched its serve.
+      planAgent: payload.planAgent === true
     };
     sessions.set(id, state);
 
@@ -989,13 +1059,37 @@ function runHost() {
       return;
     }
 
+    // Per-turn agent flip: mode rides the input payload so the send and the
+    // agent choice are one atomic message — no set-mode plumbing to race.
+    const mode = payload?.mode === "plan" ? "plan" : "auto";
+    if (mode === "plan" && !state.planAgent) {
+      emitSessionEvent(id, state, {
+        type: "error",
+        message:
+          "Plan mode needs a pane restart to load the plan agent. Restart the pane, then try /plan again."
+      });
+      return;
+    }
+
     // Mid-turn sends are legal steering: the server persists the message
     // immediately and the running loop absorbs it at its next step (verified
     // 1.17.11 `ensureRunning` semantics). Tag the echo so the pane can pin it
     // above the composer instead of burying it in the streaming transcript.
+    // The echo's `mode` is ground truth for the pane's plan-accept arming: it
+    // is emitted by the same call that chose the agent, so it stays correct
+    // across mid-turn mode flips. NOTE: a message absorbed mid-turn runs under
+    // the in-flight turn's agent regardless of this field.
     const queued = Boolean(state.turnBusy);
-    emitSessionEvent(id, state, queued ? { type: "user", text, queued: true } : { type: "user", text });
-    const body = { agent: "planner", parts: buildPlannerTurnParts(text), model };
+    emitSessionEvent(
+      id,
+      state,
+      queued ? { type: "user", text, queued: true, mode } : { type: "user", text, mode }
+    );
+    const body = {
+      agent: mode === "plan" ? "plan" : "planner",
+      parts: buildPlannerTurnParts(text, mode),
+      model
+    };
     request(state, "POST", `/session/${encodeURIComponent(state.sessionId)}/prompt_async`, body).catch(
       (error) => {
         if (sessions.get(id) !== state) return;
@@ -1019,6 +1113,60 @@ function runHost() {
       emitSessionEvent(id, state, {
         type: "error",
         message: `Could not answer the permission request: ${error.message}`
+      });
+    });
+  }
+
+  function compact(payload) {
+    const id = payload?.id;
+    const state = sessions.get(id);
+    if (!state || !state.child || !state.sessionId) return;
+    const model = splitModelId(state.plannerModel);
+    if (!model) {
+      emitSessionEvent(id, state, {
+        type: "error",
+        message: "No Brain model is set. Pick one with /brain-model before compacting."
+      });
+      return;
+    }
+    // Summarize runs a full model turn server-side; the default 30s request
+    // timeout would destroy the POST mid-compaction and surface a spurious
+    // error while the server keeps compacting.
+    request(
+      state,
+      "POST",
+      `/session/${encodeURIComponent(state.sessionId)}/summarize`,
+      { providerID: model.providerID, modelID: model.modelID },
+      300_000
+    ).catch((error) => {
+      if (sessions.get(id) !== state) return;
+      emitSessionEvent(id, state, {
+        type: "error",
+        message: `Could not compact the session: ${error.message}`
+      });
+    });
+  }
+
+  function question(payload) {
+    const id = payload?.id;
+    const state = sessions.get(id);
+    if (!state || !state.child) return;
+    const requestId = String(payload?.requestId || "");
+    if (!requestId) return;
+    const reject = payload?.reject === true;
+    // Reply body: option LABELS (or typed free-text), one inner array PER
+    // question in request order — indexes or a flat array 400 server-side.
+    const answers = Array.isArray(payload?.answers)
+      ? payload.answers.map((entry) =>
+          Array.isArray(entry) ? entry.map(String) : [String(entry)]
+        )
+      : [];
+    const path = `/question/${encodeURIComponent(requestId)}/${reject ? "reject" : "reply"}`;
+    request(state, "POST", path, reject ? undefined : { answers }).catch((error) => {
+      if (sessions.get(id) !== state) return;
+      emitSessionEvent(id, state, {
+        type: "error",
+        message: `Could not answer the question: ${error.message}`
       });
     });
   }
@@ -1539,6 +1687,8 @@ function runHost() {
       if (msg.type === "start") start(msg.payload);
       else if (msg.type === "input") input(msg.payload);
       else if (msg.type === "permission") permission(msg.payload);
+      else if (msg.type === "question") question(msg.payload);
+      else if (msg.type === "compact") compact(msg.payload);
       else if (msg.type === "planner-model") plannerModel(msg.payload);
       else if (msg.type === "providers") providers(msg.payload);
       else if (msg.type === "auth-set") authSet(msg.payload);
@@ -1566,7 +1716,8 @@ module.exports = {
   splitModelId,
   buildPlannerTurnParts,
   OPEN_FUSION_GATE_MARKER,
-  OPEN_FUSION_GATE_REMINDER
+  OPEN_FUSION_GATE_REMINDER,
+  OPEN_FUSION_PLAN_REMINDER
 };
 
 if (require.main === module) {

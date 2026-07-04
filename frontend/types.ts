@@ -42,14 +42,26 @@ export type FusionCodexEffort =
 
 export type FusionRunMode = "auto" | "plan";
 
+// Which CLI family backs a Fusion role. Either role can run either family:
+// the planner and executor each pick Claude (claude CLI) or Codex (codex
+// app-server) independently — an OpenFusion-style family→model choice, minus
+// providers/keys (both families ride the user's existing subscriptions).
+export type FusionFamily = "claude" | "codex";
+
+// A role's effort is validated against ITS family's enum (FusionEffort for
+// claude, FusionCodexEffort for codex); this union is what the wire carries.
+export type FusionRoleEffort = FusionEffort | FusionCodexEffort;
+
 export type OpenFusionModel = string;
 
 export interface FusionSettings {
   mode: FusionRunMode;
-  model: FusionClaudeModel;
-  codexModel: FusionCodexModel;
-  claudeEffort: FusionEffort;
-  codexEffort: FusionCodexEffort;
+  plannerFamily: FusionFamily;
+  plannerModel: string;
+  plannerEffort: FusionRoleEffort;
+  executorFamily: FusionFamily;
+  executorModel: string;
+  executorEffort: FusionRoleEffort;
 }
 
 export type AgentThreadLookupStatus =
@@ -195,22 +207,35 @@ export interface AgentSession {
   name: string;
   kind: AgentKind;
   command: string;
-  // A Fusion pane: a claude session that delegates execution to Codex. Always
-  // paired with kind === "claude".
+  // A Fusion pane: a planner session that delegates execution to a separate
+  // executor engine. Persisted with kind === "claude" for legacy reasons even
+  // when the planner family is codex.
   fusion?: boolean;
+  fusionPlannerFamily?: FusionFamily;
+  fusionPlannerModel?: string;
+  fusionPlannerEffort?: FusionRoleEffort;
+  fusionExecutorFamily?: FusionFamily;
+  fusionExecutorModel?: string;
+  fusionExecutorEffort?: FusionRoleEffort;
+  fusionRunMode?: FusionRunMode;
+  // Legacy per-engine fields from saved panes that predate per-role families:
+  // model/claudeEffort described the (always-claude) planner, codexModel/
+  // codexEffort the (always-codex) executor. Read for migration only.
   fusionModel?: FusionClaudeModel;
   fusionCodexModel?: FusionCodexModel;
   fusionClaudeEffort?: FusionEffort;
   fusionCodexEffort?: FusionCodexEffort;
-  fusionRunMode?: FusionRunMode;
-  // Legacy shared effort field from older saved Fusion panes. New panes store
-  // separate Opus/Codex effort values but keep this readable for migration.
+  // Older still: one shared effort for both roles.
   fusionEffort?: FusionEffort;
   // Open Fusion panes are persisted as kind === "opencode" with app-scoped
   // planner/executor config generated at launch time.
   openFusion?: boolean;
   openFusionPlannerModel?: OpenFusionModel;
   openFusionExecutorModel?: OpenFusionModel;
+  // Plan/Auto for the Open Fusion pane. Unlike Fusion there is no host-side
+  // mode state: the pane sends the mode with every turn and the host picks
+  // the opencode agent per prompt.
+  openFusionRunMode?: FusionRunMode;
   cwd: string;
   createdAt: number;
   threadRef?: AgentThreadRef;
@@ -365,7 +390,10 @@ export interface FusionLogEntry {
 // Normalized events from the headless Claude chat host (backend/fusionChatHost.cjs),
 // broadcast on the "fusion-chat:event" channel. All carry the pane id except
 // host-error (broadcast to all windows).
-export type FusionChatEvent =
+// replay: true marks a reattach replay of buffered history (pane remount onto a
+// live host session). Replayed events rebuild the pane transcript only — they
+// carry no new status/attention information and must not disturb either.
+export type FusionChatEvent = (
   | { id: string; type: "session"; sessionId: string }
   | { id: string; type: "user"; text: string; steer?: boolean }
   | { id: string; type: "turn-start" }
@@ -379,6 +407,10 @@ export type FusionChatEvent =
   | { id: string; type: "background-activity"; backgroundActivity: AgentBackgroundActivity }
   | { id: string; type: "turn-end" }
   | { id: string; type: "turn-error"; message: string }
+  // "/compact" sent as a user message: the CLI runs a compaction pass
+  // (system/status status:"compacting" → compact_result success|failed).
+  | { id: string; type: "compact-start" }
+  | { id: string; type: "compacted"; ok: boolean; error?: string }
   | {
       id: string;
       type: "result";
@@ -391,7 +423,8 @@ export type FusionChatEvent =
   | { id: string; type: "stderr"; text: string }
   | { id: string; type: "error"; message: string }
   | { id: string; type: "closed"; code?: number }
-  | { type: "host-error"; message: string };
+  | { type: "host-error"; message: string }
+) & { replay?: boolean };
 
 // Normalized events from the headless OpenCode chat host
 // (backend/openFusionChatHost.cjs), broadcast on "openfusion-chat:event". The
@@ -399,11 +432,27 @@ export type FusionChatEvent =
 // planner primary agent; "executor"/"investigator" are its task subagents.
 export type OpenFusionChatRole = "brain" | "executor" | "investigator";
 
-export type OpenFusionChatEvent =
+// One question inside an opencode question-service request (V1 vocabulary).
+export interface OpenFusionQuestion {
+  question: string;
+  header: string;
+  options: { label: string; description: string }[];
+  // Multi-select: the answer array for this question may carry several labels.
+  multiple: boolean;
+  // Free-text answers allowed (opencode defaults this to true).
+  custom: boolean;
+}
+
+// Same replay contract as FusionChatEvent: reattach replays are transcript
+// restores, never fresh activity.
+export type OpenFusionChatEvent = (
   | { id: string; type: "session"; sessionId: string; resumed?: boolean }
   // queued: sent mid-turn — the server persisted it and the running loop
   // absorbs it at its next step; the pane pins it above the composer until then.
-  | { id: string; type: "user"; text: string; queued?: boolean }
+  // mode: the run mode the host actually sent this turn as ("plan" | "auto").
+  // Ground truth for plan-accept arming — emitted by the same call that chose
+  // the opencode agent, so it stays correct across mid-turn mode flips.
+  | { id: string; type: "user"; text: string; queued?: boolean; mode?: string }
   | { id: string; type: "turn-start" }
   // A new Brain step began (new root assistant message): any pinned queued
   // message is now part of the model's context.
@@ -447,6 +496,20 @@ export type OpenFusionChatEvent =
       title?: string;
     }
   | { id: string; type: "permission-resolved"; requestId: string; reply: string }
+  // opencode question service (ask tool, plan_exit): one request can carry
+  // SEVERAL questions; answers reply with option labels (or typed text), one
+  // array per question, in order.
+  | {
+      id: string;
+      type: "question";
+      requestId: string;
+      role: OpenFusionChatRole;
+      questions: OpenFusionQuestion[];
+    }
+  | { id: string; type: "question-resolved"; requestId: string }
+  // The server compacted the session's context (manual /compact or its own
+  // overflow-driven auto-compaction).
+  | { id: string; type: "compacted" }
   | {
       id: string;
       type: "auth-result";
@@ -493,7 +556,8 @@ export type OpenFusionChatEvent =
   | { id: string; type: "stderr"; text: string }
   | { id: string; type: "error"; message: string; role?: OpenFusionChatRole }
   | { id: string; type: "closed"; code?: number }
-  | { type: "host-error"; message: string };
+  | { type: "host-error"; message: string }
+) & { replay?: boolean };
 
 export interface OpenFusionProvider {
   id: string;

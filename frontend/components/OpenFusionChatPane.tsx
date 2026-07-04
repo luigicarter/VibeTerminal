@@ -27,11 +27,13 @@ import type {
   AgentProfile,
   AgentSession,
   AgentThreadRef,
+  FusionRunMode,
   OpenFusionAuthMethod,
   OpenFusionChatEvent,
   OpenFusionChatMessage,
   OpenFusionChatRole,
   OpenFusionProvider,
+  OpenFusionQuestion,
   OpenFusionToolMeta,
   SessionStatus
 } from "../types";
@@ -61,6 +63,9 @@ import {
 export interface OpenFusionSettingsChange {
   plannerModel?: string;
   executorModel?: string;
+  // Plan/Auto. Renderer-only: the host reads the mode per turn from the input
+  // payload, so a mode change never restarts the pane.
+  runMode?: FusionRunMode;
 }
 
 interface OpenFusionChatPaneProps {
@@ -109,6 +114,15 @@ interface PendingPermission {
   permission: string;
   patterns: string[];
   title?: string;
+}
+
+// One opencode question-service request (may carry several questions). FIFO:
+// a permission always takes precedence; questions render one request at a
+// time behind it.
+interface PendingQuestion {
+  requestId: string;
+  role: OpenFusionChatRole;
+  questions: OpenFusionQuestion[];
 }
 
 // One model the user is adding to a custom provider: the id the endpoint
@@ -224,12 +238,15 @@ type PickerState =
   | null;
 
 const SLASH_COMMANDS = [
+  { name: "/plan", desc: "Plan mode: investigate read-only and propose a plan first" },
+  { name: "/auto", desc: "Auto mode: delegate to the Executor and build" },
   { name: "/brain-model", desc: "Pick the Brain (planner) model" },
   { name: "/executor-model", desc: "Pick the Executor model" },
   { name: "/connect", desc: "Connect a provider (API key or OAuth)" },
   { name: "/custom-provider", desc: "Add an OpenAI-compatible provider (your URL, key, and model names)" },
   { name: "/disconnect", desc: "Remove a provider's stored credential" },
   { name: "/models", desc: "Show the current Brain and Executor models" },
+  { name: "/compact", desc: "Summarize the conversation to free context" },
   { name: "/resume", desc: "Pick a saved chat from this folder to resume" },
   { name: "/details", desc: "Toggle tool execution details" },
   { name: "/new", desc: "Start a fresh conversation" },
@@ -308,6 +325,14 @@ function shortModelLabel(model: string | undefined, fallback: string) {
   return slash > 0 ? value.slice(slash + 1) : value;
 }
 
+// Mirrors FusionChatPane's accept-bar prompt: mode flips to Auto first, then
+// this literal goes out as a normal planner turn.
+const IMPLEMENT_PLAN_PROMPT = "Implement the plan.";
+
+function normalizeRunMode(value: unknown): FusionRunMode {
+  return value === "plan" ? "plan" : "auto";
+}
+
 function permissionDetail(pending: PendingPermission) {
   const patterns = pending.patterns.filter(Boolean).join(", ");
   const scope = pending.title ? `${pending.title} — ` : "";
@@ -341,6 +366,17 @@ export default function OpenFusionChatPane({
   const [failed, setFailed] = useState(false);
   const [interrupting, setInterrupting] = useState(false);
   const [pendingPermission, setPendingPermission] = useState<PendingPermission | null>(null);
+  // Armed when a plan-mode turn settles cleanly with Brain text — shows the
+  // "Implement this plan?" bar. Cleared on any send, mode flip, or turn upset.
+  const [planActionReady, setPlanActionReady] = useState(false);
+  // Question-service requests, FIFO. Only the head renders (and only when no
+  // permission is pending — permission > question for key ownership).
+  const [pendingQuestions, setPendingQuestions] = useState<PendingQuestion[]>([]);
+  // Progress through the HEAD request's questions: answered-so-far arrays and
+  // the multi-select picks for the current question.
+  const [questionIndex, setQuestionIndex] = useState(0);
+  const [questionAnswers, setQuestionAnswers] = useState<string[][]>([]);
+  const [questionMultiPick, setQuestionMultiPick] = useState<Set<string>>(() => new Set());
   // Messages sent mid-turn (steering). The server has them queued; they stay
   // pinned above the composer — opencode's QUEUED badge mechanic — until the
   // Brain's next step absorbs them into context, then they join the transcript
@@ -412,6 +448,16 @@ export default function OpenFusionChatPane({
   const busyRef = useRef(false);
   const interruptingRef = useRef(false);
   const waitingRef = useRef(false);
+  // Event-handler mirror of `pendingQuestions` (the handler closure is frozen
+  // at mount, and resolution needs the post-removal list synchronously).
+  const pendingQuestionsRef = useRef<PendingQuestion[]>([]);
+  // Plan-accept arming state, readable from the frozen event-handler closure.
+  // planTurnModeRef mirrors the HOST's user-echo mode (ground truth for what
+  // agent the turn actually ran as); planHadBrainTextRef requires Brain prose
+  // this turn so tool-only or scout-only turns never arm the bar.
+  const runModeRef = useRef<FusionRunMode>("auto");
+  const planTurnModeRef = useRef<FusionRunMode>("auto");
+  const planHadBrainTextRef = useRef(false);
   // Follow the stream only while the user is at the bottom — auto-scroll used
   // to yank the view down on EVERY delta, which made reading scrollback during
   // a turn impossible. Scrolling back to the bottom re-pins.
@@ -453,6 +499,23 @@ export default function OpenFusionChatPane({
       ? String(session.openFusionExecutorModel).trim()
       : "";
   const modelsReady = Boolean(plannerModel && executorModel);
+  const runMode = normalizeRunMode(session.openFusionRunMode);
+  runModeRef.current = runMode;
+  // Safe from any closure: touches only refs and stable setters.
+  function clearPendingQuestions() {
+    pendingQuestionsRef.current = [];
+    setPendingQuestions([]);
+    setQuestionIndex(0);
+    setQuestionAnswers([]);
+    setQuestionMultiPick(new Set());
+  }
+
+  // Permission > question: only one interaction panel owns the keyboard.
+  const activeQuestion = pendingPermission ? null : (pendingQuestions[0] ?? null);
+  const activeQuestionInfo = activeQuestion
+    ? (activeQuestion.questions[Math.min(questionIndex, activeQuestion.questions.length - 1)] ??
+      null)
+    : null;
   // Current picks, readable from the session-scoped event handler (its closure
   // is frozen at first render, which used to misroute the post-connect
   // drill-in to "brain" even when the Brain was already set).
@@ -705,7 +768,14 @@ export default function OpenFusionChatPane({
     steeringRef.current = [];
     setSteering([]);
     interruptSettledRef.current = false;
-    onStatusChangeRef.current("starting");
+    // Every fresh-launch path (create/restart/resume/clear/settings-restart/
+    // boot restore) resets status to "idle" before this effect runs, so
+    // anything else means a remount onto a LIVE host session (project switch
+    // back). The reattach replay is status-neutral, so stomping the settled
+    // done/waiting/failed pill with "starting" here would never be corrected.
+    if (session.status === "idle" || session.status === "starting") {
+      onStatusChangeRef.current("starting");
+    }
     let cancelled = false;
     const resumeThreadRef =
       session.nextLaunchMode === "resume" &&
@@ -933,6 +1003,18 @@ export default function OpenFusionChatPane({
         }
         return;
       }
+      // Reattach replay rebuilds this pane's transcript and local flags after
+      // a remount, but App's lifecycle mirror tracked the live events the
+      // whole time — re-emitting status/attention from replayed history would
+      // re-latch "done" and re-light an attention dot the user already
+      // acknowledged.
+      const replay = event.replay === true;
+      const reportStatus: typeof onStatusChangeRef.current = (status) => {
+        if (!replay) onStatusChangeRef.current(status);
+      };
+      const reportAttention: typeof emitAttention = (state, reason, message) => {
+        if (!replay) emitAttention(state, reason, message);
+      };
       if (event.type !== "assistant-text" && event.type !== "thinking") {
         flushDeltas();
       }
@@ -953,6 +1035,13 @@ export default function OpenFusionChatPane({
           if (event.queued) {
             queueSteering(event.text);
           } else {
+            // A fresh turn began: reset plan-accept arming from the host's
+            // echoed mode. Rehydrated transcripts carry no mode, so a resumed
+            // pane can never arm from history. Queued echoes are absorbed by
+            // the RUNNING turn and must not touch the arming state.
+            planTurnModeRef.current = normalizeRunMode(event.mode);
+            planHadBrainTextRef.current = false;
+            setPlanActionReady(false);
             push({ role: "user", kind: "text", text: event.text });
           }
           break;
@@ -969,14 +1058,18 @@ export default function OpenFusionChatPane({
           setWaitingState(false);
           setFailed(false);
           setPendingPermission(null);
+          clearPendingQuestions();
           setBusyState(true);
-          onStatusChangeRef.current("running");
+          reportStatus("running");
           break;
         case "step-start":
           // The Brain started its next step: queued steering is absorbed.
           flushSteering();
           break;
         case "assistant-text":
+          if (event.role === "brain" && event.delta.trim()) {
+            planHadBrainTextRef.current = true;
+          }
           setActiveRole(event.role);
           appendStreaming(event.role, "text", event.delta, event.streamId);
           break;
@@ -1115,25 +1208,75 @@ export default function OpenFusionChatPane({
           };
           setPendingPermission(pending);
           setWaitingState(true);
-          onStatusChangeRef.current("waiting");
+          reportStatus("waiting");
           const detail = permissionDetail(pending);
           push({
             role: event.role,
             kind: "activity",
             text: `Permission requested: ${detail}`
           });
-          emitAttention("waiting", "approval", detail);
+          reportAttention("waiting", "approval", detail);
           break;
         }
         case "permission-resolved":
           setPendingPermission((current) =>
             current && current.requestId === event.requestId ? null : current
           );
-          setWaitingState(false);
-          if (busyRef.current) {
-            onStatusChangeRef.current("running");
+          // Questions may still be queued behind the permission — keep the
+          // waiting lane until the whole interaction queue drains.
+          if (!pendingQuestionsRef.current.length) {
+            setWaitingState(false);
+            if (busyRef.current) {
+              reportStatus("running");
+            }
           }
           break;
+        case "question": {
+          if (pendingQuestionsRef.current.some((q) => q.requestId === event.requestId)) {
+            break;
+          }
+          const pending: PendingQuestion = {
+            requestId: event.requestId,
+            role: event.role,
+            questions: event.questions
+          };
+          pendingQuestionsRef.current = [...pendingQuestionsRef.current, pending];
+          setPendingQuestions(pendingQuestionsRef.current);
+          setWaitingState(true);
+          reportStatus("waiting");
+          const summary = event.questions
+            .map((q) => q.header || q.question)
+            .filter(Boolean)
+            .join(" · ");
+          push({
+            role: event.role,
+            kind: "activity",
+            text: `Question: ${clip(summary || "input requested", 200)}`
+          });
+          reportAttention("waiting", "question", clip(summary, 120));
+          break;
+        }
+        case "question-resolved": {
+          // Resolution can come from our own reply OR an external one (e.g.
+          // the request timed out server-side) — drop it wherever it sits.
+          const next = pendingQuestionsRef.current.filter(
+            (q) => q.requestId !== event.requestId
+          );
+          if (next.length !== pendingQuestionsRef.current.length) {
+            pendingQuestionsRef.current = next;
+            setPendingQuestions(next);
+            setQuestionIndex(0);
+            setQuestionAnswers([]);
+            setQuestionMultiPick(new Set());
+          }
+          if (!next.length) {
+            setWaitingState(false);
+            if (busyRef.current) {
+              reportStatus("running");
+            }
+          }
+          break;
+        }
         case "auth-result": {
           const flow = authFlowRef.current;
           const mine = Boolean(flow && event.nonce && event.nonce === flow.nonce);
@@ -1304,21 +1447,33 @@ export default function OpenFusionChatPane({
             setUsage({ costUsd: event.costUsd, tokens: event.tokens });
           }
           if (event.subtype === "restored") {
-            onStatusChangeRef.current("idle");
+            reportStatus("idle");
             break;
           }
           if (interruptSettle) {
             pushTurnEnd(true);
-            onStatusChangeRef.current("waiting");
+            reportStatus("waiting");
             flushSteering();
             break;
           }
           pushTurnEnd(false);
+          // Arm the accept bar only on a CLEAN settle of a turn the host
+          // actually ran as the plan agent, with Brain prose to accept.
+          // Aborts never reach here (interruptSettle above) and restored
+          // replays broke out earlier.
+          if (
+            runModeRef.current === "plan" &&
+            planTurnModeRef.current === "plan" &&
+            planHadBrainTextRef.current &&
+            !waitingRef.current
+          ) {
+            setPlanActionReady(true);
+          }
           if (waitingRef.current) {
-            onStatusChangeRef.current("waiting");
+            reportStatus("waiting");
           } else {
-            onStatusChangeRef.current("done");
-            emitAttention("completed", "done");
+            reportStatus("done");
+            reportAttention("completed", "done");
           }
           flushSteering();
           break;
@@ -1331,12 +1486,17 @@ export default function OpenFusionChatPane({
           setBusyState(false);
           setWaitingState(false);
           setPendingPermission(null);
+          clearPendingQuestions();
+          setPlanActionReady(false);
           // A message queued before the interrupt is still in the session's
           // history — surface it under the marker as the freshest entry so
           // the user sees it will lead the next turn.
           flushSteering();
-          onStatusChangeRef.current("waiting");
-          emitAttention("waiting", "question", "Turn interrupted — tell Open Fusion how to continue.");
+          reportStatus("waiting");
+          reportAttention("waiting", "question", "Turn interrupted — tell Open Fusion how to continue.");
+          break;
+        case "compacted":
+          push({ role: "brain", kind: "activity", text: "Context compacted." });
           break;
         case "stderr":
           if (event.text.trim()) {
@@ -1350,11 +1510,13 @@ export default function OpenFusionChatPane({
           setBusyState(false);
           setWaitingState(false);
           setPendingPermission(null);
+          clearPendingQuestions();
+          setPlanActionReady(false);
           setFailed(true);
           push({ role: event.role ?? "brain", kind: "error", text: event.message });
           flushSteering();
-          onStatusChangeRef.current("failed");
-          emitAttention("failed", "error", event.message);
+          reportStatus("failed");
+          reportAttention("failed", "error", event.message);
           break;
         }
         case "closed": {
@@ -1366,14 +1528,16 @@ export default function OpenFusionChatPane({
           setBusyState(false);
           setWaitingState(false);
           setPendingPermission(null);
+          clearPendingQuestions();
+          setPlanActionReady(false);
           if ((event.code ?? 0) !== 0 || wasBusy) {
             const message = `Open Fusion engine exited (${event.code ?? "unknown"}).`;
             setFailed(true);
             push({ role: "brain", kind: "error", text: message });
-            onStatusChangeRef.current("failed");
-            emitAttention("failed", "exit", message);
+            reportStatus("failed");
+            reportAttention("failed", "exit", message);
           } else {
-            onStatusChangeRef.current("idle");
+            reportStatus("idle");
           }
           break;
         }
@@ -1398,13 +1562,43 @@ export default function OpenFusionChatPane({
     void window.vibe?.openFusionChat?.interrupt(session.id);
   }
 
+  // Mode changes are pure renderer state (persisted on the session); the host
+  // reads the mode from each input payload, so there is no IPC to await and
+  // nothing to race — unlike Fusion's set-mode round trip.
+  function applyRunMode(next: FusionRunMode) {
+    const mode = normalizeRunMode(next);
+    if (mode === runModeRef.current) return;
+    setPlanActionReady(false);
+    onSettingsChange({ runMode: mode });
+  }
+
+  function toggleRunMode() {
+    applyRunMode(runModeRef.current === "plan" ? "auto" : "plan");
+  }
+
+  function handleImplementPlan() {
+    if (busyRef.current || !planActionReady) return;
+    setPlanActionReady(false);
+    applyRunMode("auto");
+    setFailed(false);
+    pinnedToBottomRef.current = true;
+    // Explicit "auto" literal: the flip above lands via React state later —
+    // the send must not depend on it.
+    window.vibe?.openFusionChat?.sendUserTurn(session.id, IMPLEMENT_PLAN_PROMPT, "auto");
+    setBusyState(true);
+    onStatusChangeRef.current("running");
+  }
+
   function answerPermission(reply: "once" | "always" | "reject") {
     const pending = pendingPermission;
     if (!pending) return;
     setPendingPermission(null);
-    setWaitingState(false);
-    if (busyRef.current) {
-      onStatusChangeRef.current("running");
+    // A queued question becomes the active panel next — stay in waiting.
+    if (!pendingQuestionsRef.current.length) {
+      setWaitingState(false);
+      if (busyRef.current) {
+        onStatusChangeRef.current("running");
+      }
     }
     push({
       role: "user",
@@ -1416,6 +1610,75 @@ export default function OpenFusionChatPane({
     });
     void window.vibe?.openFusionChat
       ?.permission(session.id, pending.requestId, reply)
+      .then((result) => {
+        if (result && result.ok === false && result.error) {
+          push({ role: "brain", kind: "error", text: result.error });
+        }
+      });
+  }
+
+  // Removes the head question request from the queue and restores flow state.
+  function retireActiveQuestion(active: PendingQuestion) {
+    const next = pendingQuestionsRef.current.filter(
+      (q) => q.requestId !== active.requestId
+    );
+    pendingQuestionsRef.current = next;
+    setPendingQuestions(next);
+    setQuestionIndex(0);
+    setQuestionAnswers([]);
+    setQuestionMultiPick(new Set());
+    if (!next.length) {
+      setWaitingState(false);
+      if (busyRef.current) {
+        onStatusChangeRef.current("running");
+      }
+    }
+  }
+
+  // Record the current question's answer (labels or typed text). Advances to
+  // the next question in the request, or POSTs the whole answer set — one
+  // label array PER question, in order, as the reply endpoint requires.
+  function submitQuestionAnswer(labels: string[]) {
+    const active = activeQuestion;
+    if (!active || !labels.length) return;
+    const nextAnswers = [...questionAnswers.slice(0, questionIndex), labels];
+    if (questionIndex + 1 < active.questions.length) {
+      setQuestionAnswers(nextAnswers);
+      setQuestionIndex(questionIndex + 1);
+      setQuestionMultiPick(new Set());
+      return;
+    }
+    retireActiveQuestion(active);
+    push({
+      role: "user",
+      kind: "text",
+      text: `Answered: ${nextAnswers.map((entry) => entry.join(", ")).join(" · ")}`
+    });
+    void window.vibe?.openFusionChat
+      ?.answerQuestion(session.id, active.requestId, nextAnswers)
+      .then((result) => {
+        if (result && result.ok === false && result.error) {
+          push({ role: "brain", kind: "error", text: result.error });
+        }
+      });
+  }
+
+  function toggleQuestionPick(label: string) {
+    setQuestionMultiPick((prev) => {
+      const next = new Set(prev);
+      if (next.has(label)) next.delete(label);
+      else next.add(label);
+      return next;
+    });
+  }
+
+  function rejectActiveQuestion() {
+    const active = activeQuestion;
+    if (!active) return;
+    retireActiveQuestion(active);
+    push({ role: "user", kind: "text", text: "Dismissed the question." });
+    void window.vibe?.openFusionChat
+      ?.rejectQuestion(session.id, active.requestId)
       .then((result) => {
         if (result && result.ok === false && result.error) {
           push({ role: "brain", kind: "error", text: result.error });
@@ -1928,6 +2191,15 @@ export default function OpenFusionChatPane({
     const [name, ...rest] = text.split(/\s+/);
     const arg = rest.join(" ").trim();
     switch (name) {
+      case "/plan":
+        applyRunMode("plan");
+        return true;
+      case "/auto":
+        applyRunMode("auto");
+        return true;
+      case "/mode":
+        toggleRunMode();
+        return true;
       case "/brain-model":
       case "/brain":
         if (arg) applyModelPick("brain", arg);
@@ -1979,6 +2251,32 @@ export default function OpenFusionChatPane({
       case "/openfusion":
         showModels();
         return true;
+      case "/compact":
+      case "/summarize": {
+        if (!modelsReady || !plannerModel) {
+          push({
+            role: "brain",
+            kind: "activity",
+            text: "Pick a Brain model first (/brain-model) — compaction runs on the Brain."
+          });
+          return true;
+        }
+        if (busyRef.current || interruptingRef.current) {
+          push({
+            role: "brain",
+            kind: "activity",
+            text: "Finish or interrupt the current turn before compacting."
+          });
+          return true;
+        }
+        push({ role: "brain", kind: "activity", text: "Compacting context…" });
+        void window.vibe?.openFusionChat?.compact(session.id).then((result) => {
+          if (result && result.ok === false && result.error) {
+            push({ role: "brain", kind: "error", text: result.error });
+          }
+        });
+        return true;
+      }
       case "/resume":
       case "/sessions":
         openResumePicker();
@@ -2021,6 +2319,13 @@ export default function OpenFusionChatPane({
         return;
       }
     }
+    // An active question that allows free-text answers owns the composer:
+    // typed text is the answer for the CURRENT question, not a new turn.
+    if (activeQuestion && activeQuestionInfo?.custom) {
+      setInput("");
+      submitQuestionAnswer([text]);
+      return;
+    }
     // First-run gate: no turn leaves the pane until both roles have an
     // explicitly picked model (slash commands above stay usable — they ARE the
     // setup path).
@@ -2038,7 +2343,7 @@ export default function OpenFusionChatPane({
     setFailed(false);
     // Sending implies following the conversation again.
     pinnedToBottomRef.current = true;
-    window.vibe?.openFusionChat?.sendUserTurn(session.id, text);
+    window.vibe?.openFusionChat?.sendUserTurn(session.id, text, runModeRef.current);
     if (!busyRef.current) {
       setBusyState(true);
       onStatusChangeRef.current("running");
@@ -2306,6 +2611,19 @@ export default function OpenFusionChatPane({
   })();
   const menuOpen =
     picker !== null || (menu.items.length > 0 && !menuDismissed);
+  // Guards Shift+Tab: a stray toggle while typing a slash command (menu
+  // filtered closed) must not silently switch modes mid-command.
+  const inputIsSlashCommand = input.trimStart().startsWith("/");
+  const showPlanActionBar =
+    planActionReady &&
+    runMode === "plan" &&
+    !busy &&
+    !waiting &&
+    !failed &&
+    !pendingPermission &&
+    !activeQuestion &&
+    !authFlow &&
+    modelsReady;
   // "Connected" providers that never needed a key (the opencode zen free
   // tier) don't count as the user having connected anything — the first-run
   // gate must still lead with Connect.
@@ -2413,14 +2731,34 @@ export default function OpenFusionChatPane({
         answerPermission("reject");
         return;
       }
+      // Same for an active question: Esc rejects the request, not the turn.
+      if (activeQuestion) {
+        rejectActiveQuestion();
+        return;
+      }
       interrupt();
     };
     window.addEventListener("keydown", handleWindowKeyDown);
     return () => window.removeEventListener("keydown", handleWindowKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [busy, isSelected, session.id, pendingPermission]);
+  }, [busy, isSelected, session.id, pendingPermission, activeQuestion]);
 
   const activeRoleLabel = ROLE_LABELS[activeRole];
+
+  // A settled "done" is a notification, not a resting state: once the user
+  // engages the pane again (clicks it, or types the next prompt), the finished
+  // turn is acknowledged and the pill returns to "ready". waiting/failed stay
+  // put — they still need an answer / carry the error until the next turn.
+  const acknowledgeCompletedTurn = () => {
+    if (session.status === "done") {
+      onStatusChangeRef.current("idle");
+    }
+  };
+
+  const handlePanePointerDown = () => {
+    onSelect();
+    acknowledgeCompletedTurn();
+  };
 
   // The local flags only know the live lane (a turn in flight); how the pane
   // SETTLED — finished a turn, interrupted and waiting on the user, failed —
@@ -2457,7 +2795,7 @@ export default function OpenFusionChatPane({
           `terminal-pane-attention-${session.attention.state}`
       )}
       style={{ "--pane-accent": profile.accent } as React.CSSProperties}
-      onPointerDown={onSelect}
+      onPointerDown={handlePanePointerDown}
     >
       <header className="pane-header pane-drag-zone" title="Drag header to move pane">
         <div className="pane-title">
@@ -2510,7 +2848,7 @@ export default function OpenFusionChatPane({
           </button>
         </div>
       </header>
-      <div className="fusion-chat" onPointerDown={onSelect}>
+      <div className="fusion-chat" onPointerDown={handlePanePointerDown}>
         <div className="fusion-chat-scroll" ref={scrollRef} onScroll={handleChatScroll}>
           {visibleMessages.length === 0 ? (
             <div className="oc-hero">
@@ -2564,6 +2902,59 @@ export default function OpenFusionChatPane({
                   Reject <span className="oc-key">esc</span>
                 </button>
               </div>
+            </div>
+          )}
+          {activeQuestion && activeQuestionInfo && (
+            <div className="oc-permission" role="group" aria-label="Question">
+              <div className="oc-permission-title">
+                {activeQuestionInfo.header || "Question"}
+                {activeQuestion.questions.length > 1 &&
+                  ` — ${Math.min(questionIndex + 1, activeQuestion.questions.length)} of ${activeQuestion.questions.length}`}
+              </div>
+              <div className="oc-permission-body">{activeQuestionInfo.question}</div>
+              <div className="oc-permission-options">
+                {activeQuestionInfo.options.map((option) =>
+                  activeQuestionInfo.multiple ? (
+                    <button
+                      key={option.label}
+                      type="button"
+                      className={clsx(questionMultiPick.has(option.label) && "is-primary")}
+                      title={option.description || option.label}
+                      onClick={() => toggleQuestionPick(option.label)}
+                    >
+                      {questionMultiPick.has(option.label) ? "✓ " : ""}
+                      {option.label}
+                    </button>
+                  ) : (
+                    <button
+                      key={option.label}
+                      type="button"
+                      title={option.description || option.label}
+                      onClick={() => submitQuestionAnswer([option.label])}
+                    >
+                      {option.label}
+                    </button>
+                  )
+                )}
+                {activeQuestionInfo.multiple && (
+                  <button
+                    type="button"
+                    className="is-primary"
+                    disabled={questionMultiPick.size === 0}
+                    onClick={() => submitQuestionAnswer([...questionMultiPick])}
+                  >
+                    Submit
+                  </button>
+                )}
+                <button type="button" onClick={rejectActiveQuestion}>
+                  Dismiss <span className="oc-key">esc</span>
+                </button>
+              </div>
+              {activeQuestionInfo.custom && (
+                <div className="oc-permission-hint">
+                  …or type an answer below and press Enter.
+                </div>
+              )}
             </div>
           )}
           {authFlow && (
@@ -3076,6 +3467,20 @@ export default function OpenFusionChatPane({
               </div>
             </div>
           )}
+          {showPlanActionBar && (
+            <div className="fusion-plan-action-bar" role="group" aria-label="Plan actions">
+              <span className="fusion-plan-action-label">Implement this plan?</span>
+              <button
+                className="fusion-plan-action-button is-primary"
+                type="button"
+                title="Switch to Auto and send: Implement the plan."
+                onClick={handleImplementPlan}
+              >
+                <Play size={14} />
+                <span>Implement plan</span>
+              </button>
+            </div>
+          )}
           {steering.length > 0 && (
             <div className="openfusion-steering" role="status" aria-label="Queued messages">
               {steering.map((item) => (
@@ -3102,10 +3507,26 @@ export default function OpenFusionChatPane({
                       ? "Queue the next instruction…"
                       : !modelsReady
                         ? "Connect a provider and pick models to start…"
-                        : `Ask anything... "${PROMPT_EXAMPLES[placeholderIndex % PROMPT_EXAMPLES.length]}"`
+                        : showPlanActionBar
+                          ? "Implement the plan, or type to refine it…"
+                          : `Ask anything... "${PROMPT_EXAMPLES[placeholderIndex % PROMPT_EXAMPLES.length]}"`
                 }
-                onChange={(e) => setInput(e.target.value)}
+                onChange={(e) => {
+                  setInput(e.target.value);
+                  acknowledgeCompletedTurn();
+                }}
                 onKeyDown={(e) => {
+                  // Shift+Tab flips Plan/Auto — but never while the menu is
+                  // open OR a slash command is being typed. Always swallowed
+                  // so focus never escapes the composer backwards (mirrors
+                  // FusionChatPane).
+                  if (e.key === "Tab" && e.shiftKey) {
+                    e.preventDefault();
+                    if (!menuOpen && !inputIsSlashCommand) {
+                      toggleRunMode();
+                    }
+                    return;
+                  }
                   if (menuOpen) {
                     if (e.key === "ArrowDown") {
                       e.preventDefault();
@@ -3165,6 +3586,22 @@ export default function OpenFusionChatPane({
                       return;
                     }
                   }
+                  // Question panel keys (only when no permission is above it):
+                  // esc rejects the whole request; bare Enter is a no-op so a
+                  // reflex Enter never picks an accidental default. Enter WITH
+                  // text falls through to send(), which routes it as the
+                  // custom answer.
+                  if (activeQuestion) {
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      rejectActiveQuestion();
+                      return;
+                    }
+                    if (e.key === "Enter" && !e.shiftKey && !input.trim()) {
+                      e.preventDefault();
+                      return;
+                    }
+                  }
                   if (e.key === "Escape" && busy) {
                     e.preventDefault();
                     interrupt();
@@ -3177,8 +3614,16 @@ export default function OpenFusionChatPane({
                 }}
                 rows={1}
               />
-              <div className="oc-prompt-meta" title={modelsLine}>
-                <span className="oc-prompt-agent">Brain</span>
+              <div className="oc-prompt-meta" title={`${modelsLine} · Shift+Tab toggles mode`}>
+                <button
+                  type="button"
+                  className={clsx("oc-prompt-agent", `is-${runMode}`)}
+                  title={`Switch to ${runMode === "plan" ? "Auto" : "Plan"} mode (Shift+Tab)`}
+                  aria-pressed={runMode === "plan"}
+                  onClick={toggleRunMode}
+                >
+                  {runMode === "plan" ? "Plan" : "Auto"}
+                </button>
                 <span className="oc-prompt-sep">·</span>
                 <span className="oc-prompt-model">{brainLabel}</span>
                 <span className="oc-prompt-pair">⇄</span>
@@ -3251,6 +3696,11 @@ export default function OpenFusionChatPane({
         </span>
         <div className="oc-footer-right">
           {pendingPermission && <span className="oc-footer-perm">△ 1 Permission</span>}
+          {pendingQuestions.length > 0 && (
+            <span className="oc-footer-perm">
+              ? {pendingQuestions.length} Question{pendingQuestions.length > 1 ? "s" : ""}
+            </span>
+          )}
           <button
             type="button"
             className={clsx("oc-footer-details", verbose && "is-on")}

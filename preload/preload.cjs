@@ -167,9 +167,15 @@ contextBridge.exposeInMainWorld("vibe", {
         nonce
       }),
     openExternal: (url) => ipcRenderer.invoke("app:open-external", { url }),
-    sendUserTurn: (id, text) => ipcRenderer.send("openfusion-chat:input", { id, text }),
+    sendUserTurn: (id, text, mode) =>
+      ipcRenderer.send("openfusion-chat:input", { id, text, mode }),
     permission: (id, requestId, reply) =>
       ipcRenderer.invoke("openfusion-chat:permission", { id, requestId, reply }),
+    answerQuestion: (id, requestId, answers) =>
+      ipcRenderer.invoke("openfusion-chat:question", { id, requestId, answers }),
+    rejectQuestion: (id, requestId) =>
+      ipcRenderer.invoke("openfusion-chat:question", { id, requestId, reject: true }),
+    compact: (id) => ipcRenderer.invoke("openfusion-chat:compact", { id }),
     interrupt: (id) => ipcRenderer.invoke("openfusion-chat:interrupt", { id }),
     stop: (id) => ipcRenderer.invoke("openfusion-chat:stop", { id }),
     onEvent: (callback) => {

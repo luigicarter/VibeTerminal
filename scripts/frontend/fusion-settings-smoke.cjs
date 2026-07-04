@@ -1,9 +1,13 @@
 // Fusion settings-layer smoke.
 //
-// Locks the Fusion pane's model/effort selection behavior: per-engine effort
-// enums (codex has NO "max" — verified against the codex 0.142 binary:
-// minimal|low|medium|high|xhigh|ultra), legacy "max"→"xhigh" coercion at every
-// layer, model validation before restart, and the menu-activation semantics.
+// Locks the Fusion pane's per-role FAMILY/model/effort selection behavior:
+// each role (planner/executor) picks a family — Claude (claude CLI) or Codex
+// (codex app-server) — then a model, through an Open Fusion-style two-stage
+// picker. Per-family effort enums (codex has NO "max" — verified against the
+// codex 0.142 binary: minimal|low|medium|high|xhigh|ultra), legacy
+// "max"→"xhigh" coercion at every layer, legacy field migration
+// (model/claudeEffort → planner, codexModel/codexEffort → executor), model
+// validation before restart, and the menu-activation semantics.
 //
 // The slash-menu logic lives in frontend/components/fusionSlashMenu.ts (pure,
 // extracted exactly so this smoke can exercise REAL behavior): it is
@@ -35,12 +39,18 @@ new Function("module", "exports", "require", compiled)(
   require
 );
 const {
+  buildFusionPicker,
   buildSlashMenu,
+  familyMaxEffort,
   normalizeFusionCodexEffort,
   normalizeFusionModel,
+  normalizeFusionRoleEffort,
+  normalizeFusionRoleSettings,
   isValidClaudeModelId,
+  resolveModelArgument,
   CODEX_EFFORT_VALUES,
-  FREE_TEXT_SLASH_COMMANDS
+  FREE_TEXT_SLASH_COMMANDS,
+  FUSION_SLASH_COMMANDS
 } = menuModule.exports;
 
 // ---- per-engine effort enums ----
@@ -58,6 +68,18 @@ assert(
   normalizeFusionCodexEffort(undefined) === "auto",
   "absent codex effort means auto — never inherited from the claude effort"
 );
+// Cross-family coercion: a saved effort survives a family flip at the nearest
+// real level instead of failing every turn as an unknown variant.
+assert(
+  normalizeFusionRoleEffort("claude", "ultra") === "max" &&
+    normalizeFusionRoleEffort("claude", "minimal") === "low" &&
+    normalizeFusionRoleEffort("codex", "max") === "xhigh",
+  "efforts must coerce across families at the nearest real level"
+);
+assert(
+  familyMaxEffort("claude") === "max" && familyMaxEffort("codex") === "xhigh",
+  "the 'max' preset must map to each family's own top level"
+);
 
 // ---- model validation ----
 assert(
@@ -74,11 +96,121 @@ assert(
   "the 'fast' shorthand maps to sonnet"
 );
 
+// ---- legacy migration: old fields land on the right roles ----
+{
+  const migrated = normalizeFusionRoleSettings({
+    model: "sonnet",
+    claudeEffort: "max",
+    codexModel: "gpt-5.5",
+    codexEffort: "max"
+  });
+  assert(
+    migrated.plannerFamily === "claude" &&
+      migrated.plannerModel === "sonnet" &&
+      migrated.plannerEffort === "max" &&
+      migrated.executorFamily === "codex" &&
+      migrated.executorModel === "gpt-5.5" &&
+      migrated.executorEffort === "xhigh",
+    "legacy settings must migrate to planner(claude)/executor(codex) with per-family effort coercion"
+  );
+}
+{
+  const defaults = normalizeFusionRoleSettings(null);
+  assert(
+    defaults.plannerFamily === "claude" &&
+      defaults.plannerModel === "opus" &&
+      defaults.executorFamily === "codex" &&
+      defaults.executorModel === "auto",
+    "empty settings must land on the stock planner opus / executor codex-default pair"
+  );
+}
+
+// ---- typed model arguments resolve to a family (or refuse) ----
+assert(
+  resolveModelArgument("codex/gpt-5.5")?.family === "codex" &&
+    resolveModelArgument("claude/sonnet")?.family === "claude" &&
+    resolveModelArgument("opus")?.family === "claude" &&
+    resolveModelArgument("gpt-5.5")?.family === "codex" &&
+    resolveModelArgument("totally-unknown-model") === null,
+  "typed model args must resolve by slug or shape and refuse unattributable ids"
+);
+
+// ---- the Open Fusion-style picker: family stage → model stage ----
+{
+  // Family stage: the role's CURRENT family leads and is marked, so Enter
+  // drills into where the user already is (never a silent switch).
+  const menu = buildFusionPicker({ role: "planner" }, "", { plannerFamily: "codex" });
+  assert(
+    menu.items[0]?.command === "__family:codex" &&
+      menu.items[0]?.desc.includes("current") &&
+      menu.items.some((item) => item.command === "__family:claude"),
+    "planner family stage must lead with the current family marked as current"
+  );
+}
+{
+  // Model stage: current model marked + front-loaded — Enter is a no-op pick.
+  const menu = buildFusionPicker(
+    { role: "planner", family: "codex" },
+    "",
+    { plannerFamily: "codex", plannerModel: "gpt-5.5" }
+  );
+  assert(
+    menu.items[0]?.command === "__model:codex/gpt-5.5" &&
+      menu.items[0]?.desc.includes("current"),
+    "picker model stage must lead with the CURRENT model marked as current"
+  );
+}
+{
+  // Executor on the Claude family — the cross-family quadrant.
+  const menu = buildFusionPicker(
+    { role: "executor", family: "claude" },
+    "",
+    { executorFamily: "claude", executorModel: "sonnet" }
+  );
+  assert(
+    menu.items[0]?.command === "__model:claude/sonnet" &&
+      menu.items[0]?.desc.includes("current"),
+    "executor claude model stage must mark the current claude executor model"
+  );
+}
+{
+  // Unmatched-but-launchable id → explicit "Use '<id>'" escape row.
+  const menu = buildFusionPicker(
+    { role: "executor", family: "codex" },
+    "gpt-9-custom",
+    { executorFamily: "codex", executorModel: "auto" }
+  );
+  assert(
+    menu.items.length === 1 &&
+      menu.items[0].command === "__model:codex/gpt-9-custom",
+    "an unmatched valid id in the picker must surface as a 'Use <id>' row"
+  );
+}
+{
+  // The palette carries both picker commands as COMMANDS (the pane opens the
+  // state picker), never as text fills.
+  const plannerCmd = FUSION_SLash_COMMANDS_lookup("/planner-model");
+  const executorCmd = FUSION_SLash_COMMANDS_lookup("/executor-model");
+  assert(
+    plannerCmd && executorCmd,
+    "the palette must list /planner-model and /executor-model"
+  );
+  const menu = buildSlashMenu("/planner-model");
+  const row = menu.items.find((item) => item.key === "/planner-model");
+  assert(
+    row && row.command === "/planner-model" && !row.fill,
+    "/planner-model palette row must be a command (opens the picker), not a fill"
+  );
+}
+function FUSION_SLash_COMMANDS_lookup(name) {
+  return FUSION_SLASH_COMMANDS.find((cmd) => cmd.name === name);
+}
+
 // ---- menu behavior: bare '/claude' must NOT commit a model reset ----
 // The CURRENT model leads the list, so Enter (activates index 0) is a
 // harmless "Already using …" no-op instead of silently reverting to Opus.
 {
-  const menu = buildSlashMenu("/claude", { model: "sonnet" });
+  const menu = buildSlashMenu("/claude", { plannerFamily: "claude", plannerModel: "sonnet" });
   assert(
     menu.items[0]?.command === "/claude sonnet" &&
       menu.items[0]?.desc.includes("current"),
@@ -86,7 +218,7 @@ assert(
   );
 }
 {
-  const menu = buildSlashMenu("/codex", { codexModel: "gpt-5.5" });
+  const menu = buildSlashMenu("/codex", { executorFamily: "codex", executorModel: "gpt-5.5" });
   assert(
     menu.items[0]?.command === "/codex gpt-5.5" &&
       menu.items[0]?.desc.includes("current"),
@@ -95,7 +227,10 @@ assert(
 }
 {
   // A custom current model (outside the catalog) still leads the list.
-  const menu = buildSlashMenu("/claude", { model: "claude-opus-4-6" });
+  const menu = buildSlashMenu("/claude", {
+    plannerFamily: "claude",
+    plannerModel: "claude-opus-4-6"
+  });
   assert(
     menu.items[0]?.command === "/claude claude-opus-4-6",
     "a custom current planning model must lead the /claude submenu"
@@ -108,7 +243,7 @@ assert(
   "/claude must not be a free-text command — its argument filters the submenu"
 );
 {
-  const menu = buildSlashMenu("/claude son", { model: "opus" });
+  const menu = buildSlashMenu("/claude son", { plannerFamily: "claude", plannerModel: "opus" });
   assert(
     menu.items.length === 1 && menu.items[0].command === "/claude sonnet",
     "typing '/claude son' must filter the submenu down to Sonnet"
@@ -116,7 +251,10 @@ assert(
 }
 {
   // Unmatched-but-launchable id → explicit "Use '<id>'" escape row.
-  const menu = buildSlashMenu("/claude claude-opus-4-6", { model: "opus" });
+  const menu = buildSlashMenu("/claude claude-opus-4-6", {
+    plannerFamily: "claude",
+    plannerModel: "opus"
+  });
   assert(
     menu.items.length === 1 &&
       menu.items[0].command === "/claude claude-opus-4-6" &&
@@ -126,14 +264,20 @@ assert(
 }
 {
   // Unmatched AND unlaunchable → empty menu (Enter then hits validation).
-  const menu = buildSlashMenu("/claude gpt-5.5", { model: "opus" });
+  const menu = buildSlashMenu("/claude gpt-5.5", {
+    plannerFamily: "claude",
+    plannerModel: "opus"
+  });
   assert(
     menu.items.length === 0,
     "an id claude can't launch must NOT get a menu row"
   );
 }
 {
-  const menu = buildSlashMenu("/codex gpt-5.4-custom", { codexModel: "auto" });
+  const menu = buildSlashMenu("/codex gpt-5.4-custom", {
+    executorFamily: "codex",
+    executorModel: "auto"
+  });
   assert(
     menu.items.length === 1 && menu.items[0].command === "/codex gpt-5.4-custom",
     "an unmatched codex id must surface as a 'Use <id>' row"
@@ -151,8 +295,8 @@ assert(
 {
   const menu = buildSlashMenu("/claude ");
   assert(
-    menu.title === "Planning Model" && menu.items.length > 0,
-    "'/claude ' must open the Planning Model submenu"
+    menu.title === "Planner Model (Claude)" && menu.items.length > 0,
+    "'/claude ' must open the Planner Model submenu"
   );
 }
 
@@ -172,21 +316,26 @@ const host = fs.readFileSync(
   "utf8"
 );
 
-// Claude planning effort must NEVER leak into the codex effort: the pane
-// omits codexEffort when it's auto, and main used to backfill it from the
-// CLAUDE effort (`payload.codexEffort ?? payload.effort`) — the UI then said
-// "Execution Auto" while every delegation ran at the claude level.
+// The planner effort must NEVER leak into the executor effort: the pane omits
+// the executor effort when it's auto, and main used to backfill it from the
+// PLANNER effort (`payload.codexEffort ?? payload.effort`) — the UI then said
+// "Execution Auto" while every delegation ran at the planner's level.
 assert(
   !main.includes("payload.codexEffort ?? payload.effort") &&
-    main.includes("normalizeFusionCodexEffort(payload.codexEffort)"),
-  "main must read the codex effort ONLY from payload.codexEffort"
+    !main.includes("payload.executorEffort ?? payload.effort") &&
+    main.includes("payload.executorEffort ?? payload.codexEffort"),
+  "main must read the executor effort ONLY from executor fields (legacy codexEffort ok, planner effort never)"
+);
+// All three layers route legacy "max" through per-family coercion.
+assert(
+  app.includes("normalizeFusionRoleSettings"),
+  "App must normalize Fusion settings through the shared per-role funnel"
 );
 assert(
-  /if \(\s*(value|effort)\s*===\s*"max"\s*\)\s*(\{\s*)?return "xhigh"/.test(app) &&
-    /if \(\s*(value|effort)\s*===\s*"max"\s*\)\s*(\{\s*)?return "xhigh"/.test(
-      fs.readFileSync(menuSource, "utf8")
-    ),
-  "App and the menu module must coerce legacy codex effort 'max' to 'xhigh'"
+  /if \(lower === "max"\) \{\s*\n\s*return "xhigh";/.test(
+    fs.readFileSync(menuSource, "utf8")
+  ),
+  "the menu module must coerce legacy codex effort 'max' to 'xhigh'"
 );
 assert(
   adapter.includes("function cleanCodexEffort") &&
@@ -196,9 +345,9 @@ assert(
 
 // Model validation before restart + speed-preset honesty.
 assert(
-  pane.includes("isValidClaudeModelId(settings.model)") &&
+  pane.includes("isValidFamilyModelId(nextPlannerFamily, settings.plannerModel)") &&
     pane.includes("is not a Claude model this pane can launch"),
-  "pane must refuse unknown planning-model ids instead of restarting into a dead claude process"
+  "pane must refuse unknown planner-model ids instead of restarting into a dead process"
 );
 assert(
   pane.includes("Unknown speed preset"),
@@ -208,26 +357,32 @@ assert(
 // Speed/effort shortcuts must not clobber the model pick: only the "fast"
 // presets (whose label advertises the faster model) may set one.
 assert(
-  !pane.includes('applySettings({ model: "opus", claudeEffort'),
-  "/opus effort and non-fast presets must NOT force the model back to opus"
+  !pane.includes('plannerModel: "opus", plannerEffort'),
+  "non-fast presets must NOT force the model back to opus"
 );
 assert(
-  pane.includes('applySettings({ claudeEffort: "high" }, "planning speed")') &&
-    pane.includes('applySettings({ claudeEffort: "auto", codexEffort: "auto" }, "Fusion speed")'),
-  "balanced/deep/max presets must be effort-only (model-preserving)"
+  pane.includes('applySettings({ plannerEffort: "high" }, "planning speed")') &&
+    pane.includes('applySettings({ plannerEffort: "auto", executorEffort: "auto" }, "Fusion speed")'),
+  "balanced/deep presets must be effort-only (model-preserving)"
 );
 assert(
-  pane.includes('applySettings({ codexEffort: "xhigh" }, "execution speed")'),
-  "speed presets must map the top execution level to xhigh, never codex 'max'"
+  pane.includes("familyMaxEffort(executorFamily)"),
+  "the top execution level must come from the executor family's own enum (xhigh for codex), never codex 'max'"
 );
 
-// Composer navigation: Esc dismisses the menu without erasing input; Shift+Tab
-// never toggles the mode while a slash command is being typed; Tab in slash
-// input can't blur the composer; hover-highlight arms on real mouse movement.
+// Composer navigation: Esc dismisses the menu without erasing input (and backs
+// a picker out one stage per press); Shift+Tab never toggles the mode while a
+// slash command is being typed; Tab in slash input can't blur the composer;
+// hover-highlight arms on real mouse movement.
 assert(
   pane.includes("setSlashMenuDismissed(true)") &&
     pane.includes("!slashMenuDismissed"),
   "Esc must dismiss the slash menu while KEEPING the typed input"
+);
+assert(
+  pane.includes("if (picker?.family)") &&
+    pane.includes("setPicker({ role: picker.role })"),
+  "Esc in the picker must back out one stage (model → family) per press"
 );
 assert(
   pane.includes("!slashMenuOpen && !inputIsSlashCommand"),

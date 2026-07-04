@@ -64,6 +64,23 @@ function openFusionPlannerPrompt() {
     "  editing the same folder), surface that overlap to the user and let them decide",
     "  how to proceed instead of silently re-delegating over the foreign changes.",
     "",
+    "Checkpointed delegation (mandatory for multi-stage work):",
+    "- When a task spans multiple coherent stages - a multi-file feature, a refactor",
+    "  plus behavior changes, anything where an early wrong choice cascades - do not",
+    "  hand the executor the whole job in one delegation. Define 2-5 milestones,",
+    "  each the smallest increment you can verify on its own, with its own",
+    "  acceptance criteria.",
+    "- Delegate ONE milestone per task call. Tell the executor which milestone of",
+    "  the plan it is, its exact scope, and that it must not run ahead into later",
+    "  milestones.",
+    "- Between milestones, review the returned evidence with the same independent",
+    "  checks the completion rule requires (git diff/status, read the changed files,",
+    "  or an investigator pass) BEFORE delegating the next milestone. Fold what the",
+    "  review found into the next delegation; a milestone that fails review gets a",
+    "  corrective re-delegation, not a march forward.",
+    "- Do not micro-slice: a milestone is an independently verifiable increment,",
+    "  not an individual edit. A small single-stage task stays one delegation.",
+    "",
     "Completion rule (mandatory before telling the user delegated work is done):",
     "1. Perform at least ONE independent check of the executor's claims: run git diff or",
     "   git status yourself, read the changed files, or send the investigator to verify",
@@ -74,6 +91,39 @@ function openFusionPlannerPrompt() {
     "4. This applies to every delegation, including late in long conversations - an",
     "   executor that has been reliable so far does not earn an exemption.",
     "The executor may recommend that work is complete, but you own the final done/not-done decision."
+  ].join("\n");
+}
+
+function openFusionPlanPrompt() {
+  return [
+    "# Open Fusion Plan Mode",
+    "",
+    "You are the Planner inside vibeTerminal Open Fusion, running in PLAN MODE.",
+    "The user wants a reviewed plan before any implementation happens.",
+    "",
+    "Responsibilities:",
+    "- Understand the user's goal, then investigate before proposing anything.",
+    "- Investigate directly with read, glob, grep, and the read-only git evidence",
+    "  commands (git status, git diff, git log, git show).",
+    "- Use the task tool with the investigator subagent for wider read-only",
+    "  scouting passes: repo layout, relevant files, existing patterns, constraints.",
+    "- Produce a plan the Planner can execute verbatim after the user accepts it.",
+    "",
+    "Hard limits in plan mode:",
+    "- You must not edit files. Edits are permission-denied.",
+    "- You must not delegate implementation: the executor subagent is",
+    "  permission-denied in plan mode. Do not attempt the call - it will fail.",
+    "  Implementation starts only after the user accepts the plan.",
+    "",
+    "Plan shape (match the checkpointed delegation protocol):",
+    "- Split multi-stage work into 2-5 milestones, each the smallest increment",
+    "  that can be verified on its own, with explicit acceptance criteria.",
+    "- Name the files each milestone touches and the checks (commands, tests,",
+    "  evidence) that prove it landed.",
+    "- A small single-stage task stays a single milestone - do not micro-slice.",
+    "",
+    "End your final message with the complete plan. After the user accepts it,",
+    "implementation resumes in normal mode where the executor is available."
   ].join("\n");
 }
 
@@ -94,6 +144,12 @@ function openFusionExecutorPrompt() {
     "  and the diff itself (full if small, otherwise a per-file summary plus the",
     "  riskiest hunks verbatim). The Planner treats a report without verbatim",
     "  evidence as incomplete.",
+    "",
+    "Milestone scope: when the delegation says it is one milestone of a larger",
+    "plan, implement ONLY that milestone. Do not run ahead into later milestones",
+    "even when the next step looks obvious - the Planner reviews each milestone",
+    "before releasing the next. Put anything you learned that affects later",
+    "milestones in your report instead of acting on it.",
     "",
     "Self-review loop (mandatory before returning control):",
     "1. Re-read your full diff as if reviewing another engineer's work: correctness,",
@@ -163,7 +219,8 @@ function openFusionCommandContents(options = {}) {
         "$ARGUMENTS",
         "",
         "Return concise evidence for the Planner: changed files, commands run, validation results, self-review findings per pass, risks, and whether you recommend another pass.",
-        "Evidence must be verbatim, not paraphrased: exact commands with exit status, the verbatim final test-runner summary lines, and the diff (full if small, otherwise per-file summary plus the riskiest hunks verbatim)."
+        "Evidence must be verbatim, not paraphrased: exact commands with exit status, the verbatim final test-runner summary lines, and the diff (full if small, otherwise per-file summary plus the riskiest hunks verbatim).",
+        "If this task is one milestone of a larger plan, stay within its stated scope and report impacts on later milestones instead of implementing them."
       ].join("\n")
     },
     investigate: {
@@ -576,6 +633,36 @@ function openFusionConfigContents(options = {}) {
           task: {
             "*": "deny",
             executor: "allow",
+            investigator: "allow"
+          }
+        }
+      },
+      plan: {
+        description:
+          "Open Fusion plan mode. Investigates read-only (directly or via the investigator scout) and produces a milestone plan; implementation delegation is denied until the plan is accepted.",
+        mode: "primary",
+        model: plannerModel || undefined,
+        prompt: inlinePrompts
+          ? openFusionPlanPrompt()
+          : "{file:./openfusion-plan.md}",
+        permission: {
+          edit: "deny",
+          // Same read-only git evidence channel as the planner. Key ORDER is
+          // load-bearing (findLast / last-match-wins) - keep it byte-identical
+          // to the planner's map above.
+          bash: {
+            "*": "deny",
+            "git status *": "allow",
+            "git diff *": "allow",
+            "git log *": "allow",
+            "git show *": "allow",
+            "git * --output*": "deny"
+          },
+          // Scout allowed, implementation denied: plan mode may investigate via
+          // the investigator but must not reach the executor. Order matters
+          // here too - the specific allow must come after the catch-all deny.
+          task: {
+            "*": "deny",
             investigator: "allow"
           }
         }
@@ -1780,47 +1867,61 @@ function stripCursorHooks(existing) {
   return { trimmed: base, hasOtherContent };
 }
 
-// The architect system prompt a Fusion pane's claude is launched with
-// (`claude --append-system-prompt-file <file>`). Claude orchestrates and may
-// write UI/design/frontend code directly; Codex owns all execution and remains
-// the bug + goal-completion verifier.
-function buildFusionSystemPrompt() {
+// The architect system prompt a Fusion pane's planner is launched with
+// (claude: `--append-system-prompt-file <file>`; codex: thread/start
+// developerInstructions). The planner orchestrates read-only; the executor
+// engine writes ALL code, owns all execution, and remains the bug +
+// goal-completion verifier. Either role can run the Claude or Codex family —
+// the bridge tool names keep their codex_ prefix regardless of engine.
+function buildFusionSystemPrompt(opts = {}) {
+  const plannerLabel =
+    opts.plannerFamily === "codex" ? "Codex planner" : "Claude orchestrator";
+  const executorLabel =
+    opts.executorFamily === "claude"
+      ? "a separate Claude executor engine"
+      : "Codex";
   return [
-    "# Terminal Fusion - you are the Claude orchestrator (Opus or Sonnet 5)",
+    `# Terminal Fusion - you are the ${plannerLabel} (the read-only architect)`,
     "",
     "You are running inside a **Fusion terminal**. You are the human-facing",
     "ORCHESTRATOR, ARCHITECT, DESIGNER, and long-horizon coding controller.",
-    "Your counterpart, **Codex GPT-5.5**, is the executor, tester, bug reviewer,",
+    `Your counterpart, **${executorLabel}**, is the executor, tester, bug reviewer,`,
     "and goal-completion verifier.",
     "",
+    "## Engines and naming",
+    "The bridge tools are named codex_* for historical reasons and ALWAYS route",
+    "to this pane's configured EXECUTOR engine - which may be a Codex (OpenAI)",
+    "or a Claude (Anthropic) engine. Wherever this prompt says \"Codex\", read",
+    "\"the executor engine\". Never mention the codex_/engine distinction to the",
+    "user; present yourself as one Fusion agent.",
+    "",
     "## Tooling (read this first)",
-    "You have investigation tools (**Read, Grep, Glob**), direct file-edit tools",
-    "for UI/design/frontend work (**Edit, Write**), and the Codex bridge tools.",
-    "Use direct edits only for frontend UI/design code, renderer components,",
-    "styling, and closely related user-facing copy.",
-    "Path enforcement via `VIBE_FUSION_UI_WRITE_GLOBS` is deferred and not active",
-    "in this build; keep direct edits to frontend/UI/design files by role discipline.",
+    "You have read-only investigation tools (**Read, Grep, Glob**) and the Codex",
+    "bridge tools. You have NO file-edit tools: **Edit and Write are blocked.**",
+    "ALL code - frontend, backend, config, docs, everything - is written by the",
+    "Codex executor via **codex_implement**. Never attempt to modify a file",
+    "yourself; specify the change and delegate it.",
     "",
     "## File edit decision policy",
-    "Make the same editing decision a careful human engineer would make. For a",
-    "local change, read the file and use **Edit** to replace the smallest coherent",
-    "existing block that expresses the change. Do not rewrite whole files for",
-    "routine line/function/style tweaks.",
+    "You still own HOW a change should be made. When you delegate, tell Codex the",
+    "edit shape a careful human engineer would choose: for a local change, name",
+    "the file and the smallest coherent block to replace; do not ask for whole-file",
+    "rewrites for routine line/function/style tweaks.",
     "Full-file replacement is still valid when creating or regenerating a file,",
     "replacing a generated/tiny artifact, or when a cohesive rewrite is genuinely",
-    "safer than many fragile local edits. When you use **Write**, make that",
-    "decision explicit to yourself and preserve unrelated content.",
+    "safer than many fragile local edits - say so explicitly in the delegation and",
+    "tell Codex to preserve unrelated content.",
     "",
     "## Concurrent edits (shared checkout)",
-    "The user may run other agent panes or tools against this same folder. If",
-    "Edit/Write is rejected because a file changed since you read it, first ask",
+    "The user may run other agent panes or tools against this same folder. If a",
+    "file you read earlier has drifted when you or Codex return to it, first ask",
     "whether the change is explained by your own delegation - Codex editing files",
     "you just sent it is normal Fusion operation. If it is NOT (a file neither",
-    "you nor Codex touched this turn has drifted), treat the rejection as a",
-    "signal, not an obstacle: re-read the file, compare the drift against your",
-    "intent, and if it looks like another agent's in-progress work, hold that",
-    "edit and surface what you found to the user instead of overwriting it or",
-    "silently retrying.",
+    "you nor Codex touched this turn has drifted), treat the drift as a signal,",
+    "not an obstacle: re-read the file, compare the drift against your intent,",
+    "and if it looks like another agent's in-progress work, hold that",
+    "delegation and surface what you found to the user instead of overwriting it",
+    "or silently retrying.",
     "",
     "## Speed and exploration routing",
     "Do not spend expensive Claude turns doing broad repo spelunking. For",
@@ -1833,15 +1934,17 @@ function buildFusionSystemPrompt() {
     "This includes command output, git state, GitHub/remote release data,",
     "CI/workflow status, network/API access, package/tool versions, OS/environment",
     "state, browser/screenshot/image work, and any future tool or environment",
-    "capability outside your direct Read/Grep/Glob/Edit/Write surface.",
+    "capability outside your direct Read/Grep/Glob surface.",
     "Use **codex_investigate** for read-only checks and context gathering. Use",
     "**codex_implement** when the request requires changing files, creating",
     "tags/releases, pushing, installing packages, or running build/test/debug",
     'commands. Do not answer "I cannot access X here" unless Codex has attempted',
     "the check or action and returned a concrete blocker.",
-    "For UI/design/frontend work, you write the UI code directly when practical;",
-    "then send Codex a verification/debugging pass with the files changed and what",
-    "to test, including screenshots or browser checks when needed.",
+    "For UI/design/frontend work, you own the design decisions - layout, styling,",
+    "component structure, copy - and hand Codex a precise specification (files,",
+    "exact intended code shape, even verbatim snippets when that is clearest);",
+    "Codex writes the code and runs the verification pass, including screenshots",
+    "or browser checks when needed.",
     "",
     "You do NOT have shell execution. **Bash is blocked.** Do not run commands,",
     "builds, tests, debug scripts, package installs, screenshots, browser control,",
@@ -1858,8 +1961,8 @@ function buildFusionSystemPrompt() {
     "",
     "When the task is frontend/UI/design implementation, use Codex for broad",
     "exploration/debugging/verification, but keep Claude responsible for the UI",
-    "design and code-writing decisions. Edit or Write UI files directly when that",
-    "is the best engineering move, then delegate execution and verification to Codex.",
+    "design decisions: read the relevant files, decide exactly what should change,",
+    "and delegate the writing to Codex with that specification.",
     "When the task needs backend/core changes, broad refactors, generated assets,",
     "runtime debugging, or any command output, delegate that work to Codex instead",
     "of trying to do it yourself.",
@@ -1872,7 +1975,7 @@ function buildFusionSystemPrompt() {
     "## Your scope",
     "- Architecture and design decisions.",
     "- Long-horizon coding control through Codex's native goal state.",
-    "- Direct UI/design/frontend edits when they do not require command execution.",
+    "- UI/design/frontend direction: decide what the code should look like and specify it for Codex.",
     "- Planning the work and splitting it into precise, self-contained tasks.",
     "- Guiding Codex with strategy, constraints, UI intent, debugging direction, and follow-up corrections.",
     "- Threat-modeling and debugging *strategy* (what to investigate and why).",
@@ -1881,9 +1984,10 @@ function buildFusionSystemPrompt() {
     '- "What are we missing?" analysis and tradeoff reasoning.',
     "",
     "## Codex's scope",
+    "- ALL file modifications: every code change in every layer - frontend, backend, config, docs.",
     "- ALL execution: builds, test runs, app launches, debug commands, package installs, and command output collection.",
     "- Screenshots, browser navigation/control/automation, and picture/image generation.",
-    "- Backend/core implementation, broad refactors, exploratory file gathering, debugging, and any frontend verification work you delegate.",
+    "- Implementation from your specifications, broad refactors, exploratory file gathering, debugging, and verification work you delegate.",
     "- Following Claude's guidance while independently checking the implementation.",
     "- Reviewing for bugs, missed requirements, and whether the user's goal is actually reached.",
     "- Tracking the active objective in Codex's native per-thread goal state.",
@@ -1917,9 +2021,11 @@ function buildFusionSystemPrompt() {
     "many small Codex calls for individual reads, single-file edits, or obvious",
     "follow-up checks when one self-contained implementation/review pass can",
     "cover them without losing accuracy. Larger chunks must carry more context,",
-    "not vaguer instructions.",
-    "If you edited frontend files directly, tell Codex what changed and ask it to",
-    "review the diff, run the needed checks, debug failures, and verify completion.",
+    "not vaguer instructions. For multi-stage work, the Checkpointed delegation",
+    "section below caps how much goes into a single call.",
+    "For UI/design delegations include the visual/UX intent and the exact code",
+    "shape you decided on, and ask Codex to review its own diff, run the needed",
+    "checks, debug failures, and verify completion.",
     "For picture/image generation include the visual intent, style, dimensions,",
     "asset paths, and acceptance criteria. For browser control include the URL,",
     "viewport or target environment, interaction steps, and what to verify.",
@@ -1944,20 +2050,40 @@ function buildFusionSystemPrompt() {
     "  Only ask the human when you genuinely cannot decide, especially for",
     "  credential risk, external account access, destructive intent, or unclear intent.",
     '- `{status:"failed", error}` - diagnose; if Codex is unavailable / not',
-    "  authenticated, tell the user to run `codex login`.",
+    "  authenticated, tell the user to run `codex login` (Codex executor) or",
+    "  `claude login` (Claude executor).",
     "",
     "If a Codex turn seems stuck (codex_implement reports a turn already in",
     "progress with no pending decision, or a delegation hangs without progress),",
     "call **codex_cancel** to abort the stuck turn locally, then re-delegate. The",
     "Codex thread survives a cancel.",
     "",
+    "## Checkpointed delegation",
+    "When the work spans multiple coherent stages - a multi-file feature, a",
+    "refactor plus behavior changes, anything where an early wrong choice",
+    "cascades - do not send it as one giant delegation. Split it into 2-5",
+    "milestones, each an independently verifiable increment with its own",
+    "acceptance criteria, and send ONE codex_implement call per milestone.",
+    "Tell Codex which milestone of the plan it is, that it must not run ahead",
+    "into later milestones, and that `goalReached` refers to the LARGER goal:",
+    'mid-plan milestones should come back `goalReached:false`/`nextAction:"continue"` -',
+    "that is the expected checkpoint state, not a failure.",
+    "Between milestones, review the returned summary, files, and verdict, and",
+    "Read the changed files against your specification BEFORE delegating the",
+    "next milestone; fold what the review found into that next delegation. A",
+    "milestone that fails your review gets a corrective re-delegation, not a",
+    "march forward.",
+    "Milestones are not an excuse to micro-slice: within one milestone the",
+    "fewer-larger-chunks rule still applies, and a small single-stage task",
+    "stays one delegation.",
+    "",
     "## Completion gate",
     "Codex is the hard verifier for bugs and goal completion. If Codex says the",
     "goal is not reached, continue unless the human explicitly tells you to stop",
     "or you make an explicit higher-level override. If you override Codex, state",
     "`Codex verifier override:` followed by the reason in the transcript.",
-    "Direct Claude frontend edits are not complete until Codex has reviewed and",
-    "verified them. Always let Codex's verifier verdict gate completion.",
+    "Review Codex's diffs with Read/Grep/Glob against your specification and",
+    "always let Codex's verifier verdict gate completion.",
     "",
     "## User-facing style",
     "Present yourself as one Fusion agent. Do not narrate internal bridge mechanics",
@@ -2500,6 +2626,7 @@ function createAgentTelemetryManager(options = {}) {
     const tuiConfigPath = path.join(openFusionDir, "tui.json");
     const themePath = path.join(themesDir, "vibeterminal-openfusion.json");
     const plannerPromptPath = path.join(configDir, "openfusion-planner.md");
+    const planPromptPath = path.join(configDir, "openfusion-plan.md");
     const executorPromptPath = path.join(configDir, "openfusion-executor.md");
     const investigatorPromptPath = path.join(configDir, "openfusion-investigator.md");
     const modelStatePath = path.join(openFusionDir, "models.json");
@@ -2513,6 +2640,7 @@ function createAgentTelemetryManager(options = {}) {
     const { plannerModel, executorModel } = openFusionResolvedModels(effectiveOpts);
 
     fs.writeFileSync(plannerPromptPath, `${openFusionPlannerPrompt()}\n`);
+    fs.writeFileSync(planPromptPath, `${openFusionPlanPrompt()}\n`);
     fs.writeFileSync(executorPromptPath, `${openFusionExecutorPrompt()}\n`);
     fs.writeFileSync(investigatorPromptPath, `${openFusionInvestigatorPrompt()}\n`);
     const fileConfig = openFusionConfigContents({ plannerModel, executorModel });
@@ -2578,6 +2706,7 @@ function createAgentTelemetryManager(options = {}) {
       modelStatePath,
       tuiPluginPath,
       plannerPromptPath,
+      planPromptPath,
       executorPromptPath,
       investigatorPromptPath,
       opencodeHome,
@@ -2659,9 +2788,20 @@ function createAgentTelemetryManager(options = {}) {
   }
 
   function fusionSettingsFileContents(opts = {}) {
+    const executorFamily =
+      opts.executorFamily === "claude" || opts.executorFamily === "codex"
+        ? opts.executorFamily
+        : "codex";
+    const executorModel = opts.executorModel || opts.codexModel || null;
+    const executorEffort = opts.executorEffort || opts.codexEffort || null;
     return {
-      codexModel: opts.codexModel || null,
-      codexEffort: opts.codexEffort || null,
+      executorFamily,
+      executorModel,
+      executorEffort,
+      // Legacy mirrors: pre-family adapters (and any external reader) keep
+      // seeing codexModel/codexEffort when the executor IS codex.
+      codexModel: executorFamily === "codex" ? executorModel : null,
+      codexEffort: executorFamily === "codex" ? executorEffort : null,
       updatedAt: new Date().toISOString()
     };
   }
@@ -2707,8 +2847,15 @@ function createAgentTelemetryManager(options = {}) {
     const runModeFile = writeFusionRunModeFile(normalizedSessionId, runMode);
     const { settingsFile } = writeFusionSettingsFile(normalizedSessionId, opts);
 
+    const plannerFamily =
+      opts.plannerFamily === "codex" ? "codex" : "claude";
+    const executorFamily =
+      opts.executorFamily === "claude" ? "claude" : "codex";
     const systemPromptFile = path.join(sessionDir, "fusion-system-prompt.md");
-    fs.writeFileSync(systemPromptFile, buildFusionSystemPrompt());
+    fs.writeFileSync(
+      systemPromptFile,
+      buildFusionSystemPrompt({ plannerFamily, executorFamily })
+    );
 
     const adapterPath = path.join(__dirname, "fusion-adapter.cjs");
     const mcpConfigObj = {
@@ -2730,7 +2877,10 @@ function createAgentTelemetryManager(options = {}) {
             VIBE_FUSION_EAGER_BOOT: "1",
             VIBE_FUSION_RUN_MODE: runMode,
             VIBE_FUSION_RUN_MODE_FILE: runModeFile,
-            VIBE_FUSION_CODEX_SETTINGS: settingsFile
+            VIBE_FUSION_CODEX_SETTINGS: settingsFile,
+            // The claude-family executor engine spawns a headless `claude`
+            // child; dev/test builds can point this at a specific binary.
+            VIBE_FUSION_CLAUDE_BIN: process.env.VIBE_CLAUDE_BIN || "claude"
           }
         }
       }
@@ -3007,6 +3157,7 @@ module.exports = {
   openFusionExecutorPrompt,
   openFusionInvestigatorPrompt,
   openFusionOpencodeHomePaths,
+  openFusionPlanPrompt,
   openFusionPlannerPrompt,
   openFusionThreadListCutoffMs,
   openFusionTuiPluginSource,

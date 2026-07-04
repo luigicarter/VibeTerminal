@@ -201,7 +201,9 @@ function buildCodexVerifierTask(task) {
     '- `nextAction`: "done" when complete, "continue" when Claude should redelegate/fix more, or "ask_human" when human input is required.',
     "- `summary`: one concise sentence explaining the verdict.",
     "",
-    'If you are not sure the goal is complete, set `goalReached:false` and `nextAction:"continue"`.'
+    'If you are not sure the goal is complete, set `goalReached:false` and `nextAction:"continue"`.',
+    "",
+    'If the task states it is one milestone of a larger plan, implement only that milestone and judge `goalReached` against the LARGER goal: report `goalReached:false` and `nextAction:"continue"` until the final milestone completes it, even when this milestone itself is done.'
   ].join("\n");
 }
 
@@ -313,8 +315,37 @@ function cleanCodexEffort(value) {
   return effort && effort.toLowerCase() === "max" ? "xhigh" : effort;
 }
 
+// Which engine family executes delegations: "codex" (app-server, the
+// original) or "claude" (persistent headless claude child). Anything else in
+// the settings file degrades to codex.
+function cleanExecutorFamily(value) {
+  return String(value || "").trim().toLowerCase() === "claude" ? "claude" : "codex";
+}
+
+// Claude executor model: "sonnet" is the executor default; the "fast"
+// shorthand and auto/default all land there too.
+function cleanClaudeExecutorModel(value) {
+  const text = String(value || "").trim();
+  if (!text) return "sonnet";
+  const lower = text.toLowerCase();
+  return lower === "auto" || lower === "default" || lower === "fast" ? "sonnet" : text;
+}
+
+// Claude executor effort: the claude --effort enum. Codex-only levels coerce
+// to the nearest real level (minimal→low, ultra→max) so a family flip never
+// launches claude with an unknown variant.
+function cleanClaudeEffort(value) {
+  const effort = cleanCodexSetting(value);
+  if (!effort) return null;
+  const lower = effort.toLowerCase();
+  if (lower === "minimal") return "low";
+  if (lower === "ultra") return "max";
+  return ["low", "medium", "high", "xhigh", "max"].includes(lower) ? lower : null;
+}
+
 function readCodexSettings() {
   const fallback = {
+    family: "codex",
     model: cleanCodexSetting(ENV_CODEX_MODEL),
     effort: cleanCodexEffort(ENV_CODEX_EFFORT),
     source: "env"
@@ -322,9 +353,21 @@ function readCodexSettings() {
   if (!SETTINGS_FILE) return fallback;
   try {
     const parsed = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8"));
+    const family = cleanExecutorFamily(parsed?.executorFamily);
+    if (family === "claude") {
+      return {
+        family,
+        model: cleanClaudeExecutorModel(parsed?.executorModel),
+        effort: cleanClaudeEffort(parsed?.executorEffort),
+        source: "file"
+      };
+    }
     return {
-      model: cleanCodexSetting(parsed?.codexModel),
-      effort: cleanCodexEffort(parsed?.codexEffort),
+      family,
+      // executorModel/executorEffort are the canonical fields; legacy files
+      // (pre-family builds) carry only codexModel/codexEffort.
+      model: cleanCodexSetting(parsed?.executorModel ?? parsed?.codexModel),
+      effort: cleanCodexEffort(parsed?.executorEffort ?? parsed?.codexEffort),
       source: "file"
     };
   } catch (error) {
@@ -467,6 +510,24 @@ async function codexSteer(text) {
   if (!trimmed) {
     return { status: "skipped", reason: "empty_steer" };
   }
+  if (activeExecutorFamily === "claude") {
+    if (!claudeTurnActive) {
+      return { status: "skipped", reason: "no_active_codex_turn" };
+    }
+    const sent = claudeSend({
+      type: "user",
+      message: {
+        role: "user",
+        content: `Live user steering for this active Fusion turn:\n${trimmed}`
+      }
+    });
+    if (!sent) {
+      relay({ role: "codex", kind: "steer", text: "live steering failed: executor channel is not writable" });
+      return { status: "failed", error: "Fusion executor channel is not writable" };
+    }
+    relay({ role: "codex", kind: "steer", text: "live steering accepted" });
+    return { status: "accepted" };
+  }
   if (!threadId || !activeTurnId) {
     return { status: "skipped", reason: "no_active_codex_turn" };
   }
@@ -496,6 +557,15 @@ async function codexSteer(text) {
 }
 
 async function codexInterrupt() {
+  if (activeExecutorFamily === "claude") {
+    if (!claudeTurnActive) {
+      return { status: "skipped", reason: "no_active_codex_turn" };
+    }
+    claudeInterruptRequested = true;
+    sendClaudeInterruptRequest();
+    relay({ role: "codex", kind: "interrupt", text: "active Fusion turn interrupted" });
+    return { status: "accepted" };
+  }
   if (!threadId || !activeTurnId) {
     return { status: "skipped", reason: "no_active_codex_turn" };
   }
@@ -594,7 +664,9 @@ function resetHarness(reason = "Fusion stopped.") {
   parked.clear();
   failAll(new Error(reason));
   killCodex();
+  killClaudeExecutor();
   resetCodexProcessState();
+  activeExecutorFamily = null;
   latchedTurnResult = null;
   resetTurnBuffers();
 }
@@ -787,6 +859,361 @@ function failAll(error) {
   currentGoal = null;
   goalFeatureAvailable = null;
   resolveTurn({ status: "failed", error: message });
+}
+
+// ---- claude-family executor engine ----
+// A persistent headless `claude` child (stream-json in/out) that fills the
+// same south-side role as the codex app-server when the executor family is
+// "claude". It reuses fusionChatHost's exported arg builder + stream
+// normalizer and feeds the SAME shared turn machinery (turnSummary/turnFiles,
+// awaitTurn/resolveTurn, verdict extraction), so the north side and result
+// shapes are identical for both engines.
+const CLAUDE_EXEC_BIN = process.env.VIBE_FUSION_CLAUDE_BIN || "claude";
+const CLAUDE_FILE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+let activeExecutorFamily = null;
+let claudeChild = null;
+let claudeNormalizer = null;
+let claudeStdoutBuffer = "";
+let claudeSpawnedModel = null;
+let claudeSpawnedEffort = null;
+let claudeTurnActive = false;
+let claudeInterruptRequested = false;
+let claudeTurnErrorText = "";
+let claudeTextParts = [];
+let claudeInterruptSeq = 0;
+
+// Engine selection is per delegation (the settings file is re-read every
+// call), but NEVER mid-turn: a live settings flip applies to the NEXT
+// delegation, otherwise a goal-sync inside the running turn would tear down
+// the engine that is executing it.
+function ensureExecutorFamily(family) {
+  if (activeExecutorFamily === family) return activeExecutorFamily;
+  if (currentTurn || turnArming || claudeTurnActive) {
+    return activeExecutorFamily || family;
+  }
+  const previous = activeExecutorFamily;
+  activeExecutorFamily = family;
+  if (!previous) return family;
+  if (previous === "claude") {
+    killClaudeExecutor();
+  } else {
+    threadId = null;
+    threadReady = null;
+    activeThreadModel = null;
+    goalFeatureAvailable = null;
+  }
+  currentGoal = null;
+  relay({
+    role: "codex",
+    kind: "activity",
+    text: `executor engine switched; starting a fresh ${family === "claude" ? "Claude" : "Codex"} executor`
+  });
+  return family;
+}
+
+function claudeSend(obj) {
+  if (
+    !claudeChild ||
+    !claudeChild.stdin ||
+    claudeChild.stdin.destroyed ||
+    !claudeChild.stdin.writable
+  ) {
+    return false;
+  }
+  try {
+    claudeChild.stdin.write(`${JSON.stringify(obj)}\n`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function killClaudeExecutor() {
+  const child = claudeChild;
+  claudeChild = null;
+  claudeNormalizer = null;
+  claudeStdoutBuffer = "";
+  claudeSpawnedModel = null;
+  claudeSpawnedEffort = null;
+  claudeTurnActive = false;
+  claudeInterruptRequested = false;
+  claudeTextParts = [];
+  if (!child || child.killed) return;
+  if (isWin && child.pid) {
+    try {
+      require("child_process").execFileSync(
+        "taskkill",
+        ["/pid", String(child.pid), "/t", "/f"],
+        { stdio: "ignore" }
+      );
+      return;
+    } catch {
+      // fall through
+    }
+  }
+  try {
+    child.kill();
+  } catch {
+    // ignore
+  }
+}
+
+function buildClaudeExecutorArgs(settings = {}) {
+  const { buildClaudeArgs } = require("./fusionChatHost.cjs");
+  return buildClaudeArgs({
+    cwd: CWD,
+    model: settings.model || "sonnet",
+    effort: settings.effort || undefined,
+    // Full-autonomy parity with the codex executor's dangerFullAccess +
+    // approvalPolicy "never": the executor owns all writes and execution, so
+    // routine prompts never park. Investigations stay read-only by task
+    // contract (the same parity the win32 codex investigate gate documents).
+    permissionMode: "bypassPermissions"
+  });
+}
+
+function ensureClaudeChild(settings = {}) {
+  const model = settings.model || "sonnet";
+  const effort = settings.effort || null;
+  if (claudeChild && (claudeSpawnedModel !== model || claudeSpawnedEffort !== effort)) {
+    relay({
+      role: "codex",
+      kind: "activity",
+      text: "execution model updated; starting a fresh Claude executor"
+    });
+    killClaudeExecutor();
+  }
+  if (claudeChild) return;
+  const { windowsCmdArg, createStreamNormalizer } = require("./fusionChatHost.cjs");
+  const args = buildClaudeExecutorArgs({ model, effort });
+  let child;
+  if (isWin) {
+    // The Windows claude is an npm shim (.cmd/.ps1), so always route through
+    // cmd.exe with buildClaudeSpawn's quoting rules.
+    const shell = process.env.ComSpec || "cmd.exe";
+    child = spawn(
+      shell,
+      ["/d", "/s", "/c", [CLAUDE_EXEC_BIN, ...args].map(windowsCmdArg).join(" ")],
+      { cwd: CWD, stdio: ["pipe", "pipe", "pipe"], windowsHide: true }
+    );
+  } else {
+    child = spawn(CLAUDE_EXEC_BIN, args, {
+      cwd: CWD,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true
+    });
+  }
+  claudeChild = child;
+  claudeNormalizer = createStreamNormalizer();
+  claudeStdoutBuffer = "";
+  claudeSpawnedModel = model;
+  claudeSpawnedEffort = effort;
+  child.stdout.on("data", (chunk) => {
+    if (claudeChild !== child) return;
+    claudeStdoutBuffer += chunk.toString("utf8");
+    let index;
+    while ((index = claudeStdoutBuffer.indexOf("\n")) !== -1) {
+      const line = claudeStdoutBuffer.slice(0, index).trim();
+      claudeStdoutBuffer = claudeStdoutBuffer.slice(index + 1);
+      if (!line) continue;
+      for (const event of claudeNormalizer(line)) {
+        handleClaudeExecutorEvent(event);
+      }
+    }
+  });
+  child.stderr.on("data", () => {});
+  child.on("error", (error) => {
+    if (claudeChild !== child) return;
+    const wasActive = claudeTurnActive;
+    killClaudeExecutor();
+    if (wasActive) {
+      resolveOrLatchTurn({
+        status: "failed",
+        error: `Fusion executor failed: ${error.message}`
+      });
+    }
+  });
+  child.on("exit", () => {
+    if (claudeChild !== child) return;
+    const wasActive = claudeTurnActive;
+    claudeChild = null;
+    claudeTurnActive = false;
+    if (wasActive) {
+      resolveOrLatchTurn({ status: "failed", error: "Fusion executor process exited" });
+    }
+  });
+}
+
+function claudeToolBaseName(name) {
+  return String(name || "").replace(/^mcp__[^_]+__/, "");
+}
+
+function handleClaudeExecutorEvent(event) {
+  if (!event || !claudeTurnActive) return;
+  switch (event.type) {
+    case "assistant-text":
+      claudeTextParts.push(event.delta || "");
+      refreshTurnIdleTimer("executor text");
+      break;
+    case "thinking":
+      refreshTurnIdleTimer("executor thinking");
+      break;
+    case "tool-call": {
+      const name = claudeToolBaseName(event.name);
+      const input = event.input && typeof event.input === "object" ? event.input : {};
+      if (name === "Bash") {
+        relay({ role: "codex", kind: "command", text: clippedCommandPreview(input.command) });
+      } else if (CLAUDE_FILE_TOOLS.has(name)) {
+        const filePath = input.file_path || input.notebook_path || input.path || "";
+        if (filePath) {
+          turnFiles.push(String(filePath));
+          relay({ role: "codex", kind: "file", text: `edit ${filePath}` });
+        }
+      }
+      refreshTurnIdleTimer(`executor ${name || "tool"}`);
+      break;
+    }
+    case "tool-result":
+      refreshTurnIdleTimer("executor tool result");
+      break;
+    case "turn-error":
+      claudeTurnErrorText = event.message || claudeTurnErrorText;
+      refreshTurnIdleTimer("executor turn error");
+      break;
+    case "turn-start":
+    case "turn-end":
+      refreshTurnIdleTimer(event.type);
+      break;
+    case "result":
+      finishClaudeExecutorTurn(event);
+      break;
+    default:
+      break;
+  }
+}
+
+function finishClaudeExecutorTurn(event) {
+  if (!claudeTurnActive) return;
+  claudeTurnActive = false;
+  const text = claudeTextParts.join("").trim();
+  claudeTextParts = [];
+  if (text) turnSummary.push(text);
+  if (claudeInterruptRequested) {
+    claudeInterruptRequested = false;
+    resolveOrLatchTurn({ status: "failed", error: "Fusion turn was interrupted." });
+    return;
+  }
+  if (event && event.isError) {
+    resolveOrLatchTurn({
+      status: "failed",
+      error:
+        (typeof event.resultText === "string" && event.resultText) ||
+        claudeTurnErrorText ||
+        "Fusion executor turn failed"
+    });
+    return;
+  }
+  resolveOrLatchTurn(
+    activeTurnKind === "investigate" ? completedInvestigationResult() : completedTurnResult()
+  );
+}
+
+function sendClaudeInterruptRequest() {
+  claudeInterruptSeq += 1;
+  return claudeSend({
+    type: "control_request",
+    request_id: `fusion_exec_int_${claudeInterruptSeq}`,
+    request: { subtype: "interrupt" }
+  });
+}
+
+// The claude-engine turn driver: mirrors codexImplement/codexInvestigate's
+// south half (the shared north guards run before dispatch).
+async function claudeExecutorTurn(task, settings, kind) {
+  turnArming = true;
+  let done;
+  let goalSetup = null;
+  try {
+    ensureClaudeChild(settings);
+    if (kind === "implement") {
+      goalSetup = await ensureGoalForTask(task);
+    }
+    resetTurnBuffers();
+    latchedTurnResult = null;
+    claudeTextParts = [];
+    claudeTurnErrorText = "";
+    claudeInterruptRequested = false;
+    relay({
+      role: "opus",
+      kind: "delegate",
+      text: kind === "investigate" ? `investigate: ${task}` : task
+    });
+    done = awaitTurn(kind);
+  } finally {
+    turnArming = false;
+  }
+  claudeTurnActive = true;
+  const content =
+    kind === "investigate" ? buildCodexInvestigationTask(task) : buildCodexVerifierTask(task);
+  if (!claudeSend({ type: "user", message: { role: "user", content } })) {
+    claudeTurnActive = false;
+    resolveTurn({ status: "failed", error: "Fusion executor channel is not writable" });
+  }
+  const result = await done;
+  if (kind === "investigate") {
+    return result;
+  }
+  const withGoal = await syncGoalAfterTurn(result);
+  if (goalSetup && goalSetup.status === "failed" && withGoal.status === "completed") {
+    return { ...withGoal, goalSetup };
+  }
+  return withGoal;
+}
+
+// Local goal store for the claude executor: claude has no native per-thread
+// goal RPC, so the adapter keeps the SAME normalized goal shape locally and
+// the north-side contract (codex_goal_* results, ensureGoalForTask,
+// syncGoalAfterTurn) works unchanged.
+function claudeGoalSet(options = {}) {
+  const objective = truncateGoalObjective(options.objective);
+  const hasTokenBudget = options.tokenBudget != null && options.tokenBudget !== "";
+  if (!objective && options.status == null && !hasTokenBudget) {
+    return { status: "error", error: "objective, status, or tokenBudget is required" };
+  }
+  const base = currentGoal;
+  const now = Date.now();
+  let tokenBudget = base ? base.tokenBudget : null;
+  if (hasTokenBudget) {
+    const numeric = Number(options.tokenBudget);
+    if (Number.isFinite(numeric) && numeric > 0) {
+      tokenBudget = Math.floor(numeric);
+    }
+  }
+  goalFeatureAvailable = true;
+  currentGoal = normalizeGoal({
+    threadId: "claude-executor",
+    objective: objective || (base ? base.objective : ""),
+    status:
+      options.status != null ? normalizeGoalStatus(options.status) : base ? base.status : "active",
+    tokenBudget,
+    tokensUsed: base ? base.tokensUsed : 0,
+    timeUsedSeconds: base ? base.timeUsedSeconds : 0,
+    createdAt: base && base.createdAt ? base.createdAt : now,
+    updatedAt: now
+  });
+  return { status: "ok", goal: currentGoal };
+}
+
+function claudeGoalGet() {
+  goalFeatureAvailable = true;
+  return { status: "ok", goal: currentGoal };
+}
+
+function claudeGoalClear() {
+  goalFeatureAvailable = true;
+  const cleared = Boolean(currentGoal);
+  currentGoal = null;
+  return { status: "ok", cleared };
 }
 
 // Send a request and await its response. South wire matches the boot smoke:
@@ -1649,7 +2076,13 @@ async function ensureThread() {
 }
 async function warmupCodexThread() {
   try {
-    await ensureThread();
+    const settings = readCodexSettings();
+    const family = ensureExecutorFamily(settings.family);
+    if (family === "claude") {
+      ensureClaudeChild(settings);
+    } else {
+      await ensureThread();
+    }
     relay({ role: "codex", kind: "warmup", text: "execution bridge ready" });
   } catch (error) {
     const message = error?.message || "Fusion execution bridge failed to start";
@@ -1680,6 +2113,10 @@ function awaitTurn(kind = "implement") {
 }
 
 async function codexGoalSet(options = {}) {
+  const family = ensureExecutorFamily(readCodexSettings().family);
+  if (family === "claude") {
+    return claudeGoalSet(options);
+  }
   await ensureThread();
   const params = { threadId };
   const objective = truncateGoalObjective(options.objective);
@@ -1709,6 +2146,10 @@ async function codexGoalSet(options = {}) {
 }
 
 async function codexGoalGet() {
+  const family = ensureExecutorFamily(readCodexSettings().family);
+  if (family === "claude") {
+    return claudeGoalGet();
+  }
   await ensureThread();
   try {
     const response = await rpc("thread/goal/get", { threadId });
@@ -1721,6 +2162,10 @@ async function codexGoalGet() {
 }
 
 async function codexGoalClear() {
+  const family = ensureExecutorFamily(readCodexSettings().family);
+  if (family === "claude") {
+    return claudeGoalClear();
+  }
   await ensureThread();
   try {
     const response = await rpc("thread/goal/clear", { threadId });
@@ -1743,6 +2188,15 @@ function codexCancel() {
   // (never awaited) so a wedged or silent child cannot block the escape hatch.
   if (threadId && activeTurnId) {
     rpc("turn/interrupt", { threadId, turnId: activeTurnId }).catch(() => {});
+  }
+  // Same for a running claude-executor turn: request the abort and drop the
+  // active flag so the child's eventual result event is ignored instead of
+  // latching a stale completed result for the next waiter.
+  if (claudeTurnActive) {
+    claudeTurnActive = false;
+    claudeInterruptRequested = false;
+    claudeTextParts = [];
+    sendClaudeInterruptRequest();
   }
   // Clear the local mirror and unblock any in-flight `await done` synchronously,
   // so the orchestrator is freed even if the child never replies.
@@ -1800,6 +2254,13 @@ async function codexImplement(task) {
       error: "Fusion turn already in progress; wait for the active turn to surface a decision or complete."
     };
   }
+  {
+    const settings = readCodexSettings();
+    const family = ensureExecutorFamily(settings.family);
+    if (family === "claude") {
+      return claudeExecutorTurn(task, settings, "implement");
+    }
+  }
   // Held across the awaits below: a concurrent tool call passing the
   // currentTurn check during ensureThread/ensureGoalForTask would otherwise
   // reset this turn's accumulation buffers mid-flight.
@@ -1847,6 +2308,13 @@ async function codexInvestigate(task) {
       status: "error",
       error: "Fusion turn already in progress; wait for the active turn to surface a decision or complete."
     };
+  }
+  {
+    const settings = readCodexSettings();
+    const family = ensureExecutorFamily(settings.family);
+    if (family === "claude") {
+      return claudeExecutorTurn(task, settings, "investigate");
+    }
   }
   turnArming = true;
   let done;
@@ -2182,8 +2650,10 @@ function startMcpServer() {
 
 module.exports = {
   VERDICT_MARKER,
+  buildClaudeExecutorArgs,
   buildCodexInvestigationTask,
   buildCodexVerifierTask,
+  cleanClaudeEffort,
   extractVerifierVerdict,
   commandExecutionDisplayText,
   goalStatusForVerdict,

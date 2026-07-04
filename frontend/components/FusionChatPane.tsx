@@ -26,28 +26,29 @@ import type {
   AgentSession,
   AgentThreadRef,
   ChatMessage,
-  FusionClaudeModel,
-  FusionCodexEffort,
-  FusionCodexModel,
   FusionChatEvent,
-  FusionEffort,
+  FusionFamily,
   FusionRunMode,
   FusionSettings,
   SessionStatus
 } from "../types";
 import {
+  buildFusionPicker,
   buildSlashMenu,
-  CODEX_EFFORT_LABELS,
-  FUSION_EFFORT_LABELS,
-  FUSION_EFFORT_VALUES,
+  familyDisplayName,
+  familyEffortLabel,
+  familyEffortValues,
+  familyMaxEffort,
   FUSION_SPEED_VALUES,
-  isValidClaudeModelId,
-  normalizeFusionCodexEffort,
-  normalizeFusionCodexModel,
-  normalizeFusionEffort,
-  normalizeFusionModel,
-  OPUS_LABEL,
-  SONNET_LABEL,
+  fusionRoleModelLabel,
+  isValidFamilyModelId,
+  normalizeFusionFamily,
+  normalizeFusionRoleEffort,
+  normalizeFusionRoleModel,
+  normalizeFusionRoleSettings,
+  resolveModelArgument,
+  scopeEffortValues,
+  type FusionPickerState,
   type FusionRoleScope,
   type FusionSpeedPreset,
   type SlashMenuItem
@@ -187,22 +188,14 @@ function normalizeFusionRunMode(value: unknown): FusionRunMode {
   return String(value || "").trim().toLowerCase() === "plan" ? "plan" : DEFAULT_FUSION_RUN_MODE;
 }
 
-function fusionClaudeModelLabel(value: FusionClaudeModel) {
-  if (value === "opus") return OPUS_LABEL;
-  if (value === "sonnet") return SONNET_LABEL;
-  return value;
-}
-
-function fusionCodexModelLabel(value: FusionCodexModel) {
-  return value === "auto" ? "Codex default" : value;
-}
-
 function fusionRunModeLabel(value: FusionRunMode) {
   return FUSION_RUN_MODE_LABELS[value];
 }
 
 function fusionSettingsSummary(settings: FusionSettings) {
-  return `Mode ${fusionRunModeLabel(settings.mode)} · Planning ${fusionClaudeModelLabel(settings.model)} · Planning effort ${FUSION_EFFORT_LABELS[settings.claudeEffort]} · Execution ${fusionCodexModelLabel(settings.codexModel)} · Execution effort ${CODEX_EFFORT_LABELS[settings.codexEffort]}`;
+  const planner = `${familyDisplayName(settings.plannerFamily)} ${fusionRoleModelLabel(settings.plannerFamily, settings.plannerModel)}`;
+  const executor = `${familyDisplayName(settings.executorFamily)} ${fusionRoleModelLabel(settings.executorFamily, settings.executorModel)}`;
+  return `Mode ${fusionRunModeLabel(settings.mode)} · Planning ${planner} · Planning effort ${familyEffortLabel(settings.plannerFamily, String(settings.plannerEffort))} · Execution ${executor} · Execution effort ${familyEffortLabel(settings.executorFamily, String(settings.executorEffort))}`;
 }
 
 interface ToolMeta {
@@ -510,6 +503,9 @@ export default function FusionChatPane({
   // Esc hides the menu for the CURRENT input without erasing what the user
   // typed (it used to wipe the whole command). Any input change re-arms it.
   const [slashMenuDismissed, setSlashMenuDismissed] = useState(false);
+  // Open Fusion-style state picker: /planner-model and /executor-model open a
+  // family→model drill-in; while it is open the composer input only filters.
+  const [picker, setPicker] = useState<FusionPickerState>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   // Follow the stream only while the user is at the bottom — auto-scroll used
   // to yank the view down on EVERY delta, which made reading scrollback during
@@ -563,20 +559,36 @@ export default function FusionChatPane({
       }),
     []
   );
-  const fusionModel = normalizeFusionModel(session.fusionModel);
-  const fusionCodexModel = normalizeFusionCodexModel(session.fusionCodexModel);
-  const fusionClaudeEffort = normalizeFusionEffort(session.fusionClaudeEffort ?? session.fusionEffort);
-  const fusionCodexEffort = normalizeFusionCodexEffort(session.fusionCodexEffort ?? session.fusionEffort);
+  // Per-role family/model/effort settings, normalized with legacy-field
+  // migration (old panes stored model/claudeEffort = the always-claude
+  // planner, codexModel/codexEffort = the always-codex executor).
+  const roleSettings = normalizeFusionRoleSettings({
+    plannerFamily: session.fusionPlannerFamily,
+    plannerModel: session.fusionPlannerModel,
+    plannerEffort: session.fusionPlannerEffort,
+    executorFamily: session.fusionExecutorFamily,
+    executorModel: session.fusionExecutorModel,
+    executorEffort: session.fusionExecutorEffort,
+    model: session.fusionModel,
+    claudeEffort: session.fusionClaudeEffort ?? session.fusionEffort,
+    codexModel: session.fusionCodexModel,
+    codexEffort: session.fusionCodexEffort ?? session.fusionEffort
+  });
+  const {
+    plannerFamily,
+    plannerModel,
+    plannerEffort,
+    executorFamily,
+    executorModel,
+    executorEffort
+  } = roleSettings;
   const fusionRunMode = normalizeFusionRunMode(session.fusionRunMode);
   const fusionRunModeText = fusionRunModeLabel(fusionRunMode);
-  const fusionModelLabel = fusionClaudeModelLabel(fusionModel);
-  const codexModelLabel = fusionCodexModelLabel(fusionCodexModel);
+  const fusionModelLabel = fusionRoleModelLabel(plannerFamily, plannerModel);
+  const executorModelLabel = fusionRoleModelLabel(executorFamily, executorModel);
   const fusionSettingsLine = fusionSettingsSummary({
     mode: fusionRunMode,
-    model: fusionModel,
-    codexModel: fusionCodexModel,
-    claudeEffort: fusionClaudeEffort,
-    codexEffort: fusionCodexEffort
+    ...roleSettings
   });
   const activeRoleLabel = fusionRoleLabel(activeRole);
   const inputIsSlashCommand = input.trim().startsWith("/");
@@ -586,12 +598,15 @@ export default function FusionChatPane({
       ? session.backgroundActivity
       : null;
   const backgroundActivityTitle = formatBackgroundActivityTitle(backgroundActivity);
-  const canResumeClaude = session.resumeRef?.provider === "claude" && Boolean(session.resumeRef.id);
-  const slashMenu = buildSlashMenu(input, {
-    model: fusionModel,
-    codexModel: fusionCodexModel
-  });
-  const slashMenuOpen = slashMenu.items.length > 0 && !slashMenuDismissed;
+  // Resume only makes sense within the SAME planner family — a claude thread
+  // id means nothing to a codex planner and vice versa.
+  const canResumeClaude =
+    session.resumeRef?.provider === plannerFamily && Boolean(session.resumeRef.id);
+  const slashMenuContext = roleSettings;
+  const slashMenu = picker
+    ? buildFusionPicker(picker, input, slashMenuContext)
+    : buildSlashMenu(input, slashMenuContext);
+  const slashMenuOpen = picker !== null || (slashMenu.items.length > 0 && !slashMenuDismissed);
   // OpenCode's /details-off rule: successful completed tool rows disappear,
   // running/failed rows stay, delegations (task) stay. Everything tagged
   // internal (Codex worklines, bridge mechanics, stderr) needs details on.
@@ -625,6 +640,10 @@ export default function FusionChatPane({
   // handler (its closure is frozen at mount) for the turn-completion line.
   const fusionModelLabelRef = useRef(fusionModelLabel);
   fusionModelLabelRef.current = fusionModelLabel;
+  // Planner family, readable from the frozen event handler: the published
+  // thread ref's provider must track the ACTIVE planner family.
+  const plannerFamilyRef = useRef<FusionFamily>(plannerFamily);
+  plannerFamilyRef.current = plannerFamily;
   const planResponseModeRef = useRef<FusionRunMode>("auto");
   const planResponseHadTextRef = useRef(false);
   const planExitSignaledRef = useRef(false);
@@ -675,11 +694,11 @@ export default function FusionChatPane({
   }, [input, isMaximized]);
 
   // Reset the highlighted command (and re-arm a dismissed menu) whenever the
-  // typed token changes.
+  // typed token or the picker stage changes.
   useEffect(() => {
     setSlashIndex(0);
     setSlashMenuDismissed(false);
-  }, [input]);
+  }, [input, picker]);
 
   useEffect(() => {
     activeMenuItemRef.current?.scrollIntoView({ block: "nearest" });
@@ -749,7 +768,9 @@ export default function FusionChatPane({
     }
 
     onThreadRefChangeRef.current({
-      provider: "claude",
+      // The planner owns the pane's conversation thread: claude session ids
+      // for a claude planner, codex thread ids for a codex planner.
+      provider: plannerFamilyRef.current,
       id: claudeSessionId,
       // Never fall back to the pane's placeholder label ("Fusion 2") — the
       // title stays empty until a real prompt-derived one exists.
@@ -804,11 +825,18 @@ export default function FusionChatPane({
     planResponseModeRef.current = fusionRunModeRef.current;
     planResponseHadTextRef.current = false;
     planExitSignaledRef.current = false;
-    onStatusChangeRef.current("starting");
+    // Every fresh-launch path (create/restart/resume/clear/settings-restart/
+    // boot restore) resets status to "idle" before this effect runs, so
+    // anything else means a remount onto a LIVE host session (project switch
+    // back). The reattach replay is status-neutral, so stomping the settled
+    // done/waiting/failed pill with "starting" here would never be corrected.
+    if (session.status === "idle" || session.status === "starting") {
+      onStatusChangeRef.current("starting");
+    }
     let cancelled = false;
     const resumeThreadRef =
       session.nextLaunchMode === "resume" &&
-      session.threadRef?.provider === "claude" &&
+      session.threadRef?.provider === plannerFamily &&
       session.threadRef.id
         ? session.threadRef
         : undefined;
@@ -835,7 +863,7 @@ export default function FusionChatPane({
         // 1" and a dead pane. Confirm the id first and self-heal to a fresh
         // chat — the same contract TerminalPane's resolveLaunchCommand uses.
         let effectiveResumeId = resumeId;
-        if (resumeId && window.vibe?.agentThreads) {
+        if (resumeId && plannerFamily === "claude" && window.vibe?.agentThreads) {
           try {
             const confirm = await window.vibe.agentThreads.findLatest({
               provider: "claude",
@@ -867,10 +895,14 @@ export default function FusionChatPane({
           cwd: session.cwd,
           resumeId: effectiveResumeId,
           mode: fusionRunMode,
-          model: fusionModel,
-          ...(fusionCodexModel === "auto" ? {} : { codexModel: fusionCodexModel }),
-          ...(fusionClaudeEffort === "auto" ? {} : { effort: fusionClaudeEffort }),
-          ...(fusionCodexEffort === "auto" ? {} : { codexEffort: fusionCodexEffort })
+          plannerFamily,
+          executorFamily,
+          // "auto" means "let the engine use its default" — omit rather than
+          // sending a literal the CLIs would treat as a model id.
+          ...(plannerModel === "auto" ? {} : { model: plannerModel }),
+          ...(executorModel === "auto" ? {} : { executorModel }),
+          ...(plannerEffort === "auto" ? {} : { effort: plannerEffort }),
+          ...(executorEffort === "auto" ? {} : { executorEffort })
         };
         fusionChat
           .start(startPayload)
@@ -991,6 +1023,18 @@ export default function FusionChatPane({
         }
         return;
       }
+      // Reattach replay rebuilds this pane's transcript and local flags after
+      // a remount, but App's lifecycle mirror tracked the live events the
+      // whole time — re-emitting status/attention from replayed history would
+      // re-latch "done" and re-light an attention dot the user already
+      // acknowledged.
+      const replay = event.replay === true;
+      const reportStatus: typeof onStatusChangeRef.current = (status) => {
+        if (!replay) onStatusChangeRef.current(status);
+      };
+      const reportAttention: typeof emitAttention = (state, reason, message) => {
+        if (!replay) emitAttention(state, reason, message);
+      };
       if (event.type !== "assistant-text" && event.type !== "thinking") {
         flushDeltas();
       }
@@ -1044,7 +1088,7 @@ export default function FusionChatPane({
           setFailed(false);
           clearPendingDecision();
           setBusyState(true);
-          onStatusChangeRef.current("running");
+          reportStatus("running");
           // One answer spans several assistant messages (a turn-start each); add
           // a paragraph break when text continues straight into the next message.
           setMessages((prev) => {
@@ -1192,8 +1236,8 @@ export default function FusionChatPane({
             setPendingDecision(pendingFusionDecisionFromResult(parsed));
             setWaitingState(true);
             setBusyState(false);
-            onStatusChangeRef.current("waiting");
-            emitAttention(
+            reportStatus("waiting");
+            reportAttention(
               "waiting",
               parsed.status === "needs_decision" ? "approval" : "question",
               meta ? formatCodexBridgeResult(meta.name, event.text ?? "") : ""
@@ -1248,14 +1292,26 @@ export default function FusionChatPane({
             setBusyState(false);
             setFailed(true);
             clearPendingDecision();
-            onStatusChangeRef.current("failed");
-            emitAttention("failed", "error", message);
+            reportStatus("failed");
+            reportAttention("failed", "error", message);
           }
           break;
         }
         case "turn-end":
           // Keep the Opus bubble open across assistant-message seams; it is
           // closed on `result`/`closed` so the whole answer stays together.
+          break;
+        case "compact-start":
+          push({ role: "opus", kind: "activity", text: "Compacting context…" });
+          break;
+        case "compacted":
+          push({
+            role: "opus",
+            kind: event.ok ? "activity" : "error",
+            text: event.ok
+              ? "Context compacted."
+              : `Compaction failed: ${event.error || "unknown error"}`
+          });
           break;
         case "turn-error":
           // A non-streamed error (e.g. the picked model is unavailable for
@@ -1295,12 +1351,12 @@ export default function FusionChatPane({
                   : event.resultText
               });
             }
-            emitAttention("failed", "error", event.resultText || "Turn failed.");
+            reportAttention("failed", "error", event.resultText || "Turn failed.");
             break;
           }
           pushTurnEnd(false);
           if (waitingForDecisionRef.current) {
-            onStatusChangeRef.current("waiting");
+            reportStatus("waiting");
           } else {
             if (
               fusionRunModeRef.current === "plan" &&
@@ -1310,7 +1366,7 @@ export default function FusionChatPane({
             ) {
               setPlanActionReady(true);
             }
-            emitAttention("completed", "done");
+            reportAttention("completed", "done");
           }
           break;
         case "interrupted":
@@ -1327,7 +1383,7 @@ export default function FusionChatPane({
           clearPendingDecision();
           setPlanActionReady(false);
           setBusyState(false);
-          onStatusChangeRef.current("waiting");
+          reportStatus("waiting");
           pushTurnEnd(true);
           break;
         case "stderr": {
@@ -1355,7 +1411,7 @@ export default function FusionChatPane({
           setFailed(true);
           clearPendingDecision();
           setPlanActionReady(false);
-          emitAttention("failed", "error", event.message);
+          reportAttention("failed", "error", event.message);
           break;
         case "closed":
           setActiveRole("claude");
@@ -1371,7 +1427,7 @@ export default function FusionChatPane({
             clearPendingDecision();
             setPlanActionReady(false);
             push({ role: "opus", kind: "error", text: message });
-            emitAttention("failed", "exit", message);
+            reportAttention("failed", "exit", message);
           } else if (busyRef.current) {
             const message = "Fusion process closed before returning a result.";
             setBusyState(false);
@@ -1379,7 +1435,7 @@ export default function FusionChatPane({
             clearPendingDecision();
             setPlanActionReady(false);
             push({ role: "opus", kind: "error", text: message });
-            emitAttention("failed", "exit", message);
+            reportAttention("failed", "exit", message);
           } else {
             setBusyState(false);
           }
@@ -1411,44 +1467,89 @@ export default function FusionChatPane({
   }, []);
 
   function applySettings(settings: Partial<FusionSettings>, label = "settings") {
+    const nextPlannerFamily = normalizeFusionFamily(settings.plannerFamily, plannerFamily);
+    const nextExecutorFamily = normalizeFusionFamily(settings.executorFamily, executorFamily);
     // Validate BEFORE anything restarts: an unknown planning model previously
     // relaunched the pane into `claude --model <typo>`, which exits
     // immediately — a dead pane with the transcript replaced by a notice.
     if (
-      typeof settings.model === "string" &&
-      !isValidClaudeModelId(settings.model)
+      typeof settings.plannerModel === "string" &&
+      !isValidFamilyModelId(nextPlannerFamily, settings.plannerModel)
     ) {
       push({
         role: "opus",
         kind: "error",
-        text: `'${settings.model}' is not a Claude model this pane can launch. Use opus, sonnet, or a full claude-* model id.`
+        text:
+          nextPlannerFamily === "claude"
+            ? `'${settings.plannerModel}' is not a Claude model this pane can launch. Use opus, sonnet, or a full claude-* model id.`
+            : `'${settings.plannerModel}' is not a launchable Codex model id.`
       });
       return;
     }
-    const nextSettings = {
+    if (
+      typeof settings.executorModel === "string" &&
+      !isValidFamilyModelId(nextExecutorFamily, settings.executorModel)
+    ) {
+      push({
+        role: "opus",
+        kind: "error",
+        text:
+          nextExecutorFamily === "claude"
+            ? `'${settings.executorModel}' is not a Claude model this pane can launch. Use opus, sonnet, or a full claude-* model id.`
+            : `'${settings.executorModel}' is not a launchable Codex model id.`
+      });
+      return;
+    }
+    // A family flip without an explicit model lands on that family's default;
+    // efforts always re-normalize against the TARGET family so a saved level
+    // survives the flip at the nearest real value instead of failing turns.
+    const plannerFamilyChanged = nextPlannerFamily !== plannerFamily;
+    const executorFamilyChanged = nextExecutorFamily !== executorFamily;
+    const nextSettings: FusionSettings = {
       mode: normalizeFusionRunMode(settings.mode ?? fusionRunMode),
-      model: normalizeFusionModel(settings.model ?? fusionModel),
-      codexModel: normalizeFusionCodexModel(settings.codexModel ?? fusionCodexModel),
-      claudeEffort: normalizeFusionEffort(settings.claudeEffort ?? fusionClaudeEffort),
-      codexEffort: normalizeFusionCodexEffort(settings.codexEffort ?? fusionCodexEffort)
+      plannerFamily: nextPlannerFamily,
+      plannerModel: normalizeFusionRoleModel(
+        nextPlannerFamily,
+        "planner",
+        settings.plannerModel ?? (plannerFamilyChanged ? undefined : plannerModel)
+      ),
+      plannerEffort: normalizeFusionRoleEffort(
+        nextPlannerFamily,
+        settings.plannerEffort ?? plannerEffort
+      ),
+      executorFamily: nextExecutorFamily,
+      executorModel: normalizeFusionRoleModel(
+        nextExecutorFamily,
+        "executor",
+        settings.executorModel ?? (executorFamilyChanged ? undefined : executorModel)
+      ),
+      executorEffort: normalizeFusionRoleEffort(
+        nextExecutorFamily,
+        settings.executorEffort ?? executorEffort
+      )
     };
     if (
       nextSettings.mode === fusionRunMode &&
-      nextSettings.model === fusionModel &&
-      nextSettings.codexModel === fusionCodexModel &&
-      nextSettings.claudeEffort === fusionClaudeEffort &&
-      nextSettings.codexEffort === fusionCodexEffort
+      nextSettings.plannerFamily === plannerFamily &&
+      nextSettings.plannerModel === plannerModel &&
+      nextSettings.plannerEffort === plannerEffort &&
+      nextSettings.executorFamily === executorFamily &&
+      nextSettings.executorModel === executorModel &&
+      nextSettings.executorEffort === executorEffort
     ) {
       pushCommandStatus(`Already using ${fusionSettingsSummary(nextSettings)}.`);
       return;
     }
+    // Planner changes relaunch the planner process; executor changes apply
+    // live (the adapter re-reads them per delegation).
     const requiresRestart =
-      nextSettings.model !== fusionModel ||
-      nextSettings.claudeEffort !== fusionClaudeEffort;
+      nextSettings.plannerFamily !== plannerFamily ||
+      nextSettings.plannerModel !== plannerModel ||
+      nextSettings.plannerEffort !== plannerEffort;
     const notice = session.started
       ? requiresRestart
         ? `${busyRef.current ? "Interrupting current turn and restarting" : "Restarting"} Fusion with ${fusionSettingsSummary(nextSettings)}.`
-        : `Updated Fusion ${label} live: ${fusionSettingsSummary(nextSettings)}. Next Codex turn will use it.`
+        : `Updated Fusion ${label} live: ${fusionSettingsSummary(nextSettings)}. Next executor turn will use it.`
       : `Saved Fusion ${label}: ${fusionSettingsSummary(nextSettings)}.`;
     pendingRestartNoticeRef.current = session.started && requiresRestart ? notice : null;
     pushCommandStatus(notice);
@@ -1461,12 +1562,9 @@ export default function FusionChatPane({
       return true;
     }
 
-    const nextSettings = {
+    const nextSettings: FusionSettings = {
       mode,
-      model: fusionModel,
-      codexModel: fusionCodexModel,
-      claudeEffort: fusionClaudeEffort,
-      codexEffort: fusionCodexEffort
+      ...roleSettings
     };
 
     setPlanActionReady(false);
@@ -1506,6 +1604,37 @@ export default function FusionChatPane({
 
   function applySlashSelection(item: SlashMenuItem | undefined) {
     if (!item) return;
+    const command = item.command || "";
+    // Picker stage tags (Open Fusion's __provider:/__model: mechanic):
+    // __family advances family→model, __model commits and closes.
+    if (command.startsWith("__family:")) {
+      if (picker) {
+        setPicker({
+          role: picker.role,
+          family: normalizeFusionFamily(command.slice("__family:".length), plannerFamily)
+        });
+        setInput("");
+        composerRef.current?.focus();
+      }
+      return;
+    }
+    if (command.startsWith("__model:")) {
+      const match = /^(claude|codex)\/(.+)$/.exec(command.slice("__model:".length));
+      const role = picker?.role;
+      setPicker(null);
+      setInput("");
+      composerRef.current?.focus();
+      if (match && role) {
+        const family = match[1] as FusionFamily;
+        const model = match[2].trim();
+        if (role === "planner") {
+          applySettings({ plannerFamily: family, plannerModel: model }, "planner model");
+        } else {
+          applySettings({ executorFamily: family, executorModel: model }, "executor model");
+        }
+      }
+      return;
+    }
     if (item.fill) {
       setInput(item.fill);
       setSlashIndex(0);
@@ -1522,77 +1651,98 @@ export default function FusionChatPane({
   }
 
   // Speed presets are EFFORT presets and preserve the user's model picks.
-  // Only "fast" swaps the planning model (to Sonnet) — that's its advertised
-  // point. balanced/deep/max used to hard-reset the model to Opus, which read
-  // as "my model pick didn't stick".
+  // Only "fast" swaps the planning model (to the family's fast pick) — that's
+  // its advertised point. balanced/deep/max used to hard-reset the model,
+  // which read as "my model pick didn't stick".
   function applySpeedPreset(scope: FusionRoleScope, preset: FusionSpeedPreset) {
+    const fastPlannerModel = plannerFamily === "codex" ? "gpt-5.1-codex-mini" : "sonnet";
     if (scope === "planning") {
       if (preset === "fast") {
-        applySettings({ model: "sonnet", claudeEffort: "low" }, "planning speed");
+        applySettings({ plannerModel: fastPlannerModel, plannerEffort: "low" }, "planning speed");
       } else if (preset === "balanced") {
-        applySettings({ claudeEffort: "auto" }, "planning speed");
+        applySettings({ plannerEffort: "auto" }, "planning speed");
       } else if (preset === "deep") {
-        applySettings({ claudeEffort: "high" }, "planning speed");
+        applySettings({ plannerEffort: "high" }, "planning speed");
       } else {
-        applySettings({ claudeEffort: "max" }, "planning speed");
+        applySettings({ plannerEffort: familyMaxEffort(plannerFamily) }, "planning speed");
       }
       return;
     }
 
     if (scope === "execution") {
       if (preset === "fast") {
-        applySettings({ codexEffort: "low" }, "execution speed");
+        applySettings({ executorEffort: "low" }, "execution speed");
       } else if (preset === "balanced") {
-        applySettings({ codexEffort: "auto" }, "execution speed");
+        applySettings({ executorEffort: "auto" }, "execution speed");
       } else if (preset === "deep") {
-        applySettings({ codexEffort: "high" }, "execution speed");
+        applySettings({ executorEffort: "high" }, "execution speed");
       } else {
-        // Codex has no "max" — xhigh is its top standard level.
-        applySettings({ codexEffort: "xhigh" }, "execution speed");
+        // Each family's own top level — codex has no "max", claude does.
+        applySettings({ executorEffort: familyMaxEffort(executorFamily) }, "execution speed");
       }
       return;
     }
 
     if (preset === "fast") {
-      applySettings({ model: "sonnet", claudeEffort: "low", codexEffort: "low" }, "Fusion speed");
+      applySettings(
+        { plannerModel: fastPlannerModel, plannerEffort: "low", executorEffort: "low" },
+        "Fusion speed"
+      );
     } else if (preset === "balanced") {
-      applySettings({ claudeEffort: "auto", codexEffort: "auto" }, "Fusion speed");
+      applySettings({ plannerEffort: "auto", executorEffort: "auto" }, "Fusion speed");
     } else if (preset === "deep") {
-      applySettings({ claudeEffort: "high", codexEffort: "high" }, "Fusion speed");
+      applySettings({ plannerEffort: "high", executorEffort: "high" }, "Fusion speed");
     } else {
-      applySettings({ claudeEffort: "max", codexEffort: "xhigh" }, "Fusion speed");
+      applySettings(
+        {
+          plannerEffort: familyMaxEffort(plannerFamily),
+          executorEffort: familyMaxEffort(executorFamily)
+        },
+        "Fusion speed"
+      );
     }
   }
 
   function applyEffortLevel(scope: FusionRoleScope, effort: string) {
+    const normalized = effort.trim().toLowerCase();
     if (scope === "planning") {
-      if (!FUSION_EFFORT_VALUES.includes(effort as FusionEffort)) {
+      const values = familyEffortValues(plannerFamily);
+      if (!values.includes(normalized)) {
         pushCommandStatus(
-          `Planning effort supports ${FUSION_EFFORT_VALUES.join(", ")} — '${effort}' is execution-only.`
+          `Planning effort (${familyDisplayName(plannerFamily)}) supports ${values.join(", ")} — not '${effort}'.`
         );
         return;
       }
-      applySettings({ claudeEffort: effort as FusionEffort }, "planning effort");
+      applySettings(
+        { plannerEffort: normalizeFusionRoleEffort(plannerFamily, normalized) },
+        "planning effort"
+      );
       return;
     }
 
     if (scope === "execution") {
-      applySettings({ codexEffort: normalizeFusionCodexEffort(effort) }, "execution effort");
+      // Coerce across enums (claude "max" → codex "xhigh", etc.) instead of
+      // failing every delegation with an unknown variant.
+      applySettings(
+        { executorEffort: normalizeFusionRoleEffort(executorFamily, normalized) },
+        "execution effort"
+      );
       return;
     }
 
-    // Whole-harness: apply to both, translating per engine (Claude "max" has
-    // no Codex equivalent → xhigh; Codex-only levels don't reach this scope).
-    if (!FUSION_EFFORT_VALUES.includes(effort as FusionEffort)) {
+    // Whole-harness: only levels BOTH current families accept, applied with
+    // per-family translation so neither engine sees an unknown variant.
+    const sharedValues = scopeEffortValues("harness", slashMenuContext);
+    if (!sharedValues.includes(normalized)) {
       pushCommandStatus(
-        `Whole-harness effort supports ${FUSION_EFFORT_VALUES.join(", ")}. Use /effort execution for ${effort}.`
+        `Whole-harness effort supports ${sharedValues.join(", ")}. Use /effort planning or /effort execution for ${effort}.`
       );
       return;
     }
     applySettings(
       {
-        claudeEffort: effort as FusionEffort,
-        codexEffort: normalizeFusionCodexEffort(effort)
+        plannerEffort: normalizeFusionRoleEffort(plannerFamily, normalized),
+        executorEffort: normalizeFusionRoleEffort(executorFamily, normalized)
       },
       "Fusion effort"
     );
@@ -1632,7 +1782,7 @@ export default function FusionChatPane({
     if (normalized === "/help") {
       setInput("");
       pushCommandStatus(
-        "commands: /plan, /auto, /mode, /speed, /effort, /models, /details, /clear, /resume. Advanced: /opus, /codex, /claude <model>."
+        "commands: /plan, /auto, /mode, /planner-model, /executor-model, /speed, /effort, /models, /details, /clear, /resume. Advanced: /claude <model> (planner → Claude), /codex <model> (executor → Codex)."
       );
       return true;
     }
@@ -1660,6 +1810,26 @@ export default function FusionChatPane({
     if (normalized === "/mode") {
       setInput("");
       toggleRunMode();
+      return true;
+    }
+
+    if (normalized === "/compact") {
+      setInput("");
+      if (!session.started) {
+        pushCommandStatus("Nothing to compact yet.");
+        return true;
+      }
+      if (busyRef.current) {
+        pushCommandStatus("Finish or interrupt the current turn before compacting.");
+        return true;
+      }
+      // The CLI interprets "/compact" from stream-json input (verified by
+      // fusion-compact-spike). Label the echo so the transcript shows intent
+      // instead of a bare slash command.
+      decisionTurnLabelsRef.current.set("/compact", "Compact conversation context.");
+      setBusyState(true);
+      onStatusChangeRef.current("running");
+      window.vibe?.fusionChat?.sendUserTurn(session.id, "/compact");
       return true;
     }
 
@@ -1696,36 +1866,54 @@ export default function FusionChatPane({
       return true;
     }
 
-    if (normalized === "/opus") {
-      setInput("/opus ");
+    // Open Fusion-parity pickers: bare command opens the family→model
+    // drill-in; with an argument the pick applies directly (family/model
+    // slug, or a bare id attributed by shape).
+    if (normalized === "/planner-model" || normalized === "/planner") {
+      setInput("");
+      setPicker({ role: "planner" });
       composerRef.current?.focus();
       return true;
     }
 
-    if (normalized === "/opus model") {
+    if (normalized === "/executor-model" || normalized === "/executor") {
       setInput("");
-      applySettings({ model: "opus" }, "planning model");
+      setPicker({ role: "executor" });
+      composerRef.current?.focus();
       return true;
     }
 
-    const opusEffortMatch = normalized.match(/^\/opus\s+effort\s+(auto|low|medium|high|xhigh|max)$/);
-    if (opusEffortMatch) {
+    const plannerModelMatch = raw.match(/^\/planner(?:-model)?\s+(.+)$/i);
+    if (plannerModelMatch) {
       setInput("");
-      // Effort only — this used to also force model:"opus", silently
-      // reverting a Sonnet/custom pick ("my model didn't stick").
-      applySettings({ claudeEffort: opusEffortMatch[1] as FusionEffort }, "planning effort");
+      const resolved = resolveModelArgument(plannerModelMatch[1]);
+      if (!resolved) {
+        pushCommandStatus(
+          `Could not match '${plannerModelMatch[1].trim()}' to a family. Use claude/<model> or codex/<model>.`
+        );
+        return true;
+      }
+      applySettings(
+        { plannerFamily: resolved.family, plannerModel: resolved.model },
+        "planner model"
+      );
       return true;
     }
 
-    const opusSpeedMatch = normalized.match(/^\/opus\s+(?:speed\s+)?(fast|balanced|deep|max)$/);
-    if (opusSpeedMatch) {
-      handleSlashCommand(`/speed planning ${opusSpeedMatch[1]}`);
-      return true;
-    }
-
-    if (normalized === "/speed opus") {
+    const executorModelMatch = raw.match(/^\/executor(?:-model)?\s+(.+)$/i);
+    if (executorModelMatch) {
       setInput("");
-      applySpeedPreset("harness", "balanced");
+      const resolved = resolveModelArgument(executorModelMatch[1]);
+      if (!resolved) {
+        pushCommandStatus(
+          `Could not match '${executorModelMatch[1].trim()}' to a family. Use claude/<model> or codex/<model>.`
+        );
+        return true;
+      }
+      applySettings(
+        { executorFamily: resolved.family, executorModel: resolved.model },
+        "executor model"
+      );
       return true;
     }
 
@@ -1775,20 +1963,21 @@ export default function FusionChatPane({
     const claudeMatch = raw.match(/^\/(?:claude|model\s+claude)\s+(.+)$/i);
     if (claudeMatch) {
       setInput("");
-      // Raw value on purpose: applySettings validates against the known
-      // aliases/claude-* pattern and refuses instead of silently launching a
-      // doomed process (or silently snapping a typo back to the default).
-      applySettings({ model: claudeMatch[1].trim() }, "Claude model");
+      // Legacy shorthand with family-explicit semantics: the PLANNER moves to
+      // the Claude family. Raw value on purpose: applySettings validates
+      // against the known aliases/claude-* pattern and refuses instead of
+      // silently launching a doomed process.
+      applySettings(
+        { plannerFamily: "claude", plannerModel: claudeMatch[1].trim() },
+        "planner model"
+      );
       return true;
     }
 
     const codexEffortMatch = normalized.match(/^\/codex\s+effort\s+(auto|minimal|low|medium|high|xhigh|ultra|max)$/);
     if (codexEffortMatch) {
       setInput("");
-      applySettings(
-        { codexEffort: normalizeFusionCodexEffort(codexEffortMatch[1]) },
-        "Codex effort"
-      );
+      applyEffortLevel("execution", codexEffortMatch[1]);
       return true;
     }
 
@@ -1801,9 +1990,12 @@ export default function FusionChatPane({
 
     const codexMatch = raw.match(/^\/(?:codex|model\s+codex)\s+(.+)$/i);
     if (codexMatch) {
-      const nextModel = normalizeFusionCodexModel(codexMatch[1]);
       setInput("");
-      applySettings({ codexModel: nextModel }, "Codex model");
+      // Legacy shorthand: the EXECUTOR moves to the Codex family.
+      applySettings(
+        { executorFamily: "codex", executorModel: codexMatch[1].trim() },
+        "executor model"
+      );
       return true;
     }
 
@@ -2040,6 +2232,21 @@ export default function FusionChatPane({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busy, isSelected, session.id]);
 
+  // A settled "done" is a notification, not a resting state: once the user
+  // engages the pane again (clicks it, or types the next prompt), the finished
+  // turn is acknowledged and the pill returns to "ready". waiting/failed stay
+  // put — they still need an answer / carry the error until the next turn.
+  const acknowledgeCompletedTurn = () => {
+    if (session.status === "done") {
+      onStatusChangeRef.current("idle");
+    }
+  };
+
+  const handlePanePointerDown = () => {
+    onSelect();
+    acknowledgeCompletedTurn();
+  };
+
   // The local flags only know the live lane (a turn in flight); how the pane
   // SETTLED — finished a turn, interrupted and waiting on the user, failed —
   // lives in the app-reconciled session.status, the same source the sidebar
@@ -2074,7 +2281,7 @@ export default function FusionChatPane({
           `terminal-pane-attention-${session.attention.state}`
       )}
       style={{ "--pane-accent": profile.accent } as React.CSSProperties}
-      onPointerDown={onSelect}
+      onPointerDown={handlePanePointerDown}
     >
       <header className="pane-header pane-drag-zone" title="Drag header to move pane">
         <div className="pane-title">
@@ -2139,14 +2346,15 @@ export default function FusionChatPane({
           </button>
         </div>
       </header>
-      <div className="fusion-chat" onPointerDown={onSelect}>
+      <div className="fusion-chat" onPointerDown={handlePanePointerDown}>
         <div className="fusion-chat-scroll" ref={scrollRef} onScroll={handleChatScroll}>
           {visibleMessages.length === 0 ? (
             <div className="oc-hero">
               <OcLogo words={[{ lines: OC_LOGO_FUSION, bold: true }]} label="Fusion" />
               <p className="oc-hero-tag">
-                One agent for planning, coding, and review — Opus plans, Codex
-                builds.
+                One agent for planning, coding, and review —{" "}
+                {familyDisplayName(plannerFamily)} plans,{" "}
+                {familyDisplayName(executorFamily)} builds.
               </p>
               <p className="oc-hero-hint">
                 Ask anything to get started <span className="oc-hero-sep">·</span>{" "}
@@ -2278,6 +2486,7 @@ export default function FusionChatPane({
                 onChange={(e) => {
                   inputRef.current = e.target.value;
                   setInput(e.target.value);
+                  acknowledgeCompletedTurn();
                 }}
                 onPaste={handleComposerPaste}
                 onDrop={handleComposerDrop}
@@ -2312,9 +2521,21 @@ export default function FusionChatPane({
                       return;
                     }
                     if (e.key === "Escape") {
+                      e.preventDefault();
+                      // Picker open: Esc backs out ONE stage per press
+                      // (model → family → closed), Open Fusion's mechanic.
+                      if (picker?.family) {
+                        setPicker({ role: picker.role });
+                        setInput("");
+                        return;
+                      }
+                      if (picker) {
+                        setPicker(null);
+                        setInput("");
+                        return;
+                      }
                       // Close the menu but KEEP the typed input (a second Esc
                       // clears it below). It used to erase the whole command.
-                      e.preventDefault();
                       setSlashMenuDismissed(true);
                       return;
                     }
@@ -2371,9 +2592,29 @@ export default function FusionChatPane({
                   {fusionRunModeText}
                 </button>
                 <span className="oc-prompt-sep">·</span>
-                <span className="oc-prompt-model">{fusionModelLabel}</span>
+                <button
+                  type="button"
+                  className="oc-prompt-model"
+                  title={`Planner: ${familyDisplayName(plannerFamily)} ${fusionModelLabel} — click to change (/planner-model)`}
+                  onClick={() => {
+                    setPicker({ role: "planner" });
+                    composerRef.current?.focus();
+                  }}
+                >
+                  {fusionModelLabel}
+                </button>
                 <span className="oc-prompt-pair">⇄</span>
-                <span className="oc-prompt-model is-executor">{codexModelLabel}</span>
+                <button
+                  type="button"
+                  className="oc-prompt-model is-executor"
+                  title={`Executor: ${familyDisplayName(executorFamily)} ${executorModelLabel} — click to change (/executor-model)`}
+                  onClick={() => {
+                    setPicker({ role: "executor" });
+                    composerRef.current?.focus();
+                  }}
+                >
+                  {executorModelLabel}
+                </button>
               </div>
             </div>
           </div>

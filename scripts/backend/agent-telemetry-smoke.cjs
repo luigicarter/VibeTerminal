@@ -461,6 +461,39 @@ function postTelemetry(callbackUrl, token, payload) {
         openFusionConfig.agent?.executor?.model === "opencode/gpt-5.1-codex",
       "Open Fusion executor should be a model-pinned subagent"
     );
+    // Plan mode: a second read-only primary agent selected per-prompt. The
+    // task map must deny the executor (scout allowed, implementation blocked)
+    // and default_agent must stay planner.
+    const planAgent = openFusionConfig.agent?.plan;
+    const planBash = planAgent?.permission?.bash;
+    assert(
+      planAgent?.mode === "primary" &&
+        planAgent?.model === "openai/gpt-5.1" &&
+        planAgent?.permission?.edit === "deny" &&
+        planBash?.["*"] === "deny" &&
+        planBash?.["git status *"] === "allow" &&
+        planBash?.["git * --output*"] === "deny" &&
+        openFusionConfig.default_agent === "planner",
+      "Open Fusion plan agent should be a read-only primary on the Brain model with the git evidence allowlist"
+    );
+    const planBashKeys = Object.keys(planBash || {});
+    assert(
+      planBashKeys.join("|") === plannerBashKeys.join("|"),
+      "Open Fusion plan agent bash map must stay byte-identical (incl. key order) to the planner's (findLast semantics)"
+    );
+    assert(
+      JSON.stringify(Object.keys(planAgent?.permission?.task || {})) ===
+        JSON.stringify(["*", "investigator"]) &&
+        planAgent?.permission?.task?.["*"] === "deny" &&
+        planAgent?.permission?.task?.investigator === "allow",
+      "Open Fusion plan agent task map must be exactly {'*': deny, investigator: allow} in that order — NO executor key"
+    );
+    assert(
+      openFusionEnvConfig.agent?.plan?.prompt?.includes("Open Fusion Plan Mode") &&
+        openFusionEnvConfig.agent?.plan?.prompt?.includes("must not delegate implementation") &&
+        openFusionEnvConfig.agent?.plan?.prompt?.includes("2-5 milestones"),
+      "Open Fusion plan prompt must carry the plan-mode contract (no implementation, milestone plan)"
+    );
     assert(
       openFusionConfig.agent?.planner?.permission?.task?.investigator === "allow" &&
         openFusionConfig.agent?.investigator?.mode === "subagent" &&
@@ -506,7 +539,16 @@ function postTelemetry(callbackUrl, token, payload) {
       "Open Fusion completion gate must be operational: mandatory independent check + verbatim evidence contract"
     );
     assert(
+      openFusionEnvConfig.agent?.planner?.prompt?.includes("Checkpointed delegation") &&
+        openFusionEnvConfig.agent?.planner?.prompt?.includes("ONE milestone per task call") &&
+        openFusionEnvConfig.agent?.planner?.prompt?.includes("BEFORE delegating the next milestone") &&
+        openFusionEnvConfig.agent?.executor?.prompt?.includes("implement ONLY that milestone") &&
+        openFusionEnvConfig.command?.delegate?.template?.includes("one milestone of a larger plan"),
+      "Open Fusion checkpointed delegation must be wired: milestone plan + between-milestone review in the planner, milestone scope discipline in the executor and /delegate"
+    );
+    assert(
       fs.existsSync(openFusionFiles.plannerPromptPath) &&
+        fs.existsSync(openFusionFiles.planPromptPath) &&
         fs.existsSync(openFusionFiles.executorPromptPath) &&
         fs.existsSync(openFusionFiles.investigatorPromptPath) &&
         fs.existsSync(openFusionFiles.themePath) &&

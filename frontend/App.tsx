@@ -46,6 +46,10 @@ import {
 import { computeCwdConflicts } from "./cwdConflicts";
 import TerminalPane from "./components/TerminalPane";
 import FusionChatPane from "./components/FusionChatPane";
+import {
+  normalizeFusionRoleSettings,
+  type NormalizedFusionRoleSettings
+} from "./components/fusionSlashMenu";
 import OpenFusionChatPane, {
   type OpenFusionSettingsChange
 } from "./components/OpenFusionChatPane";
@@ -63,10 +67,6 @@ import type {
   AgentThreadRef,
   AgentThreadLookupStatus,
   CodeChangeSummary,
-  FusionClaudeModel,
-  FusionCodexEffort,
-  FusionCodexModel,
-  FusionEffort,
   FusionRunMode,
   FusionChatEvent,
   FusionSettings,
@@ -98,30 +98,7 @@ const MIN_SIDEBAR_WIDTH = 220;
 const MAX_SIDEBAR_WIDTH = 520;
 const MIN_WORKSPACE_WIDTH = 360;
 const CODE_CHANGE_REFRESH_MS = 7_500;
-const FUSION_MODEL_ID_PATTERN = /^[A-Za-z0-9._:/@+-]+$/;
-const DEFAULT_FUSION_CLAUDE_MODEL: FusionClaudeModel = "opus";
-const DEFAULT_FUSION_CODEX_MODEL: FusionCodexModel = "auto";
 const DEFAULT_FUSION_RUN_MODE: FusionRunMode = "auto";
-const FUSION_EFFORT_VALUES: FusionEffort[] = [
-  "auto",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max"
-];
-// Codex speaks its own enum (verified against the codex 0.142 binary):
-// minimal..ultra, and crucially NO "max" — legacy saved "max" coerces to
-// "xhigh" so old panes stop poisoning delegations.
-const FUSION_CODEX_EFFORT_VALUES: FusionCodexEffort[] = [
-  "auto",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "ultra"
-];
 
 // Last-used model configuration, per terminal mode. New panes start from the
 // previous session's picks instead of hard defaults — a model choice survives
@@ -149,23 +126,14 @@ function writeStoredJson(key: string, value: Record<string, unknown>) {
   }
 }
 
-function rememberFusionSettings(settings: {
-  model: FusionClaudeModel;
-  codexModel: FusionCodexModel;
-  claudeEffort: FusionEffort;
-  codexEffort: FusionCodexEffort;
-}) {
-  writeStoredJson(LAST_FUSION_SETTINGS_KEY, settings);
+function rememberFusionSettings(settings: NormalizedFusionRoleSettings) {
+  writeStoredJson(LAST_FUSION_SETTINGS_KEY, { ...settings });
 }
 
-function lastFusionSettings() {
-  const stored = readStoredJson(LAST_FUSION_SETTINGS_KEY);
-  return {
-    model: normalizeFusionModel(stored?.model),
-    codexModel: normalizeFusionCodexModel(stored?.codexModel),
-    claudeEffort: normalizeFusionEffort(stored?.claudeEffort),
-    codexEffort: normalizeFusionCodexEffort(stored?.codexEffort)
-  };
+function lastFusionSettings(): NormalizedFusionRoleSettings {
+  // Reads both the per-role shape and the legacy {model, codexModel,
+  // claudeEffort, codexEffort} seed written before families existed.
+  return normalizeFusionRoleSettings(readStoredJson(LAST_FUSION_SETTINGS_KEY));
 }
 
 function rememberOpenFusionModels(models: {
@@ -344,8 +312,14 @@ function getProfile(kind: AgentKind) {
   return agentProfiles.find((profile) => profile.kind === kind) ?? agentProfiles[0];
 }
 
+// A Fusion pane's conversation belongs to its PLANNER: claude session ids for
+// a claude planner, codex thread ids for a codex planner. Either provider is
+// a resumable Fusion thread ref (family match is enforced at launch time).
 function hasClaudeThreadId(threadRef?: AgentThreadRef): threadRef is AgentThreadRef {
-  return threadRef?.provider === "claude" && Boolean(threadRef.id);
+  return (
+    (threadRef?.provider === "claude" || threadRef?.provider === "codex") &&
+    Boolean(threadRef.id)
+  );
 }
 
 function threadRefForKind(kind: AgentKind, threadRef?: AgentThreadRef) {
@@ -415,56 +389,36 @@ function finiteNumber(value: unknown, fallback: number) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
-function normalizeFusionModelId(value: unknown, fallback: string) {
-  const trimmed = typeof value === "string" ? value.trim() : "";
-  if (
-    !trimmed ||
-    trimmed.length > 96 ||
-    !FUSION_MODEL_ID_PATTERN.test(trimmed)
-  ) {
-    return fallback;
-  }
-
-  return trimmed;
-}
-
-function normalizeFusionModel(value: unknown): FusionClaudeModel {
-  const model = normalizeFusionModelId(value, DEFAULT_FUSION_CLAUDE_MODEL);
-  const lower = model.toLowerCase();
-  if (lower === "fast") {
-    return "sonnet";
-  }
-
-  if (lower === "opus" || lower === "sonnet") {
-    return lower;
-  }
-
-  return model;
-}
-
-function normalizeFusionCodexModel(value: unknown): FusionCodexModel {
-  const model = normalizeFusionModelId(value, DEFAULT_FUSION_CODEX_MODEL);
-  const lower = model.toLowerCase();
-  if (lower === "default" || lower === "auto") {
-    return DEFAULT_FUSION_CODEX_MODEL;
-  }
-
-  return model;
-}
-
-function normalizeFusionEffort(value: unknown): FusionEffort {
-  return FUSION_EFFORT_VALUES.includes(value as FusionEffort)
-    ? (value as FusionEffort)
-    : "auto";
-}
-
-function normalizeFusionCodexEffort(value: unknown): FusionCodexEffort {
-  if (value === "max") {
-    return "xhigh";
-  }
-  return FUSION_CODEX_EFFORT_VALUES.includes(value as FusionCodexEffort)
-    ? (value as FusionCodexEffort)
-    : "auto";
+// Per-role Fusion settings normalization lives in the shared menu module
+// (normalizeFusionRoleSettings) so App, the pane, and the settings smoke all
+// migrate legacy fields identically. This helper maps a session's stored
+// fields through it and clears the legacy fields.
+function normalizedFusionSessionFields(session: AgentSession) {
+  const role = normalizeFusionRoleSettings({
+    plannerFamily: session.fusionPlannerFamily,
+    plannerModel: session.fusionPlannerModel,
+    plannerEffort: session.fusionPlannerEffort,
+    executorFamily: session.fusionExecutorFamily,
+    executorModel: session.fusionExecutorModel,
+    executorEffort: session.fusionExecutorEffort,
+    model: session.fusionModel,
+    claudeEffort: session.fusionClaudeEffort ?? session.fusionEffort,
+    codexModel: session.fusionCodexModel,
+    codexEffort: session.fusionCodexEffort ?? session.fusionEffort
+  });
+  return {
+    fusionPlannerFamily: role.plannerFamily,
+    fusionPlannerModel: role.plannerModel,
+    fusionPlannerEffort: role.plannerEffort,
+    fusionExecutorFamily: role.executorFamily,
+    fusionExecutorModel: role.executorModel,
+    fusionExecutorEffort: role.executorEffort,
+    fusionModel: undefined,
+    fusionCodexModel: undefined,
+    fusionClaudeEffort: undefined,
+    fusionCodexEffort: undefined,
+    fusionEffort: undefined
+  };
 }
 
 function normalizeFusionRunMode(value: unknown): FusionRunMode {
@@ -647,15 +601,22 @@ function createSession(
     name: sessionName,
     kind: effectiveKind,
     fusion: isFusion || undefined,
-    fusionModel: fusionSeed?.model,
-    fusionCodexModel: fusionSeed?.codexModel,
-    fusionClaudeEffort: fusionSeed?.claudeEffort,
-    fusionCodexEffort: fusionSeed?.codexEffort,
+    fusionPlannerFamily: fusionSeed?.plannerFamily,
+    fusionPlannerModel: fusionSeed?.plannerModel,
+    fusionPlannerEffort: fusionSeed?.plannerEffort,
+    fusionExecutorFamily: fusionSeed?.executorFamily,
+    fusionExecutorModel: fusionSeed?.executorModel,
+    fusionExecutorEffort: fusionSeed?.executorEffort,
     fusionRunMode: isFusion ? DEFAULT_FUSION_RUN_MODE : undefined,
+    fusionModel: undefined,
+    fusionCodexModel: undefined,
+    fusionClaudeEffort: undefined,
+    fusionCodexEffort: undefined,
     fusionEffort: undefined,
     openFusion: isOpenFusion || undefined,
     openFusionPlannerModel: openFusionSeed?.plannerModel,
     openFusionExecutorModel: openFusionSeed?.executorModel,
+    openFusionRunMode: isOpenFusion ? DEFAULT_FUSION_RUN_MODE : undefined,
     command: profile.command,
     cwd,
     createdAt: Date.now(),
@@ -758,24 +719,10 @@ function restoreSession(session: AgentSession): AgentSession {
     nextLaunchMode: normalizeLaunchMode("new"),
     threadRef: isFusion ? undefined : createThreadRef(restoredKind),
     resumeRef,
-    fusionModel: isFusion
-      ? normalizeFusionModel(session.fusionModel)
-      : session.fusionModel,
-    fusionCodexModel: isFusion
-      ? normalizeFusionCodexModel(session.fusionCodexModel)
-      : session.fusionCodexModel,
-    fusionClaudeEffort: isFusion
-      ? normalizeFusionEffort(session.fusionClaudeEffort ?? session.fusionEffort)
-      : session.fusionClaudeEffort,
-    fusionCodexEffort: isFusion
-      ? normalizeFusionCodexEffort(session.fusionCodexEffort ?? session.fusionEffort)
-      : session.fusionCodexEffort,
+    ...(isFusion ? normalizedFusionSessionFields(session) : {}),
     fusionRunMode: isFusion
       ? normalizeFusionRunMode(session.fusionRunMode)
       : session.fusionRunMode,
-    fusionEffort: isFusion
-      ? undefined
-      : session.fusionEffort,
     openFusionPlannerModel: isOpenFusion
       ? normalizeOpenFusionModel(
           session.openFusionPlannerModel,
@@ -788,6 +735,9 @@ function restoreSession(session: AgentSession): AgentSession {
           DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
         )
       : session.openFusionExecutorModel,
+    openFusionRunMode: isOpenFusion
+      ? normalizeFusionRunMode(session.openFusionRunMode)
+      : session.openFusionRunMode,
     threadLookupStartedAt: undefined,
     threadLookupStatus: "idle",
     threadLookupMessage: undefined,
@@ -1628,18 +1578,11 @@ export default function App() {
         ...createSession(sessionCreationKind(session), session.cwd, sessions),
         name: `${session.name} copy`,
         command: session.command,
-        // The copy keeps the source's Fusion model/effort/mode settings instead
-        // of silently reverting to defaults.
+        // The copy keeps the source's Fusion family/model/effort/mode settings
+        // instead of silently reverting to defaults.
         ...(session.fusion
           ? {
-              fusionModel: normalizeFusionModel(session.fusionModel),
-              fusionCodexModel: normalizeFusionCodexModel(session.fusionCodexModel),
-              fusionClaudeEffort: normalizeFusionEffort(
-                session.fusionClaudeEffort ?? session.fusionEffort
-              ),
-              fusionCodexEffort: normalizeFusionCodexEffort(
-                session.fusionCodexEffort ?? session.fusionEffort
-              ),
+              ...normalizedFusionSessionFields(session),
               fusionRunMode: normalizeFusionRunMode(session.fusionRunMode)
             }
           : {}),
@@ -1654,6 +1597,9 @@ export default function App() {
               session.openFusionExecutorModel,
               DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
             )
+          : undefined,
+        openFusionRunMode: session.openFusion
+          ? normalizeFusionRunMode(session.openFusionRunMode)
           : undefined,
         resumeRef: sourceThread
       }
@@ -1791,6 +1737,15 @@ export default function App() {
 
   function applyFusionChatLifecycle(event: FusionChatEvent) {
     if (!("id" in event) || typeof event.id !== "string") {
+      return;
+    }
+
+    // Reattach replay (pane remount onto a live host session) is a transcript
+    // restore for the pane, not fresh activity. This mirror tracked the live
+    // events while the pane was unmounted, so it already holds the settled
+    // status/attention — reprocessing the replay would re-latch "done" and
+    // re-mark the attention dot the user already acknowledged.
+    if (event.replay) {
       return;
     }
 
@@ -2048,6 +2003,12 @@ export default function App() {
       return;
     }
 
+    // Same replay contract as applyFusionChatLifecycle: a reattach replay
+    // carries no new status/attention information — skip it.
+    if (event.replay) {
+      return;
+    }
+
     if (event.type === "turn-start") {
       updateAnySession(event.id, (session) =>
         session.openFusion
@@ -2288,40 +2249,42 @@ export default function App() {
       return;
     }
 
-    const nextFusionModel = normalizeFusionModel(settings.model);
-    const nextFusionCodexModel = normalizeFusionCodexModel(settings.codexModel);
-    const nextFusionClaudeEffort = normalizeFusionEffort(settings.claudeEffort);
-    const nextFusionCodexEffort = normalizeFusionCodexEffort(settings.codexEffort);
+    const next = normalizeFusionRoleSettings(settings);
     const nextFusionRunMode = normalizeFusionRunMode(settings.mode);
-    const currentFusionModel = normalizeFusionModel(session.fusionModel);
-    const currentFusionCodexModel = normalizeFusionCodexModel(session.fusionCodexModel);
-    const currentFusionClaudeEffort = normalizeFusionEffort(
-      session.fusionClaudeEffort ?? session.fusionEffort
-    );
-    const currentFusionCodexEffort = normalizeFusionCodexEffort(
-      session.fusionCodexEffort ?? session.fusionEffort
-    );
+    const current = normalizeFusionRoleSettings({
+      plannerFamily: session.fusionPlannerFamily,
+      plannerModel: session.fusionPlannerModel,
+      plannerEffort: session.fusionPlannerEffort,
+      executorFamily: session.fusionExecutorFamily,
+      executorModel: session.fusionExecutorModel,
+      executorEffort: session.fusionExecutorEffort,
+      model: session.fusionModel,
+      claudeEffort: session.fusionClaudeEffort ?? session.fusionEffort,
+      codexModel: session.fusionCodexModel,
+      codexEffort: session.fusionCodexEffort ?? session.fusionEffort
+    });
+    // Planner changes relaunch the planner process; executor changes apply
+    // live through the adapter's per-delegation settings re-read.
+    const plannerFamilyChanged = next.plannerFamily !== current.plannerFamily;
     const requiresRestart =
-      nextFusionModel !== currentFusionModel ||
-      nextFusionClaudeEffort !== currentFusionClaudeEffort;
-    const codexSettingsChanged =
-      nextFusionCodexModel !== currentFusionCodexModel ||
-      nextFusionCodexEffort !== currentFusionCodexEffort;
+      plannerFamilyChanged ||
+      next.plannerModel !== current.plannerModel ||
+      next.plannerEffort !== current.plannerEffort;
+    const executorSettingsChanged =
+      next.executorFamily !== current.executorFamily ||
+      next.executorModel !== current.executorModel ||
+      next.executorEffort !== current.executorEffort;
 
     // Carry the pick forward: the next NEW Fusion pane starts from this
     // configuration instead of the stock defaults.
-    rememberFusionSettings({
-      model: nextFusionModel,
-      codexModel: nextFusionCodexModel,
-      claudeEffort: nextFusionClaudeEffort,
-      codexEffort: nextFusionCodexEffort
-    });
+    rememberFusionSettings(next);
 
-    if (session.started && !requiresRestart && codexSettingsChanged) {
+    if (session.started && !requiresRestart && executorSettingsChanged) {
       window.vibe?.fusionChat
         ?.updateSettings(session.id, {
-          codexModel: nextFusionCodexModel,
-          codexEffort: nextFusionCodexEffort
+          executorFamily: next.executorFamily,
+          executorModel: next.executorModel,
+          executorEffort: next.executorEffort
         })
         .catch(() => {});
     }
@@ -2333,23 +2296,33 @@ export default function App() {
             return item;
           }
 
-          const currentClaudeRef = hasClaudeThreadId(item.threadRef)
-            ? item.threadRef
-            : undefined;
-          const previousClaudeRef = sessionResumeRef(item);
-          const relaunchResumeRef = currentClaudeRef ?? previousClaudeRef;
+          // A thread only survives the relaunch within the SAME planner
+          // family — a claude session id means nothing to a codex planner.
+          const familyRef = (ref?: AgentThreadRef) =>
+            ref?.provider === next.plannerFamily && ref.id ? ref : undefined;
+          const currentPlannerRef = familyRef(
+            hasClaudeThreadId(item.threadRef) ? item.threadRef : undefined
+          );
+          const previousPlannerRef = familyRef(sessionResumeRef(item));
+          const relaunchResumeRef = currentPlannerRef ?? previousPlannerRef;
           return {
             ...item,
-            fusionModel: nextFusionModel,
-            fusionCodexModel: nextFusionCodexModel,
-            fusionClaudeEffort: nextFusionClaudeEffort,
-            fusionCodexEffort: nextFusionCodexEffort,
+            fusionPlannerFamily: next.plannerFamily,
+            fusionPlannerModel: next.plannerModel,
+            fusionPlannerEffort: next.plannerEffort,
+            fusionExecutorFamily: next.executorFamily,
+            fusionExecutorModel: next.executorModel,
+            fusionExecutorEffort: next.executorEffort,
             fusionRunMode: nextFusionRunMode,
+            fusionModel: undefined,
+            fusionCodexModel: undefined,
+            fusionClaudeEffort: undefined,
+            fusionCodexEffort: undefined,
             fusionEffort: undefined,
             ...(requiresRestart && item.fusion
               ? {
                   threadRef: relaunchResumeRef,
-                  resumeRef: currentClaudeRef ? previousClaudeRef : undefined
+                  resumeRef: currentPlannerRef ? previousPlannerRef : undefined
                 }
               : {}),
             ...(requiresRestart && item.started
@@ -2397,6 +2370,11 @@ export default function App() {
       settings.executorModel ?? session.openFusionExecutorModel,
       DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
     );
+    // Plan/Auto is renderer-only state (the host reads it per turn from the
+    // input payload), so a mode change never restarts the pane.
+    const nextRunMode = normalizeFusionRunMode(
+      settings.runMode ?? session.openFusionRunMode
+    );
     const currentExecutorModel = normalizeOpenFusionModel(
       session.openFusionExecutorModel,
       DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
@@ -2427,6 +2405,7 @@ export default function App() {
             ...item,
             openFusionPlannerModel: nextPlannerModel,
             openFusionExecutorModel: nextExecutorModel,
+            openFusionRunMode: nextRunMode,
             ...(requiresRestart && item.started
               ? {
                   threadRef: relaunchResumeRef,

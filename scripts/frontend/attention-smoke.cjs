@@ -446,12 +446,12 @@ assert(
     appSource.includes("threadRef: undefined") &&
     appSource.includes("resumeRef: currentChatRef ?? previousChatRef") &&
     appSource.includes("function updateFusionSettings(") &&
-    appSource.includes("const codexSettingsChanged =") &&
+    appSource.includes("const executorSettingsChanged =") &&
     appSource.includes("?.updateSettings(session.id") &&
-    appSource.includes("nextFusionModel !== currentFusionModel") &&
-    appSource.includes("nextFusionClaudeEffort !== currentFusionClaudeEffort") &&
+    appSource.includes("next.plannerModel !== current.plannerModel") &&
+    appSource.includes("next.plannerEffort !== current.plannerEffort") &&
     appSource.includes('nextLaunchMode: relaunchResumeRef?.id ? "resume" : "new"'),
-  "Fusion clear/planning settings should restart and resume Claude, while Codex-only settings update live"
+  "Fusion clear/planner settings should restart and resume the planner thread, while executor-only settings update live"
 );
 assert(
   appSource.includes("function updateOpenFusionSettings(") &&
@@ -593,9 +593,9 @@ const ocChatSource = fs.readFileSync(
 );
 assert(
   fusionChatPaneSource.includes("onAttention") &&
-    fusionChatPaneSource.includes('emitAttention("completed", "done")') &&
-    fusionChatPaneSource.includes('emitAttention("failed", "error"') &&
-    fusionChatPaneSource.includes('emitAttention("failed", "exit"'),
+    fusionChatPaneSource.includes('reportAttention("completed", "done")') &&
+    fusionChatPaneSource.includes('reportAttention("failed", "error"') &&
+    fusionChatPaneSource.includes('reportAttention("failed", "exit"'),
   "FusionChatPane should emit completed/failed attention events"
 );
 assert(
@@ -627,15 +627,18 @@ assert(
     fusionChatPaneSource.includes('className="fusion-slash-menu"') &&
     fusionChatPaneSource.includes('className="oc-prompt-meta fusion-settings-summary"') &&
     fusionChatPaneSource.includes("const startPayload =") &&
-    fusionChatPaneSource.includes('model: fusionModel') &&
+    fusionChatPaneSource.includes("plannerFamily,") &&
     fusionChatPaneSource.includes(
-      'fusionCodexModel === "auto" ? {} : { codexModel: fusionCodexModel }'
+      '(plannerModel === "auto" ? {} : { model: plannerModel })'
     ) &&
     fusionChatPaneSource.includes(
-      'fusionClaudeEffort === "auto" ? {} : { effort: fusionClaudeEffort }'
+      '(executorModel === "auto" ? {} : { executorModel })'
     ) &&
     fusionChatPaneSource.includes(
-      'fusionCodexEffort === "auto" ? {} : { codexEffort: fusionCodexEffort }'
+      '(plannerEffort === "auto" ? {} : { effort: plannerEffort })'
+    ) &&
+    fusionChatPaneSource.includes(
+      '(executorEffort === "auto" ? {} : { executorEffort })'
     ) &&
     fusionChatPaneSource.includes("function applySpeedPreset") &&
     fusionChatPaneSource.includes("function applyEffortLevel") &&
@@ -725,7 +728,7 @@ assert(
     fusionChatPaneSource.includes("setWaitingState(true)") &&
     fusionChatPaneSource.includes("const [failed, setFailed] = useState(false)") &&
     fusionChatPaneSource.includes('event.kind === "warmup_error"') &&
-    fusionChatPaneSource.includes('onStatusChangeRef.current("failed")') &&
+    fusionChatPaneSource.includes('reportStatus("failed")') &&
     fusionChatPaneSource.includes("Answer Fusion to continue"),
   "FusionChatPane should render distinct waiting and failed states for approval/question turns and warmup errors"
 );
@@ -747,7 +750,47 @@ for (const [label, chatPaneSource] of [
       !chatPaneSource.includes('failed ? "failed" : "idle"'),
     `${label} pill should mirror settled done/waiting/failed from session.status instead of collapsing to "ready"`
   );
+  // Reattach replay (pane remount onto a live host session) is a transcript
+  // restore, not fresh activity: the pane rebuilds its local state from
+  // replayed events but must not re-emit status/attention — App's lifecycle
+  // mirror tracked the live events the whole time, and re-emitting would
+  // re-latch "done" and re-light an acknowledged attention dot on every
+  // project switch.
+  assert(
+    chatPaneSource.includes("const replay = event.replay === true") &&
+      chatPaneSource.includes("if (!replay) onStatusChangeRef.current(status)") &&
+      chatPaneSource.includes("if (!replay) emitAttention(state, reason, message)"),
+    `${label} should gate status/attention emission off replayed events`
+  );
+  // The launch effect must not reset a settled pill to "starting" on a plain
+  // remount: every genuine launch path resets status to "idle" first, and the
+  // status-neutral replay would never correct the stomp.
+  assert(
+    chatPaneSource.includes(
+      'if (session.status === "idle" || session.status === "starting") {'
+    ),
+    `${label} remount over a live session must not reset the pill to "starting"`
+  );
+  // A settled "done" is a notification, not a resting state: engaging the
+  // pane again (click or typing the next prompt) acknowledges it back to
+  // "ready". waiting/failed stay put until answered / the next turn.
+  assert(
+    chatPaneSource.includes("const acknowledgeCompletedTurn = ") &&
+      chatPaneSource.includes('onStatusChangeRef.current("idle")') &&
+      chatPaneSource.includes("onPointerDown={handlePanePointerDown}") &&
+      !chatPaneSource.includes("onPointerDown={onSelect}") &&
+      chatPaneSource.includes("acknowledgeCompletedTurn();"),
+    `${label} should release an acknowledged "done" back to ready on click/typing`
+  );
 }
+
+// The app-side lifecycle mirrors must ignore replayed events wholesale — they
+// already hold the settled status/attention (they kept tracking live events
+// while the pane was unmounted).
+assert(
+  appSource.split("if (event.replay) {").length === 3,
+  "both chat lifecycle mirrors should skip replayed events"
+);
 
 const preloadSource = fs.readFileSync(preloadPath, "utf8");
 assert(
