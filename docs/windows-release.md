@@ -4,10 +4,10 @@ vibeTerminal ships to Windows users as an Electron Builder NSIS installer hosted
 
 ## Current Public Release
 
-The current public Windows release is `v0.1.42`:
+The current public Windows release is `v0.1.43`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.42`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.42/vibeTerminal-Setup-0.1.42.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.43`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.43/vibeTerminal-Setup-0.1.43.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -68,6 +68,7 @@ npm run smoke:backend:updates
 npm run smoke:backend:fusion-launch
 npm run smoke:backend:fusion-adapter
 npm run smoke:backend:fusion-chat-parse
+npm run smoke:backend:completion-gate
 npm run smoke:backend:openfusion-chat-parse
 npm run smoke:backend:openfusion-custom-provider
 npm run smoke:backend:fusion-appserver:embedded
@@ -140,6 +141,7 @@ npm run smoke:backend:updates
 npm run smoke:backend:fusion-launch
 npm run smoke:backend:fusion-adapter
 npm run smoke:backend:fusion-chat-parse
+npm run smoke:backend:completion-gate
 npm run smoke:backend:openfusion-chat-parse
 npm run smoke:backend:openfusion-custom-provider
 npm run smoke:backend:fusion-appserver:embedded

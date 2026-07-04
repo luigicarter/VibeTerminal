@@ -20,6 +20,7 @@
 
 const { spawn, execFileSync } = require("child_process");
 const { createCodexBrainSession } = require("./fusionCodexBrain.cjs");
+const { createFusionGateTracker } = require("./completionGate.cjs");
 
 const isWin = process.platform === "win32";
 const CLAUDE_BIN = process.env.VIBE_CLAUDE_BIN || "claude";
@@ -42,16 +43,28 @@ function planModeDirective() {
   ].join("\n");
 }
 
-function buildFusionInputContent(text, mode, steer) {
+// One-shot corrective nudge: prepended by input() when the completion-gate
+// tracker armed it (a turn settled presenting codex_implement results with no
+// independent check). Only fresh non-plan, non-steer turns carry it. The user
+// echo carries `text` alone, so the nudge never renders in the transcript.
+const FUSION_GATE_NUDGE = [
+  "FUSION COMPLETION-GATE NOTICE: your previous turn presented codex_implement",
+  "results without an independent check. Before any new delegation, verify the",
+  "changed files against your spec (Read them, or run codex_investigate) and",
+  "state which check you ran."
+].join("\n");
+
+function buildFusionInputContent(text, mode, steer, nudge) {
   if (mode !== "plan") {
-    return steer
-      ? [
-          "STEER CURRENT FUSION TURN:",
-          text,
-          "",
-          "Incorporate this direction into the active response. If Codex is currently running, use this as steering for the next Codex decision, correction, or follow-up delegation instead of treating it as a separate new request."
-        ].join("\n")
-      : text;
+    if (steer) {
+      return [
+        "STEER CURRENT FUSION TURN:",
+        text,
+        "",
+        "Incorporate this direction into the active response. If Codex is currently running, use this as steering for the next Codex decision, correction, or follow-up delegation instead of treating it as a separate new request."
+      ].join("\n");
+    }
+    return nudge ? [FUSION_GATE_NUDGE, "", text].join("\n") : text;
   }
 
   const directive = planModeDirective();
@@ -327,6 +340,11 @@ function runHost() {
   }
 
   function emitSessionEvent(id, state, event) {
+    // Single choke point for both planner engines: the completion-gate tracker
+    // annotates clean `result` events BEFORE they reach history, so reattach
+    // replay carries the gate chip for free (replaySession bypasses observe —
+    // no double-fire).
+    if (state.gate) event = state.gate.observe(event);
     state.history.push(cloneEvent(event));
     if (state.history.length > MAX_HISTORY_EVENTS) {
       state.history.splice(0, state.history.length - MAX_HISTORY_EVENTS);
@@ -377,7 +395,14 @@ function runHost() {
     });
 
     const normalizer = createStreamNormalizer();
-    const state = { child, normalizer, buffer: "", history: [], mode: normalizeFusionRunMode(payload.mode) };
+    const state = {
+      child,
+      normalizer,
+      buffer: "",
+      history: [],
+      mode: normalizeFusionRunMode(payload.mode),
+      gate: createFusionGateTracker({ cwd })
+    };
     sessions.set(id, state);
 
     child.stdout.on("data", (chunk) => {
@@ -429,7 +454,8 @@ function runHost() {
       brain: null,
       engine: "codex",
       history: [],
-      mode: normalizeFusionRunMode(payload.mode)
+      mode: normalizeFusionRunMode(payload.mode),
+      gate: createFusionGateTracker({ cwd })
     };
     sessions.set(id, state);
     const emitEvent = (event) => {
@@ -485,9 +511,17 @@ function runHost() {
       return;
     }
 
+    // One-shot completion-gate nudge, computed ONCE above the engine branch so
+    // both planner families carry it identically. Short-circuit order is
+    // load-bearing: plan-mode and steer sends must not burn the flag — it
+    // stays armed for the next fresh Auto turn.
+    const runMode = normalizeFusionRunMode(state.mode);
+    const nudge =
+      runMode !== "plan" && !steer && Boolean(state.gate && state.gate.consumeNudge());
+
     if (state.engine === "codex") {
       emitSessionEvent(id, state, { type: "user", text, steer });
-      const content = buildFusionInputContent(text, normalizeFusionRunMode(state.mode), steer);
+      const content = buildFusionInputContent(text, runMode, steer, nudge);
       state.brain.sendInput(content, steer).catch((error) => {
         if (sessions.get(id) !== state) return;
         emitSessionEvent(id, state, {
@@ -500,7 +534,7 @@ function runHost() {
 
     try {
       emitSessionEvent(id, state, { type: "user", text, steer });
-      const content = buildFusionInputContent(text, normalizeFusionRunMode(state.mode), steer);
+      const content = buildFusionInputContent(text, runMode, steer, nudge);
       state.child.stdin.write(
         JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n"
       );
@@ -697,7 +731,14 @@ function buildClaudeSpawn(payload = {}) {
   return { command: CLAUDE_BIN, args };
 }
 
-module.exports = { buildClaudeArgs, buildClaudeSpawn, createStreamNormalizer, windowsCmdArg };
+module.exports = {
+  buildClaudeArgs,
+  buildClaudeSpawn,
+  buildFusionInputContent,
+  createStreamNormalizer,
+  windowsCmdArg,
+  FUSION_GATE_NUDGE
+};
 
 if (require.main === module) {
   runHost();

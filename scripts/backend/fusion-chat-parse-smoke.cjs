@@ -12,9 +12,12 @@ const path = require("path");
 const {
   buildClaudeArgs,
   buildClaudeSpawn,
+  buildFusionInputContent,
   createStreamNormalizer,
-  windowsCmdArg
+  windowsCmdArg,
+  FUSION_GATE_NUDGE
 } = require("../../backend/fusionChatHost.cjs");
+const { createFusionGateTracker } = require("../../backend/completionGate.cjs");
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -55,7 +58,12 @@ const fixture = [
     type: "user",
     message: {
       content: [
-        { type: "tool_result", tool_use_id: "tool-1", content: '{"status":"completed"}' },
+        {
+          type: "tool_result",
+          tool_use_id: "tool-1",
+          content:
+            '{"status":"completed","summary":"done","files":["src/api/limits.ts"],"goalReached":true,"nextAction":"done"}'
+        },
         { type: "tool_result", tool_use_id: "agent-1", content: "done", is_error: true }
       ]
     }
@@ -145,6 +153,68 @@ function main() {
       compacted[1].ok === true &&
       compacted[1].error === undefined,
     `compacted events should mirror compact_result/compact_error: ${JSON.stringify(compacted)}`
+  );
+
+  // ---- completion-gate tracker over the real fixture stream ----
+  // The fixture is the canonical UNVERIFIED case: codex_implement returns
+  // (files: src/api/limits.ts) and the turn settles with no planner evidence.
+  {
+    const gate = createFusionGateTracker({ cwd: "C:\\repo" });
+    const observed = events.map((event) => gate.observe(event));
+    const settle = observed.find((event) => event.type === "result");
+    assert(
+      settle && settle.gate && settle.gate.status === "unverified",
+      "a codex_implement return with no planner evidence must settle unverified"
+    );
+    assert(
+      gate.getState().latchOpen &&
+        gate.getState().changedFiles[0].endsWith("src/api/limits.ts"),
+      "the latch should carry the adapter's changed-file list"
+    );
+    assert(gate.consumeNudge() === true && gate.consumeNudge() === false, "nudge must be one-shot");
+    // Follow-up turn: Claude Reads the changed file (absolute path vs the
+    // adapter's relative one), then settles — verified.
+    const followUp = [];
+    for (const obj of [
+      {
+        type: "stream_event",
+        event: {
+          type: "content_block_start",
+          content_block: { type: "tool_use", id: "read-1", name: "Read" }
+        }
+      },
+      {
+        type: "stream_event",
+        event: {
+          type: "content_block_delta",
+          delta: { type: "input_json_delta", partial_json: '{"file_path":"C:\\\\repo\\\\src\\\\api\\\\limits.ts"}' }
+        }
+      },
+      { type: "stream_event", event: { type: "content_block_stop" } },
+      {
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: "read-1", content: "file body" }] }
+      },
+      { type: "result", subtype: "success", total_cost_usd: 0.001 }
+    ]) {
+      for (const event of normalize(JSON.stringify(obj))) followUp.push(gate.observe(event));
+    }
+    const verified = followUp.find((event) => event.type === "result");
+    assert(
+      verified && verified.gate && verified.gate.status === "verified" &&
+        verified.gate.evidence[0] === "read changed file",
+      "a Read of the returned file must verify the pending delegation"
+    );
+  }
+
+  // ---- buildFusionInputContent nudge arm ----
+  assert(
+    buildFusionInputContent("x", "auto", false, true).includes(FUSION_GATE_NUDGE) &&
+      buildFusionInputContent("x", "auto", false, true).includes("x") &&
+      buildFusionInputContent("x", "auto", false, false) === "x" &&
+      !buildFusionInputContent("x", "plan", false, true).includes(FUSION_GATE_NUDGE) &&
+      !buildFusionInputContent("x", "auto", true, true).includes(FUSION_GATE_NUDGE),
+    "the gate nudge must ride only fresh non-plan, non-steer turns"
   );
 
   const claudeArgs = buildClaudeArgs({
@@ -237,6 +307,12 @@ function main() {
       hostSource.includes('type: "background-activity"') &&
       hostSource.includes('function isBackgroundAgentTool'),
     "Fusion host should replay live sessions, reject stale process events, and report closed-session input"
+  );
+  assert(
+    hostSource.includes("if (state.gate) event = state.gate.observe(event);") &&
+      hostSource.includes("createFusionGateTracker({ cwd })") &&
+      hostSource.includes("state.gate && state.gate.consumeNudge()"),
+    "Fusion host must observe events through the completion-gate tracker (both engines) and gate the one-shot nudge"
   );
 
   // ---- codex-brain planner normalizer (per-role families) ----
@@ -359,6 +435,51 @@ function main() {
       toolDone.events[0].text === '{"status":"completed"}' &&
       toolDone.events[0].isError === false,
     "bridge tool results should surface their text content"
+  );
+
+  // Native shell items surface as observe-only completion-gate evidence: one
+  // event on item/completed, nothing on item/started, panes ignore the type.
+  const nativeStarted = collect({
+    method: "item/started",
+    params: {
+      item: { type: "commandExecution", id: "cmd-1", command: "git diff --stat", status: "inProgress" }
+    }
+  });
+  assert(
+    nativeStarted.events.length === 0,
+    "commandExecution item/started must emit nothing (observe on completion only)"
+  );
+  const nativeDone = collect({
+    method: "item/completed",
+    params: {
+      item: {
+        type: "commandExecution",
+        id: "cmd-1",
+        command: "git diff --stat",
+        status: "completed",
+        exitCode: 0,
+        commandActions: [{ type: "unknown", command: "git diff --stat" }]
+      }
+    }
+  });
+  assert(
+    nativeDone.events.length === 1 &&
+      nativeDone.events[0].type === "native-tool" &&
+      nativeDone.events[0].name === "bash" &&
+      nativeDone.events[0].command === "git diff --stat" &&
+      nativeDone.events[0].ok === true &&
+      Array.isArray(nativeDone.events[0].actions),
+    "completed commandExecution items should emit one observe-only native-tool event"
+  );
+  const nativeFailed = collect({
+    method: "item/completed",
+    params: {
+      item: { type: "commandExecution", id: "cmd-2", command: "git diff", status: "failed", exitCode: 1 }
+    }
+  });
+  assert(
+    nativeFailed.events[0].type === "native-tool" && nativeFailed.events[0].ok === false,
+    "failed commandExecution items must carry ok:false (never counts as evidence)"
   );
 
   collect({

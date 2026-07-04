@@ -387,6 +387,18 @@ export interface FusionLogEntry {
   ts: number;
 }
 
+// Completion-gate verdict attached by the host tracker (backend/completionGate.cjs)
+// to clean turn-settle events: did the planner run an independent check (git
+// evidence / read the changed files / investigator pass) after the last
+// executor delegation returned? Rendered as a neutral chip on the turn-end row.
+export interface CompletionGateVerdict {
+  status: "verified" | "unverified";
+  // Evidence labels for verified settles, e.g. "git diff", "read changed file".
+  evidence?: string[];
+  // Epoch ms of the executor return still awaiting a check (unverified only).
+  pendingSince?: number;
+}
+
 // Normalized events from the headless Claude chat host (backend/fusionChatHost.cjs),
 // broadcast on the "fusion-chat:event" channel. All carry the pane id except
 // host-error (broadcast to all windows).
@@ -403,6 +415,16 @@ export type FusionChatEvent = (
   // isError mirrors the stream-json tool_result's is_error flag so the pane's
   // OpenCode-style tool rows can settle red instead of guessing from text.
   | { id: string; type: "tool-result"; toolId: string; text: string; isError?: boolean }
+  // Internal completion-gate evidence observation (codex-planner native shell
+  // — git evidence, file reads). Panes ignore this type entirely.
+  | {
+      id: string;
+      type: "native-tool";
+      name: string;
+      command: string;
+      actions: unknown[];
+      ok: boolean;
+    }
   | { id: string; type: "activity"; role: "opus" | "codex"; kind: string; text?: string }
   | { id: string; type: "background-activity"; backgroundActivity: AgentBackgroundActivity }
   | { id: string; type: "turn-end" }
@@ -418,6 +440,7 @@ export type FusionChatEvent = (
       costUsd?: number;
       isError?: boolean;
       resultText?: string;
+      gate?: CompletionGateVerdict;
     }
   | { id: string; type: "interrupted" }
   | { id: string; type: "stderr"; text: string }
@@ -470,6 +493,9 @@ export type OpenFusionChatEvent = (
       toolId: string;
       name: string;
       role: OpenFusionChatRole;
+      // Producing session — lets the completion-gate tracker attribute child
+      // (executor) tool activity to its delegation.
+      sessionID?: string;
       title?: string;
       input: unknown;
     }
@@ -479,12 +505,16 @@ export type OpenFusionChatEvent = (
       toolId: string;
       name: string;
       role: OpenFusionChatRole;
+      sessionID?: string;
       ok: boolean;
       title?: string;
       text: string;
       // Slim slice of OpenCode's tool state.metadata: edit diffs, glob/grep
       // hit counts — what the OpenCode-style tool rows render.
       meta?: OpenFusionToolMeta;
+      // On settled task delegations: the child session whose edit/write paths
+      // the completion-gate tracker accumulated.
+      childSessionId?: string;
     }
   | {
       id: string;
@@ -551,6 +581,7 @@ export type OpenFusionChatEvent = (
       subtype?: string;
       costUsd?: number;
       tokens?: { input: number; output: number; reasoning: number };
+      gate?: CompletionGateVerdict;
     }
   | { id: string; type: "interrupted" }
   | { id: string; type: "stderr"; text: string }
@@ -622,6 +653,8 @@ export interface OpenFusionChatMessage {
   // task rows: live progress line (current child tool / toolcall tally) and
   // completion stats, rendered as the "↳ …" second line like OpenCode.
   taskDetail?: string;
+  // kind:"result" rows: completion-gate verdict chip for the settled turn.
+  gate?: CompletionGateVerdict;
 }
 
 export type ChatRole = "user" | "opus" | "codex";
@@ -660,4 +693,6 @@ export interface ChatMessage {
   meta?: OpenFusionToolMeta;
   // Task (delegation) rows: live "↳ …" progress line / completion stats.
   taskDetail?: string;
+  // kind:"result" rows: completion-gate verdict chip for the settled turn.
+  gate?: CompletionGateVerdict;
 }

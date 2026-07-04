@@ -27,6 +27,7 @@ import type {
   AgentProfile,
   AgentSession,
   AgentThreadRef,
+  CompletionGateVerdict,
   FusionRunMode,
   OpenFusionAuthMethod,
   OpenFusionChatEvent,
@@ -976,7 +977,7 @@ export default function OpenFusionChatPane({
       );
     };
     // OpenCode's turn-completion line: "▣ Brain · model · 32s".
-    const pushTurnEnd = (interrupted: boolean) => {
+    const pushTurnEnd = (interrupted: boolean, gate?: CompletionGateVerdict) => {
       const duration = turnStartRef.current ? Date.now() - turnStartRef.current : 0;
       turnStartRef.current = 0;
       push({
@@ -989,7 +990,8 @@ export default function OpenFusionChatPane({
           interrupted ? "interrupted" : ""
         ]
           .filter(Boolean)
-          .join(" · ")
+          .join(" · "),
+        gate
       });
     };
 
@@ -1456,7 +1458,7 @@ export default function OpenFusionChatPane({
             flushSteering();
             break;
           }
-          pushTurnEnd(false);
+          pushTurnEnd(false, event.gate);
           // Arm the accept bar only on a CLEAN settle of a turn the host
           // actually ran as the plan agent, with Brain prose to accept.
           // Aborts never reach here (interruptSettle above) and restored

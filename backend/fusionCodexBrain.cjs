@@ -152,6 +152,20 @@ function createCodexBrainNormalizer() {
             isError: Boolean(item.error)
           });
         }
+      } else if (item.type === "commandExecution" && msg.method === "item/completed") {
+        // Observe-only completion-gate evidence: the codex planner's native
+        // read-only shell (git status/diff/log/show, file reads) never renders
+        // in the pane, but without this event the gate tracker could not see
+        // the planner's independent checks and every codex-planner delegation
+        // would read as unverified. commandActions is the app-server's parsed
+        // view (read actions carry the absolute path).
+        events.push({
+          type: "native-tool",
+          name: "bash",
+          command: String(item.command || ""),
+          actions: Array.isArray(item.commandActions) ? item.commandActions : [],
+          ok: item.status === "completed" && (item.exitCode === 0 || item.exitCode == null)
+        });
       }
       return { events, reply };
     }

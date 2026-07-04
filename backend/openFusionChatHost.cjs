@@ -42,6 +42,7 @@ const { spawn, execFileSync } = require("child_process");
 const crypto = require("crypto");
 const http = require("http");
 const { windowsCmdArg } = require("./fusionChatHost.cjs");
+const { createOpenFusionGateTracker } = require("./completionGate.cjs");
 
 const isWin = process.platform === "win32";
 const OPENCODE_BIN = process.env.VIBE_OPENCODE_BIN || "opencode";
@@ -97,15 +98,27 @@ const OPEN_FUSION_PLAN_REMINDER =
   `${OPEN_FUSION_GATE_MARKER} Plan mode is active: stay read-only. Investigate ` +
   "directly or via the investigator scout; the executor is permission-denied until " +
   "the user accepts the plan. End your reply with the complete milestone plan.";
+// One-shot corrective nudge: armed by the completion-gate tracker when a turn
+// settled presenting an executor report with no independent check, consumed by
+// the next non-plan, non-queued turn. Same marker prefix — rehydration filters
+// marked parts by that prefix, so a new prefix would leak into resumed
+// transcripts as user text.
+const OPEN_FUSION_GATE_NUDGE =
+  `${OPEN_FUSION_GATE_MARKER} Correction: the previous executor delegation was ` +
+  "presented without an independent check. Verify it now (git diff/status, read " +
+  "the changed files, or an investigator pass) and state which check you ran " +
+  "before continuing.";
 
-function buildPlannerTurnParts(text, mode) {
-  return [
+function buildPlannerTurnParts(text, mode, options = {}) {
+  const parts = [
     { type: "text", text: String(text ?? "") },
     {
       type: "text",
       text: mode === "plan" ? OPEN_FUSION_PLAN_REMINDER : OPEN_FUSION_GATE_REMINDER
     }
   ];
+  if (options.nudge) parts.push({ type: "text", text: OPEN_FUSION_GATE_NUDGE });
+  return parts;
 }
 
 // ---- SSE normalizer (pure, per-session state) ----
@@ -315,6 +328,7 @@ function createOpenCodeEventNormalizer(rootSessionId) {
             toolId: callID,
             name,
             role,
+            sessionID,
             title: String(state.title || ""),
             input: state.input && typeof state.input === "object" ? state.input : {}
           });
@@ -329,6 +343,7 @@ function createOpenCodeEventNormalizer(rootSessionId) {
               toolId: callID,
               name,
               role,
+              sessionID,
               title: String(state.title || ""),
               input: state.input && typeof state.input === "object" ? state.input : {}
             });
@@ -343,10 +358,15 @@ function createOpenCodeEventNormalizer(rootSessionId) {
             toolId: callID,
             name,
             role,
+            sessionID,
             ok: status === "completed",
             title: String(state.title || ""),
             text: clipText(status === "completed" ? state.output : state.error || state.output),
-            meta: toolMeta(metadata)
+            meta: toolMeta(metadata),
+            // Links a settled task delegation to the child session whose
+            // edit/write paths the completion-gate tracker accumulated.
+            childSessionId:
+              name === "task" && metadata.sessionId ? String(metadata.sessionId) : undefined
           });
           break;
         }
@@ -863,7 +883,11 @@ function runHost() {
               ) {
                 state.turnBusy = false;
               }
-              emitSessionEvent(id, state, event);
+              // Completion-gate tracking sees ONLY live normalizer output —
+              // rehydration and reattach replay bypass it by design. observe()
+              // annotates clean `result` events with the gate verdict before
+              // they reach history, so replays carry the chip for free.
+              emitSessionEvent(id, state, state.gate ? state.gate.observe(event) : event);
             }
           }
         });
@@ -906,6 +930,7 @@ function runHost() {
         if (existing && existing.id === resumeId) {
           state.sessionId = resumeId;
           state.normalizer = createOpenCodeEventNormalizer(resumeId);
+          state.gate = createOpenFusionGateTracker({ cwd: state.cwd });
           connectEvents(id, state);
           emitSessionEvent(id, state, { type: "session", sessionId: resumeId, resumed: true });
           const messages = await request(state, "GET", `/session/${encodeURIComponent(resumeId)}/message`);
@@ -926,6 +951,7 @@ function runHost() {
     if (!created || !created.id) throw new Error("OpenCode did not return a session id");
     state.sessionId = String(created.id);
     state.normalizer = createOpenCodeEventNormalizer(state.sessionId);
+    state.gate = createOpenFusionGateTracker({ cwd: state.cwd });
     connectEvents(id, state);
     emitSessionEvent(id, state, { type: "session", sessionId: state.sessionId });
   }
@@ -958,8 +984,10 @@ function runHost() {
       child,
       password,
       port: 0,
+      cwd: String(cwd || ""),
       sessionId: "",
       normalizer: null,
+      gate: null,
       sseRequest: null,
       sseRetries: 0,
       sseGeneration: 0,
@@ -1085,9 +1113,13 @@ function runHost() {
       state,
       queued ? { type: "user", text, queued: true, mode } : { type: "user", text, mode }
     );
+    // One-shot completion-gate nudge: only a fresh non-plan turn consumes it
+    // (short-circuit order is load-bearing — a plan or queued send must not
+    // burn the flag; it stays armed for the next qualifying turn).
+    const nudge = mode !== "plan" && !queued && Boolean(state.gate && state.gate.consumeNudge());
     const body = {
       agent: mode === "plan" ? "plan" : "planner",
-      parts: buildPlannerTurnParts(text, mode),
+      parts: buildPlannerTurnParts(text, mode, { nudge }),
       model
     };
     request(state, "POST", `/session/${encodeURIComponent(state.sessionId)}/prompt_async`, body).catch(
@@ -1634,7 +1666,10 @@ function runHost() {
     request(state, "POST", `/session/${encodeURIComponent(state.sessionId)}/abort`)
       .then(() => {
         if (sessions.get(id) !== state) return;
-        emitSessionEvent(id, state, { type: "interrupted" });
+        // Synthesized outside the normalizer loop — route it through the gate
+        // tracker so the aborted turn's settle is never annotated.
+        const event = { type: "interrupted" };
+        emitSessionEvent(id, state, state.gate ? state.gate.observe(event) : event);
       })
       .catch(() => {
         // best-effort; the user can still Restart as the hard stop.
@@ -1717,6 +1752,7 @@ module.exports = {
   buildPlannerTurnParts,
   OPEN_FUSION_GATE_MARKER,
   OPEN_FUSION_GATE_REMINDER,
+  OPEN_FUSION_GATE_NUDGE,
   OPEN_FUSION_PLAN_REMINDER
 };
 

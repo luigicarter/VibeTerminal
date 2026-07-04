@@ -1920,6 +1920,9 @@ button {
 .oc-skin .oc-turnend { margin-top: 12px; padding-left: 6px; color: var(--oc-text); }
 .oc-skin .oc-turnend-mark { color: var(--oc-primary); }
 .oc-skin .oc-turnend-meta { color: var(--oc-muted); }
+/* Completion-gate chip ("✓ checked · git diff" / "unchecked"): deliberately
+   muted for BOTH states — it is an observability signal, not a warning. */
+.oc-skin .oc-turnend-gate { color: var(--oc-muted); }
 
 /* Error panel: OpenCode's left-bordered error block. */
 .oc-skin .oc-errorblock {

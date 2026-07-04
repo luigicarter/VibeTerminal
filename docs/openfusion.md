@@ -499,10 +499,30 @@ transcript ordering (the coherence seam Fusion fights in
      milestones instead of acting on them. Micro-slicing is explicitly ruled
      out — a milestone is a verifiable increment, and small single-stage tasks
      stay one delegation.
+  6. **Verified-done detection + one-shot nudge (2026-07-04).** The gate is no
+     longer purely an honor system: a host-side tracker
+     (`backend/completionGate.cjs`, `createOpenFusionGateTracker`) observes the
+     live normalized event stream and mechanically records whether an
+     independent check happened between an executor `task` returning and the
+     Brain turn settling. Evidence = root-session allowlisted git bash
+     (`git status/diff/log/show`), a root `read` of a file the executor
+     edited (child edit/write paths are accumulated per child session and
+     linked via the task result's `childSessionId`), or an investigator task.
+     Clean settles carry `gate: {status: "verified"|"unverified", evidence}`;
+     the pane renders it on the "▣ Brain · …" turn-end row as a deliberately
+     neutral muted chip ("✓ checked · git diff" / "unchecked"). A settle that
+     presented an executor report unchecked arms a ONE-SHOT corrective part
+     (`OPEN_FUSION_GATE_NUDGE`, same marker prefix so rehydration strips it)
+     that rides the next fresh non-plan turn. Aborted/errored settles are
+     never annotated and keep the latch; new prompts and `/compact` do not
+     clear it; resume/restart resets the tracker (documented, deliberate —
+     child sessions are not rehydrated). Detection only: nothing is blocked.
 
   Locked by `agent-telemetry-smoke` (permission shape incl. key order + prompt
-  anchors) and `openfusion-chat-parse-smoke` (reminder part + rehydration
-  strip).
+  anchors), `openfusion-chat-parse-smoke` (reminder/nudge parts + rehydration
+  strip + gate tracker over the fixture stream + normalizer sessionID/
+  childSessionId fields), and `completion-gate-smoke` (latch/evidence/nudge
+  semantics).
 - **Work ownership:** the Planner stays in the loop as the observer/steerer. The
   Executor performs the concrete implementation work: code edits, shell commands,
   command-result analysis, fixes, and self-review.

@@ -54,6 +54,10 @@ export interface OcChatMessage {
   // task rows: live progress line (current child work / call tally) and
   // completion stats, rendered as the "↳ …" second line like OpenCode.
   taskDetail?: string;
+  // kind:"result" rows: completion-gate verdict for the settled turn — did the
+  // planner independently check the last executor delegation? Neutral chip,
+  // both states muted by design.
+  gate?: { status: "verified" | "unverified"; evidence?: string[]; pendingSince?: number };
 }
 
 export function clip(value: string, max: number) {
@@ -599,6 +603,14 @@ export const OcChatRow = memo(function OcChatRow({
         <span className="oc-turnend-mark">▣ </span>
         <span className="oc-turnend-mode">{m.text}</span>
         {m.taskDetail && <span className="oc-turnend-meta"> · {m.taskDetail}</span>}
+        {m.gate && (
+          <span className="oc-turnend-gate">
+            {" · "}
+            {m.gate.status === "verified"
+              ? `✓ checked · ${m.gate.evidence?.[0] ?? "evidence"}`
+              : "unchecked"}
+          </span>
+        )}
       </div>
     );
   }

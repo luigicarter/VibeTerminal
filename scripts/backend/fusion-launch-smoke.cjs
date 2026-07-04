@@ -246,8 +246,9 @@ async function main() {
     assert(
       /FUSION PLAN MODE IS ACTIVE/.test(hostSource) &&
         /msg\.type === "mode"/.test(hostSource) &&
-        /buildFusionInputContent\(text, normalizeFusionRunMode\(state\.mode\), steer\)/.test(hostSource),
-      "Fusion chat host should apply the Plan mode read-only turn directive"
+        /const runMode = normalizeFusionRunMode\(state\.mode\);/.test(hostSource) &&
+        /buildFusionInputContent\(text, runMode, steer, nudge\)/.test(hostSource),
+      "Fusion chat host should apply the Plan mode read-only turn directive (with the completion-gate nudge arm)"
     );
 
     assert(

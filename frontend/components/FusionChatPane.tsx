@@ -26,6 +26,7 @@ import type {
   AgentSession,
   AgentThreadRef,
   ChatMessage,
+  CompletionGateVerdict,
   FusionChatEvent,
   FusionFamily,
   FusionRunMode,
@@ -996,7 +997,7 @@ export default function FusionChatPane({
       );
     };
     // OpenCode's turn-completion line: "▣ Fusion · Opus 4.8 · 32s".
-    const pushTurnEnd = (interrupted: boolean) => {
+    const pushTurnEnd = (interrupted: boolean, gate?: CompletionGateVerdict) => {
       const duration = turnStartRef.current ? Date.now() - turnStartRef.current : 0;
       turnStartRef.current = 0;
       push({
@@ -1009,7 +1010,8 @@ export default function FusionChatPane({
           interrupted ? "interrupted" : ""
         ]
           .filter(Boolean)
-          .join(" · ")
+          .join(" · "),
+        gate
       });
     };
 
@@ -1354,7 +1356,7 @@ export default function FusionChatPane({
             reportAttention("failed", "error", event.resultText || "Turn failed.");
             break;
           }
-          pushTurnEnd(false);
+          pushTurnEnd(false, event.gate);
           if (waitingForDecisionRef.current) {
             reportStatus("waiting");
           } else {

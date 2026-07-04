@@ -1,6 +1,6 @@
 {
   "name": "vibe-terminal",
-  "version": "0.1.42",
+  "version": "0.1.43",
   "private": true,
   "description": "A tiled local workspace for running multiple coding agents side by side.",
   "author": "vibeTerminal contributors",
@@ -27,6 +27,7 @@
     "smoke:backend:fusion-appserver": "node scripts/backend/fusion-appserver-smoke.cjs",
     "smoke:backend:fusion-launch": "node scripts/backend/fusion-launch-smoke.cjs",
     "smoke:backend:fusion-chat-parse": "node scripts/backend/fusion-chat-parse-smoke.cjs",
+    "smoke:backend:completion-gate": "node scripts/backend/completion-gate-smoke.cjs",
     "smoke:backend:openfusion-chat-parse": "node scripts/backend/openfusion-chat-parse-smoke.cjs",
     "smoke:backend:openfusion-isolation": "node scripts/backend/openfusion-isolation-smoke.cjs",
     "smoke:backend:openfusion-custom-provider": "node scripts/backend/openfusion-custom-provider-smoke.cjs",

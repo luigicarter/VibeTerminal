@@ -19,8 +19,10 @@ const {
   buildPlannerTurnParts,
   OPEN_FUSION_GATE_MARKER,
   OPEN_FUSION_GATE_REMINDER,
+  OPEN_FUSION_GATE_NUDGE,
   OPEN_FUSION_PLAN_REMINDER
 } = require("../../backend/openFusionChatHost.cjs");
+const { createOpenFusionGateTracker } = require("../../backend/completionGate.cjs");
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -219,6 +221,27 @@ const fixture = [
         tool: "bash",
         callID: "bash_1",
         state: { status: "completed", input: { command: "echo 391" }, output: "391" }
+      }
+    }
+  },
+  // Executor edits a file — the completion-gate tracker accumulates this path.
+  {
+    type: "message.part.updated",
+    properties: {
+      sessionID: CHILD,
+      part: {
+        id: "prt_cedit",
+        messageID: "msg_c1",
+        sessionID: CHILD,
+        type: "tool",
+        tool: "edit",
+        callID: "edit_1",
+        state: {
+          status: "completed",
+          input: { filePath: "C:\\repo\\src\\thing.ts", oldString: "a", newString: "b" },
+          output: "edited",
+          metadata: { diff: "-a\n+b" }
+        }
       }
     }
   },
@@ -435,6 +458,17 @@ assert(
     toolResults.some((event) => event.name === "bash" && event.role === "executor"),
   "executor tool activity should surface with role executor"
 );
+// Completion-gate plumbing: tool events carry their producing session, and a
+// settled task result links to the child session whose edits were accumulated.
+assert(
+  toolCalls.some((event) => event.name === "edit" && event.role === "executor" && event.sessionID === CHILD) &&
+    toolResults.some((event) => event.name === "edit" && event.sessionID === CHILD),
+  "executor edit tool events should carry the child sessionID"
+);
+assert(
+  toolResults.some((event) => event.name === "task" && event.childSessionId === CHILD),
+  "the task tool-result should carry childSessionId for changed-file lookup"
+);
 
 // Permission round-trip.
 const permissions = byType("permission");
@@ -499,6 +533,61 @@ assert(
   "events from foreign sessions must be dropped"
 );
 
+// ---- completion-gate tracker over the real fixture stream ----
+// The fixture's turn is the canonical UNVERIFIED case: the executor task
+// returns (child edited src/thing.ts) and the turn settles with no planner
+// evidence action — the tracker must annotate the settle and arm the nudge.
+{
+  const gate = createOpenFusionGateTracker({ cwd: "C:\\repo" });
+  const observed = events.map((event) => gate.observe(event));
+  const settles = observed.filter((event) => event.type === "result");
+  assert(settles.length === 1, "fixture should settle exactly once");
+  assert(
+    settles[0].gate && settles[0].gate.status === "unverified",
+    "an executor return with no planner evidence must settle unverified"
+  );
+  const state = gate.getState();
+  assert(
+    state.latchOpen &&
+      state.nudgePending &&
+      state.changedFiles.length === 1 &&
+      state.changedFiles[0].endsWith("src/thing.ts"),
+    "the latch should stay open carrying the executor's changed file"
+  );
+  // Second turn: the planner runs allowlisted git evidence, then settles.
+  const secondTurn = [];
+  for (const raw of [
+    { type: "session.status", properties: { sessionID: ROOT, status: { type: "busy" } } },
+    {
+      type: "message.part.updated",
+      properties: {
+        sessionID: ROOT,
+        part: {
+          id: "prt_gitbash",
+          messageID: "msg_a2",
+          sessionID: ROOT,
+          type: "tool",
+          tool: "bash",
+          callID: "bash_git",
+          state: { status: "completed", input: { command: "git diff --stat" }, output: "1 file changed" }
+        }
+      }
+    },
+    { type: "session.idle", properties: { sessionID: ROOT } }
+  ]) {
+    for (const event of normalize(raw)) secondTurn.push(gate.observe(event));
+  }
+  const verified = secondTurn.find((event) => event.type === "result");
+  assert(
+    verified && verified.gate && verified.gate.status === "verified" && verified.gate.evidence[0] === "git diff",
+    "planner git evidence must verify the pending delegation with the git label"
+  );
+  assert(
+    !gate.getState().latchOpen && !gate.getState().nudgePending && gate.consumeNudge() === false,
+    "verification closes the latch and disarms the un-consumed nudge"
+  );
+}
+
 // ---- buildPlannerTurnParts ----
 // Every Brain turn carries the user's text plus the marked standing gate
 // reminder as a SEPARATE part (so rehydration can drop it wholesale).
@@ -522,6 +611,16 @@ assert(
     OPEN_FUSION_PLAN_REMINDER !== OPEN_FUSION_GATE_REMINDER,
   "plan-mode turns must carry the plan-variant reminder under the same marker prefix"
 );
+// One-shot corrective nudge rides as a THIRD marked part — same prefix, so the
+// existing rehydration strip covers it too.
+const nudgeParts = buildPlannerTurnParts("continue", "auto", { nudge: true });
+assert(
+  nudgeParts.length === 3 &&
+    nudgeParts[2].text === OPEN_FUSION_GATE_NUDGE &&
+    nudgeParts[2].text.startsWith(OPEN_FUSION_GATE_MARKER) &&
+    buildPlannerTurnParts("continue", "auto", {}).length === 2,
+  "the gate nudge must append as a third marked part only when armed"
+);
 
 // ---- rehydrateMessages ----
 const rehydrated = rehydrateMessages(
@@ -530,10 +629,11 @@ const rehydrated = rehydrateMessages(
       info: { id: "m1", role: "user" },
       parts: [{ type: "text", text: "hi" }]
     },
-    // A host-sent turn: the reminder part must NOT rehydrate as user text.
+    // A host-sent turn (with the nudge armed): neither the reminder nor the
+    // nudge part may rehydrate as user text.
     {
       info: { id: "m1b", role: "user" },
-      parts: buildPlannerTurnParts("try again")
+      parts: buildPlannerTurnParts("try again", "auto", { nudge: true })
     },
     {
       info: { id: "m2", role: "assistant" },
@@ -671,6 +771,14 @@ assert(
     hostSource.includes("replaySession(id, existingState);") &&
     hostSource.includes("event: { ...event, replay: true }"),
   "Open Fusion host should tag reattach-replayed events with replay: true"
+);
+// Completion-gate wiring: the tracker observes the LIVE normalizer stream (and
+// the synthesized interrupt), and only fresh non-plan turns consume the nudge.
+assert(
+  hostSource.includes("state.gate ? state.gate.observe(event) : event") &&
+    hostSource.includes("createOpenFusionGateTracker({ cwd: state.cwd })") &&
+    hostSource.includes('mode !== "plan" && !queued && Boolean(state.gate && state.gate.consumeNudge())'),
+  "Open Fusion host must observe live events through the completion-gate tracker and gate the one-shot nudge"
 );
 
 console.log("Open Fusion chat parse smoke passed");

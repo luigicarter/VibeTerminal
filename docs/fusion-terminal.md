@@ -132,6 +132,26 @@ complete before the final milestone. Milestones don't license micro-slicing:
 within one milestone the fewer-larger-chunks delegation rule still applies,
 and small single-stage tasks stay one delegation.
 
+**Completion-gate detection (2026-07-04)** (locked by `completion-gate-smoke` +
+`fusion-chat-parse-smoke`): Codex's verifier verdict remains the first gate;
+this observes whether Claude ran its independent second check. A host-side
+tracker (`backend/completionGate.cjs`, `createFusionGateTracker`) sits in
+`emitSessionEvent` — one choke point covering BOTH planner families — and
+latches when a `codex_implement` tool-result parses to `status:"completed"`
+(capturing its `files` list; `needs_decision` never latches). Evidence =
+a planner `Read` of a returned file (relative/absolute reconciled by
+suffix-matching; when `files` is empty any successful Read counts), a
+`codex_investigate` pass, or — codex planner only — native read-only shell
+git evidence / file reads, surfaced as observe-only `native-tool` events the
+panes ignore (`commandExecution` items in `fusionCodexBrain.cjs`, vocabulary
+from the vendored app-server types; live emission still to be probed). Clean
+settles carry `gate` and render a neutral muted chip on the "▣ Fusion · …"
+turn-end row ("✓ checked · read changed file" / "unchecked"); an unchecked
+settle arms a one-shot `FUSION_GATE_NUDGE` block prepended to the next fresh
+non-plan, non-steer turn (the user echo carries only the user's text, so it
+never renders). Aborted/errored settles are never annotated and keep the
+latch; pane restart resets the tracker. Detection only — nothing is blocked.
+
 Future
 worktree isolation is a hardening option; the current implementation runs Codex
 implementation turns in the pane's workspace with `danger-full-access` and
