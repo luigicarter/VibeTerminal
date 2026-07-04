@@ -106,11 +106,18 @@
 > the normalizer surfaces it as a `stream-end` event so the pane retires that
 > bubble's live caret per-part instead of leaving every finished row blinking
 > until the turn settles (turn-wide clearing on result/interrupt/error stays
-> the net for aborted parts, which never get a `time.end`).
+> the net for aborted parts, which never get a `time.end`). `stream-end` is
+> once-per-part, so content stragglers arriving AFTER the end snapshot (bus
+> reordering) are dropped — emitting them would reopen a pane bubble whose
+> caret nothing retires.
 >
 > **Transcript rendering (OpenCode-TUI parity, 2026-07-03):** the pane renders
 > the same row shapes as OpenCode's own TUI (verified against the v1.17.11
-> `packages/tui` source) wearing Open Fusion's palette. Tool calls are ONE row
+> `packages/tui` source) wearing Open Fusion's palette. The row renderer,
+> glyph/label helpers, spinner, markdown/diff blocks, and block-letter wordmark
+> now live in the shared kit `frontend/components/ocChat.tsx` under the
+> `.oc-skin` CSS scope — the Fusion pane renders through the same kit
+> (proseRole "opus"), so row-shape changes land in both panes. Tool calls are ONE row
 > per callID — created on `tool-call`, updated in place by the matching
 > `tool-result` — with OpenCode's icon glyphs (`$` bash, `→` read, `✱`
 > glob/grep, `←` edit/write, `%` webfetch, `◈` websearch, `⚙` generic, `│`/`✓`
@@ -327,7 +334,16 @@ transcript ordering (the coherence seam Fusion fights in
       "mode": "primary",
       "model": "<user pick A>",
       "permission": {
-        "bash": "deny",
+        // Git evidence allowlist — key ORDER is load-bearing (findLast:
+        // last matching key wins), see "Gate hardening" below.
+        "bash": {
+          "*": "deny",
+          "git status *": "allow",
+          "git diff *": "allow",
+          "git log *": "allow",
+          "git show *": "allow",
+          "git * --output*": "deny"
+        },
         "edit": "deny",
         "task": { "*": "deny", "executor": "allow", "investigator": "allow" }
       },
@@ -378,16 +394,56 @@ transcript ordering (the coherence seam Fusion fights in
   "brain answers the executor's permission requests" would require the future
   server/SDK slice (subscribe to `permission.asked`, reply via the permission
   API after consulting the Planner).
-- **Review gate (decided 2026-07-03):** two stages. The executor prompt mandates
-  a **capped self-review loop** before it returns control: re-read the full diff
-  as a reviewer (correctness, scope drift, edge cases, leftover debug code,
-  validation gaps), fix and re-validate, review again — stop on a clean pass;
-  after the second fix pass, one final review reports anything still unfixed
-  instead of looping.
+- **Review gate (decided 2026-07-03, hardened 2026-07-03):** two stages. The
+  executor prompt mandates a **capped self-review loop** before it returns
+  control: re-read the full diff as a reviewer (correctness, scope drift, edge
+  cases, leftover debug code, validation gaps), fix and re-validate, review
+  again — stop on a clean pass; after the second fix pass, one final review
+  reports anything still unfixed instead of looping.
   The Planner then reviews that evidence as the **independent second gate**; the
   final **done vs guide a correction pass** decision belongs to the
   Planner/intelligence layer. If the work is not done, the Planner writes the
   next corrective instruction and sends the executor another `task` call.
+
+  **Gate hardening (2026-07-03).** Field report: after several turns a Brain
+  took the executor's self-review as truth. Root causes: the gate was two
+  sentences of prompt prose with no enforcement; the Planner had **no
+  independent evidence channel** (`bash: deny` meant the only diff/test output
+  it ever saw was inside the executor's own report); and multi-turn drift (each
+  accepted report becomes in-context precedent for rubber-stamping the next).
+  Four coordinated fixes, none of which adds a verifier subagent:
+
+  1. **Read-only git evidence channel.** The planner's `bash` permission is now
+     a pattern allowlist: `git status/diff/log/show` allowed, everything else
+     (and `git * --output*`, git's write-to-file escape) denied. Live-verified
+     1.17.11 semantics this depends on: agent-level `permission.bash` accepts a
+     glob→action object; rules evaluate with `findLast` so the **last matching
+     key wins** (insertion order, NOT specificity — the `"*": "deny"` catch-all
+     must stay FIRST and the `--output` deny LAST); unmatched commands default
+     to `ask`, not deny, so the catch-all is what preserves the read-only lock;
+     a trailing `" *"` matches the bare command and arguments but not
+     `git difftool`; globs are full-string anchored and case-insensitive on
+     win32; the shell tool tree-sitter-parses chained commands and
+     permission-checks **each subcommand**, so `git diff && rm -rf /` cannot
+     launder the deny.
+  2. **Operational completion rule.** The planner prompt's completion rule is
+     now a mandatory checklist: ≥1 independent check (git diff/status, read the
+     changed files, or an investigator pass) before presenting work as done,
+     name the check in the reply, treat a report without verbatim evidence as
+     automatically not-done, no exemption for a so-far-reliable executor.
+  3. **Per-turn standing reminder.** `openFusionChatHost.input()` appends a
+     marked reminder part (`[Open Fusion standing reminder] …`) to every Brain
+     turn via `buildPlannerTurnParts` — countering long-context salience decay.
+     The pane echo carries only the user's own text, the SSE normalizer drops
+     non-assistant parts, and `rehydrateMessages` filters marker-prefixed parts,
+     so the reminder never renders in the transcript, live or resumed.
+  4. **Verbatim evidence contract.** The executor prompt and `/delegate`
+     template require verbatim primary artifacts (exact commands + exit status,
+     verbatim final test-runner summary lines, the diff itself), not summaries.
+
+  Locked by `agent-telemetry-smoke` (permission shape incl. key order + prompt
+  anchors) and `openfusion-chat-parse-smoke` (reminder part + rehydration
+  strip).
 - **Work ownership:** the Planner stays in the loop as the observer/steerer. The
   Executor performs the concrete implementation work: code edits, shell commands,
   command-result analysis, fixes, and self-review.
@@ -547,7 +603,13 @@ runs a mandatory capped self-review loop (stop on a clean pass; after two fix
 passes a final review reports unfixed findings honestly), and its report is
 evidence for the
 Planner, which decides done vs another guided executor pass as the independent
-second gate — no third verifier subagent (decided 2026-07-03). The Planner
+second gate — no third verifier subagent (decided 2026-07-03). Hardened
+2026-07-03 after a field report of a Brain rubber-stamping executor reports in
+long conversations: the gate is now operational, not aspirational — the Planner
+has a read-only git-evidence bash allowlist, a mandatory independent-check
+completion rule, a host-appended per-turn standing reminder, and a verbatim
+evidence contract on executor reports (see "Gate hardening" under Review gate).
+The Planner
 remains the observer/steerer, while the Executor performs code edits, shell
 commands, command-result analysis, fixes, and self-review.
 

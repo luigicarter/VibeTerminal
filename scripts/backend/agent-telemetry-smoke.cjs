@@ -431,15 +431,30 @@ function postTelemetry(callbackUrl, token, payload) {
     const openFusionConfig = JSON.parse(
       fs.readFileSync(openFusionFiles.configPath, "utf8")
     );
+    const plannerBash = openFusionConfig.agent?.planner?.permission?.bash;
     assert(
       openFusionConfig.default_agent === "planner" &&
         openFusionConfig.agent?.planner?.mode === "primary" &&
         openFusionConfig.agent?.planner?.model === "openai/gpt-5.1" &&
-        openFusionConfig.agent?.planner?.permission?.bash === "deny" &&
+        plannerBash?.["*"] === "deny" &&
+        plannerBash?.["git status *"] === "allow" &&
+        plannerBash?.["git diff *"] === "allow" &&
+        plannerBash?.["git log *"] === "allow" &&
+        plannerBash?.["git show *"] === "allow" &&
+        plannerBash?.["git * --output*"] === "deny" &&
         openFusionConfig.agent?.planner?.permission?.edit === "deny" &&
         openFusionConfig.agent?.planner?.permission?.task?.executor === "allow" &&
         openFusionConfig.agent?.planner?.permission?.task?.["*"] === "deny",
-      "Open Fusion planner should be a read-only primary agent with task access"
+      "Open Fusion planner should be read-only except the git evidence bash allowlist"
+    );
+    // opencode evaluates permission rules with findLast (LAST matching key
+    // wins), so the deny catch-all must be first and the --output deny last —
+    // reordering these keys silently flips the whole allowlist.
+    const plannerBashKeys = Object.keys(plannerBash || {});
+    assert(
+      plannerBashKeys[0] === "*" &&
+        plannerBashKeys[plannerBashKeys.length - 1] === "git * --output*",
+      "Open Fusion planner bash allowlist must keep '*' deny first and the --output deny last (findLast semantics)"
     );
     assert(
       openFusionConfig.agent?.executor?.mode === "subagent" &&
@@ -481,6 +496,14 @@ function postTelemetry(callbackUrl, token, payload) {
         openFusionEnvConfig.agent?.planner?.prompt?.includes("independent second gate") &&
         openFusionEnvConfig.command?.delegate?.template?.includes("self-review findings per pass"),
       "Open Fusion executor should carry the capped self-review loop with the planner as the independent second gate"
+    );
+    assert(
+      openFusionEnvConfig.agent?.planner?.prompt?.includes("at least ONE independent check") &&
+        openFusionEnvConfig.agent?.planner?.prompt?.includes("which independent check you performed") &&
+        openFusionEnvConfig.agent?.planner?.prompt?.includes("does not earn an exemption") &&
+        openFusionEnvConfig.agent?.executor?.prompt?.includes("verbatim primary artifacts") &&
+        openFusionEnvConfig.command?.delegate?.template?.includes("Evidence must be verbatim"),
+      "Open Fusion completion gate must be operational: mandatory independent check + verbatim evidence contract"
     );
     assert(
       fs.existsSync(openFusionFiles.plannerPromptPath) &&

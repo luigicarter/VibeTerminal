@@ -105,13 +105,15 @@ either direction — flip it to `read-only` on Windows to re-test after a Codex
 sandbox fix.
 
 **Interrupting a turn:** the Fusion chat host control protocol has a dedicated
-`interrupt` message (distinct from `stop`, which kills the whole session). The
-composer shows a **Stop** button while a turn runs, and **Esc** is bound both in
-the composer and at the selected-pane window level. Both send Claude a
-stream-json `control_request` interrupt over the live child's stdin. The host
-then emits `interrupted`, and the renderer clears the running state from that
-acknowledgement so the session stays up for the next message. Restart/Close
-remain the hard kill (`fusion-chat:stop` → `killChild`).
+`interrupt` message (distinct from `stop`, which kills the whole session).
+**Esc** is bound both in the composer and at the selected-pane window level
+(the composer status row shows "interrupting…" beside the busy spinner; there
+is no stop button). It sends Claude a stream-json `control_request` interrupt
+over the live child's stdin. The host then emits `interrupted`, and the
+renderer clears the running state from that acknowledgement — settling
+still-running tool rows as aborted and closing the turn with a
+"▣ Fusion · model · interrupted" line — so the session stays up for the next
+message. Restart/Close remain the hard kill (`fusion-chat:stop` → `killChild`).
 
 ## Key finding: Codex 0.142.3 ships the app-server stack natively
 
@@ -304,28 +306,28 @@ steer/stop (interrupt is native to `claude`).
 > Re-coupling the adapter to host code (an unguarded env read, a `require()` of
 > the Electron host) fails CI here.
 
-## UI — unified role-tagged log
+## UI — one agent, OpenCode-parity transcript
 
-One interleaved transcript, with internal bridge/tool mechanics hidden behind the
-Details toggle by default. The visible flow should read as one Fusion agent with
-concise implementation status, not a wall of raw goal/tool JSON. **Not**
-split-lanes, **not** a side rail.
+Since the 2026-07-03 reskin the pane renders through the shared OpenCode-parity
+chat kit (`frontend/components/ocChat.tsx`, the same row shapes/composer/footer
+the Open Fusion pane wears — see `docs/frontend.md` for the full component
+inventory). One interleaved transcript that reads as one Fusion agent. **Not**
+split-lanes, **not** a side rail:
 
-```
-┌─ Fusion terminal ───────────────────────────────────┐
-│ 🔵 Opus   plan: add rate limiting (3 steps)           │
-│ 🟢 Codex  edit  src/mw/rateLimit.ts                   │
-│ 🟢 Codex  run   npm test → 12 pass                    │
-│ 🔵 Opus   diff-check: missing 429 Retry-After header  │
-│ 🟢 Codex  fix   add Retry-After header                │
-│ 🔵 Opus   ✓ looks correct — done                      │
-└───────────────────────────────────────────────────────┘
-```
-
-The renderer maps meaningful app-server item events (streamed via the telemetry
-callback server) to concise implementation lines; Opus's own turns are the
-Claude-tagged prose; goal updates, bridge calls, and raw tool results are kept as
-Details-only diagnostics.
+- Opus prose is markdown; thinking folds into "+ Thought" collapsibles; every
+  turn closes with a "▣ Fusion · model · duration" line.
+- Claude's own tools (Read/Glob/Grep/Edit/Write) are OpenCode-style one-liner
+  rows updated in place by their results — Edit shows a colored diff panel
+  derived from `old_string`/`new_string`.
+- `codex_implement`/`codex_investigate` render as Task rows ("Executor/Scout
+  Task — …") whose "↳ …" line ticks with the Codex side-channel's
+  command/file/message activity; completed rows read "↳ N updates · 12s" and
+  click open a report built from the bridge's JSON (findings/summary, files,
+  verifier verdict). Goal updates and other bridge calls are muted one-liners.
+- `/details` (footer toggle + slash command, default ON) hides
+  completed-successful tool rows and internal worklines; running/failed/Task
+  rows always stay. Pre-turn engine chatter (launch-time stderr, warmup notes)
+  never enters the transcript — the FUSION hero owns a fresh pane.
 
 Mid-turn sends (steering) do not drop into the scrolling transcript, where the
 stream would bury them: the pane pins them above the composer with a QUEUED

@@ -52,7 +52,9 @@ function openFusionPlannerPrompt() {
     "  repo layout, relevant files, constraints, and facts you need before deciding.",
     "  The investigator is permission-locked read-only, so it can never change state.",
     "- Use the task tool with the executor subagent for concrete implementation work.",
-    "- Do not perform code edits or shell commands yourself.",
+    "- Do not perform code edits yourself. Your shell access is limited to read-only",
+    "  git evidence commands (git status, git diff, git log, git show) for verifying",
+    "  executor claims; every other command is denied - concrete work goes to the executor.",
     "- Review the executor's summary, diffs, command results, tests, and self-review findings.",
     "  The executor self-reviews in a loop before reporting; treat that as evidence,",
     "  not authority - your review is the independent second gate.",
@@ -62,9 +64,16 @@ function openFusionPlannerPrompt() {
     "  editing the same folder), surface that overlap to the user and let them decide",
     "  how to proceed instead of silently re-delegating over the foreign changes.",
     "",
-    "Completion rule:",
-    "The executor may recommend that work is complete, but you own the final done/not-done decision.",
-    "Only present completion to the user after you have reviewed the evidence and are satisfied."
+    "Completion rule (mandatory before telling the user delegated work is done):",
+    "1. Perform at least ONE independent check of the executor's claims: run git diff or",
+    "   git status yourself, read the changed files, or send the investigator to verify",
+    "   a specific claim. The executor's report alone is never sufficient evidence.",
+    "2. State in your reply which independent check you performed and what it showed.",
+    "3. An executor report without verbatim evidence (exact commands, verbatim test",
+    "   output, the actual diff) is automatically not done: re-delegate and demand the evidence.",
+    "4. This applies to every delegation, including late in long conversations - an",
+    "   executor that has been reliable so far does not earn an exemption.",
+    "The executor may recommend that work is complete, but you own the final done/not-done decision."
   ].join("\n");
 }
 
@@ -80,6 +89,11 @@ function openFusionExecutorPrompt() {
     "- Run shell commands, tests, builds, and inspections needed to validate the work.",
     "- Interpret command results and fix issues you find.",
     "- Report changed files, commands run, validation results, remaining risks, and a recommendation.",
+    "- Reports must carry verbatim primary artifacts, not summaries: the exact commands",
+    "  you ran with their exit status, the verbatim final test-runner summary lines,",
+    "  and the diff itself (full if small, otherwise a per-file summary plus the",
+    "  riskiest hunks verbatim). The Planner treats a report without verbatim",
+    "  evidence as incomplete.",
     "",
     "Self-review loop (mandatory before returning control):",
     "1. Re-read your full diff as if reviewing another engineer's work: correctness,",
@@ -148,7 +162,8 @@ function openFusionCommandContents(options = {}) {
         "",
         "$ARGUMENTS",
         "",
-        "Return concise evidence for the Planner: changed files, commands run, validation results, self-review findings per pass, risks, and whether you recommend another pass."
+        "Return concise evidence for the Planner: changed files, commands run, validation results, self-review findings per pass, risks, and whether you recommend another pass.",
+        "Evidence must be verbatim, not paraphrased: exact commands with exit status, the verbatim final test-runner summary lines, and the diff (full if small, otherwise per-file summary plus the riskiest hunks verbatim)."
       ].join("\n")
     },
     investigate: {
@@ -184,7 +199,7 @@ function openFusionCommandContents(options = {}) {
         "Briefly explain the active Open Fusion operating model to the user.",
         "",
         "Mention:",
-        "- Brain/Planner is the primary, human-facing, read-only agent.",
+        "- Brain/Planner is the primary, human-facing agent: no edits, shell limited to read-only git evidence commands.",
         "- Executor is the delegated implementation subagent.",
         "- Investigator is the permission-locked read-only scouting subagent.",
         "- Use /delegate <task> for executor work and /investigate <question> for read-only scouting.",
@@ -543,7 +558,21 @@ function openFusionConfigContents(options = {}) {
           : "{file:./openfusion-planner.md}",
         permission: {
           edit: "deny",
-          bash: "deny",
+          // Read-only git evidence channel for the completion gate. Key ORDER is
+          // load-bearing: opencode 1.17.11 evaluates rules with findLast (last
+          // matching key wins, insertion order, not specificity), so the "*"
+          // catch-all must stay FIRST and the --output deny LAST. The trailing
+          // " *" glob matches the bare command and arguments but not e.g.
+          // "git difftool"; chained commands ("a && b") are permission-checked
+          // per subcommand, so the allowlist cannot be laundered via chaining.
+          bash: {
+            "*": "deny",
+            "git status *": "allow",
+            "git diff *": "allow",
+            "git log *": "allow",
+            "git show *": "allow",
+            "git * --output*": "deny"
+          },
           task: {
             "*": "deny",
             executor: "allow",

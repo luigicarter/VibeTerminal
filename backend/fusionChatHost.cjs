@@ -190,7 +190,10 @@ function createStreamNormalizer() {
             text:
               typeof part.content === "string"
                 ? part.content
-                : JSON.stringify(part.content)
+                : JSON.stringify(part.content),
+            // The pane's OpenCode-style tool rows settle red on real errors;
+            // without this flag they could only guess from the result text.
+            isError: Boolean(part.is_error)
           });
           if (toolId && activeBackgroundAgents.delete(toolId)) {
             appendBackgroundActivity(events, activeBackgroundAgents);

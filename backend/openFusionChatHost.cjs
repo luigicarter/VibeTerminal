@@ -76,6 +76,27 @@ function splitModelId(model) {
   return { providerID: raw.slice(0, slash), modelID: raw.slice(slash + 1) };
 }
 
+// Standing completion-gate reminder appended to every Brain turn. The planner
+// system prompt states the gate once, but over long conversations each accepted
+// executor report becomes in-context precedent for rubber-stamping the next one;
+// a per-turn reminder keeps the gate salient. The marker prefix is how the host
+// recognizes its own part again: rehydration drops marked parts so a resumed
+// transcript never shows the reminder as user text (live rendering never sees it
+// — the pane echo carries only the user's own text, and the SSE normalizer drops
+// non-assistant parts).
+const OPEN_FUSION_GATE_MARKER = "[Open Fusion standing reminder]";
+const OPEN_FUSION_GATE_REMINDER =
+  `${OPEN_FUSION_GATE_MARKER} Executor reports are evidence, not verdicts: ` +
+  "before presenting delegated work as done, verify it independently (git diff/status, " +
+  "read the changed files, or an investigator pass) and state which check you ran.";
+
+function buildPlannerTurnParts(text) {
+  return [
+    { type: "text", text: String(text ?? "") },
+    { type: "text", text: OPEN_FUSION_GATE_REMINDER }
+  ];
+}
+
 // ---- SSE normalizer (pure, per-session state) ----
 // Turns parsed OpenCode /event objects into high-level chat events. Only events
 // belonging to the pane's session tree (root session + task-spawned child
@@ -141,7 +162,7 @@ function createOpenCodeEventNormalizer(rootSessionId) {
     const partId = String(part.id || "");
     const progress = progressFor(partId);
     const text = String(fullText ?? "");
-    if (text.length > progress.emitted) {
+    if (!progress.ended && text.length > progress.emitted) {
       const delta = text.slice(progress.emitted);
       progress.emitted = text.length;
       events.push({
@@ -224,9 +245,15 @@ function createOpenCodeEventNormalizer(rootSessionId) {
         // the cursor — the next full snapshot re-delivers this content with
         // the right kind through the length dedupe.
         if (!partType) break;
+        // Content landing AFTER the part's end snapshot is a bus straggler
+        // duplicating tail text the snapshot already delivered. Emitting it
+        // would reopen a pane bubble whose caret nothing retires — stream-end
+        // is deliberately once-per-part.
+        const progress = progressFor(partId);
+        if (progress.ended) break;
         const delta = String(props.delta ?? "");
         if (!delta) break;
-        progressFor(partId).emitted += delta.length;
+        progress.emitted += delta.length;
         events.push({
           type: partType === "reasoning" ? "thinking" : "assistant-text",
           role: roleFor(sessionID),
@@ -389,6 +416,9 @@ function rehydrateMessages(messages, rootSessionId) {
       const text = parts
         .filter((part) => part && part.type === "text")
         .map((part) => String(part.text || ""))
+        // The host appends a marked gate-reminder part to every Brain turn;
+        // a resumed transcript must not render it as the user's own words.
+        .filter((partText) => !partText.startsWith(OPEN_FUSION_GATE_MARKER))
         .join("\n")
         .trim();
       if (text) events.push({ type: "user", text });
@@ -965,7 +995,7 @@ function runHost() {
     // above the composer instead of burying it in the streaming transcript.
     const queued = Boolean(state.turnBusy);
     emitSessionEvent(id, state, queued ? { type: "user", text, queued: true } : { type: "user", text });
-    const body = { agent: "planner", parts: [{ type: "text", text }], model };
+    const body = { agent: "planner", parts: buildPlannerTurnParts(text), model };
     request(state, "POST", `/session/${encodeURIComponent(state.sessionId)}/prompt_async`, body).catch(
       (error) => {
         if (sessions.get(id) !== state) return;
@@ -1533,7 +1563,10 @@ module.exports = {
   buildCustomProviderPatch,
   buildServeSpawn,
   normalizeAuthMethods,
-  splitModelId
+  splitModelId,
+  buildPlannerTurnParts,
+  OPEN_FUSION_GATE_MARKER,
+  OPEN_FUSION_GATE_REMINDER
 };
 
 if (require.main === module) {

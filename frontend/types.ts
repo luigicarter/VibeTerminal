@@ -372,7 +372,9 @@ export type FusionChatEvent =
   | { id: string; type: "assistant-text"; delta: string }
   | { id: string; type: "thinking"; delta: string }
   | { id: string; type: "tool-call"; toolId: string; name: string; input: unknown }
-  | { id: string; type: "tool-result"; toolId: string; text: string }
+  // isError mirrors the stream-json tool_result's is_error flag so the pane's
+  // OpenCode-style tool rows can settle red instead of guessing from text.
+  | { id: string; type: "tool-result"; toolId: string; text: string; isError?: boolean }
   | { id: string; type: "activity"; role: "opus" | "codex"; kind: string; text?: string }
   | { id: string; type: "background-activity"; backgroundActivity: AgentBackgroundActivity }
   | { id: string; type: "turn-end" }
@@ -561,11 +563,22 @@ export interface OpenFusionChatMessage {
 export type ChatRole = "user" | "opus" | "codex";
 
 // One rendered entry in a Fusion pane's chat transcript (ephemeral view-model
-// built from the merged Opus stream + Codex activity).
+// built from the merged Opus stream + Codex activity). Mirrors the shared
+// OcChatMessage row model (frontend/components/ocChat.tsx) with Fusion roles.
 export interface ChatMessage {
   key: string;
   role: ChatRole;
-  kind: "text" | "tool-call" | "tool-result" | "thinking" | "activity" | "result" | "error";
+  kind:
+    | "text"
+    // One OpenCode-style row per tool call: created on tool-call, updated in
+    // place by the matching tool-result (status/output/meta), like the TUI.
+    | "tool"
+    | "tool-call"
+    | "tool-result"
+    | "thinking"
+    | "activity"
+    | "result"
+    | "error";
   text: string;
   toolId?: string;
   ts: number;
@@ -573,4 +586,14 @@ export interface ChatMessage {
   // Internal Fusion bridge/tool mechanics. Hidden in the normal transcript and
   // shown only when the Details toggle is enabled.
   internal?: boolean;
+  // kind:"tool" fields (see OcChatMessage).
+  toolName?: string;
+  toolStatus?: "running" | "done" | "error";
+  toolInput?: unknown;
+  toolOutput?: string;
+  // Row label for codex bridge calls whose raw input isn't self-describing.
+  toolTitle?: string;
+  meta?: OpenFusionToolMeta;
+  // Task (delegation) rows: live "↳ …" progress line / completion stats.
+  taskDetail?: string;
 }

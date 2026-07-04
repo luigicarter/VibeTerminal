@@ -15,7 +15,10 @@ const {
   rehydrateMessages,
   buildServeSpawn,
   normalizeAuthMethods,
-  splitModelId
+  splitModelId,
+  buildPlannerTurnParts,
+  OPEN_FUSION_GATE_MARKER,
+  OPEN_FUSION_GATE_REMINDER
 } = require("../../backend/openFusionChatHost.cjs");
 
 function assert(condition, message) {
@@ -92,6 +95,20 @@ const fixture = [
     properties: {
       sessionID: ROOT,
       part: { id: "prt_t1", messageID: "msg_a1", sessionID: ROOT, type: "reasoning", text: "plan it", time: { start: 1, end: 2 } }
+    }
+  },
+  // Stragglers AFTER the end snapshot (bus reordering): both the delta and a
+  // longer late snapshot must be dropped — emitting them would reopen a pane
+  // bubble whose caret nothing retires, since stream-end is once-per-part.
+  {
+    type: "message.part.delta",
+    properties: { sessionID: ROOT, messageID: "msg_a1", partID: "prt_t1", field: "text", delta: " straggler" }
+  },
+  {
+    type: "message.part.updated",
+    properties: {
+      sessionID: ROOT,
+      part: { id: "prt_t1", messageID: "msg_a1", sessionID: ROOT, type: "reasoning", text: "plan it straggler", time: { start: 1, end: 2 } }
     }
   },
   {
@@ -408,12 +425,32 @@ assert(
   "events from foreign sessions must be dropped"
 );
 
+// ---- buildPlannerTurnParts ----
+// Every Brain turn carries the user's text plus the marked standing gate
+// reminder as a SEPARATE part (so rehydration can drop it wholesale).
+const turnParts = buildPlannerTurnParts("fix the bug");
+assert(
+  Array.isArray(turnParts) &&
+    turnParts.length === 2 &&
+    turnParts[0].type === "text" &&
+    turnParts[0].text === "fix the bug" &&
+    turnParts[1].type === "text" &&
+    turnParts[1].text === OPEN_FUSION_GATE_REMINDER &&
+    turnParts[1].text.startsWith(OPEN_FUSION_GATE_MARKER),
+  "buildPlannerTurnParts should append the marked gate reminder as a separate part"
+);
+
 // ---- rehydrateMessages ----
 const rehydrated = rehydrateMessages(
   [
     {
       info: { id: "m1", role: "user" },
       parts: [{ type: "text", text: "hi" }]
+    },
+    // A host-sent turn: the reminder part must NOT rehydrate as user text.
+    {
+      info: { id: "m1b", role: "user" },
+      parts: buildPlannerTurnParts("try again")
     },
     {
       info: { id: "m2", role: "assistant" },
@@ -435,6 +472,16 @@ const rehydrated = rehydrateMessages(
 assert(
   rehydrated[0].type === "user" && rehydrated[0].text === "hi",
   "rehydration should replay user turns"
+);
+assert(
+  rehydrated[1].type === "user" && rehydrated[1].text === "try again",
+  "rehydration must strip the gate-reminder part from user turns"
+);
+assert(
+  !rehydrated.some(
+    (event) => typeof event.text === "string" && event.text.includes(OPEN_FUSION_GATE_MARKER)
+  ),
+  "the gate reminder must never surface in rehydrated transcript events"
 );
 assert(
   rehydrated.some((event) => event.type === "tool-call" && event.name === "task") &&

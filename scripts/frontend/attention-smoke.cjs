@@ -585,6 +585,12 @@ const fusionSlashMenuSource = fs.readFileSync(
   path.join(__dirname, "..", "..", "frontend", "components", "fusionSlashMenu.ts"),
   "utf8"
 );
+// The transcript row shapes live in the shared OpenCode-parity kit (ocChat.tsx)
+// both chat panes render through; row-level contracts are asserted there.
+const ocChatSource = fs.readFileSync(
+  path.join(__dirname, "..", "..", "frontend", "components", "ocChat.tsx"),
+  "utf8"
+);
 assert(
   fusionChatPaneSource.includes("onAttention") &&
     fusionChatPaneSource.includes('emitAttention("completed", "done")') &&
@@ -619,7 +625,7 @@ assert(
     fusionSlashMenuSource.includes("function hasFreeTextSlashArgument") &&
     fusionSlashMenuSource.includes("if (hasFreeTextSlashArgument(input))") &&
     fusionChatPaneSource.includes('className="fusion-slash-menu"') &&
-    fusionChatPaneSource.includes('className="fusion-settings-summary"') &&
+    fusionChatPaneSource.includes('className="oc-prompt-meta fusion-settings-summary"') &&
     fusionChatPaneSource.includes("const startPayload =") &&
     fusionChatPaneSource.includes('model: fusionModel') &&
     fusionChatPaneSource.includes(
@@ -652,13 +658,16 @@ assert(
     fusionChatPaneSource.includes("formatBackgroundActivityTitle") &&
     fusionChatPaneSource.includes('className="fusion-background-activity"') &&
     fusionChatPaneSource.includes("backgroundActivity.count > 1") &&
-    fusionChatPaneSource.includes('m.kind === "thinking" && !m.text.trim()'),
+    fusionChatPaneSource.includes('proseRole="opus"') &&
+    ocChatSource.includes('(m.kind === "thinking" || isSubagentStream) && !m.text.trim()'),
   "FusionChatPane should drive harness-specific speed/effort submenus, unified role labels, and empty-thinking suppression"
 );
 assert(
   fusionSlashMenuSource.includes("function normalizeFusionModel(value: unknown)") &&
     fusionChatPaneSource.includes('case "stderr"') &&
-    fusionChatPaneSource.includes("busy && !inputIsSlashCommand"),
+    // Slash commands stay usable mid-turn: send() routes through
+    // handleSlashCommand BEFORE the busy branch steers.
+    fusionChatPaneSource.includes("if (handleSlashCommand(text)) return;"),
   "FusionChatPane should normalize restored settings, show stderr, and allow slash commands while busy"
 );
 assert(
@@ -774,17 +783,19 @@ assert(
   "Fusion slash-command palette should render as a submenu panel under the input"
 );
 assert(
-  stylesSource.includes(".fusion-composer textarea") &&
-    stylesSource.includes("height: 20px;"),
-  "Fusion composer textarea should have a stable one-line initial height"
+  stylesSource.includes(".oc-skin .oc-prompt-input") &&
+    !stylesSource.includes(".fusion-composer"),
+  "Fusion composer should render as the shared OpenCode prompt box"
 );
+// The OpenCode-parity rows carry no per-speaker author labels at all — the
+// pane speaks with one voice; role only tints Details-lane worklines.
 assert(
-  stylesSource.includes(".chat-opus .chat-author,") &&
-    stylesSource.includes(".chat-codex .chat-author { color: var(--pane-accent); }") &&
-    stylesSource.includes(".chat-opus .chat-tool-author,") &&
-    stylesSource.includes(".chat-codex .chat-tool-author { color: var(--pane-accent); }") &&
+  stylesSource.includes(".oc-skin .oc-md") &&
+    stylesSource.includes(".oc-skin .oc-tool-row") &&
+    stylesSource.includes(".oc-skin .oc-workline.oc-role-codex") &&
+    !stylesSource.includes(".chat-tool-author") &&
     !stylesSource.includes(".fusion-chip-codex"),
-  "Fusion transcript should render Opus and Codex activity with one visible speaker style"
+  "Fusion transcript should render OpenCode-parity rows in the shared oc-skin with one visible speaker style"
 );
 
 console.log("attention smoke passed");

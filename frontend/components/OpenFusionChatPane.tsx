@@ -43,6 +43,20 @@ import {
   validateCustomProviderName,
   validateOpenFusionModel
 } from "../openFusion";
+import {
+  OC_LOGO_FUSION,
+  OC_LOGO_OPEN,
+  OcChatRow,
+  OcLogo,
+  OcSpinner,
+  asRecord,
+  clip,
+  extractTaskResult,
+  firstString,
+  formatDurationShort,
+  titlecase,
+  toolLabel
+} from "./ocChat";
 
 export interface OpenFusionSettingsChange {
   plannerModel?: string;
@@ -88,15 +102,6 @@ const PROMPT_EXAMPLES = [
   "What is the tech stack of this project?",
   "Fix broken tests"
 ];
-
-// Compact duration like OpenCode's Locale.duration: "12s", "1m 23s", "1h 2m".
-function formatDurationShort(ms: number) {
-  const seconds = Math.max(0, Math.round(ms / 1000));
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
-  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
-}
 
 interface PendingPermission {
   requestId: string;
@@ -276,11 +281,6 @@ function moreRow(key: string, remaining: number): SlashMenuItem {
   };
 }
 
-function clip(value: string, max: number) {
-  const text = (value ?? "").trim();
-  return text.length > max ? `${text.slice(0, max)}…` : text;
-}
-
 // Ages for the resume picker rows ("just now", "5m ago", "3d ago").
 function formatThreadAge(updatedAt: number): string {
   const timestamp = Number(updatedAt) || 0;
@@ -298,25 +298,6 @@ function formatThreadAge(updatedAt: number): string {
   return new Date(timestamp).toLocaleDateString();
 }
 
-function previewText(text: string): string {
-  const line = (text ?? "")
-    .split("\n")
-    .map((value) => value.trim())
-    .find(Boolean);
-  return line ? clip(line, 120) : "(no output)";
-}
-
-// Collapsed STREAMING rows tick along on their latest line — a first-line
-// preview would freeze the row the moment it starts. Only the tail is scanned:
-// this runs on every flush of a growing block, and splitting the whole text
-// each time would make long streams progressively slower.
-function lastLinePreview(text: string): string {
-  const tail = (text ?? "").slice(-600);
-  const lines = tail.split("\n").map((value) => value.trim()).filter(Boolean);
-  const line = lines[lines.length - 1];
-  return line ? clip(line, 120) : "…";
-}
-
 function titleFromFirstPrompt(text: string) {
   return clip(text.replace(/\s+/g, " ").trim(), 80);
 }
@@ -327,533 +308,11 @@ function shortModelLabel(model: string | undefined, fallback: string) {
   return slash > 0 ? value.slice(slash + 1) : value;
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
-function firstString(...values: unknown[]) {
-  for (const value of values) {
-    if (typeof value === "string" && value.trim()) return value.trim();
-  }
-  return "";
-}
-
-// ── OpenCode TUI parity: tool icons, labels, and row shapes ─────────────────
-// Mirrors packages/tui/src/routes/session/index.tsx (v1.17.11): the same icon
-// glyphs, pending texts, and label formats the real OpenCode TUI renders.
-
-const TOOL_ICONS: Record<string, string> = {
-  bash: "$",
-  read: "→",
-  glob: "✱",
-  grep: "✱",
-  list: "✱",
-  webfetch: "%",
-  websearch: "◈",
-  write: "←",
-  edit: "←",
-  apply_patch: "%",
-  task: "│",
-  question: "→",
-  skill: "→"
-};
-
-const TOOL_PENDING: Record<string, string> = {
-  bash: "Writing command...",
-  read: "Reading file...",
-  glob: "Finding files...",
-  grep: "Searching content...",
-  webfetch: "Fetching from the web...",
-  websearch: "Searching web...",
-  write: "Preparing write...",
-  edit: "Preparing edit...",
-  apply_patch: "Preparing patch...",
-  task: "Delegating...",
-  todowrite: "Updating todos...",
-  question: "Asking questions...",
-  skill: "Loading skill..."
-};
-
-function toolIcon(name: string, status: OpenFusionChatMessage["toolStatus"]) {
-  if (name === "task" && status === "done") return "✓";
-  return TOOL_ICONS[name] ?? "⚙";
-}
-
-function titlecase(value: string) {
-  const text = (value || "").trim();
-  return text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
-}
-
-// opencode's `input()` helper: primitive args rendered as [k=v, …].
-function inputSummary(input: unknown, omit: string[] = []): string {
-  const data = asRecord(input);
-  const primitives = Object.entries(data).filter(([key, value]) => {
-    if (omit.includes(key)) return false;
-    return (
-      typeof value === "string" || typeof value === "number" || typeof value === "boolean"
-    );
-  });
-  if (!primitives.length) return "";
-  return `[${primitives.map(([key, value]) => `${key}=${clip(String(value), 60)}`).join(", ")}]`;
-}
-
-// The one-line row text per tool, matching OpenCode's InlineTool children.
-function toolLabel(name: string, input: unknown, meta?: OpenFusionToolMeta): string {
-  const data = asRecord(input);
-  switch (name) {
-    case "read":
-      return `Read ${firstString(data.filePath, data.path) || "file"} ${inputSummary(input, ["filePath", "path"])}`.trimEnd();
-    case "edit":
-      return `Edit ${firstString(data.filePath, data.path) || "file"}`;
-    case "write":
-      return `Write ${firstString(data.filePath, data.path) || "file"}`;
-    case "bash":
-      return firstString(data.command, data.description) || "command";
-    case "glob": {
-      const where = firstString(data.path);
-      const count = meta?.count;
-      return `Glob "${firstString(data.pattern)}"${where ? ` in ${where}` : ""}${
-        typeof count === "number" ? ` (${count} ${count === 1 ? "match" : "matches"})` : ""
-      }`;
-    }
-    case "grep": {
-      const where = firstString(data.path);
-      const matches = meta?.matches;
-      return `Grep "${clip(firstString(data.pattern), 80)}"${where ? ` in ${where}` : ""}${
-        typeof matches === "number" ? ` (${matches} ${matches === 1 ? "match" : "matches"})` : ""
-      }`;
-    }
-    case "webfetch":
-      return `WebFetch ${clip(firstString(data.url), 100)}`;
-    case "websearch":
-      return `WebSearch "${clip(firstString(data.query), 80)}"`;
-    case "todowrite":
-      return "Todos";
-    case "todoread":
-      return "Read the task list";
-    case "skill":
-      return `Skill "${firstString(data.name)}"`;
-    default:
-      return `${name} ${inputSummary(input)}`.trimEnd();
-  }
-}
-
-// OpenCode's formatSubagentTitle: "Executor Task — description".
-function subagentTitle(input: unknown, fallbackTitle: string) {
-  const data = asRecord(input);
-  const agent = titlecase(firstString(data.subagent_type) || "executor");
-  const description = firstString(data.description, fallbackTitle) || "subtask";
-  return `${agent} Task — ${clip(description, 160)}`;
-}
-
-interface TodoEntry {
-  status: string;
-  content: string;
-}
-
-function parseTodos(value: unknown): TodoEntry[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((item) => {
-    const todo = asRecord(item);
-    const status = firstString(todo.status);
-    const content = firstString(todo.content);
-    return status && content ? [{ status, content }] : [];
-  });
-}
-
-// OpenCode treats permission-rejected tool errors as "denied" (strikethrough).
-function isDeniedError(text: string) {
-  return (
-    text.includes("QuestionRejectedError") ||
-    text.includes("rejected permission") ||
-    text.includes("specified a rule") ||
-    text.includes("user dismissed")
-  );
-}
-
-const OUTPUT_COLLAPSE_LINES = 10;
-
-function collapseOutput(text: string, maxLines: number) {
-  const lines = (text ?? "").split("\n");
-  if (lines.length <= maxLines) return { output: text, overflow: false };
-  return { output: lines.slice(0, maxLines).join("\n"), overflow: true };
-}
-
-// The executor's task report comes back wrapped in <task …><task_result>…</…>.
-function extractTaskResult(text: string) {
-  const match = /<task_result>([\s\S]*?)<\/task_result>/.exec(text ?? "");
-  return (match ? match[1] : text ?? "").trim();
-}
-
 function permissionDetail(pending: PendingPermission) {
   const patterns = pending.patterns.filter(Boolean).join(", ");
   const scope = pending.title ? `${pending.title} — ` : "";
   return `${scope}${pending.permission}${patterns ? ` (${patterns})` : ""}`;
 }
-
-// OpenCode's "blocks" busy spinner: a knight-rider sweep of block cells,
-// animated in CSS (styles.css .oc-spinner).
-function OcSpinner() {
-  return (
-    <span className="oc-spinner" aria-hidden="true">
-      <i />
-      <i />
-      <i />
-      <i />
-    </span>
-  );
-}
-
-// Brain prose renders as markdown like the OpenCode TUI. Links must open in
-// the system browser — a plain anchor would navigate the Electron window.
-const Markdown = memo(function Markdown({ text }: { text: string }) {
-  return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      components={{
-        a: ({ href, children }) => (
-          <a
-            href={href}
-            onClick={(event) => {
-              event.preventDefault();
-              if (href) void window.vibe?.openFusionChat?.openExternal(href);
-            }}
-          >
-            {children}
-          </a>
-        )
-      }}
-    >
-      {text}
-    </ReactMarkdown>
-  );
-});
-
-// Unified-diff body for Edit tool rows, colored like OpenCode's diff view.
-// File headers are dropped — the block title already names the file.
-const DiffBlock = memo(function DiffBlock({ diff }: { diff: string }) {
-  const lines = diff.replace(/\n+$/, "").split("\n");
-  return (
-    <div className="oc-diff">
-      {lines.map((line, i) => {
-        if (
-          line.startsWith("+++") ||
-          line.startsWith("---") ||
-          line.startsWith("diff ") ||
-          line.startsWith("Index:") ||
-          line.startsWith("\\ No newline")
-        ) {
-          return null;
-        }
-        const kind = line.startsWith("@@")
-          ? "hunk"
-          : line.startsWith("+")
-            ? "add"
-            : line.startsWith("-")
-              ? "del"
-              : "ctx";
-        return (
-          <div key={i} className={`oc-diff-line is-${kind}`}>
-            {line || " "}
-          </div>
-        );
-      })}
-    </div>
-  );
-});
-
-// Block-letter wordmark in OpenCode's exact logo technique (left word muted,
-// right word bold, "_/^/~" shadow cells), spelling OPEN FUSION. Letter shapes
-// reuse OpenCode's glyph font; F/U/S/I are derived in the same style.
-const LOGO_LEFT = [
-  "                   ",
-  "█▀▀█ █▀▀█ █▀▀█ █▀▀▄",
-  "█__█ █__█ █^^^ █__█",
-  "▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀~~▀"
-];
-const LOGO_RIGHT = [
-  "                          ",
-  "█▀▀▀ █__█ █▀▀▀ █ █▀▀█ █▀▀▄",
-  "█^^^ █__█ ^^^█ █ █__█ █__█",
-  "▀    ▀▀▀▀ ▀▀▀▀ ▀ ▀▀▀▀ ▀~~▀"
-];
-
-function LogoLine({ line, bold }: { line: string; bold?: boolean }) {
-  return (
-    <span className={clsx("oc-logo-word", bold && "is-bold")}>
-      {Array.from(line).map((ch, i) => {
-        if (ch === "_") {
-          return (
-            <span key={i} className="oc-logo-shbg">
-              {" "}
-            </span>
-          );
-        }
-        if (ch === "^") {
-          return (
-            <span key={i} className="oc-logo-shbg">
-              ▀
-            </span>
-          );
-        }
-        if (ch === "~") {
-          return (
-            <span key={i} className="oc-logo-sh">
-              ▀
-            </span>
-          );
-        }
-        return <span key={i}>{ch}</span>;
-      })}
-    </span>
-  );
-}
-
-function OpenFusionLogo() {
-  return (
-    <div className="oc-logo" role="img" aria-label="Open Fusion">
-      {LOGO_LEFT.map((line, i) => (
-        <div key={i} className="oc-logo-row">
-          <LogoLine line={line} />
-          <LogoLine line={LOGO_RIGHT[i]} bold />
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// One transcript row, memoized: a streaming delta re-renders ONLY the growing
-// bubble instead of reconciling every row of a long transcript per chunk —
-// that full-list churn is what made streaming feel choppy.
-//
-// Row shapes mirror OpenCode's TUI part renderers (v1.17.11): user blocks with
-// a colored left bar, markdown prose, inline tool rows with icon glyphs, block
-// panels for bash output / diffs / todos, "+ Thought" collapsibles, and
-// "Agent Task — description" delegation rows with a "↳" progress line.
-const OpenFusionChatRow = memo(function OpenFusionChatRow({
-  m,
-  isExpanded,
-  onToggle
-}: {
-  m: OpenFusionChatMessage;
-  isExpanded: boolean;
-  onToggle: (key: string) => void;
-}) {
-  // Subagent text streams (the executor's code-in-progress, Scout's report
-  // drafts) are raw work product like tool output and reasoning — never
-  // full-width transcript prose.
-  const isSubagentStream = m.kind === "text" && m.role !== "user" && m.role !== "brain";
-  if ((m.kind === "thinking" || isSubagentStream) && !m.text.trim()) {
-    return null;
-  }
-
-  if (m.kind === "tool") {
-    const name = m.toolName ?? "tool";
-    const status = m.toolStatus ?? "running";
-    const data = asRecord(m.toolInput);
-    const denied = status === "error" && isDeniedError(m.toolOutput ?? "");
-    const failed = status === "error" && !denied;
-
-    // Delegations: OpenCode's Task row — spinner/│ while running, ✓ when done,
-    // "Executor Task — description" + "↳ current work / N toolcalls · 12s".
-    // Click reveals the subagent's report.
-    if (name === "task") {
-      const report = (m.toolOutput ?? "").trim();
-      return (
-        <div className={clsx("oc-tool", "oc-task", `is-${status}`, denied && "is-denied", failed && "is-failed")}>
-          <div
-            className={clsx("oc-tool-row", report && "oc-clickable")}
-            onClick={report ? () => onToggle(m.key) : undefined}
-          >
-            <span className="oc-tool-icon">
-              {status === "running" ? <OcSpinner /> : toolIcon(name, status)}
-            </span>
-            <span className="oc-tool-label">
-              {subagentTitle(m.toolInput, m.text)}
-              {m.taskDetail && <span className="oc-task-detail">{"\n"}↳ {m.taskDetail}</span>}
-            </span>
-          </div>
-          {isExpanded && report && (
-            <div className="oc-task-report">
-              <Markdown text={report} />
-            </div>
-          )}
-        </div>
-      );
-    }
-
-    // Bash: OpenCode's block panel — "$ command" plus output, collapsed at 10
-    // lines with the TUI's "Click to expand" affordance.
-    if (name === "bash") {
-      const command = firstString(data.command, data.description) || "command";
-      const output = (m.toolOutput ?? "").trim();
-      if (status === "running") {
-        return (
-          <div className="oc-tool is-running">
-            <div className="oc-tool-row">
-              <span className="oc-tool-icon">
-                <OcSpinner />
-              </span>
-              <span className="oc-tool-label">{command}</span>
-            </div>
-          </div>
-        );
-      }
-      const collapsed = collapseOutput(output, OUTPUT_COLLAPSE_LINES);
-      const shown = isExpanded || !collapsed.overflow ? output : collapsed.output;
-      return (
-        <div
-          className={clsx("oc-block", failed && "is-failed", collapsed.overflow && "oc-clickable")}
-          onClick={collapsed.overflow ? () => onToggle(m.key) : undefined}
-        >
-          <div className="oc-block-cmd">$ {command}</div>
-          {shown && <pre className={clsx("oc-block-output", failed && "is-error")}>{shown}</pre>}
-          {collapsed.overflow && (
-            <div className="oc-block-hint">{isExpanded ? "Click to collapse" : "Click to expand"}</div>
-          )}
-        </div>
-      );
-    }
-
-    // Edits that came back with a diff: OpenCode's "← Edit path" diff panel.
-    if (name === "edit" && status === "done" && m.meta?.diff) {
-      return (
-        <div className="oc-block">
-          <div className="oc-block-title">← Edit {firstString(data.filePath, data.path) || "file"}</div>
-          <DiffBlock diff={m.meta.diff} />
-        </div>
-      );
-    }
-
-    // Todos: OpenCode's "# Todos" checklist panel.
-    if (name === "todowrite" && status !== "error") {
-      const todos = parseTodos(data.todos);
-      if (todos.length) {
-        return (
-          <div className="oc-block">
-            <div className="oc-block-title"># Todos</div>
-            <div className="oc-todos">
-              {todos.map((todo, i) => (
-                <div key={i} className={clsx("oc-todo", `is-${todo.status}`)}>
-                  [{todo.status === "completed" ? "✓" : todo.status === "in_progress" ? "•" : " "}]{" "}
-                  {todo.content}
-                </div>
-              ))}
-            </div>
-          </div>
-        );
-      }
-    }
-
-    // Everything else: OpenCode's inline one-liner. "~ pending" before the
-    // input arrives, bright while running, muted once complete, red + click-
-    // to-expand on failure, strikethrough when the user denied it.
-    const hasInput = Object.keys(data).length > 0;
-    const error = (m.toolOutput ?? "").trim();
-    return (
-      <div className={clsx("oc-tool", `is-${status}`, denied && "is-denied", failed && "is-failed")}>
-        <div
-          className={clsx("oc-tool-row", failed && error && "oc-clickable")}
-          onClick={failed && error ? () => onToggle(m.key) : undefined}
-        >
-          {!hasInput && status === "running" ? (
-            <span className="oc-tool-pending">~ {TOOL_PENDING[name] ?? "Working..."}</span>
-          ) : (
-            <>
-              <span className="oc-tool-icon">
-                {status === "running" && name === "read" ? <OcSpinner /> : toolIcon(name, status)}
-              </span>
-              <span className="oc-tool-label">{toolLabel(name, m.toolInput, m.meta)}</span>
-            </>
-          )}
-        </div>
-        {failed && isExpanded && error && <pre className="oc-tool-error">{error}</pre>}
-      </div>
-    );
-  }
-
-  // Reasoning: OpenCode's spinner-while-thinking, then a "+ Thought: title"
-  // one-liner that expands to the full trace.
-  if (m.kind === "thinking") {
-    const content = m.text.replace("[REDACTED]", "").trim();
-    if (m.streaming) {
-      return (
-        <div className="oc-thought">
-          <span className="oc-thought-head">
-            <OcSpinner /> Thinking
-          </span>
-        </div>
-      );
-    }
-    const title = clip(content.split("\n").find((line) => line.trim()) ?? "", 100);
-    return (
-      <div className="oc-thought">
-        <span className="oc-thought-head oc-clickable" onClick={() => onToggle(m.key)}>
-          {isExpanded ? "- " : "+ "}Thought: {title}
-        </span>
-        {isExpanded && <pre className="oc-thought-body">{content}</pre>}
-      </div>
-    );
-  }
-
-  // Subagent work product: a muted "↳" ticker line (OpenCode keeps subagent
-  // internals out of the parent transcript; the Details toggle reveals these).
-  if (isSubagentStream) {
-    const preview = m.streaming ? lastLinePreview(m.text) : previewText(m.text);
-    const expandable = preview !== m.text.trim();
-    return (
-      <div className={clsx("oc-workline", `oc-role-${m.role}`)}>
-        <span
-          className={clsx("oc-workline-text", expandable && "oc-clickable")}
-          onClick={expandable ? () => onToggle(m.key) : undefined}
-        >
-          ↳ {isExpanded ? m.text : preview}
-          {m.streaming && <span className="oc-caret">▋</span>}
-        </span>
-      </div>
-    );
-  }
-
-  // Turn completion: OpenCode's "▣ Mode · model · duration" line.
-  if (m.kind === "result") {
-    return (
-      <div className="oc-turnend">
-        <span className="oc-turnend-mark">▣ </span>
-        <span className="oc-turnend-mode">{m.text}</span>
-        {m.taskDetail && <span className="oc-turnend-meta"> · {m.taskDetail}</span>}
-      </div>
-    );
-  }
-
-  // Errors: OpenCode's left-bordered error panel.
-  if (m.kind === "error") {
-    return <div className="oc-errorblock">{m.text}</div>;
-  }
-
-  // System notices ("Provider connected.", "Turn interrupted.").
-  if (m.kind === "activity" || m.kind === "tool-call" || m.kind === "tool-result") {
-    return <div className="oc-note">{m.text}</div>;
-  }
-
-  // User prompt: OpenCode's accent-barred panel block.
-  if (m.role === "user") {
-    return (
-      <div className="oc-user">
-        <div className="oc-user-text">{m.text}</div>
-      </div>
-    );
-  }
-
-  // Brain prose: markdown, OpenCode's TextPart.
-  return (
-    <div className={clsx("oc-md", m.streaming && "is-streaming")}>
-      <Markdown text={m.text} />
-      {m.streaming && <span className="oc-caret">▋</span>}
-    </div>
-  );
-});
 
 export default function OpenFusionChatPane({
   session,
@@ -2990,6 +2449,7 @@ export default function OpenFusionChatPane({
       className={clsx(
         "terminal-pane",
         "fusion-pane",
+        "oc-skin",
         "openfusion-pane",
         showAttention && "terminal-pane-attention",
         showAttention &&
@@ -3054,7 +2514,10 @@ export default function OpenFusionChatPane({
         <div className="fusion-chat-scroll" ref={scrollRef} onScroll={handleChatScroll}>
           {visibleMessages.length === 0 ? (
             <div className="oc-hero">
-              <OpenFusionLogo />
+              <OcLogo
+                words={[{ lines: OC_LOGO_OPEN }, { lines: OC_LOGO_FUSION, bold: true }]}
+                label="Open Fusion"
+              />
               <p className="oc-hero-tag">
                 Two specialists, one loop — the Brain plans and reviews, the Executor
                 writes and runs.
@@ -3074,9 +2537,10 @@ export default function OpenFusionChatPane({
             </div>
           ) : (
             visibleMessages.map((m) => (
-              <OpenFusionChatRow
+              <OcChatRow
                 key={m.key}
                 m={m}
+                proseRole="brain"
                 isExpanded={expanded.has(m.key)}
                 onToggle={toggleExpanded}
               />

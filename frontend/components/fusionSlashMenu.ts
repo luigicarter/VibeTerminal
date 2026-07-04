@@ -107,6 +107,7 @@ export const FUSION_SLASH_COMMANDS: SlashCommand[] = [
   { name: "/fast", desc: "Switch Fusion to the fast preset" },
   { name: "/claude", arg: "<model>", desc: "Set the planning model", takesArg: true, submenu: true },
   { name: "/models", desc: "Show the current models and effort" },
+  { name: "/details", desc: "Toggle tool execution details" },
   { name: "/resume", desc: "Resume the last Claude Fusion chat" },
   { name: "/clear", desc: "Clear this conversation" },
   { name: "/help", desc: "List the available commands" }

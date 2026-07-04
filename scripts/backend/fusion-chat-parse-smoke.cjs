@@ -56,7 +56,7 @@ const fixture = [
     message: {
       content: [
         { type: "tool_result", tool_use_id: "tool-1", content: '{"status":"completed"}' },
-        { type: "tool_result", tool_use_id: "agent-1", content: "done" }
+        { type: "tool_result", tool_use_id: "agent-1", content: "done", is_error: true }
       ]
     }
   },
@@ -90,6 +90,11 @@ function main() {
 
   const toolResult = events.find((e) => e.type === "tool-result");
   assert(toolResult && toolResult.toolId === "tool-1", "missing tool-result event");
+  // is_error must ride through: the pane's OpenCode-style rows settle red on
+  // it instead of guessing from the result text.
+  assert(toolResult.isError === false, "tool-result should carry isError: false");
+  const failedResult = events.find((e) => e.type === "tool-result" && e.toolId === "agent-1");
+  assert(failedResult && failedResult.isError === true, "failed tool-result should carry isError: true");
 
   const backgroundEvents = events.filter((e) => e.type === "background-activity");
   assert(backgroundEvents.length === 2, `expected background start/stop, got ${backgroundEvents.length}`);
