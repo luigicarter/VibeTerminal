@@ -149,9 +149,11 @@ export interface SlashMenuContext {
   plannerFamily?: FusionFamily | string;
   plannerModel?: string;
   plannerEffort?: string;
+  plannerFast?: boolean;
   executorFamily?: FusionFamily | string;
   executorModel?: string;
   executorEffort?: string;
+  executorFast?: boolean;
 }
 
 // The "/" palette — the Fusion equivalent of the slash menu a real CLI draws
@@ -164,11 +166,11 @@ export const FUSION_SLASH_COMMANDS: SlashCommand[] = [
   { name: "/executor-model", desc: "Pick the executor family and model", picker: "executor" },
   { name: "/speed", desc: "Fusion speed presets", submenu: true },
   { name: "/effort", desc: "Fusion reasoning effort", submenu: true },
-  { name: "/fast", desc: "Switch Fusion to the fast preset" },
+  { name: "/fast", desc: "Toggle real fast serving (same model, faster tokens, higher cost)" },
   { name: "/models", desc: "Show the current models and effort" },
   { name: "/details", desc: "Toggle tool execution details" },
   { name: "/compact", desc: "Summarize the conversation to free context" },
-  { name: "/resume", desc: "Resume the last Fusion chat" },
+  { name: "/resume", desc: "Pick a saved chat from this folder to resume" },
   { name: "/clear", desc: "Clear this conversation" },
   { name: "/help", desc: "List the available commands" }
 ];
@@ -177,10 +179,10 @@ export const FUSION_SLASH_COMMANDS: SlashCommand[] = [
 export const FREE_TEXT_SLASH_COMMANDS = ["/model claude", "/model codex"];
 
 export type FusionRoleScope = "harness" | "planning" | "execution";
-export type FusionSpeedPreset = "fast" | "balanced" | "deep" | "max";
+export type FusionSpeedPreset = "quick" | "balanced" | "deep" | "max";
 
 export const FUSION_SPEED_LABELS: Record<FusionSpeedPreset, string> = {
-  fast: "Fast",
+  quick: "Quick",
   balanced: "Balanced",
   deep: "Deep",
   max: "Max"
@@ -250,9 +252,9 @@ export const effortItems = (
   }));
 
 // Speed presets are EFFORT presets: they keep the user's model picks. The only
-// exception is "fast", whose whole point is a faster planning model — its
-// description says so explicitly.
-const fastPlannerModelLabel = (context?: SlashMenuContext) =>
+// exception is "quick", the old downgrade preset: it swaps the planner to the
+// family's lighter model and lowers reasoning effort.
+const quickPlannerModelLabel = (context?: SlashMenuContext) =>
   contextPlannerFamily(context) === "codex" ? "GPT-5.1 Codex Mini" : SONNET_LABEL;
 
 // The "max" preset maps to each family's own top level.
@@ -265,22 +267,22 @@ export const speedItems = (scope: FusionRoleScope, context?: SlashMenuContext): 
     label: `${roleName(scope)} ${FUSION_SPEED_LABELS[preset]}`,
     desc:
       scope === "harness"
-        ? preset === "fast"
-          ? `${fastPlannerModelLabel(context)} planning and low effort everywhere`
+        ? preset === "quick"
+          ? `${quickPlannerModelLabel(context)} planning and low effort everywhere`
           : preset === "balanced"
             ? "Automatic effort across Fusion (keeps your models)"
             : preset === "deep"
               ? "High effort across Fusion (keeps your models)"
               : "Top planning and execution effort (keeps your models)"
         : scope === "planning"
-          ? preset === "fast"
-            ? `${fastPlannerModelLabel(context)} planning at low effort`
+          ? preset === "quick"
+            ? `${quickPlannerModelLabel(context)} planning at low effort`
             : preset === "balanced"
               ? "Automatic planning effort (keeps your model)"
               : preset === "deep"
                 ? "High planning effort (keeps your model)"
                 : "Top planning effort (keeps your model)"
-          : preset === "fast"
+          : preset === "quick"
             ? "Low execution effort"
             : preset === "balanced"
               ? "Automatic execution effort"
@@ -723,18 +725,22 @@ export interface NormalizedFusionRoleSettings {
   plannerFamily: FusionFamily;
   plannerModel: string;
   plannerEffort: FusionRoleEffort;
+  plannerFast: boolean;
   executorFamily: FusionFamily;
   executorModel: string;
   executorEffort: FusionRoleEffort;
+  executorFast: boolean;
 }
 
 export function normalizeFusionRoleSettings(raw: {
   plannerFamily?: unknown;
   plannerModel?: unknown;
   plannerEffort?: unknown;
+  plannerFast?: unknown;
   executorFamily?: unknown;
   executorModel?: unknown;
   executorEffort?: unknown;
+  executorFast?: unknown;
   model?: unknown;
   claudeEffort?: unknown;
   codexModel?: unknown;
@@ -766,9 +772,11 @@ export function normalizeFusionRoleSettings(raw: {
     plannerFamily,
     plannerModel,
     plannerEffort,
+    plannerFast: source.plannerFast === true,
     executorFamily,
     executorModel,
-    executorEffort
+    executorEffort,
+    executorFast: source.executorFast === true
   };
 }
 

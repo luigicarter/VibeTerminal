@@ -9,6 +9,7 @@
 // Control IN (from main, one JSON per line on stdin):
 //   {type:"start",  payload:{id, cwd, mcpConfig, systemPromptFile, model, mode?, effort?, settingsFile?, tools?, allowedTools, disallowedTools?, permissionMode?, strictMcpConfig?, resumeId?}}
 //   {type:"input",  payload:{id, text, steer?}}
+//   {type:"settings", payload:{id, plannerFast?}}
 //   {type:"interrupt", payload:{id}}   ← abort the CURRENT turn, keep the session
 //   {type:"stop",   payload:{id}}       ← kill the whole session process
 //   {type:"shutdown"}
@@ -18,13 +19,23 @@
 // The stream-json normalizer is exported (createStreamNormalizer) so the parser
 // smoke can test it with a recorded fixture — no Claude, no auth, no cost.
 
+const fs = require("fs");
+const path = require("path");
 const { spawn, execFileSync } = require("child_process");
 const { createCodexBrainSession } = require("./fusionCodexBrain.cjs");
 const { createFusionGateTracker } = require("./completionGate.cjs");
+const { locateClaudeTranscriptFile } = require("./agentThreadHost.cjs");
+const { codexHome, locateCodexRollout } = require("./agentThreads.cjs");
 
 const isWin = process.platform === "win32";
 const CLAUDE_BIN = process.env.VIBE_CLAUDE_BIN || "claude";
 const MAX_HISTORY_EVENTS = 20_000;
+const CLAUDE_RESULT_BACKSTOP_MS = Math.max(
+  100,
+  Number.isFinite(Number(process.env.VIBE_FUSION_CLAUDE_RESULT_BACKSTOP_MS))
+    ? Number(process.env.VIBE_FUSION_CLAUDE_RESULT_BACKSTOP_MS)
+    : 5_000
+);
 
 function normalizeFusionPlannerFamily(value) {
   return String(value || "").trim().toLowerCase() === "codex" ? "codex" : "claude";
@@ -38,7 +49,7 @@ function planModeDirective() {
   return [
     "FUSION PLAN MODE IS ACTIVE.",
     "Investigate read-only with Read, Grep, Glob, or codex_investigate, then present a concrete implementation plan to the user.",
-    "Do not call codex_implement, codex_respond, codex_goal_set, codex_goal_clear, or any execution tool until the user switches this pane back to Auto mode.",
+    "Do not call codex_implement, codex_respond, codex_goal_set, codex_goal_clear, or any execution tool until the user switches this pane back to Auto mode. If a steer_routing result is already pending, codex_steer_resolve may still be used to settle that live route.",
     "Execution is hard-blocked in the adapter while Plan mode is active."
   ].join("\n");
 }
@@ -78,6 +89,200 @@ function buildFusionInputContent(text, mode, steer, nudge) {
         "Incorporate this direction into the active response as read-only planning guidance. Present the plan; do not delegate execution until Auto mode is restored."
       ].join("\n")
     : [directive, "", "USER REQUEST:", text].join("\n");
+}
+
+// ---- resume rehydration ----
+// A resumed planner child never replays its prior conversation (claude
+// `--resume` and codex `thread/resume` load context silently), so without
+// this the pane showed a FRESH hero over a live old chat — "resume did
+// nothing". Rebuild the visible transcript from the on-disk record: user
+// prompts + assistant prose (tool rows are not replayed). Events are emitted
+// with replay:true — the renderer's reattach-replay contract — so restoring
+// history never latches status or attention, and they enter state.history so
+// later remounts replay them like any other event.
+
+// Tail-biased caps: recent turns matter, a 50MB transcript does not.
+const REHYDRATE_MAX_BYTES = 4 * 1024 * 1024;
+const REHYDRATE_MAX_EVENTS = 400;
+
+function readTranscriptTailLines(filePath) {
+  const stat = fs.statSync(filePath);
+  const start = Math.max(0, stat.size - REHYDRATE_MAX_BYTES);
+  const length = stat.size - start;
+  const fd = fs.openSync(filePath, "r");
+  let raw;
+  try {
+    const buffer = Buffer.allocUnsafe(length);
+    const bytesRead = fs.readSync(fd, buffer, 0, length, start);
+    raw = buffer.toString("utf8", 0, bytesRead);
+  } finally {
+    fs.closeSync(fd);
+  }
+  // A mid-file start almost certainly cut a line in half: drop the fragment.
+  if (start > 0) {
+    raw = raw.slice(raw.indexOf("\n") + 1);
+  }
+  return raw.split(/\r?\n/);
+}
+
+// Reverse buildFusionInputContent: stored user turns carry the harness
+// envelopes (plan directive, steer wrapper, gate nudge) that must not render
+// as the user's words. Keep the two functions in sync.
+function unwrapFusionUserText(text) {
+  let value = String(text || "");
+  if (value.startsWith(FUSION_GATE_NUDGE)) {
+    value = value.slice(FUSION_GATE_NUDGE.length).replace(/^\n+/, "");
+  }
+  const directive = planModeDirective();
+  if (value.startsWith(directive)) {
+    value = value.slice(directive.length).replace(/^\n+/, "");
+    if (value.startsWith("USER REQUEST:")) {
+      value = value.slice("USER REQUEST:".length).replace(/^\n+/, "");
+    }
+  }
+  if (value.startsWith("STEER CURRENT FUSION TURN:")) {
+    value = value.slice("STEER CURRENT FUSION TURN:".length).replace(/^\n+/, "");
+    const trailer = value.lastIndexOf("\n\nIncorporate this direction");
+    if (trailer !== -1) {
+      value = value.slice(0, trailer);
+    }
+  }
+  return value;
+}
+
+// Transcript texts that read as user messages but are not the user's prompt:
+// slash-command envelopes, local command output, and the resume caveat banner.
+function isClaudeMetaText(text) {
+  return (
+    text.startsWith("<command-") ||
+    text.startsWith("<local-command-") ||
+    text.startsWith("Caveat:")
+  );
+}
+
+function claudeContentText(content) {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  // A user record whose content carries tool_result parts is tool feedback
+  // (e.g. codex_implement's reply), not something the user typed.
+  if (content.some((part) => part && part.type === "tool_result")) {
+    return "";
+  }
+  return content
+    .map((part) => (typeof part?.text === "string" ? part.text : ""))
+    .join("")
+    .trim();
+}
+
+// Cap and close a rehydration event list: keep the newest turns, starting at
+// a user boundary when one exists, and settle the renderer with a status-
+// neutral "restored" result.
+function finishRehydrationEvents(events) {
+  if (!events.length) {
+    return [];
+  }
+  let trimmed = events;
+  if (events.length > REHYDRATE_MAX_EVENTS) {
+    trimmed = events.slice(events.length - REHYDRATE_MAX_EVENTS);
+    const firstUser = trimmed.findIndex((event) => event.type === "user");
+    if (firstUser > 0) {
+      trimmed = trimmed.slice(firstUser);
+    }
+  }
+  return [...trimmed, { type: "result", subtype: "restored" }];
+}
+
+// Claude transcript (~/.claude/projects/<cwd>/<id>.jsonl): user/assistant
+// records, one API message per line.
+function buildClaudeRehydrationEvents(transcriptPath) {
+  let lines;
+  try {
+    lines = readTranscriptTailLines(transcriptPath);
+  } catch {
+    return [];
+  }
+
+  const events = [];
+  let lastWasAssistant = false;
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    let record;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (record.isMeta || record.isSidechain) continue;
+    if (record.type === "user" && record.message) {
+      const text = unwrapFusionUserText(claudeContentText(record.message.content));
+      if (text && !isClaudeMetaText(text)) {
+        events.push({ type: "user", text });
+        lastWasAssistant = false;
+      }
+      continue;
+    }
+    if (record.type === "assistant" && record.message) {
+      const text = claudeContentText(record.message.content);
+      if (text) {
+        // Consecutive assistant messages merge into one bubble; keep the
+        // paragraph break turn-start would have added live.
+        events.push({
+          type: "assistant-text",
+          delta: lastWasAssistant ? `\n\n${text}` : text
+        });
+        lastWasAssistant = true;
+      }
+    }
+  }
+  return finishRehydrationEvents(events);
+}
+
+// Codex rollout (~/.codex/sessions/.../rollout-<ts>-<id>.jsonl): event_msg
+// lines with user_message/agent_message payloads. Instruction/environment
+// envelopes start with "<" and are skipped (same rule as title harvesting).
+function buildCodexRehydrationEvents(rolloutPath) {
+  let lines;
+  try {
+    lines = readTranscriptTailLines(rolloutPath);
+  } catch {
+    return [];
+  }
+
+  const events = [];
+  let lastWasAssistant = false;
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    let record;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (record.type !== "event_msg" || typeof record.payload?.message !== "string") {
+      continue;
+    }
+    if (record.payload.type === "user_message") {
+      const text = unwrapFusionUserText(record.payload.message);
+      if (text && !text.startsWith("<")) {
+        events.push({ type: "user", text });
+        lastWasAssistant = false;
+      }
+    } else if (record.payload.type === "agent_message") {
+      const text = record.payload.message.trim();
+      if (text) {
+        events.push({
+          type: "assistant-text",
+          delta: lastWasAssistant ? `\n\n${text}` : text
+        });
+        lastWasAssistant = true;
+      }
+    }
+  }
+  return finishRehydrationEvents(events);
 }
 
 function toolDisplayName(name) {
@@ -130,12 +335,67 @@ function appendBackgroundActivity(events, activeBackgroundAgents) {
   });
 }
 
+function latePlannerResultUsageEvent(event) {
+  const usageEvent = {
+    type: "result-usage",
+    subtype: event.subtype,
+    lateResult: true
+  };
+  if (event.usage != null) usageEvent.usage = event.usage;
+  if (typeof event.costUsd === "number") usageEvent.costUsd = event.costUsd;
+  return usageEvent.usage != null || typeof usageEvent.costUsd === "number"
+    ? usageEvent
+    : null;
+}
+
+function applyPlannerTurnSettleState(state, event) {
+  if (event.type === "user") {
+    state.plannerTurnSettled = false;
+    state.plannerResultBackstopEligible = false;
+    return { event, clearBackstop: true };
+  }
+  if (event.type === "turn-start") {
+    state.plannerTurnSettled = false;
+    return { event, clearBackstop: true };
+  }
+  if (event.type === "tool-result" && event.completedBridgeResult) {
+    state.plannerResultBackstopEligible = true;
+    return { event };
+  }
+  if (
+    event.type === "turn-end" &&
+    state.plannerResultBackstopEligible &&
+    !event.awaitsToolResult
+  ) {
+    return { event, armBackstop: true };
+  }
+  if (event.type === "result") {
+    if (state.plannerTurnSettled) {
+      return { event: latePlannerResultUsageEvent(event), skipGate: true };
+    }
+    state.plannerTurnSettled = true;
+    state.plannerResultBackstopEligible = false;
+    return { event, clearBackstop: true };
+  }
+  if (
+    event.type === "error" ||
+    event.type === "interrupted" ||
+    event.type === "closed"
+  ) {
+    state.plannerResultBackstopEligible = false;
+    return { event, clearBackstop: true };
+  }
+  return { event };
+}
+
 // ---- stream-json normalizer (pure, per-session state) ----
 // Turns the raw Anthropic stream-json line objects into high-level chat events.
 function createStreamNormalizer() {
   let block = null; // { kind: "text"|"thinking"|"tool_use", toolId?, name?, jsonBuf? }
   let turnErrorEmitted = false;
+  let messageAwaitsToolResult = false;
   const activeBackgroundAgents = new Map();
+  const bridgeToolIds = new Set();
 
   return function normalize(line) {
     let msg;
@@ -218,17 +478,38 @@ function createStreamNormalizer() {
       for (const part of msg.message.content) {
         if (part && part.type === "tool_result") {
           const toolId = String(part.tool_use_id || "");
+          const text =
+            typeof part.content === "string"
+              ? part.content
+              : Array.isArray(part.content)
+                ? part.content
+                    .filter((item) => item && item.type === "text" && typeof item.text === "string")
+                    .map((item) => item.text)
+                    .join("\n")
+                : JSON.stringify(part.content);
+          const bridgeToolResult = toolId && bridgeToolIds.has(toolId);
+          let parsed = null;
+          if (bridgeToolResult && typeof text === "string") {
+            try {
+              parsed = JSON.parse(text);
+            } catch {
+              parsed = null;
+            }
+          }
+          const completedBridgeResult =
+            Boolean(bridgeToolResult) &&
+            !part.is_error &&
+            Boolean(parsed && parsed.status === "completed");
           events.push({
             type: "tool-result",
             toolId: part.tool_use_id,
-            text:
-              typeof part.content === "string"
-                ? part.content
-                : JSON.stringify(part.content),
+            text,
             // The pane's OpenCode-style tool rows settle red on real errors;
             // without this flag they could only guess from the result text.
-            isError: Boolean(part.is_error)
+            isError: Boolean(part.is_error),
+            completedBridgeResult
           });
+          if (bridgeToolResult) bridgeToolIds.delete(toolId);
           if (toolId && activeBackgroundAgents.delete(toolId)) {
             appendBackgroundActivity(events, activeBackgroundAgents);
           }
@@ -244,11 +525,13 @@ function createStreamNormalizer() {
     const ev = msg.event;
     switch (ev.type) {
       case "message_start":
+        messageAwaitsToolResult = false;
         events.push({ type: "turn-start" });
         break;
       case "content_block_start": {
         const cb = ev.content_block || {};
         if (cb.type === "tool_use") {
+          messageAwaitsToolResult = true;
           block = { kind: "tool_use", toolId: cb.id, name: cb.name, jsonBuf: "" };
         } else if (cb.type === "thinking") {
           block = { kind: "thinking" };
@@ -285,6 +568,9 @@ function createStreamNormalizer() {
             name: block.name,
             input
           });
+          if (String(block.name || "").endsWith("codex_implement")) {
+            bridgeToolIds.add(String(block.toolId || ""));
+          }
           if (isBackgroundAgentTool(block.name)) {
             activeBackgroundAgents.set(
               String(block.toolId || ""),
@@ -297,7 +583,7 @@ function createStreamNormalizer() {
         break;
       }
       case "message_stop":
-        events.push({ type: "turn-end" });
+        events.push({ type: "turn-end", awaitsToolResult: messageAwaitsToolResult });
         break;
       default:
         break;
@@ -339,12 +625,46 @@ function runHost() {
     }
   }
 
+  function clearPlannerResultBackstop(state) {
+    if (state?.plannerResultBackstopTimer) {
+      clearTimeout(state.plannerResultBackstopTimer);
+      state.plannerResultBackstopTimer = null;
+    }
+  }
+
+  function armPlannerResultBackstop(id, state, delayMs, reason) {
+    clearPlannerResultBackstop(state);
+    state.plannerResultBackstopTimer = setTimeout(() => {
+      if (sessions.get(id) !== state) return;
+      state.plannerResultBackstopTimer = null;
+      emitSessionEvent(id, state, {
+        type: "result",
+        subtype: "success",
+        isError: false,
+        synthetic: true,
+        reason
+      });
+    }, delayMs);
+    if (typeof state.plannerResultBackstopTimer.unref === "function") {
+      state.plannerResultBackstopTimer.unref();
+    }
+  }
+
   function emitSessionEvent(id, state, event) {
+    const settle = applyPlannerTurnSettleState(state, event);
+    event = settle.event;
+    if (settle.clearBackstop) {
+      clearPlannerResultBackstop(state);
+    }
+    if (settle.armBackstop) {
+      armPlannerResultBackstop(id, state, CLAUDE_RESULT_BACKSTOP_MS, "final-turn-end");
+    }
+    if (!event) return;
     // Single choke point for both planner engines: the completion-gate tracker
     // annotates clean `result` events BEFORE they reach history, so reattach
     // replay carries the gate chip for free (replaySession bypasses observe —
     // no double-fire).
-    if (state.gate) event = state.gate.observe(event);
+    if (!settle.skipGate && state.gate) event = state.gate.observe(event);
     state.history.push(cloneEvent(event));
     if (state.history.length > MAX_HISTORY_EVENTS) {
       state.history.splice(0, state.history.length - MAX_HISTORY_EVENTS);
@@ -367,6 +687,20 @@ function runHost() {
     }
   }
 
+  // Restore a resumed conversation into the pane: replay-tagged live emission
+  // (status/attention-neutral) plus history entry (so remount replays keep
+  // it). Deliberately NOT via emitSessionEvent — the completion-gate tracker
+  // must never observe restored turns.
+  function rehydrateResumedTranscript(id, state, events) {
+    for (const event of events) {
+      state.history.push(cloneEvent(event));
+      emit({ type: "event", id, event: { ...event, replay: true } });
+    }
+    if (state.history.length > MAX_HISTORY_EVENTS) {
+      state.history.splice(0, state.history.length - MAX_HISTORY_EVENTS);
+    }
+  }
+
   function start(payload) {
     const { id, cwd } = payload;
     if (sessions.has(id)) {
@@ -377,6 +711,7 @@ function runHost() {
         return;
       }
 
+      clearPlannerResultBackstop(existingState);
       sessions.delete(id);
     }
 
@@ -400,10 +735,31 @@ function runHost() {
       normalizer,
       buffer: "",
       history: [],
+      engine: "claude",
+      plannerFast: payload.plannerFast === true,
+      fastSeq: 0,
       mode: normalizeFusionRunMode(payload.mode),
       gate: createFusionGateTracker({ cwd })
     };
     sessions.set(id, state);
+
+    // `claude --resume` loads the old conversation silently; restore it into
+    // the pane before any live child output arrives.
+    if (payload.resumeId) {
+      let located = null;
+      try {
+        located = locateClaudeTranscriptFile(String(payload.resumeId));
+      } catch {
+        located = null;
+      }
+      if (located?.path) {
+        rehydrateResumedTranscript(
+          id,
+          state,
+          buildClaudeRehydrationEvents(located.path)
+        );
+      }
+    }
 
     child.stdout.on("data", (chunk) => {
       if (sessions.get(id) !== state) {
@@ -458,6 +814,28 @@ function runHost() {
       gate: createFusionGateTracker({ cwd })
     };
     sessions.set(id, state);
+
+    // codex `thread/resume` loads the old conversation silently; restore it
+    // into the pane before any live brain output arrives.
+    if (payload.resumeId) {
+      let located = null;
+      try {
+        located = locateCodexRollout(
+          path.join(codexHome(), "sessions"),
+          String(payload.resumeId)
+        );
+      } catch {
+        located = null;
+      }
+      if (located?.path) {
+        rehydrateResumedTranscript(
+          id,
+          state,
+          buildCodexRehydrationEvents(located.path)
+        );
+      }
+    }
+
     const emitEvent = (event) => {
       if (sessions.get(id) !== state) return;
       emitSessionEvent(id, state, event);
@@ -471,6 +849,7 @@ function runHost() {
         systemPromptFile: payload.systemPromptFile,
         model: payload.model || undefined,
         effort: payload.effort || undefined,
+        plannerFast: payload.plannerFast === true,
         resumeId: payload.resumeId || undefined,
         emitEvent
       });
@@ -494,6 +873,7 @@ function runHost() {
     const id = payload?.id;
     const text = String(payload?.text ?? "");
     const steer = Boolean(payload?.steer);
+    const routed = steer && payload?.routed === true;
     const state = sessions.get(id);
     if (!state) {
       emitDirectSessionEvent(id, {
@@ -521,6 +901,9 @@ function runHost() {
 
     if (state.engine === "codex") {
       emitSessionEvent(id, state, { type: "user", text, steer });
+      if (routed) {
+        return;
+      }
       const content = buildFusionInputContent(text, runMode, steer, nudge);
       state.brain.sendInput(content, steer).catch((error) => {
         if (sessions.get(id) !== state) return;
@@ -534,6 +917,9 @@ function runHost() {
 
     try {
       emitSessionEvent(id, state, { type: "user", text, steer });
+      if (routed) {
+        return;
+      }
       const content = buildFusionInputContent(text, runMode, steer, nudge);
       state.child.stdin.write(
         JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n"
@@ -567,6 +953,47 @@ function runHost() {
     const state = sessions.get(id);
     if (!state) return;
     state.mode = normalizeFusionRunMode(payload.mode);
+  }
+
+  function settings(payload) {
+    const id = payload?.id;
+    const state = sessions.get(id);
+    if (!state) return;
+    if (state.engine === "codex" && state.brain?.setFast) {
+      state.brain.setFast(payload.plannerFast === true).catch((error) => {
+        if (sessions.get(id) !== state) return;
+        emitSessionEvent(id, state, {
+          type: "activity",
+          role: "opus",
+          kind: "activity",
+          text: `Could not update Codex planner fast serving: ${error.message || "planner is gone"}`
+        });
+      });
+      return;
+    }
+    if (state.engine === "claude" && state.child?.stdin?.writable) {
+      state.plannerFast = payload.plannerFast === true;
+      state.fastSeq = (state.fastSeq || 0) + 1;
+      try {
+        state.child.stdin.write(
+          JSON.stringify({
+            type: "control_request",
+            request_id: `fast_${id}_${state.fastSeq}`,
+            request: {
+              subtype: "apply_flag_settings",
+              settings: { fastMode: state.plannerFast }
+            }
+          }) + "\n"
+        );
+      } catch (error) {
+        emitSessionEvent(id, state, {
+          type: "activity",
+          role: "opus",
+          kind: "activity",
+          text: `Could not update Claude planner fast serving: ${error.message || "planner is gone"}`
+        });
+      }
+    }
   }
 
   function interrupt(payload) {
@@ -604,13 +1031,17 @@ function runHost() {
   function stop(payload) {
     const state = sessions.get(payload.id);
     if (state) {
+      clearPlannerResultBackstop(state);
       killChild(state.child);
       sessions.delete(payload.id);
     }
   }
 
   function shutdown() {
-    for (const { child } of sessions.values()) killChild(child);
+    for (const state of sessions.values()) {
+      clearPlannerResultBackstop(state);
+      killChild(state.child);
+    }
     sessions.clear();
     process.exit(0);
   }
@@ -634,6 +1065,7 @@ function runHost() {
       else if (msg.type === "input") input(msg.payload);
       else if (msg.type === "activity") activity(msg.payload);
       else if (msg.type === "mode") mode(msg.payload);
+      else if (msg.type === "settings") settings(msg.payload);
       else if (msg.type === "interrupt") interrupt(msg.payload);
       else if (msg.type === "stop") stop(msg.payload);
       else if (msg.type === "shutdown") shutdown();
@@ -734,8 +1166,12 @@ function buildClaudeSpawn(payload = {}) {
 module.exports = {
   buildClaudeArgs,
   buildClaudeSpawn,
+  buildClaudeRehydrationEvents,
+  buildCodexRehydrationEvents,
   buildFusionInputContent,
+  applyPlannerTurnSettleState,
   createStreamNormalizer,
+  unwrapFusionUserText,
   windowsCmdArg,
   FUSION_GATE_NUDGE
 };

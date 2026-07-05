@@ -59,9 +59,11 @@ export interface FusionSettings {
   plannerFamily: FusionFamily;
   plannerModel: string;
   plannerEffort: FusionRoleEffort;
+  plannerFast: boolean;
   executorFamily: FusionFamily;
   executorModel: string;
   executorEffort: FusionRoleEffort;
+  executorFast: boolean;
 }
 
 export type AgentThreadLookupStatus =
@@ -164,11 +166,15 @@ export interface AgentThreadLookupPayload {
   // Open Fusion panes look up threads in the app-owned OpenCode store, not the
   // user's global one; main injects the matching env for the discovery host.
   openFusion?: boolean;
+  // Fusion resume-picker listings keep to chats the Fusion harness itself
+  // created (its headless claude planner records entrypoint "sdk-cli", unlike
+  // interactive pane chats).
+  fusion?: boolean;
 }
 
-// Saved-chat history for the Open Fusion resume picker: every app-created
-// session for the pane's folder, newest first. A failure must read as "could
-// not list", never as "no saved chats" — the two render differently.
+// Saved-chat history for the chat panes' resume pickers: every saved chat for
+// the pane's folder, newest first. A failure must read as "could not list",
+// never as "no saved chats" — the two render differently.
 export type AgentThreadListResult =
   | {
       status: "found";
@@ -214,9 +220,11 @@ export interface AgentSession {
   fusionPlannerFamily?: FusionFamily;
   fusionPlannerModel?: string;
   fusionPlannerEffort?: FusionRoleEffort;
+  fusionPlannerFast?: boolean;
   fusionExecutorFamily?: FusionFamily;
   fusionExecutorModel?: string;
   fusionExecutorEffort?: FusionRoleEffort;
+  fusionExecutorFast?: boolean;
   fusionRunMode?: FusionRunMode;
   // Legacy per-engine fields from saved panes that predate per-role families:
   // model/claudeEffort described the (always-claude) planner, codexModel/
@@ -470,6 +478,9 @@ export interface OpenFusionQuestion {
 // restores, never fresh activity.
 export type OpenFusionChatEvent = (
   | { id: string; type: "session"; sessionId: string; resumed?: boolean }
+  // The serve is up but the pane's session is deferred to the first input
+  // (fresh panes only) — carries the provider-catalog prefetch.
+  | { id: string; type: "engine-ready" }
   // queued: sent mid-turn — the server persisted it and the running loop
   // absorbs it at its next step; the pane pins it above the composer until then.
   // mode: the run mode the host actually sent this turn as ("plan" | "auto").
@@ -496,8 +507,21 @@ export type OpenFusionChatEvent = (
       // Producing session — lets the completion-gate tracker attribute child
       // (executor) tool activity to its delegation.
       sessionID?: string;
+      // On running task delegations: the spawned child session that can receive
+      // best-effort live steering while the Brain's native task call is blocked.
+      childSessionId?: string;
       title?: string;
       input: unknown;
+    }
+  | {
+      id: string;
+      type: "task-child";
+      toolId: string;
+      name: "task";
+      role: "brain";
+      sessionID?: string;
+      childSessionId: string;
+      agent: "executor" | "investigator" | string;
     }
   | {
       id: string;
@@ -583,6 +607,7 @@ export type OpenFusionChatEvent = (
       tokens?: { input: number; output: number; reasoning: number };
       gate?: CompletionGateVerdict;
     }
+  | { id: string; type: "steer-route"; message: string }
   | { id: string; type: "interrupted" }
   | { id: string; type: "stderr"; text: string }
   | { id: string; type: "error"; message: string; role?: OpenFusionChatRole }
@@ -653,6 +678,7 @@ export interface OpenFusionChatMessage {
   // task rows: live progress line (current child tool / toolcall tally) and
   // completion stats, rendered as the "↳ …" second line like OpenCode.
   taskDetail?: string;
+  taskRole?: string;
   // kind:"result" rows: completion-gate verdict chip for the settled turn.
   gate?: CompletionGateVerdict;
 }
@@ -693,6 +719,7 @@ export interface ChatMessage {
   meta?: OpenFusionToolMeta;
   // Task (delegation) rows: live "↳ …" progress line / completion stats.
   taskDetail?: string;
+  taskRole?: string;
   // kind:"result" rows: completion-gate verdict chip for the settled turn.
   gate?: CompletionGateVerdict;
 }

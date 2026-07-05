@@ -17,8 +17,6 @@ import {
 } from "lucide-react";
 import clsx from "clsx";
 import { shouldShowAttentionDot } from "../attention";
-import { cwdConflictChipLabel, cwdConflictTitle } from "../cwdConflicts";
-import type { CwdConflict } from "../cwdConflicts";
 import type {
   AgentAttentionEvent,
   AgentBackgroundActivity,
@@ -52,6 +50,7 @@ import {
   type FusionPickerState,
   type FusionRoleScope,
   type FusionSpeedPreset,
+  type SlashMenu,
   type SlashMenuItem
 } from "./fusionSlashMenu";
 import {
@@ -68,13 +67,17 @@ import {
 interface FusionChatPaneProps {
   session: AgentSession;
   profile: AgentProfile;
-  cwdConflict?: CwdConflict;
+  // Thread ids active in OTHER panes: the resume picker marks them and refuses
+  // to open the same conversation twice (two panes writing one session id).
+  claimedThreadIds?: string[];
   isMaximized: boolean;
   isSelected: boolean;
   onClose: () => void;
   onDuplicate: () => void;
   onRestart: () => void;
-  onResume: () => void;
+  // Bare call resumes the stashed last chat; with a threadRef it resumes that
+  // specific saved chat (the resume picker's selection).
+  onResume: (threadRef?: AgentThreadRef) => void;
   onClear: () => void;
   onSettingsChange: (settings: FusionSettings) => void;
   onAdd: () => void;
@@ -90,6 +93,35 @@ const FUSION_RUN_MODE_LABELS: Record<FusionRunMode, string> = {
   auto: "Auto",
   plan: "Plan"
 };
+
+// The pane's picker is either the family→model drill-in (fusionSlashMenu's
+// state) or the saved-chat resume picker: null = list still loading. `error`
+// renders as "couldn't read" — an error must never masquerade as "no saved
+// chats".
+type FusionPanePickerState =
+  | FusionPickerState
+  | { resume: AgentThreadRef[] | null; error?: string };
+
+// Rows shown per picker page before the "N more — keep typing" hint row (the
+// list scrolls; this only bounds render size and keeps truncation VISIBLE).
+const RESUME_PICKER_PAGE_SIZE = 24;
+
+// Ages for the resume picker rows ("just now", "5m ago", "3d ago").
+function formatThreadAge(updatedAt: number): string {
+  const timestamp = Number(updatedAt) || 0;
+  const age = Date.now() - timestamp;
+  if (!timestamp || !Number.isFinite(age) || age < 0) {
+    return "";
+  }
+  const minutes = Math.floor(age / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(timestamp).toLocaleDateString();
+}
 const FUSION_COMPOSER_MAX_PX = 160;
 const MAX_COMPOSER_PATHS = 32;
 const IMPLEMENT_PLAN_PROMPT = "Implement the plan.";
@@ -196,7 +228,9 @@ function fusionRunModeLabel(value: FusionRunMode) {
 function fusionSettingsSummary(settings: FusionSettings) {
   const planner = `${familyDisplayName(settings.plannerFamily)} ${fusionRoleModelLabel(settings.plannerFamily, settings.plannerModel)}`;
   const executor = `${familyDisplayName(settings.executorFamily)} ${fusionRoleModelLabel(settings.executorFamily, settings.executorModel)}`;
-  return `Mode ${fusionRunModeLabel(settings.mode)} · Planning ${planner} · Planning effort ${familyEffortLabel(settings.plannerFamily, String(settings.plannerEffort))} · Execution ${executor} · Execution effort ${familyEffortLabel(settings.executorFamily, String(settings.executorEffort))}`;
+  const plannerFast = settings.plannerFast ? "on" : "off";
+  const executorFast = settings.executorFast ? "on" : "off";
+  return `Mode ${fusionRunModeLabel(settings.mode)} · Planning ${planner} · Planning effort ${familyEffortLabel(settings.plannerFamily, String(settings.plannerEffort))} · Planning fast ${plannerFast} · Execution ${executor} · Execution effort ${familyEffortLabel(settings.executorFamily, String(settings.executorEffort))} · Execution fast ${executorFast}`;
 }
 
 interface ToolMeta {
@@ -217,7 +251,7 @@ const FUSION_SPEAKER_LABEL = "Fusion";
 // Opus makes every tool call. Fusion bridge calls are plumbing; Codex's
 // user-facing voice is the concise result/status we derive from those calls.
 function isCodexBridgeTool(name: string): boolean {
-  return /codex_investigate|codex_implement|codex_respond/.test(name);
+  return /codex_investigate|codex_implement|codex_respond|codex_steer_resolve/.test(name);
 }
 
 function isCodexGoalTool(name: string): boolean {
@@ -299,6 +333,9 @@ function bridgeToolTitle(name: string, input: unknown): string | undefined {
   if (name.endsWith("codex_goal_get")) return "Goal checked";
   if (name.endsWith("codex_goal_clear")) return "Goal cleared";
   if (name.endsWith("codex_cancel")) return "Cancel delegation";
+  if (name.endsWith("codex_steer_resolve")) {
+    return `Resolve steer · ${firstString(data.decision) || "push"}`;
+  }
   if (name.endsWith("codex_respond")) {
     const note = firstString(data.note);
     return `Respond · ${firstString(data.decision) || "decision"}${note ? ` — ${clip(note, 80)}` : ""}`;
@@ -337,6 +374,27 @@ function buildEditDiff(input: unknown): string | undefined {
 // bridge's JSON reply (findings/summary, touched files, verifier verdict).
 function codexTaskReport(parsed: Record<string, unknown> | null, raw: string): string {
   if (!parsed) return clip(raw ?? "", 8000);
+  if (parsed.status === "steer_routing") {
+    const parts: string[] = [];
+    const userSteer = firstString(parsed.userSteer);
+    if (userSteer) parts.push(`**User steer**\n${userSteer}`);
+    const progress = asRecord(parsed.executorProgress);
+    const lastActivity = firstString(progress.lastActivity);
+    if (lastActivity) parts.push(`**Executor still running**\n${lastActivity}`);
+    const files = Array.isArray(progress.filesTouched)
+      ? progress.filesTouched.filter((file): file is string => typeof file === "string")
+      : [];
+    if (files.length) {
+      parts.push(["**Files touched so far**", ...files.map((file) => `- ${file}`)].join("\n"));
+    }
+    const partialSummary = firstString(progress.partialSummary);
+    if (partialSummary && partialSummary !== lastActivity) {
+      parts.push(`**Partial summary**\n${partialSummary}`);
+    }
+    const guidance = firstString(parsed.guidance);
+    if (guidance) parts.push(guidance);
+    return parts.join("\n\n") || clip(raw ?? "", 8000);
+  }
   const parts: string[] = [];
   const summary = firstString(parsed.findings, parsed.summary, parsed.verifierSummary);
   if (summary) parts.push(summary);
@@ -379,6 +437,14 @@ function formatCodexBridgeResult(name: string, text: string): string {
     const kind = String(parsed.kind ?? "decision");
     const detail = String(parsed.detail ?? "Decision needed.");
     return `needs ${kind}: ${clip(detail, 180)}`;
+  }
+
+  if (status === "steer_routing") {
+    return `route steer: ${clip(String(parsed.userSteer ?? "User steering is pending."), 180)}`;
+  }
+
+  if (status === "steer_replan_ready") {
+    return "ready to replan";
   }
 
   if (status === "completed") {
@@ -470,7 +536,7 @@ function titleFromFirstPrompt(text: string) {
 export default function FusionChatPane({
   session,
   profile,
-  cwdConflict,
+  claimedThreadIds,
   isMaximized,
   isSelected,
   onClose,
@@ -505,8 +571,10 @@ export default function FusionChatPane({
   // typed (it used to wipe the whole command). Any input change re-arms it.
   const [slashMenuDismissed, setSlashMenuDismissed] = useState(false);
   // Open Fusion-style state picker: /planner-model and /executor-model open a
-  // family→model drill-in; while it is open the composer input only filters.
-  const [picker, setPicker] = useState<FusionPickerState>(null);
+  // family→model drill-in; /resume opens the saved-chat picker. While one is
+  // open the composer input only filters.
+  const [picker, setPicker] = useState<FusionPanePickerState>(null);
+  const resumeListRequestRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   // Follow the stream only while the user is at the bottom — auto-scroll used
   // to yank the view down on EVERY delta, which made reading scrollback during
@@ -527,6 +595,7 @@ export default function FusionChatPane({
   const busyRef = useRef(false);
   // Event-handler mirror of `steering` (the handler closure is frozen at mount).
   const steeringRef = useRef<{ key: string; text: string }[]>([]);
+  const pendingSteerFlushRef = useRef<string | null>(null);
   const toolRoleRef = useRef(new Map<string, ToolMeta>());
   const claudeSessionIdRef = useRef("");
   const claudeThreadTitleRef = useRef("");
@@ -567,9 +636,11 @@ export default function FusionChatPane({
     plannerFamily: session.fusionPlannerFamily,
     plannerModel: session.fusionPlannerModel,
     plannerEffort: session.fusionPlannerEffort,
+    plannerFast: session.fusionPlannerFast,
     executorFamily: session.fusionExecutorFamily,
     executorModel: session.fusionExecutorModel,
     executorEffort: session.fusionExecutorEffort,
+    executorFast: session.fusionExecutorFast,
     model: session.fusionModel,
     claudeEffort: session.fusionClaudeEffort ?? session.fusionEffort,
     codexModel: session.fusionCodexModel,
@@ -579,9 +650,11 @@ export default function FusionChatPane({
     plannerFamily,
     plannerModel,
     plannerEffort,
+    plannerFast,
     executorFamily,
     executorModel,
-    executorEffort
+    executorEffort,
+    executorFast
   } = roleSettings;
   const fusionRunMode = normalizeFusionRunMode(session.fusionRunMode);
   const fusionRunModeText = fusionRunModeLabel(fusionRunMode);
@@ -604,8 +677,75 @@ export default function FusionChatPane({
   const canResumeClaude =
     session.resumeRef?.provider === plannerFamily && Boolean(session.resumeRef.id);
   const slashMenuContext = roleSettings;
+  // Saved-chat picker rows: title + age, newest first, chats open in other
+  // panes marked, typed input only filters. Mirrors the Open Fusion picker.
+  const buildResumeMenu = (): SlashMenu => {
+    if (!picker || !("resume" in picker)) {
+      return { title: "", items: [] };
+    }
+    if (picker.resume === null) {
+      return { title: "Resume a chat — reading saved chats…", items: [] };
+    }
+    const filter = input.trim().toLowerCase();
+    const claimed = new Set(claimedThreadIds ?? []);
+    const currentId = claudeSessionIdRef.current || session.threadRef?.id || "";
+    const threads = picker.resume.filter(
+      (thread) =>
+        thread.id &&
+        thread.id !== currentId &&
+        (!filter ||
+          (thread.title ?? "").toLowerCase().includes(filter) ||
+          thread.id.toLowerCase().includes(filter))
+    );
+    const items: SlashMenuItem[] = threads
+      .slice(0, RESUME_PICKER_PAGE_SIZE)
+      .map((thread) => ({
+        key: `resume-${thread.id}`,
+        label: clip(thread.title?.trim() || "Untitled chat", 80),
+        desc: claimed.has(thread.id!)
+          ? "open in another pane"
+          : formatThreadAge(thread.updatedAt),
+        command: `__resume:${thread.id}`
+      }));
+    if (threads.length > RESUME_PICKER_PAGE_SIZE) {
+      items.push({
+        key: "resume-more",
+        label: `… ${threads.length - RESUME_PICKER_PAGE_SIZE} more`,
+        desc: "Keep typing to filter the list"
+      });
+    }
+    // Listing failed but the pane still stashes its last chat: offer that
+    // directly instead of a dead end.
+    if (picker.error && canResumeClaude) {
+      items.push({
+        key: "resume-last",
+        label: "Resume last chat",
+        desc: clip(
+          session.resumeRef?.title?.trim() || "the most recent saved chat",
+          60
+        ),
+        command: "__resume-last"
+      });
+    }
+    if (!items.length) {
+      items.push({
+        key: "resume-empty",
+        label: picker.error
+          ? "Couldn't read saved chats"
+          : filter
+            ? "No saved chats match"
+            : "No saved Fusion chats for this folder",
+        desc:
+          picker.error ??
+          "Chats appear here once a Fusion conversation has started."
+      });
+    }
+    return { title: "Resume a chat — type to filter", items };
+  };
   const slashMenu = picker
-    ? buildFusionPicker(picker, input, slashMenuContext)
+    ? "resume" in picker
+      ? buildResumeMenu()
+      : buildFusionPicker(picker, input, slashMenuContext)
     : buildSlashMenu(input, slashMenuContext);
   const slashMenuOpen = picker !== null || (slashMenu.items.length > 0 && !slashMenuDismissed);
   // OpenCode's /details-off rule: successful completed tool rows disappear,
@@ -619,6 +759,10 @@ export default function FusionChatPane({
         }
         return !message.internal;
       });
+  // Per-turn cost readout is hidden by default: on a Claude subscription the
+  // reported total_cost_usd is an API-equivalent value, not an actual charge,
+  // so showing a "$" reads misleadingly as a bill. Flip to true to restore it.
+  const SHOW_FUSION_COST = false;
   const usageLabel =
     usage && typeof usage.costUsd === "number" && usage.costUsd > 0
       ? `$${usage.costUsd.toFixed(2)}`
@@ -898,6 +1042,8 @@ export default function FusionChatPane({
           mode: fusionRunMode,
           plannerFamily,
           executorFamily,
+          plannerFast,
+          executorFast,
           // "auto" means "let the engine use its default" — omit rather than
           // sending a literal the CLIs would treat as a model id.
           ...(plannerModel === "auto" ? {} : { model: plannerModel }),
@@ -1341,6 +1487,13 @@ export default function FusionChatPane({
           if (typeof event.costUsd === "number" && event.costUsd > 0) {
             setUsage({ costUsd: event.costUsd });
           }
+          // Rehydration settle: a restored transcript is not a finished turn —
+          // no completion line, no attention, no plan-bar arming.
+          if (event.subtype === "restored") {
+            turnStartRef.current = 0;
+            reportStatus("idle");
+            break;
+          }
           if (event.isError) {
             settleRunningTools();
             turnStartRef.current = 0;
@@ -1372,6 +1525,24 @@ export default function FusionChatPane({
           }
           break;
         case "interrupted":
+          if (pendingSteerFlushRef.current) {
+            const steerText = pendingSteerFlushRef.current;
+            pendingSteerFlushRef.current = null;
+            steeringRef.current = [];
+            setSteering([]);
+            setActiveRole("claude");
+            stopStreaming();
+            settleRunningTools();
+            setInterruptingState(false);
+            setWaitingState(false);
+            setFailed(false);
+            clearPendingDecision();
+            setPlanActionReady(false);
+            window.vibe?.fusionChat?.sendUserTurn(session.id, steerText);
+            setBusyState(true);
+            onStatusChangeRef.current("running");
+            break;
+          }
           setActiveRole("claude");
           stopStreaming();
           settleRunningTools();
@@ -1519,6 +1690,7 @@ export default function FusionChatPane({
         nextPlannerFamily,
         settings.plannerEffort ?? plannerEffort
       ),
+      plannerFast: settings.plannerFast ?? plannerFast,
       executorFamily: nextExecutorFamily,
       executorModel: normalizeFusionRoleModel(
         nextExecutorFamily,
@@ -1528,22 +1700,25 @@ export default function FusionChatPane({
       executorEffort: normalizeFusionRoleEffort(
         nextExecutorFamily,
         settings.executorEffort ?? executorEffort
-      )
+      ),
+      executorFast: settings.executorFast ?? executorFast
     };
     if (
       nextSettings.mode === fusionRunMode &&
       nextSettings.plannerFamily === plannerFamily &&
       nextSettings.plannerModel === plannerModel &&
       nextSettings.plannerEffort === plannerEffort &&
+      nextSettings.plannerFast === plannerFast &&
       nextSettings.executorFamily === executorFamily &&
       nextSettings.executorModel === executorModel &&
-      nextSettings.executorEffort === executorEffort
+      nextSettings.executorEffort === executorEffort &&
+      nextSettings.executorFast === executorFast
     ) {
       pushCommandStatus(`Already using ${fusionSettingsSummary(nextSettings)}.`);
       return;
     }
-    // Planner changes relaunch the planner process; executor changes apply
-    // live (the adapter re-reads them per delegation).
+    // Planner family/model/effort changes relaunch the planner process; fast
+    // toggles and executor changes apply live.
     const requiresRestart =
       nextSettings.plannerFamily !== plannerFamily ||
       nextSettings.plannerModel !== plannerModel ||
@@ -1607,10 +1782,38 @@ export default function FusionChatPane({
   function applySlashSelection(item: SlashMenuItem | undefined) {
     if (!item) return;
     const command = item.command || "";
+    // Saved-chat picker rows: resume the picked conversation (refusing one
+    // that is already open in another pane).
+    if (command.startsWith("__resume:")) {
+      const threadId = command.slice("__resume:".length);
+      const thread =
+        picker && "resume" in picker && picker.resume
+          ? picker.resume.find((entry) => entry.id === threadId)
+          : undefined;
+      setPicker(null);
+      setInput("");
+      if (!thread) return;
+      if (claimedThreadIds?.includes(threadId)) {
+        push({
+          role: "opus",
+          kind: "activity",
+          text: "That chat is already open in another pane."
+        });
+        return;
+      }
+      onResume(thread);
+      return;
+    }
+    if (command === "__resume-last") {
+      setPicker(null);
+      setInput("");
+      onResume();
+      return;
+    }
     // Picker stage tags (Open Fusion's __provider:/__model: mechanic):
     // __family advances family→model, __model commits and closes.
     if (command.startsWith("__family:")) {
-      if (picker) {
+      if (picker && "role" in picker) {
         setPicker({
           role: picker.role,
           family: normalizeFusionFamily(command.slice("__family:".length), plannerFamily)
@@ -1622,7 +1825,7 @@ export default function FusionChatPane({
     }
     if (command.startsWith("__model:")) {
       const match = /^(claude|codex)\/(.+)$/.exec(command.slice("__model:".length));
-      const role = picker?.role;
+      const role = picker && "role" in picker ? picker.role : undefined;
       setPicker(null);
       setInput("");
       composerRef.current?.focus();
@@ -1652,15 +1855,55 @@ export default function FusionChatPane({
     push({ role: "opus", kind: "activity", text });
   }
 
+  // List every saved Fusion chat for this folder (newest first) so the user
+  // can resume the one they want — not just the stashed last chat. Listing
+  // follows the CURRENT planner family: a claude planner lists claude chats,
+  // a codex planner codex threads (a thread id means nothing across families).
+  function openResumePicker() {
+    const requestToken = ++resumeListRequestRef.current;
+    setPicker({ resume: null });
+    setInput("");
+    composerRef.current?.focus();
+    const applyResult = (threads: AgentThreadRef[], error?: string) => {
+      if (resumeListRequestRef.current !== requestToken) return;
+      setPicker((current) =>
+        current && "resume" in current
+          ? error
+            ? { resume: threads, error }
+            : { resume: threads }
+          : current
+      );
+    };
+    const list = window.vibe?.agentThreads?.list;
+    if (!list) {
+      applyResult([], "Saved-chat history is unavailable in this build.");
+      return;
+    }
+    const currentId = claudeSessionIdRef.current || session.threadRef?.id || "";
+    list({
+      provider: plannerFamily,
+      cwd: session.cwd,
+      fusion: true,
+      excludeIds: currentId ? [currentId] : undefined
+    })
+      .then((result) => {
+        if (result?.status === "found") {
+          applyResult(result.threads ?? []);
+        } else {
+          applyResult([], result?.message || "Could not read the saved chats.");
+        }
+      })
+      .catch(() => applyResult([], "Could not read the saved chats."));
+  }
+
   // Speed presets are EFFORT presets and preserve the user's model picks.
-  // Only "fast" swaps the planning model (to the family's fast pick) — that's
-  // its advertised point. balanced/deep/max used to hard-reset the model,
-  // which read as "my model pick didn't stick".
+  // Only "quick" swaps the planning model (to the family's lighter pick) and
+  // lowers effort: it is the old downgrade preset under a non-conflicting name.
   function applySpeedPreset(scope: FusionRoleScope, preset: FusionSpeedPreset) {
-    const fastPlannerModel = plannerFamily === "codex" ? "gpt-5.1-codex-mini" : "sonnet";
+    const quickPlannerModel = plannerFamily === "codex" ? "gpt-5.1-codex-mini" : "sonnet";
     if (scope === "planning") {
-      if (preset === "fast") {
-        applySettings({ plannerModel: fastPlannerModel, plannerEffort: "low" }, "planning speed");
+      if (preset === "quick") {
+        applySettings({ plannerModel: quickPlannerModel, plannerEffort: "low" }, "planning speed");
       } else if (preset === "balanced") {
         applySettings({ plannerEffort: "auto" }, "planning speed");
       } else if (preset === "deep") {
@@ -1672,7 +1915,7 @@ export default function FusionChatPane({
     }
 
     if (scope === "execution") {
-      if (preset === "fast") {
+      if (preset === "quick") {
         applySettings({ executorEffort: "low" }, "execution speed");
       } else if (preset === "balanced") {
         applySettings({ executorEffort: "auto" }, "execution speed");
@@ -1685,9 +1928,9 @@ export default function FusionChatPane({
       return;
     }
 
-    if (preset === "fast") {
+    if (preset === "quick") {
       applySettings(
-        { plannerModel: fastPlannerModel, plannerEffort: "low", executorEffort: "low" },
+        { plannerModel: quickPlannerModel, plannerEffort: "low", executorEffort: "low" },
         "Fusion speed"
       );
     } else if (preset === "balanced") {
@@ -1763,9 +2006,62 @@ export default function FusionChatPane({
 
   function normalizeSpeedPreset(value: string | undefined): FusionSpeedPreset | null {
     const normalized = String(value || "").toLowerCase();
+    if (normalized === "fast") {
+      return "quick";
+    }
     return FUSION_SPEED_VALUES.includes(normalized as FusionSpeedPreset)
       ? (normalized as FusionSpeedPreset)
       : null;
+  }
+
+  function applyFastServing(scope: FusionRoleScope, explicit?: boolean) {
+    if (scope === "planning") {
+      const next = explicit ?? !plannerFast;
+      applySettings({ plannerFast: next }, "planning fast serving");
+      return;
+    }
+
+    if (scope === "execution") {
+      const next = explicit ?? !executorFast;
+      applySettings({ executorFast: next }, "execution fast serving");
+      return;
+    }
+
+    const next = explicit ?? !(plannerFast && executorFast);
+    applySettings({ plannerFast: next, executorFast: next }, "fast serving");
+  }
+
+  function applyFastCommand(raw: string) {
+    const args = raw
+      .replace(/^\/fast\b/i, "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+    let scope: FusionRoleScope = "harness";
+    let explicit: boolean | undefined;
+    for (const arg of args) {
+      const lower = arg.toLowerCase();
+      if (lower === "on" || lower === "off") {
+        explicit = lower === "on";
+        continue;
+      }
+      if (["fusion", "harness", "all"].includes(lower)) {
+        scope = "harness";
+        continue;
+      }
+      if (["planning", "planner", "claude", "opus"].includes(lower)) {
+        scope = "planning";
+        continue;
+      }
+      if (["execution", "executor", "codex"].includes(lower)) {
+        scope = "execution";
+        continue;
+      }
+      pushCommandStatus("Unknown fast serving scope. Use /fast, /fast planner, /fast executor, /fast on, or /fast off.");
+      return true;
+    }
+    applyFastServing(scope, explicit);
+    return true;
   }
 
   function handleSlashCommand(text: string) {
@@ -1784,7 +2080,7 @@ export default function FusionChatPane({
     if (normalized === "/help") {
       setInput("");
       pushCommandStatus(
-        "commands: /plan, /auto, /mode, /planner-model, /executor-model, /speed, /effort, /models, /details, /clear, /resume. Advanced: /claude <model> (planner → Claude), /codex <model> (executor → Codex)."
+        "commands: /plan, /auto, /mode, /planner-model, /executor-model, /fast, /speed, /effort, /models, /details, /clear, /resume. Advanced: /claude <model> (planner → Claude), /codex <model> (executor → Codex)."
       );
       return true;
     }
@@ -1847,25 +2143,13 @@ export default function FusionChatPane({
 
     if (normalized === "/resume") {
       setInput("");
-      if (canResumeClaude) {
-        setMessages([]);
-        setInterruptingState(false);
-        setBusyState(false);
-        onResume();
-      } else {
-        push({
-          role: "opus",
-          kind: "error",
-          text: "No Claude Fusion chat is available to resume."
-        });
-      }
+      openResumePicker();
       return true;
     }
 
-    if (normalized === "/fast") {
+    if (normalized === "/fast" || normalized.startsWith("/fast ")) {
       setInput("");
-      applySpeedPreset("harness", "fast");
-      return true;
+      return applyFastCommand(raw);
     }
 
     // Open Fusion-parity pickers: bare command opens the family→model
@@ -1983,10 +2267,10 @@ export default function FusionChatPane({
       return true;
     }
 
-    const codexSpeedMatch = normalized.match(/^\/codex\s+(?:speed\s+)?(fast|balanced|deep|max)$/);
+    const codexSpeedMatch = normalized.match(/^\/codex\s+(?:speed\s+)?(quick|fast|balanced|deep|max)$/);
     if (codexSpeedMatch) {
       setInput("");
-      applySpeedPreset("execution", codexSpeedMatch[1] as FusionSpeedPreset);
+      applySpeedPreset("execution", normalizeSpeedPreset(codexSpeedMatch[1]) || "quick");
       return true;
     }
 
@@ -2220,12 +2504,23 @@ export default function FusionChatPane({
     setInterruptingState(true);
   }
 
+  function escInterrupt() {
+    if (busyRef.current && !interruptingRef.current && steeringRef.current.length > 0) {
+      const items = steeringRef.current;
+      pendingSteerFlushRef.current =
+        items.length === 1
+          ? items[0].text
+          : items.map((steer, index) => `${index + 1}. ${steer.text}`).join("\n\n");
+    }
+    interrupt();
+  }
+
   useEffect(() => {
     if (!busy || !isSelected) return;
     const handleWindowKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.key !== "Escape") return;
       event.preventDefault();
-      interrupt();
+      escInterrupt();
     };
     window.addEventListener("keydown", handleWindowKeyDown);
     return () => window.removeEventListener("keydown", handleWindowKeyDown);
@@ -2307,17 +2602,6 @@ export default function FusionChatPane({
               )}
             </span>
           )}
-          {cwdConflict && (
-            <span
-              className={clsx(
-                "pane-cwd-conflict-chip",
-                cwdConflict.active && "is-active"
-              )}
-              title={cwdConflictTitle(cwdConflict)}
-            >
-              {cwdConflictChipLabel(cwdConflict)}
-            </span>
-          )}
         </div>
         <div className="pane-status">
           <span className={`status-pill status-${pillStatus}`}>{pillLabel}</span>
@@ -2335,11 +2619,9 @@ export default function FusionChatPane({
           >
             {session.started ? <RefreshCcw size={14} /> : <Play size={14} />}
           </button>
-          {canResumeClaude && (
-            <button title="Resume last Fusion Claude chat" onClick={onResume}>
-              <RotateCcw size={14} />
-            </button>
-          )}
+          <button title="Resume a saved chat" onClick={openResumePicker}>
+            <RotateCcw size={14} />
+          </button>
           <button title={isMaximized ? "Restore pane" : "Maximize pane"} onClick={onMaximize}>
             {isMaximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
           </button>
@@ -2462,7 +2744,7 @@ export default function FusionChatPane({
                 </div>
               ))}
               <span className="fusion-steering-hint">
-                Held here until Fusion's next step picks it up · Esc interrupts now
+                Held here until Fusion's next step picks it up · Esc pushes it in now
               </span>
             </div>
           )}
@@ -2526,7 +2808,8 @@ export default function FusionChatPane({
                       e.preventDefault();
                       // Picker open: Esc backs out ONE stage per press
                       // (model → family → closed), Open Fusion's mechanic.
-                      if (picker?.family) {
+                      // The resume picker has one stage, so Esc just closes it.
+                      if (picker && "role" in picker && picker.family) {
                         setPicker({ role: picker.role });
                         setInput("");
                         return;
@@ -2556,7 +2839,7 @@ export default function FusionChatPane({
                   if (e.key === "Escape") {
                     if (busy) {
                       e.preventDefault();
-                      interrupt();
+                      escInterrupt();
                       return;
                     }
                     if (input) {
@@ -2636,7 +2919,7 @@ export default function FusionChatPane({
                 </span>
               ) : (
                 <>
-                  {usageLabel && <span className="oc-usage">{usageLabel}</span>}
+                  {SHOW_FUSION_COST && usageLabel && <span className="oc-usage">{usageLabel}</span>}
                   <span className="oc-hint">
                     <span className="oc-hint-key">shift+tab</span>{" "}
                     {fusionRunMode === "plan" ? "auto" : "plan"} mode

@@ -44,6 +44,18 @@
 > overrides (benign on Windows). Locked by
 > `scripts/backend/openfusion-isolation-smoke.cjs`.
 >
+> **Parallel executor children (2026-07-05):** Open Fusion preserves
+> OpenCode's native ability to run multiple `task` children inside one pane.
+> The Planner prompt permits multiple same-turn task calls only for genuinely
+> independent, disjoint scopes; dependent/checkpointed milestones stay
+> sequential and must be reviewed before the next delegation. The host tracks
+> active executor children in `activeExecutorTasks: Map<childSessionId, task>`
+> and the steering router snapshots every active child so it can target a
+> selected `childSessionId` for inject/replan. The pane keys Task-row progress
+> by child `sessionID` instead of by the shared `executor` role, so two live
+> executor rows can tick independently and each row carries an
+> Executor/Investigator chip.
+>
 > **No default models (2026-07-02):** the pane assumes nothing on open. The
 > old hardcoded Planner/Executor defaults are gone everywhere (backend
 > `agentTelemetry.cjs`/`main.cjs`, renderer `openFusion.ts`); `""` means "not
@@ -174,8 +186,11 @@
 > collapsed at 10 lines, "Click to expand"); Edit renders the host-forwarded
 > `meta.diff` as a colored unified diff; `todowrite` renders OpenCode's
 > "# Todos" `[✓]/[•]/[ ]` checklist; delegations render as OpenCode Task rows
-> ("Executor Task — description" + a live "↳ current tool / N toolcalls" line,
-> completed as "↳ N toolcalls · 12s"; click reveals the extracted task report).
+> (Executor/Investigator chip + "Executor Task — description" + a live
+> "↳ current tool / N toolcalls" line, completed as "↳ N toolcalls · 12s";
+> click reveals the extracted task report). Live Task progress is attributed by
+> child `sessionID`, not role, so parallel executor children do not overwrite
+> each other's progress line.
 > Brain text is markdown prose (react-markdown + GFM); thinking renders as
 > OpenCode's "Thinking" spinner → "+ Thought: title" collapsible; subagent text
 > streams are Details-lane worklines ("↳ …" last-line tickers). Each turn ends
@@ -203,6 +218,17 @@
 > `{type:"step-start"}` on each NEW root assistant message; the pane pins
 > queued sends above the composer — opencode's own QUEUED badge mechanic —
 > until a step-start/turn boundary flushes them into the transcript.
+>
+> **OpenFusion steering router (2026-07-05):** classic Fusion's
+> `codex_implement` steering route is adapter-owned and can early-return a
+> planner decision object while the executor keeps running. Open Fusion's
+> executor delegation is a native OpenCode `task` tool, so the host runs a
+> hidden Planner decision pass when a mid-turn steer arrives during active
+> executor work. The router sees every active child snapshot and returns
+> `inject`, `replan`, or `ignore` plus a `childSessionId`; `inject` posts the
+> refined steer into that child session, while `replan` aborts only that child
+> and queues an amended root Planner prompt. If the router omits or names a
+> stale child, the host falls back to the most recently started active executor.
 >
 > **Provider auth (in-pane, OpenCode-parity, live-verified):** the pane
 > replicates OpenCode's own "Connect a provider" workflow over the same server
@@ -499,7 +525,13 @@ transcript ordering (the coherence seam Fusion fights in
      milestones instead of acting on them. Micro-slicing is explicitly ruled
      out — a milestone is a verifiable increment, and small single-stage tasks
      stay one delegation.
-  6. **Verified-done detection + one-shot nudge (2026-07-04).** The gate is no
+  6. **Independent parallel fan-out.** The Planner may emit multiple `task`
+     calls in one assistant turn only for independent, disjoint work with no
+     ordering dependency or shared file ownership. Parallel children must each
+     get self-contained scope and acceptance criteria. Anything that depends on
+     reviewing a prior milestone, or might edit/verify the same files, remains
+     sequential under the checkpoint rule.
+  7. **Verified-done detection + one-shot nudge (2026-07-04).** The gate is no
      longer purely an honor system: a host-side tracker
      (`backend/completionGate.cjs`, `createOpenFusionGateTracker`) observes the
      live normalized event stream and mechanically records whether an
@@ -657,7 +689,22 @@ session, targetRef)`, which reuses the deliberate-resume plumbing (stop →
 relaunch with `nextLaunchMode: "resume"`, confirm-before-resume self-heal,
 `GET /session/{id}/message` rehydration), stashing the outgoing conversation
 as the next `resumeRef`. Locked by
-`scripts/backend/openfusion-isolation-smoke.cjs`. The old embedded-TUI launch path (`opencode --agent planner` inside a
+`scripts/backend/openfusion-isolation-smoke.cjs`.
+
+**Ghost sessions + real titles (2026-07-04):** the picker used to be a wall of
+identical "vibeTerminal Open Fusion" rows, most of them EMPTY — every pane
+start (including every app reopen) eagerly `POST /session`-ed with that fixed
+title, and opencode never re-titles a session created with an explicit title,
+so pane-open ghosts outnumbered and outdated the real conversations. Fixed at
+both ends: the host now defers session creation to the FIRST input and titles
+the session with that prompt (`ensureSession` in
+`backend/openFusionChatHost.cjs`; the `engine-ready` event replaces the eager
+session event as the renderer's provider-prefetch trigger), and the listing
+hides legacy untouched ghosts (`updated === created` to the millisecond — a
+real conversation bumps `updated` on its first message). Resume/confirm paths
+ignore the ghost filter, so a stashed ghost id still resumes.
+
+The old embedded-TUI launch path (`opencode --agent planner` inside a
 PTY with `OPENCODE_TUI_CONFIG`, TUI plugin pickers) is superseded; the config
 generator still writes the theme/tui/plugin files, which stock `opencode` runs
 in that directory can pick up, but no pane launches the TUI anymore.

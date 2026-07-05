@@ -232,6 +232,23 @@ async function main() {
     hostSource.includes("No Brain model is set"),
     "chat host must refuse turns without an explicit Brain model (backstop behind the UI gate)"
   );
+  // Ghost-session fixes: a fresh pane must NOT create a session at boot (it
+  // is deferred to the first input and titled from that prompt), and the
+  // history listing must hide the untouched ghosts earlier builds minted.
+  assert(
+    hostSource.includes("function ensureSession") &&
+      hostSource.includes("ensureSession(id, state, text)") &&
+      !hostSource.includes('await request(state, "POST", "/session", { title: "vibeTerminal Open Fusion" })'),
+    "chat host must defer session creation to the first input and title it from the prompt"
+  );
+  const threadHostSource = fs.readFileSync(
+    path.join(rootDir, "backend", "agentThreadHost.cjs"),
+    "utf8"
+  );
+  assert(
+    threadHostSource.includes("thread.updatedAt > thread.createdAt"),
+    "history listing must hide untouched ghost sessions (updated === created)"
+  );
   const mainSource = fs.readFileSync(path.join(rootDir, "backend", "main.cjs"), "utf8");
   assert(
     mainSource.includes("getOpenFusionOpencodeHome()") &&
@@ -241,10 +258,19 @@ async function main() {
   assert(
     mainSource.includes('ipcMain.handle("agent-thread:list"') &&
       mainSource.includes(
-        "Saved-chat listing is only available for Open Fusion panes."
+        "Saved-chat listing is only available for chat panes."
       ) &&
       mainSource.includes("getOpenFusionThreadCutoffMs"),
-    "saved-chat listing must fail closed (app store only) and apply the migration cutoff"
+    "opencode saved-chat listing must fail closed (app store only) and apply the migration cutoff"
+  );
+  // The Fusion picker's claude/codex listings read the user's own global
+  // stores (where --resume/thread-resume read from) and bypass the
+  // opencode-only gate — but never the other way around.
+  assert(
+    mainSource.indexOf('payload?.provider === "claude" || payload?.provider === "codex"') <
+      mainSource.indexOf("Saved-chat listing is only available for chat panes.") &&
+      mainSource.indexOf('payload?.provider === "claude" || payload?.provider === "codex"') !== -1,
+    "claude/codex listing must pass through above the opencode fail-closed gate"
   );
   const preloadSource = fs.readFileSync(
     path.join(rootDir, "preload", "preload.cjs"),

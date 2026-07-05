@@ -4,9 +4,21 @@ const path = require("path");
 
 const appPath = path.join(__dirname, "..", "..", "frontend", "App.tsx");
 const stylesPath = path.join(__dirname, "..", "..", "frontend", "styles.css");
+const backendPath = path.join(__dirname, "..", "..", "backend", "main.cjs");
+const preloadPath = path.join(__dirname, "..", "..", "preload", "preload.cjs");
+const electronTypesPath = path.join(
+  __dirname,
+  "..",
+  "..",
+  "frontend",
+  "electron.d.ts"
+);
 
 const appSource = fs.readFileSync(appPath, "utf8");
 const stylesSource = fs.readFileSync(stylesPath, "utf8");
+const backendSource = fs.readFileSync(backendPath, "utf8");
+const preloadSource = fs.readFileSync(preloadPath, "utf8");
+const electronTypesSource = fs.readFileSync(electronTypesPath, "utf8");
 
 assert(
   !appSource.includes("window.vibe?.app.getCwd().then") &&
@@ -99,12 +111,46 @@ assert(
 );
 
 assert(
+  backendSource.includes('ipcMain.handle("workspace:open-in-explorer"') &&
+    backendSource.includes('ipcMain.handle("workspace:open-terminal"') &&
+    preloadSource.includes("openInExplorer: (path) =>") &&
+    preloadSource.includes('ipcRenderer.invoke("workspace:open-in-explorer", { path })') &&
+    preloadSource.includes("openTerminal: (path) =>") &&
+    preloadSource.includes('ipcRenderer.invoke("workspace:open-terminal", { path })') &&
+    electronTypesSource.includes("openInExplorer: (path: string)") &&
+    electronTypesSource.includes("openTerminal: (path: string)"),
+  "workspace actions should be exposed through main IPC, preload, and renderer types"
+);
+
+assert(
+  appSource.includes("interface WorkspaceContextMenuState") &&
+    appSource.includes("function openWorkspaceContextMenu(") &&
+    appSource.includes("function runWorkspaceContextAction(") &&
+    appSource.includes("workspaceApi.openInExplorer(workspace.path)") &&
+    appSource.includes("workspaceApi.openTerminal(workspace.path)") &&
+    appSource.includes("Open in file explorer") &&
+    appSource.includes("Open terminal") &&
+    appSource.includes("workspace-context-menu") &&
+    appSource.includes("onContextMenu={(event) =>") &&
+    stylesSource.includes(".workspace-context-menu") &&
+    stylesSource.includes(".workspace-row.context-open .workspace-button"),
+  "folder rows should expose a styled React context menu wired to workspace actions"
+);
+
+assert(
   stylesSource.includes(".workspace-row") &&
     stylesSource.includes(".workspace-remove-button") &&
     stylesSource.includes(".confirmation-backdrop") &&
     stylesSource.includes(".confirmation-dialog") &&
     stylesSource.includes(".confirmation-actions button.danger"),
   "folder remove controls and confirmation dialog should be styled"
+);
+
+assert(
+  stylesSource.includes("linear-gradient(180deg, #1c211d 0%, #151913 100%)") &&
+    stylesSource.includes("inset 3px 0 0 #f4cf5a") &&
+    stylesSource.includes(".workspace-context-menu button:hover"),
+  "sidebar should use the refreshed visual language for rows, active states, and menus"
 );
 
 console.log("workspace smoke passed");

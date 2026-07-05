@@ -55,6 +55,8 @@ declare global {
       workspace: {
         selectFolder: () => Promise<string | null>;
         getCodeChanges: (cwd: string) => Promise<CodeChangeSummary>;
+        openInExplorer: (path: string) => Promise<{ ok: boolean; error?: string }>;
+        openTerminal: (path: string) => Promise<{ ok: boolean; error?: string }>;
       };
       files?: {
         getPathForFile?: (file: File) => string;
@@ -96,6 +98,8 @@ declare global {
           // Codex. "auto" model/effort values are omitted rather than sent.
           plannerFamily?: FusionFamily | string;
           executorFamily?: FusionFamily | string;
+          plannerFast?: boolean;
+          executorFast?: boolean;
           model?: string;
           executorModel?: string;
           mode?: FusionRunMode | string;
@@ -108,9 +112,12 @@ declare global {
         updateSettings: (
           id: string,
           settings: {
+            plannerFamily?: FusionFamily | string;
+            plannerFast?: boolean;
             executorFamily?: FusionFamily | string;
             executorModel?: string;
             executorEffort?: string;
+            executorFast?: boolean;
             // Legacy field names (pre-family builds).
             codexModel?: string;
             codexEffort?: string;

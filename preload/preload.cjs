@@ -72,7 +72,11 @@ contextBridge.exposeInMainWorld("vibe", {
   workspace: {
     selectFolder: () => ipcRenderer.invoke("workspace:select-folder"),
     getCodeChanges: (cwd) =>
-      ipcRenderer.invoke("workspace:code-changes", { cwd })
+      ipcRenderer.invoke("workspace:code-changes", { cwd }),
+    openInExplorer: (path) =>
+      ipcRenderer.invoke("workspace:open-in-explorer", { path }),
+    openTerminal: (path) =>
+      ipcRenderer.invoke("workspace:open-terminal", { path })
   },
   files: {
     getPathForFile: (file) => getPathForDroppedFile(file),

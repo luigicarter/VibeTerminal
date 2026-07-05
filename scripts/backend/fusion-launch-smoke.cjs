@@ -30,9 +30,13 @@ async function main() {
   try {
     const files = await manager.prepareFusionFiles("fusion-session", {
       cwd: process.cwd(),
+      plannerFamily: "codex",
+      plannerFast: true,
+      executorFamily: "codex",
       codexBin,
       codexModel: "gpt-5.5",
       codexEffort: "xhigh",
+      executorFast: true,
       runMode: "plan"
     });
     assert(files, "prepareFusionFiles returned null");
@@ -100,6 +104,11 @@ async function main() {
     );
     assert(files.settingsFile && fs.existsSync(files.settingsFile), "missing Fusion Codex settings file");
     const fusionSettings = JSON.parse(fs.readFileSync(files.settingsFile, "utf8"));
+    assert(fusionSettings.plannerFamily === "codex", "settings file missing the selected planner family");
+    assert(fusionSettings.plannerFast === true, "settings file missing plannerFast");
+    assert(fusionSettings.fastMode === true, "settings file missing Claude planner fastMode");
+    assert(fusionSettings.executorFamily === "codex", "settings file missing the selected executor family");
+    assert(fusionSettings.executorFast === true, "settings file missing executorFast");
     assert(fusionSettings.codexModel === "gpt-5.5", "settings file missing the selected Codex model");
     assert(fusionSettings.codexEffort === "xhigh", "settings file missing the selected Codex effort");
     assert(
@@ -147,8 +156,13 @@ async function main() {
       buildFusionSystemPrompt().includes("## Checkpointed delegation") &&
         buildFusionSystemPrompt().includes("ONE codex_implement call per milestone") &&
         buildFusionSystemPrompt().includes("BEFORE delegating the") &&
+        buildFusionSystemPrompt().includes("Withholding forward knowledge") &&
         buildFusionSystemPrompt().includes("expected checkpoint state"),
       "buildFusionSystemPrompt is missing the checkpointed delegation protocol"
+    );
+    assert(
+      buildFusionSystemPrompt().includes("switch families mid-thread"),
+      "buildFusionSystemPrompt is missing the mid-thread engine/model identity clause"
     );
     const mainSource = fs.readFileSync(path.join(rootDir, "backend", "main.cjs"), "utf8");
     assert(/function fusionClaudeAllowedTools/.test(mainSource), "Fusion allowed tools helper not found in main.cjs");
@@ -184,6 +198,10 @@ async function main() {
     assert(
       allowList.some((entry) => entry.includes("codex_investigate")),
       "Fusion allowlist should expose codex_investigate for Codex-fed exploration"
+    );
+    assert(
+      allowList.some((entry) => entry.includes("codex_steer_resolve")),
+      "Fusion allowlist should expose codex_steer_resolve for planner-first mid-turn steering"
     );
     assert(
       /disallowedTools:\s*fusionClaudeDisallowedTools\(\)/.test(mainSource) &&
@@ -224,8 +242,10 @@ async function main() {
         // Per-role families reach both the telemetry files and the host.
         /normalizeFusionFamily\(payload\.plannerFamily, "claude"\)/.test(mainSource) &&
         /normalizeFusionFamily\(payload\.executorFamily, "codex"\)/.test(mainSource) &&
-        /plannerFamily,\s*\n\s*codexBin,/.test(mainSource),
-      "Fusion launch should pass independent per-role effort/family settings"
+        /plannerFamily,\s*\n\s*plannerFast,/.test(mainSource) &&
+        /settingsFile: JSON\.stringify\(\{ fastMode: plannerFast \}\)/.test(mainSource) &&
+        /executorFast/.test(mainSource),
+      "Fusion launch should pass independent per-role effort/family/fast settings"
     );
     assert(
       /steerFusionSession\(payload\.id, payload\.text\)/.test(mainSource) &&
@@ -243,6 +263,11 @@ async function main() {
       "Fusion telemetry should persist and update per-session run mode"
     );
     const hostSource = fs.readFileSync(path.join(rootDir, "backend", "fusionChatHost.cjs"), "utf8");
+    assert(
+      /subtype: "apply_flag_settings"/.test(hostSource) &&
+        /settings: \{ fastMode: state\.plannerFast \}/.test(hostSource),
+      "Fusion chat host should apply Claude planner fastMode live"
+    );
     assert(
       /FUSION PLAN MODE IS ACTIVE/.test(hostSource) &&
         /msg\.type === "mode"/.test(hostSource) &&

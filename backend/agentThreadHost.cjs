@@ -5,6 +5,7 @@ const readline = require("readline");
 const { spawn } = require("child_process");
 const {
   findCodexThread,
+  listCodexThreads,
   confirmCodexThread,
   normalizeThreadTitle
 } = require("./agentThreads.cjs");
@@ -184,7 +185,9 @@ function parseClaudeTranscript(filePath, cwd) {
     let sessionId = "";
     let createdAt = 0;
     let title = "";
+    let aiTitle = "";
     let customTitle = "";
+    let entrypoint = "";
     let sawMatchingCwd = false;
 
     for (const line of lines) {
@@ -210,6 +213,12 @@ function parseClaudeTranscript(filePath, cwd) {
       }
 
       sessionId = sessionId || event.sessionId || "";
+      // How the session was launched: interactive pane chats record
+      // `entrypoint:"cli"`, Fusion's headless planner records `"sdk-cli"` —
+      // the discriminator the Fusion resume picker filters on.
+      if (!entrypoint && typeof event.entrypoint === "string") {
+        entrypoint = event.entrypoint;
+      }
       // A deliberate rename (`--name` / in-session rename) wins over the
       // first-prompt title — it is what Claude's own /resume picker shows.
       // Generic pane labels this app once forced are skipped instead.
@@ -220,6 +229,15 @@ function parseClaudeTranscript(filePath, cwd) {
         !GENERIC_CUSTOM_TITLE.test(event.customTitle.trim())
       ) {
         customTitle = normalizeThreadTitle(event.customTitle);
+      }
+      // Claude's generated session title (what its own picker shows) — better
+      // than the raw first prompt when present.
+      if (
+        !aiTitle &&
+        event.type === "ai-title" &&
+        typeof event.aiTitle === "string"
+      ) {
+        aiTitle = normalizeThreadTitle(event.aiTitle);
       }
       // First-prompt title: mirrors how Claude titles untitled sessions in its
       // picker. Assistant/summary/meta lines never title a thread.
@@ -251,13 +269,24 @@ function parseClaudeTranscript(filePath, cwd) {
     return {
       provider: "claude",
       id: sessionId,
-      title: customTitle || title,
+      title: customTitle || aiTitle || title,
       createdAt: Number.isFinite(createdAt) ? createdAt : 0,
-      updatedAt: stat.mtimeMs
+      updatedAt: stat.mtimeMs,
+      entrypoint
     };
   } catch {
     return null;
   }
+}
+
+// Strip parse-internal fields (entrypoint) before a ref leaves the host — a
+// published threadRef gets persisted in workspace state as-is.
+function publishClaudeThreadRef(ref) {
+  if (!ref) {
+    return ref;
+  }
+  const { entrypoint: _entrypoint, ...threadRef } = ref;
+  return threadRef;
 }
 
 function findLatestClaudeThread(cwd, after = 0, excludeIds = []) {
@@ -274,7 +303,39 @@ function findLatestClaudeThread(cwd, after = 0, excludeIds = []) {
     )
     .sort((a, b) => b.updatedAt - a.updatedAt);
 
-  return matches[0] || null;
+  return publishClaudeThreadRef(matches[0] || null);
+}
+
+// Every Claude chat for a folder, newest first — the Fusion resume picker's
+// data source. `fusionOnly` keeps the picker to chats the Fusion harness
+// itself created (headless SDK launches record entrypoint "sdk-cli";
+// interactive pane chats record "cli"). An empty projects tree is a real
+// empty history, not a failure.
+function listClaudeThreads(cwd, after = 0, excludeIds = [], options = {}) {
+  const excluded = toExcludedSet(excludeIds);
+  const seen = new Set();
+  const threads = collectJsonlFiles(claudeProjectsDir())
+    .map((filePath) => parseClaudeTranscript(filePath, cwd))
+    .filter(
+      (ref) =>
+        ref &&
+        ref.id &&
+        !excluded.has(String(ref.id)) &&
+        Number.isFinite(ref.createdAt) &&
+        ref.createdAt >= after &&
+        (!options.fusionOnly || ref.entrypoint === "sdk-cli")
+    )
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .filter((ref) => {
+      if (seen.has(ref.id)) {
+        return false;
+      }
+      seen.add(ref.id);
+      return true;
+    })
+    .map(publishClaudeThreadRef);
+
+  return { status: "found", threads };
 }
 
 function placeholderClaudeRef(id) {
@@ -361,8 +422,9 @@ function confirmClaudeThread(cwd, id) {
   const located = locateClaudeTranscriptFile(target);
 
   if (located.path) {
-    const threadRef =
-      parseClaudeTranscript(located.path, cwd) || placeholderClaudeRef(target);
+    const threadRef = publishClaudeThreadRef(
+      parseClaudeTranscript(located.path, cwd) || placeholderClaudeRef(target)
+    );
     return { status: "found", threadRef };
   }
 
@@ -505,7 +567,13 @@ function listOpenCodeThreads(cwd, after = 0, excludeIds = [], envOverrides) {
         const sessions = JSON.parse(stdout);
         resolve({
           status: "found",
-          threads: selectOpenCodeThreadRefs(sessions, cwd, after, excludeIds)
+          // updated === created (to the ms) means nothing ever happened in the
+          // session: a ghost minted by a pane start in the eager-create era.
+          // Real conversations bump `updated` on their first message. Only the
+          // history listing hides them — confirm/latest lookups are untouched.
+          threads: selectOpenCodeThreadRefs(sessions, cwd, after, excludeIds).filter(
+            (thread) => thread.updatedAt > thread.createdAt
+          )
         });
       } catch {
         resolve({
@@ -833,6 +901,11 @@ async function findLatestAgentThread(payload) {
       return confirmCodexThread(cwd, payload.confirmId);
     }
 
+    // History listing for the Fusion resume picker (codex-planner panes).
+    if (payload.list) {
+      return listCodexThreads(payload);
+    }
+
     return findCodexThread(payload);
   }
 
@@ -842,6 +915,14 @@ async function findLatestAgentThread(payload) {
     // `claude --resume <id>`.
     if (payload.confirmId) {
       return confirmClaudeThread(cwd, payload.confirmId);
+    }
+
+    // History listing for the Fusion resume picker: every chat for this
+    // folder, newest first. `fusion` keeps it to harness-created chats.
+    if (payload.list) {
+      return listClaudeThreads(cwd, after, payload.excludeIds, {
+        fusionOnly: Boolean(payload.fusion)
+      });
     }
 
     const threadRef = findLatestClaudeThread(cwd, after, payload.excludeIds);
@@ -984,7 +1065,9 @@ module.exports = {
   findLatestCursorThread,
   findLatestOpenCodeThread,
   isSamePath,
+  listClaudeThreads,
   listOpenCodeThreads,
+  locateClaudeTranscriptFile,
   normalizePathForCompare,
   opencodeSpawnEnv,
   selectOpenCodeThreadRefs,

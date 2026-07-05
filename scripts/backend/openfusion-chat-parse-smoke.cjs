@@ -17,6 +17,18 @@ const {
   normalizeAuthMethods,
   splitModelId,
   buildPlannerTurnParts,
+  buildExecutorSteerParts,
+  buildExecutorSteerPromptRequest,
+  buildPlannerPromptRequest,
+  buildOpenFusionSteerDecisionPrompt,
+  parseOpenFusionSteerDecision,
+  buildOpenFusionReplanPrompt,
+  shouldRouteOpenFusionSteer,
+  summarizeOpenFusionExecutorActivity,
+  extractOpenFusionAssistantTexts,
+  openFusionExecutorSnapshot,
+  selectOpenFusionExecutorTask,
+  OPEN_FUSION_EXECUTOR_STEER_PREFIX,
   OPEN_FUSION_GATE_MARKER,
   OPEN_FUSION_GATE_REMINDER,
   OPEN_FUSION_GATE_NUDGE,
@@ -436,6 +448,7 @@ assert(
 // Task tool call + completion; executor bash call + result carry the child role.
 const toolCalls = byType("tool-call");
 const toolResults = byType("tool-result");
+const taskChildEvents = byType("task-child");
 assert(
   toolCalls.some((event) => event.name === "task" && event.role === "brain"),
   "the task delegation should emit a brain tool-call"
@@ -443,6 +456,16 @@ assert(
 assert(
   toolCalls.filter((event) => event.name === "task").length === 1,
   "pending → running must emit only one task tool-call"
+);
+assert(
+  taskChildEvents.some(
+    (event) =>
+      event.name === "task" &&
+      event.role === "brain" &&
+      event.childSessionId === CHILD &&
+      event.agent === "executor"
+  ),
+  "pending → running should surface the task child session for live executor steering without duplicating the tool row"
 );
 assert(
   toolResults.some(
@@ -601,6 +624,131 @@ assert(
     turnParts[1].text === OPEN_FUSION_GATE_REMINDER &&
     turnParts[1].text.startsWith(OPEN_FUSION_GATE_MARKER),
   "buildPlannerTurnParts should append the marked gate reminder as a separate part"
+);
+const steerParts = buildExecutorSteerParts("change course");
+assert(
+  Array.isArray(steerParts) &&
+    steerParts.length === 1 &&
+    steerParts[0].type === "text" &&
+    steerParts[0].text === `${OPEN_FUSION_EXECUTOR_STEER_PREFIX}change course` &&
+    !steerParts[0].text.startsWith(OPEN_FUSION_GATE_MARKER),
+  "buildExecutorSteerParts should create a live executor steering prompt without using the gate marker"
+);
+const steerRequest = buildExecutorSteerPromptRequest("ses child/1", "openai/gpt-5.1-codex", "change course");
+assert(
+  steerRequest &&
+    steerRequest.path === "/session/ses%20child%2F1/prompt_async" &&
+    steerRequest.body.agent === "executor" &&
+    steerRequest.body.model.providerID === "openai" &&
+    steerRequest.body.model.modelID === "gpt-5.1-codex" &&
+    steerRequest.body.parts[0].text === `${OPEN_FUSION_EXECUTOR_STEER_PREFIX}change course`,
+  "buildExecutorSteerPromptRequest should target the active child session with executor model and steering parts"
+);
+assert(
+  buildExecutorSteerPromptRequest("", "openai/gpt-5.1-codex", "change") === null &&
+    buildExecutorSteerPromptRequest("ses_child", "", "change") === null &&
+    buildExecutorSteerPromptRequest("ses_child", "openai/gpt-5.1-codex", "  ") === null,
+  "buildExecutorSteerPromptRequest should fail closed without child session, model, or steering text"
+);
+const routeState = {
+  activeExecutorTasks: new Map([
+    [
+      CHILD,
+      {
+        childSessionId: CHILD,
+        taskPrompt: "implement the backend route",
+        activity: ["tool read: backend/openFusionChatHost.cjs"],
+        startedAt: 1
+      }
+    ],
+    [
+      "ses_child_two",
+      {
+        childSessionId: "ses_child_two",
+        taskPrompt: "update the frontend task row",
+        activity: ["tool read: frontend/components/OpenFusionChatPane.tsx"],
+        startedAt: 2
+      }
+    ]
+  ])
+};
+assert(
+  shouldRouteOpenFusionSteer(routeState, "tighten this") === true &&
+    shouldRouteOpenFusionSteer({ activeExecutorTasks: new Map() }, "tighten this") === false &&
+    shouldRouteOpenFusionSteer(routeState, "   ") === false,
+  "Open Fusion steering should route only when a non-empty steer lands during an active executor task"
+);
+const routeSnapshot = openFusionExecutorSnapshot(routeState);
+assert(
+  routeSnapshot.childSessionId === "ses_child_two" &&
+    routeSnapshot.activeTasks.length === 2 &&
+    routeSnapshot.activeTasks.some((task) => task.childSessionId === CHILD) &&
+    selectOpenFusionExecutorTask(routeState, CHILD)?.childSessionId === CHILD &&
+    selectOpenFusionExecutorTask(routeState, "missing")?.childSessionId === "ses_child_two",
+  "Open Fusion steering snapshots should list every active child and target an explicit child before falling back to the newest active task"
+);
+const decisionPrompt = buildOpenFusionSteerDecisionPrompt("tighten this", routeSnapshot);
+assert(
+  decisionPrompt.includes('"childSessionId":"active child session id or empty"') &&
+    decisionPrompt.includes("implement the backend route") &&
+    decisionPrompt.includes("update the frontend task row") &&
+    decisionPrompt.includes("ses_child_two") &&
+    decisionPrompt.includes("tool read: backend/openFusionChatHost.cjs") &&
+    decisionPrompt.includes("tighten this"),
+  "steer decision prompt should include strict action schema, every active task, executor activity, and user steer"
+);
+const fencedDecision = parseOpenFusionSteerDecision(
+  '```json\n{"action":"replan","childSessionId":"ses_child_two","text":"redo task","reason":"scope changed"}\n```',
+  "fallback steer"
+);
+const noisyDecision = parseOpenFusionSteerDecision(
+  'Planner note {"action":"ignore","text":"","reason":"already handled"} trailing',
+  "fallback steer"
+);
+const garbageDecision = parseOpenFusionSteerDecision("not json", "fallback steer");
+assert(
+  fencedDecision.action === "replan" &&
+    fencedDecision.childSessionId === "ses_child_two" &&
+    fencedDecision.text === "redo task" &&
+    noisyDecision.action === "ignore" &&
+    noisyDecision.text === "fallback steer" &&
+    garbageDecision.action === "inject" &&
+    garbageDecision.text === "fallback steer" &&
+    garbageDecision.fallback === true,
+  "steer decision parser should handle fenced/noisy JSON and fall back to inject on garbage"
+);
+assert(
+  summarizeOpenFusionExecutorActivity({
+    type: "tool-call",
+    name: "read",
+    input: { path: "backend/openFusionChatHost.cjs" }
+  }).includes("backend/openFusionChatHost.cjs") &&
+    summarizeOpenFusionExecutorActivity({ type: "assistant-text", delta: "working on the route" }).includes("working on the route"),
+  "executor activity summarizer should capture tool details and assistant snippets"
+);
+assert(
+  extractOpenFusionAssistantTexts([
+    { info: { role: "user" }, parts: [{ type: "text", text: "hidden user" }] },
+    { info: { role: "assistant" }, parts: [{ type: "text", text: "decision text" }] }
+  ])[0] === "decision text",
+  "router assistant extraction should ignore user messages and return assistant text"
+);
+const plannerPrompt = buildPlannerPromptRequest("ses_root", "openrouter/google/gemini-3-pro", "amended task", "auto");
+assert(
+  plannerPrompt &&
+    plannerPrompt.path === "/session/ses_root/prompt_async" &&
+    plannerPrompt.body.agent === "planner" &&
+    plannerPrompt.body.model.providerID === "openrouter" &&
+    plannerPrompt.body.model.modelID === "google/gemini-3-pro",
+  "planner prompt request should target the root session with the selected planner model"
+);
+const replanPrompt = buildOpenFusionReplanPrompt("stop doing x", "do y instead", openFusionExecutorSnapshot(routeState));
+assert(
+  replanPrompt.includes("OPEN FUSION STEERING REPLAN") &&
+    replanPrompt.includes("stop doing x") &&
+    replanPrompt.includes("do y instead") &&
+    replanPrompt.includes("implement the backend route"),
+  "replan prompt should carry the user steer, amended task, and interrupted executor snapshot"
 );
 // Plan turns swap in the plan-variant reminder — SAME marker prefix, or
 // rehydration would render it as user text.
@@ -779,6 +927,19 @@ assert(
     hostSource.includes("createOpenFusionGateTracker({ cwd: state.cwd })") &&
     hostSource.includes('mode !== "plan" && !queued && Boolean(state.gate && state.gate.consumeNudge())'),
   "Open Fusion host must observe live events through the completion-gate tracker and gate the one-shot nudge"
+);
+assert(
+  hostSource.includes("activeExecutorTasks") &&
+    hostSource.includes("getPrimaryActiveExecutorTask") &&
+    hostSource.includes("selectOpenFusionExecutorTask") &&
+    hostSource.includes("ensureRouterSession") &&
+    hostSource.includes("runSteerDecision") &&
+    hostSource.includes("routeSteerToPlanner") &&
+    hostSource.includes("preserveSteerViaExecutorOrRoot") &&
+    hostSource.includes('type: "steer-route"') &&
+    hostSource.includes("if (!handled)") &&
+    hostSource.includes("return;"),
+  "Open Fusion host should route active executor steering through a hidden planner decision before falling back to root queue"
 );
 
 console.log("Open Fusion chat parse smoke passed");

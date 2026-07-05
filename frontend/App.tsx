@@ -5,6 +5,7 @@ import {
   type CSSProperties,
   type DragEvent as ReactDragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent
 } from "react";
 import {
@@ -18,6 +19,7 @@ import {
   Plus,
   Play,
   RefreshCw,
+  TerminalSquare,
   X
 } from "lucide-react";
 import clsx from "clsx";
@@ -43,7 +45,6 @@ import {
   statusFromAttentionState,
   statusFromTerminalEvent
 } from "./attention";
-import { computeCwdConflicts } from "./cwdConflicts";
 import TerminalPane from "./components/TerminalPane";
 import FusionChatPane from "./components/FusionChatPane";
 import {
@@ -168,6 +169,14 @@ type WorkspaceDropPosition = "before" | "after";
 interface WorkspaceDropTarget {
   workspaceId: string;
   position: WorkspaceDropPosition;
+}
+
+interface WorkspaceContextMenuState {
+  workspaceId: string;
+  name: string;
+  path: string;
+  x: number;
+  y: number;
 }
 
 interface ThreadLookupPatch {
@@ -398,9 +407,11 @@ function normalizedFusionSessionFields(session: AgentSession) {
     plannerFamily: session.fusionPlannerFamily,
     plannerModel: session.fusionPlannerModel,
     plannerEffort: session.fusionPlannerEffort,
+    plannerFast: session.fusionPlannerFast,
     executorFamily: session.fusionExecutorFamily,
     executorModel: session.fusionExecutorModel,
     executorEffort: session.fusionExecutorEffort,
+    executorFast: session.fusionExecutorFast,
     model: session.fusionModel,
     claudeEffort: session.fusionClaudeEffort ?? session.fusionEffort,
     codexModel: session.fusionCodexModel,
@@ -410,9 +421,11 @@ function normalizedFusionSessionFields(session: AgentSession) {
     fusionPlannerFamily: role.plannerFamily,
     fusionPlannerModel: role.plannerModel,
     fusionPlannerEffort: role.plannerEffort,
+    fusionPlannerFast: role.plannerFast,
     fusionExecutorFamily: role.executorFamily,
     fusionExecutorModel: role.executorModel,
     fusionExecutorEffort: role.executorEffort,
+    fusionExecutorFast: role.executorFast,
     fusionModel: undefined,
     fusionCodexModel: undefined,
     fusionClaudeEffort: undefined,
@@ -604,9 +617,11 @@ function createSession(
     fusionPlannerFamily: fusionSeed?.plannerFamily,
     fusionPlannerModel: fusionSeed?.plannerModel,
     fusionPlannerEffort: fusionSeed?.plannerEffort,
+    fusionPlannerFast: fusionSeed?.plannerFast,
     fusionExecutorFamily: fusionSeed?.executorFamily,
     fusionExecutorModel: fusionSeed?.executorModel,
     fusionExecutorEffort: fusionSeed?.executorEffort,
+    fusionExecutorFast: fusionSeed?.executorFast,
     fusionRunMode: isFusion ? DEFAULT_FUSION_RUN_MODE : undefined,
     fusionModel: undefined,
     fusionCodexModel: undefined,
@@ -1003,6 +1018,8 @@ export default function App() {
   );
   const [workspaceDropTarget, setWorkspaceDropTarget] =
     useState<WorkspaceDropTarget | null>(null);
+  const [workspaceContextMenu, setWorkspaceContextMenu] =
+    useState<WorkspaceContextMenuState | null>(null);
 
   const activeWorkspace =
     workspaces.find((workspace) => workspace.id === activeWorkspaceId) ??
@@ -1034,18 +1051,6 @@ export default function App() {
     ...multiSessions,
     ...workspaces.flatMap((workspace) => workspace.sessions)
   ];
-  // Cross-scope on purpose: a pane in another workspace (or Multi) still
-  // writes to the same disk, so folder overlap spans every session, not just
-  // the visible board.
-  const cwdConflicts = computeCwdConflicts([
-    ...multiSessions.map((session) => ({ session, scopeLabel: "Multi" })),
-    ...workspaces.flatMap((workspace) =>
-      workspace.sessions.map((session) => ({
-        session,
-        scopeLabel: workspace.name
-      }))
-    )
-  ]);
   const workspaceClosePending =
     workspaces.find((workspace) => workspace.id === workspaceClosePendingId) ??
     null;
@@ -1131,6 +1136,54 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth));
   }, [sidebarWidth]);
+
+  useEffect(() => {
+    if (!workspaceContextMenu) {
+      return;
+    }
+
+    if (
+      !workspaces.some(
+        (workspace) => workspace.id === workspaceContextMenu.workspaceId
+      )
+    ) {
+      setWorkspaceContextMenu(null);
+    }
+  }, [workspaceContextMenu, workspaces]);
+
+  useEffect(() => {
+    if (!workspaceContextMenu) {
+      return;
+    }
+
+    const closeMenu = () => setWorkspaceContextMenu(null);
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeMenu();
+      }
+    };
+    const handlePointerDown = (event: PointerEvent) => {
+      if (
+        event.target instanceof Element &&
+        event.target.closest(".workspace-context-menu")
+      ) {
+        return;
+      }
+
+      closeMenu();
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("resize", closeMenu);
+    window.addEventListener("scroll", closeMenu, true);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("scroll", closeMenu, true);
+    };
+  }, [workspaceContextMenu]);
 
   useEffect(() => {
     const handleWindowResize = () => {
@@ -1779,7 +1832,7 @@ export default function App() {
     if (event.type === "tool-call") {
       fusionBridgeToolRef.current.set(
         `${event.id}:${event.toolId}`,
-        /codex_investigate|codex_implement|codex_respond/.test(event.name)
+        /codex_investigate|codex_implement|codex_respond|codex_steer_resolve/.test(event.name)
       );
       return;
     }
@@ -2255,16 +2308,18 @@ export default function App() {
       plannerFamily: session.fusionPlannerFamily,
       plannerModel: session.fusionPlannerModel,
       plannerEffort: session.fusionPlannerEffort,
+      plannerFast: session.fusionPlannerFast,
       executorFamily: session.fusionExecutorFamily,
       executorModel: session.fusionExecutorModel,
       executorEffort: session.fusionExecutorEffort,
+      executorFast: session.fusionExecutorFast,
       model: session.fusionModel,
       claudeEffort: session.fusionClaudeEffort ?? session.fusionEffort,
       codexModel: session.fusionCodexModel,
       codexEffort: session.fusionCodexEffort ?? session.fusionEffort
     });
-    // Planner changes relaunch the planner process; executor changes apply
-    // live through the adapter's per-delegation settings re-read.
+    // Planner family/model/effort changes relaunch the planner process;
+    // executor settings and fast-serving toggles apply live.
     const plannerFamilyChanged = next.plannerFamily !== current.plannerFamily;
     const requiresRestart =
       plannerFamilyChanged ||
@@ -2274,17 +2329,23 @@ export default function App() {
       next.executorFamily !== current.executorFamily ||
       next.executorModel !== current.executorModel ||
       next.executorEffort !== current.executorEffort;
+    const fastSettingsChanged =
+      next.plannerFast !== current.plannerFast ||
+      next.executorFast !== current.executorFast;
 
     // Carry the pick forward: the next NEW Fusion pane starts from this
     // configuration instead of the stock defaults.
     rememberFusionSettings(next);
 
-    if (session.started && !requiresRestart && executorSettingsChanged) {
+    if (session.started && !requiresRestart && (executorSettingsChanged || fastSettingsChanged)) {
       window.vibe?.fusionChat
         ?.updateSettings(session.id, {
+          plannerFamily: next.plannerFamily,
+          plannerFast: next.plannerFast,
           executorFamily: next.executorFamily,
           executorModel: next.executorModel,
-          executorEffort: next.executorEffort
+          executorEffort: next.executorEffort,
+          executorFast: next.executorFast
         })
         .catch(() => {});
     }
@@ -2310,9 +2371,11 @@ export default function App() {
             fusionPlannerFamily: next.plannerFamily,
             fusionPlannerModel: next.plannerModel,
             fusionPlannerEffort: next.plannerEffort,
+            fusionPlannerFast: next.plannerFast,
             fusionExecutorFamily: next.executorFamily,
             fusionExecutorModel: next.executorModel,
             fusionExecutorEffort: next.executorEffort,
+            fusionExecutorFast: next.executorFast,
             fusionRunMode: nextFusionRunMode,
             fusionModel: undefined,
             fusionCodexModel: undefined,
@@ -2771,6 +2834,54 @@ export default function App() {
     }
   }
 
+  function openWorkspaceContextMenu(
+    event: ReactMouseEvent<HTMLElement>,
+    workspace: ProjectWorkspace
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    setWorkspaceContextMenu({
+      workspaceId: workspace.id,
+      name: workspace.name,
+      path: workspace.path,
+      x: Math.min(event.clientX, Math.max(16, window.innerWidth - 238)),
+      y: Math.min(event.clientY, Math.max(16, window.innerHeight - 122))
+    });
+  }
+
+  async function runWorkspaceContextAction(
+    action: "explorer" | "terminal",
+    workspace: WorkspaceContextMenuState
+  ) {
+    setWorkspaceContextMenu(null);
+
+    const workspaceApi = window.vibe?.workspace;
+    if (!workspaceApi) {
+      setShellMessage("Workspace actions are unavailable in this window.");
+      return;
+    }
+
+    try {
+      const result =
+        action === "explorer"
+          ? await workspaceApi.openInExplorer(workspace.path)
+          : await workspaceApi.openTerminal(workspace.path);
+
+      if (result?.ok) {
+        return;
+      }
+
+      setShellMessage(
+        result?.error ||
+          (action === "explorer"
+            ? "Could not open the folder in file explorer."
+            : "Could not open a terminal for this folder.")
+      );
+    } catch (err) {
+      setShellMessage(String(err));
+    }
+  }
+
   async function openFolder() {
     const path = await window.vibe?.workspace.selectFolder();
     if (!path) {
@@ -2932,6 +3043,8 @@ export default function App() {
               <div
                 className={clsx(
                   "workspace-row",
+                  workspaceContextMenu?.workspaceId === workspace.id &&
+                    "context-open",
                   draggingWorkspaceId === workspace.id && "dragging",
                   isDropTarget &&
                     workspaceDropTarget?.position === "before" &&
@@ -2945,6 +3058,9 @@ export default function App() {
                   handleWorkspaceDragOver(event, workspace.id)
                 }
                 onDrop={(event) => handleWorkspaceDrop(event, workspace.id)}
+                onContextMenu={(event) =>
+                  openWorkspaceContextMenu(event, workspace)
+                }
               >
                 <button
                   type="button"
@@ -2996,6 +3112,47 @@ export default function App() {
         </div>
 
       </aside>
+
+      {workspaceContextMenu && (
+        <div
+          className="workspace-context-menu"
+          role="menu"
+          aria-label={`Folder actions for ${workspaceContextMenu.name}`}
+          style={
+            {
+              "--context-menu-x": `${workspaceContextMenu.x}px`,
+              "--context-menu-y": `${workspaceContextMenu.y}px`
+            } as CSSProperties
+          }
+          onClick={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          <div className="workspace-context-menu-title">
+            <Folder size={14} />
+            <span>{workspaceContextMenu.name}</span>
+          </div>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() =>
+              runWorkspaceContextAction("explorer", workspaceContextMenu)
+            }
+          >
+            <FolderOpen size={15} />
+            <span>Open in file explorer</span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() =>
+              runWorkspaceContextAction("terminal", workspaceContextMenu)
+            }
+          >
+            <TerminalSquare size={15} />
+            <span>Open terminal</span>
+          </button>
+        </div>
+      )}
 
       {sidebarOpen && (
         <div
@@ -3132,13 +3289,15 @@ export default function App() {
                   <FusionChatPane
                     session={session}
                     profile={getProfile("fusion")}
-                    cwdConflict={cwdConflicts.get(session.id)}
+                    claimedThreadIds={claimedThreadIds(session.id)}
                     isMaximized={session.id === maximizedSessionId}
                     isSelected={session.id === selectedSessionId}
                     onClose={() => closeSession(activeScope, session)}
                     onDuplicate={() => duplicateSession(activeScope, session)}
                     onRestart={() => restartSession(activeScope, session)}
-                    onResume={() => resumeSession(activeScope, session)}
+                    onResume={(threadRef) =>
+                      resumeSession(activeScope, session, threadRef)
+                    }
                     onClear={() => clearFusionSession(activeScope, session)}
                     onSettingsChange={(settings) =>
                       updateFusionSettings(activeScope, session, settings)
@@ -3167,7 +3326,6 @@ export default function App() {
                     session={session}
                     profile={getProfile("openfusion")}
                     claimedThreadIds={claimedThreadIds(session.id)}
-                    cwdConflict={cwdConflicts.get(session.id)}
                     isMaximized={session.id === maximizedSessionId}
                     isSelected={session.id === selectedSessionId}
                     onClose={() => closeSession(activeScope, session)}
@@ -3206,7 +3364,6 @@ export default function App() {
                       session.fusion ? getProfile("fusion") : getProfile(session.kind)
                     }
                     claimedThreadIds={claimedThreadIds(session.id)}
-                    cwdConflict={cwdConflicts.get(session.id)}
                     isMaximized={session.id === maximizedSessionId}
                     isArranging={isArranging}
                     onClose={() => closeSession(activeScope, session)}

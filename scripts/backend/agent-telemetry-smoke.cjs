@@ -539,12 +539,41 @@ function postTelemetry(callbackUrl, token, payload) {
       "Open Fusion completion gate must be operational: mandatory independent check + verbatim evidence contract"
     );
     assert(
+      openFusionEnvConfig.agent?.planner?.prompt?.includes("switch families mid-thread") &&
+        openFusionEnvConfig.agent?.planner?.prompt?.includes("at most one question") &&
+        openFusionEnvConfig.agent?.executor?.prompt?.includes(
+          "Never fabricate, approximate, or reconstruct command or test output"
+        ),
+      "Open Fusion prompts should carry the mid-thread identity, act-vs-ask, and anti-simulation clauses"
+    );
+    assert(
+      openFusionEnvConfig.agent?.executor?.prompt?.includes("OPEN_FUSION_EXECUTOR_REPORT") &&
+        openFusionEnvConfig.agent?.executor?.prompt?.includes(
+          "Recommendation: COMPLETE | CONTINUE | ASK_HUMAN"
+        ) &&
+        openFusionEnvConfig.agent?.executor?.prompt?.includes("Use exactly one Recommendation token") &&
+        openFusionEnvConfig.command?.delegate?.template?.includes("OPEN_FUSION_EXECUTOR_REPORT") &&
+        openFusionEnvConfig.command?.delegate?.template?.includes(
+          "Recommendation: COMPLETE | CONTINUE | ASK_HUMAN"
+        ) &&
+        openFusionEnvConfig.command?.delegate?.template?.includes("END_OPEN_FUSION_EXECUTOR_REPORT"),
+      "Open Fusion executor and /delegate prompts should require a fixed parseable report block with an explicit Recommendation token"
+    );
+    assert(
       openFusionEnvConfig.agent?.planner?.prompt?.includes("Checkpointed delegation") &&
         openFusionEnvConfig.agent?.planner?.prompt?.includes("ONE milestone per task call") &&
+        openFusionEnvConfig.agent?.planner?.prompt?.includes("Withholding forward knowledge") &&
         openFusionEnvConfig.agent?.planner?.prompt?.includes("BEFORE delegating the next milestone") &&
         openFusionEnvConfig.agent?.executor?.prompt?.includes("implement ONLY that milestone") &&
         openFusionEnvConfig.command?.delegate?.template?.includes("one milestone of a larger plan"),
       "Open Fusion checkpointed delegation must be wired: milestone plan + between-milestone review in the planner, milestone scope discipline in the executor and /delegate"
+    );
+    assert(
+      openFusionEnvConfig.agent?.planner?.prompt?.includes("Independent parallel fan-out") &&
+        openFusionEnvConfig.agent?.planner?.prompt?.includes("multiple task tool calls in one assistant turn") &&
+        openFusionEnvConfig.agent?.planner?.prompt?.includes("genuinely independent") &&
+        openFusionEnvConfig.agent?.planner?.prompt?.includes("Those remain sequential"),
+      "Open Fusion planner should permit same-turn parallel task fan-out only for independent disjoint work"
     );
     assert(
       fs.existsSync(openFusionFiles.plannerPromptPath) &&

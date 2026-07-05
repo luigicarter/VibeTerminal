@@ -8,18 +8,21 @@
 
 const { execFileSync, spawn } = require("child_process");
 const fs = require("fs");
+const http = require("http");
 const os = require("os");
 const path = require("path");
 
 const adapterPath = path.join(__dirname, "..", "..", "backend", "fusion-adapter.cjs");
 const isWin = process.platform === "win32";
 const {
+  FAST_SERVICE_TIER,
   VERDICT_MARKER,
   buildClaudeExecutorArgs,
   buildCodexInvestigationTask,
   buildCodexVerifierTask,
   cleanClaudeEffort,
   extractVerifierVerdict,
+  fastTierForModel,
   goalStatusForVerdict,
   normalizeGoal,
   normalizeGoalStatus,
@@ -124,6 +127,7 @@ function main() {
             assert(names.includes("codex_investigate"), "tools/list missing codex_investigate");
             assert(names.includes("codex_implement"), "tools/list missing codex_implement");
             assert(names.includes("codex_respond"), "tools/list missing codex_respond");
+            assert(names.includes("codex_steer_resolve"), "tools/list missing codex_steer_resolve");
             assert(names.includes("codex_cancel"), "tools/list missing codex_cancel");
             const goalTool = tools.find((t) => t.name === "codex_goal_set");
             assert(
@@ -158,8 +162,11 @@ function main() {
             );
             assert(source.includes("goalReached"), "adapter does not return the structured verifier fields");
             assert(
-              source.includes('config: { "features.goals": true }'),
-              "adapter does not enable native Codex goals with the verified feature override"
+              source.includes('"features.goals": true') &&
+                source.includes('"features.fast_mode": true') &&
+                source.includes("params.serviceTier") &&
+                source.includes('rpc("model/list"'),
+              "adapter must enable native Codex goals + FastMode and resolve serviceTier through model/list"
             );
             assert(
               source.includes('sandbox: "danger-full-access"') &&
@@ -183,8 +190,9 @@ function main() {
               "adapter should reset initialization state when replacing the Codex worker"
             );
             assert(
-              source.includes('const PLAN_MODE_ALLOWED_TOOLS = new Set(["codex_goal_get", "codex_investigate", "codex_cancel"])'),
-              "Plan mode should only allow read-only investigation, goal reads, and cancellation"
+              source.includes("codex_steer_resolve") &&
+                source.includes("const PLAN_MODE_ALLOWED_TOOLS = new Set(["),
+              "Plan mode should allow steering-route resolution while keeping implementation blocked"
             );
             assert(source.includes('rpc("thread/goal/set"'), "adapter does not call native goal set");
             assert(source.includes('rpc("thread/goal/get"'), "adapter does not call native goal get");
@@ -232,6 +240,14 @@ function main() {
                 source.includes('name: "codex_cancel"') &&
                 source.includes("parked.clear()"),
               "adapter must expose an orchestrator-reachable codex_cancel escape hatch that clears parked state"
+            );
+            assert(
+              source.includes('status: "steer_routing"') &&
+                source.includes("function codexSteerResolve") &&
+                source.includes("STEER_ROUTE_TIMEOUT_MS") &&
+                source.includes('status: "routing"') &&
+                source.includes("buildSteerRoutingResult"),
+              "adapter must route active implementation steering through the planner with a watchdog"
             );
             assert(
               source.includes("Number.isFinite(n) && n > 0 ? n : 600000"),
@@ -295,6 +311,10 @@ rl.on("line", (line) => {
   const msg = JSON.parse(line);
   if (msg.method === "initialize") {
     send({ id: msg.id, result: {} });
+    return;
+  }
+  if (msg.method === "model/list") {
+    send({ id: msg.id, result: { data: [{ id: "gpt-5.5", model: "gpt-5.5", isDefault: true, serviceTiers: [{ id: "priority", name: "Fast", description: "Fastest inference" }] }], nextCursor: null } });
     return;
   }
   if (msg.method === "thread/start") {
@@ -886,6 +906,10 @@ rl.on("line", (line) => {
     send({ id: msg.id, result: {} });
     return;
   }
+  if (msg.method === "model/list") {
+    send({ id: msg.id, result: { data: [{ id: "gpt-5.5", model: "gpt-5.5", isDefault: true, serviceTiers: [{ id: "priority", name: "Fast", description: "Fastest inference" }] }], nextCursor: null } });
+    return;
+  }
   if (msg.method === "thread/start") {
     send({ id: msg.id, result: { thread: { id: "thread-1" } } });
     return;
@@ -945,6 +969,10 @@ rl.on("line", (line) => {
   const msg = JSON.parse(line);
   if (msg.method === "initialize") {
     send({ id: msg.id, result: {} });
+    return;
+  }
+  if (msg.method === "model/list") {
+    send({ id: msg.id, result: { data: [{ id: "gpt-5.5", model: "gpt-5.5", isDefault: true, serviceTiers: [{ id: "priority", name: "Fast", description: "Fastest inference" }] }], nextCursor: null } });
     return;
   }
   if (msg.method === "thread/start") {
@@ -1431,6 +1459,7 @@ rl.on("line", (line) => {
   if (!line.trim()) return;
   const msg = JSON.parse(line);
   if (msg.method === "initialize") { send({ id: msg.id, result: {} }); return; }
+  if (msg.method === "model/list") { send({ id: msg.id, result: { data: [{ id: "gpt-5.5", model: "gpt-5.5", isDefault: true, serviceTiers: [{ id: "priority", name: "Fast", description: "Fastest inference" }] }], nextCursor: null } }); return; }
   if (msg.method === "thread/start") { send({ id: msg.id, result: { thread: { id: "thread-1" } } }); return; }
   if (msg.method === "thread/goal/set") { send({ id: msg.id, result: { goal: goal() } }); return; }
   if (msg.method === "turn/start") {
@@ -1575,6 +1604,394 @@ function callAdapterCancelClearsWedge() {
   });
 }
 
+function writeSteerRoutingFakeAppServer(dir, options = {}) {
+  const completeOnSteer = options.completeOnSteer !== false;
+  const markerDir = JSON.stringify(dir);
+  const summaryText = JSON.stringify(
+    `Steered work completed.\n${VERDICT_MARKER} {"goalReached":true,"bugsFound":[],"missingRequirements":[],"nextAction":"done","summary":"Steered work completed."}`
+  );
+  fs.writeFileSync(
+    path.join(dir, "app-server"),
+    `
+const fs = require("fs");
+const path = require("path");
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+const markerDir = ${markerDir};
+const summaryText = ${summaryText};
+const completeOnSteer = ${completeOnSteer ? "true" : "false"};
+function send(msg) { process.stdout.write(JSON.stringify(msg) + "\\n"); }
+function mark(name, text = "") { fs.appendFileSync(path.join(markerDir, name), text + "\\n"); }
+function goal(params = {}) {
+  return { threadId: "thread-1", objective: params.objective || "do work", status: params.status || "active", tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0, createdAt: 1, updatedAt: 1 };
+}
+function turn(status, items = []) {
+  return { id: "turn-1", items, itemsView: "full", status, error: null, startedAt: 1, completedAt: status === "completed" ? 2 : null, durationMs: status === "completed" ? 10 : null };
+}
+function agentItem() {
+  return { type: "agentMessage", id: "msg-steered", text: summaryText, phase: null, memoryCitation: null };
+}
+rl.on("line", (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+  if (msg.method === "initialize") { send({ id: msg.id, result: {} }); return; }
+  if (msg.method === "model/list") { send({ id: msg.id, result: { data: [{ id: "gpt-5.5", model: "gpt-5.5", isDefault: true, serviceTiers: [{ id: "priority", name: "Fast", description: "Fastest inference" }] }], nextCursor: null } }); return; }
+  if (msg.method === "thread/start") { send({ id: msg.id, result: { thread: { id: "thread-1" } } }); return; }
+  if (msg.method === "thread/goal/set") { send({ id: msg.id, result: { goal: goal(msg.params || {}) } }); return; }
+  if (msg.method === "turn/start") {
+    mark("turn-started.txt");
+    send({ id: msg.id, result: { turn: turn("running") } });
+    send({ method: "turn/started", params: { threadId: "thread-1", turn: turn("running") } });
+    return;
+  }
+  if (msg.method === "turn/steer") {
+    const text = (((msg.params || {}).input || [])[0] || {}).text || "";
+    mark("steered.txt", text);
+    send({ id: msg.id, result: { turnId: "turn-1" } });
+    if (completeOnSteer) {
+      const agent = agentItem();
+      send({ method: "item/completed", params: { threadId: "thread-1", turnId: "turn-1", item: agent } });
+      send({ method: "turn/completed", params: { threadId: "thread-1", turn: turn("completed", [agent]) } });
+    }
+    return;
+  }
+  if (msg.method === "turn/interrupt") {
+    mark("interrupted.txt");
+    send({ id: msg.id, result: {} });
+    return;
+  }
+  if (msg.id !== undefined) send({ id: msg.id, result: {} });
+});
+`
+  );
+}
+
+function waitForCondition(check, timeoutMs = 10000, label = "condition") {
+  return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
+    const timer = setInterval(() => {
+      try {
+        const value = check();
+        if (value) {
+          clearInterval(timer);
+          resolve(value);
+          return;
+        }
+      } catch {
+        // keep waiting
+      }
+      if (Date.now() - startedAt > timeoutMs) {
+        clearInterval(timer);
+        reject(new Error(`timed out waiting for ${label}`));
+      }
+    }, 25);
+  });
+}
+
+function postJson(urlString, token, payload) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(urlString);
+    const body = JSON.stringify(payload);
+    const request = http.request(
+      {
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: "POST",
+        timeout: 5000,
+        headers: {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(body),
+          "x-vibe-telemetry-token": token
+        }
+      },
+      (response) => {
+        let responseBody = "";
+        response.on("data", (chunk) => {
+          responseBody += chunk.toString("utf8");
+        });
+        response.on("end", () => {
+          try {
+            resolve(JSON.parse(responseBody || "{}"));
+          } catch (error) {
+            reject(error);
+          }
+        });
+      }
+    );
+    request.on("error", reject);
+    request.on("timeout", () => {
+      request.destroy();
+      reject(new Error("POST timed out"));
+    });
+    request.end(body);
+  });
+}
+
+function createFusionCallbackServer(token) {
+  let controlUrl = "";
+  const server = http.createServer((request, response) => {
+    if (request.method !== "POST") {
+      response.writeHead(404);
+      response.end();
+      return;
+    }
+    if (request.headers["x-vibe-telemetry-token"] !== token) {
+      response.writeHead(403);
+      response.end();
+      return;
+    }
+    let body = "";
+    request.on("data", (chunk) => {
+      body += chunk.toString("utf8");
+    });
+    request.on("end", () => {
+      try {
+        const event = JSON.parse(body || "{}");
+        if (event.type === "fusion.adapterReady" && event.controlUrl) {
+          controlUrl = String(event.controlUrl).replace(/\/$/, "");
+        }
+      } catch {
+        // ignore
+      }
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{}");
+    });
+  });
+  return new Promise((resolve, reject) => {
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      resolve({
+        server,
+        callbackUrl: `http://127.0.0.1:${address.port}/agent-event`,
+        getControlUrl: () => controlUrl
+      });
+    });
+  });
+}
+
+function callAdapterSteerRoutingWithFakeAppServer(mode) {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `fusion-adapter-steer-${mode}-`));
+  writeSteerRoutingFakeAppServer(tempDir, { completeOnSteer: mode === "push" });
+  const token = `steer-token-${Date.now()}-${Math.random()}`;
+  const sessionId = `fusion-adapter-steer-${mode}`;
+  let callback = null;
+  let child = null;
+  let finished = false;
+  let buffer = "";
+  let stderr = "";
+  const responses = new Map();
+
+  function cleanup() {
+    if (callback && callback.server) {
+      try {
+        callback.server.close();
+      } catch {
+        // ignore
+      }
+    }
+    if (child) {
+      try {
+        child.stdin.end();
+      } catch {
+        // ignore
+      }
+      try {
+        child.kill();
+      } catch {
+        // ignore
+      }
+      if (isWin && child.pid) {
+        try {
+          execFileSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
+        } catch {
+          // best-effort
+        }
+      }
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+
+  return createFusionCallbackServer(token).then((createdCallback) => {
+    callback = createdCallback;
+    child = spawn(process.execPath, [adapterPath], {
+      cwd: tempDir,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        VIBE_FUSION_CODEX_BIN: process.execPath,
+        VIBE_TERMINAL_FUSION_CWD: tempDir,
+        VIBE_TERMINAL_SESSION_ID: sessionId,
+        VIBE_TERMINAL_CALLBACK_URL: callback.callbackUrl,
+        VIBE_TERMINAL_TELEMETRY_TOKEN: token,
+        VIBE_FUSION_STEER_ROUTE_TIMEOUT_MS: "5000",
+        VIBE_FUSION_TURN_IDLE_TIMEOUT_MS: "5000",
+        VIBE_FUSION_TURN_AFTER_COMMAND_TIMEOUT_MS: "5000"
+      }
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      let index;
+      while ((index = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, index).trim();
+        buffer = buffer.slice(index + 1);
+        if (!line) continue;
+        try {
+          const msg = JSON.parse(line);
+          if (msg.id !== undefined) responses.set(msg.id, msg);
+        } catch {
+          // ignore
+        }
+      }
+    });
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        finished = true;
+        cleanup();
+        reject(new Error(`timed out waiting for steer-routing ${mode}; stderr=${stderr}`));
+      }, 15000);
+
+      function fail(error) {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        cleanup();
+        reject(error);
+      }
+
+      child.on("error", fail);
+      child.on("exit", (code) => {
+        if (finished) return;
+        fail(new Error(`adapter exited before steer-routing ${mode}: code=${code}; stderr=${stderr}`));
+      });
+
+      (async () => {
+        try {
+          child.stdin.write(
+            `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: `fusion-steer-${mode}`, version: "0.0.0" } } })}\n`
+          );
+          child.stdin.write(
+            `${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "codex_implement", arguments: { task: "do steered work" } } })}\n`
+          );
+          const controlUrl = await waitForCondition(() => callback.getControlUrl(), 5000, "adapter control url");
+          await waitForFile(path.join(tempDir, "turn-started.txt"), 5000);
+          const steerResponse = await postJson(`${controlUrl}/steer`, token, {
+            sessionId,
+            text: "change direction"
+          });
+          assert(steerResponse.status === "routing", `expected routing steer response, got ${JSON.stringify(steerResponse)}`);
+          const routed = await waitForCondition(() => responses.get(2), 5000, "steer_routing MCP result");
+          const routedParsed = JSON.parse(routed.result.content[0].text);
+          assert(routedParsed.status === "steer_routing", `expected steer_routing result, got ${routed.result.content[0].text}`);
+          assert(/change direction/.test(routedParsed.userSteer), `steer_routing should include user steer: ${routed.result.content[0].text}`);
+          assert(!fs.existsSync(path.join(tempDir, "interrupted.txt")), "routing should not interrupt executor before planner decision");
+
+          if (mode === "push") {
+            child.stdin.write(
+              `${JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "codex_steer_resolve", arguments: { decision: "push", text: "refined change direction" } } })}\n`
+            );
+            const pushed = await waitForCondition(() => responses.get(3), 5000, "push resolution");
+            const parsed = JSON.parse(pushed.result.content[0].text);
+            assert(parsed.status === "completed", `push should resume and complete: ${pushed.result.content[0].text}`);
+            assert(parsed.goalReached === true, `push completion should carry verifier result: ${pushed.result.content[0].text}`);
+            const steeredText = fs.readFileSync(path.join(tempDir, "steered.txt"), "utf8");
+            assert(/refined change direction/.test(steeredText), "push should deliver refined steer text to executor");
+            assert(!fs.existsSync(path.join(tempDir, "interrupted.txt")), "push should not interrupt executor");
+          } else {
+            child.stdin.write(
+              `${JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "codex_steer_resolve", arguments: { decision: "replan" } } })}\n`
+            );
+            const replanned = await waitForCondition(() => responses.get(3), 5000, "replan resolution");
+            const parsed = JSON.parse(replanned.result.content[0].text);
+            assert(parsed.status === "steer_replan_ready", `replan should stop executor and return ready state: ${replanned.result.content[0].text}`);
+            await waitForFile(path.join(tempDir, "interrupted.txt"), 5000);
+          }
+
+          finished = true;
+          clearTimeout(timer);
+          cleanup();
+          resolve();
+        } catch (error) {
+          fail(error);
+        }
+      })();
+    });
+  });
+}
+
+function callAdapterDeadWindowSteerSkips() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-adapter-steer-dead-"));
+  const token = `steer-token-${Date.now()}-${Math.random()}`;
+  const sessionId = "fusion-adapter-steer-dead";
+  let callback = null;
+  let child = null;
+  return createFusionCallbackServer(token)
+    .then((createdCallback) => {
+      callback = createdCallback;
+      child = spawn(process.execPath, [adapterPath], {
+        cwd: tempDir,
+        stdio: ["pipe", "pipe", "pipe"],
+        env: {
+          ...process.env,
+          VIBE_FUSION_CODEX_BIN: process.execPath,
+          VIBE_TERMINAL_FUSION_CWD: tempDir,
+          VIBE_TERMINAL_SESSION_ID: sessionId,
+          VIBE_TERMINAL_CALLBACK_URL: callback.callbackUrl,
+          VIBE_TERMINAL_TELEMETRY_TOKEN: token
+        }
+      });
+      return waitForCondition(() => callback.getControlUrl(), 5000, "adapter control url");
+    })
+    .then((controlUrl) =>
+      postJson(`${controlUrl}/steer`, token, {
+        sessionId,
+        text: "dead window steer"
+      })
+    )
+    .then((result) => {
+      assert(
+        result.status === "skipped" && result.reason === "no_active_turn",
+        `dead-window steer should skip without buffering: ${JSON.stringify(result)}`
+      );
+    })
+    .finally(() => {
+      if (callback && callback.server) {
+        try {
+          callback.server.close();
+        } catch {
+          // ignore
+        }
+      }
+      if (child) {
+        try {
+          child.stdin.end();
+        } catch {
+          // ignore
+        }
+        try {
+          child.kill();
+        } catch {
+          // ignore
+        }
+        if (isWin && child.pid) {
+          try {
+            execFileSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
+          } catch {
+            // best-effort
+          }
+        }
+      }
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    });
+}
+
 function assertAdapterRunsHostFree() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-adapter-hostfree-"));
   writeFakeAppServer(tempDir);
@@ -1670,7 +2087,7 @@ function assertAdapterRunsHostFree() {
             );
             const tools = responses.get(2).result && responses.get(2).result.tools ? responses.get(2).result.tools : [];
             const names = tools.map((t) => t.name);
-            for (const tool of ["codex_goal_set", "codex_goal_get", "codex_goal_clear", "codex_investigate", "codex_implement", "codex_respond", "codex_cancel"]) {
+            for (const tool of ["codex_goal_set", "codex_goal_get", "codex_goal_clear", "codex_investigate", "codex_implement", "codex_respond", "codex_steer_resolve", "codex_cancel"]) {
               assert(names.includes(tool), `host-free tools/list missing ${tool}`);
             }
             const callText = responses.get(3).result.content[0].text;
@@ -1771,6 +2188,14 @@ function assertVerifierHelpers() {
     wrapped.includes("one milestone of a larger plan") &&
       wrapped.includes("judge `goalReached` against the LARGER goal"),
     "wrapped task missing the milestone goalReached clause (mid-plan verdicts must stay continue)"
+  );
+  assert(
+    wrapped.includes("switch families mid-thread"),
+    "wrapped task missing the mid-thread engine/model identity clause"
+  );
+  assert(
+    wrapped.includes("Never fabricate, approximate, or reconstruct command or test output"),
+    "wrapped task missing the anti-simulation command/test output clause"
   );
 
   const summary =
@@ -1900,23 +2325,26 @@ function assertExecutorSettingsParsing() {
   try {
     const file = path.join(tempDir, "fusion-settings.json");
 
-    fs.writeFileSync(file, JSON.stringify({ executorFamily: "claude", executorModel: "fast", executorEffort: "ultra" }));
+    fs.writeFileSync(file, JSON.stringify({ executorFamily: "claude", executorModel: "fast", executorEffort: "ultra", executorFast: true }));
     let parsed = readSettingsInChild(file);
     assert(parsed.family === "claude", `family should parse claude: ${JSON.stringify(parsed)}`);
     assert(parsed.model === "sonnet", `claude "fast" should coerce to sonnet: ${JSON.stringify(parsed)}`);
     assert(parsed.effort === "max", `claude effort ultra should coerce to max: ${JSON.stringify(parsed)}`);
+    assert(parsed.fast === true, `executorFast true should parse: ${JSON.stringify(parsed)}`);
 
     fs.writeFileSync(file, JSON.stringify({ executorFamily: "claude", executorEffort: "minimal" }));
     parsed = readSettingsInChild(file);
     assert(parsed.model === "sonnet", `claude executor should default to sonnet: ${JSON.stringify(parsed)}`);
     assert(parsed.effort === "low", `claude effort minimal should coerce to low: ${JSON.stringify(parsed)}`);
+    assert(parsed.fast === false, `missing executorFast should default false: ${JSON.stringify(parsed)}`);
 
     // Legacy pre-family file: codexModel/codexEffort only.
-    fs.writeFileSync(file, JSON.stringify({ codexModel: "gpt-5.5", codexEffort: "max" }));
+    fs.writeFileSync(file, JSON.stringify({ codexModel: "gpt-5.5", codexEffort: "max", executorFast: true }));
     parsed = readSettingsInChild(file);
     assert(parsed.family === "codex", `legacy file should stay codex: ${JSON.stringify(parsed)}`);
     assert(parsed.model === "gpt-5.5", `legacy codexModel should parse: ${JSON.stringify(parsed)}`);
     assert(parsed.effort === "xhigh", `legacy codex max should self-heal to xhigh: ${JSON.stringify(parsed)}`);
+    assert(parsed.fast === true, `codex executorFast should parse: ${JSON.stringify(parsed)}`);
 
     fs.writeFileSync(file, JSON.stringify({ executorFamily: "codex", executorModel: "auto", executorEffort: "" }));
     parsed = readSettingsInChild(file);
@@ -1927,6 +2355,22 @@ function assertExecutorSettingsParsing() {
     assert(cleanClaudeEffort("minimal") === "low", "cleanClaudeEffort should coerce minimal to low");
     assert(cleanClaudeEffort("auto") === null, "cleanClaudeEffort should treat auto as unset");
     assert(cleanClaudeEffort("bogus") === null, "cleanClaudeEffort should drop unknown levels");
+    assert(FAST_SERVICE_TIER === "priority", "Codex Fast service tier request value must be priority");
+    assert(
+      fastTierForModel(
+        [{ id: "gpt-fast", serviceTiers: [{ id: "priority", name: "Fast" }] }],
+        "gpt-fast"
+      ) === "priority",
+      "fastTierForModel should return priority for a model that advertises it"
+    );
+    assert(
+      fastTierForModel([{ id: "gpt-standard", serviceTiers: [] }], "gpt-standard") === null,
+      "fastTierForModel should leave standard serving when the model does not advertise priority"
+    );
+    assert(
+      fastTierForModel(null, "custom-model") === "priority",
+      "unknown catalog should fall back to app-server service-tier validation"
+    );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -1944,10 +2388,12 @@ function assertClaudeExecutorArgs() {
   );
   assert(flag(defaults, "--model") === "sonnet", `claude executor default model should be sonnet: ${defaults.join(" ")}`);
   assert(!defaults.includes("--effort"), `unset effort should omit the flag: ${defaults.join(" ")}`);
+  assert(flag(defaults, "--settings") === '{"fastMode":false}', `unset fast should explicitly disable Claude fastMode: ${defaults.join(" ")}`);
   assert(defaults.includes("--input-format"), "claude executor must speak stream-json");
-  const custom = buildClaudeExecutorArgs({ model: "opus", effort: "high" });
+  const custom = buildClaudeExecutorArgs({ model: "opus", effort: "high", fast: true });
   assert(flag(custom, "--model") === "opus", `custom model should pass through: ${custom.join(" ")}`);
   assert(flag(custom, "--effort") === "high", `custom effort should pass through: ${custom.join(" ")}`);
+  assert(flag(custom, "--settings") === '{"fastMode":true}', `executorFast should pass Claude fastMode: ${custom.join(" ")}`);
 }
 
 // A fake claude CLI: consumes one stream-json user message, replays a
@@ -1962,6 +2408,7 @@ function writeFakeClaudeExecutor(dir) {
 const fs = require("fs");
 const path = require("path");
 fs.writeFileSync(path.join(__dirname, "claude-argv.txt"), process.argv.slice(2).join("\\n"));
+const controlFile = path.join(__dirname, "claude-control.jsonl");
 const readline = require("readline");
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 function send(obj) { process.stdout.write(JSON.stringify(obj) + "\\n"); }
@@ -1970,6 +2417,10 @@ rl.on("line", (line) => {
   if (!line.trim()) return;
   let msg;
   try { msg = JSON.parse(line); } catch { return; }
+  if (msg.type === "control_request") {
+    fs.appendFileSync(controlFile, JSON.stringify(msg) + "\\n");
+    return;
+  }
   if (msg.type !== "user") return;
   send({ type: "system", subtype: "init", session_id: "fake-claude-exec" });
   ev({ type: "message_start" });
@@ -2008,7 +2459,7 @@ function callAdapterImplementWithFakeClaudeExecutor() {
   writeFakeAppServer(tempDir, { markerFile });
   const fakeClaudeBin = writeFakeClaudeExecutor(tempDir);
   const settingsFile = path.join(tempDir, "fusion-settings.json");
-  fs.writeFileSync(settingsFile, JSON.stringify({ executorFamily: "claude", executorModel: "sonnet" }));
+  fs.writeFileSync(settingsFile, JSON.stringify({ executorFamily: "claude", executorModel: "sonnet", executorFast: true }));
   const child = spawn(process.execPath, [adapterPath], {
     cwd: tempDir,
     stdio: ["pipe", "pipe", "pipe"],
@@ -2113,6 +2564,10 @@ function callAdapterImplementWithFakeClaudeExecutor() {
               argv.includes("bypassPermissions") && argv.includes("sonnet"),
               `claude executor argv should carry bypassPermissions + model: ${argv}`
             );
+            assert(
+              argv.includes("--settings") && argv.includes('\\"fastMode\\":true'),
+              `claude executor argv should carry startup fastMode settings: ${argv}`
+            );
             child.stdin.write(
               `${JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "codex_goal_get", arguments: {} } })}\n`
             );
@@ -2128,13 +2583,36 @@ function callAdapterImplementWithFakeClaudeExecutor() {
               parsed.goal.status === "complete",
               `done verdict should have synced the local goal to complete: ${text}`
             );
+            fs.writeFileSync(settingsFile, JSON.stringify({ executorFamily: "claude", executorModel: "sonnet", executorFast: false }));
+            child.stdin.write(
+              `${JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "codex_implement", arguments: { task: "second fake claude pass" } } })}\n`
+            );
+          } else if (msg.id === 4) {
+            const text = msg.result.content[0].text;
+            const parsed = JSON.parse(text);
+            assert(parsed.status === "completed", `second claude executor implement should complete: ${text}`);
+            const controlFile = path.join(tempDir, "claude-control.jsonl");
+            assert(fs.existsSync(controlFile), "fast-only Claude executor change should send a live control request");
+            const controls = fs
+              .readFileSync(controlFile, "utf8")
+              .split(/\r?\n/)
+              .filter(Boolean)
+              .map((line) => JSON.parse(line));
+            assert(
+              controls.some(
+                (control) =>
+                  control.request?.subtype === "apply_flag_settings" &&
+                  control.request?.settings?.fastMode === false
+              ),
+              `fast-only Claude executor change should apply fastMode=false live: ${JSON.stringify(controls)}`
+            );
             // Flip the settings file to codex: the NEXT call must re-route to
             // the app-server engine (fake app-server boots, thread marker).
             fs.writeFileSync(settingsFile, JSON.stringify({ executorFamily: "codex" }));
             child.stdin.write(
-              `${JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "codex_goal_get", arguments: {} } })}\n`
+              `${JSON.stringify({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "codex_goal_get", arguments: {} } })}\n`
             );
-          } else if (msg.id === 4) {
+          } else if (msg.id === 5) {
             finished = true;
             clearTimeout(timer);
             const text = msg.result.content[0].text;
@@ -2195,6 +2673,9 @@ main()
     await callAdapterApprovalResumeWithFakeAppServer({ queueSecondApproval: true });
     await callAdapterClearsParkedApprovalWhenAppServerExits();
     await callAdapterCancelClearsWedge();
+    await callAdapterSteerRoutingWithFakeAppServer("push");
+    await callAdapterSteerRoutingWithFakeAppServer("replan");
+    await callAdapterDeadWindowSteerSkips();
     await callAdapterImplementWithFakeClaudeExecutor();
     console.log("Fusion adapter smoke passed");
   })

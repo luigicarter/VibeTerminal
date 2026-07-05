@@ -8,12 +8,16 @@
 
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
+const { spawn, execFileSync } = require("child_process");
 
 const {
+  applyPlannerTurnSettleState,
   buildClaudeArgs,
   buildClaudeSpawn,
   buildFusionInputContent,
   createStreamNormalizer,
+  unwrapFusionUserText,
   windowsCmdArg,
   FUSION_GATE_NUDGE
 } = require("../../backend/fusionChatHost.cjs");
@@ -21,6 +25,176 @@ const { createFusionGateTracker } = require("../../backend/completionGate.cjs");
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+const isWin = process.platform === "win32";
+
+function writeFakeClaudePlanner(dir) {
+  const scriptPath = path.join(dir, "fake-claude-planner.js");
+  fs.writeFileSync(
+    scriptPath,
+    `
+const fs = require("fs");
+const path = require("path");
+const readline = require("readline");
+fs.appendFileSync(path.join(__dirname, "claude-starts.txt"), "START\\n" + process.argv.slice(2).join("\\n") + "\\n");
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on("line", (line) => {
+  if (!line.trim()) return;
+  let msg;
+  try { msg = JSON.parse(line); } catch { return; }
+  if (msg.type === "control_request") {
+    fs.appendFileSync(path.join(__dirname, "claude-control.jsonl"), JSON.stringify(msg) + "\\n");
+  }
+});
+setInterval(() => {}, 1000);
+`
+  );
+  if (isWin) {
+    const cmdPath = path.join(dir, "fake-claude-planner.cmd");
+    fs.writeFileSync(cmdPath, `@"${process.execPath}" "%~dp0fake-claude-planner.js" %*\r\n`);
+    return cmdPath;
+  }
+  const shPath = path.join(dir, "fake-claude-planner");
+  fs.writeFileSync(shPath, `#!/bin/sh\nexec "${process.execPath}" "${scriptPath}" "$@"\n`);
+  fs.chmodSync(shPath, 0o755);
+  return shPath;
+}
+
+function killProcessTree(child) {
+  if (!child || child.killed) return;
+  if (isWin && child.pid) {
+    try {
+      execFileSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
+      return;
+    } catch {
+      // fall through
+    }
+  }
+  try {
+    child.kill();
+  } catch {
+    // ignore
+  }
+}
+
+async function assertFusionChatHostClaudeFastLive() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-chat-host-fast-"));
+  const fakeClaude = writeFakeClaudePlanner(tempDir);
+  const hostPath = path.join(__dirname, "..", "..", "backend", "fusionChatHost.cjs");
+  const child = spawn(process.execPath, [hostPath], {
+    cwd: tempDir,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      VIBE_CLAUDE_BIN: fakeClaude
+    }
+  });
+
+  let stdout = "";
+  let stderr = "";
+  let finished = false;
+  const controlFile = path.join(tempDir, "claude-control.jsonl");
+  const startsFile = path.join(tempDir, "claude-starts.txt");
+
+  function cleanup() {
+    try {
+      child.stdin.end();
+    } catch {
+      // ignore
+    }
+    killProcessTree(child);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      finished = true;
+      cleanup();
+      reject(new Error(`timed out waiting for Claude planner fast live update; stdout=${stdout}; stderr=${stderr}`));
+    }, 15000);
+
+    function fail(error) {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      cleanup();
+      reject(error);
+    }
+
+    function pass() {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      cleanup();
+      resolve();
+    }
+
+    child.on("error", fail);
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("exit", (code) => {
+      if (!finished) {
+        fail(new Error(`fusionChatHost exited early with code ${code}; stdout=${stdout}; stderr=${stderr}`));
+      }
+    });
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+      if (!stdout.includes('"ready"')) return;
+      child.stdin.write(
+        `${JSON.stringify({
+          type: "start",
+          payload: {
+            id: "claude-fast-live",
+            cwd: tempDir,
+            plannerFamily: "claude",
+            plannerFast: false,
+            settingsFile: JSON.stringify({ fastMode: false }),
+            model: "opus"
+          }
+        })}\n`
+      );
+      setTimeout(() => {
+        child.stdin.write(
+          `${JSON.stringify({
+            type: "settings",
+            payload: { id: "claude-fast-live", plannerFast: true }
+          })}\n`
+        );
+      }, 200);
+    });
+
+    const poll = setInterval(() => {
+      if (finished) {
+        clearInterval(poll);
+        return;
+      }
+      try {
+        if (!fs.existsSync(controlFile) || !fs.existsSync(startsFile)) return;
+        const controls = fs
+          .readFileSync(controlFile, "utf8")
+          .split(/\r?\n/)
+          .filter(Boolean)
+          .map((line) => JSON.parse(line));
+        const starts = fs.readFileSync(startsFile, "utf8").split(/^START$/m).length - 1;
+        assert(starts === 1, `planner fast update must not respawn Claude; starts=${starts}`);
+        assert(
+          controls.some(
+            (control) =>
+              control.request?.subtype === "apply_flag_settings" &&
+              control.request?.settings?.fastMode === true
+          ),
+          `Claude planner fast update should use apply_flag_settings: ${JSON.stringify(controls)}`
+        );
+        clearInterval(poll);
+        pass();
+      } catch (error) {
+        clearInterval(poll);
+        fail(error);
+      }
+    }, 100);
+  });
 }
 
 const fixture = [
@@ -86,7 +260,7 @@ const fixture = [
   { type: "system", subtype: "status", status: null, compact_result: "success", session_id: "sess-abc" }
 ];
 
-function main() {
+async function main() {
   const normalize = createStreamNormalizer();
   const events = [];
   for (const obj of fixture) {
@@ -138,8 +312,153 @@ function main() {
 
   assert(events.some((e) => e.type === "turn-start"), "missing turn-start");
   assert(events.some((e) => e.type === "turn-end"), "missing turn-end");
+  assert(
+    events.find((e) => e.type === "turn-end")?.awaitsToolResult === true,
+    "a message_stop after tool_use should be marked as waiting on tool results"
+  );
   const result = events.find((e) => e.type === "result");
   assert(result && result.subtype === "success", "missing successful result event");
+
+  // A Claude turn can stream the final assistant message after codex_implement
+  // returns but fail to print the trailing CLI result line. The host backstop
+  // uses these normalizer flags to settle the pane without marking the earlier
+  // tool_use message_stop as final.
+  {
+    const missingResultNormalize = createStreamNormalizer();
+    const missingResultEvents = [];
+    for (const obj of [
+      { type: "stream_event", event: { type: "message_start", message: {} } },
+      {
+        type: "stream_event",
+        event: {
+          type: "content_block_start",
+          content_block: { type: "tool_use", id: "bridge-1", name: "mcp__fusion-codex__codex_implement" }
+        }
+      },
+      { type: "stream_event", event: { type: "content_block_delta", delta: { type: "input_json_delta", partial_json: '{"task":"tiny"}' } } },
+      { type: "stream_event", event: { type: "content_block_stop" } },
+      { type: "stream_event", event: { type: "message_stop" } },
+      {
+        type: "user",
+        message: {
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "bridge-1",
+              content: [
+                {
+                  type: "text",
+                  text: '{"status":"completed","goalReached":true,"nextAction":"done"}'
+                }
+              ]
+            }
+          ]
+        }
+      },
+      { type: "stream_event", event: { type: "message_start", message: {} } },
+      { type: "stream_event", event: { type: "content_block_start", content_block: { type: "text" } } },
+      { type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "Done." } } },
+      { type: "stream_event", event: { type: "content_block_stop" } },
+      { type: "stream_event", event: { type: "message_stop" } }
+    ]) {
+      for (const event of missingResultNormalize(JSON.stringify(obj))) {
+        missingResultEvents.push(event);
+      }
+    }
+    const turnEnds = missingResultEvents.filter((e) => e.type === "turn-end");
+    const bridgeResult = missingResultEvents.find((e) => e.type === "tool-result");
+    assert(
+      turnEnds.length === 2 &&
+        turnEnds[0].awaitsToolResult === true &&
+        turnEnds[1].awaitsToolResult === false,
+      `tool_use and final message_stop should be distinguishable: ${JSON.stringify(turnEnds)}`
+    );
+    assert(
+      bridgeResult &&
+        bridgeResult.text === '{"status":"completed","goalReached":true,"nextAction":"done"}' &&
+        bridgeResult.completedBridgeResult === true,
+      `completed codex_implement array content should be normalized for host backstop: ${JSON.stringify(bridgeResult)}`
+    );
+  }
+
+  // ---- planner settle-state guard/backstop race ----
+  {
+    const state = {};
+    const gate = createFusionGateTracker({ cwd: "C:\\repo" });
+    const emitted = [];
+    const emitLikeHost = (event) => {
+      const settle = applyPlannerTurnSettleState(state, event);
+      if (settle.event) {
+        emitted.push(settle.skipGate ? settle.event : gate.observe(settle.event));
+      }
+      return settle;
+    };
+
+    emitLikeHost({ type: "turn-start" });
+    emitLikeHost({
+      type: "tool-call",
+      toolId: "bridge-race",
+      name: "mcp__fusion-codex__codex_implement",
+      input: { task: "tiny" }
+    });
+    emitLikeHost({
+      type: "tool-result",
+      toolId: "bridge-race",
+      text: '{"status":"completed","files":["src/api/limits.ts"],"goalReached":true,"nextAction":"done"}',
+      completedBridgeResult: true,
+      isError: false
+    });
+    assert(
+      emitLikeHost({ type: "turn-end", awaitsToolResult: true }).armBackstop !== true,
+      "backstop must not arm while the assistant message is still awaiting a tool result"
+    );
+    assert(
+      emitLikeHost({ type: "turn-start" }).clearBackstop === true &&
+        state.plannerResultBackstopEligible === true,
+      "the final assistant message start should clear timers without losing completed-delegation eligibility"
+    );
+    assert(
+      emitLikeHost({ type: "turn-end", awaitsToolResult: false }).armBackstop === true,
+      "backstop should arm only after the final assistant message_stop"
+    );
+    emitLikeHost({ type: "result", subtype: "success", isError: false, synthetic: true });
+    emitLikeHost({
+      type: "result",
+      subtype: "success",
+      isError: false,
+      usage: { input_tokens: 10, output_tokens: 2 },
+      costUsd: 0.01
+    });
+
+    const terminalResults = emitted.filter((event) => event.type === "result");
+    const lateUsage = emitted.find((event) => event.type === "result-usage");
+    assert(
+      terminalResults.length === 1 &&
+        terminalResults[0].synthetic === true &&
+        terminalResults[0].gate?.status === "unverified",
+      `synthetic followed by late real result should produce one gated terminal settle: ${JSON.stringify(emitted)}`
+    );
+    assert(
+      lateUsage &&
+        lateUsage.lateResult === true &&
+        lateUsage.costUsd === 0.01 &&
+        lateUsage.usage?.input_tokens === 10,
+      `late real result should forward usage/cost as a non-terminal event: ${JSON.stringify(lateUsage)}`
+    );
+
+    const staleState = {};
+    applyPlannerTurnSettleState(staleState, {
+      type: "tool-result",
+      completedBridgeResult: true
+    });
+    assert(staleState.plannerResultBackstopEligible === true, "completed bridge result should arm eligibility");
+    applyPlannerTurnSettleState(staleState, { type: "user", text: "new turn" });
+    assert(
+      staleState.plannerResultBackstopEligible === false &&
+        applyPlannerTurnSettleState(staleState, { type: "turn-end", awaitsToolResult: false }).armBackstop !== true,
+      "real user input must clear stale backstop eligibility before an unrelated later turn"
+    );
+  }
 
   // /compact status lines → compact-start + compacted (ok mirrors
   // compact_result; the error text rides along for the failed case).
@@ -309,10 +628,21 @@ function main() {
     "Fusion host should replay live sessions, reject stale process events, and report closed-session input"
   );
   assert(
-    hostSource.includes("if (state.gate) event = state.gate.observe(event);") &&
+    hostSource.includes("if (!settle.skipGate && state.gate) event = state.gate.observe(event);") &&
       hostSource.includes("createFusionGateTracker({ cwd })") &&
       hostSource.includes("state.gate && state.gate.consumeNudge()"),
     "Fusion host must observe events through the completion-gate tracker (both engines) and gate the one-shot nudge"
+  );
+  assert(
+    hostSource.includes("function armPlannerResultBackstop") &&
+      hostSource.includes("applyPlannerTurnSettleState") &&
+      hostSource.includes("plannerTurnSettled") &&
+      hostSource.includes("plannerResultBackstopEligible") &&
+      hostSource.includes("completedBridgeResult") &&
+      hostSource.includes("awaitsToolResult") &&
+      hostSource.includes("synthetic: true") &&
+      hostSource.includes('type: "result-usage"'),
+    "Claude planner path must settle completed bridge turns once and forward late real usage without a second terminal result"
   );
 
   // ---- codex-brain planner normalizer (per-role families) ----
@@ -557,12 +887,12 @@ function main() {
     "Fusion host should dispatch codex-family planners to the codex brain engine"
   );
 
+  await assertFusionChatHostClaudeFastLive();
+
   console.log("Fusion chat parse smoke passed");
 }
 
-try {
-  main();
-} catch (error) {
+main().catch((error) => {
   console.error(`FAIL fusion-chat-parse-smoke: ${error.message}`);
   process.exit(1);
-}
+});

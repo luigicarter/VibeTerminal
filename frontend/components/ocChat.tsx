@@ -54,6 +54,7 @@ export interface OcChatMessage {
   // task rows: live progress line (current child work / call tally) and
   // completion stats, rendered as the "↳ …" second line like OpenCode.
   taskDetail?: string;
+  taskRole?: string;
   // kind:"result" rows: completion-gate verdict for the settled turn — did the
   // planner independently check the last executor delegation? Neutral chip,
   // both states muted by design.
@@ -439,6 +440,7 @@ export const OcChatRow = memo(function OcChatRow({
     // Click reveals the subagent's report.
     if (name === "task") {
       const report = (m.toolOutput ?? "").trim();
+      const taskRole = (m.taskRole ?? "").trim();
       return (
         <div className={clsx("oc-tool", "oc-task", `is-${status}`, denied && "is-denied", failed && "is-failed")}>
           <div
@@ -449,6 +451,11 @@ export const OcChatRow = memo(function OcChatRow({
               {status === "running" ? <OcSpinner /> : toolIcon(name, status)}
             </span>
             <span className="oc-tool-label">
+              {taskRole && (
+                <span className={clsx("oc-task-role", `oc-task-role-${taskRole.toLowerCase()}`)}>
+                  {titlecase(taskRole)}
+                </span>
+              )}
               {subagentTitle(m.toolInput, m.text)}
               {m.taskDetail && <span className="oc-task-detail">{"\n"}↳ {m.taskDetail}</span>}
             </span>

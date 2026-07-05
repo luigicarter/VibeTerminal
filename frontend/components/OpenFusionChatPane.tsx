@@ -20,8 +20,6 @@ import {
 } from "lucide-react";
 import clsx from "clsx";
 import { shouldShowAttentionDot } from "../attention";
-import { cwdConflictChipLabel, cwdConflictTitle } from "../cwdConflicts";
-import type { CwdConflict } from "../cwdConflicts";
 import type {
   AgentAttentionEvent,
   AgentProfile,
@@ -75,7 +73,6 @@ interface OpenFusionChatPaneProps {
   // Thread ids active in OTHER panes: the resume picker marks them and refuses
   // to open the same conversation twice (two panes writing one session id).
   claimedThreadIds?: string[];
-  cwdConflict?: CwdConflict;
   isMaximized: boolean;
   isSelected: boolean;
   onClose: () => void;
@@ -344,7 +341,6 @@ export default function OpenFusionChatPane({
   session,
   profile,
   claimedThreadIds,
-  cwdConflict,
   isMaximized,
   isSelected,
   onClose,
@@ -468,6 +464,8 @@ export default function OpenFusionChatPane({
   const streamBubblesRef = useRef(new Map<string, string>());
   // Event-handler mirror of `steering` (the handler closure is frozen at mount).
   const steeringRef = useRef<{ key: string; text: string }[]>([]);
+  const pendingSteerFlushRef = useRef<string | null>(null);
+  const skipNextInterruptedResultRef = useRef(false);
   // An abort settles as session.idle → a trailing "result" event; this latch
   // keeps that settle from overwriting the interrupted waiting-state with
   // done/completed. Armed by "interrupted", cleared by the next turn-start.
@@ -476,12 +474,12 @@ export default function OpenFusionChatPane({
   // Turn wall-clock start, for the "▣ Brain · model · 32s" completion line.
   const turnStartRef = useRef(0);
   // Running delegations: task toolId -> row key + stats, plus an index from
-  // subagent kind to the task currently owning that kind's child events —
-  // powers the Task rows' "↳ current work / N toolcalls · 12s" line.
+  // child session id to its owning task row. Parallel executor children share
+  // the same role, so role-name indexing would collapse their progress lines.
   const tasksByToolIdRef = useRef(
-    new Map<string, { key: string; startTs: number; toolcalls: number }>()
+    new Map<string, { key: string; startTs: number; toolcalls: number; childSessionId?: string }>()
   );
-  const taskRoleIndexRef = useRef(new Map<string, string>());
+  const taskChildIndexRef = useRef(new Map<string, string>());
   const threadIdRef = useRef("");
   const threadTitleRef = useRef("");
   const onThreadRefChangeRef = useRef(onThreadRefChange);
@@ -967,7 +965,7 @@ export default function OpenFusionChatPane({
     // (OpenCode's server marks aborted tool parts as errors the same way).
     const settleRunningTools = () => {
       tasksByToolIdRef.current.clear();
-      taskRoleIndexRef.current.clear();
+      taskChildIndexRef.current.clear();
       setMessages((prev) =>
         prev.map((m) =>
           m.kind === "tool" && m.toolStatus === "running"
@@ -1029,6 +1027,12 @@ export default function OpenFusionChatPane({
           // waiting for the user to open a picker.
           void window.vibe?.openFusionChat?.requestProviders(session.id);
           break;
+        case "engine-ready":
+          // Fresh panes defer session creation to the first input, so the
+          // provider-catalog prefetch (which used to ride the session event)
+          // now rides this ping.
+          void window.vibe?.openFusionChat?.requestProviders(session.id);
+          break;
         case "user":
           if (!threadTitleRef.current) {
             threadTitleRef.current = titleFromFirstPrompt(event.text);
@@ -1052,9 +1056,10 @@ export default function OpenFusionChatPane({
           // is in its context now.
           flushSteering();
           interruptSettledRef.current = false;
+          skipNextInterruptedResultRef.current = false;
           turnStartRef.current = Date.now();
           tasksByToolIdRef.current.clear();
-          taskRoleIndexRef.current.clear();
+          taskChildIndexRef.current.clear();
           setActiveRole("brain");
           setInterruptingState(false);
           setWaitingState(false);
@@ -1101,9 +1106,29 @@ export default function OpenFusionChatPane({
           }
           break;
         }
+        case "task-child": {
+          if (event.childSessionId) {
+            taskChildIndexRef.current.set(event.childSessionId, event.toolId);
+            const task = tasksByToolIdRef.current.get(event.toolId);
+            if (task) {
+              task.childSessionId = event.childSessionId;
+            }
+          }
+          const taskRole = event.agent === "investigator" ? "investigator" : "executor";
+          setMessages((prev) =>
+            prev.map((row) =>
+              row.kind === "tool" && row.toolId === event.toolId ? { ...row, taskRole } : row
+            )
+          );
+          break;
+        }
         case "tool-call": {
           setActiveRole(event.role);
           const isDelegation = event.name === "task" && event.role === "brain";
+          const agentKind =
+            isDelegation && firstString(asRecord(event.input).subagent_type) === "investigator"
+              ? "investigator"
+              : "executor";
           // One OpenCode-style row per call; the matching tool-result updates
           // it in place (status → done/error, output, meta).
           const key = push({
@@ -1113,23 +1138,23 @@ export default function OpenFusionChatPane({
             toolId: event.toolId,
             toolName: event.name,
             toolStatus: "running",
-            toolInput: event.input
+            toolInput: event.input,
+            taskRole: isDelegation ? agentKind : undefined
           });
           if (isDelegation) {
-            const agentKind =
-              firstString(asRecord(event.input).subagent_type) === "investigator"
-                ? "investigator"
-                : "executor";
             tasksByToolIdRef.current.set(event.toolId, {
               key,
               startTs: Date.now(),
-              toolcalls: 0
+              toolcalls: 0,
+              childSessionId: event.childSessionId
             });
-            taskRoleIndexRef.current.set(agentKind, event.toolId);
+            if (event.childSessionId) {
+              taskChildIndexRef.current.set(event.childSessionId, event.toolId);
+            }
           } else if (event.role !== "brain") {
             // A subagent's tool: tick the owning Task row's "↳ …" line, like
             // OpenCode's live "↳ Read path" under a running task.
-            const taskId = taskRoleIndexRef.current.get(event.role);
+            const taskId = event.sessionID ? taskChildIndexRef.current.get(event.sessionID) : undefined;
             const task = taskId ? tasksByToolIdRef.current.get(taskId) : undefined;
             if (task) {
               task.toolcalls += 1;
@@ -1159,8 +1184,11 @@ export default function OpenFusionChatPane({
                 ? `${task.toolcalls} toolcall${task.toolcalls === 1 ? "" : "s"} · ${duration}`
                 : duration;
             tasksByToolIdRef.current.delete(event.toolId);
-            for (const [kind, id] of taskRoleIndexRef.current) {
-              if (id === event.toolId) taskRoleIndexRef.current.delete(kind);
+            if (event.childSessionId) {
+              taskChildIndexRef.current.delete(event.childSessionId);
+            }
+            for (const [childSessionId, id] of taskChildIndexRef.current) {
+              if (id === event.toolId) taskChildIndexRef.current.delete(childSessionId);
             }
           }
           setMessages((prev) => {
@@ -1440,7 +1468,14 @@ export default function OpenFusionChatPane({
           // "interrupted" lane owns status + attention for those, so this
           // event must not re-brand the turn as done/completed.
           const interruptSettle = interruptSettledRef.current || interruptingRef.current;
+          const skipInterruptedResult =
+            skipNextInterruptedResultRef.current && interruptSettle;
           interruptSettledRef.current = false;
+          if (skipInterruptedResult) {
+            skipNextInterruptedResultRef.current = false;
+            break;
+          }
+          skipNextInterruptedResultRef.current = false;
           setActiveRole("brain");
           stopStreaming();
           setInterruptingState(false);
@@ -1481,6 +1516,27 @@ export default function OpenFusionChatPane({
           break;
         }
         case "interrupted":
+          if (pendingSteerFlushRef.current) {
+            const steerText = pendingSteerFlushRef.current;
+            pendingSteerFlushRef.current = null;
+            steeringRef.current = [];
+            setSteering([]);
+            interruptSettledRef.current = true;
+            skipNextInterruptedResultRef.current = true;
+            stopStreaming();
+            settleRunningTools();
+            setInterruptingState(false);
+            setWaitingState(false);
+            setPendingPermission(null);
+            clearPendingQuestions();
+            setPlanActionReady(false);
+            planTurnModeRef.current = "auto";
+            planHadBrainTextRef.current = false;
+            window.vibe?.openFusionChat?.sendUserTurn(session.id, steerText, "auto");
+            setBusyState(true);
+            onStatusChangeRef.current("running");
+            break;
+          }
           interruptSettledRef.current = true;
           stopStreaming();
           settleRunningTools();
@@ -1499,6 +1555,15 @@ export default function OpenFusionChatPane({
           break;
         case "compacted":
           push({ role: "brain", kind: "activity", text: "Context compacted." });
+          break;
+        case "steer-route":
+          if (event.message.trim()) {
+            push({
+              role: "brain",
+              kind: "activity",
+              text: `Steering: ${event.message.trim()}`
+            });
+          }
           break;
         case "stderr":
           if (event.text.trim()) {
@@ -1562,6 +1627,17 @@ export default function OpenFusionChatPane({
     if (!busyRef.current || interruptingRef.current) return;
     setInterruptingState(true);
     void window.vibe?.openFusionChat?.interrupt(session.id);
+  }
+
+  function escInterrupt() {
+    if (busyRef.current && !interruptingRef.current && steeringRef.current.length > 0) {
+      const items = steeringRef.current;
+      pendingSteerFlushRef.current =
+        items.length === 1
+          ? items[0].text
+          : items.map((steer, index) => `${index + 1}. ${steer.text}`).join("\n\n");
+    }
+    interrupt();
   }
 
   // Mode changes are pure renderer state (persisted on the session); the host
@@ -2738,7 +2814,7 @@ export default function OpenFusionChatPane({
         rejectActiveQuestion();
         return;
       }
-      interrupt();
+      escInterrupt();
     };
     window.addEventListener("keydown", handleWindowKeyDown);
     return () => window.removeEventListener("keydown", handleWindowKeyDown);
@@ -2809,17 +2885,6 @@ export default function OpenFusionChatPane({
           <span className={clsx("openfusion-role-chip", `is-${activeRole}`)} title={modelsLine}>
             {activeRoleLabel}
           </span>
-          {cwdConflict && (
-            <span
-              className={clsx(
-                "pane-cwd-conflict-chip",
-                cwdConflict.active && "is-active"
-              )}
-              title={cwdConflictTitle(cwdConflict)}
-            >
-              {cwdConflictChipLabel(cwdConflict)}
-            </span>
-          )}
         </div>
         <div className="pane-status">
           {/* waiting outranks busy: a permission ask leaves the server turn
@@ -3492,7 +3557,7 @@ export default function OpenFusionChatPane({
                 </div>
               ))}
               <span className="openfusion-steering-hint">
-                Held here until the Brain's next step picks it up · Esc interrupts now
+                Held here until the Brain's next step picks it up · Esc pushes it in now
               </span>
             </div>
           )}
@@ -3606,7 +3671,7 @@ export default function OpenFusionChatPane({
                   }
                   if (e.key === "Escape" && busy) {
                     e.preventDefault();
-                    interrupt();
+                    escInterrupt();
                     return;
                   }
                   if (e.key === "Enter" && !e.shiftKey) {

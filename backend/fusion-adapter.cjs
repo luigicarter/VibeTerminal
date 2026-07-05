@@ -36,6 +36,7 @@ const ENV_CODEX_MODEL = process.env.VIBE_FUSION_CODEX_MODEL || null;
 const ENV_CODEX_EFFORT = process.env.VIBE_FUSION_CODEX_EFFORT || null;
 const RUN_MODE_FILE = process.env.VIBE_FUSION_RUN_MODE_FILE || null;
 let runMode = normalizeFusionRunMode(process.env.VIBE_FUSION_RUN_MODE);
+const FAST_SERVICE_TIER = "priority";
 
 const EAGER_BOOT = process.env.VIBE_FUSION_EAGER_BOOT === "1";
 const REQUEST_TIMEOUT_MS = Number(process.env.VIBE_FUSION_RPC_TIMEOUT_MS || 30000);
@@ -55,6 +56,10 @@ const TURN_AFTER_COMMAND_TIMEOUT_MS = Number(
 const TURN_HARD_TIMEOUT_MS = Math.max(
   Number(process.env.VIBE_FUSION_TURN_HARD_TIMEOUT_MS) || 900000,
   60000
+);
+const STEER_ROUTE_TIMEOUT_MS = Math.max(
+  Number(process.env.VIBE_FUSION_STEER_ROUTE_TIMEOUT_MS) || 20000,
+  5000
 );
 const PARKED_REQUEST_METHODS = new Set([
   "item/commandExecution/requestApproval",
@@ -189,6 +194,7 @@ function buildCodexVerifierTask(task) {
     "## Fusion verifier contract",
     "You are Codex GPT-5.5 inside Terminal Fusion. You implement, run tests, debug, and verify whether the user's goal is actually reached.",
     "Claude/Opus may provide strategy, constraints, UI intent, debugging direction, and follow-up corrections; follow that guidance while still independently checking the result.",
+    "Earlier turns in this thread may have been authored by a different engine or model - the user can switch families mid-thread. Judge the code and evidence in front of you, not the apparent authorship, and do not infer your own capabilities from a prior turn's byline.",
     "Within Fusion, picture/image generation and browser navigation/control/automation are Codex-owned execution work. Perform those delegated operations here and verify the resulting image or browser state.",
     "Before your final answer, review the implementation for bugs, compile/runtime failures, missing requirements, and whether the original goal is complete.",
     "Your final answer MUST end with exactly one single-line JSON verdict prefixed by this marker:",
@@ -202,6 +208,7 @@ function buildCodexVerifierTask(task) {
     "- `summary`: one concise sentence explaining the verdict.",
     "",
     'If you are not sure the goal is complete, set `goalReached:false` and `nextAction:"continue"`.',
+    "Never fabricate, approximate, or reconstruct command or test output. If you did not actually run a command or test, say so and set `goalReached:false` rather than reporting an assumed result.",
     "",
     'If the task states it is one milestone of a larger plan, implement only that milestone and judge `goalReached` against the LARGER goal: report `goalReached:false` and `nextAction:"continue"` until the final milestone completes it, even when this milestone itself is done.'
   ].join("\n");
@@ -348,6 +355,7 @@ function readCodexSettings() {
     family: "codex",
     model: cleanCodexSetting(ENV_CODEX_MODEL),
     effort: cleanCodexEffort(ENV_CODEX_EFFORT),
+    fast: false,
     source: "env"
   };
   if (!SETTINGS_FILE) return fallback;
@@ -359,6 +367,7 @@ function readCodexSettings() {
         family,
         model: cleanClaudeExecutorModel(parsed?.executorModel),
         effort: cleanClaudeEffort(parsed?.executorEffort),
+        fast: parsed?.executorFast === true,
         source: "file"
       };
     }
@@ -368,6 +377,7 @@ function readCodexSettings() {
       // (pre-family builds) carry only codexModel/codexEffort.
       model: cleanCodexSetting(parsed?.executorModel ?? parsed?.codexModel),
       effort: cleanCodexEffort(parsed?.executorEffort ?? parsed?.codexEffort),
+      fast: parsed?.executorFast === true,
       source: "file"
     };
   } catch (error) {
@@ -383,12 +393,61 @@ function applyCodexModelSetting(params, settings = readCodexSettings()) {
   return settings;
 }
 
-function applyCodexTurnSettings(params, settings = readCodexSettings()) {
+function modelCatalogEntry(models, modelId) {
+  if (!Array.isArray(models) || models.length === 0) return null;
+  const wanted = String(modelId || "").trim();
+  if (wanted) {
+    return (
+      models.find((model) => model && (model.id === wanted || model.model === wanted)) || null
+    );
+  }
+  return models.find((model) => model && (model.isDefault || model.is_default)) || null;
+}
+
+function fastTierForModel(models, modelId) {
+  const entry = modelCatalogEntry(models, modelId);
+  if (!entry) return FAST_SERVICE_TIER;
+  const tiers = Array.isArray(entry.serviceTiers)
+    ? entry.serviceTiers
+    : Array.isArray(entry.service_tiers)
+      ? entry.service_tiers
+      : [];
+  return tiers.some((tier) => tier && tier.id === FAST_SERVICE_TIER)
+    ? FAST_SERVICE_TIER
+    : null;
+}
+
+function noteExecutorFastUnsupported() {
+  relay({
+    role: "codex",
+    kind: "activity",
+    text: "execution fast serving is not available for this Codex model; using standard serving"
+  });
+}
+
+async function applyCodexFastTier(params, settings = readCodexSettings()) {
+  if (!settings.fast) {
+    params.serviceTier = null;
+    return settings;
+  }
+  const tier = fastTierForModel(
+    await readModelCatalog(),
+    settings.model || activeThreadResolvedModel || activeThreadModel
+  );
+  params.serviceTier = tier;
+  if (!tier) {
+    noteExecutorFastUnsupported();
+  }
+  return settings;
+}
+
+async function applyCodexTurnSettings(params, settings = readCodexSettings()) {
   if (settings.effort) {
     params.effort = settings.effort;
   } else if (settings.source === "file") {
     params.effort = null;
   }
+  await applyCodexFastTier(params, settings);
   return settings;
 }
 
@@ -399,6 +458,7 @@ function resetCodexThreadForModelChange(nextModel) {
   currentGoal = null;
   goalFeatureAvailable = null;
   activeThreadModel = null;
+  activeThreadResolvedModel = null;
   relay({ role: "codex", kind: "activity", text: "execution model updated; starting a fresh Codex thread" });
   return true;
 }
@@ -465,6 +525,9 @@ let threadId = null;
 let threadReady = null;
 let codexInitialized = false;
 let activeThreadModel = null;
+let activeThreadResolvedModel = null;
+let modelCatalog = null;
+let modelCatalogLoaded = false;
 const pendingReq = new Map(); // app-server request id -> {resolve, reject}
 const parked = new Map(); // pendingId -> {rpcId, method, params}
 let currentTurn = null; // {resolve, idleTimer, commandTimer} - fulfilled by turn/completed | turn/failed | an approval request
@@ -475,6 +538,9 @@ let turnArming = false;
 let activeTurnId = null;
 let activeTurnKind = null;
 let latchedTurnResult = null;
+let steerBuffer = [];
+let steerRoutingPending = false;
+let steerRoutingTimer = null;
 let turnSummary = [];
 let turnFiles = [];
 let completedItemIds = new Set();
@@ -505,7 +571,128 @@ function extractTurnId(value) {
   return null;
 }
 
+function clippedText(value, maxChars) {
+  const text = String(value || "").trim();
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, Math.max(0, maxChars - 3))}...`;
+}
+
+function bufferedSteerText() {
+  return steerBuffer.map((item) => String(item || "").trim()).filter(Boolean).join("\n");
+}
+
+function clearSteerRoutingTimer() {
+  if (steerRoutingTimer) {
+    clearTimeout(steerRoutingTimer);
+    steerRoutingTimer = null;
+  }
+}
+
+function clearSteerRoutingState(options = {}) {
+  const { clearBuffer = true } = options;
+  clearSteerRoutingTimer();
+  steerRoutingPending = false;
+  if (clearBuffer) {
+    steerBuffer = [];
+  }
+}
+
+function executorProgressSnapshot() {
+  const filesTouched = Array.from(new Set(turnFiles.filter(Boolean)));
+  const deltaText = Array.from(agentMessageDeltas.values())
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .pop();
+  const summaryText = turnSummary
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  const lastActivity = deltaText || summaryText[summaryText.length - 1] || "";
+  return {
+    filesTouched,
+    lastActivity: clippedText(lastActivity, 400),
+    partialSummary: clippedText(summaryText.join("\n"), 1200)
+  };
+}
+
+function buildSteerRoutingResult() {
+  return {
+    status: "steer_routing",
+    userSteer: bufferedSteerText(),
+    executorProgress: executorProgressSnapshot(),
+    guidance:
+      "The user steered mid-delegation and the executor is STILL RUNNING. Decide and answer with codex_steer_resolve: decision:'push' with (optionally refined) text folds the steer into the running executor so it keeps its momentum; decision:'replan' stops the executor so you can re-delegate with an amended codex_implement. Choose replan only if the steer changes the plan/scope; otherwise push.",
+    nextAction: "steer_resolve"
+  };
+}
+
+function armSteerRoutingWatchdog() {
+  clearSteerRoutingTimer();
+  steerRoutingTimer = setTimeout(() => {
+    if (!steerRoutingPending) return;
+    const steerText = bufferedSteerText();
+    clearSteerRoutingState();
+    relay({
+      role: "codex",
+      kind: "steer",
+      text: "planner did not resolve steering in time; pushing it to the running executor"
+    });
+    pushSteerToExecutor(steerText).catch((error) => {
+      relay({
+        role: "codex",
+        kind: "steer",
+        text: `timed-out steering push failed: ${error?.message || "unknown error"}`
+      });
+    });
+  }, STEER_ROUTE_TIMEOUT_MS);
+}
+
 async function codexSteer(text) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) {
+    relay({ role: "codex", kind: "steer", text: "empty steering ignored" });
+    return { status: "skipped", reason: "empty_steer" };
+  }
+  steerBuffer.push(trimmed);
+
+  if (steerRoutingPending) {
+    relay({
+      role: "codex",
+      kind: "steer",
+      text: "batched live steering for planner routing"
+    });
+    return { status: "routing", batched: true };
+  }
+
+  if (currentTurn && activeTurnKind === "implement") {
+    steerRoutingPending = true;
+    armSteerRoutingWatchdog();
+    relay({
+      role: "codex",
+      kind: "steer",
+      text: "routing steer to planner"
+    });
+    resolveTurn(buildSteerRoutingResult());
+    return { status: "routing" };
+  }
+
+  if (currentTurn && activeTurnKind === "investigate") {
+    const result = await pushSteerToExecutor(trimmed);
+    steerBuffer.pop();
+    return result.status === "accepted"
+      ? { status: "steered" }
+      : { status: result.status, reason: result.reason, error: result.error };
+  }
+
+  steerBuffer.pop();
+  relay({
+    role: "codex",
+    kind: "steer",
+    text: "live steering left for planner thread; no active executor turn"
+  });
+  return { status: "skipped", reason: "no_active_turn" };
+}
+
+async function pushSteerToExecutor(text) {
   const trimmed = String(text || "").trim();
   if (!trimmed) {
     return { status: "skipped", reason: "empty_steer" };
@@ -637,6 +824,7 @@ function startTurnAfterCommandTimer(command = "command") {
 }
 
 function resetTurnBuffers() {
+  clearSteerRoutingState();
   turnSummary = [];
   turnFiles = [];
   completedItemIds = new Set();
@@ -654,8 +842,10 @@ function resetCodexProcessState(options = {}) {
   threadReady = null;
   codexInitialized = false;
   activeThreadModel = null;
+  activeThreadResolvedModel = null;
   activeTurnId = null;
   activeTurnKind = null;
+  clearSteerRoutingState();
   currentGoal = null;
   goalFeatureAvailable = null;
 }
@@ -668,6 +858,7 @@ function resetHarness(reason = "Fusion stopped.") {
   resetCodexProcessState();
   activeExecutorFamily = null;
   latchedTurnResult = null;
+  clearSteerRoutingState();
   resetTurnBuffers();
 }
 
@@ -876,11 +1067,13 @@ let claudeNormalizer = null;
 let claudeStdoutBuffer = "";
 let claudeSpawnedModel = null;
 let claudeSpawnedEffort = null;
+let claudeSpawnedFast = null;
 let claudeTurnActive = false;
 let claudeInterruptRequested = false;
 let claudeTurnErrorText = "";
 let claudeTextParts = [];
 let claudeInterruptSeq = 0;
+let claudeFastSeq = 0;
 
 // Engine selection is per delegation (the settings file is re-read every
 // call), but NEVER mid-turn: a live settings flip applies to the NEXT
@@ -900,6 +1093,7 @@ function ensureExecutorFamily(family) {
     threadId = null;
     threadReady = null;
     activeThreadModel = null;
+    activeThreadResolvedModel = null;
     goalFeatureAvailable = null;
   }
   currentGoal = null;
@@ -935,6 +1129,7 @@ function killClaudeExecutor() {
   claudeStdoutBuffer = "";
   claudeSpawnedModel = null;
   claudeSpawnedEffort = null;
+  claudeSpawnedFast = null;
   claudeTurnActive = false;
   claudeInterruptRequested = false;
   claudeTextParts = [];
@@ -964,6 +1159,7 @@ function buildClaudeExecutorArgs(settings = {}) {
     cwd: CWD,
     model: settings.model || "sonnet",
     effort: settings.effort || undefined,
+    settingsFile: JSON.stringify({ fastMode: settings.fast === true }),
     // Full-autonomy parity with the codex executor's dangerFullAccess +
     // approvalPolicy "never": the executor owns all writes and execution, so
     // routine prompts never park. Investigations stay read-only by task
@@ -972,9 +1168,37 @@ function buildClaudeExecutorArgs(settings = {}) {
   });
 }
 
+function applyClaudeExecutorFastSetting(fast) {
+  const next = fast === true;
+  if (claudeSpawnedFast === next) return;
+  if (
+    !claudeChild ||
+    !claudeChild.stdin ||
+    claudeChild.stdin.destroyed ||
+    !claudeChild.stdin.writable
+  ) {
+    claudeSpawnedFast = next;
+    return;
+  }
+  claudeFastSeq += 1;
+  if (
+    claudeSend({
+      type: "control_request",
+      request_id: `fusion_exec_fast_${claudeFastSeq}`,
+      request: {
+        subtype: "apply_flag_settings",
+        settings: { fastMode: next }
+      }
+    })
+  ) {
+    claudeSpawnedFast = next;
+  }
+}
+
 function ensureClaudeChild(settings = {}) {
   const model = settings.model || "sonnet";
   const effort = settings.effort || null;
+  const fast = settings.fast === true;
   if (claudeChild && (claudeSpawnedModel !== model || claudeSpawnedEffort !== effort)) {
     relay({
       role: "codex",
@@ -983,9 +1207,12 @@ function ensureClaudeChild(settings = {}) {
     });
     killClaudeExecutor();
   }
-  if (claudeChild) return;
+  if (claudeChild) {
+    applyClaudeExecutorFastSetting(fast);
+    return;
+  }
   const { windowsCmdArg, createStreamNormalizer } = require("./fusionChatHost.cjs");
-  const args = buildClaudeExecutorArgs({ model, effort });
+  const args = buildClaudeExecutorArgs({ model, effort, fast });
   let child;
   if (isWin) {
     // The Windows claude is an npm shim (.cmd/.ps1), so always route through
@@ -1008,6 +1235,7 @@ function ensureClaudeChild(settings = {}) {
   claudeStdoutBuffer = "";
   claudeSpawnedModel = model;
   claudeSpawnedEffort = effort;
+  claudeSpawnedFast = fast;
   child.stdout.on("data", (chunk) => {
     if (claudeChild !== child) return;
     claudeStdoutBuffer += chunk.toString("utf8");
@@ -1249,11 +1477,40 @@ function notify(method, params) {
   return codexSend(params === undefined ? { method } : { method, params });
 }
 
-function resolveTurn(result) {
+async function readModelCatalog() {
+  if (modelCatalogLoaded) return modelCatalog;
+  modelCatalogLoaded = true;
+  try {
+    const models = [];
+    let cursor = null;
+    do {
+      const result = await rpc("model/list", {
+        includeHidden: true,
+        limit: 500,
+        ...(cursor ? { cursor } : {})
+      });
+      if (Array.isArray(result?.data)) {
+        models.push(...result.data);
+      }
+      cursor = result?.nextCursor || null;
+    } while (cursor);
+    modelCatalog = models;
+  } catch {
+    modelCatalog = null;
+  }
+  return modelCatalog;
+}
+
+function shouldPreserveActiveTurn(result, options = {}) {
+  if (options.preserveActiveTurn) return true;
+  return Boolean(result && (result.status === "needs_decision" || result.status === "steer_routing"));
+}
+
+function resolveTurn(result, options = {}) {
   if (!currentTurn) return;
   const turn = currentTurn;
   currentTurn = null;
-  if (!result || result.status !== "needs_decision") {
+  if (!shouldPreserveActiveTurn(result, options)) {
     activeTurnId = null;
     activeTurnKind = null;
   }
@@ -1277,6 +1534,13 @@ function drainLatchedTurnResult() {
   latchedTurnResult = null;
   resolveTurn(result);
   return true;
+}
+
+function takeLatchedTurnResult() {
+  if (!latchedTurnResult) return null;
+  const result = latchedTurnResult;
+  latchedTurnResult = null;
+  return result;
 }
 
 function pendingDecisionFor(pendingId, item) {
@@ -2041,14 +2305,19 @@ async function ensureThread() {
         cwd: CWD,
         sandbox: "danger-full-access",
         approvalPolicy: "never",
-        config: { "features.goals": true }
+        config: { "features.goals": true, "features.fast_mode": true }
       };
       applyCodexModelSetting(params, settings);
+      await applyCodexFastTier(params, settings);
       const res = await rpc("thread/start", params);
       const nextThreadId = res && res.thread && res.thread.id;
       if (!nextThreadId) throw new Error("thread/start returned no thread id");
       threadId = nextThreadId;
       activeThreadModel = requestedModel;
+      activeThreadResolvedModel = (res && res.model) || requestedModel;
+      if (settings.fast && params.serviceTier && res?.serviceTier !== params.serviceTier) {
+        noteExecutorFastUnsupported();
+      }
       return threadId;
     })();
   }
@@ -2062,6 +2331,7 @@ async function ensureThread() {
       currentGoal = null;
       goalFeatureAvailable = null;
       activeThreadModel = null;
+      activeThreadResolvedModel = null;
       return ensureThread();
     }
     return readyThreadId;
@@ -2182,7 +2452,7 @@ async function codexGoalClear() {
 // Codex thread and native goal stay alive. Unlike resetHarness (host-only, kills
 // the child), this keeps the bridge warm and never blocks on the child.
 function codexCancel() {
-  const hadActiveTurn = Boolean(currentTurn);
+  const hadActiveTurn = Boolean(currentTurn || activeTurnId || claudeTurnActive || steerRoutingPending);
   const clearedDecisions = parked.size > 0;
   // Best-effort: ask the app-server to abandon the active turn. Fire-and-forget
   // (never awaited) so a wedged or silent child cannot block the escape hatch.
@@ -2202,11 +2472,83 @@ function codexCancel() {
   // so the orchestrator is freed even if the child never replies.
   parked.clear();
   latchedTurnResult = null;
+  clearSteerRoutingState();
   resolveTurn({ status: "cancelled", error: "Fusion turn cancelled by the orchestrator." });
   activeTurnId = null;
   activeTurnKind = null;
   relay({ role: "opus", kind: "cancel", text: "turn cancelled" });
   return { status: "cancelled", hadActiveTurn, clearedDecisions };
+}
+
+async function codexSteerResolve(decisionValue, text) {
+  const decision = String(decisionValue || "push").trim().toLowerCase();
+  if (!["push", "replan"].includes(decision)) {
+    return { status: "error", error: "decision must be push or replan" };
+  }
+  if (!steerRoutingPending) {
+    return { status: "error", error: "No pending steering route to resolve." };
+  }
+  clearSteerRoutingTimer();
+  const steerText = String(text || "").trim() || bufferedSteerText();
+
+  if (decision === "replan") {
+    const interrupted = await codexInterrupt();
+    steerRoutingPending = false;
+    steerBuffer = [];
+    latchedTurnResult = null;
+    clearSteerRoutingTimer();
+    resetTurnBuffers();
+    relay({ role: "codex", kind: "steer", text: "executor stopped for steering replan" });
+    return {
+      status: "steer_replan_ready",
+      interrupted,
+      note: "Executor stopped for replanning. Call codex_implement now with your amended task."
+    };
+  }
+
+  steerRoutingPending = false;
+
+  if (latchedTurnResult) {
+    const completed = takeLatchedTurnResult();
+    steerBuffer = [];
+    const withGoal = await syncGoalAfterTurn(completed);
+    relay({
+      role: "codex",
+      kind: "steer",
+      text: "executor finished before steering landed"
+    });
+    return {
+      ...withGoal,
+      steerNotApplied: true,
+      userSteer: steerText,
+      note:
+        "The executor finished before your steer landed; its result is included. Call codex_implement to apply your steer as a follow-up."
+    };
+  }
+
+  if (!activeTurnId && !claudeTurnActive) {
+    steerBuffer = [];
+    return { status: "failed", error: "No active executor turn is available for steering." };
+  }
+
+  steerBuffer = [];
+  const pushed = await pushSteerToExecutor(steerText);
+  if (pushed.status !== "accepted") {
+    relay({
+      role: "codex",
+      kind: "steer",
+      text: `steering push failed: ${pushed.error || pushed.reason || pushed.status}`
+    });
+    return {
+      status: "failed",
+      error: pushed.error || `Could not push steering: ${pushed.reason || pushed.status}`
+    };
+  }
+  relay({ role: "codex", kind: "steer", text: "steering pushed to running executor" });
+  const done = awaitTurn(activeTurnKind || "implement");
+  drainLatchedTurnResult();
+  const result = await done;
+  return syncGoalAfterTurn(result);
 }
 
 async function ensureGoalForTask(task) {
@@ -2248,6 +2590,23 @@ async function codexImplement(task) {
   if (pendingDecision) {
     return pendingDecision;
   }
+  if (steerRoutingPending) {
+    await codexInterrupt();
+    steerRoutingPending = false;
+    steerBuffer = [];
+    latchedTurnResult = null;
+    clearSteerRoutingTimer();
+    relay({ role: "codex", kind: "steer", text: "fresh delegation treated as steering replan" });
+  }
+  if (latchedTurnResult && !activeTurnId) {
+    const result = takeLatchedTurnResult();
+    const withGoal = await syncGoalAfterTurn(result);
+    return {
+      ...withGoal,
+      warning:
+        "A previously routed executor turn completed before the planner started the next delegation; review this result before re-delegating."
+    };
+  }
   if (currentTurn || turnArming) {
     return {
       status: "error",
@@ -2283,7 +2642,7 @@ async function codexImplement(task) {
     approvalPolicy: "never",
     sandboxPolicy: fusionCodexSandboxPolicy()
   };
-  applyCodexTurnSettings(params);
+  await applyCodexTurnSettings(params);
   rpc("turn/start", params)
     .then(handleTurnStartResponse)
     .catch((error) => resolveTurn({ status: "failed", error: error.message }));
@@ -2302,6 +2661,14 @@ async function codexInvestigate(task) {
   });
   if (pendingDecision) {
     return pendingDecision;
+  }
+  if (steerRoutingPending) {
+    await codexInterrupt();
+    steerRoutingPending = false;
+    steerBuffer = [];
+    latchedTurnResult = null;
+    clearSteerRoutingTimer();
+    relay({ role: "codex", kind: "steer", text: "fresh investigation treated as steering replan" });
   }
   if (currentTurn || turnArming) {
     return {
@@ -2333,7 +2700,7 @@ async function codexInvestigate(task) {
     approvalPolicy: "never",
     sandboxPolicy: fusionCodexInvestigateSandboxPolicy()
   };
-  applyCodexTurnSettings(params);
+  await applyCodexTurnSettings(params);
   rpc("turn/start", params)
     .then(handleTurnStartResponse)
     .catch((error) => resolveTurn({ status: "failed", error: error.message }));
@@ -2371,6 +2738,14 @@ function buildDecisionResult(method, params, decision, note) {
 }
 
 async function codexRespond(pendingId, decision, note) {
+  if (steerRoutingPending) {
+    return {
+      status: "steer_routing",
+      ...buildSteerRoutingResult(),
+      warning:
+        "A steering route is awaiting a decision. Call codex_steer_resolve with decision:'push' or decision:'replan' before answering other pending requests."
+    };
+  }
   if (currentTurn || turnArming) {
     return (
       pendingDecisionResult({
@@ -2476,7 +2851,7 @@ const TOOLS = [
   {
     name: "codex_implement",
     description:
-      "Delegate implementation, testing, compile/runtime fixing, refactors, repo navigation, picture/image generation, browser navigation/control/automation, bug review, or goal-completion verification to embedded Codex GPT-5.5. In Fusion Plan mode this tool refuses execution until the pane is switched back to Auto. Opus 4.8 drives architecture, strategy, UX/UI build-out when appropriate, human-facing orchestration, and guidance for Codex on constraints, UI intent, debugging direction, and follow-up corrections. Codex follows that guidance while independently verifying bugs and goal completion. Use codex_goal_set first for substantial top-level work; codex_implement will create a fallback native Codex goal if none exists and will sync goal status from the verifier verdict. Returns one of: {status:'completed', summary, files, goalReached, bugsFound, missingRequirements, nextAction, verifierVerdict, goal}; {status:'needs_decision', pendingId, kind, detail} - answer it with codex_respond; or {status:'failed', error}. If goalReached is false or nextAction is 'continue', continue/redelegate unless the human or an explicit Opus override says otherwise.",
+      "Delegate implementation, testing, compile/runtime fixing, refactors, repo navigation, picture/image generation, browser navigation/control/automation, bug review, or goal-completion verification to embedded Codex GPT-5.5. In Fusion Plan mode this tool refuses execution until the pane is switched back to Auto. Opus 4.8 drives architecture, strategy, UX/UI build-out when appropriate, human-facing orchestration, and guidance for Codex on constraints, UI intent, debugging direction, and follow-up corrections. Codex follows that guidance while independently verifying bugs and goal completion. Use codex_goal_set first for substantial top-level work; codex_implement will create a fallback native Codex goal if none exists and will sync goal status from the verifier verdict. Returns one of: {status:'completed', summary, files, goalReached, bugsFound, missingRequirements, nextAction, verifierVerdict, goal}; {status:'needs_decision', pendingId, kind, detail} - answer it with codex_respond; {status:'steer_routing', userSteer, executorProgress, guidance, nextAction:'steer_resolve'} - answer it with codex_steer_resolve; or {status:'failed', error}. If goalReached is false or nextAction is 'continue', continue/redelegate unless the human or an explicit Opus override says otherwise.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2507,6 +2882,25 @@ const TOOLS = [
     }
   },
   {
+    name: "codex_steer_resolve",
+    description:
+      "Answer a steer_routing result returned by codex_implement while the executor is still running. Use decision='push' to fold the user's steering into the running executor; optional text may refine the steer. Use decision='replan' to stop the executor, then call codex_implement with an amended task on the same persistent executor thread.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        decision: {
+          type: "string",
+          enum: ["push", "replan"]
+        },
+        text: {
+          type: "string",
+          description: "Optional refined steering text. Defaults to the buffered user steer."
+        }
+      },
+      required: ["decision"]
+    }
+  },
+  {
     name: "codex_cancel",
     description:
       "Abort the in-flight Codex turn and clear any pending approvals for this Fusion pane WITHOUT restarting the pane. Use it as the escape hatch when a turn is wedged - e.g. codex_implement keeps returning a 'turn already in progress' error with no decision to answer, or a parked approval can no longer be resolved. The Codex thread and native goal stay alive, so you can re-delegate with codex_implement afterwards. Returns {status:'cancelled', hadActiveTurn, clearedDecisions}.",
@@ -2517,7 +2911,12 @@ const TOOLS = [
   }
 ];
 
-const PLAN_MODE_ALLOWED_TOOLS = new Set(["codex_goal_get", "codex_investigate", "codex_cancel"]);
+const PLAN_MODE_ALLOWED_TOOLS = new Set([
+  "codex_goal_get",
+  "codex_investigate",
+  "codex_cancel",
+  "codex_steer_resolve"
+]);
 
 function sendMcp(obj) {
   process.stdout.write(`${JSON.stringify(obj)}\n`);
@@ -2553,6 +2952,11 @@ async function handleToolCall(id, params) {
         String(args.pendingId || ""),
         String(args.decision || ""),
         args.note != null ? String(args.note) : ""
+      );
+    } else if (name === "codex_steer_resolve") {
+      result = await codexSteerResolve(
+        String(args.decision || ""),
+        args.text != null ? String(args.text) : ""
       );
     } else if (name === "codex_cancel") {
       result = codexCancel();
@@ -2649,12 +3053,14 @@ function startMcpServer() {
 }
 
 module.exports = {
+  FAST_SERVICE_TIER,
   VERDICT_MARKER,
   buildClaudeExecutorArgs,
   buildCodexInvestigationTask,
   buildCodexVerifierTask,
   cleanClaudeEffort,
   extractVerifierVerdict,
+  fastTierForModel,
   commandExecutionDisplayText,
   goalStatusForVerdict,
   normalizeGoal,

@@ -230,7 +230,21 @@ function parseCodexSessionMeta(filePath) {
   }
 }
 
-function findCodexThread(payload = {}, options = {}) {
+// Strip walk-internal fields before a codex ref leaves this module — a
+// published threadRef gets persisted in workspace state as-is.
+function publishCodexThreadRef(thread) {
+  const {
+    cwd: _cwd,
+    originator: _originator,
+    rolloutPath: _rolloutPath,
+    ...threadRef
+  } = withRolloutTitle(thread);
+  return threadRef;
+}
+
+// Rollouts for a cwd that could belong to this app: same filter latest-thread
+// discovery uses (Codex Desktop sessions are never ours).
+function collectCodexCandidates(payload = {}, options = {}) {
   const cwd = payload.cwd;
   const after = Number(payload.after || 0);
   const excludeIds = new Set(
@@ -238,16 +252,8 @@ function findCodexThread(payload = {}, options = {}) {
       ? payload.excludeIds.filter(Boolean).map(String)
       : []
   );
-
-  if (!cwd) {
-    return {
-      status: "failed",
-      message: "Cannot discover a Codex thread without a working directory."
-    };
-  }
-
   const sessionsDir = path.join(codexHome(options), "sessions");
-  const candidates = collectJsonlFiles(sessionsDir)
+  return collectJsonlFiles(sessionsDir)
     .map(parseCodexSessionMeta)
     .filter((thread) => {
       if (!thread) {
@@ -260,18 +266,22 @@ function findCodexThread(payload = {}, options = {}) {
         thread.createdAt >= after &&
         !excludeIds.has(thread.id)
       );
-    })
-    .sort((a, b) => a.createdAt - b.createdAt || a.updatedAt - b.updatedAt);
+    });
+}
 
-  const publish = (thread) => {
-    const {
-      cwd: _cwd,
-      originator: _originator,
-      rolloutPath: _rolloutPath,
-      ...threadRef
-    } = withRolloutTitle(thread);
-    return threadRef;
-  };
+function findCodexThread(payload = {}, options = {}) {
+  if (!payload.cwd) {
+    return {
+      status: "failed",
+      message: "Cannot discover a Codex thread without a working directory."
+    };
+  }
+
+  const candidates = collectCodexCandidates(payload, options).sort(
+    (a, b) => a.createdAt - b.createdAt || a.updatedAt - b.updatedAt
+  );
+
+  const publish = publishCodexThreadRef;
 
   if (candidates.length === 0) {
     return {
@@ -292,6 +302,24 @@ function findCodexThread(payload = {}, options = {}) {
     status: "found",
     threadRef: publish(candidates[0])
   };
+}
+
+// Every Codex thread for a folder, newest first — the Fusion resume picker's
+// data source for codex-planner panes. Unlike findCodexThread this never goes
+// ambiguous: the user does the disambiguating by picking a row.
+function listCodexThreads(payload = {}, options = {}) {
+  if (!payload.cwd) {
+    return {
+      status: "failed",
+      message: "Cannot list Codex threads without a working directory."
+    };
+  }
+
+  const threads = collectCodexCandidates(payload, options)
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .map(publishCodexThreadRef);
+
+  return { status: "found", threads };
 }
 
 // Locate a Codex rollout file for a specific session id without reading file
@@ -388,7 +416,9 @@ function confirmCodexThread(cwd, id, options = {}) {
 }
 
 module.exports = {
+  codexHome,
   collectJsonlFiles,
+  listCodexThreads,
   confirmCodexThread,
   findCodexThread,
   isSamePath,

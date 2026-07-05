@@ -50,6 +50,7 @@ const {
   resolveModelArgument,
   CODEX_EFFORT_VALUES,
   FREE_TEXT_SLASH_COMMANDS,
+  FUSION_SPEED_VALUES,
   FUSION_SLASH_COMMANDS
 } = menuModule.exports;
 
@@ -108,20 +109,34 @@ assert(
     migrated.plannerFamily === "claude" &&
       migrated.plannerModel === "sonnet" &&
       migrated.plannerEffort === "max" &&
+      migrated.plannerFast === false &&
       migrated.executorFamily === "codex" &&
       migrated.executorModel === "gpt-5.5" &&
-      migrated.executorEffort === "xhigh",
+      migrated.executorEffort === "xhigh" &&
+      migrated.executorFast === false,
     "legacy settings must migrate to planner(claude)/executor(codex) with per-family effort coercion"
   );
 }
 {
   const defaults = normalizeFusionRoleSettings(null);
   assert(
-    defaults.plannerFamily === "claude" &&
+      defaults.plannerFamily === "claude" &&
       defaults.plannerModel === "opus" &&
+      defaults.plannerFast === false &&
       defaults.executorFamily === "codex" &&
-      defaults.executorModel === "auto",
-    "empty settings must land on the stock planner opus / executor codex-default pair"
+      defaults.executorModel === "auto" &&
+      defaults.executorFast === false,
+    "empty settings must land on the stock planner opus / executor codex-default pair with fast serving off"
+  );
+}
+{
+  const explicit = normalizeFusionRoleSettings({
+    plannerFast: true,
+    executorFast: true
+  });
+  assert(
+    explicit.plannerFast === true && explicit.executorFast === true,
+    "explicit fast serving flags must survive settings normalization"
   );
 }
 
@@ -293,6 +308,18 @@ assert(
   );
 }
 {
+  assert(
+    FUSION_SPEED_VALUES.includes("quick") && !FUSION_SPEED_VALUES.includes("fast"),
+    "the old downgrade speed preset must be named quick, not fast"
+  );
+  const menu = buildSlashMenu("/speed");
+  assert(
+    menu.items.some((item) => item.command === "/speed fusion quick") &&
+      !menu.items.some((item) => item.command === "/speed fusion fast"),
+    "/speed must present quick as the primary downgrade preset"
+  );
+}
+{
   const menu = buildSlashMenu("/claude ");
   assert(
     menu.title === "Planner Model (Claude)" && menu.items.length > 0,
@@ -354,11 +381,17 @@ assert(
   "unknown /speed values must error, not be reinterpreted as a planning model"
 );
 
-// Speed/effort shortcuts must not clobber the model pick: only the "fast"
-// presets (whose label advertises the faster model) may set one.
+// Speed/effort shortcuts must not clobber the model pick: only the "quick"
+// downgrade preset may set one.
 assert(
   !pane.includes('plannerModel: "opus", plannerEffort'),
-  "non-fast presets must NOT force the model back to opus"
+  "non-quick presets must NOT force the model back to opus"
+);
+assert(
+  pane.includes('if (preset === "quick")') &&
+    pane.includes("quickPlannerModel") &&
+    pane.includes('applySettings({ plannerModel: quickPlannerModel, plannerEffort: "low" }, "planning speed")'),
+  "/speed quick must keep the old downgrade behavior under the new name"
 );
 assert(
   pane.includes('applySettings({ plannerEffort: "high" }, "planning speed")') &&
@@ -369,6 +402,36 @@ assert(
   pane.includes("familyMaxEffort(executorFamily)"),
   "the top execution level must come from the executor family's own enum (xhigh for codex), never codex 'max'"
 );
+assert(
+  !pane.includes('applySpeedPreset("harness", "fast")') &&
+    pane.includes('applySettings({ plannerFast: next, executorFast: next }, "fast serving")') &&
+    pane.includes('normalized === "/fast" || normalized.startsWith("/fast ")') &&
+    pane.includes("/planner-model, /executor-model, /fast, /speed"),
+  "/fast must toggle real fast serving flags instead of invoking the old speed preset"
+);
+{
+  const paneRestartBlock = pane.slice(
+    pane.indexOf("const requiresRestart ="),
+    pane.indexOf("const notice = session.started")
+  );
+  const appRestartBlock = app.slice(
+    app.indexOf("const requiresRestart ="),
+    app.indexOf("const executorSettingsChanged =")
+  );
+  assert(
+    !paneRestartBlock.includes("plannerFast") &&
+      !paneRestartBlock.includes("executorFast") &&
+      !appRestartBlock.includes("plannerFast") &&
+      !appRestartBlock.includes("executorFast"),
+    "fast serving flag changes must not enter the pane restart predicate"
+  );
+  assert(
+    app.includes("fastSettingsChanged") &&
+      app.includes("plannerFast: next.plannerFast") &&
+      app.includes("executorFast: next.executorFast"),
+    "fast serving changes must use the live update-settings path"
+  );
+}
 
 // Composer navigation: Esc dismisses the menu without erasing input (and backs
 // a picker out one stage per press); Shift+Tab never toggles the mode while a
@@ -380,9 +443,23 @@ assert(
   "Esc must dismiss the slash menu while KEEPING the typed input"
 );
 assert(
-  pane.includes("if (picker?.family)") &&
+  pane.includes('if (picker && "role" in picker && picker.family)') &&
     pane.includes("setPicker({ role: picker.role })"),
   "Esc in the picker must back out one stage (model → family) per press"
+);
+// The saved-chat resume picker: /resume lists this folder's Fusion chats
+// (newest first) instead of blind-resuming the stashed last chat.
+assert(
+  pane.includes("function openResumePicker") &&
+    pane.includes('command: `__resume:${thread.id}`') &&
+    pane.includes("provider: plannerFamily") &&
+    pane.includes("fusion: true"),
+  "/resume must open the saved-chat picker listing the planner family's chats for this folder"
+);
+assert(
+  pane.includes('"open in another pane"') &&
+    pane.includes("claimedThreadIds?.includes(threadId)"),
+  "the resume picker must mark and refuse chats already open in another pane"
 );
 assert(
   pane.includes("!slashMenuOpen && !inputIsSlashCommand"),

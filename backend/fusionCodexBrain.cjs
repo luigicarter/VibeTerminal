@@ -34,6 +34,31 @@ const fs = require("fs");
 const FUSION_BRIDGE_SERVER = "fusion-codex";
 const RPC_TIMEOUT_MS = 30_000;
 const THREAD_RPC_TIMEOUT_MS = 60_000;
+const FAST_SERVICE_TIER = "priority";
+
+function modelCatalogEntry(models, modelId) {
+  if (!Array.isArray(models) || models.length === 0) return null;
+  const wanted = String(modelId || "").trim();
+  if (wanted) {
+    return (
+      models.find((model) => model && (model.id === wanted || model.model === wanted)) || null
+    );
+  }
+  return models.find((model) => model && (model.isDefault || model.is_default)) || null;
+}
+
+function fastTierForModel(models, modelId) {
+  const entry = modelCatalogEntry(models, modelId);
+  if (!entry) return FAST_SERVICE_TIER;
+  const tiers = Array.isArray(entry.serviceTiers)
+    ? entry.serviceTiers
+    : Array.isArray(entry.service_tiers)
+      ? entry.service_tiers
+      : [];
+  return tiers.some((tier) => tier && tier.id === FAST_SERVICE_TIER)
+    ? FAST_SERVICE_TIER
+    : null;
+}
 
 function textInput(content) {
   return [{ type: "text", text: String(content ?? ""), text_elements: [] }];
@@ -283,6 +308,7 @@ function createCodexBrainSession(options) {
     systemPromptFile,
     model,
     effort,
+    plannerFast,
     resumeId,
     emitEvent
   } = options;
@@ -305,6 +331,10 @@ function createCodexBrainSession(options) {
   let buffer = "";
   let threadId = null;
   let threadModelPinned = false;
+  let activeModel = model ? String(model) : null;
+  let fastServing = plannerFast === true;
+  let modelCatalog = null;
+  let modelCatalogLoaded = false;
   let stopped = false;
 
   function send(obj) {
@@ -345,6 +375,44 @@ function createCodexBrainSession(options) {
 
   function notify(method, params) {
     send(params === undefined ? { jsonrpc: "2.0", method } : { jsonrpc: "2.0", method, params });
+  }
+
+  async function readModelCatalog() {
+    if (modelCatalogLoaded) return modelCatalog;
+    modelCatalogLoaded = true;
+    try {
+      const models = [];
+      let cursor = null;
+      do {
+        const result = await rpc("model/list", {
+          includeHidden: true,
+          limit: 500,
+          ...(cursor ? { cursor } : {})
+        });
+        if (Array.isArray(result?.data)) {
+          models.push(...result.data);
+        }
+        cursor = result?.nextCursor || null;
+      } while (cursor);
+      modelCatalog = models;
+    } catch {
+      modelCatalog = null;
+    }
+    return modelCatalog;
+  }
+
+  async function desiredFastServiceTier() {
+    if (!fastServing) return null;
+    return fastTierForModel(await readModelCatalog(), activeModel);
+  }
+
+  function noteFastUnsupported() {
+    emitEvent({
+      type: "activity",
+      role: "opus",
+      kind: "activity",
+      text: "Codex planner fast serving is not available for this model; using standard serving."
+    });
   }
 
   function failAllPending(message) {
@@ -428,11 +496,19 @@ function createCodexBrainSession(options) {
       sandbox: "read-only",
       approvalPolicy: "never",
       developerInstructions: developerInstructions || undefined,
-      config: bridgeConfigFromMcpFile(mcpConfigPath)
+      config: {
+        ...bridgeConfigFromMcpFile(mcpConfigPath),
+        "features.fast_mode": true
+      }
     };
     if (model) {
       baseParams.model = String(model);
       threadModelPinned = true;
+    }
+    const serviceTier = await desiredFastServiceTier();
+    baseParams.serviceTier = serviceTier;
+    if (fastServing && !serviceTier) {
+      noteFastUnsupported();
     }
 
     if (resumeId) {
@@ -443,6 +519,10 @@ function createCodexBrainSession(options) {
           THREAD_RPC_TIMEOUT_MS
         );
         threadId = (resumed && resumed.thread && resumed.thread.id) || String(resumeId);
+        activeModel = (resumed && resumed.model) || activeModel;
+        if (fastServing && serviceTier && resumed?.serviceTier !== serviceTier) {
+          noteFastUnsupported();
+        }
         emitEvent({ type: "session", sessionId: threadId });
         return;
       } catch (error) {
@@ -459,6 +539,10 @@ function createCodexBrainSession(options) {
     threadId = started && started.thread && started.thread.id;
     if (!threadId) {
       throw new Error("thread/start returned no thread id");
+    }
+    activeModel = (started && started.model) || activeModel;
+    if (fastServing && serviceTier && started?.serviceTier !== serviceTier) {
+      noteFastUnsupported();
     }
     emitEvent({ type: "session", sessionId: threadId });
   }
@@ -506,6 +590,21 @@ function createCodexBrainSession(options) {
     return true;
   }
 
+  async function setFast(next) {
+    fastServing = next === true;
+    await ready;
+    if (!threadId) return false;
+    const serviceTier = await desiredFastServiceTier();
+    await rpc("thread/settings/update", {
+      threadId,
+      serviceTier
+    });
+    if (fastServing && !serviceTier) {
+      noteFastUnsupported();
+    }
+    return true;
+  }
+
   function markStopped() {
     stopped = true;
   }
@@ -515,6 +614,7 @@ function createCodexBrainSession(options) {
     ready,
     sendInput,
     interrupt,
+    setFast,
     markStopped,
     isStopped: () => stopped,
     getThreadId: () => threadId

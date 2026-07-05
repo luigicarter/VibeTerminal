@@ -41,8 +41,12 @@
 > Headless multi-turn uses a long-lived `--input-format stream-json` process
 > (M3.1 spike). Verified: typecheck/build + smoke suite (incl. the embedded
 > binary booting `app-server`, + `fusion-chat-parse`) + clean boot. Remaining: a
-> live turn needs `claude login` + `codex login`; transcript ephemeral (Resume
-> via `claude --resume`); per-platform binaries + code-signing for release.
+> live turn needs `claude login` + `codex login`; per-platform binaries +
+> code-signing for release. (2026-07-04: the transcript is no longer ephemeral
+> across resumes — `/resume` opens a saved-chat picker for the folder, newest
+> first with generated titles, and the host rehydrates the picked conversation
+> into the pane from the claude project JSONL / codex rollout; see
+> docs/backend.md and docs/frontend.md.)
 >
 > **Settings layer rewrite (2026-07-02, hardened 2026-07-03):** model/effort
 > selection is catalog-backed and validated, mirroring Open Fusion's native
@@ -63,8 +67,13 @@
 > FILTERS the submenu (it used to close it) and an unmatched-but-launchable
 > id gets an explicit `Use '<id>'` row; `/opus effort <x>` and the
 > balanced/deep/max speed presets are effort-only (they used to force the
-> model back to Opus — only the "fast" presets, which advertise it, switch to
-> Sonnet); Esc closes the menu but keeps the typed input (second Esc clears);
+> model back to Opus). The old downgrade speed preset is now `quick`: it
+> switches the planner to the family's lighter model and drops effort to low.
+> `/fast` is reserved for real fast serving (same model and same effort,
+> faster token serving at higher cost) and toggles independent
+> `plannerFast`/`executorFast` flags; `/fast planner`, `/fast executor`,
+> `/fast on`, and `/fast off` are live settings changes. Esc closes the menu
+> but keeps the typed input (second Esc clears);
 > Shift+Tab never flips Plan/Auto while a slash command is being typed; Tab
 > can't blur the composer mid-command; hover-highlight arms on real mouse
 > movement only. Unknown planning models are refused before anything
@@ -405,11 +414,17 @@ split-lanes, **not** a side rail:
 Mid-turn sends (steering) do not drop into the scrolling transcript, where the
 stream would bury them: the pane pins them above the composer with a QUEUED
 badge (same mechanic as the Open Fusion pane) until the next assistant message
-— the next API call, whose context includes the queued text — absorbs them,
-at which point they join the transcript as `Steer: …` right where Claude
-actually saw them. If the turn ends or is interrupted first, they flush as the
-freshest entry above the composer; the text is already in Claude's history and
-leads the next turn.
+absorbs them, at which point they join the transcript as `Steer: ...` right
+where Claude actually saw them. If the steer lands while `codex_implement` is
+actively waiting on the executor, the adapter now keeps that executor turn
+running and early-returns `{status:"steer_routing", ...}` to the planner. The
+planner must answer with `codex_steer_resolve`: `decision:"push"` sends the
+steer into the still-running executor, while `decision:"replan"` interrupts the
+executor so the planner can re-delegate on the same persistent thread. If the
+planner does not answer promptly, a watchdog pushes the buffered steer into the
+running executor as the safe default. Steering outside an active implementation
+turn still falls back to the planner-thread steer path, so it is never silently
+dropped.
 
 ## Milestones
 

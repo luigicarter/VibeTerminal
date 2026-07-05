@@ -51,6 +51,14 @@ const MAX_TOOL_OUTPUT_CHARS = 20_000;
 const PORT_TIMEOUT_MS = 30_000;
 const SSE_RETRY_MS = 1_500;
 const SSE_MAX_RETRIES = 5;
+const STEER_ROUTER_TIMEOUT_MS = Math.max(
+  5_000,
+  Number(process.env.VIBE_OPENFUSION_STEER_ROUTER_TIMEOUT_MS) || 20_000
+);
+const STEER_ROUTER_POLL_MS = Math.max(
+  100,
+  Number(process.env.VIBE_OPENFUSION_STEER_ROUTER_POLL_MS) || 500
+);
 
 function clipText(value, max = MAX_TOOL_OUTPUT_CHARS) {
   const text = String(value ?? "");
@@ -109,6 +117,9 @@ const OPEN_FUSION_GATE_NUDGE =
   "the changed files, or an investigator pass) and state which check you ran " +
   "before continuing.";
 
+const OPEN_FUSION_EXECUTOR_STEER_PREFIX =
+  "Live user steering for this active Open Fusion executor task:\n";
+
 function buildPlannerTurnParts(text, mode, options = {}) {
   const parts = [
     { type: "text", text: String(text ?? "") },
@@ -119,6 +130,229 @@ function buildPlannerTurnParts(text, mode, options = {}) {
   ];
   if (options.nudge) parts.push({ type: "text", text: OPEN_FUSION_GATE_NUDGE });
   return parts;
+}
+
+function buildExecutorSteerParts(text) {
+  return [{ type: "text", text: `${OPEN_FUSION_EXECUTOR_STEER_PREFIX}${String(text ?? "").trim()}` }];
+}
+
+function compactWhitespace(value, max = 1200) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text.length > max ? `${text.slice(0, Math.max(0, max - 3))}...` : text;
+}
+
+function buildExecutorSteerPromptRequest(childSessionId, executorModel, text) {
+  const sessionId = String(childSessionId || "").trim();
+  const steerText = String(text || "").trim();
+  const model = splitModelId(executorModel);
+  if (!sessionId || !steerText || !model) return null;
+  return {
+    path: `/session/${encodeURIComponent(sessionId)}/prompt_async`,
+    body: {
+      agent: "executor",
+      parts: buildExecutorSteerParts(steerText),
+      model
+    }
+  };
+}
+
+function buildPlannerPromptRequest(sessionId, plannerModel, text, mode = "auto") {
+  const rootSessionId = String(sessionId || "").trim();
+  const promptText = String(text || "").trim();
+  const model = splitModelId(plannerModel);
+  if (!rootSessionId || !promptText || !model) return null;
+  return {
+    path: `/session/${encodeURIComponent(rootSessionId)}/prompt_async`,
+    body: {
+      agent: mode === "plan" ? "plan" : "planner",
+      parts: buildPlannerTurnParts(promptText, mode, { nudge: false }),
+      model
+    }
+  };
+}
+
+function buildOpenFusionSteerDecisionPrompt(userSteer, snapshot = {}) {
+  return [
+    "You are the Open Fusion Brain routing live user steering while your main Brain turn is blocked inside one or more native executor tasks.",
+    "Decide which active executor child, if any, the user's steering targets, and whether it should be injected into that child, should stop/replan that child, or should be ignored.",
+    "Return JSON only, no markdown, with this schema:",
+    '{"action":"inject|replan|ignore","childSessionId":"active child session id or empty","text":"refined instruction or amended executor task","reason":"short reason"}',
+    "",
+    "Decision policy:",
+    "- inject: the steer clarifies, corrects, or nudges one active executor task without changing scope.",
+    "- replan: the steer changes scope, invalidates one active executor task, or requires a different delegation.",
+    "- ignore: the steer is empty, irrelevant, or already satisfied.",
+    "- When multiple active executor tasks are listed, choose the childSessionId whose taskPrompt/activity best matches the user steer.",
+    "- When only one active executor task is listed, use that childSessionId for inject/replan.",
+    "",
+    `User steer:\n${String(userSteer || "").trim()}`,
+    "",
+    `Executor snapshot:\n${JSON.stringify(snapshot || {}, null, 2)}`
+  ].join("\n");
+}
+
+function parseOpenFusionSteerDecision(value, fallbackText = "") {
+  const raw = String(value || "").trim();
+  let parsed = null;
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidates = [
+    fenced ? fenced[1] : "",
+    raw,
+    raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1)
+  ].filter((candidate) => candidate && candidate.includes("{") && candidate.includes("}"));
+  for (const candidate of candidates) {
+    try {
+      parsed = JSON.parse(candidate);
+      break;
+    } catch {
+      // try the next shape
+    }
+  }
+  if (!parsed || typeof parsed !== "object") {
+    return {
+      action: "inject",
+      childSessionId: "",
+      text: String(fallbackText || "").trim(),
+      reason: "router_decision_parse_failed",
+      fallback: true
+    };
+  }
+  const action = String(parsed.action || parsed.decision || "").trim().toLowerCase();
+  const normalized = ["inject", "replan", "ignore"].includes(action) ? action : "inject";
+  return {
+    action: normalized,
+    childSessionId: String(parsed.childSessionId || parsed.sessionId || parsed.targetChildSessionId || "").trim(),
+    text: String(parsed.text || "").trim() || String(fallbackText || "").trim(),
+    reason: String(parsed.reason || "").trim(),
+    fallback: normalized !== action
+  };
+}
+
+function buildOpenFusionReplanPrompt(userSteer, amendedText, snapshot = {}) {
+  const text = String(amendedText || "").trim() || String(userSteer || "").trim();
+  return [
+    "OPEN FUSION STEERING REPLAN:",
+    "The user steered while the executor task was running. The router decided the current task should stop and the Brain should replan.",
+    "",
+    `User steer:\n${String(userSteer || "").trim()}`,
+    "",
+    `Amended instruction:\n${text}`,
+    "",
+    `Interrupted executor snapshot:\n${JSON.stringify(snapshot || {}, null, 2)}`,
+    "",
+    "Revise the plan and delegate a new executor task if needed. Do not assume the interrupted executor completed its work."
+  ].join("\n");
+}
+
+function shouldRouteOpenFusionSteer(state, text) {
+  return Boolean(String(text || "").trim() && hasActiveExecutorTask(state));
+}
+
+function summarizeOpenFusionExecutorActivity(event) {
+  if (!event || typeof event !== "object") return "";
+  if ((event.type === "assistant-text" || event.type === "thinking") && event.delta) {
+    const label = event.type === "thinking" ? "thinking" : "assistant";
+    return `${label}: ${compactWhitespace(event.delta, 180)}`;
+  }
+  if (event.type === "tool-call") {
+    const input = event.input && typeof event.input === "object" ? event.input : {};
+    const detail =
+      event.title ||
+      input.command ||
+      input.filePath ||
+      input.path ||
+      input.pattern ||
+      input.description ||
+      input.prompt ||
+      "";
+    return `tool ${event.name || "tool"}: ${compactWhitespace(detail, 180)}`;
+  }
+  if (event.type === "tool-result") {
+    return `tool ${event.name || "tool"} ${event.ok === false ? "failed" : "finished"}: ${compactWhitespace(event.text, 180)}`;
+  }
+  return "";
+}
+
+function extractOpenFusionAssistantTexts(messages) {
+  const texts = [];
+  for (const entry of Array.isArray(messages) ? messages : []) {
+    const info = entry && entry.info && typeof entry.info === "object" ? entry.info : {};
+    if (String(info.role || "") !== "assistant") continue;
+    const parts = Array.isArray(entry && entry.parts) ? entry.parts : [];
+    const text = parts
+      .filter((part) => part && part.type === "text")
+      .map((part) => String(part.text || ""))
+      .join("\n")
+      .trim();
+    if (text) texts.push(text);
+  }
+  return texts;
+}
+
+function openFusionExecutorSnapshot(state) {
+  const task = getPrimaryActiveExecutorTask(state) || {};
+  const activeTasks = getActiveExecutorTasks(state).map((activeTask) => ({
+    childSessionId: String(activeTask.childSessionId || "").trim(),
+    taskPrompt: String(activeTask.taskPrompt || "").trim(),
+    activity: Array.isArray(activeTask.activity) ? activeTask.activity.slice(-12) : []
+  }));
+  return {
+    childSessionId: String(task.childSessionId || "").trim(),
+    taskPrompt: String(task.taskPrompt || "").trim(),
+    activity: Array.isArray(task.activity) ? task.activity.slice(-12) : [],
+    activeTasks
+  };
+}
+
+function getActiveExecutorTaskMap(state) {
+  if (!state || typeof state !== "object") return null;
+  if (!state.activeExecutorTasks || typeof state.activeExecutorTasks.values !== "function") {
+    state.activeExecutorTasks = new Map();
+  }
+  return state.activeExecutorTasks;
+}
+
+function getActiveExecutorTasks(state) {
+  if (!state || typeof state !== "object") return [];
+  const map = getActiveExecutorTaskMap(state);
+  if (map && typeof map.values === "function") {
+    return Array.from(map.values()).filter(Boolean);
+  }
+  return [];
+}
+
+function getActiveExecutorTaskBySession(state, sessionID) {
+  const key = String(sessionID || "");
+  if (!key) return null;
+  const map = getActiveExecutorTaskMap(state);
+  return map && map.get(key) ? map.get(key) : null;
+}
+
+function hasActiveExecutorTask(state) {
+  return getActiveExecutorTasks(state).length > 0;
+}
+
+function getPrimaryActiveExecutorTask(state) {
+  const tasks = getActiveExecutorTasks(state);
+  if (!tasks.length) return null;
+  // M1 compatibility path: keep pre-M2 steering behavior equivalent to the
+  // previous last-writer-wins single active-executor slot.
+  let primary = null;
+  for (const task of tasks) {
+    if (!primary || Number(task.startedAt || 0) >= Number(primary.startedAt || 0)) {
+      primary = task;
+    }
+  }
+  return primary;
+}
+
+function selectOpenFusionExecutorTask(state, childSessionId) {
+  const requested = String(childSessionId || "").trim();
+  if (requested) {
+    const task = getActiveExecutorTaskBySession(state, requested);
+    if (task) return task;
+  }
+  return getPrimaryActiveExecutorTask(state);
 }
 
 // ---- SSE normalizer (pure, per-session state) ----
@@ -310,17 +544,30 @@ function createOpenCodeEventNormalizer(rootSessionId) {
         const role = roleFor(sessionID);
         const name = String(part.tool || "tool");
         const metadata = state.metadata && typeof state.metadata === "object" ? state.metadata : {};
+        const childSessionId = name === "task" && metadata.sessionId ? String(metadata.sessionId) : "";
         // Register task-spawned child sessions from tool metadata too — the
         // session.created event can arrive after the first child part.
-        if (name === "task" && metadata.sessionId && !inTree(metadata.sessionId)) {
+        if (childSessionId && !inTree(childSessionId)) {
           const input = state.input && typeof state.input === "object" ? state.input : {};
-          tree.set(String(metadata.sessionId), {
+          tree.set(childSessionId, {
             agent: String(input.subagent_type || "executor"),
             title: String(state.title || "")
           });
         }
         const previous = toolStatus.get(callID);
         if (status === "pending" || status === "running") {
+          if (childSessionId && previous === "called") {
+            const input = state.input && typeof state.input === "object" ? state.input : {};
+            events.push({
+              type: "task-child",
+              toolId: callID,
+              name,
+              role,
+              sessionID,
+              childSessionId,
+              agent: String(input.subagent_type || "executor")
+            });
+          }
           if (previous === "called" || previous === "done") break;
           toolStatus.set(callID, "called");
           events.push({
@@ -329,6 +576,7 @@ function createOpenCodeEventNormalizer(rootSessionId) {
             name,
             role,
             sessionID,
+            childSessionId: childSessionId || undefined,
             title: String(state.title || ""),
             input: state.input && typeof state.input === "object" ? state.input : {}
           });
@@ -344,6 +592,7 @@ function createOpenCodeEventNormalizer(rootSessionId) {
               name,
               role,
               sessionID,
+              childSessionId: childSessionId || undefined,
               title: String(state.title || ""),
               input: state.input && typeof state.input === "object" ? state.input : {}
             });
@@ -365,8 +614,7 @@ function createOpenCodeEventNormalizer(rootSessionId) {
             meta: toolMeta(metadata),
             // Links a settled task delegation to the child session whose
             // edit/write paths the completion-gate tracker accumulated.
-            childSessionId:
-              name === "task" && metadata.sessionId ? String(metadata.sessionId) : undefined
+            childSessionId: childSessionId || undefined
           });
           break;
         }
@@ -520,11 +768,14 @@ function rehydrateMessages(messages, rootSessionId) {
         const state = part.state && typeof part.state === "object" ? part.state : {};
         const callID = String(part.callID || part.id || "");
         const name = String(part.tool || "tool");
+        const metadata = state.metadata && typeof state.metadata === "object" ? state.metadata : {};
+        const childSessionId = name === "task" && metadata.sessionId ? String(metadata.sessionId) : "";
         events.push({
           type: "tool-call",
           toolId: callID,
           name,
           role: "brain",
+          childSessionId: childSessionId || undefined,
           title: String(state.title || ""),
           input: state.input && typeof state.input === "object" ? state.input : {}
         });
@@ -537,7 +788,8 @@ function rehydrateMessages(messages, rootSessionId) {
             ok: state.status === "completed",
             title: String(state.title || ""),
             text: clipText(state.status === "completed" ? state.output : state.error || state.output),
-            meta: toolMeta(state.metadata)
+            meta: toolMeta(metadata),
+            childSessionId: childSessionId || undefined
           });
         }
       }
@@ -823,6 +1075,281 @@ function runHost() {
     });
   }
 
+  function emitSteerRoutingNote(id, state, text) {
+    if (!text) return;
+    emitSessionEvent(id, state, {
+      type: "steer-route",
+      message: text
+    });
+  }
+
+  function clearSteerRoutingState(state) {
+    if (!state) return;
+    const tasks = getActiveExecutorTaskMap(state);
+    if (tasks) tasks.clear();
+    state.routerSessionId = null;
+    state.steerRouting = false;
+  }
+
+  function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function ensureRouterSession(state) {
+    if (state.routerSessionId) return state.routerSessionId;
+    const created = await request(state, "POST", "/session", { title: "(fusion steer router)" });
+    if (!created || !created.id) {
+      throw new Error("OpenCode did not return a router session id");
+    }
+    state.routerSessionId = String(created.id);
+    return state.routerSessionId;
+  }
+
+  async function readRouterAssistantText(state, routerSessionId, previousAssistantCount) {
+    const deadline = Date.now() + STEER_ROUTER_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const messages = await request(
+        state,
+        "GET",
+        `/session/${encodeURIComponent(routerSessionId)}/message`,
+        undefined,
+        Math.min(5_000, STEER_ROUTER_TIMEOUT_MS)
+      );
+      const assistantTexts = extractOpenFusionAssistantTexts(messages);
+      if (assistantTexts.length > previousAssistantCount) {
+        return assistantTexts[assistantTexts.length - 1];
+      }
+      await delay(STEER_ROUTER_POLL_MS);
+    }
+    throw new Error("router decision timed out");
+  }
+
+  async function runSteerDecision(id, state, steerText) {
+    const fallback = (reason) => ({
+      action: "inject",
+      text: String(steerText || "").trim(),
+      reason,
+      fallback: true
+    });
+    const snapshot = openFusionExecutorSnapshot(state);
+    const prompt = buildOpenFusionSteerDecisionPrompt(steerText, snapshot);
+    const model = splitModelId(state.plannerModel);
+    if (!model) return fallback("planner_model_missing");
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const routerSessionId = await ensureRouterSession(state);
+        const beforeMessages = await request(
+          state,
+          "GET",
+          `/session/${encodeURIComponent(routerSessionId)}/message`
+        ).catch((error) => {
+          if (/HTTP 404/i.test(String(error && error.message))) throw error;
+          return [];
+        });
+        const previousAssistantCount = extractOpenFusionAssistantTexts(beforeMessages).length;
+        await request(state, "POST", `/session/${encodeURIComponent(routerSessionId)}/prompt_async`, {
+          agent: "planner",
+          parts: [{ type: "text", text: prompt }],
+          model
+        });
+        const assistantText = await readRouterAssistantText(state, routerSessionId, previousAssistantCount);
+        const decision = parseOpenFusionSteerDecision(assistantText, steerText);
+        if (decision.fallback) {
+          emitSteerRoutingNote(id, state, `router reply was invalid; injecting steer directly (${decision.reason})`);
+        }
+        return decision;
+      } catch (error) {
+        if (/HTTP 404/i.test(String(error && error.message)) && state.routerSessionId && attempt === 0) {
+          state.routerSessionId = null;
+          continue;
+        }
+        emitSteerRoutingNote(
+          id,
+          state,
+          `router decision failed; injecting steer directly (${error?.message || error})`
+        );
+        return fallback(error?.message || "router_decision_failed");
+      }
+    }
+    return fallback("router_session_recreate_failed");
+  }
+
+  function observeOpenFusionTaskEvent(state, event) {
+    if (!event || typeof event !== "object") return;
+    const activityTask = getActiveExecutorTaskBySession(state, event.sessionID);
+    if (activityTask) {
+      const line = summarizeOpenFusionExecutorActivity(event);
+      if (line) {
+        activityTask.activity = [
+          ...(Array.isArray(activityTask.activity) ? activityTask.activity : []),
+          line
+        ].slice(-12);
+      }
+    }
+    if (
+      (event.type === "tool-call" || event.type === "task-child") &&
+      event.name === "task" &&
+      event.role === "brain" &&
+      event.childSessionId
+    ) {
+      const input = event.input && typeof event.input === "object" ? event.input : {};
+      const agent = String(event.agent || input.subagent_type || "executor");
+      if (agent === "executor") {
+        const childSessionId = String(event.childSessionId);
+        const tasks = getActiveExecutorTaskMap(state);
+        const existing = tasks.get(childSessionId);
+        const now = Date.now();
+        tasks.set(childSessionId, {
+          ...(existing || {}),
+          toolId: String(event.toolId || ""),
+          childSessionId,
+          taskPrompt: String(input.prompt || input.description || event.title || "").trim(),
+          activity: Array.isArray(existing?.activity) ? existing.activity : [],
+          startedAt: existing?.startedAt || now
+        });
+      }
+      return;
+    }
+    if (
+      event.type === "tool-result" &&
+      event.name === "task" &&
+      state.activeExecutorTasks &&
+      typeof state.activeExecutorTasks.entries === "function"
+    ) {
+      for (const [childSessionId, task] of state.activeExecutorTasks.entries()) {
+        if (String(task?.toolId || "") === String(event.toolId || "")) {
+          state.activeExecutorTasks.delete(childSessionId);
+          break;
+        }
+      }
+    }
+    if (event.type === "result" || event.type === "interrupted" || event.type === "error") {
+      const tasks = getActiveExecutorTaskMap(state);
+      if (tasks) tasks.clear();
+    }
+  }
+
+  function pushQueuedSteerToActiveExecutor(id, state, text, targetTask = null) {
+    const task = targetTask || getPrimaryActiveExecutorTask(state);
+    if (!task || !task.childSessionId) return false;
+    const steerRequest = buildExecutorSteerPromptRequest(
+      task.childSessionId,
+      state.executorModel,
+      text
+    );
+    if (!steerRequest) return false;
+    request(state, "POST", steerRequest.path, steerRequest.body).catch((error) => {
+      if (sessions.get(id) !== state) return;
+      emitSessionEvent(id, state, {
+        type: "stderr",
+        text: `Open Fusion live executor steering failed: ${error.message || error}\n`
+      });
+    });
+    return true;
+  }
+
+  function preserveSteerViaExecutorOrRoot(id, state, text, targetTask = null) {
+    if (pushQueuedSteerToActiveExecutor(id, state, text, targetTask)) return;
+    const rootPrompt = buildPlannerPromptRequest(state.sessionId, state.plannerModel, text, "auto");
+    if (!rootPrompt) {
+      emitSteerRoutingNote(id, state, "could not preserve steer: no executor child or root planner prompt target");
+      return;
+    }
+    emitSteerRoutingNote(id, state, "executor child unavailable; preserving steer on the root planner");
+    request(state, "POST", rootPrompt.path, rootPrompt.body).catch((error) => {
+      emitSteerRoutingNote(id, state, `root planner steer preservation failed (${error?.message || error})`);
+    });
+  }
+
+  async function routeSteerToPlanner(id, state, steerText) {
+    if (!shouldRouteOpenFusionSteer(state, steerText)) return false;
+    if (state.steerRouting) {
+      emitSteerRoutingNote(id, state, "another steer is already routing; injecting this one directly");
+      preserveSteerViaExecutorOrRoot(id, state, steerText);
+      return true;
+    }
+
+    state.steerRouting = true;
+    emitSteerRoutingNote(id, state, "routing live steer to planner decision pass");
+    try {
+      const snapshot = openFusionExecutorSnapshot(state);
+      const decision = await runSteerDecision(id, state, steerText);
+      const action = decision.action || "inject";
+      const decisionText = String(decision.text || steerText || "").trim();
+      const task = selectOpenFusionExecutorTask(state, decision.childSessionId);
+      const childSessionId = task && task.childSessionId ? String(task.childSessionId) : "";
+
+      if (action === "ignore") {
+        emitSteerRoutingNote(id, state, `planner ignored steer${decision.reason ? `: ${decision.reason}` : ""}`);
+        return true;
+      }
+
+      if (action === "replan") {
+        if (!childSessionId || !state.sessionId) {
+          emitSteerRoutingNote(id, state, "planner chose replan but task state vanished; injecting steer directly");
+          preserveSteerViaExecutorOrRoot(id, state, decisionText || steerText, task);
+          return true;
+        }
+        emitSteerRoutingNote(id, state, "planner chose replan; aborting executor task and queueing amended planner prompt");
+        await request(state, "POST", `/session/${encodeURIComponent(childSessionId)}/abort`).catch((error) => {
+          emitSteerRoutingNote(id, state, `executor task abort failed; continuing with amended root prompt (${error?.message || error})`);
+        });
+        const replanPrompt = buildOpenFusionReplanPrompt(steerText, decisionText, snapshot);
+        const rootPrompt = buildPlannerPromptRequest(state.sessionId, state.plannerModel, replanPrompt, "auto");
+        if (!rootPrompt) {
+          emitSteerRoutingNote(id, state, "could not build amended planner prompt; injecting steer directly");
+          preserveSteerViaExecutorOrRoot(id, state, decisionText || steerText, task);
+          return true;
+        }
+        await request(state, "POST", rootPrompt.path, rootPrompt.body);
+        const tasks = getActiveExecutorTaskMap(state);
+        if (tasks && childSessionId) tasks.delete(childSessionId);
+        return true;
+      }
+
+      emitSteerRoutingNote(id, state, decision.fallback ? "injecting steer directly after router fallback" : "planner chose inject");
+      preserveSteerViaExecutorOrRoot(id, state, decisionText || steerText, task);
+      return true;
+    } catch (error) {
+      emitSteerRoutingNote(id, state, `routing failed; injecting steer directly (${error?.message || error})`);
+      preserveSteerViaExecutorOrRoot(id, state, steerText);
+      return true;
+    } finally {
+      state.steerRouting = false;
+    }
+  }
+
+  function postRootPlannerInput(id, state, text, mode, model, queued) {
+    ensureSession(id, state, text)
+      .then(() => {
+        if (sessions.get(id) !== state || !state.sessionId) return;
+        // One-shot completion-gate nudge: only a fresh non-plan turn consumes
+        // it (short-circuit order is load-bearing — a plan or queued send must
+        // not burn the flag; it stays armed for the next qualifying turn).
+        const nudge =
+          mode !== "plan" && !queued && Boolean(state.gate && state.gate.consumeNudge());
+        const body = {
+          agent: mode === "plan" ? "plan" : "planner",
+          parts: buildPlannerTurnParts(text, mode, { nudge }),
+          model
+        };
+        return request(
+          state,
+          "POST",
+          `/session/${encodeURIComponent(state.sessionId)}/prompt_async`,
+          body
+        );
+      })
+      .catch((error) => {
+        if (sessions.get(id) !== state) return;
+        emitSessionEvent(id, state, {
+          type: "error",
+          message: `Could not send the turn: ${error.message}`
+        });
+      });
+  }
+
   function connectEvents(id, state) {
     // Generation guard: every (re)connect orphans the previous stream's
     // handlers so a deliberate reattach can never double-schedule reconnects.
@@ -873,6 +1400,7 @@ function runHost() {
             }
             if (!state.normalizer) continue;
             for (const event of state.normalizer(parsed)) {
+              observeOpenFusionTaskEvent(state, event);
               // Track turn state so auth changes never dispose an instance
               // with a delegation in flight (dispose is safe for idle panes).
               if (event.type === "turn-start") state.turnBusy = true;
@@ -947,13 +1475,43 @@ function runHost() {
         // id via thread discovery, but the server is the final authority.
       }
     }
-    const created = await request(state, "POST", "/session", { title: "vibeTerminal Open Fusion" });
-    if (!created || !created.id) throw new Error("OpenCode did not return a session id");
-    state.sessionId = String(created.id);
-    state.normalizer = createOpenCodeEventNormalizer(state.sessionId);
-    state.gate = createOpenFusionGateTracker({ cwd: state.cwd });
-    connectEvents(id, state);
-    emitSessionEvent(id, state, { type: "session", sessionId: state.sessionId });
+    // Fresh pane: session creation is DEFERRED to the first input, which
+    // titles the session from that prompt. Creating one here minted a ghost
+    // "vibeTerminal Open Fusion" session on every pane start and app boot —
+    // the resume picker drowned in identical-titled empty chats. The
+    // engine-ready ping keeps the renderer's provider-catalog prefetch (which
+    // used to ride the session event).
+    emitSessionEvent(id, state, { type: "engine-ready" });
+  }
+
+  // Create the pane's session on demand — at the FIRST user input — titled
+  // from that prompt (opencode never re-titles a session created with an
+  // explicit title, so the create-time title is what the resume picker shows
+  // forever). Serialized behind a promise so rapid sends cannot double-create.
+  function ensureSession(id, state, firstPromptText) {
+    if (state.sessionId) return Promise.resolve();
+    if (!state.sessionPromise) {
+      const title =
+        String(firstPromptText || "").replace(/\s+/g, " ").trim().slice(0, 80) ||
+        "vibeTerminal Open Fusion";
+      state.sessionPromise = (async () => {
+        const created = await request(state, "POST", "/session", { title });
+        if (!created || !created.id) {
+          throw new Error("OpenCode did not return a session id");
+        }
+        if (sessions.get(id) !== state) return;
+        state.sessionId = String(created.id);
+        state.normalizer = createOpenCodeEventNormalizer(state.sessionId);
+        state.gate = createOpenFusionGateTracker({ cwd: state.cwd });
+        connectEvents(id, state);
+        emitSessionEvent(id, state, { type: "session", sessionId: state.sessionId });
+      })().catch((error) => {
+        // A failed create must not wedge the pane: the next send retries.
+        state.sessionPromise = null;
+        throw error;
+      });
+    }
+    return state.sessionPromise;
   }
 
   function start(payload) {
@@ -986,6 +1544,8 @@ function runHost() {
       port: 0,
       cwd: String(cwd || ""),
       sessionId: "",
+      // In-flight lazy session creation (first input); see ensureSession.
+      sessionPromise: null,
       normalizer: null,
       gate: null,
       sseRequest: null,
@@ -994,6 +1554,9 @@ function runHost() {
       stopping: false,
       stdoutBuffer: "",
       turnBusy: false,
+      activeExecutorTasks: new Map(),
+      routerSessionId: null,
+      steerRouting: false,
       history: [],
       plannerModel: String(payload.plannerModel || ""),
       executorModel: String(payload.executorModel || ""),
@@ -1047,6 +1610,7 @@ function runHost() {
     child.on("exit", (code) => {
       if (sessions.get(id) !== state) return;
       state.child = null;
+      clearSteerRoutingState(state);
       try {
         state.sseRequest?.destroy();
       } catch {
@@ -1067,7 +1631,9 @@ function runHost() {
       });
       return;
     }
-    if (!state.child || !state.sessionId) {
+    // Ready = the serve reported its port. The session itself is created
+    // lazily below — a fresh pane has none until its first send.
+    if (!state.child || !state.port) {
       emitSessionEvent(id, state, {
         type: "error",
         message: "Open Fusion engine is not ready yet. Wait a moment and try again."
@@ -1113,24 +1679,22 @@ function runHost() {
       state,
       queued ? { type: "user", text, queued: true, mode } : { type: "user", text, mode }
     );
-    // One-shot completion-gate nudge: only a fresh non-plan turn consumes it
-    // (short-circuit order is load-bearing — a plan or queued send must not
-    // burn the flag; it stays armed for the next qualifying turn).
-    const nudge = mode !== "plan" && !queued && Boolean(state.gate && state.gate.consumeNudge());
-    const body = {
-      agent: mode === "plan" ? "plan" : "planner",
-      parts: buildPlannerTurnParts(text, mode, { nudge }),
-      model
-    };
-    request(state, "POST", `/session/${encodeURIComponent(state.sessionId)}/prompt_async`, body).catch(
-      (error) => {
-        if (sessions.get(id) !== state) return;
-        emitSessionEvent(id, state, {
-          type: "error",
-          message: `Could not send the turn: ${error.message}`
+    if (queued && text.trim()) {
+      routeSteerToPlanner(id, state, text)
+        .then((handled) => {
+          if (!handled) {
+            postRootPlannerInput(id, state, text, mode, model, queued);
+          }
+        })
+        .catch((error) => {
+          emitSteerRoutingNote(id, state, `routing crashed; preserving root queued steer (${error?.message || error})`);
+          postRootPlannerInput(id, state, text, mode, model, queued);
         });
-      }
-    );
+      return;
+    }
+    // The first send creates the session (titled from this prompt); later
+    // sends resolve instantly. Only then is the turn posted.
+    postRootPlannerInput(id, state, text, mode, model, queued);
   }
 
   function permission(payload) {
@@ -1680,6 +2244,7 @@ function runHost() {
     const state = sessions.get(payload?.id);
     if (state) {
       state.stopping = true;
+      clearSteerRoutingState(state);
       try {
         state.sseRequest?.destroy();
       } catch {
@@ -1693,6 +2258,7 @@ function runHost() {
   function shutdown() {
     for (const state of sessions.values()) {
       state.stopping = true;
+      clearSteerRoutingState(state);
       try {
         state.sseRequest?.destroy();
       } catch {
@@ -1750,6 +2316,18 @@ module.exports = {
   normalizeAuthMethods,
   splitModelId,
   buildPlannerTurnParts,
+  buildExecutorSteerParts,
+  buildExecutorSteerPromptRequest,
+  buildPlannerPromptRequest,
+  buildOpenFusionSteerDecisionPrompt,
+  parseOpenFusionSteerDecision,
+  buildOpenFusionReplanPrompt,
+  shouldRouteOpenFusionSteer,
+  summarizeOpenFusionExecutorActivity,
+  extractOpenFusionAssistantTexts,
+  openFusionExecutorSnapshot,
+  selectOpenFusionExecutorTask,
+  OPEN_FUSION_EXECUTOR_STEER_PREFIX,
   OPEN_FUSION_GATE_MARKER,
   OPEN_FUSION_GATE_REMINDER,
   OPEN_FUSION_GATE_NUDGE,

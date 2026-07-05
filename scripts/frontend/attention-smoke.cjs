@@ -33,6 +33,7 @@ const openFusionChatPanePath = path.join(
 const preloadPath = path.join(__dirname, "..", "..", "preload", "preload.cjs");
 const mainPath = path.join(__dirname, "..", "..", "backend", "main.cjs");
 const stylesPath = path.join(__dirname, "..", "..", "frontend", "styles.css");
+const typesPath = path.join(__dirname, "..", "..", "frontend", "types.ts");
 const source = fs.readFileSync(attentionPath, "utf8");
 const compiled = ts.transpileModule(source, {
   compilerOptions: {
@@ -427,7 +428,7 @@ assert(
 assert(
     appSource.includes("fusionBridgeToolRef") &&
     appSource.includes('event.type === "tool-call"') &&
-    appSource.includes("/codex_investigate|codex_implement|codex_respond/") &&
+    appSource.includes("/codex_investigate|codex_implement|codex_respond|codex_steer_resolve/") &&
     appSource.includes("if (!isFusionBridgeTool)") &&
     appSource.includes("fusionBridgeToolRef.current.delete(toolKey)"),
   "Fusion waiting cleanup should only react to Codex bridge tool results"
@@ -578,6 +579,7 @@ assert(
 );
 
 const fusionChatPaneSource = fs.readFileSync(fusionChatPanePath, "utf8");
+const typesSource = fs.readFileSync(typesPath, "utf8");
 // The pure slash-menu/catalog logic was extracted to fusionSlashMenu.ts so the
 // settings smoke can execute it; grep-contract checks for those pieces read
 // the module instead of the component.
@@ -783,6 +785,23 @@ for (const [label, chatPaneSource] of [
     `${label} should release an acknowledged "done" back to ready on click/typing`
   );
 }
+
+assert(
+  openFusionChatPaneSource.includes('case "steer-route"') &&
+    openFusionChatPaneSource.includes("Steering: ${event.message.trim()}") &&
+    typesSource.includes('type: "steer-route"; message: string'),
+  "OpenFusionChatPane should surface planner-decision steering route events as visible activity rows"
+);
+assert(
+  openFusionChatPaneSource.includes("taskChildIndexRef") &&
+    !openFusionChatPaneSource.includes("taskRoleIndexRef") &&
+    openFusionChatPaneSource.includes('case "task-child"') &&
+    openFusionChatPaneSource.includes("taskChildIndexRef.current.set(event.childSessionId, event.toolId)") &&
+    openFusionChatPaneSource.includes("taskChildIndexRef.current.get(event.sessionID)") &&
+    ocChatSource.includes("oc-task-role") &&
+    typesSource.includes('type: "task-child"'),
+  "OpenFusionChatPane should attribute parallel executor progress by childSessionId and show a task role chip"
+);
 
 // The app-side lifecycle mirrors must ignore replayed events wholesale — they
 // already hold the settled status/attention (they kept tracking live events

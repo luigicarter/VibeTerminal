@@ -131,6 +131,7 @@ const FUSION_CODEX_BRIDGE_TOOLS = [
   "mcp__fusion-codex__codex_investigate",
   "mcp__fusion-codex__codex_implement",
   "mcp__fusion-codex__codex_respond",
+  "mcp__fusion-codex__codex_steer_resolve",
   "mcp__fusion-codex__codex_goal_set",
   "mcp__fusion-codex__codex_goal_get",
   "mcp__fusion-codex__codex_goal_clear",
@@ -1024,6 +1025,10 @@ function normalizeFusionRunMode(value) {
   return normalizeFusionString(value)?.trim().toLowerCase() === "plan" ? "plan" : "auto";
 }
 
+function normalizeFusionBoolean(value) {
+  return value === true;
+}
+
 function fusionClaudeTools() {
   return [...FUSION_CODEX_BRIDGE_TOOLS, ...FUSION_CLAUDE_BUILTIN_TOOLS].join(",");
 }
@@ -1316,6 +1321,117 @@ ipcMain.handle("workspace:code-changes", (_event, payload) =>
   getCodeChangeSummary(payload?.cwd)
 );
 
+ipcMain.handle("workspace:open-in-explorer", async (_event, payload) => {
+  const folderPath = typeof payload?.path === "string" ? payload.path.trim() : "";
+  if (!folderPath) {
+    return { ok: false, error: "missing path" };
+  }
+  if (!fs.existsSync(folderPath)) {
+    return { ok: false, error: "Folder no longer exists." };
+  }
+
+  try {
+    const error = await shell.openPath(folderPath);
+    if (error) {
+      return { ok: false, error };
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+});
+
+ipcMain.handle("workspace:open-terminal", async (_event, payload) => {
+  const folderPath = typeof payload?.path === "string" ? payload.path.trim() : "";
+  if (!folderPath) {
+    return { ok: false, error: "missing path" };
+  }
+  if (!fs.existsSync(folderPath)) {
+    return { ok: false, error: "Folder no longer exists." };
+  }
+
+  try {
+    if (process.platform === "win32") {
+      const launchPowerShell = () => {
+        const child = spawn(process.env.ComSpec || "cmd.exe", [
+          "/c",
+          "start",
+          "",
+          "powershell.exe",
+          "-NoExit",
+          "-Command",
+          `Set-Location -LiteralPath '${folderPath.replace(/'/g, "''")}'`
+        ], {
+          detached: true,
+          stdio: "ignore",
+          windowsHide: false
+        });
+        child.on("error", () => {});
+        child.unref();
+      };
+
+      try {
+        const child = spawn("wt.exe", ["-d", folderPath], {
+          detached: true,
+          stdio: "ignore",
+          windowsHide: false
+        });
+        child.on("error", () => {
+          try {
+            launchPowerShell();
+          } catch {
+            // The IPC already returned; nothing useful can be surfaced here.
+          }
+        });
+        child.unref();
+      } catch {
+        launchPowerShell();
+      }
+      return { ok: true };
+    }
+
+    if (process.platform === "darwin") {
+      const child = spawn("open", ["-a", "Terminal", folderPath], {
+        detached: true,
+        stdio: "ignore"
+      });
+      child.on("error", () => {});
+      child.unref();
+      return { ok: true };
+    }
+
+    const launchGnomeTerminal = () => {
+      const child = spawn("gnome-terminal", [`--working-directory=${folderPath}`], {
+        detached: true,
+        stdio: "ignore"
+      });
+      child.on("error", () => {});
+      child.unref();
+    };
+
+    try {
+      const child = spawn("x-terminal-emulator", [], {
+        cwd: folderPath,
+        detached: true,
+        stdio: "ignore"
+      });
+      child.on("error", () => {
+        try {
+          launchGnomeTerminal();
+        } catch {
+          // The IPC already returned; nothing useful can be surfaced here.
+        }
+      });
+      child.unref();
+    } catch {
+      launchGnomeTerminal();
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+});
+
 ipcMain.handle("files:describe-paths", (_event, payload) =>
   describeFilePaths(payload)
 );
@@ -1343,6 +1459,13 @@ ipcMain.handle("agent-thread:latest", (_event, payload) => {
 });
 
 ipcMain.handle("agent-thread:list", (_event, payload) => {
+  // Saved-chat history for the Fusion resume picker: claude/codex chats live
+  // in the user's own global stores (exactly where `--resume` reads from), so
+  // the lookup passes straight through.
+  if (payload?.provider === "claude" || payload?.provider === "codex") {
+    return findLatestAgentThread({ ...payload, list: true });
+  }
+
   // Saved-chat history for the Open Fusion resume picker. Unlike the latest
   // lookup this must FAIL CLOSED: listing may only ever run against the
   // app-owned OpenCode store — falling through to the user's global store
@@ -1350,7 +1473,7 @@ ipcMain.handle("agent-thread:list", (_event, payload) => {
   if (payload?.provider !== "opencode" || !payload.openFusion) {
     return {
       status: "failed",
-      message: "Saved-chat listing is only available for Open Fusion panes."
+      message: "Saved-chat listing is only available for chat panes."
     };
   }
   try {
@@ -1503,14 +1626,18 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
         ? normalizeFusionClaudeRoleEffort(rawExecutorEffort)
         : normalizeFusionCodexEffort(rawExecutorEffort);
     const fusionRunMode = normalizeFusionRunMode(payload.mode);
+    const plannerFast = normalizeFusionBoolean(payload.plannerFast);
+    const executorFast = normalizeFusionBoolean(payload.executorFast);
     const telemetry = getAgentTelemetry();
     const files = await telemetry.prepareFusionFiles(id, {
       cwd: launchCwd.cwd,
       codexBin,
       plannerFamily,
+      plannerFast,
       executorFamily,
       executorModel: fusionExecutorModel,
       executorEffort: fusionExecutorEffort,
+      executorFast,
       runMode: fusionRunMode
     });
     if (!files) {
@@ -1525,9 +1652,11 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
         codexBin,
         mcpConfig: files.mcpConfig,
         systemPromptFile: files.systemPromptFile,
+        settingsFile: JSON.stringify({ fastMode: plannerFast }),
         model: fusionModel,
         mode: fusionRunMode,
         effort: plannerEffort,
+        plannerFast,
         // The planner is read-only (Read/Glob/Grep + the executor bridge);
         // the executor writes all code and owns execution and final bug/goal
         // verification. The codex planner path enforces the same lock with
@@ -1574,14 +1703,30 @@ ipcMain.handle("fusion-chat:update-settings", async (_event, payload) => {
     executorFamily === "claude"
       ? normalizeFusionClaudeRoleEffort(rawExecutorEffort)
       : normalizeFusionCodexEffort(rawExecutorEffort);
+  const plannerFamily = normalizeFusionFamily(payload.plannerFamily, "claude");
+  const plannerFast = normalizeFusionBoolean(payload.plannerFast);
+  const executorFast = normalizeFusionBoolean(payload.executorFast);
   const result = await getAgentTelemetry().updateFusionSettings(payload.id, {
+    plannerFamily,
+    plannerFast,
     executorFamily,
     executorModel: fusionExecutorModel,
-    executorEffort: fusionExecutorEffort
+    executorEffort: fusionExecutorEffort,
+    executorFast
   });
   if (result.status === "failed") {
     return { ok: false, error: result.error || "could not update Fusion settings" };
   }
+  sendToFusionChatHost({
+    type: "settings",
+    payload: {
+      id: payload.id,
+      plannerFamily,
+      plannerFast,
+      executorFamily,
+      executorFast
+    }
+  });
   return { ok: true };
 });
 ipcMain.handle("fusion-chat:set-mode", async (_event, payload) => {
@@ -1639,20 +1784,27 @@ ipcMain.on("fusion-chat:input", (_event, payload) => {
 
 ipcMain.on("fusion-chat:steer", (_event, payload) => {
   if (payload?.id && typeof payload.text === "string") {
-    getAgentTelemetry()
-      .steerFusionSession(payload.id, payload.text)
-      .catch(() => {});
-    const sent = sendToFusionChatHost({
-      type: "input",
-      payload: { id: payload.id, text: payload.text, steer: true }
-    });
-    if (!sent) {
-      broadcastFusionChatEvent({
-        id: payload.id,
-        type: "error",
-        message: "Fusion chat host is not running. Restart Fusion to continue."
+    (async () => {
+      const steerResult = await getAgentTelemetry()
+        .steerFusionSession(payload.id, payload.text)
+        .catch(() => ({ status: "failed" }));
+      const sent = sendToFusionChatHost({
+        type: "input",
+        payload: {
+          id: payload.id,
+          text: payload.text,
+          steer: true,
+          routed: steerResult?.status === "routing"
+        }
       });
-    }
+      if (!sent) {
+        broadcastFusionChatEvent({
+          id: payload.id,
+          type: "error",
+          message: "Fusion chat host is not running. Restart Fusion to continue."
+        });
+      }
+    })();
   }
 });
 
