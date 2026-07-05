@@ -61,6 +61,52 @@ setInterval(() => {}, 1000);
   return shPath;
 }
 
+function writeRestartingFakeClaudePlanner(dir) {
+  const scriptPath = path.join(dir, "fake-claude-restart-planner.js");
+  fs.writeFileSync(
+    scriptPath,
+    `
+const fs = require("fs");
+const path = require("path");
+const readline = require("readline");
+const startsPath = path.join(__dirname, "claude-starts.txt");
+const turnsPath = path.join(__dirname, "claude-user-turns.jsonl");
+const priorStarts = fs.existsSync(startsPath)
+  ? (fs.readFileSync(startsPath, "utf8").match(/^START$/gm) || []).length
+  : 0;
+fs.appendFileSync(startsPath, "START\\n" + process.argv.slice(2).join("\\n") + "\\n");
+if (priorStarts === 0) {
+  process.exit(0);
+}
+console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "restart-session" }));
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on("line", (line) => {
+  if (!line.trim()) return;
+  let msg;
+  try { msg = JSON.parse(line); } catch { return; }
+  if (msg.type !== "user") return;
+  fs.appendFileSync(turnsPath, JSON.stringify({ content: msg.message && msg.message.content }) + "\\n");
+  console.log(JSON.stringify({ type: "stream_event", event: { type: "message_start", message: {} } }));
+  console.log(JSON.stringify({ type: "stream_event", event: { type: "content_block_start", content_block: { type: "text" } } }));
+  console.log(JSON.stringify({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "recovered" } } }));
+  console.log(JSON.stringify({ type: "stream_event", event: { type: "content_block_stop" } }));
+  console.log(JSON.stringify({ type: "stream_event", event: { type: "message_stop" } }));
+  console.log(JSON.stringify({ type: "result", subtype: "success" }));
+});
+setInterval(() => {}, 1000);
+`
+  );
+  if (isWin) {
+    const cmdPath = path.join(dir, "fake-claude-restart-planner.cmd");
+    fs.writeFileSync(cmdPath, `@"${process.execPath}" "%~dp0fake-claude-restart-planner.js" %*\r\n`);
+    return cmdPath;
+  }
+  const shPath = path.join(dir, "fake-claude-restart-planner");
+  fs.writeFileSync(shPath, `#!/bin/sh\nexec "${process.execPath}" "${scriptPath}" "$@"\n`);
+  fs.chmodSync(shPath, 0o755);
+  return shPath;
+}
+
 function killProcessTree(child) {
   if (!child || child.killed) return;
   if (isWin && child.pid) {
@@ -76,6 +122,144 @@ function killProcessTree(child) {
   } catch {
     // ignore
   }
+}
+
+async function assertFusionChatHostRestartsCleanClosedClaude() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-chat-host-restart-"));
+  const fakeClaude = writeRestartingFakeClaudePlanner(tempDir);
+  const hostPath = path.join(__dirname, "..", "..", "backend", "fusionChatHost.cjs");
+  const child = spawn(process.execPath, [hostPath], {
+    cwd: tempDir,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      VIBE_CLAUDE_BIN: fakeClaude
+    }
+  });
+
+  let stdout = "";
+  let stdoutBuffer = "";
+  let stderr = "";
+  let started = false;
+  let inputSent = false;
+  let finished = false;
+  const startsFile = path.join(tempDir, "claude-starts.txt");
+  const turnsFile = path.join(tempDir, "claude-user-turns.jsonl");
+
+  function cleanup() {
+    try {
+      child.stdin.end();
+    } catch {
+      // ignore
+    }
+    killProcessTree(child);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      finished = true;
+      cleanup();
+      reject(new Error(`timed out waiting for clean-close restart; stdout=${stdout}; stderr=${stderr}`));
+    }, 15000);
+
+    function fail(error) {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      cleanup();
+      reject(error);
+    }
+
+    function pass() {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      cleanup();
+      resolve();
+    }
+
+    child.on("error", fail);
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("exit", (code) => {
+      if (!finished) {
+        fail(new Error(`fusionChatHost exited early with code ${code}; stdout=${stdout}; stderr=${stderr}`));
+      }
+    });
+    child.stdout.on("data", (chunk) => {
+      const text = chunk.toString("utf8");
+      stdout += text;
+      stdoutBuffer += text;
+      let index;
+      while ((index = stdoutBuffer.indexOf("\n")) !== -1) {
+        const line = stdoutBuffer.slice(0, index).trim();
+        stdoutBuffer = stdoutBuffer.slice(index + 1);
+        if (!line) continue;
+        let msg;
+        try {
+          msg = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (msg.type === "ready" && !started) {
+          started = true;
+          child.stdin.write(
+            `${JSON.stringify({
+              type: "start",
+              payload: {
+                id: "claude-clean-close-restart",
+                cwd: tempDir,
+                plannerFamily: "claude",
+                model: "opus"
+              }
+            })}\n`
+          );
+        } else if (
+          msg.type === "event" &&
+          msg.id === "claude-clean-close-restart" &&
+          msg.event?.type === "closed" &&
+          msg.event.code === 0 &&
+          !inputSent
+        ) {
+          inputSent = true;
+          child.stdin.write(
+            `${JSON.stringify({
+              type: "input",
+              payload: { id: "claude-clean-close-restart", text: "hello after clean close" }
+            })}\n`
+          );
+        }
+      }
+    });
+
+    const poll = setInterval(() => {
+      if (finished) {
+        clearInterval(poll);
+        return;
+      }
+      try {
+        if (!inputSent || !fs.existsSync(turnsFile) || !fs.existsSync(startsFile)) return;
+        const starts = (fs.readFileSync(startsFile, "utf8").match(/^START$/gm) || []).length;
+        const turns = fs.readFileSync(turnsFile, "utf8");
+        assert(starts === 2, `clean closed planner should restart exactly once; starts=${starts}`);
+        assert(
+          turns.includes("hello after clean close"),
+          `restarted planner should receive the user's turn: ${turns}`
+        );
+        assert(
+          !stdout.includes("Fusion process is closed. Restart Fusion to continue."),
+          `clean close should recover instead of surfacing stale-process error: ${stdout}`
+        );
+        clearInterval(poll);
+        pass();
+      } catch (error) {
+        clearInterval(poll);
+        fail(error);
+      }
+    }, 100);
+  });
 }
 
 async function assertFusionChatHostClaudeFastLive() {
@@ -618,6 +802,7 @@ async function main() {
       hostSource.includes("emitSessionEvent(id, state, event)") &&
       hostSource.includes("emitDirectSessionEvent(id,") &&
       hostSource.includes("sessions.get(id) !== state") &&
+      hostSource.includes("function restartCleanClosedSession") &&
       hostSource.includes("Fusion process is closed. Restart Fusion to continue.") &&
       hostSource.includes("STEER CURRENT FUSION TURN:") &&
       hostSource.includes("payload?.steer") &&
@@ -881,12 +1066,13 @@ async function main() {
   }
 
   assert(
-    hostSource.includes("startCodexBrain(payload)") &&
+    hostSource.includes("startCodexBrain(payload, options)") &&
       hostSource.includes('state.engine === "codex"') &&
       hostSource.includes("createCodexBrainSession"),
     "Fusion host should dispatch codex-family planners to the codex brain engine"
   );
 
+  await assertFusionChatHostRestartsCleanClosedClaude();
   await assertFusionChatHostClaudeFastLive();
 
   console.log("Fusion chat parse smoke passed");

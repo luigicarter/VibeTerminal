@@ -625,6 +625,18 @@ function runHost() {
     }
   }
 
+  function clonePayload(payload) {
+    try {
+      return JSON.parse(JSON.stringify(payload || {}));
+    } catch {
+      return { ...(payload || {}) };
+    }
+  }
+
+  function cloneHistory(history) {
+    return Array.isArray(history) ? history.map(cloneEvent) : [];
+  }
+
   function clearPlannerResultBackstop(state) {
     if (state?.plannerResultBackstopTimer) {
       clearTimeout(state.plannerResultBackstopTimer);
@@ -701,14 +713,43 @@ function runHost() {
     }
   }
 
-  function start(payload) {
+  function markPlannerClosed(state, code) {
+    state.child = null;
+    state.closed = true;
+    state.lastExitCode = code;
+    state.closedAt = Date.now();
+  }
+
+  function restartCleanClosedSession(id, state) {
+    if (!state || state.child || state.lastExitCode !== 0 || !state.launchPayload) {
+      return null;
+    }
+    const payload = { ...clonePayload(state.launchPayload), id };
+    const options = {
+      history: cloneHistory(state.history),
+      gate: state.gate,
+      preserveHistory: true
+    };
+    clearPlannerResultBackstop(state);
+    sessions.delete(id);
+    start(payload, options);
+    const nextState = sessions.get(id);
+    return nextState?.child ? nextState : null;
+  }
+
+  function start(payload, options = {}) {
     const { id, cwd } = payload;
     if (sessions.has(id)) {
       const existingState = sessions.get(id);
       if (existingState?.child) {
         existingState.mode = normalizeFusionRunMode(payload.mode);
+        existingState.launchPayload = {
+          ...clonePayload(existingState.launchPayload),
+          ...clonePayload(payload),
+          mode: existingState.mode
+        };
         replaySession(id, existingState);
-        return;
+        return existingState;
       }
 
       clearPlannerResultBackstop(existingState);
@@ -718,8 +759,7 @@ function runHost() {
     // Per-role families: a codex planner runs `codex app-server` behind the
     // same control protocol and event vocabulary as the headless claude.
     if (normalizeFusionPlannerFamily(payload.plannerFamily) === "codex") {
-      startCodexBrain(payload);
-      return;
+      return startCodexBrain(payload, options);
     }
 
     const launch = buildClaudeSpawn(payload);
@@ -734,18 +774,22 @@ function runHost() {
       child,
       normalizer,
       buffer: "",
-      history: [],
+      history: cloneHistory(options.history),
       engine: "claude",
+      launchPayload: clonePayload(payload),
+      closed: false,
+      lastExitCode: null,
+      closedAt: 0,
       plannerFast: payload.plannerFast === true,
       fastSeq: 0,
       mode: normalizeFusionRunMode(payload.mode),
-      gate: createFusionGateTracker({ cwd })
+      gate: options.gate || createFusionGateTracker({ cwd })
     };
     sessions.set(id, state);
 
     // `claude --resume` loads the old conversation silently; restore it into
     // the pane before any live child output arrives.
-    if (payload.resumeId) {
+    if (payload.resumeId && !options.preserveHistory) {
       let located = null;
       try {
         located = locateClaudeTranscriptFile(String(payload.resumeId));
@@ -795,29 +839,34 @@ function runHost() {
       if (sessions.get(id) !== state) {
         return;
       }
-      state.child = null;
+      markPlannerClosed(state, code);
       emitSessionEvent(id, state, { type: "closed", code });
     });
+    return state;
   }
 
   // Spawn and wire a codex-family planner: one `codex app-server` child per
   // pane, MCP-hosting this pane's fusion-adapter, normalized onto the SAME
   // event vocabulary as the claude stream path (history/replay included).
-  function startCodexBrain(payload) {
+  function startCodexBrain(payload, options = {}) {
     const { id, cwd } = payload;
     const state = {
       child: null,
       brain: null,
       engine: "codex",
-      history: [],
+      history: cloneHistory(options.history),
+      launchPayload: clonePayload(payload),
+      closed: false,
+      lastExitCode: null,
+      closedAt: 0,
       mode: normalizeFusionRunMode(payload.mode),
-      gate: createFusionGateTracker({ cwd })
+      gate: options.gate || createFusionGateTracker({ cwd })
     };
     sessions.set(id, state);
 
     // codex `thread/resume` loads the old conversation silently; restore it
     // into the pane before any live brain output arrives.
-    if (payload.resumeId) {
+    if (payload.resumeId && !options.preserveHistory) {
       let located = null;
       try {
         located = locateCodexRollout(
@@ -858,15 +907,18 @@ function runHost() {
         type: "error",
         message: `Fusion planner failed to start: ${error.message}`
       });
-      return;
+      state.lastExitCode = 1;
+      state.closedAt = Date.now();
+      return state;
     }
     state.brain = brain;
     state.child = brain.child;
     brain.child.on("exit", (code) => {
       if (sessions.get(id) !== state) return;
-      state.child = null;
+      markPlannerClosed(state, code);
       emitSessionEvent(id, state, { type: "closed", code });
     });
+    return state;
   }
 
   function input(payload) {
@@ -874,7 +926,7 @@ function runHost() {
     const text = String(payload?.text ?? "");
     const steer = Boolean(payload?.steer);
     const routed = steer && payload?.routed === true;
-    const state = sessions.get(id);
+    let state = sessions.get(id);
     if (!state) {
       emitDirectSessionEvent(id, {
         type: "error",
@@ -884,11 +936,16 @@ function runHost() {
     }
 
     if (!state.child) {
-      emitSessionEvent(id, state, {
-        type: "error",
-        message: "Fusion process is closed. Restart Fusion to continue."
-      });
-      return;
+      const restartedState = restartCleanClosedSession(id, state);
+      if (restartedState?.child) {
+        state = restartedState;
+      } else {
+        emitSessionEvent(id, state, {
+          type: "error",
+          message: "Fusion process is closed. Restart Fusion to continue."
+        });
+        return;
+      }
     }
 
     // One-shot completion-gate nudge, computed ONCE above the engine branch so
@@ -953,14 +1010,21 @@ function runHost() {
     const state = sessions.get(id);
     if (!state) return;
     state.mode = normalizeFusionRunMode(payload.mode);
+    if (state.launchPayload) {
+      state.launchPayload.mode = state.mode;
+    }
   }
 
   function settings(payload) {
     const id = payload?.id;
     const state = sessions.get(id);
     if (!state) return;
+    const plannerFast = payload.plannerFast === true;
+    if (state.launchPayload) {
+      state.launchPayload.plannerFast = plannerFast;
+    }
     if (state.engine === "codex" && state.brain?.setFast) {
-      state.brain.setFast(payload.plannerFast === true).catch((error) => {
+      state.brain.setFast(plannerFast).catch((error) => {
         if (sessions.get(id) !== state) return;
         emitSessionEvent(id, state, {
           type: "activity",
@@ -972,7 +1036,7 @@ function runHost() {
       return;
     }
     if (state.engine === "claude" && state.child?.stdin?.writable) {
-      state.plannerFast = payload.plannerFast === true;
+      state.plannerFast = plannerFast;
       state.fastSeq = (state.fastSeq || 0) + 1;
       try {
         state.child.stdin.write(
