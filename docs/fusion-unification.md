@@ -53,7 +53,7 @@ You ──▶ Claude Opus/Sonnet 5 (headless `claude`, read + UI-write tools, Ba
    `fusionChatHost.buildClaudeArgs`. Claude is spawned headless with `--tools`
    limiting the built-in surface to `Read`, `Glob`, and `Grep`,
    `--allowedTools` exposing those plus the Fusion bridge,
-   `--disallowedTools Bash,Edit,MultiEdit,Write,NotebookEdit`, and
+   `--disallowedTools Bash,Edit,Write,NotebookEdit`, and
    `--strict-mcp-config`. Claude is read-only: ALL code writing plus every
    command, test, build, debug run, screenshot, browser action,
    image-generation task, and verification pass routes through

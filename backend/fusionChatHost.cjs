@@ -715,9 +715,7 @@ function runHost() {
 
   function markPlannerClosed(state, code) {
     state.child = null;
-    state.closed = true;
     state.lastExitCode = code;
-    state.closedAt = Date.now();
   }
 
   function restartCleanClosedSession(id, state) {
@@ -777,9 +775,7 @@ function runHost() {
       history: cloneHistory(options.history),
       engine: "claude",
       launchPayload: clonePayload(payload),
-      closed: false,
       lastExitCode: null,
-      closedAt: 0,
       plannerFast: payload.plannerFast === true,
       fastSeq: 0,
       mode: normalizeFusionRunMode(payload.mode),
@@ -856,9 +852,7 @@ function runHost() {
       engine: "codex",
       history: cloneHistory(options.history),
       launchPayload: clonePayload(payload),
-      closed: false,
       lastExitCode: null,
-      closedAt: 0,
       mode: normalizeFusionRunMode(payload.mode),
       gate: options.gate || createFusionGateTracker({ cwd })
     };
@@ -908,7 +902,6 @@ function runHost() {
         message: `Fusion planner failed to start: ${error.message}`
       });
       state.lastExitCode = 1;
-      state.closedAt = Date.now();
       return state;
     }
     state.brain = brain;

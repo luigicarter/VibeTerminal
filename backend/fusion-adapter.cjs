@@ -19,6 +19,8 @@
 
 const fs = require("fs");
 const http = require("http");
+const os = require("os");
+const path = require("path");
 const { spawn } = require("child_process");
 
 const isWin = process.platform === "win32";
@@ -1060,7 +1062,7 @@ function failAll(error) {
 // awaitTurn/resolveTurn, verdict extraction), so the north side and result
 // shapes are identical for both engines.
 const CLAUDE_EXEC_BIN = process.env.VIBE_FUSION_CLAUDE_BIN || "claude";
-const CLAUDE_FILE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+const CLAUDE_FILE_TOOLS = new Set(["Edit", "Write", "NotebookEdit"]);
 let activeExecutorFamily = null;
 let claudeChild = null;
 let claudeNormalizer = null;
@@ -1074,6 +1076,16 @@ let claudeTurnErrorText = "";
 let claudeTextParts = [];
 let claudeInterruptSeq = 0;
 let claudeFastSeq = 0;
+
+function writeClaudeExecutorSettingsFile(fast) {
+  const baseDir = SETTINGS_FILE ? path.dirname(SETTINGS_FILE) : os.tmpdir();
+  const file = SETTINGS_FILE
+    ? path.join(baseDir, "fusion-claude-executor-settings.json")
+    : path.join(os.tmpdir(), `fusion-claude-executor-settings-${process.pid}.json`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ fastMode: fast === true }, null, 2) + "\n");
+  return file;
+}
 
 // Engine selection is per delegation (the settings file is re-read every
 // call), but NEVER mid-turn: a live settings flip applies to the NEXT
@@ -1159,7 +1171,7 @@ function buildClaudeExecutorArgs(settings = {}) {
     cwd: CWD,
     model: settings.model || "sonnet",
     effort: settings.effort || undefined,
-    settingsFile: JSON.stringify({ fastMode: settings.fast === true }),
+    settingsFile: writeClaudeExecutorSettingsFile(settings.fast === true),
     // Full-autonomy parity with the codex executor's dangerFullAccess +
     // approvalPolicy "never": the executor owns all writes and execution, so
     // routine prompts never park. Investigations stay read-only by task

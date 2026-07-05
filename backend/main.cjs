@@ -144,7 +144,7 @@ const FUSION_CODEX_BRIDGE_TOOLS = [
 // hard-blocked via --disallowedTools so a prompt or surface regression can't
 // silently re-open direct writes.
 const FUSION_CLAUDE_BUILTIN_TOOLS = ["Read", "Glob", "Grep"];
-const FUSION_CLAUDE_EDIT_DENY_TOOLS = ["Edit", "MultiEdit", "Write", "NotebookEdit"];
+const FUSION_CLAUDE_EDIT_DENY_TOOLS = ["Edit", "Write", "NotebookEdit"];
 
 function pathFromFileUrl(value) {
   try {
@@ -1652,7 +1652,7 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
         codexBin,
         mcpConfig: files.mcpConfig,
         systemPromptFile: files.systemPromptFile,
-        settingsFile: JSON.stringify({ fastMode: plannerFast }),
+        settingsFile: files.settingsFile,
         model: fusionModel,
         mode: fusionRunMode,
         effort: plannerEffort,

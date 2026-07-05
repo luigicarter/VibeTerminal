@@ -265,6 +265,8 @@ async function assertFusionChatHostRestartsCleanClosedClaude() {
 async function assertFusionChatHostClaudeFastLive() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-chat-host-fast-"));
   const fakeClaude = writeFakeClaudePlanner(tempDir);
+  const settingsFile = path.join(tempDir, "fusion-claude-settings.json");
+  fs.writeFileSync(settingsFile, `${JSON.stringify({ fastMode: false }, null, 2)}\n`);
   const hostPath = path.join(__dirname, "..", "..", "backend", "fusionChatHost.cjs");
   const child = spawn(process.execPath, [hostPath], {
     cwd: tempDir,
@@ -334,7 +336,7 @@ async function assertFusionChatHostClaudeFastLive() {
             cwd: tempDir,
             plannerFamily: "claude",
             plannerFast: false,
-            settingsFile: JSON.stringify({ fastMode: false }),
+            settingsFile,
             model: "opus"
           }
         })}\n`

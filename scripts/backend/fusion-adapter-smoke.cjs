@@ -2382,18 +2382,28 @@ function assertClaudeExecutorArgs() {
     const index = args.indexOf(name);
     return index === -1 ? undefined : args[index + 1];
   };
+  const defaultSettingsFile = flag(defaults, "--settings");
   assert(
     flag(defaults, "--permission-mode") === "bypassPermissions",
     `claude executor must run bypassPermissions (codex dangerFullAccess parity): ${defaults.join(" ")}`
   );
   assert(flag(defaults, "--model") === "sonnet", `claude executor default model should be sonnet: ${defaults.join(" ")}`);
   assert(!defaults.includes("--effort"), `unset effort should omit the flag: ${defaults.join(" ")}`);
-  assert(flag(defaults, "--settings") === '{"fastMode":false}', `unset fast should explicitly disable Claude fastMode: ${defaults.join(" ")}`);
+  assert(defaultSettingsFile && fs.existsSync(defaultSettingsFile), `unset fast should pass a Claude settings file: ${defaults.join(" ")}`);
+  assert(
+    JSON.parse(fs.readFileSync(defaultSettingsFile, "utf8")).fastMode === false,
+    `unset fast should explicitly disable Claude fastMode: ${defaults.join(" ")}`
+  );
   assert(defaults.includes("--input-format"), "claude executor must speak stream-json");
   const custom = buildClaudeExecutorArgs({ model: "opus", effort: "high", fast: true });
+  const customSettingsFile = flag(custom, "--settings");
   assert(flag(custom, "--model") === "opus", `custom model should pass through: ${custom.join(" ")}`);
   assert(flag(custom, "--effort") === "high", `custom effort should pass through: ${custom.join(" ")}`);
-  assert(flag(custom, "--settings") === '{"fastMode":true}', `executorFast should pass Claude fastMode: ${custom.join(" ")}`);
+  assert(customSettingsFile && fs.existsSync(customSettingsFile), `executorFast should pass a Claude settings file: ${custom.join(" ")}`);
+  assert(
+    JSON.parse(fs.readFileSync(customSettingsFile, "utf8")).fastMode === true,
+    `executorFast should pass Claude fastMode: ${custom.join(" ")}`
+  );
 }
 
 // A fake claude CLI: consumes one stream-json user message, replays a
@@ -2565,8 +2575,15 @@ function callAdapterImplementWithFakeClaudeExecutor() {
               `claude executor argv should carry bypassPermissions + model: ${argv}`
             );
             assert(
-              argv.includes("--settings") && argv.includes('\\"fastMode\\":true'),
-              `claude executor argv should carry startup fastMode settings: ${argv}`
+              argv.includes("--settings"),
+              `claude executor argv should carry startup fastMode settings file: ${argv}`
+            );
+            const argvLines = argv.split(/\r?\n/).filter(Boolean);
+            const settingsArg = argvLines[argvLines.indexOf("--settings") + 1];
+            assert(settingsArg && fs.existsSync(settingsArg), `claude executor settings file should exist: ${argv}`);
+            assert(
+              JSON.parse(fs.readFileSync(settingsArg, "utf8")).fastMode === true,
+              `claude executor settings file should carry startup fastMode=true: ${settingsArg}`
             );
             child.stdin.write(
               `${JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "codex_goal_get", arguments: {} } })}\n`

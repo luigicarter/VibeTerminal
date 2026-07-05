@@ -54,7 +54,7 @@ guard **in the same change** or the smoke test fails.
 
 1. **Never add shell/edit/image-generation/browser-control tools to Claude.**
    The Fusion helpers in `main.cjs`, backed by
-   `disallowedTools='Bash,Edit,MultiEdit,Write,NotebookEdit'`, `--tools`, and
+   `disallowedTools='Bash,Edit,Write,NotebookEdit'`, `--tools`, and
    `--strict-mcp-config`, are the physical guarantee. ALL code writing,
    execution, image/browser work, and verification stay in `codex_implement`.
 2. **Don't soften the gate language** in the system prompt rewrite (A3). Keep

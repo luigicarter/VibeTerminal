@@ -176,7 +176,7 @@ async function main() {
     const builtinTools = extractStringArrayConst(mainSource, "FUSION_CLAUDE_BUILTIN_TOOLS");
     const allowList = [...builtinTools, ...bridgeTools];
     assert(
-      ["Edit", "MultiEdit", "Write", "NotebookEdit", "Bash"].every(
+      ["Edit", "Write", "NotebookEdit", "Bash"].every(
         (tool) => !allowList.includes(tool)
       ),
       "Fusion Claude allowlist must not grant any write/execution tools - all code goes through Codex"
@@ -213,10 +213,10 @@ async function main() {
       "FUSION_CLAUDE_EDIT_DENY_TOOLS"
     );
     assert(
-      ["Edit", "MultiEdit", "Write", "NotebookEdit"].every((tool) =>
+      ["Edit", "Write", "NotebookEdit"].every((tool) =>
         editDenyTools.includes(tool)
       ),
-      "Fusion Claude edit deny list must hard-block every file-edit tool"
+      "Fusion Claude edit deny list must hard-block every current file-edit tool"
     );
     assert(
       /tools:\s*fusionClaudeTools\(\)/.test(mainSource) && /strictMcpConfig:\s*true/.test(mainSource),
@@ -243,7 +243,7 @@ async function main() {
         /normalizeFusionFamily\(payload\.plannerFamily, "claude"\)/.test(mainSource) &&
         /normalizeFusionFamily\(payload\.executorFamily, "codex"\)/.test(mainSource) &&
         /plannerFamily,\s*\n\s*plannerFast,/.test(mainSource) &&
-        /settingsFile: JSON\.stringify\(\{ fastMode: plannerFast \}\)/.test(mainSource) &&
+        /settingsFile: files\.settingsFile/.test(mainSource) &&
         /executorFast/.test(mainSource),
       "Fusion launch should pass independent per-role effort/family/fast settings"
     );
