@@ -411,6 +411,19 @@ function codexTaskReport(parsed: Record<string, unknown> | null, raw: string): s
   return parts.join("\n\n") || clip(raw ?? "", 8000);
 }
 
+// The delegation's stashed side-channel lines, rendered as a fenced "Activity"
+// block appended to the Task report. Kept out of the inline transcript so a
+// long run doesn't explode into one "↳ …" sibling per Codex tool call — the
+// Task row shows a single rolling line + "N updates", and this is the detail
+// revealed on click. Newlines are flattened so each activity stays one line.
+function activityLogBlock(activities: string[]): string {
+  if (!activities.length) return "";
+  const log = activities
+    .map((line) => clip(line.replace(/\s*\n\s*/g, " "), 200))
+    .join("\n");
+  return `**Activity**\n\`\`\`\n${log}\n\`\`\``;
+}
+
 function parseJsonObject(text: string): Record<string, unknown> | null {
   try {
     const parsed = JSON.parse(text);
@@ -613,6 +626,9 @@ export default function FusionChatPane({
     toolId: string;
     startTs: number;
     toolcalls: number;
+    // Raw side-channel lines, stashed for the Task row's click-to-expand
+    // report instead of being spilled as per-activity "↳ …" worklines.
+    activities: string[];
   } | null>(null);
   const [planActionReady, setPlanActionReady] = useState(false);
   const [implementingPlan, setImplementingPlan] = useState(false);
@@ -1133,13 +1149,20 @@ export default function FusionChatPane({
     // An abort/exit leaves tool rows spinning forever — settle them as aborted
     // (the same rule the Open Fusion pane applies).
     const settleRunningTools = () => {
+      // Preserve the interrupted delegation's stashed activity list: with the
+      // per-activity worklines gone, this report is the only place it survives.
+      const aborted = delegationRef.current;
+      const abortedBlock = aborted ? activityLogBlock(aborted.activities) : "";
       delegationRef.current = null;
       setMessages((prev) =>
-        prev.map((m) =>
-          m.kind === "tool" && m.toolStatus === "running"
-            ? { ...m, toolStatus: "error" as const, toolOutput: m.toolOutput || "aborted" }
-            : m
-        )
+        prev.map((m) => {
+          if (m.kind !== "tool" || m.toolStatus !== "running") return m;
+          const toolOutput =
+            aborted && m.key === aborted.key && abortedBlock
+              ? [m.toolOutput, abortedBlock].filter(Boolean).join("\n\n")
+              : m.toolOutput || "aborted";
+          return { ...m, toolStatus: "error" as const, toolOutput };
+        })
       );
     };
     // OpenCode's turn-completion line: "▣ Fusion · Opus 4.8 · 32s".
@@ -1308,7 +1331,8 @@ export default function FusionChatPane({
               key,
               toolId: event.toolId,
               startTs: Date.now(),
-              toolcalls: 0
+              toolcalls: 0,
+              activities: []
             };
             break;
           }
@@ -1340,14 +1364,16 @@ export default function FusionChatPane({
           // Delegation rows expose the bridge's JSON as a readable report;
           // other bridge calls keep the concise status line; Claude's builtin
           // tools keep their raw output for the row body.
-          const output = isDelegation
+          // Completed delegations get OpenCode's "↳ N updates · 12s" line, and
+          // their click-to-expand report carries the full activity list — the
+          // per-command lines aren't shown inline anymore (see "activity").
+          const delegation =
+            delegationRef.current?.toolId === event.toolId ? delegationRef.current : null;
+          let output = isDelegation
             ? codexTaskReport(parsed, event.text ?? "")
             : meta && (fromCodex || meta.isGoalTool || meta.name.endsWith("codex_cancel"))
               ? formatCodexBridgeResult(meta.name, event.text ?? "")
               : clip(event.text ?? "", 8000);
-          // Completed delegations get OpenCode's "↳ N updates · 12s" line.
-          const delegation =
-            delegationRef.current?.toolId === event.toolId ? delegationRef.current : null;
           let taskDetail: string | undefined;
           if (delegation) {
             const duration = formatDurationShort(Date.now() - delegation.startTs);
@@ -1355,6 +1381,8 @@ export default function FusionChatPane({
               delegation.toolcalls > 0
                 ? `${delegation.toolcalls} update${delegation.toolcalls === 1 ? "" : "s"} · ${duration}`
                 : duration;
+            const block = activityLogBlock(delegation.activities);
+            if (block) output = `${output}\n\n${block}`.trim();
             delegationRef.current = null;
           }
           setMessages((prev) =>
@@ -1407,16 +1435,20 @@ export default function FusionChatPane({
             (kind === "command" || kind === "file" || kind === "message")
           ) {
             // The Codex side-channel IS the delegation's live progress: tick
-            // the Task row's "↳ …" line (like OpenCode's "↳ current tool")
-            // and keep the raw line as a Details-lane workline.
+            // the Task row's single "↳ …" line (like OpenCode's "↳ current
+            // tool") and stash the raw line for the click-to-expand report.
+            // We deliberately do NOT push a per-activity workline here — that
+            // flattened every Codex tool call into its own sibling "↳ …" line,
+            // duplicating the "N updates" summary and burying the parent Task.
+            // The full activity list now lives inside the delegation report.
             delegation.toolcalls += 1;
             const detail = kind === "command" ? `$ ${clip(text, 80)}` : clip(text, 80);
+            delegation.activities.push(kind === "command" ? `$ ${text}` : text);
             setMessages((prev) =>
               prev.map((row) =>
                 row.key === delegation.key ? { ...row, taskDetail: detail } : row
               )
             );
-            push({ role: "codex", kind: "text", text, internal: true });
             break;
           }
           // Internal bridge mechanics outside a running turn are engine
