@@ -16,10 +16,16 @@ const adapterPath = path.join(__dirname, "..", "..", "backend", "fusion-adapter.
 const isWin = process.platform === "win32";
 const {
   FAST_SERVICE_TIER,
+  FANOUT_MAX_TASKS,
   VERDICT_MARKER,
   buildClaudeExecutorArgs,
   buildCodexInvestigationTask,
   buildCodexVerifierTask,
+  buildFanoutScoutTask,
+  buildFanoutWorkstreamTask,
+  combineFanoutResults,
+  fanoutFileConflicts,
+  normalizeFanoutTasks,
   cleanClaudeEffort,
   codexMcpServerConfigKey,
   commandExecutionDisplayText,
@@ -2321,6 +2327,11 @@ function assertVerifierHelpers() {
     wrapped.includes("Never fabricate, approximate, or reconstruct command or test output"),
     "wrapped task missing the anti-simulation command/test output clause"
   );
+  assert(
+    wrapped.includes("Preflight named capabilities before building work on top of them") &&
+      wrapped.includes('Set `nextAction:"ask_human"` when fixing it needs the user'),
+    "wrapped task missing the capability preflight / connect-escalation clause"
+  );
 
   const summary =
     "Implemented and tested.\n" +
@@ -2920,6 +2931,770 @@ function callAdapterImplementWithFakeClaudeExecutor() {
   });
 }
 
+// ---- parallel fan-out coverage ----
+
+function assertFanoutHelpers() {
+  // Input normalization: single task, batch, caps, and mutual exclusion.
+  assert(normalizeFanoutTasks("do it").task === "do it", "single task should pass through");
+  assert(
+    normalizeFanoutTasks("", ["only one"]).task === "only one",
+    "a one-entry tasks array should collapse to the single-task path"
+  );
+  assert(
+    Array.isArray(normalizeFanoutTasks("", ["a", "b"]).tasks),
+    "a two-entry tasks array should select the fan-out path"
+  );
+  assert(
+    /at most 4/.test(normalizeFanoutTasks("", ["a", "b", "c", "d", "e"]).error || ""),
+    "more than FANOUT_MAX_TASKS entries must error asking to consolidate"
+  );
+  assert(FANOUT_MAX_TASKS === 4, "fan-out cap should stay at 4 parallel tasks");
+  assert(
+    /not both/.test(normalizeFanoutTasks("x", ["a", "b"]).error || ""),
+    "task alongside tasks must be rejected"
+  );
+  assert(
+    /required/.test(normalizeFanoutTasks("", []).error || "") ||
+      /non-empty/.test(normalizeFanoutTasks("", []).error || ""),
+    "an empty tasks array must be rejected"
+  );
+
+  // Worker task wrappers carry the parallel-scope contract.
+  const scoutTask = buildFanoutScoutTask("map the backend", 0, 3);
+  assert(
+    scoutTask.includes(buildCodexInvestigationTask("map the backend")) &&
+      /Parallel scout 1 of 3/.test(scoutTask) &&
+      /No mid-turn questions/.test(scoutTask),
+    "scout wrapper must keep the investigation contract and add the parallel-scope clause"
+  );
+  const workTask = buildFanoutWorkstreamTask("implement feature", 1, 2);
+  assert(
+    workTask.includes(buildCodexVerifierTask("implement feature")) &&
+      /Parallel workstream 2 of 2/.test(workTask) &&
+      /Touch ONLY the files/.test(workTask) &&
+      /LARGER goal/.test(workTask) &&
+      /missingRequirements/.test(workTask),
+    "workstream wrapper must keep the verifier contract and add scope/goal/no-question clauses"
+  );
+
+  // Conflict detection: same path reported by two workers (case-insensitive,
+  // separator-normalized on win32).
+  const conflicts = fanoutFileConflicts([
+    { files: ["src/a.js", "src/shared.js"] },
+    { files: ["src/b.js", isWin ? "src\\SHARED.js" : "src/shared.js"] }
+  ]);
+  assert(
+    conflicts.length === 1 && /shared\.js$/i.test(conflicts[0]),
+    `overlapping worker files must surface as fileConflicts: ${JSON.stringify(conflicts)}`
+  );
+  assert(
+    fanoutFileConflicts([{ files: ["src/a.js", "src/a.js"] }, { files: ["src/b.js"] }]).length === 0,
+    "a single worker repeating its own file is not a conflict"
+  );
+
+  // Combined investigate result: per-scout sections + files union.
+  const scoutCombined = combineFanoutResults("investigate", ["q1", "q2"], [
+    { status: "completed", findings: "found one", files: ["a.js"] },
+    { status: "failed", error: "boom" }
+  ]);
+  assert(scoutCombined.status === "completed", "scout aggregate always completes");
+  assert(
+    scoutCombined.scouts.length === 2 &&
+      scoutCombined.scouts[1].findings.includes("boom") &&
+      /Scout 1\/2/.test(scoutCombined.findings) &&
+      /Scout 2\/2/.test(scoutCombined.findings) &&
+      scoutCombined.files.includes("a.js"),
+    `scout aggregate must carry per-scout sections and the files union: ${JSON.stringify(scoutCombined)}`
+  );
+
+  // Combined implement result: per-worker verdicts, conflicts, aggregate gates.
+  const implCombined = combineFanoutResults("implement", ["w1", "w2"], [
+    {
+      status: "completed",
+      summary: "did w1",
+      files: ["src/a.js", "src/shared.js"],
+      goalReached: true,
+      bugsFound: [],
+      missingRequirements: [],
+      nextAction: "done",
+      verifierVerdict: { goalReached: true, nextAction: "done" }
+    },
+    {
+      status: "completed",
+      summary: "did w2",
+      files: ["src/b.js", "src/shared.js"],
+      goalReached: true,
+      bugsFound: ["off-by-one"],
+      missingRequirements: [],
+      nextAction: "done",
+      verifierVerdict: { goalReached: true, nextAction: "done" }
+    }
+  ]);
+  assert(
+    implCombined.workers.length === 2 &&
+      implCombined.fileConflicts &&
+      implCombined.fileConflicts.includes("src/shared.js") &&
+      implCombined.goalReached === false &&
+      implCombined.nextAction === "continue" &&
+      /overlapping files/i.test(implCombined.warning || "") &&
+      implCombined.bugsFound.includes("off-by-one"),
+    `file conflicts must gate the aggregate to continue: ${JSON.stringify(implCombined)}`
+  );
+  const cleanCombined = combineFanoutResults("implement", ["w1", "w2"], [
+    {
+      status: "completed",
+      summary: "did w1",
+      files: ["src/a.js"],
+      goalReached: true,
+      bugsFound: [],
+      missingRequirements: [],
+      nextAction: "done",
+      verifierVerdict: {}
+    },
+    {
+      status: "completed",
+      summary: "did w2",
+      files: ["src/b.js"],
+      goalReached: false,
+      bugsFound: [],
+      missingRequirements: [],
+      nextAction: "continue",
+      verifierVerdict: {}
+    }
+  ]);
+  assert(
+    cleanCombined.goalReached === false && cleanCombined.nextAction === "continue",
+    "a mid-plan workstream verdict must keep the aggregate on continue"
+  );
+  const askCombined = combineFanoutResults("implement", ["w1"], [
+    {
+      status: "completed",
+      summary: "blocked",
+      files: [],
+      goalReached: false,
+      bugsFound: [],
+      missingRequirements: ["credentials"],
+      nextAction: "ask_human",
+      verifierVerdict: {}
+    }
+  ]);
+  assert(askCombined.nextAction === "ask_human", "a worker's ask_human must surface on the aggregate");
+
+  // Source anchors for the wiring that the fake-server scenarios cannot see.
+  const source = fs.readFileSync(adapterPath, "utf8");
+  assert(
+    source.includes("const fanoutWorkers = new Map()") &&
+      source.includes("function fanoutWorkerForParams") &&
+      source.includes("handleFanoutNotification(fanoutWorker, method, params)"),
+    "handleNotification must route fan-out worker events to worker-scoped state"
+  );
+  assert(
+    source.includes("function resolveFanoutServerRequest") &&
+      source.includes("FANOUT_QUESTION_ANSWER"),
+    "fan-out server requests must be auto-resolved inline, never parked"
+  );
+  assert(
+    (source.match(/abortFanoutWorkers\(/g) || []).length >= 4,
+    "codexCancel/failAll/resetCodexProcessState must abort fan-out workers"
+  );
+  assert(
+    source.includes('runClaudeFanoutSequential("investigate"') &&
+      source.includes('runClaudeFanoutSequential("implement"') &&
+      source.includes("parallel: false"),
+    "the claude executor family must run batched tasks sequentially with the same combined shape"
+  );
+  assert(
+    source.includes("const withGoal = currentGoal ? { ...result, goal: currentGoal } : result;"),
+    "a fan-out implement result must never auto-sync the native goal"
+  );
+  const investigateTool = source.includes('"2-4 self-contained, non-overlapping scouting tasks');
+  const implementTool = source.includes("ONLY for verified-disjoint work");
+  assert(investigateTool && implementTool, "both bridge tools must document the tasks[] fan-out surface");
+}
+
+function writeFanoutFakeAppServer(dir, options = {}) {
+  const logFile = JSON.stringify(options.logFile);
+  const mode = JSON.stringify(options.mode || "scout");
+  const workerCount = Number(options.workerCount || 2);
+  const verdict = JSON.stringify(
+    `${VERDICT_MARKER} {"goalReached":false,"bugsFound":[],"missingRequirements":[],"nextAction":"continue","summary":"Workstream awaiting integration."}`
+  );
+  fs.writeFileSync(
+    path.join(dir, "app-server"),
+    `
+const fs = require("fs");
+const readline = require("readline");
+const logFile = ${logFile};
+const mode = ${mode};
+const workerCount = ${workerCount};
+const verdict = ${verdict};
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+let nextThread = 0;
+let nextTurn = 0;
+let approvalSeq = 900;
+const pendingWorkerTurns = [];
+function send(msg) { process.stdout.write(JSON.stringify(msg) + "\\n"); }
+function log(entry) { fs.appendFileSync(logFile, JSON.stringify(entry) + "\\n"); }
+function turnShape(turnId, status, items = []) {
+  return { id: turnId, items, itemsView: "full", status, error: null, startedAt: 1, completedAt: status === "completed" ? 2 : null, durationMs: 1 };
+}
+function completeWorkerTurn(threadId, turnId) {
+  const n = threadId.replace(/\\D+/g, "");
+  if (mode === "scout") {
+    const agent = { type: "agentMessage", id: "msg-" + threadId, text: "Scout findings for " + threadId + " in backend/file-" + n + ".cjs", phase: null, memoryCitation: null };
+    send({ method: "item/completed", params: { threadId, turnId, item: agent } });
+    send({ method: "turn/completed", params: { threadId, turn: turnShape(turnId, "completed", [agent]) } });
+    return;
+  }
+  const own = n === "2" ? "src/a.js" : "src/b.js";
+  const change = { type: "fileChange", id: "fc-" + threadId, changes: [{ type: "edit", path: own }, { type: "edit", path: "src/shared.js" }], status: "completed" };
+  const agent = { type: "agentMessage", id: "msg-" + threadId, text: "Workstream " + threadId + " done.\\n" + verdict, phase: null, memoryCitation: null };
+  send({ method: "item/completed", params: { threadId, turnId, item: change } });
+  send({ method: "item/completed", params: { threadId, turnId, item: agent } });
+  send({ method: "turn/completed", params: { threadId, turn: turnShape(turnId, "completed", [change, agent]) } });
+}
+rl.on("line", (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+  if (msg.id !== undefined && msg.result && !msg.method) {
+    log({ kind: "serverRequestResponse", id: msg.id, result: msg.result });
+    return;
+  }
+  if (msg.method === "initialize") { send({ id: msg.id, result: {} }); return; }
+  if (msg.method === "model/list") {
+    send({ id: msg.id, result: { data: [{ id: "gpt-5.5", model: "gpt-5.5", isDefault: true, serviceTiers: [] }], nextCursor: null } });
+    return;
+  }
+  if (msg.method === "thread/start") {
+    nextThread += 1;
+    const threadId = "thread-" + nextThread;
+    log({ kind: "thread/start", threadId, params: msg.params });
+    send({ id: msg.id, result: { thread: { id: threadId } } });
+    return;
+  }
+  if (msg.method === "thread/goal/set") {
+    log({ kind: "thread/goal/set", params: msg.params });
+    send({ id: msg.id, result: { goal: { threadId: msg.params.threadId, objective: msg.params.objective || "", status: msg.params.status || "active", tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0, createdAt: 1, updatedAt: 1 } } });
+    return;
+  }
+  if (msg.method === "turn/interrupt") {
+    log({ kind: "turn/interrupt", params: msg.params });
+    send({ id: msg.id, result: {} });
+    return;
+  }
+  if (msg.method === "turn/start") {
+    nextTurn += 1;
+    const threadId = msg.params.threadId;
+    const turnId = "turn-" + nextTurn;
+    log({ kind: "turn/start", threadId, turnId, params: msg.params });
+    send({ id: msg.id, result: { turn: turnShape(turnId, "running") } });
+    send({ method: "turn/started", params: { threadId, turn: turnShape(turnId, "running") } });
+    if (mode === "hang") return;
+    if (mode === "implement" && threadId === "thread-2") {
+      approvalSeq += 1;
+      send({
+        id: approvalSeq,
+        method: "item/commandExecution/requestApproval",
+        params: { threadId, turnId, itemId: "cmd-" + threadId, reason: "install package", command: "npm install leftpad", cwd: process.cwd(), commandActions: [], availableDecisions: ["accept", "acceptForSession", "decline", "cancel"] }
+      });
+    }
+    // Withhold every worker completion until ALL worker turns have started: a
+    // serialized adapter would deadlock here, so passing proves concurrency.
+    pendingWorkerTurns.push({ threadId, turnId });
+    if (pendingWorkerTurns.length === workerCount) {
+      for (const pending of pendingWorkerTurns) completeWorkerTurn(pending.threadId, pending.turnId);
+    }
+    return;
+  }
+  if (msg.id !== undefined) send({ id: msg.id, result: {} });
+});
+`
+  );
+}
+
+function spawnFanoutAdapter(tempDir, sessionId) {
+  return spawn(process.execPath, [adapterPath], {
+    cwd: tempDir,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      VIBE_FUSION_CODEX_BIN: process.execPath,
+      VIBE_TERMINAL_FUSION_CWD: tempDir,
+      VIBE_TERMINAL_SESSION_ID: sessionId
+    }
+  });
+}
+
+function readFanoutLog(logFile) {
+  if (!fs.existsSync(logFile)) return [];
+  return fs
+    .readFileSync(logFile, "utf8")
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
+function callAdapterScoutFanoutWithFakeAppServer() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-adapter-fanout-scout-"));
+  const logFile = path.join(tempDir, "fanout-log.jsonl");
+  writeFanoutFakeAppServer(tempDir, { logFile, mode: "scout" });
+  const child = spawnFanoutAdapter(tempDir, "fusion-adapter-fanout-scout");
+
+  const responses = new Map();
+  let buffer = "";
+  let stderr = "";
+  let finished = false;
+
+  function cleanup() {
+    try {
+      child.stdin.end();
+    } catch {
+      // ignore
+    }
+    try {
+      child.kill();
+    } catch {
+      // ignore
+    }
+    if (isWin && child.pid) {
+      try {
+        execFileSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
+      } catch {
+        // best-effort
+      }
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      finished = true;
+      cleanup();
+      reject(new Error(`timed out waiting for scout fan-out result; stderr=${stderr}`));
+    }, 15000);
+
+    child.on("error", (error) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      cleanup();
+      reject(error);
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+
+    child.on("exit", (code) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      cleanup();
+      reject(new Error(`adapter exited before scout fan-out result: code=${code}; stderr=${stderr}`));
+    });
+
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      let index;
+      while ((index = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, index).trim();
+        buffer = buffer.slice(index + 1);
+        if (!line) continue;
+        const msg = JSON.parse(line);
+        if (msg.id !== undefined) responses.set(msg.id, msg);
+        if (!responses.has(2) || !responses.has(3) || finished) continue;
+        finished = true;
+        clearTimeout(timer);
+        try {
+          const busyText = responses.get(3).result.content[0].text;
+          const busy = JSON.parse(busyText);
+          assert(
+            busy.status === "error" && /already in progress/i.test(busy.error),
+            `a concurrent call during a fan-out must be rejected: ${busyText}`
+          );
+          const text = responses.get(2).result.content[0].text;
+          const parsed = JSON.parse(text);
+          assert(parsed.status === "completed", `scout fan-out should complete: ${text}`);
+          assert(
+            Array.isArray(parsed.scouts) && parsed.scouts.length === 2,
+            `scout fan-out should report per-scout results: ${text}`
+          );
+          assert(
+            /Scout 1\/2/.test(parsed.findings) && /Scout 2\/2/.test(parsed.findings),
+            `combined findings should carry per-scout sections: ${text}`
+          );
+          assert(
+            parsed.files.some((f) => /file-2\.cjs$/.test(f)) &&
+              parsed.files.some((f) => /file-3\.cjs$/.test(f)),
+            `combined files should union both scouts' paths: ${text}`
+          );
+          const log = readFanoutLog(logFile);
+          const threadStarts = log.filter((entry) => entry.kind === "thread/start");
+          assert(
+            threadStarts.length === 3,
+            `scout fan-out should start main + 2 worker threads, got ${threadStarts.length}`
+          );
+          const workerStarts = threadStarts.slice(1);
+          assert(
+            workerStarts.every((entry) => entry.params?.config?.["features.goals"] !== true),
+            `scout worker threads must not enable goals: ${JSON.stringify(workerStarts)}`
+          );
+          const turnStarts = log.filter((entry) => entry.kind === "turn/start");
+          assert(
+            turnStarts.length === 2 &&
+              new Set(turnStarts.map((entry) => entry.threadId)).size === 2,
+            `scout fan-out should run one concurrent turn per worker thread: ${JSON.stringify(turnStarts)}`
+          );
+          assert(
+            turnStarts.every((entry) => /Parallel scout \d of 2/.test(entry.params.input[0].text)),
+            "worker turns must carry the parallel-scout contract"
+          );
+          cleanup();
+          resolve();
+        } catch (error) {
+          cleanup();
+          reject(error);
+        }
+      }
+    });
+
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "fusion-adapter-fanout-scout", version: "0.0.0" }
+        }
+      })}\n`
+    );
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "codex_investigate",
+          arguments: { tasks: ["map the backend turn machinery", "map the frontend chat pane"] }
+        }
+      })}\n`
+    );
+    // Sent while the fan-out is arming/running: must be rejected, not queued.
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "codex_investigate", arguments: { task: "sneak a second turn" } }
+      })}\n`
+    );
+  });
+}
+
+function callAdapterImplementFanoutWithFakeAppServer() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-adapter-fanout-impl-"));
+  const logFile = path.join(tempDir, "fanout-log.jsonl");
+  writeFanoutFakeAppServer(tempDir, { logFile, mode: "implement" });
+  const child = spawnFanoutAdapter(tempDir, "fusion-adapter-fanout-impl");
+
+  const responses = new Map();
+  let buffer = "";
+  let stderr = "";
+  let finished = false;
+
+  function cleanup() {
+    try {
+      child.stdin.end();
+    } catch {
+      // ignore
+    }
+    try {
+      child.kill();
+    } catch {
+      // ignore
+    }
+    if (isWin && child.pid) {
+      try {
+        execFileSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
+      } catch {
+        // best-effort
+      }
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      finished = true;
+      cleanup();
+      reject(new Error(`timed out waiting for implement fan-out result; stderr=${stderr}`));
+    }, 15000);
+
+    child.on("error", (error) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      cleanup();
+      reject(error);
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+
+    child.on("exit", (code) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      cleanup();
+      reject(new Error(`adapter exited before implement fan-out result: code=${code}; stderr=${stderr}`));
+    });
+
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      let index;
+      while ((index = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, index).trim();
+        buffer = buffer.slice(index + 1);
+        if (!line) continue;
+        const msg = JSON.parse(line);
+        if (msg.id !== undefined) responses.set(msg.id, msg);
+        if (!responses.has(2) || finished) continue;
+        finished = true;
+        clearTimeout(timer);
+        try {
+          const text = responses.get(2).result.content[0].text;
+          const parsed = JSON.parse(text);
+          assert(parsed.status === "completed", `implement fan-out should complete: ${text}`);
+          assert(
+            Array.isArray(parsed.workers) && parsed.workers.length === 2,
+            `implement fan-out should report per-workstream results: ${text}`
+          );
+          assert(
+            parsed.workers.every((w) => w.nextAction === "continue" && w.goalReached === false),
+            `per-workstream verifier verdicts should parse: ${text}`
+          );
+          assert(
+            parsed.fileConflicts && parsed.fileConflicts.includes("src/shared.js"),
+            `overlapping workstream files should surface as fileConflicts: ${text}`
+          );
+          assert(
+            /overlapping files/i.test(parsed.warning || "") && /Workstream 1\/2/.test(parsed.summary),
+            `aggregate summary should carry the conflict warning and per-workstream sections: ${text}`
+          );
+          assert(
+            parsed.goalReached === false && parsed.nextAction === "continue",
+            `aggregate must stay on continue: ${text}`
+          );
+          assert(
+            parsed.files.includes("src/a.js") &&
+              parsed.files.includes("src/b.js") &&
+              parsed.files.includes("src/shared.js"),
+            `aggregate files should union all workstreams: ${text}`
+          );
+          assert(
+            /auto-declined/.test(parsed.summary),
+            `a worker's exceptional approval should be auto-declined and reported: ${text}`
+          );
+          const log = readFanoutLog(logFile);
+          const goalSets = log.filter((entry) => entry.kind === "thread/goal/set");
+          assert(goalSets.length === 1, `fan-out should create one fallback goal, got ${goalSets.length}`);
+          assert(
+            /workstream A/.test(goalSets[0].params.objective) &&
+              /workstream B/.test(goalSets[0].params.objective),
+            `fallback goal objective should join the workstream tasks: ${JSON.stringify(goalSets[0])}`
+          );
+          assert(
+            !goalSets.some((entry) => entry.params.status === "complete"),
+            "a fan-out must never auto-complete the native goal"
+          );
+          const declineResponse = log.find(
+            (entry) => entry.kind === "serverRequestResponse" && entry.id > 900
+          );
+          assert(
+            declineResponse && declineResponse.result && declineResponse.result.decision === "decline",
+            `the worker approval should be auto-declined on the wire: ${JSON.stringify(declineResponse)}`
+          );
+          const turnStarts = log.filter((entry) => entry.kind === "turn/start");
+          assert(
+            turnStarts.every((entry) => /Parallel workstream \d of 2/.test(entry.params.input[0].text)),
+            "worker turns must carry the parallel-workstream contract"
+          );
+          cleanup();
+          resolve();
+        } catch (error) {
+          cleanup();
+          reject(error);
+        }
+      }
+    });
+
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "fusion-adapter-fanout-impl", version: "0.0.0" }
+        }
+      })}\n`
+    );
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "codex_implement",
+          arguments: { tasks: ["build workstream A in src/a.js", "build workstream B in src/b.js"] }
+        }
+      })}\n`
+    );
+  });
+}
+
+function callAdapterCancelDuringFanout() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-adapter-fanout-cancel-"));
+  const logFile = path.join(tempDir, "fanout-log.jsonl");
+  writeFanoutFakeAppServer(tempDir, { logFile, mode: "hang" });
+  const child = spawnFanoutAdapter(tempDir, "fusion-adapter-fanout-cancel");
+
+  const responses = new Map();
+  let buffer = "";
+  let stderr = "";
+  let finished = false;
+  let sentCancel = false;
+
+  function cleanup() {
+    try {
+      child.stdin.end();
+    } catch {
+      // ignore
+    }
+    try {
+      child.kill();
+    } catch {
+      // ignore
+    }
+    if (isWin && child.pid) {
+      try {
+        execFileSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
+      } catch {
+        // best-effort
+      }
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      finished = true;
+      cleanup();
+      reject(new Error(`timed out waiting for fan-out cancel; stderr=${stderr}`));
+    }, 15000);
+
+    child.on("error", (error) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      cleanup();
+      reject(error);
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+
+    child.on("exit", (code) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      cleanup();
+      reject(new Error(`adapter exited before fan-out cancel result: code=${code}; stderr=${stderr}`));
+    });
+
+    // Wait for both hung worker turns to start, then cancel.
+    const poll = setInterval(() => {
+      if (sentCancel || finished) return;
+      const turnStarts = readFanoutLog(logFile).filter((entry) => entry.kind === "turn/start");
+      if (turnStarts.length >= 2) {
+        sentCancel = true;
+        child.stdin.write(
+          `${JSON.stringify({
+            jsonrpc: "2.0",
+            id: 3,
+            method: "tools/call",
+            params: { name: "codex_cancel", arguments: {} }
+          })}\n`
+        );
+      }
+    }, 50);
+
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      let index;
+      while ((index = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, index).trim();
+        buffer = buffer.slice(index + 1);
+        if (!line) continue;
+        const msg = JSON.parse(line);
+        if (msg.id !== undefined) responses.set(msg.id, msg);
+        if (!responses.has(2) || !responses.has(3) || finished) continue;
+        finished = true;
+        clearTimeout(timer);
+        clearInterval(poll);
+        try {
+          const cancelText = responses.get(3).result.content[0].text;
+          const cancel = JSON.parse(cancelText);
+          assert(cancel.status === "cancelled", `cancel during fan-out should succeed: ${cancelText}`);
+          assert(cancel.hadActiveTurn === true, `cancel should see the active fan-out: ${cancelText}`);
+          const fanoutText = responses.get(2).result.content[0].text;
+          const fanout = JSON.parse(fanoutText);
+          assert(
+            fanout.status === "cancelled",
+            `the hung fan-out call should resolve as cancelled: ${fanoutText}`
+          );
+          const interrupts = readFanoutLog(logFile).filter((entry) => entry.kind === "turn/interrupt");
+          assert(
+            new Set(interrupts.map((entry) => entry.params.threadId)).size >= 2,
+            `cancel must interrupt every fan-out worker thread: ${JSON.stringify(interrupts)}`
+          );
+          cleanup();
+          resolve();
+        } catch (error) {
+          cleanup();
+          reject(error);
+        }
+      }
+    });
+
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "fusion-adapter-fanout-cancel", version: "0.0.0" }
+        }
+      })}\n`
+    );
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "codex_investigate", arguments: { tasks: ["hang one", "hang two"] } }
+      })}\n`
+    );
+  });
+}
+
 main()
   .then(async () => {
     assertGoalSchema();
@@ -2945,6 +3720,10 @@ main()
     await callAdapterSteerRoutingWithFakeAppServer("replan");
     await callAdapterDeadWindowSteerSkips();
     await callAdapterImplementWithFakeClaudeExecutor();
+    assertFanoutHelpers();
+    await callAdapterScoutFanoutWithFakeAppServer();
+    await callAdapterImplementFanoutWithFakeAppServer();
+    await callAdapterCancelDuringFanout();
     console.log("Fusion adapter smoke passed");
   })
   .catch((error) => {

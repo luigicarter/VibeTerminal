@@ -164,6 +164,39 @@ async function main() {
       buildFusionSystemPrompt().includes("switch families mid-thread"),
       "buildFusionSystemPrompt is missing the mid-thread engine/model identity clause"
     );
+    assert(
+      buildFusionSystemPrompt().includes("The executor preflights named capabilities") &&
+        buildFusionSystemPrompt().includes("tell the user exactly what to connect") &&
+        buildFusionSystemPrompt().includes("hold the dependent"),
+      "buildFusionSystemPrompt is missing the capability connect-escalation rule"
+    );
+    assert(
+      buildFusionSystemPrompt().includes("## Orchestration triage") &&
+        buildFusionSystemPrompt().includes("cheapest sufficient level") &&
+        buildFusionSystemPrompt().includes("parallel scouts") &&
+        buildFusionSystemPrompt().includes("Never scout what one read answers"),
+      "buildFusionSystemPrompt is missing the orchestration triage ladder"
+    );
+    assert(
+      buildFusionSystemPrompt().includes("## Parallel execution safety check") &&
+        buildFusionSystemPrompt().includes("Disjoint file ownership") &&
+        buildFusionSystemPrompt().includes("No ordering dependency") &&
+        buildFusionSystemPrompt().includes("fileConflicts") &&
+        buildFusionSystemPrompt().includes("integration verification") &&
+        buildFusionSystemPrompt().includes("never auto-completes the native goal"),
+      "buildFusionSystemPrompt is missing the mandatory parallel execution safety check"
+    );
+    assert(
+      buildFusionSystemPrompt().includes("MAY run as one parallel fan-out"),
+      "buildFusionSystemPrompt should allow independent milestones to fan out after the safety check"
+    );
+    {
+      const hostSource = fs.readFileSync(path.join(rootDir, "backend", "fusionChatHost.cjs"), "utf8");
+      assert(
+        /Right-size the research/.test(hostSource) && /parallel scouts/.test(hostSource),
+        "planModeDirective should steer plan-mode research through right-sized parallel scouts"
+      );
+    }
     const mainSource = fs.readFileSync(path.join(rootDir, "backend", "main.cjs"), "utf8");
     assert(/function fusionClaudeAllowedTools/.test(mainSource), "Fusion allowed tools helper not found in main.cjs");
     assert(/function fusionClaudeTools/.test(mainSource), "Fusion --tools helper not found in main.cjs");

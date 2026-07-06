@@ -49,6 +49,7 @@ function planModeDirective() {
   return [
     "FUSION PLAN MODE IS ACTIVE.",
     "Investigate read-only with Read, Grep, Glob, or codex_investigate, then present a concrete implementation plan to the user.",
+    "Right-size the research: answer from what you know when you can, read directly for targeted lookups, and use codex_investigate with `tasks` (2-4 self-contained questions) to run parallel scouts when the plan needs context from several disjoint areas.",
     "Do not call codex_implement, codex_respond, codex_goal_set, codex_goal_clear, or any execution tool until the user switches this pane back to Auto mode. If a steer_routing result is already pending, codex_steer_resolve may still be used to settle that live route.",
     "Execution is hard-blocked in the adapter while Plan mode is active."
   ].join("\n");

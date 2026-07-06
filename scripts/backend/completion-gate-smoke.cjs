@@ -231,6 +231,41 @@ function observeAll(tracker, events) {
   assert(gate.getState().latchOpen, "failed native command is not evidence");
 }
 
+// ---- Fusion: parallel fan-out combined result latches on the files union ----
+{
+  const gate = createFusionGateTracker({ cwd: CWD });
+  const fanoutResult = JSON.stringify({
+    status: "completed",
+    summary: "### Workstream 1/2 - a\ndone\n\n### Workstream 2/2 - b\ndone",
+    files: ["src/a.js", "src/b.js", "src/shared.js"],
+    goalReached: false,
+    nextAction: "continue",
+    fileConflicts: ["src/shared.js"],
+    workers: [
+      { task: "a", status: "completed", files: ["src/a.js", "src/shared.js"] },
+      { task: "b", status: "completed", files: ["src/b.js", "src/shared.js"] }
+    ]
+  });
+  observeAll(gate, [
+    { type: "tool-call", toolId: "f1", name: "mcp__fusion-codex__codex_implement", input: { tasks: ["a", "b"] } },
+    { type: "tool-result", toolId: "f1", text: fanoutResult }
+  ]);
+  assert(gate.getState().latchOpen, "a fan-out combined result opens the latch");
+  assert(
+    gate.getState().changedFiles.length === 3,
+    "the latch captures the fan-out files union"
+  );
+  observeAll(gate, [
+    { type: "tool-call", toolId: "r1", name: "Read", input: { file_path: "C:\\repo\\src\\shared.js" } },
+    { type: "tool-result", toolId: "r1", text: "contents" }
+  ]);
+  const settle = gate.observe({ type: "result", subtype: "success", isError: false });
+  assert(
+    settle.gate && settle.gate.status === "verified" && settle.gate.evidence[0] === "read changed file",
+    "reading a conflicted fan-out file verifies the combined delegation"
+  );
+}
+
 // ---- Fusion: aborted codex-brain settle ----
 {
   const gate = createFusionGateTracker({ cwd: CWD });

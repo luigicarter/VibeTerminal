@@ -54,6 +54,16 @@
 > invocation evidence, and unavailable/errored capabilities must be reported
 > instead of treated as success. Locked by `agent-telemetry-smoke`.
 >
+> **Capability preflight + connect escalation (2026-07-06):** the executor
+> prompt and `/delegate` template also require preflighting a named capability
+> (confirm its tools are available, first real call early) before depending on
+> it. A not-connected capability (not installed, not running, unauthenticated,
+> tools absent) is reported with the exact name and failure reason, with
+> `ASK_HUMAN` recommended when only the user can connect/install/authenticate
+> it. The planner prompt's matching rule forbids blind re-delegation: it tells
+> the user exactly which server or skill to connect and holds the dependent
+> work until the user confirms. Locked by `agent-telemetry-smoke`.
+>
 > **Parallel executor children (2026-07-05):** Open Fusion preserves
 > OpenCode's native ability to run multiple `task` children inside one pane.
 > The Planner prompt permits multiple same-turn task calls only for genuinely
@@ -547,12 +557,21 @@ transcript ordering (the coherence seam Fusion fights in
      milestones instead of acting on them. Micro-slicing is explicitly ruled
      out — a milestone is a verifiable increment, and small single-stage tasks
      stay one delegation.
-  6. **Independent parallel fan-out.** The Planner may emit multiple `task`
-     calls in one assistant turn only for independent, disjoint work with no
-     ordering dependency or shared file ownership. Parallel children must each
-     get self-contained scope and acceptance criteria. Anything that depends on
-     reviewing a prior milestone, or might edit/verify the same files, remains
-     sequential under the checkpoint rule.
+  6. **Independent parallel fan-out (verify-first, 2026-07-06).** The Planner
+     may emit multiple `task` calls in one assistant turn only for
+     independent, disjoint work with no ordering dependency or shared file
+     ownership. Parallel EXECUTOR fan-out is verify-first: the prompt requires
+     the Planner to confirm and state disjoint file ownership (naming each
+     child's files), no ordering dependency, and no shared artifacts before
+     fanning out — when unsure, send investigator scouts first or stay
+     sequential. Parallel children must each get self-contained scope and
+     acceptance criteria. Anything that depends on reviewing a prior
+     milestone, or might edit/verify the same files, remains sequential under
+     the checkpoint rule. After a parallel batch the Planner checks for
+     overlapping child edits (a failed disjointness assumption) and runs its
+     independent integration check before declaring done. Parallel
+     INVESTIGATOR fan-out is explicitly blessed as always safe (read-only) and
+     preferred over sequential scouting for disjoint context areas.
   7. **Verified-done detection + one-shot nudge (2026-07-04).** The gate is no
      longer purely an honor system: a host-side tracker
      (`backend/completionGate.cjs`, `createOpenFusionGateTracker`) observes the
@@ -571,6 +590,17 @@ transcript ordering (the coherence seam Fusion fights in
      never annotated and keep the latch; new prompts and `/compact` do not
      clear it; resume/restart resets the tracker (documented, deliberate —
      child sessions are not rehydrated). Detection only: nothing is blocked.
+  8. **Orchestration triage ladder (2026-07-06).** The planner prompt opens
+     the delegation rules with an explicit right-sizing policy: answer
+     directly → own reads/git evidence → one investigator → parallel
+     investigator scouts → one executor delegation → verified parallel
+     executor fan-out → sequential milestones. Pick the cheapest sufficient
+     level; never scout what one read answers; never delegate execution for a
+     question. Plan mode carries the matching guidance (parallel scouts for
+     plan research, milestones marked parallelizable when independent), and
+     the investigator/executor prompts carry the matching parallel-scope
+     discipline (stay in scope; report out-of-scope needs and foreign
+     overlaps instead of acting).
 
   Locked by `agent-telemetry-smoke` (permission shape incl. key order + prompt
   anchors), `openfusion-chat-parse-smoke` (reminder/nudge parts + rehydration

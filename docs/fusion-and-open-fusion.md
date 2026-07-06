@@ -63,6 +63,12 @@ vendors, into one planner-plus-executor agent.
 
 - **One agent, one conversation.** You chat with a single agent; the split
   between planner and executor happens behind the scenes.
+- **A planner that right-sizes the work.** For every request the planner
+  decides how much machinery it needs: answer directly, read the code itself,
+  send one or several parallel read-only scouts to gather context, delegate a
+  single implementation pass, or — only after verifying the pieces are truly
+  independent — run parallel executor workstreams. Small questions stay cheap;
+  big jobs fan out.
 - **A planner that reviews.** The executor never has the final say on its own
   work — the planner independently checks the result and decides whether it's
   done or needs another pass.

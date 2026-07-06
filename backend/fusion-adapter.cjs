@@ -212,6 +212,7 @@ function buildCodexVerifierTask(task) {
     'If you are not sure the goal is complete, set `goalReached:false` and `nextAction:"continue"`.',
     "Never fabricate, approximate, or reconstruct command or test output. If you did not actually run a command or test, say so and set `goalReached:false` rather than reporting an assumed result.",
     "If the delegation named a specific MCP server/tool or a skill, you must actually invoke it to do the work - do not simulate or describe it. Confirm the real call happened and that its output was used. If a named MCP server or skill was unavailable, errored, or could not be exercised, record it in `missingRequirements` (and `bugsFound` if it indicates a defect) and set `goalReached:false` rather than claiming success.",
+    'Preflight named capabilities before building work on top of them: confirm the named MCP server\'s tools are actually exposed to you and make the first real call early. If the capability is not connected - not installed, not running, unauthenticated, or its tools are absent - stop the dependent work and record the exact server/tool or skill name plus the failure reason in `missingRequirements`. Set `nextAction:"ask_human"` when fixing it needs the user (connecting, installing, or authenticating the server); use `nextAction:"continue"` only when a re-delegation could fix it without the user.',
     "",
     'If the task states it is one milestone of a larger plan, implement only that milestone and judge `goalReached` against the LARGER goal: report `goalReached:false` and `nextAction:"continue"` until the final milestone completes it, even when this milestone itself is done.'
   ].join("\n");
@@ -688,6 +689,16 @@ let agentMessageDeltas = new Map();
 let currentGoal = null;
 let goalFeatureAvailable = null;
 let controlServer = null;
+// ---- parallel fan-out state (batched scouts / executor workstreams) ----
+// A batched codex_investigate/codex_implement call runs 2-4 concurrent turns
+// on EPHEMERAL app-server threads while the aggregate call holds the normal
+// single-turn latch. Workers stay registered (even after settling) until the
+// whole fan-out finalizes, so their late notifications keep routing here
+// instead of polluting the global single-turn state.
+const FANOUT_MAX_TASKS = 4;
+const fanoutWorkers = new Map(); // worker threadId -> worker
+let fanoutActive = false; // covers the codex fan-out AND the claude sequential batch window
+let activeFanoutRun = null; // {aborted} - abort skips finalize's aggregate resolve
 
 function isCurrentCodexChild(child) {
   return Boolean(child && codexChild === child);
@@ -803,6 +814,19 @@ async function codexSteer(text) {
     return { status: "routing", batched: true };
   }
 
+  if (fanoutActive || fanoutWorkers.size > 0) {
+    // Parallel workers keep their scoped tasks; push/replan routing assumes ONE
+    // executor turn. Return skipped so the host falls back to the planner-thread
+    // steer path and the planner sees the steer when the fan-out returns.
+    steerBuffer.pop();
+    relay({
+      role: "codex",
+      kind: "steer",
+      text: "steering left for planner thread; parallel workers keep their scoped tasks"
+    });
+    return { status: "skipped", reason: "fanout_active" };
+  }
+
   if (currentTurn && activeTurnKind === "implement") {
     steerRoutingPending = true;
     armSteerRoutingWatchdog();
@@ -892,6 +916,23 @@ async function codexInterrupt() {
     sendClaudeInterruptRequest();
     relay({ role: "codex", kind: "interrupt", text: "active Fusion turn interrupted" });
     return { status: "accepted" };
+  }
+  if (fanoutWorkers.size > 0) {
+    // Interrupt every live worker; each settles through its own turn/completed
+    // (interrupted) notification (idle timers backstop a silent child), and the
+    // aggregate resolves normally with the per-worker interruption results.
+    let interrupted = 0;
+    for (const worker of fanoutWorkers.values()) {
+      if (worker.settled || !worker.turnId) continue;
+      interrupted += 1;
+      rpc("turn/interrupt", { threadId: worker.threadId, turnId: worker.turnId }).catch(() => {});
+    }
+    relay({
+      role: "codex",
+      kind: "interrupt",
+      text: `interrupting ${interrupted} parallel Fusion worker${interrupted === 1 ? "" : "s"}`
+    });
+    return { status: "accepted", workers: interrupted };
   }
   if (!threadId || !activeTurnId) {
     return { status: "skipped", reason: "no_active_codex_turn" };
@@ -985,6 +1026,7 @@ function resetCodexProcessState(options = {}) {
   activeThreadResolvedModel = null;
   activeTurnId = null;
   activeTurnKind = null;
+  abortFanoutWorkers("Fusion execution process was reset.");
   clearSteerRoutingState();
   currentGoal = null;
   goalFeatureAvailable = null;
@@ -1184,6 +1226,7 @@ function failAll(error) {
   for (const { reject } of pendingReq.values()) reject(error);
   pendingReq.clear();
   parked.clear();
+  abortFanoutWorkers(message);
   activeTurnId = null;
   activeTurnKind = null;
   latchedTurnResult = null;
@@ -1231,7 +1274,7 @@ function writeClaudeExecutorSettingsFile(fast) {
 // the engine that is executing it.
 function ensureExecutorFamily(family) {
   if (activeExecutorFamily === family) return activeExecutorFamily;
-  if (currentTurn || turnArming || claudeTurnActive) {
+  if (currentTurn || turnArming || claudeTurnActive || fanoutActive) {
     return activeExecutorFamily || family;
   }
   const previous = activeExecutorFamily;
@@ -1893,6 +1936,14 @@ function handleSouth(msg) {
 function handleNotification(msg) {
   const method = msg.method;
   const params = msg.params || {};
+  // Fan-out worker events route to their scoped state and must never touch
+  // the global single-turn machinery (a worker's turn/completed would
+  // otherwise resolve the aggregate with a bogus single-turn result).
+  const fanoutWorker = fanoutWorkerForParams(params);
+  if (fanoutWorker) {
+    handleFanoutNotification(fanoutWorker, method, params);
+    return;
+  }
   if (isTurnProgressNotification(method, params)) {
     refreshTurnIdleTimer(method);
   }
@@ -1995,6 +2046,16 @@ function handleServerRequest(msg) {
       `Fusion execution requested ${method}, which is not available in embedded mode.`
     );
     return;
+  }
+  {
+    // Requests raised by fan-out workers are answered inline, never parked.
+    // While a fan-out is active, an UNMATCHED request is handled the same way
+    // as matched ones: parking it would resolve the aggregate turn.
+    const fanoutWorker = fanoutWorkerForParams(params);
+    if (fanoutWorker || fanoutActive) {
+      resolveFanoutServerRequest(fanoutWorker, msg);
+      return;
+    }
   }
   if (!PARKED_REQUEST_METHODS.has(method)) {
     unsupportedServerRequest(msg);
@@ -2539,6 +2600,584 @@ function accumulate(item) {
   }
 }
 
+// ---- parallel fan-out (batched scouts / executor workstreams) ----
+// codex_investigate/codex_implement accept `tasks` (2-4 self-contained tasks)
+// and run one concurrent turn per task on an ephemeral thread. The aggregate
+// call keeps the normal single-turn latch (awaitTurn) so every existing guard
+// holds; only the worker-scoped event routing below is new.
+
+// Validates the task/tasks input. Returns {task} for the classic single-task
+// path, {tasks} for a parallel batch, or {error}.
+function normalizeFanoutTasks(taskValue, tasksValue) {
+  const hasTask = typeof taskValue === "string" && taskValue.trim().length > 0;
+  const tasks = Array.isArray(tasksValue)
+    ? tasksValue.map((t) => String(t || "").trim()).filter(Boolean)
+    : null;
+  if (hasTask && tasks && tasks.length > 0) {
+    return { error: "Provide either task or tasks, not both." };
+  }
+  if (tasks) {
+    if (tasks.length === 0) {
+      return { error: "tasks must contain at least one non-empty task." };
+    }
+    if (tasks.length === 1) return { task: tasks[0] };
+    if (tasks.length > FANOUT_MAX_TASKS) {
+      return {
+        error: `tasks supports at most ${FANOUT_MAX_TASKS} parallel entries; consolidate the work into fewer, larger self-contained scopes.`
+      };
+    }
+    return { tasks };
+  }
+  if (hasTask) return { task: String(taskValue) };
+  return { error: "task (string) or tasks (array of 2-4 strings) is required" };
+}
+
+function fanoutWorkerForParams(params) {
+  if (!params || typeof params !== "object" || fanoutWorkers.size === 0) return null;
+  const candidates = [
+    params.threadId,
+    params.thread_id,
+    params.conversationId,
+    params.conversation_id,
+    params.thread && params.thread.id
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate && fanoutWorkers.has(candidate)) {
+      return fanoutWorkers.get(candidate);
+    }
+  }
+  // Fallback for payloads that carry only a turn id.
+  const turnId = extractTurnId(params);
+  if (!turnId) return null;
+  for (const worker of fanoutWorkers.values()) {
+    if (worker.turnId && worker.turnId === turnId) return worker;
+  }
+  return null;
+}
+
+function fanoutWorkerLabel(worker) {
+  return `${worker.kind === "investigate" ? "scout" : "workstream"} ${worker.index + 1}/${worker.count}`;
+}
+
+function clearFanoutWorkerTimers(worker) {
+  if (worker.idleTimer) {
+    clearTimeout(worker.idleTimer);
+    worker.idleTimer = null;
+  }
+  if (worker.hardTimer) {
+    clearTimeout(worker.hardTimer);
+    worker.hardTimer = null;
+  }
+}
+
+function refreshFanoutWorkerIdleTimer(worker, reason = "progress") {
+  if (worker.settled || !Number.isFinite(TURN_IDLE_TIMEOUT_MS) || TURN_IDLE_TIMEOUT_MS <= 0) {
+    return;
+  }
+  if (worker.idleTimer) clearTimeout(worker.idleTimer);
+  worker.idleTimer = setTimeout(() => {
+    settleFanoutWorker(worker, {
+      status: "failed",
+      error: `Fusion parallel worker stalled after ${reason}.`
+    });
+  }, TURN_IDLE_TIMEOUT_MS);
+}
+
+// Settles the worker's promise. The worker stays in the registry until the
+// whole fan-out finalizes so its late notifications keep routing here instead
+// of leaking into the global single-turn handlers.
+function settleFanoutWorker(worker, result) {
+  if (worker.settled) return;
+  worker.settled = true;
+  clearFanoutWorkerTimers(worker);
+  worker.resolve(result);
+}
+
+function createFanoutWorker(kind, task, index, count, workerThreadId) {
+  const worker = {
+    kind,
+    task,
+    index,
+    count,
+    threadId: workerThreadId,
+    turnId: null,
+    summary: [],
+    files: [],
+    notes: [],
+    itemIds: new Set(),
+    deltas: new Map(),
+    idleTimer: null,
+    hardTimer: null,
+    settled: false,
+    resolve: null,
+    promise: null
+  };
+  worker.promise = new Promise((resolve) => {
+    worker.resolve = resolve;
+  });
+  worker.hardTimer = setTimeout(() => {
+    settleFanoutWorker(worker, {
+      status: "failed",
+      error: "Fusion parallel worker exceeded the maximum duration."
+    });
+  }, TURN_HARD_TIMEOUT_MS);
+  refreshFanoutWorkerIdleTimer(worker, "worker start");
+  return worker;
+}
+
+function relayFanoutItem(worker, item) {
+  const label = fanoutWorkerLabel(worker);
+  if (item.type === "agentMessage" && item.text) {
+    relay({
+      role: "codex",
+      kind: "message",
+      text: `[${label}] ${summarizeAgentMessageForDisplay(item.text)}`
+    });
+  } else if (item.type === "commandExecution") {
+    relay({ role: "codex", kind: "command", text: `[${label}] ${commandExecutionDisplayText(item)}` });
+  } else if (item.type === "fileChange") {
+    const files = (item.changes || [])
+      .map((c) => `${c.type || "edit"} ${c.path || c.move_path || ""}`.trim())
+      .join(", ");
+    relay({ role: "codex", kind: "file", text: `[${label}] ${files || "file changes"}` });
+  }
+}
+
+function accumulateFanoutItem(worker, item, options = {}) {
+  if (!item || typeof item !== "object") return;
+  const itemId = typeof item.id === "string" ? item.id : "";
+  if (itemId && worker.itemIds.has(itemId)) return;
+  if (itemId) worker.itemIds.add(itemId);
+  if (options.relay !== false) relayFanoutItem(worker, item);
+  if (item.type === "agentMessage" && item.text) worker.summary.push(item.text);
+  if (item.type === "fileChange") {
+    for (const c of item.changes || []) {
+      if (c.path || c.move_path) worker.files.push(c.path || c.move_path);
+    }
+  }
+}
+
+function accumulateFanoutItems(worker, items, options = {}) {
+  if (!Array.isArray(items)) return;
+  for (const item of items) {
+    accumulateFanoutItem(worker, item, options);
+  }
+}
+
+function fanoutWorkerNotesBlock(worker) {
+  if (!worker.notes.length) return "";
+  return `\n\n[auto-handled requests]\n- ${worker.notes.join("\n- ")}`;
+}
+
+function fanoutWorkerInvestigationResult(worker) {
+  const streamedText = Array.from(worker.deltas.values()).join("").trim();
+  const findings = (worker.summary.join("\n").trim() || streamedText).trim();
+  const files = Array.from(
+    new Set([...worker.files.filter(Boolean), ...extractReferencedFiles(findings)])
+  );
+  return {
+    status: "completed",
+    findings: `${findings || "(No findings returned.)"}${fanoutWorkerNotesBlock(worker)}`,
+    files
+  };
+}
+
+function fanoutWorkerTurnResult(worker) {
+  const streamedText = Array.from(worker.deltas.values()).join("").trim();
+  const rawSummary = (worker.summary.join("\n").trim() || streamedText).trim();
+  const verifierVerdict = extractVerifierVerdict(rawSummary);
+  const displaySummary = stripVerifierVerdictFromSummary(rawSummary);
+  return {
+    status: "completed",
+    summary: `${displaySummary || verifierVerdict.summary || "(No message returned.)"}${fanoutWorkerNotesBlock(worker)}`,
+    files: Array.from(new Set(worker.files.filter(Boolean))),
+    goalReached: verifierVerdict.goalReached,
+    bugsFound: verifierVerdict.bugsFound,
+    missingRequirements: verifierVerdict.missingRequirements,
+    nextAction: verifierVerdict.nextAction,
+    verifierSummary: verifierVerdict.summary,
+    verifierVerdict
+  };
+}
+
+function finishFanoutWorkerTurn(worker, turn) {
+  accumulateFanoutItems(worker, turn && turn.items);
+  const status = turn && turn.status;
+  if (status === "failed") {
+    settleFanoutWorker(worker, { status: "failed", error: turnErrorMessage(turn) });
+    return;
+  }
+  if (status === "interrupted") {
+    settleFanoutWorker(worker, {
+      status: "failed",
+      error: "Fusion parallel worker was interrupted."
+    });
+    return;
+  }
+  settleFanoutWorker(
+    worker,
+    worker.kind === "investigate"
+      ? fanoutWorkerInvestigationResult(worker)
+      : fanoutWorkerTurnResult(worker)
+  );
+}
+
+// Worker-scoped twin of handleNotification: called for any notification whose
+// payload resolves to a registered fan-out worker.
+function handleFanoutNotification(worker, method, params) {
+  if (worker.settled) return;
+  refreshFanoutWorkerIdleTimer(worker, method);
+  // Worker progress is aggregate progress: keep the aggregate waiter's idle
+  // backstop from firing while any worker is still streaming.
+  refreshTurnIdleTimer(`fanout ${method}`);
+  if (method === "turn/started") {
+    const turnId = extractTurnId(params);
+    if (turnId) worker.turnId = turnId;
+    accumulateFanoutItems(worker, params.turn && params.turn.items, { relay: false });
+    return;
+  }
+  if (method === "item/agentMessage/delta") {
+    const itemId =
+      typeof params.itemId === "string" && params.itemId ? params.itemId : "__default__";
+    const delta = typeof params.delta === "string" ? params.delta : "";
+    if (delta) worker.deltas.set(itemId, `${worker.deltas.get(itemId) || ""}${delta}`);
+    return;
+  }
+  if (method === "item/completed" && params.item) {
+    accumulateFanoutItem(worker, params.item);
+    return;
+  }
+  if (method === "turn/completed") {
+    finishFanoutWorkerTurn(worker, params.turn);
+    return;
+  }
+  if (method === "turn/failed" || method === "error") {
+    const message =
+      (params.error && params.error.message) || params.message || "Fusion parallel worker failed";
+    settleFanoutWorker(worker, { status: "failed", error: message });
+  }
+}
+
+const FANOUT_QUESTION_ANSWER =
+  "This task is running as one of several parallel Fusion workers, so no mid-turn questions are available. " +
+  "Choose the most reasonable interpretation within your stated scope, or stop and report the blocker in your final report.";
+
+// During a fan-out, server->client requests are answered inline (never
+// parked): parking one would resolve the aggregate turn with needs_decision
+// while the other workers keep running.
+function resolveFanoutServerRequest(worker, msg) {
+  const method = String(msg.method || "");
+  const params = msg.params || {};
+  const label = worker ? fanoutWorkerLabel(worker) : "parallel worker";
+  const note = (text) => {
+    if (worker) worker.notes.push(text);
+  };
+  if (method.endsWith("requestUserInput")) {
+    const answers = {};
+    for (const q of params.questions || []) {
+      answers[q.id] = { answers: [FANOUT_QUESTION_ANSWER] };
+    }
+    codexSend({ id: msg.id, result: { answers } });
+    note(`question auto-answered (report blockers in the final report): ${approvalDetail(method, params)}`);
+    relay({
+      role: "codex",
+      kind: "approval",
+      text: `[${label}] question auto-deferred to the final report`
+    });
+    return;
+  }
+  if (PARKED_REQUEST_METHODS.has(method)) {
+    codexSend({ id: msg.id, result: buildDecisionResult(method, params, "decline") });
+    note(`${approvalKind(method)} auto-declined: ${approvalDetail(method, params)}`);
+    relay({
+      role: "codex",
+      kind: "approval",
+      text: `[${label}] ${approvalKind(method)} auto-declined (parallel worker)`
+    });
+    return;
+  }
+  sendServerError(msg.id, `Fusion parallel workers do not support ${method}.`);
+  note(`unsupported request ${method} refused`);
+}
+
+function buildFanoutScoutTask(task, index, count) {
+  return [
+    buildCodexInvestigationTask(task),
+    "",
+    `## Parallel scout ${index + 1} of ${count}`,
+    "You are one of several read-only scouts investigating disjoint areas in parallel.",
+    "Stay strictly within the scope of YOUR task above; other scouts cover the rest.",
+    "No mid-turn questions are available: if something is ambiguous, choose the most reasonable read-only interpretation and note the ambiguity in your findings."
+  ].join("\n");
+}
+
+function buildFanoutWorkstreamTask(task, index, count) {
+  return [
+    buildCodexVerifierTask(task),
+    "",
+    `## Parallel workstream ${index + 1} of ${count}`,
+    "You are one of several executor workstreams running IN PARALLEL on this same checkout.",
+    "Touch ONLY the files inside your workstream's stated scope. If a correct implementation seems to require editing a file outside that scope, do not edit it - report the need in your summary and verdict instead.",
+    "Files changing underneath you that you did not edit may be another parallel workstream's work: do not overwrite or 'fix' them; note the overlap in your report.",
+    'This workstream is one part of a larger parallel plan: judge goalReached against the LARGER goal (report goalReached:false and nextAction:"continue" unless your work alone truly completes it).',
+    'No mid-turn questions are available in a parallel workstream: if you hit a genuine blocker, stop, list it in missingRequirements, and recommend nextAction:"continue".'
+  ].join("\n");
+}
+
+async function startFanoutThread(kind, settings) {
+  const params = {
+    cwd: CWD,
+    sandbox: "danger-full-access",
+    approvalPolicy: "never",
+    // Executor workstreams get the same workspace MCP surface as the main
+    // executor thread; scouts stay minimal (no goals, no MCP injection).
+    config: kind === "implement" ? { ...workspaceMcpConfigOverrides(CWD) } : {}
+  };
+  applyCodexModelSetting(params, settings);
+  await applyCodexFastTier(params, settings);
+  const res = await rpc("thread/start", params);
+  const workerThreadId = res && res.thread && res.thread.id;
+  if (!workerThreadId) throw new Error("thread/start returned no thread id for a parallel worker");
+  return workerThreadId;
+}
+
+async function runFanoutWorker(kind, task, index, count, run) {
+  const settings = readCodexSettings();
+  const workerThreadId = await startFanoutThread(kind, settings);
+  // A cancel/reset that landed while thread/start was in flight must not
+  // launch a stray turn the abort path could no longer see.
+  if (run && run.aborted) {
+    return { status: "failed", error: "Fusion fan-out was cancelled before this worker started." };
+  }
+  const worker = createFanoutWorker(kind, task, index, count, workerThreadId);
+  fanoutWorkers.set(workerThreadId, worker);
+  relay({
+    role: "codex",
+    kind: "activity",
+    text: `[${fanoutWorkerLabel(worker)}] started: ${clippedText(task, 160)}`
+  });
+  const text =
+    kind === "investigate"
+      ? buildFanoutScoutTask(task, index, count)
+      : buildFanoutWorkstreamTask(task, index, count);
+  const params = {
+    threadId: workerThreadId,
+    input: [{ type: "text", text, text_elements: [] }],
+    approvalPolicy: "never",
+    sandboxPolicy:
+      kind === "investigate" ? fusionCodexInvestigateSandboxPolicy() : fusionCodexSandboxPolicy()
+  };
+  await applyCodexTurnSettings(params);
+  rpc("turn/start", params)
+    .then((response) => {
+      const turnId = extractTurnId(response);
+      if (turnId && !worker.turnId) worker.turnId = turnId;
+      const turn = response && response.turn;
+      if (!turn || typeof turn !== "object" || worker.settled) return;
+      accumulateFanoutItems(worker, turn.items, { relay: false });
+      if (["completed", "failed", "interrupted"].includes(turn.status)) {
+        finishFanoutWorkerTurn(worker, turn);
+      }
+    })
+    .catch((error) => settleFanoutWorker(worker, { status: "failed", error: error.message }));
+  return worker.promise;
+}
+
+function clearFanoutRegistry() {
+  for (const worker of fanoutWorkers.values()) clearFanoutWorkerTimers(worker);
+  fanoutWorkers.clear();
+}
+
+// Hard-stops every worker (used by cancel/reset/child-death paths). Marks the
+// active run aborted so finalize does not also resolve the aggregate - the
+// caller owns the aggregate result after an abort.
+function abortFanoutWorkers(reason, options = {}) {
+  if (activeFanoutRun) activeFanoutRun.aborted = true;
+  if (fanoutWorkers.size === 0) return false;
+  for (const worker of Array.from(fanoutWorkers.values())) {
+    if (options.interrupt && !worker.settled && worker.turnId) {
+      rpc("turn/interrupt", { threadId: worker.threadId, turnId: worker.turnId }).catch(() => {});
+    }
+    settleFanoutWorker(worker, { status: "failed", error: reason });
+  }
+  clearFanoutRegistry();
+  return true;
+}
+
+// Launches all workers; resolves the aggregate awaitTurn() waiter once the
+// last worker settles. Never rejects - per-worker failures land in their slot.
+function runCodexFanout(kind, tasks) {
+  fanoutActive = true;
+  const run = { aborted: false };
+  activeFanoutRun = run;
+  const results = new Array(tasks.length).fill(null);
+  let settled = 0;
+  const finalize = () => {
+    if (activeFanoutRun === run) activeFanoutRun = null;
+    fanoutActive = false;
+    clearFanoutRegistry();
+    if (!run.aborted) {
+      resolveOrLatchTurn(combineFanoutResults(kind, tasks, results));
+    }
+  };
+  tasks.forEach((task, index) => {
+    runFanoutWorker(kind, task, index, tasks.length, run)
+      .catch((error) => ({ status: "failed", error: error?.message || String(error) }))
+      .then((result) => {
+        results[index] = result || { status: "failed", error: "worker returned no result" };
+        settled += 1;
+        if (settled === tasks.length) finalize();
+      });
+  });
+}
+
+function fanoutFileConflicts(workers) {
+  const seen = new Map(); // normalized path -> {path, count}
+  for (const worker of workers) {
+    const unique = new Set(
+      (worker.files || []).map((f) => String(f || "").trim()).filter(Boolean)
+    );
+    for (const file of unique) {
+      const key = isWin ? file.toLowerCase().replace(/\//g, "\\") : file;
+      const entry = seen.get(key) || { path: file, count: 0 };
+      entry.count += 1;
+      seen.set(key, entry);
+    }
+  }
+  return Array.from(seen.values())
+    .filter((entry) => entry.count > 1)
+    .map((entry) => entry.path);
+}
+
+function fanoutSectionLabel(kind, index, count) {
+  return `${kind === "investigate" ? "Scout" : "Workstream"} ${index + 1}/${count}`;
+}
+
+function combineFanoutResults(kind, tasks, results) {
+  const count = tasks.length;
+  const normalized = results.map(
+    (result) => result || { status: "failed", error: "worker returned no result" }
+  );
+  const files = Array.from(
+    new Set(normalized.flatMap((result) => (Array.isArray(result.files) ? result.files : [])))
+  );
+  if (kind === "investigate") {
+    const scouts = normalized.map((result, index) => ({
+      task: tasks[index],
+      status: result.status,
+      findings:
+        result.status === "completed"
+          ? result.findings
+          : `(scout failed: ${result.error || "unknown error"})`,
+      files: Array.isArray(result.files) ? result.files : []
+    }));
+    const findings = scouts
+      .map(
+        (scout, index) =>
+          `### ${fanoutSectionLabel(kind, index, count)} - ${clippedText(scout.task, 160)}\n${scout.findings}`
+      )
+      .join("\n\n");
+    return { status: "completed", findings, files, scouts };
+  }
+  const workers = normalized.map((result, index) => ({
+    task: tasks[index],
+    status: result.status,
+    summary:
+      result.status === "completed"
+        ? result.summary
+        : `(workstream failed: ${result.error || "unknown error"})`,
+    files: Array.isArray(result.files) ? result.files : [],
+    goalReached: result.goalReached === true,
+    bugsFound: Array.isArray(result.bugsFound) ? result.bugsFound : [],
+    missingRequirements: Array.isArray(result.missingRequirements)
+      ? result.missingRequirements
+      : [],
+    nextAction: result.nextAction || "continue",
+    verifierVerdict: result.verifierVerdict || null
+  }));
+  const fileConflicts = fanoutFileConflicts(workers);
+  const completedCount = workers.filter((w) => w.status === "completed").length;
+  const allDone = workers.every(
+    (w) => w.status === "completed" && w.goalReached && w.nextAction === "done"
+  );
+  const askHuman = workers.some((w) => w.nextAction === "ask_human");
+  const goalReached = allDone && fileConflicts.length === 0;
+  const nextAction = askHuman ? "ask_human" : goalReached ? "done" : "continue";
+  const conflictWarning = fileConflicts.length
+    ? `Parallel workstreams touched overlapping files: ${fileConflicts.join(", ")}. Review those files for conflicting edits before proceeding.`
+    : "";
+  const verifierSummary = `Aggregate of ${count} parallel workstreams: ${completedCount} completed, ${count - completedCount} failed${
+    fileConflicts.length ? `, ${fileConflicts.length} overlapping file(s)` : ""
+  }.`;
+  const bugsFound = Array.from(new Set(workers.flatMap((w) => w.bugsFound)));
+  const missingRequirements = Array.from(
+    new Set(workers.flatMap((w) => w.missingRequirements))
+  );
+  const summarySections = workers.map(
+    (w, index) =>
+      `### ${fanoutSectionLabel(kind, index, count)} - ${clippedText(w.task, 160)}\n${w.summary}`
+  );
+  const result = {
+    status: "completed",
+    summary: [conflictWarning, ...summarySections].filter(Boolean).join("\n\n"),
+    files,
+    goalReached,
+    bugsFound,
+    missingRequirements,
+    nextAction,
+    verifierSummary,
+    verifierVerdict: {
+      goalReached,
+      bugsFound,
+      missingRequirements,
+      nextAction,
+      summary: verifierSummary
+    },
+    workers
+  };
+  if (fileConflicts.length) {
+    result.fileConflicts = fileConflicts;
+    result.warning = conflictWarning;
+  }
+  return result;
+}
+
+// The claude executor engine is a single persistent child, so a batched call
+// runs its tasks sequentially through the same shared turn machinery. Same
+// API and combined result shape; `parallel:false` tells the planner the batch
+// was serialized.
+async function runClaudeFanoutSequential(kind, tasks, settings) {
+  fanoutActive = true;
+  try {
+    const results = [];
+    for (let index = 0; index < tasks.length; index += 1) {
+      const wrapped = [
+        tasks[index],
+        "",
+        `## Batched ${kind === "investigate" ? "scout" : "workstream"} ${index + 1} of ${tasks.length}`,
+        "This task is part of a batched delegation that this executor engine runs sequentially.",
+        "Stay strictly within this task's stated scope; the other batch entries are handled separately."
+      ].join("\n");
+      const result = await claudeExecutorTurn(wrapped, settings, kind);
+      results.push(result);
+      if (result && (result.status === "cancelled" || /not writable|process exited/i.test(result.error || ""))) {
+        break;
+      }
+    }
+    while (results.length < tasks.length) {
+      results.push({ status: "failed", error: "batch stopped after an earlier engine failure" });
+    }
+    const combined = combineFanoutResults(kind, tasks, results);
+    return {
+      ...combined,
+      parallel: false,
+      note: "The current executor engine runs batched tasks sequentially."
+    };
+  } finally {
+    fanoutActive = false;
+  }
+}
+
 async function ensureThread() {
   const settings = readCodexSettings();
   const requestedModel = settings.model || null;
@@ -2710,13 +3349,19 @@ async function codexGoalClear() {
 // Codex thread and native goal stay alive. Unlike resetHarness (host-only, kills
 // the child), this keeps the bridge warm and never blocks on the child.
 function codexCancel() {
-  const hadActiveTurn = Boolean(currentTurn || activeTurnId || claudeTurnActive || steerRoutingPending);
+  const hadActiveTurn = Boolean(
+    currentTurn || activeTurnId || claudeTurnActive || steerRoutingPending || fanoutWorkers.size > 0
+  );
   const clearedDecisions = parked.size > 0;
   // Best-effort: ask the app-server to abandon the active turn. Fire-and-forget
   // (never awaited) so a wedged or silent child cannot block the escape hatch.
   if (threadId && activeTurnId) {
     rpc("turn/interrupt", { threadId, turnId: activeTurnId }).catch(() => {});
   }
+  // Same for any parallel fan-out workers: interrupt their turns and settle
+  // them locally; the aborted-run flag stops the fan-out's own finalize from
+  // latching a stale aggregate result over this cancel.
+  abortFanoutWorkers("Fusion turn cancelled by the orchestrator.", { interrupt: true });
   // Same for a running claude-executor turn: request the abort and drop the
   // active flag so the child's eventual result event is ignored instead of
   // latching a stale completed result for the next waiter.
@@ -2832,8 +3477,11 @@ async function syncGoalAfterTurn(result) {
   return { ...result, goalSync: goalResult };
 }
 
-async function codexImplement(task) {
-  if (!task) return { status: "error", error: "task is required" };
+async function codexImplement(taskValue, tasksValue) {
+  const normalized = normalizeFanoutTasks(taskValue, tasksValue);
+  if (normalized.error) return { status: "error", error: normalized.error };
+  const task = normalized.task || null;
+  const tasks = normalized.tasks || null;
   const mode = currentRunMode();
   if (mode === "plan") {
     return {
@@ -2865,7 +3513,7 @@ async function codexImplement(task) {
         "A previously routed executor turn completed before the planner started the next delegation; review this result before re-delegating."
     };
   }
-  if (currentTurn || turnArming) {
+  if (currentTurn || turnArming || fanoutActive) {
     return {
       status: "error",
       error: "Fusion turn already in progress; wait for the active turn to surface a decision or complete."
@@ -2875,6 +3523,7 @@ async function codexImplement(task) {
     const settings = readCodexSettings();
     const family = ensureExecutorFamily(settings.family);
     if (family === "claude") {
+      if (tasks) return runClaudeFanoutSequential("implement", tasks, settings);
       return claudeExecutorTurn(task, settings, "implement");
     }
   }
@@ -2886,13 +3535,30 @@ async function codexImplement(task) {
   let goalSetup;
   try {
     await ensureThread();
-    goalSetup = await ensureGoalForTask(task);
+    goalSetup = await ensureGoalForTask(tasks ? tasks.join("\n") : task);
     resetTurnBuffers();
     latchedTurnResult = null;
-    relay({ role: "opus", kind: "delegate", text: task });
+    relay({
+      role: "opus",
+      kind: "delegate",
+      text: tasks
+        ? `${tasks.length} parallel workstreams: ${clippedText(tasks[0], 200)}`
+        : task
+    });
     done = awaitTurn();
   } finally {
     turnArming = false;
+  }
+  if (tasks) {
+    runCodexFanout("implement", tasks);
+    const result = await done;
+    // A fan-out never auto-syncs the native goal (parallel workstreams are
+    // mid-plan milestones by contract); attach the goal state for review only.
+    const withGoal = currentGoal ? { ...result, goal: currentGoal } : result;
+    if (goalSetup.status === "failed" && withGoal.status === "completed") {
+      return { ...withGoal, goalSetup };
+    }
+    return withGoal;
   }
   const params = {
     threadId,
@@ -2912,8 +3578,11 @@ async function codexImplement(task) {
   return withGoal;
 }
 
-async function codexInvestigate(task) {
-  if (!task) return { status: "error", error: "task is required" };
+async function codexInvestigate(taskValue, tasksValue) {
+  const normalized = normalizeFanoutTasks(taskValue, tasksValue);
+  if (normalized.error) return { status: "error", error: normalized.error };
+  const task = normalized.task || null;
+  const tasks = normalized.tasks || null;
   const pendingDecision = pendingDecisionResult({
     warning: "Fusion already has a pending decision; answer it before starting another task."
   });
@@ -2928,7 +3597,7 @@ async function codexInvestigate(task) {
     clearSteerRoutingTimer();
     relay({ role: "codex", kind: "steer", text: "fresh investigation treated as steering replan" });
   }
-  if (currentTurn || turnArming) {
+  if (currentTurn || turnArming || fanoutActive) {
     return {
       status: "error",
       error: "Fusion turn already in progress; wait for the active turn to surface a decision or complete."
@@ -2938,6 +3607,7 @@ async function codexInvestigate(task) {
     const settings = readCodexSettings();
     const family = ensureExecutorFamily(settings.family);
     if (family === "claude") {
+      if (tasks) return runClaudeFanoutSequential("investigate", tasks, settings);
       return claudeExecutorTurn(task, settings, "investigate");
     }
   }
@@ -2947,10 +3617,20 @@ async function codexInvestigate(task) {
     await ensureThread();
     resetTurnBuffers();
     latchedTurnResult = null;
-    relay({ role: "opus", kind: "delegate", text: `investigate: ${task}` });
+    relay({
+      role: "opus",
+      kind: "delegate",
+      text: tasks
+        ? `investigate (${tasks.length} parallel scouts): ${clippedText(tasks[0], 200)}`
+        : `investigate: ${task}`
+    });
     done = awaitTurn("investigate");
   } finally {
     turnArming = false;
+  }
+  if (tasks) {
+    runCodexFanout("investigate", tasks);
+    return done;
   }
   const params = {
     threadId,
@@ -3004,7 +3684,7 @@ async function codexRespond(pendingId, decision, note) {
         "A steering route is awaiting a decision. Call codex_steer_resolve with decision:'push' or decision:'replan' before answering other pending requests."
     };
   }
-  if (currentTurn || turnArming) {
+  if (currentTurn || turnArming || fanoutActive) {
     return (
       pendingDecisionResult({
         warning: "Fusion is still processing the active turn result."
@@ -3093,7 +3773,7 @@ const TOOLS = [
   {
     name: "codex_investigate",
     description:
-      "Ask embedded Codex GPT-5.5 to do a read-only scouting pass: file discovery, targeted reads, repo navigation, dependency tracing, or concise context gathering for Claude. Use this to feed Claude findings/files/snippets before Claude does architecture or UI design thinking. Does not create or sync native goals and does not use the implementation verifier contract. Returns {status:'completed', findings, files} or {status:'failed', error}.",
+      "Ask embedded Codex GPT-5.5 to do a read-only scouting pass: file discovery, targeted reads, repo navigation, dependency tracing, or concise context gathering for Claude. Use this to feed Claude findings/files/snippets before Claude does architecture or UI design thinking. Does not create or sync native goals and does not use the implementation verifier contract. Pass `task` for one scout. When the context you need spans 2-4 DISJOINT areas, pass `tasks` instead (2-4 self-contained scouting questions) to run parallel read-only scouts concurrently; the result returns per-scout sections plus a combined findings/files view. Returns {status:'completed', findings, files, scouts?} or {status:'failed', error}.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3101,15 +3781,20 @@ const TOOLS = [
           type: "string",
           description:
             "Read-only investigation request. Ask for concise findings, relevant file paths, and short snippets when useful."
+        },
+        tasks: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "2-4 self-contained, non-overlapping scouting tasks to run as PARALLEL read-only scouts. Each scout sees only its own task, so make every entry independently answerable. Use instead of task, not alongside it."
         }
-      },
-      required: ["task"]
+      }
     }
   },
   {
     name: "codex_implement",
     description:
-      "Delegate implementation, testing, compile/runtime fixing, refactors, repo navigation, picture/image generation, browser navigation/control/automation, bug review, or goal-completion verification to embedded Codex GPT-5.5. In Fusion Plan mode this tool refuses execution until the pane is switched back to Auto. Opus 4.8 drives architecture, strategy, UX/UI build-out when appropriate, human-facing orchestration, and guidance for Codex on constraints, UI intent, debugging direction, and follow-up corrections. Codex follows that guidance while independently verifying bugs and goal completion. Use codex_goal_set first for substantial top-level work; codex_implement will create a fallback native Codex goal if none exists and will sync goal status from the verifier verdict. Returns one of: {status:'completed', summary, files, goalReached, bugsFound, missingRequirements, nextAction, verifierVerdict, goal}; {status:'needs_decision', pendingId, kind, detail} - answer it with codex_respond; {status:'steer_routing', userSteer, executorProgress, guidance, nextAction:'steer_resolve'} - answer it with codex_steer_resolve; or {status:'failed', error}. If goalReached is false or nextAction is 'continue', continue/redelegate unless the human or an explicit Opus override says otherwise.",
+      "Delegate implementation, testing, compile/runtime fixing, refactors, repo navigation, picture/image generation, browser navigation/control/automation, bug review, or goal-completion verification to embedded Codex GPT-5.5. In Fusion Plan mode this tool refuses execution until the pane is switched back to Auto. Opus 4.8 drives architecture, strategy, UX/UI build-out when appropriate, human-facing orchestration, and guidance for Codex on constraints, UI intent, debugging direction, and follow-up corrections. Codex follows that guidance while independently verifying bugs and goal completion. Use codex_goal_set first for substantial top-level work; codex_implement will create a fallback native Codex goal if none exists and will sync goal status from the verifier verdict. Returns one of: {status:'completed', summary, files, goalReached, bugsFound, missingRequirements, nextAction, verifierVerdict, goal}; {status:'needs_decision', pendingId, kind, detail} - answer it with codex_respond; {status:'steer_routing', userSteer, executorProgress, guidance, nextAction:'steer_resolve'} - answer it with codex_steer_resolve; or {status:'failed', error}. If goalReached is false or nextAction is 'continue', continue/redelegate unless the human or an explicit Opus override says otherwise. Pass `task` for one delegation; pass `tasks` (2-4 entries) ONLY for verified-disjoint parallel workstreams after the mandatory parallel-safety check - the combined result adds workers[] (per-workstream verdicts) and fileConflicts, and never auto-completes the native goal.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3117,9 +3802,14 @@ const TOOLS = [
           type: "string",
           description:
             "Complete, self-contained instructions for Codex: the files, the intent, constraints, acceptance criteria, and what to verify. Codex does not share your context."
+        },
+        tasks: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "2-4 self-contained workstreams to run as PARALLEL executors on this same checkout. ONLY for verified-disjoint work: no shared file ownership, no ordering dependency, no shared artifacts (lockfiles, generated files, the same tests). Name each workstream's files and scope explicitly. The combined result reports per-workstream verdicts plus fileConflicts when workstreams touched the same file; it never auto-completes the native goal - review every verdict and run an integration verification before declaring done. Use instead of task, not alongside it."
         }
-      },
-      required: ["task"]
+      }
     }
   },
   {
@@ -3202,9 +3892,9 @@ async function handleToolCall(id, params) {
     } else if (name === "codex_goal_clear") {
       result = await codexGoalClear();
     } else if (name === "codex_investigate") {
-      result = await codexInvestigate(String(args.task || ""));
+      result = await codexInvestigate(String(args.task || ""), args.tasks);
     } else if (name === "codex_implement") {
-      result = await codexImplement(String(args.task || ""));
+      result = await codexImplement(String(args.task || ""), args.tasks);
     } else if (name === "codex_respond") {
       result = await codexRespond(
         String(args.pendingId || ""),
@@ -3312,10 +4002,16 @@ function startMcpServer() {
 
 module.exports = {
   FAST_SERVICE_TIER,
+  FANOUT_MAX_TASKS,
   VERDICT_MARKER,
   buildClaudeExecutorArgs,
   buildCodexInvestigationTask,
   buildCodexVerifierTask,
+  buildFanoutScoutTask,
+  buildFanoutWorkstreamTask,
+  combineFanoutResults,
+  fanoutFileConflicts,
+  normalizeFanoutTasks,
   cleanClaudeEffort,
   codexMcpServerConfigKey,
   displayCommandFromItem,

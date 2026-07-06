@@ -406,6 +406,38 @@ function codexTaskReport(parsed: Record<string, unknown> | null, raw: string): s
   if (files.length) {
     parts.push(["**Files**", ...files.map((file) => `- ${file}`)].join("\n"));
   }
+  const conflicts = Array.isArray(parsed.fileConflicts)
+    ? parsed.fileConflicts.filter((file): file is string => typeof file === "string")
+    : [];
+  if (conflicts.length) {
+    parts.push(
+      [
+        "**File conflicts (overlapping workstreams)**",
+        ...conflicts.map((file) => `- ${file}`)
+      ].join("\n")
+    );
+  }
+  // Fan-out results: one status line per parallel scout/workstream (the full
+  // per-worker text already lives in the combined findings/summary sections).
+  const fanoutEntries = Array.isArray(parsed.workers)
+    ? { label: "Workstreams", entries: parsed.workers }
+    : Array.isArray(parsed.scouts)
+      ? { label: "Scouts", entries: parsed.scouts }
+      : null;
+  if (fanoutEntries && fanoutEntries.entries.length) {
+    parts.push(
+      [
+        `**${fanoutEntries.label}**`,
+        ...fanoutEntries.entries.map((entry, index) => {
+          const item = asRecord(entry);
+          const status = firstString(item.status) || "completed";
+          const next = firstString(item.nextAction);
+          const task = clip(firstString(item.task) || `#${index + 1}`, 100);
+          return `- ${index + 1}. ${status}${next ? ` · ${next}` : ""} — ${task}`;
+        })
+      ].join("\n")
+    );
+  }
   const verdict = firstString(parsed.verifierVerdict);
   if (verdict && verdict !== summary) parts.push(`**Verifier:** ${verdict}`);
   return parts.join("\n\n") || clip(raw ?? "", 8000);
@@ -462,9 +494,10 @@ function formatCodexBridgeResult(name: string, text: string): string {
 
   if (status === "completed") {
     if (name.endsWith("codex_investigate")) {
+      const scouts = Array.isArray(parsed.scouts) ? parsed.scouts.length : 0;
       const findings = String(parsed.findings ?? "investigation finished");
       const files = Array.isArray(parsed.files) ? parsed.files.length : 0;
-      return `findings: ${clip(findings, 220)}${files ? ` · ${files} file${files === 1 ? "" : "s"}` : ""}`;
+      return `${scouts > 1 ? `${scouts} scouts · ` : ""}findings: ${clip(findings, 220)}${files ? ` · ${files} file${files === 1 ? "" : "s"}` : ""}`;
     }
     const rawSummary =
       parsed.summary ?? parsed.verifierSummary ?? parsed.verifierVerdict ?? "implementation pass finished";
@@ -479,7 +512,13 @@ function formatCodexBridgeResult(name: string, text: string): string {
         : parsed.nextAction === "ask_human"
           ? "needs input"
           : "needs follow-up";
-    return `${verdict}: ${clip(summary, 220)}${files ? ` · ${files} file${files === 1 ? "" : "s"}` : ""}`;
+    const workers = Array.isArray(parsed.workers) ? parsed.workers.length : 0;
+    const conflicts = Array.isArray(parsed.fileConflicts) ? parsed.fileConflicts.length : 0;
+    const fanout =
+      workers > 1
+        ? `${workers} workstreams${conflicts ? ` · ${conflicts} file conflict${conflicts === 1 ? "" : "s"}` : ""} · `
+        : "";
+    return `${fanout}${verdict}: ${clip(summary, 220)}${files ? ` · ${files} file${files === 1 ? "" : "s"}` : ""}`;
   }
 
   if (status === "failed" || status === "error") {
@@ -1313,6 +1352,12 @@ export default function FusionChatPane({
             // Delegations are OpenCode Task rows ("Executor Task — …") with a
             // live "↳ …" line ticked by the Codex side-channel activity.
             const scout = event.name.endsWith("codex_investigate");
+            const delegationInput = asRecord(event.input);
+            const fanoutTasks = Array.isArray(delegationInput.tasks)
+              ? delegationInput.tasks.filter(
+                  (task): task is string => typeof task === "string" && task.trim().length > 0
+                )
+              : [];
             const key = push({
               role: "codex",
               kind: "tool",
@@ -1323,8 +1368,10 @@ export default function FusionChatPane({
               toolInput: {
                 subagent_type: scout ? "scout" : "executor",
                 description:
-                  firstString(asRecord(event.input).task) ||
-                  (scout ? "investigation" : "implementation")
+                  fanoutTasks.length > 1
+                    ? `${fanoutTasks.length} parallel ${scout ? "scouts" : "workstreams"} — ${clip(fanoutTasks[0], 120)}`
+                    : firstString(delegationInput.task) ||
+                      (scout ? "investigation" : "implementation")
               }
             });
             delegationRef.current = {

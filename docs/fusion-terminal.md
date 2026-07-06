@@ -116,6 +116,19 @@ engines, not invoked by the planner. The verifier contract requires the
 executor to actually invoke a named MCP server/tool or skill and report failure
 as `missingRequirements` instead of claiming success.
 
+**Capability preflight + connect escalation (2026-07-06):** the verifier
+contract additionally requires the executor to preflight a named capability
+before building work on top of it — confirm the server's tools are actually
+exposed and make the first real call early. A capability that is not connected
+(not installed, not running, unauthenticated, tools absent) comes back as
+`missingRequirements` naming the exact server/skill and failure reason, with
+`nextAction:"ask_human"` when only the user can fix it. The architect prompt's
+matching rule forbids blind re-delegation: the planner tells the user exactly
+what to connect (the configured name plus the executor's failure reason) and
+holds the dependent work until the user confirms, continuing without it only
+when it is genuinely optional. Locked by `fusion-adapter-smoke` (executor
+clause) and `fusion-launch-smoke` (planner clause).
+
 | Opus 4.8 (Claude - orchestrator/architect/designer) | Codex GPT-5.5 (implementer/reviewer/verifier) |
 |---|---|
 | Architecture decisions | Editing files |
@@ -151,6 +164,32 @@ state) and the adapter's verdict→goal sync cannot mark the native Codex goal
 complete before the final milestone. Milestones don't license micro-slicing:
 within one milestone the fewer-larger-chunks delegation rule still applies,
 and small single-stage tasks stay one delegation.
+
+**Planner-decided subagent orchestration (2026-07-06)** (locked by
+`fusion-adapter-smoke` fan-out scenarios + `fusion-launch-smoke` prompt
+anchors): the architect prompt now opens with an **orchestration triage
+ladder** — answer directly → own Read/Grep/Glob → one scout → parallel scouts
+(`codex_investigate {tasks}`) → one delegation → parallel executor fan-out
+(`codex_implement {tasks}`) → sequential milestones — so the planner decides
+per request whether subagents are needed at all and picks the cheapest
+sufficient level. **Parallel execution is verify-first:** a mandatory
+parallel-safety check requires the planner to confirm and state disjoint file
+ownership, no ordering dependency, and no shared artifacts before
+`codex_implement {tasks}`; when unsure it must scout or stay sequential.
+Fan-out mechanics in the adapter (`fanoutWorkers` registry): each batched task
+runs on its own EPHEMERAL app-server thread concurrently while the aggregate
+call holds the normal single-turn latch; worker events route by `threadId` so
+the global single-turn machinery never sees them; worker approvals/questions
+are auto-resolved inline (decline / "report the blocker in your verdict") —
+fan-outs never park `needs_decision`; per-worker verifier verdicts parse as
+usual (fail closed) and the combined result unions `files`, flags
+`fileConflicts` (per-worker file-set intersection — detection, not blocking),
+and NEVER auto-completes the native goal (aggregate `nextAction` stays
+`continue` unless every workstream is done and conflict-free). Esc/cancel
+interrupt every worker thread. Known v1 limits: steering during a fan-out
+falls back to the planner-thread path (no push/replan into N workers), and a
+claude-family executor runs batched tasks SEQUENTIALLY through its persistent
+child (same combined result shape, `parallel:false`).
 
 **Completion-gate detection (2026-07-04)** (locked by `completion-gate-smoke` +
 `fusion-chat-parse-smoke`): Codex's verifier verdict remains the first gate;
@@ -256,10 +295,16 @@ own embedded Codex child (south). It exposes a small tool surface:
   status.
 - `codex_goal_clear()` — clear the native goal when the human abandons or
   replaces the objective.
-- `codex_investigate(task)` — run a read-only Codex scouting pass that returns
-  concise findings and relevant file paths/snippets for Claude's planning.
-- `codex_implement(plan)` — run the approved plan on the pane's thread (edit, run
-  tests, generate images, control browsers, fix, verify), streaming progress.
+- `codex_investigate(task | tasks[2..4])` — run a read-only Codex scouting pass
+  that returns concise findings and relevant file paths/snippets for Claude's
+  planning. With `tasks`, 2–4 read-only scouts run CONCURRENTLY on ephemeral
+  threads and return `{findings, files, scouts[]}` combined per-scout.
+- `codex_implement(plan | tasks[2..4])` — run the approved plan on the pane's
+  thread (edit, run tests, generate images, control browsers, fix, verify),
+  streaming progress. With `tasks`, 2–4 executor workstreams run CONCURRENTLY
+  on ephemeral full-access threads — only for verified-disjoint work (see the
+  parallel-safety check below) — returning per-workstream verdicts in
+  `workers[]` plus `fileConflicts` when workstreams touched the same file.
 - `codex_respond(pendingId, decision)` — answer a parked approval or question.
 - `codex_cancel()` — abort a stuck Codex turn locally (the wedge escape hatch);
   the thread survives so Claude can re-delegate without a pane restart.

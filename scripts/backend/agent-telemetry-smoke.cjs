@@ -717,6 +717,14 @@ function postTelemetry(callbackUrl, token, payload) {
       "Open Fusion planner/plan should inspect workspace capabilities while executor and /delegate require real invocation evidence"
     );
     assert(
+      openFusionEnvConfig.agent?.executor?.prompt.includes("Preflight named capabilities before building work on top of them") &&
+        openFusionEnvConfig.agent?.executor?.prompt.includes("ASK_HUMAN when fixing it needs the user to connect, install, or authenticate") &&
+        openFusionEnvConfig.command?.delegate?.template.includes("Preflight the named capability") &&
+        openFusionEnvConfig.agent?.planner?.prompt.includes("unavailable or not connected") &&
+        openFusionEnvConfig.agent?.planner?.prompt.includes("tell the user exactly which server"),
+      "Open Fusion executor/delegate should preflight named capabilities and the planner should escalate not-connected capabilities to the user"
+    );
+    assert(
       openFusionEnvConfig.agent?.executor?.prompt.includes("another agent may be editing this checkout") &&
         openFusionEnvConfig.agent?.planner?.prompt.includes("files changing underneath it"),
       "Open Fusion prompts should carry the concurrent-edits (foreign drift) guidance"
@@ -772,6 +780,31 @@ function postTelemetry(callbackUrl, token, payload) {
         openFusionEnvConfig.agent?.planner?.prompt?.includes("genuinely independent") &&
         openFusionEnvConfig.agent?.planner?.prompt?.includes("Those remain sequential"),
       "Open Fusion planner should permit same-turn parallel task fan-out only for independent disjoint work"
+    );
+    assert(
+      openFusionEnvConfig.agent?.planner?.prompt?.includes("Orchestration triage") &&
+        openFusionEnvConfig.agent?.planner?.prompt?.includes("cheapest sufficient level") &&
+        openFusionEnvConfig.agent?.planner?.prompt?.includes("parallel investigator scouts") &&
+        openFusionEnvConfig.agent?.planner?.prompt?.includes("Never send the investigator for what one read answers"),
+      "Open Fusion planner should carry the orchestration triage ladder"
+    );
+    assert(
+      openFusionEnvConfig.agent?.planner?.prompt?.includes("verified, not assumed") &&
+        openFusionEnvConfig.agent?.planner?.prompt?.includes("disjoint file ownership") &&
+        openFusionEnvConfig.agent?.planner?.prompt?.includes("independent integration check"),
+      "Open Fusion planner must verify parallelizability before executor fan-out and integration-check after"
+    );
+    assert(
+      openFusionEnvConfig.agent?.plan?.prompt?.includes("parallel scouts") &&
+        openFusionEnvConfig.agent?.plan?.prompt?.includes("skip the investigator when your own reads answer") &&
+        openFusionEnvConfig.agent?.plan?.prompt?.includes("parallelizable"),
+      "Open Fusion plan mode should right-size research with parallel scouts and mark parallelizable milestones"
+    );
+    assert(
+      openFusionEnvConfig.agent?.investigator?.prompt?.includes("one of several scouts") &&
+        openFusionEnvConfig.agent?.executor?.prompt?.includes("one of several executors running IN") &&
+        openFusionEnvConfig.agent?.executor?.prompt?.includes("Touch ONLY files inside your delegated"),
+      "Open Fusion investigator/executor prompts should carry the parallel-scope discipline"
     );
     assert(
       fs.existsSync(openFusionFiles.plannerPromptPath) &&
