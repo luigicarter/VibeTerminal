@@ -21,6 +21,9 @@ const {
   buildCodexInvestigationTask,
   buildCodexVerifierTask,
   cleanClaudeEffort,
+  codexMcpServerConfigKey,
+  commandExecutionDisplayText,
+  displayCommandFromItem,
   extractVerifierVerdict,
   fastTierForModel,
   goalStatusForVerdict,
@@ -29,7 +32,11 @@ const {
   shouldAutoSyncGoalStatus,
   shouldReplaceGoalForTask,
   summarizeAgentMessageForDisplay,
+  summarizeCommandExecution,
   stripVerifierVerdictFromSummary,
+  translateWorkspaceMcpServerConfig,
+  unwrapShellCommand,
+  workspaceMcpConfigOverrides,
   turnErrorMessage
 } = require(adapterPath);
 
@@ -293,6 +300,9 @@ function main() {
 
 function writeFakeAppServer(dir, options = {}) {
   const markerFile = options.markerFile ? JSON.stringify(options.markerFile) : "null";
+  const threadStartParamsFile = options.threadStartParamsFile
+    ? JSON.stringify(options.threadStartParamsFile)
+    : "null";
   const delayThreadStartMs = Number(options.delayThreadStartMs || 0);
   fs.writeFileSync(
     path.join(dir, "app-server"),
@@ -300,6 +310,7 @@ function writeFakeAppServer(dir, options = {}) {
 const fs = require("fs");
 const readline = require("readline");
 const markerFile = ${markerFile};
+const threadStartParamsFile = ${threadStartParamsFile};
 const delayThreadStartMs = ${Number.isFinite(delayThreadStartMs) ? delayThreadStartMs : 0};
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 function send(msg) { process.stdout.write(JSON.stringify(msg) + "\\n"); }
@@ -319,6 +330,7 @@ rl.on("line", (line) => {
   }
   if (msg.method === "thread/start") {
     if (markerFile) fs.appendFileSync(markerFile, "thread-started\\n");
+    if (threadStartParamsFile) fs.writeFileSync(threadStartParamsFile, JSON.stringify(msg.params, null, 2));
     if (delayThreadStartMs > 0) {
       setTimeout(() => sendThreadStart(msg.id), delayThreadStartMs);
     } else {
@@ -383,6 +395,118 @@ function waitForFile(file, timeoutMs = 10000) {
       }
     }, 50);
   });
+}
+
+async function assertWorkspaceMcpConfigInjectedIntoThreadStart() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-adapter-thread-mcp-"));
+  const markerFile = path.join(tempDir, "thread-started.txt");
+  const threadStartParamsFile = path.join(tempDir, "thread-start-params.json");
+  writeFakeAppServer(tempDir, { markerFile, threadStartParamsFile });
+  fs.writeFileSync(
+    path.join(tempDir, ".mcp.json"),
+    `${JSON.stringify(
+      {
+        mcpServers: {
+          docs: {
+            command: "node",
+            args: ["docs-mcp.js"],
+            env: { DOCS_TOKEN: "local" }
+          },
+          remote: {
+            url: "https://example.test/mcp",
+            headers: { "X-Test": "yes" }
+          }
+        }
+      },
+      null,
+      2
+    )}\n`
+  );
+
+  const child = spawn(process.execPath, [adapterPath], {
+    cwd: tempDir,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      VIBE_FUSION_CODEX_BIN: process.execPath,
+      VIBE_TERMINAL_FUSION_CWD: tempDir,
+      VIBE_TERMINAL_SESSION_ID: "fusion-adapter-thread-mcp"
+    }
+  });
+
+  let stderr = "";
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk.toString("utf8");
+  });
+
+  function cleanup() {
+    try {
+      child.stdin.end();
+    } catch {
+      // ignore
+    }
+    try {
+      child.kill();
+    } catch {
+      // ignore
+    }
+    if (isWin && child.pid) {
+      try {
+        execFileSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+          stdio: "ignore"
+        });
+      } catch {
+        // best-effort
+      }
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+
+  try {
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "fusion-adapter-thread-mcp", version: "0.0.0" }
+        }
+      })}\n`
+    );
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "codex_goal_get", arguments: {} }
+      })}\n`
+    );
+    await waitForFile(threadStartParamsFile);
+    const params = JSON.parse(fs.readFileSync(threadStartParamsFile, "utf8"));
+    assert(params.cwd === tempDir, `thread/start should use workspace cwd: ${JSON.stringify(params)}`);
+    assert(
+      params.config?.["features.goals"] === true &&
+        params.config?.["features.fast_mode"] === true,
+      `thread/start should preserve existing feature flags: ${JSON.stringify(params)}`
+    );
+    assert(
+      params.config?.["mcp_servers.docs"]?.command === "node" &&
+        params.config?.["mcp_servers.docs"]?.args?.[0] === "docs-mcp.js" &&
+        params.config?.["mcp_servers.docs"]?.env?.DOCS_TOKEN === "local",
+      `thread/start should include stdio workspace MCP config override: ${JSON.stringify(params)}`
+    );
+    assert(
+      params.config?.["mcp_servers.remote"]?.url === "https://example.test/mcp" &&
+        params.config?.["mcp_servers.remote"]?.http_headers?.["X-Test"] === "yes",
+      `thread/start should include HTTP workspace MCP config override: ${JSON.stringify(params)}`
+    );
+  } catch (error) {
+    throw new Error(`${error.message}; stderr=${stderr}`);
+  } finally {
+    cleanup();
+  }
 }
 
 async function assertEagerBootStartsThread() {
@@ -2307,6 +2431,130 @@ function assertVerifierHelpers() {
   );
 }
 
+function assertWorkspaceMcpConfigOverrides() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-adapter-mcp-config-"));
+  try {
+    fs.writeFileSync(
+      path.join(tempDir, ".mcp.json"),
+      `${JSON.stringify(
+        {
+          mcpServers: {
+            docs: {
+              command: "node",
+              args: ["server.js", "--stdio"],
+              env: { API_KEY: "test", PORT: 1234 },
+              disabled: false,
+              startup_timeout_sec: 3
+            },
+            "http.server": {
+              url: "https://example.test/mcp",
+              headers: { Authorization: "Bearer test" },
+              env_http_headers: { "X-Api-Key": "API_KEY_ENV" },
+              enabled: true
+            },
+            invalid: {
+              args: ["missing-command-or-url"]
+            }
+          }
+        },
+        null,
+        2
+      )}\n`
+    );
+    const overrides = workspaceMcpConfigOverrides(tempDir);
+    assert(
+      codexMcpServerConfigKey("docs") === "mcp_servers.docs",
+      "plain MCP server names should use a dotted config key"
+    );
+    assert(
+      codexMcpServerConfigKey("http.server") === 'mcp_servers."http.server"',
+      "MCP server names containing dots should be TOML-quoted in dotted config keys"
+    );
+    assert(
+      overrides["mcp_servers.docs"]?.command === "node" &&
+        overrides["mcp_servers.docs"]?.args?.[1] === "--stdio" &&
+        overrides["mcp_servers.docs"]?.env?.PORT === "1234" &&
+        overrides["mcp_servers.docs"]?.enabled === true &&
+        overrides["mcp_servers.docs"]?.startup_timeout_sec === 3,
+      `stdio MCP server should translate into Codex mcp_servers override shape: ${JSON.stringify(overrides)}`
+    );
+    assert(
+      overrides['mcp_servers."http.server"']?.url === "https://example.test/mcp" &&
+        overrides['mcp_servers."http.server"']?.http_headers?.Authorization === "Bearer test" &&
+        overrides['mcp_servers."http.server"']?.env_http_headers?.["X-Api-Key"] === "API_KEY_ENV",
+      `HTTP MCP server should translate headers into Codex mcp_servers override shape: ${JSON.stringify(overrides)}`
+    );
+    assert(
+      !Object.prototype.hasOwnProperty.call(overrides, "mcp_servers.invalid"),
+      `invalid MCP server entries should be skipped instead of breaking thread/start: ${JSON.stringify(overrides)}`
+    );
+    assert(
+      translateWorkspaceMcpServerConfig({ command: "node", url: "https://bad.example" })?.command === "node",
+      "stdio MCP translation should prefer command and drop incompatible HTTP fields"
+    );
+    assert(
+      Object.keys(workspaceMcpConfigOverrides(path.join(tempDir, "missing"))).length === 0,
+      "missing workspace .mcp.json should produce no overrides"
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+function assertCommandDisplayHelpers() {
+  const wrappedPwsh =
+    `"C:\\Users\\ahmed\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe" -Command "rg -n \\"skill|mcp\\" ."`;
+  assert(
+    commandExecutionDisplayText({
+      type: "commandExecution",
+      command: wrappedPwsh,
+      commandActions: [{ command: 'rg -n "skill|mcp" .' }]
+    }) === 'rg -n "skill|mcp" .',
+    "commandActions should provide the clean command display"
+  );
+  assert(
+    displayCommandFromItem({
+      type: "commandExecution",
+      command: "ignored raw command",
+      command_actions: [{ command: "  ls -la  " }, { command: "rg TODO ." }]
+    }) === "ls -la ; rg TODO .",
+    "snake_case command_actions should join clean action commands"
+  );
+  assert(
+    commandExecutionDisplayText({
+      type: "commandExecution",
+      command: 'pwsh -Command "git status --short"'
+    }) === "git status --short",
+    "pwsh -Command wrapper should unwrap to the inner command"
+  );
+  assert(
+    commandExecutionDisplayText({
+      type: "commandExecution",
+      command: 'bash -lc "npm run build"'
+    }) === "npm run build",
+    "bash -lc wrapper should unwrap to the inner command"
+  );
+  assert(
+    summarizeCommandExecution({
+      type: "commandExecution",
+      command: 'Set-Content foo.txt -Value "hello"',
+      commandActions: [{ command: "ignored clean command" }]
+    }) === "write foo.txt",
+    "content-write detection should still use the raw command before display cleanup"
+  );
+  assert(
+    commandExecutionDisplayText({
+      type: "commandExecution",
+      command: "git log --oneline -5"
+    }) === "git log --oneline -5",
+    "plain commands without a shell wrapper should pass through unchanged"
+  );
+  assert(
+    unwrapShellCommand('cmd.exe /c "dir /b"') === "dir /b",
+    "cmd.exe /c wrapper should unwrap to the inner command"
+  );
+}
+
 // ---- per-family executor settings + claude engine coverage ----
 
 // readCodexSettings captures VIBE_FUSION_CODEX_SETTINGS at module load, so
@@ -2676,9 +2924,12 @@ main()
   .then(async () => {
     assertGoalSchema();
     assertVerifierHelpers();
+    assertWorkspaceMcpConfigOverrides();
+    assertCommandDisplayHelpers();
     assertPortabilityGuards();
     assertExecutorSettingsParsing();
     assertClaudeExecutorArgs();
+    await assertWorkspaceMcpConfigInjectedIntoThreadStart();
     await assertEagerBootStartsThread();
     await callAdapterToolDuringEagerBootUsesOneThreadStart();
     await callAdapterToolWithFakeAppServer();

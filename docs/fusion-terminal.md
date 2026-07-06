@@ -105,6 +105,17 @@ The two models have hard, enforced scopes. Claude is launched read-only: `Read`/
 
 The architect prompt also carries concurrent-edits guidance (locked by `fusion-launch-smoke`): file drift that is not explained by Claude's own Codex delegation may mean another agent pane or tool is editing the same checkout — Claude should re-read, hold the delegation, and surface the foreign drift to the user instead of silently letting Codex retry over it. The renderer's shared-folder chip (`frontend/cwdConflicts.ts`) shows the human the same overlap.
 
+**Workspace capabilities (MCP servers & skills, 2026-07-05):** the Fusion
+planner prompt now tells the read-only planner to inspect workspace capability
+definitions with its existing read/search tools and delegate their use by
+name. Project `.mcp.json` entries are translated into the Codex executor
+thread's `config.mcp_servers.*` overrides at `thread/start`; Claude-family
+executors continue to rely on Claude's native discovery. Skills under
+`.claude/skills` / `.codex/skills` are discovered by the underlying executor
+engines, not invoked by the planner. The verifier contract requires the
+executor to actually invoke a named MCP server/tool or skill and report failure
+as `missingRequirements` instead of claiming success.
+
 | Opus 4.8 (Claude - orchestrator/architect/designer) | Codex GPT-5.5 (implementer/reviewer/verifier) |
 |---|---|
 | Architecture decisions | Editing files |

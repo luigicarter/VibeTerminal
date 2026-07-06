@@ -211,6 +211,7 @@ function buildCodexVerifierTask(task) {
     "",
     'If you are not sure the goal is complete, set `goalReached:false` and `nextAction:"continue"`.',
     "Never fabricate, approximate, or reconstruct command or test output. If you did not actually run a command or test, say so and set `goalReached:false` rather than reporting an assumed result.",
+    "If the delegation named a specific MCP server/tool or a skill, you must actually invoke it to do the work - do not simulate or describe it. Confirm the real call happened and that its output was used. If a named MCP server or skill was unavailable, errored, or could not be exercised, record it in `missingRequirements` (and `bugsFound` if it indicates a defect) and set `goalReached:false` rather than claiming success.",
     "",
     'If the task states it is one milestone of a larger plan, implement only that milestone and judge `goalReached` against the LARGER goal: report `goalReached:false` and `nextAction:"continue"` until the final milestone completes it, even when this milestone itself is done.'
   ].join("\n");
@@ -388,6 +389,143 @@ function readCodexSettings() {
     }
     return fallback;
   }
+}
+
+function isPlainObject(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function tomlBareKeySegment(value) {
+  return /^[A-Za-z0-9_-]+$/.test(value);
+}
+
+function tomlQuotedKeySegment(value) {
+  return `"${String(value)
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\u0008/g, "\\b")
+    .replace(/\t/g, "\\t")
+    .replace(/\n/g, "\\n")
+    .replace(/\f/g, "\\f")
+    .replace(/\r/g, "\\r")}"`;
+}
+
+function codexMcpServerConfigKey(name) {
+  const serverName = String(name || "").trim();
+  if (!serverName) return null;
+  const segment = tomlBareKeySegment(serverName) ? serverName : tomlQuotedKeySegment(serverName);
+  return `mcp_servers.${segment}`;
+}
+
+function stringArray(value) {
+  if (!Array.isArray(value)) return undefined;
+  const items = value.filter((item) => typeof item === "string");
+  return items.length === value.length ? items : undefined;
+}
+
+function stringMap(value) {
+  if (!isPlainObject(value)) return undefined;
+  const out = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item === "string") {
+      out[key] = item;
+    } else if (typeof item === "number" || typeof item === "boolean") {
+      out[key] = String(item);
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function copyStringField(target, source, key) {
+  if (typeof source[key] === "string" && source[key].trim()) {
+    target[key] = source[key];
+  }
+}
+
+function copyBooleanField(target, source, key) {
+  if (typeof source[key] === "boolean") {
+    target[key] = source[key];
+  }
+}
+
+function copyNumberField(target, source, key) {
+  if (typeof source[key] === "number" && Number.isFinite(source[key])) {
+    target[key] = source[key];
+  }
+}
+
+function translateWorkspaceMcpServerConfig(server) {
+  if (!isPlainObject(server)) return null;
+  const out = {};
+  copyStringField(out, server, "command");
+  copyStringField(out, server, "url");
+  if (!out.command && !out.url) return null;
+
+  if (out.command) {
+    delete out.url;
+    const args = stringArray(server.args);
+    if (args) out.args = args;
+    const env = stringMap(server.env);
+    if (env) out.env = env;
+    copyStringField(out, server, "cwd");
+  } else {
+    const headers = stringMap(server.http_headers) || stringMap(server.headers);
+    if (headers) out.http_headers = headers;
+    const envHttpHeaders = stringMap(server.env_http_headers);
+    if (envHttpHeaders) out.env_http_headers = envHttpHeaders;
+    copyStringField(out, server, "bearer_token_env_var");
+  }
+
+  copyBooleanField(out, server, "enabled");
+  if (typeof server.disabled === "boolean" && typeof out.enabled !== "boolean") {
+    out.enabled = !server.disabled;
+  }
+  copyBooleanField(out, server, "required");
+  copyBooleanField(out, server, "supports_parallel_tool_calls");
+  copyNumberField(out, server, "startup_timeout_sec");
+  copyNumberField(out, server, "startup_timeout_ms");
+  copyNumberField(out, server, "tool_timeout_sec");
+
+  const enabledTools = stringArray(server.enabled_tools);
+  if (enabledTools) out.enabled_tools = enabledTools;
+  const disabledTools = stringArray(server.disabled_tools);
+  if (disabledTools) out.disabled_tools = disabledTools;
+  const scopes = stringArray(server.scopes);
+  if (scopes) out.scopes = scopes;
+  copyStringField(out, server, "oauth_resource");
+  copyStringField(out, server, "environment_id");
+  if (typeof server.auth === "string") out.auth = server.auth;
+  if (isPlainObject(server.oauth)) out.oauth = server.oauth;
+  if (isPlainObject(server.tools)) out.tools = server.tools;
+
+  return out;
+}
+
+function workspaceMcpConfigPath(cwd = CWD) {
+  return path.join(cwd || process.cwd(), ".mcp.json");
+}
+
+function workspaceMcpConfigOverrides(cwd = CWD) {
+  const file = workspaceMcpConfigPath(cwd);
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      logErr(`could not read workspace MCP config ${file}: ${error.message}`);
+    }
+    return {};
+  }
+  const servers = parsed && isPlainObject(parsed.mcpServers) ? parsed.mcpServers : null;
+  if (!servers) return {};
+  const overrides = {};
+  for (const [name, server] of Object.entries(servers)) {
+    const key = codexMcpServerConfigKey(name);
+    const config = translateWorkspaceMcpServerConfig(server);
+    if (!key || !config) continue;
+    overrides[key] = config;
+  }
+  return overrides;
 }
 
 function applyCodexModelSetting(params, settings = readCodexSettings()) {
@@ -1925,6 +2063,109 @@ function clippedCommandPreview(value) {
   return `${compact.slice(0, COMMAND_DISPLAY_MAX_CHARS - 1).trimEnd()}…`;
 }
 
+function readFirstShellToken(raw) {
+  const source = String(raw || "");
+  const text = source.trimStart();
+  if (!text) return null;
+
+  const quote = text[0];
+  if (quote === `"` || quote === `'`) {
+    let token = "";
+    let escaped = false;
+    for (let index = 1; index < text.length; index += 1) {
+      const ch = text[index];
+      if (escaped) {
+        token += ch;
+        escaped = false;
+        continue;
+      }
+      if (ch === "\\" && quote === `"` && text[index + 1] === quote) {
+        escaped = true;
+        continue;
+      }
+      if (ch === quote) {
+        return {
+          token,
+          rest: text.slice(index + 1).trimStart()
+        };
+      }
+      token += ch;
+    }
+    return null;
+  }
+
+  const match = text.match(/^(\S+)([\s\S]*)$/);
+  if (!match) return null;
+  return {
+    token: match[1],
+    rest: (match[2] || "").trimStart()
+  };
+}
+
+function shellBaseName(value) {
+  const name = String(value || "")
+    .replace(/\\/g, "/")
+    .split("/")
+    .pop()
+    .toLowerCase();
+  return name.replace(/\.exe$/i, "");
+}
+
+function stripOuterShellScriptQuotes(value) {
+  const text = String(value || "").trim();
+  const quote = text[0];
+  if (quote !== `"` && quote !== `'`) return text;
+  if (text.length < 2 || text[text.length - 1] !== quote) return null;
+  const inner = text.slice(1, -1);
+  if (quote === `"`) return inner.replace(/\\"/g, `"`).replace(/""/g, `"`);
+  return inner.replace(/\\'/g, `'`).replace(/''/g, `'`);
+}
+
+function unwrapShellCommand(raw) {
+  try {
+    const source = String(raw || "");
+    const first = readFirstShellToken(source);
+    if (!first || !first.token || !first.rest) return source;
+
+    const shell = shellBaseName(first.token);
+    const flagMatch = first.rest.match(/^(-command|-lc|-c|\/c|\/k)(?:\s+|$)([\s\S]*)$/i);
+    if (!flagMatch) return source;
+
+    const flag = flagMatch[1].toLowerCase();
+    const script = flagMatch[2];
+    if (!script || !script.trim()) return source;
+
+    const isPowerShell = shell === "pwsh" || shell === "powershell";
+    const isPosixShell = shell === "bash" || shell === "sh" || shell === "zsh";
+    const isCmd = shell === "cmd";
+    const allowed =
+      (isPowerShell && (flag === "-command" || flag === "-c" || flag === "-lc")) ||
+      (isPosixShell && (flag === "-c" || flag === "-lc")) ||
+      (isCmd && (flag === "/c" || flag === "/k"));
+    if (!allowed) return source;
+
+    const display = stripOuterShellScriptQuotes(script);
+    return display == null ? source : display;
+  } catch {
+    return String(raw || "");
+  }
+}
+
+function displayCommandFromItem(item) {
+  const actions = Array.isArray(item?.commandActions)
+    ? item.commandActions
+    : Array.isArray(item?.command_actions)
+      ? item.command_actions
+      : [];
+  if (actions.length > 0) {
+    const commands = actions
+      .map((action) => (typeof action?.command === "string" ? action.command.trim() : ""))
+      .filter(Boolean);
+    if (commands.length > 0) return commands.join(" ; ");
+  }
+  return unwrapShellCommand(String(item?.command || ""));
+}
+
 function stripCommandPath(value) {
   let path = String(value || "").trim();
   for (let index = 0; index < 3; index += 1) {
@@ -2236,7 +2477,8 @@ function summarizeCommandExecution(item) {
   const writePath = extractCommandWritePath(command);
   if (writePath) return `write ${writePath}`;
   if (looksLikeContentWriteCommand(command)) return "write files";
-  return clippedCommandPreview(command);
+  const display = displayCommandFromItem(item);
+  return clippedCommandPreview(display || command);
 }
 
 function commandExecutionDisplayText(item) {
@@ -2317,7 +2559,11 @@ async function ensureThread() {
         cwd: CWD,
         sandbox: "danger-full-access",
         approvalPolicy: "never",
-        config: { "features.goals": true, "features.fast_mode": true }
+        config: {
+          "features.goals": true,
+          "features.fast_mode": true,
+          ...workspaceMcpConfigOverrides(CWD)
+        }
       };
       applyCodexModelSetting(params, settings);
       await applyCodexFastTier(params, settings);
@@ -3071,6 +3317,8 @@ module.exports = {
   buildCodexInvestigationTask,
   buildCodexVerifierTask,
   cleanClaudeEffort,
+  codexMcpServerConfigKey,
+  displayCommandFromItem,
   extractVerifierVerdict,
   fastTierForModel,
   commandExecutionDisplayText,
@@ -3082,7 +3330,11 @@ module.exports = {
   shouldAutoSyncGoalStatus,
   shouldReplaceGoalForTask,
   summarizeAgentMessageForDisplay,
+  summarizeCommandExecution,
   stripVerifierVerdictFromSummary,
+  translateWorkspaceMcpServerConfig,
+  unwrapShellCommand,
+  workspaceMcpConfigOverrides,
   turnErrorMessage
 };
 

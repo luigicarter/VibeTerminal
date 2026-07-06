@@ -64,6 +64,15 @@ function openFusionPlannerPrompt() {
     "  editing the same folder), surface that overlap to the user and let them decide",
     "  how to proceed instead of silently re-delegating over the foreign changes.",
     "",
+    "Workspace capabilities (MCP servers & skills):",
+    "- This workspace may define MCP servers in `.mcp.json` and skills in",
+    "  `.claude/skills` or `.codex/skills`.",
+    "- Treat them as delegatable capabilities. Inspect availability read-only by",
+    "  reading `.mcp.json` or a skill's `SKILL.md` to understand inputs and outputs.",
+    "- Do not invoke MCP tools or skills yourself. When one genuinely helps, name",
+    "  the specific server/tool or skill in the executor task and tell the executor",
+    "  to use it and report evidence that it was actually exercised.",
+    "",
     "Earlier turns in this thread may have been authored by a different engine or model - the user can switch families mid-thread. Judge the code and evidence in front of you, not the apparent authorship, and do not infer your own capabilities from a prior turn's byline.",
     "Resolve ambiguity yourself before asking. Ask the user at most one question, and only when you genuinely cannot proceed; otherwise state your assumptions and act. Do not end a turn with a 'want me to...?' when the in-scope next step is clear.",
     "",
@@ -135,6 +144,13 @@ function openFusionPlanPrompt() {
     "  permission-denied in plan mode. Do not attempt the call - it will fail.",
     "  Implementation starts only after the user accepts the plan.",
     "",
+    "Workspace capabilities (MCP servers & skills):",
+    "- This workspace may define MCP servers in `.mcp.json` and skills in",
+    "  `.claude/skills` or `.codex/skills`.",
+    "- Inspect availability read-only by reading `.mcp.json` or a skill's",
+    "  `SKILL.md`. Plan which specific server/tool or skill the executor should",
+    "  use later, but do not invoke it yourself.",
+    "",
     "Plan shape (match the checkpointed delegation protocol):",
     "- Split multi-stage work into 2-5 milestones, each the smallest increment",
     "  that can be verified on its own, with explicit acceptance criteria.",
@@ -176,6 +192,13 @@ function openFusionExecutorPrompt() {
     "Recommendation: COMPLETE | CONTINUE | ASK_HUMAN",
     "END_OPEN_FUSION_EXECUTOR_REPORT",
     "Use exactly one Recommendation token: COMPLETE when the delegated scope is satisfied, CONTINUE when the Planner should send another executor pass, or ASK_HUMAN when blocked on user input.",
+    "",
+    "Workspace capabilities (MCP servers & skills):",
+    "If the Planner names a specific MCP server/tool or skill, actually use it for",
+    "the work - do not simulate or merely describe it. Confirm the real call",
+    "happened and that its output was used in your report. If the named capability",
+    "is unavailable, errors, or cannot be exercised, report that as a missing",
+    "requirement or risk and recommend CONTINUE or ASK_HUMAN instead of COMPLETE.",
     "",
     "Milestone scope: when the delegation says it is one milestone of a larger",
     "plan, implement ONLY that milestone. Do not run ahead into later milestones",
@@ -253,6 +276,7 @@ function openFusionCommandContents(options = {}) {
         "",
         "Return concise evidence for the Planner: changed files, commands run, validation results, self-review findings per pass, risks, and whether you recommend another pass.",
         "Evidence must be verbatim, not paraphrased: exact commands with exit status, the verbatim final test-runner summary lines, and the diff (full if small, otherwise per-file summary plus the riskiest hunks verbatim).",
+        "If the task names a specific MCP server/tool or skill, actually use it - do not simulate it - and report evidence that the real call happened and its output was used. If it is unavailable, errors, or cannot be exercised, report that and recommend CONTINUE or ASK_HUMAN instead of COMPLETE.",
         "End your response with this fixed parseable block exactly once:",
         "OPEN_FUSION_EXECUTOR_REPORT",
         "ChangedFiles: <paths changed, or none>",
@@ -634,9 +658,140 @@ function openFusionTheme() {
   };
 }
 
+function stringMap(value) {
+  if (!isPlainObject(value)) return undefined;
+  const out = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item === "string") {
+      out[key] = item;
+    } else if (typeof item === "number" || typeof item === "boolean") {
+      out[key] = String(item);
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function positiveInt(value) {
+  return Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+function openFusionMcpTimeout(server) {
+  return (
+    positiveInt(server.timeout) ||
+    positiveInt(server.tool_timeout_ms) ||
+    positiveInt(server.startup_timeout_ms) ||
+    (positiveInt(server.tool_timeout_sec) ? server.tool_timeout_sec * 1000 : undefined) ||
+    (positiveInt(server.startup_timeout_sec)
+      ? server.startup_timeout_sec * 1000
+      : undefined)
+  );
+}
+
+function openFusionMcpServerConfig(server) {
+  if (!isPlainObject(server)) return null;
+
+  const enabled =
+    typeof server.enabled === "boolean"
+      ? server.enabled
+      : typeof server.disabled === "boolean"
+        ? !server.disabled
+        : undefined;
+  const timeout = openFusionMcpTimeout(server);
+
+  if (typeof server.command === "string" && server.command.trim()) {
+    const args = Array.isArray(server.args)
+      ? server.args.filter((item) => typeof item === "string")
+      : [];
+    const command = [server.command, ...args];
+    const environment = stringMap(server.environment) || stringMap(server.env);
+    return {
+      type: "local",
+      command,
+      cwd:
+        typeof server.cwd === "string" && server.cwd.trim()
+          ? server.cwd
+          : undefined,
+      environment,
+      enabled,
+      timeout
+    };
+  }
+
+  if (typeof server.url === "string" && server.url.trim()) {
+    const headers = stringMap(server.headers) || stringMap(server.http_headers);
+    const oauth =
+      server.oauth === false || isPlainObject(server.oauth) ? server.oauth : undefined;
+    return {
+      type: "remote",
+      url: server.url,
+      headers,
+      oauth,
+      enabled,
+      timeout
+    };
+  }
+
+  return null;
+}
+
+function openFusionWorkspaceMcpConfig(cwd) {
+  if (!cwd) return undefined;
+  const mcpPath = path.join(cwd, ".mcp.json");
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(mcpPath, "utf8"));
+  } catch {
+    return undefined;
+  }
+  if (!isPlainObject(parsed?.mcpServers)) return undefined;
+
+  const servers = {};
+  for (const [name, server] of Object.entries(parsed.mcpServers)) {
+    const config = openFusionMcpServerConfig(server);
+    if (config) servers[name] = config;
+  }
+  return Object.keys(servers).length > 0 ? servers : undefined;
+}
+
+function openFusionWorkspaceSkillsConfig(cwd) {
+  if (!cwd) return undefined;
+  const paths = [
+    path.join(cwd, ".claude", "skills"),
+    path.join(cwd, ".codex", "skills")
+  ].filter((skillPath) => {
+    try {
+      return fs.statSync(skillPath).isDirectory();
+    } catch {
+      return false;
+    }
+  });
+  return paths.length > 0 ? { paths } : undefined;
+}
+
+function openFusionReadOnlyPermissionBase() {
+  return {
+    // Deny unknown/dynamic action names first; this hard-blocks MCP tools named <server>_<tool>.
+    "*": "deny",
+    read: {
+      "*": "allow",
+      "mcp:*": "deny"
+    },
+    glob: "allow",
+    grep: "allow",
+    list: "allow",
+    todowrite: "allow",
+    question: "allow",
+    webfetch: "allow",
+    websearch: "allow",
+    lsp: "allow"
+  };
+}
+
 function openFusionConfigContents(options = {}) {
   const { plannerModel, executorModel } = openFusionResolvedModels(options);
   const inlinePrompts = options.inlinePrompts === true;
+  const mcp = openFusionWorkspaceMcpConfig(options.cwd);
+  const skills = openFusionWorkspaceSkillsConfig(options.cwd);
 
   return {
     $schema: "https://opencode.ai/config.json",
@@ -647,6 +802,10 @@ function openFusionConfigContents(options = {}) {
     // opencode silently choosing on the user's behalf.
     model: plannerModel || undefined,
     command: openFusionCommandContents({ plannerModel, executorModel }),
+    // OpenCode config exposes MCP/skills globally, not per-agent. Planner/plan
+    // prompts and permissions keep capability invocation delegated to executor.
+    mcp,
+    skills,
     agent: {
       planner: {
         description:
@@ -657,6 +816,7 @@ function openFusionConfigContents(options = {}) {
           ? openFusionPlannerPrompt()
           : "{file:./openfusion-planner.md}",
         permission: {
+          ...openFusionReadOnlyPermissionBase(),
           edit: "deny",
           // Read-only git evidence channel for the completion gate. Key ORDER is
           // load-bearing: opencode 1.17.11 evaluates rules with findLast (last
@@ -677,7 +837,8 @@ function openFusionConfigContents(options = {}) {
             "*": "deny",
             executor: "allow",
             investigator: "allow"
-          }
+          },
+          skill: "deny"
         }
       },
       plan: {
@@ -689,6 +850,7 @@ function openFusionConfigContents(options = {}) {
           ? openFusionPlanPrompt()
           : "{file:./openfusion-plan.md}",
         permission: {
+          ...openFusionReadOnlyPermissionBase(),
           edit: "deny",
           // Same read-only git evidence channel as the planner. Key ORDER is
           // load-bearing (findLast / last-match-wins) - keep it byte-identical
@@ -707,7 +869,8 @@ function openFusionConfigContents(options = {}) {
           task: {
             "*": "deny",
             investigator: "allow"
-          }
+          },
+          skill: "deny"
         }
       },
       executor: {
@@ -732,11 +895,13 @@ function openFusionConfigContents(options = {}) {
         // Hard read-only: no edits, no shell, and no task laundering (it must
         // not be able to reach the executor to write on its behalf).
         permission: {
+          ...openFusionReadOnlyPermissionBase(),
           edit: "deny",
           bash: "deny",
           task: {
             "*": "deny"
-          }
+          },
+          skill: "deny"
         }
       }
     }
@@ -2003,6 +2168,22 @@ function buildFusionSystemPrompt(opts = {}) {
     "file discovery, or text search through Codex unless you need an independent",
     "verifier pass or a command/test/browser/image result.",
     "",
+    "## Workspace capabilities (MCP servers & skills)",
+    "",
+    "This workspace may define MCP servers (a project `.mcp.json`, or the user's",
+    "`~/.claude` / `~/.codex` config) and skills (`.claude/skills`,",
+    "`.codex/skills`). You CANNOT call them: the read-only planner surface does",
+    `not expose MCP tools or the Skill tool. ${executorLabel} can.`,
+    "Treat them as delegatable capabilities. Inspect what is available read-only",
+    "with Read/Grep/Glob (open `.mcp.json`, or a skill's `SKILL.md`, to understand",
+    "its inputs and outputs). When a task genuinely benefits from one, name the",
+    "SPECIFIC server/tool or skill in your codex_implement delegation and tell the",
+    "executor to use it.",
+    "The executor discovers workspace capabilities natively and will invoke the",
+    "named capability, then verify the result as part of its normal review pass.",
+    "Naming the capability makes your intent explicit and lets the verifier confirm",
+    "it was actually exercised.",
+    "",
     "When the task is frontend/UI/design implementation, use Codex for broad",
     "exploration/debugging/verification, but keep Claude responsible for the UI",
     "design decisions: read the relevant files, decide exactly what should change,",
@@ -2701,10 +2882,15 @@ function createAgentTelemetryManager(options = {}) {
     fs.writeFileSync(planPromptPath, `${openFusionPlanPrompt()}\n`);
     fs.writeFileSync(executorPromptPath, `${openFusionExecutorPrompt()}\n`);
     fs.writeFileSync(investigatorPromptPath, `${openFusionInvestigatorPrompt()}\n`);
-    const fileConfig = openFusionConfigContents({ plannerModel, executorModel });
+    const fileConfig = openFusionConfigContents({
+      plannerModel,
+      executorModel,
+      cwd: effectiveOpts.cwd
+    });
     const envConfig = openFusionConfigContents({
       plannerModel,
       executorModel,
+      cwd: effectiveOpts.cwd,
       inlinePrompts: true
     });
     fs.writeFileSync(configPath, `${JSON.stringify(fileConfig, null, 2)}\n`);

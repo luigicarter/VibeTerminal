@@ -1526,7 +1526,8 @@ ipcMain.handle("terminal:create", async (_event, payload) => {
       executorModel: normalizeOpenFusionModel(
         payload.openFusionExecutorModel,
         OPEN_FUSION_MODEL_UNSET
-      )
+      ),
+      cwd: launchCwd.cwd
     });
 
     if (!openFusionFiles) {
@@ -1828,7 +1829,8 @@ ipcMain.handle("openfusion-chat:start", async (_event, payload) => {
       executorModel: normalizeOpenFusionModel(
         payload.executorModel,
         OPEN_FUSION_MODEL_UNSET
-      )
+      ),
+      cwd: launchCwd.cwd
     });
     if (!files) {
       return { ok: false, error: "could not prepare Open Fusion config" };

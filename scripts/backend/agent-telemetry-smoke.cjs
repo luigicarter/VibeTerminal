@@ -37,6 +37,48 @@ function assert(condition, message) {
   }
 }
 
+function wildcardMatch(value, pattern) {
+  const escaped = String(pattern)
+    .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*");
+  return new RegExp(`^${escaped}$`).test(String(value));
+}
+
+function permissionRules(config) {
+  const rules = [];
+  for (const [permission, value] of Object.entries(config || {})) {
+    if (typeof value === "string") {
+      rules.push({ permission, pattern: "*", action: value });
+      continue;
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      continue;
+    }
+    for (const [pattern, action] of Object.entries(value)) {
+      if (typeof action === "string") {
+        rules.push({ permission, pattern, action });
+      }
+    }
+  }
+  return rules;
+}
+
+function resolveOpenCodePermission(agentPermission, permission, pattern = "*") {
+  const rules = permissionRules({ "*": "allow" }).concat(
+    permissionRules(agentPermission)
+  );
+  for (let index = rules.length - 1; index >= 0; index -= 1) {
+    const rule = rules[index];
+    if (
+      wildcardMatch(permission, rule.permission) &&
+      wildcardMatch(pattern, rule.pattern)
+    ) {
+      return rule.action;
+    }
+  }
+  return "ask";
+}
+
 function writeFakeProvider(name) {
   fs.mkdirSync(fakeBin, { recursive: true });
 
@@ -403,9 +445,53 @@ function postTelemetry(callbackUrl, token, payload) {
       "global process PATH should not be mutated by instrumentation"
     );
 
+    const claudeSkillsDir = path.join(root, ".claude", "skills");
+    const codexSkillsDir = path.join(root, ".codex", "skills");
+    fs.mkdirSync(path.join(claudeSkillsDir, "doc-writer"), { recursive: true });
+    fs.mkdirSync(path.join(codexSkillsDir, "repo-auditor"), { recursive: true });
+    fs.writeFileSync(
+      path.join(claudeSkillsDir, "doc-writer", "SKILL.md"),
+      "# doc-writer\n"
+    );
+    fs.writeFileSync(
+      path.join(codexSkillsDir, "repo-auditor", "SKILL.md"),
+      "# repo-auditor\n"
+    );
+    fs.writeFileSync(
+      path.join(root, ".mcp.json"),
+      `${JSON.stringify(
+        {
+          mcpServers: {
+            docs: {
+              command: "node",
+              args: ["docs-mcp.js"],
+              env: { DOCS_TOKEN: "local" },
+              disabled: false
+            },
+            linear: {
+              command: "node",
+              args: ["linear-mcp.js"],
+              env: { LINEAR_TOKEN: "local" }
+            },
+            remote: {
+              url: "https://example.test/mcp",
+              headers: { "X-Test": "yes" },
+              enabled: true
+            },
+            invalid: {
+              args: ["missing-command-or-url"]
+            }
+          }
+        },
+        null,
+        2
+      )}\n`
+    );
+
     const openFusionFiles = await manager.prepareOpenFusionFiles("pane-one", {
       plannerModel: "openai/gpt-5.1",
-      executorModel: "opencode/gpt-5.1-codex"
+      executorModel: "opencode/gpt-5.1-codex",
+      cwd: root
     });
     assert(openFusionFiles, "Open Fusion files should be prepared");
     assert(
@@ -431,25 +517,63 @@ function postTelemetry(callbackUrl, token, payload) {
     const openFusionConfig = JSON.parse(
       fs.readFileSync(openFusionFiles.configPath, "utf8")
     );
+    const plannerPermission = openFusionConfig.agent?.planner?.permission;
     const plannerBash = openFusionConfig.agent?.planner?.permission?.bash;
     assert(
       openFusionConfig.default_agent === "planner" &&
         openFusionConfig.agent?.planner?.mode === "primary" &&
         openFusionConfig.agent?.planner?.model === "openai/gpt-5.1" &&
+        plannerPermission?.["*"] === "deny" &&
+        plannerPermission?.read?.["*"] === "allow" &&
+        plannerPermission?.read?.["mcp:*"] === "deny" &&
+        plannerPermission?.grep === "allow" &&
+        plannerPermission?.glob === "allow" &&
+        plannerPermission?.todowrite === "allow" &&
         plannerBash?.["*"] === "deny" &&
         plannerBash?.["git status *"] === "allow" &&
         plannerBash?.["git diff *"] === "allow" &&
         plannerBash?.["git log *"] === "allow" &&
         plannerBash?.["git show *"] === "allow" &&
         plannerBash?.["git * --output*"] === "deny" &&
-        openFusionConfig.agent?.planner?.permission?.edit === "deny" &&
-        openFusionConfig.agent?.planner?.permission?.task?.executor === "allow" &&
-        openFusionConfig.agent?.planner?.permission?.task?.["*"] === "deny",
+        plannerPermission?.edit === "deny" &&
+        plannerPermission?.task?.executor === "allow" &&
+        plannerPermission?.task?.["*"] === "deny" &&
+        plannerPermission?.skill === "deny",
       "Open Fusion planner should be read-only except the git evidence bash allowlist"
+    );
+    assert(
+      openFusionConfig.mcp?.docs?.type === "local" &&
+        openFusionConfig.mcp?.docs?.command?.[0] === "node" &&
+        openFusionConfig.mcp?.docs?.command?.[1] === "docs-mcp.js" &&
+        openFusionConfig.mcp?.docs?.environment?.DOCS_TOKEN === "local" &&
+        openFusionConfig.mcp?.docs?.enabled === true &&
+        openFusionConfig.mcp?.linear?.type === "local" &&
+        openFusionConfig.mcp?.linear?.command?.[0] === "node" &&
+        openFusionConfig.mcp?.linear?.command?.[1] === "linear-mcp.js" &&
+        openFusionConfig.mcp?.linear?.environment?.LINEAR_TOKEN === "local" &&
+        openFusionConfig.mcp?.remote?.type === "remote" &&
+        openFusionConfig.mcp?.remote?.url === "https://example.test/mcp" &&
+        openFusionConfig.mcp?.remote?.headers?.["X-Test"] === "yes" &&
+        !openFusionConfig.mcp?.invalid &&
+        Array.isArray(openFusionConfig.skills?.paths) &&
+        openFusionConfig.skills.paths.includes(claudeSkillsDir) &&
+        openFusionConfig.skills.paths.includes(codexSkillsDir),
+      "Open Fusion config should translate workspace .mcp.json and include workspace skill paths"
+    );
+    assert(
+      JSON.stringify(openFusionEnvConfig.mcp) === JSON.stringify(openFusionConfig.mcp) &&
+        JSON.stringify(openFusionEnvConfig.skills) ===
+          JSON.stringify(openFusionConfig.skills),
+      "Open Fusion env config should carry the same workspace capabilities as the file config"
     );
     // opencode evaluates permission rules with findLast (LAST matching key
     // wins), so the deny catch-all must be first and the --output deny last —
     // reordering these keys silently flips the whole allowlist.
+    const plannerPermissionKeys = Object.keys(plannerPermission || {});
+    assert(
+      plannerPermissionKeys[0] === "*",
+      "Open Fusion planner permission must keep top-level '*' deny first so dynamic MCP tools stay blocked"
+    );
     const plannerBashKeys = Object.keys(plannerBash || {});
     assert(
       plannerBashKeys[0] === "*" &&
@@ -458,23 +582,50 @@ function postTelemetry(callbackUrl, token, payload) {
     );
     assert(
       openFusionConfig.agent?.executor?.mode === "subagent" &&
-        openFusionConfig.agent?.executor?.model === "opencode/gpt-5.1-codex",
-      "Open Fusion executor should be a model-pinned subagent"
+        openFusionConfig.agent?.executor?.model === "opencode/gpt-5.1-codex" &&
+        openFusionConfig.agent?.executor?.permission === undefined,
+      "Open Fusion executor should be a model-pinned subagent with default permissions"
+    );
+    assert(
+      resolveOpenCodePermission(plannerPermission, "linear_create_issue") === "deny" &&
+        resolveOpenCodePermission(plannerPermission, "read", "src/index.ts") === "allow" &&
+        resolveOpenCodePermission(plannerPermission, "read", "mcp:linear:*") === "deny" &&
+        resolveOpenCodePermission(plannerPermission, "todowrite") === "allow" &&
+        resolveOpenCodePermission(plannerPermission, "grep") === "allow" &&
+        resolveOpenCodePermission(
+          openFusionConfig.agent?.executor?.permission,
+          "linear_create_issue"
+        ) === "allow",
+      "Open Fusion planner must hard-deny dynamic MCP tools while keeping read-only built-ins allowed and executor default-allowed"
     );
     // Plan mode: a second read-only primary agent selected per-prompt. The
     // task map must deny the executor (scout allowed, implementation blocked)
     // and default_agent must stay planner.
     const planAgent = openFusionConfig.agent?.plan;
+    const planPermission = planAgent?.permission;
     const planBash = planAgent?.permission?.bash;
     assert(
       planAgent?.mode === "primary" &&
         planAgent?.model === "openai/gpt-5.1" &&
-        planAgent?.permission?.edit === "deny" &&
+        planPermission?.["*"] === "deny" &&
+        planPermission?.read?.["*"] === "allow" &&
+        planPermission?.read?.["mcp:*"] === "deny" &&
+        planPermission?.grep === "allow" &&
+        planPermission?.todowrite === "allow" &&
+        planPermission?.edit === "deny" &&
+        planPermission?.skill === "deny" &&
         planBash?.["*"] === "deny" &&
         planBash?.["git status *"] === "allow" &&
         planBash?.["git * --output*"] === "deny" &&
         openFusionConfig.default_agent === "planner",
       "Open Fusion plan agent should be a read-only primary on the Brain model with the git evidence allowlist"
+    );
+    assert(
+      Object.keys(planPermission || {})[0] === "*" &&
+        resolveOpenCodePermission(planPermission, "linear_create_issue") === "deny" &&
+        resolveOpenCodePermission(planPermission, "todowrite") === "allow" &&
+        resolveOpenCodePermission(planPermission, "read", "src/index.ts") === "allow",
+      "Open Fusion plan agent must deny dynamic MCP tools while keeping read-only built-ins allowed"
     );
     const planBashKeys = Object.keys(planBash || {});
     assert(
@@ -494,15 +645,51 @@ function postTelemetry(callbackUrl, token, payload) {
         openFusionEnvConfig.agent?.plan?.prompt?.includes("2-5 milestones"),
       "Open Fusion plan prompt must carry the plan-mode contract (no implementation, milestone plan)"
     );
+    const investigatorPermission = openFusionConfig.agent?.investigator?.permission;
     assert(
-      openFusionConfig.agent?.planner?.permission?.task?.investigator === "allow" &&
+      plannerPermission?.task?.investigator === "allow" &&
         openFusionConfig.agent?.investigator?.mode === "subagent" &&
-        openFusionConfig.agent?.investigator?.permission?.edit === "deny" &&
-        openFusionConfig.agent?.investigator?.permission?.bash === "deny" &&
-        openFusionConfig.agent?.investigator?.permission?.task?.["*"] === "deny" &&
+        investigatorPermission?.["*"] === "deny" &&
+        investigatorPermission?.read?.["*"] === "allow" &&
+        investigatorPermission?.read?.["mcp:*"] === "deny" &&
+        investigatorPermission?.grep === "allow" &&
+        investigatorPermission?.todowrite === "allow" &&
+        investigatorPermission?.edit === "deny" &&
+        investigatorPermission?.bash === "deny" &&
+        investigatorPermission?.task?.["*"] === "deny" &&
+        investigatorPermission?.skill === "deny" &&
         openFusionConfig.command?.investigate?.agent === "investigator" &&
         openFusionConfig.command?.investigate?.subtask === true,
       "Open Fusion investigator must be a hard read-only subagent (no edit/bash/task) reachable from the planner and /investigate"
+    );
+    assert(
+      Object.keys(investigatorPermission || {})[0] === "*" &&
+        resolveOpenCodePermission(investigatorPermission, "linear_create_issue") === "deny" &&
+        resolveOpenCodePermission(investigatorPermission, "todowrite") === "allow" &&
+        resolveOpenCodePermission(investigatorPermission, "read", "src/index.ts") === "allow",
+      "Open Fusion investigator must deny dynamic MCP tools while keeping read-only built-ins allowed"
+    );
+    const emptyWorkspace = path.join(root, "empty-workspace");
+    fs.mkdirSync(emptyWorkspace, { recursive: true });
+    const emptyWorkspaceConfig = openFusionConfigContents({
+      plannerModel: "openai/gpt-5.1",
+      executorModel: "opencode/gpt-5.1-codex",
+      cwd: emptyWorkspace
+    });
+    assert(
+      emptyWorkspaceConfig.mcp === undefined &&
+        Object.keys(emptyWorkspaceConfig.agent?.planner?.permission || {})[0] === "*" &&
+        Object.keys(emptyWorkspaceConfig.agent?.plan?.permission || {})[0] === "*" &&
+        Object.keys(emptyWorkspaceConfig.agent?.investigator?.permission || {})[0] === "*" &&
+        resolveOpenCodePermission(
+          emptyWorkspaceConfig.agent?.planner?.permission,
+          "linear_create_issue"
+        ) === "deny" &&
+        emptyWorkspaceConfig.agent?.planner?.permission?.skill === "deny" &&
+        emptyWorkspaceConfig.agent?.plan?.permission?.skill === "deny" &&
+        emptyWorkspaceConfig.agent?.investigator?.permission?.skill === "deny" &&
+        emptyWorkspaceConfig.agent?.executor?.permission === undefined,
+      "Open Fusion read-only agent MCP lock must not depend on workspace .mcp.json being present"
     );
     assert(
       openFusionConfig.command?.delegate?.agent === "executor" &&
@@ -517,6 +704,17 @@ function postTelemetry(callbackUrl, token, payload) {
         openFusionEnvConfig.agent?.executor?.prompt.includes("Open Fusion Executor") &&
         openFusionEnvConfig.command?.delegate?.template.includes("$ARGUMENTS"),
       "Open Fusion inline config should carry prompts and commands so env config can override project config"
+    );
+    assert(
+      openFusionEnvConfig.agent?.planner?.prompt.includes("Workspace capabilities (MCP servers & skills)") &&
+        openFusionEnvConfig.agent?.planner?.prompt.includes("reading `.mcp.json`") &&
+        openFusionEnvConfig.agent?.planner?.prompt.includes("specific server/tool or skill") &&
+        openFusionEnvConfig.agent?.plan?.prompt.includes("Workspace capabilities (MCP servers & skills)") &&
+        openFusionEnvConfig.agent?.plan?.prompt.includes("skill's") &&
+        openFusionEnvConfig.agent?.plan?.prompt.includes("`SKILL.md`") &&
+        openFusionEnvConfig.agent?.executor?.prompt.includes("If the Planner names a specific MCP server/tool or skill") &&
+        openFusionEnvConfig.command?.delegate?.template.includes("If the task names a specific MCP server/tool or skill"),
+      "Open Fusion planner/plan should inspect workspace capabilities while executor and /delegate require real invocation evidence"
     );
     assert(
       openFusionEnvConfig.agent?.executor?.prompt.includes("another agent may be editing this checkout") &&

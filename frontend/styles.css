@@ -50,14 +50,17 @@ button {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 13px;
+  gap: 14px;
   overflow: hidden;
-  border-right: 1px solid #363d36;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  background: linear-gradient(180deg, #1c211d 0%, #151913 100%);
   background:
-    linear-gradient(180deg, rgba(244, 207, 90, 0.06), transparent 26%),
-    linear-gradient(180deg, #1c211d 0%, #151913 100%);
+    linear-gradient(180deg, rgba(244, 207, 90, 0.05), transparent 22%),
+    linear-gradient(180deg, #1a1f1b 0%, #12150f 100%);
   padding: 15px 13px;
-  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.035);
+  box-shadow:
+    inset -1px 0 0 rgba(255, 255, 255, 0.035),
+    inset 0 1px 0 rgba(255, 255, 255, 0.025);
 }
 
 .sidebar-collapsed .sidebar {
@@ -88,12 +91,14 @@ button {
   opacity: 0;
   transition:
     background 120ms ease,
+    box-shadow 120ms ease,
     opacity 120ms ease;
 }
 
 .sidebar-resize-handle:hover::after,
 .sidebar-resize-handle:focus-visible::after {
-  background: #f4cf5a;
+  background: #ffe07a;
+  box-shadow: 0 0 18px rgba(244, 207, 90, 0.3);
   opacity: 1;
 }
 
@@ -115,7 +120,8 @@ button {
   border-radius: 8px;
   background: #10130e;
   box-shadow:
-    0 8px 20px rgba(0, 0, 0, 0.24),
+    0 0 0 1px rgba(244, 207, 90, 0.1),
+    0 8px 20px rgba(0, 0, 0, 0.28),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
@@ -130,11 +136,12 @@ button {
   margin: 0;
   color: #f6f1e6;
   font-size: 15px;
+  letter-spacing: 0.01em;
   line-height: 1.1;
 }
 
 .brand span {
-  color: #a9aca5;
+  color: #969d94;
   font-size: 12px;
 }
 
@@ -152,9 +159,10 @@ button {
   color: #f4f1e8;
   cursor: pointer;
   transition:
-    border-color 120ms ease,
-    background 120ms ease,
-    transform 120ms ease;
+    border-color 140ms ease,
+    background 140ms ease,
+    box-shadow 140ms ease,
+    transform 140ms ease;
 }
 
 .open-folder-button:hover,
@@ -169,6 +177,7 @@ button {
   box-shadow:
     0 0 0 1px rgba(244, 207, 90, 0.18),
     0 10px 24px rgba(244, 207, 90, 0.08);
+  transform: translateY(-1px);
 }
 
 .agent-toolbar button:hover {
@@ -179,9 +188,13 @@ button {
 
 .open-folder-button {
   min-height: 38px;
+  border: 1px solid #454b3f;
+  background: linear-gradient(180deg, #2a3027, #232823);
+  color: #f9f2df;
+  border-radius: 10px;
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.05),
-    0 8px 22px rgba(0, 0, 0, 0.16);
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 10px 24px rgba(0, 0, 0, 0.2);
 }
 
 .multi-mode-card {
@@ -190,28 +203,31 @@ button {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 9px;
-  border: 1px solid #3a423b;
-  border-radius: 8px;
-  background: #1f241f;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.025);
   color: #f6f2e9;
   cursor: pointer;
   padding: 10px;
   text-align: left;
   transition:
-    border-color 120ms ease,
-    background 120ms ease;
+    border-color 140ms ease,
+    background 140ms ease,
+    box-shadow 140ms ease;
 }
 
 .multi-mode-card:hover,
 .multi-mode-card.active {
-  border-color: #636b61;
-  background: #242a23;
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .multi-mode-card.active {
+  border-color: rgba(244, 207, 90, 0.38);
+  background: rgba(244, 207, 90, 0.09);
   box-shadow:
     inset 3px 0 0 #f4cf5a,
-    0 12px 28px rgba(0, 0, 0, 0.16);
+    0 10px 22px rgba(0, 0, 0, 0.18);
 }
 
 .multi-mode-card.has-attention,
@@ -256,11 +272,11 @@ button {
 }
 
 .sidebar-section-title {
-  margin-top: 5px;
-  color: #858a84;
+  margin-top: 7px;
+  color: #7c8179;
   font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
 }
 
@@ -334,7 +350,7 @@ button {
   grid-template-columns: minmax(0, 1fr) 28px;
   align-items: center;
   gap: 4px;
-  border-radius: 8px;
+  border-radius: 10px;
 }
 
 .workspace-row.drop-before::before,
@@ -364,9 +380,9 @@ button {
   width: 100%;
   align-items: center;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: 10px;
   background: transparent;
-  color: #d5d6cf;
+  color: #d7ddd6;
   cursor: pointer;
   text-align: left;
 }
@@ -377,10 +393,11 @@ button {
   min-height: 38px;
   padding: 0 9px;
   transition:
-    border-color 120ms ease,
-    background 120ms ease,
-    color 120ms ease,
-    box-shadow 120ms ease;
+    border-color 140ms ease,
+    background 140ms ease,
+    color 140ms ease,
+    box-shadow 140ms ease,
+    transform 140ms ease;
 }
 
 .workspace-button[draggable="true"] {
@@ -443,16 +460,22 @@ button {
 .workspace-button:hover,
 .workspace-button.active,
 .workspace-row.context-open .workspace-button {
-  border-color: #4d554d;
-  background: #242a22;
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
   color: #ffffff;
 }
 
+.workspace-button:hover:not(.active) {
+  transform: translateX(1px);
+}
+
 .workspace-button.active {
-  border-color: rgba(244, 207, 90, 0.42);
+  border-color: rgba(244, 207, 90, 0.38);
+  background: rgba(244, 207, 90, 0.09);
+  transform: none;
   box-shadow:
     inset 3px 0 0 #f4cf5a,
-    0 10px 24px rgba(0, 0, 0, 0.14);
+    0 9px 20px rgba(0, 0, 0, 0.18);
 }
 
 .workspace-remove-button {
@@ -461,16 +484,16 @@ button {
   height: 28px;
   place-items: center;
   border: 1px solid transparent;
-  border-radius: 7px;
+  border-radius: 8px;
   background: transparent;
   color: #858a84;
   cursor: pointer;
   opacity: 0.72;
   transition:
-    border-color 120ms ease,
-    background 120ms ease,
-    color 120ms ease,
-    opacity 120ms ease;
+    border-color 140ms ease,
+    background 140ms ease,
+    color 140ms ease,
+    opacity 140ms ease;
 }
 
 .workspace-row:hover .workspace-remove-button,
@@ -493,13 +516,15 @@ button {
   display: grid;
   width: min(222px, calc(100vw - 24px));
   gap: 4px;
-  border: 1px solid #3a413b;
-  border-radius: 8px;
-  background: #181c15;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: #161a14;
+  background: rgba(22, 26, 20, 0.92);
+  backdrop-filter: blur(8px);
   padding: 6px;
   box-shadow:
-    0 18px 46px rgba(0, 0, 0, 0.42),
-    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    0 22px 56px rgba(0, 0, 0, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 .workspace-context-menu-title {
@@ -508,7 +533,7 @@ button {
   align-items: center;
   gap: 7px;
   min-height: 28px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
   color: #a9aca5;
   padding: 0 8px 5px;
   font-size: 12px;
@@ -527,12 +552,16 @@ button {
   gap: 8px;
   min-height: 34px;
   border: 1px solid transparent;
-  border-radius: 7px;
+  border-radius: 8px;
   background: transparent;
   color: #e8e6dc;
   cursor: pointer;
   padding: 0 8px;
   text-align: left;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease,
+    color 140ms ease;
 }
 
 .workspace-context-menu button:hover,

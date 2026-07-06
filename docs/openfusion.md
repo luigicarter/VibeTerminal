@@ -44,6 +44,16 @@
 > overrides (benign on Windows). Locked by
 > `scripts/backend/openfusion-isolation-smoke.cjs`.
 >
+> **Workspace capabilities (MCP servers & skills, 2026-07-05):** Open Fusion
+> generated config now imports project `.mcp.json` into OpenCode's top-level
+> `mcp` config and adds workspace `.claude/skills` / `.codex/skills` folders to
+> `skills.paths`. OpenCode exposes these as global config, so the role contract
+> keeps use delegated: planner/plan/investigator deny `skill`, inspect
+> `.mcp.json` and `SKILL.md` read-only, and name a specific server/tool or skill
+> in executor tasks. The executor prompt and `/delegate` template require real
+> invocation evidence, and unavailable/errored capabilities must be reported
+> instead of treated as success. Locked by `agent-telemetry-smoke`.
+>
 > **Parallel executor children (2026-07-05):** Open Fusion preserves
 > OpenCode's native ability to run multiple `task` children inside one pane.
 > The Planner prompt permits multiple same-turn task calls only for genuinely
@@ -386,6 +396,16 @@ transcript ordering (the coherence seam Fusion fights in
 {
   "default_agent": "planner",
   "model": "<user pick A>",
+  "mcp": {
+    "docs": {
+      "type": "local",
+      "command": ["node", "docs-mcp.js"],
+      "environment": { "DOCS_TOKEN": "local" }
+    }
+  },
+  "skills": {
+    "paths": ["<workspace>/.claude/skills", "<workspace>/.codex/skills"]
+  },
   "command": {
     "delegate": {
       "agent": "executor",
@@ -418,7 +438,8 @@ transcript ordering (the coherence seam Fusion fights in
           "git * --output*": "deny"
         },
         "edit": "deny",
-        "task": { "*": "deny", "executor": "allow", "investigator": "allow" }
+        "task": { "*": "deny", "executor": "allow", "investigator": "allow" },
+        "skill": "deny"
       },
       "prompt": "{file:./openfusion-planner.md}"
     },
@@ -433,7 +454,8 @@ transcript ordering (the coherence seam Fusion fights in
       "permission": {
         "bash": "deny",
         "edit": "deny",
-        "task": { "*": "deny" }
+        "task": { "*": "deny" },
+        "skill": "deny"
       },
       "prompt": "{file:./openfusion-investigator.md}"
     }
@@ -449,10 +471,10 @@ transcript ordering (the coherence seam Fusion fights in
 - **Read-only investigation:** the `investigator` subagent (and its
   `/investigate <question>` command) is the scouting half of the workflow. It is
   **permission-locked read-only** — `edit: deny`, `bash: deny`, and
-  `task: {"*": "deny"}` so it can't launder writes by delegating to the
-  executor. Unlike Fusion's `codex_investigate` (read-only by task contract),
-  this lock is enforced by OpenCode's permission system regardless of model
-  quality.
+  `task: {"*": "deny"}` plus `skill: deny` so it can't launder writes by
+  delegating to the executor or invoking workspace skills. Unlike Fusion's
+  `codex_investigate` (read-only by task contract), this lock is enforced by
+  OpenCode's permission system regardless of model quality.
 - **Approval routing (live-verified, OpenCode 1.17.11):** permission `ask`s
   raised inside an executor turn surface as a **TUI dialog to the human**
   ("Permission required … Allow once / Allow always / Reject") — they do NOT
