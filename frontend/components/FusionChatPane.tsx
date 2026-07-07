@@ -443,6 +443,13 @@ function codexTaskReport(parsed: Record<string, unknown> | null, raw: string): s
   return parts.join("\n\n") || clip(raw ?? "", 8000);
 }
 
+// The planner's full delegation directive, shown as the leading section of the
+// Task row's click-to-expand report (never as a transcript note — see the
+// "delegate" branch of the activity handler).
+function delegationPromptBlock(prompt: string): string {
+  return `**Delegation**\n\n${clip(prompt, 8000)}`;
+}
+
 // The delegation's stashed side-channel lines, rendered as a fenced "Activity"
 // block appended to the Task report. Kept out of the inline transcript so a
 // long run doesn't explode into one "↳ …" sibling per Codex tool call — the
@@ -668,6 +675,9 @@ export default function FusionChatPane({
     // Raw side-channel lines, stashed for the Task row's click-to-expand
     // report instead of being spilled as per-activity "↳ …" worklines.
     activities: string[];
+    // The planner's full delegation directive (the adapter's "delegate"
+    // activity), folded into the same report instead of a transcript note.
+    prompt?: string;
   } | null>(null);
   const [planActionReady, setPlanActionReady] = useState(false);
   const [implementingPlan, setImplementingPlan] = useState(false);
@@ -1430,6 +1440,11 @@ export default function FusionChatPane({
                 : duration;
             const block = activityLogBlock(delegation.activities);
             if (block) output = `${output}\n\n${block}`.trim();
+            // Planner's ask above the executor's findings/activity — the
+            // report reads top-down as directive → result → work log.
+            if (delegation.prompt) {
+              output = `${delegationPromptBlock(delegation.prompt)}\n\n${output}`.trim();
+            }
             delegationRef.current = null;
           }
           setMessages((prev) =>
@@ -1494,6 +1509,23 @@ export default function FusionChatPane({
             setMessages((prev) =>
               prev.map((row) =>
                 row.key === delegation.key ? { ...row, taskDetail: detail } : row
+              )
+            );
+            break;
+          }
+          // The planner's delegation directive belongs to the Task row: the
+          // row header already carries the clipped description, and this
+          // activity arrives after the tool-call — pushed as a note it lands
+          // fully expanded BELOW the executor's Task row. Stash it as the
+          // row's expandable report instead (readable while running; the
+          // tool-result folds it into the final report above the findings).
+          if (kind === "delegate" && delegation) {
+            delegation.prompt = text;
+            setMessages((prev) =>
+              prev.map((row) =>
+                row.key === delegation.key
+                  ? { ...row, toolOutput: delegationPromptBlock(text) }
+                  : row
               )
             );
             break;
