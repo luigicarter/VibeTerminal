@@ -491,6 +491,8 @@ export type OpenFusionChatEvent = (
   // A new Brain step began (new root assistant message): any pinned queued
   // message is now part of the model's context.
   | { id: string; type: "step-start" }
+  // A routed steer reached terminal disposition: drop the pinned Queued badge.
+  | { id: string; type: "steer-absorbed" }
   // streamId identifies the producing OpenCode part: concurrent streams
   // (parallel subagents, reasoning beside text) must not share a bubble.
   | { id: string; type: "assistant-text"; role: OpenFusionChatRole; delta: string; streamId?: string }

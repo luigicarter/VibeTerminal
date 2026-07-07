@@ -745,6 +745,20 @@ function postTelemetry(callbackUrl, token, payload) {
       "Open Fusion completion gate must be operational: mandatory independent check + verbatim evidence contract"
     );
     assert(
+      openFusionEnvConfig.agent?.executor?.prompt?.includes(
+        "Visual verification (mandatory when the outcome is visual)"
+      ) &&
+        openFusionEnvConfig.agent?.executor?.prompt?.includes(
+          "open that image with your image-viewing tool"
+        ) &&
+        openFusionEnvConfig.agent?.executor?.prompt?.includes("not actually view") &&
+        openFusionEnvConfig.command?.delegate?.template?.includes("actually view that image") &&
+        openFusionEnvConfig.agent?.planner?.prompt?.includes(
+          "never\n   verify a visual outcome"
+        ),
+      "Open Fusion must mandate visual verification: executor renders + views visual outcomes, planner rejects code-read-only verification of visual work"
+    );
+    assert(
       openFusionEnvConfig.agent?.planner?.prompt?.includes("switch families mid-thread") &&
         openFusionEnvConfig.agent?.planner?.prompt?.includes("at most one question") &&
         openFusionEnvConfig.agent?.executor?.prompt?.includes(

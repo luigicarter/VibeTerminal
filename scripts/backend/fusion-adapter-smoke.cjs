@@ -2315,6 +2315,12 @@ function assertVerifierHelpers() {
     "wrapped task should tell Codex it owns image generation and browser control"
   );
   assert(
+    wrapped.includes("When the delegated outcome is visual") &&
+      wrapped.includes("VIEW that image with your image-viewing tool") &&
+      wrapped.includes("never describe an image you did not actually view"),
+    "wrapped task must mandate rendering + actually viewing visual outcomes, not code-read verification"
+  );
+  assert(
     wrapped.includes("one milestone of a larger plan") &&
       wrapped.includes("judge `goalReached` against the LARGER goal"),
     "wrapped task missing the milestone goalReached clause (mid-plan verdicts must stay continue)"

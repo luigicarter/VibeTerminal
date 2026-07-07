@@ -601,6 +601,21 @@ transcript ordering (the coherence seam Fusion fights in
      the investigator/executor prompts carry the matching parallel-scope
      discipline (stay in scope; report out-of-scope needs and foreign
      overlaps instead of acting).
+  9. **Mandatory visual verification (2026-07-06).** Field report: executors
+     never actually looked at visual outcomes — UI/styling tasks came back
+     "validated" by code reading and passing tests, without the app ever being
+     rendered. The executor prompt and `/delegate` template now require it:
+     when the delegated outcome is something a user sees (UI layout/styling,
+     rendered pages, generated images, charts, terminal UI), the executor must
+     run or render the artifact, capture the actual visual state to an image
+     file, open that image with its image-viewing tool, and report the capture
+     command, image path, and what it observed on the Validation line — and
+     must say so plainly (recommend CONTINUE/ASK_HUMAN) when it genuinely
+     cannot render or view, never describing an image it did not view. The
+     planner completion rule gained the matching clause: code reading or
+     passing tests alone never verify a visual outcome — re-delegate and
+     demand the visual check. Fusion carries the same pair (verifier contract
+     in `fusion-adapter.cjs` + the system prompt's UI/design delegation rules).
 
   Locked by `agent-telemetry-smoke` (permission shape incl. key order + prompt
   anchors), `openfusion-chat-parse-smoke` (reminder/nudge parts + rehydration

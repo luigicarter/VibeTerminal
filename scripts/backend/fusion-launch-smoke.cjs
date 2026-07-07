@@ -60,6 +60,12 @@ async function main() {
     assert(/Picture\/image generation/i.test(prompt), "system prompt must route image generation to Codex");
     assert(/browser navigation\/control\/automation/i.test(prompt), "system prompt must route browser control to Codex");
     assert(
+      /acceptance criteria are visual/i.test(prompt) &&
+        /capture a screenshot or image file, actually view it/i.test(prompt) &&
+        /verified only by code reading/i.test(prompt),
+      "system prompt must require visual evidence for visual delegations (render + view, not code-read)"
+    );
+    assert(
       /Edit and Write are blocked/i.test(prompt) && /NO file-edit tools/i.test(prompt),
       "system prompt must state Claude has no file-edit tools (all code written by Codex)"
     );

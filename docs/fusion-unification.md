@@ -65,7 +65,13 @@ You ──▶ Claude Opus/Sonnet 5 (headless `claude`, read + UI-write tools, Ba
    for Claude's planning under a `readOnly` turn sandbox. Each `codex_implement`
    wraps the task in a **verifier contract** (`buildCodexVerifierTask` — *"You are
    Codex GPT-5.5…"*) demanding a single-line JSON verdict, then streams Codex's
-   items back to the renderer via the best-effort telemetry callback.
+   items back to the renderer via the best-effort telemetry callback. Since
+   2026-07-06 the contract also mandates visual verification: when the
+   delegated outcome is visual (UI/styling, rendered pages, images, charts,
+   terminal UI), Codex must render it, capture a screenshot/image file,
+   actually view the image, and report what it observed — code reading and
+   tests alone are declared insufficient, and an unviewable result goes into
+   `missingRequirements` instead of being passed off as checked.
 
 3. **Exceptional decision parking** — `handleServerRequest` → `needs_decision`.
    Codex now runs with full workspace access and no routine command approvals,

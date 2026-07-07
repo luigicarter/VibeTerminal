@@ -1684,6 +1684,8 @@ function runHost() {
         .then((handled) => {
           if (!handled) {
             postRootPlannerInput(id, state, text, mode, model, queued);
+          } else {
+            emitSessionEvent(id, state, { type: "steer-absorbed" });
           }
         })
         .catch((error) => {

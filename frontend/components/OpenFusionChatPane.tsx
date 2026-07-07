@@ -1073,6 +1073,9 @@ export default function OpenFusionChatPane({
           // The Brain started its next step: queued steering is absorbed.
           flushSteering();
           break;
+        case "steer-absorbed":
+          flushSteering();
+          break;
         case "assistant-text":
           if (event.role === "brain" && event.delta.trim()) {
             planHadBrainTextRef.current = true;
