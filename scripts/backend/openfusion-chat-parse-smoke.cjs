@@ -32,7 +32,12 @@ const {
   OPEN_FUSION_GATE_MARKER,
   OPEN_FUSION_GATE_REMINDER,
   OPEN_FUSION_GATE_NUDGE,
-  OPEN_FUSION_PLAN_REMINDER
+  OPEN_FUSION_PLAN_REMINDER,
+  OPEN_FUSION_BACKGROUND_MARKER,
+  backgroundTaskTitleOf,
+  buildOpenFusionBackgroundContract,
+  buildOpenFusionBackgroundWakeText,
+  parseOpenFusionBackgroundReport
 } = require("../../backend/openFusionChatHost.cjs");
 const { createOpenFusionGateTracker } = require("../../backend/completionGate.cjs");
 
@@ -941,5 +946,70 @@ assert(
     hostSource.includes("return;"),
   "Open Fusion host should route active executor steering through a hidden planner decision before falling back to root queue"
 );
+
+// ---- detached background delegations ----
+assert(
+  hostSource.includes("function startOpenFusionBackgroundTask") &&
+    hostSource.includes("function observeBackgroundSseEvent") &&
+    hostSource.includes("function settleBackgroundTask") &&
+    hostSource.includes("function maybeFlushOpenFusionWakes") &&
+    hostSource.includes("function deliverOpenFusionWake") &&
+    hostSource.includes('agent: "executor-bg"') &&
+    hostSource.includes("state.backgroundBySession") &&
+    hostSource.includes("state.gate.observe(echo)") &&
+    hostSource.includes("s.turnBusy || (s.backgroundTasks && s.backgroundTasks.size > 0)") &&
+    hostSource.includes("settleAllBackgroundTasks(id, state,"),
+  "Open Fusion host must own the detached background engine (host-created executor-bg sessions watched pre-normalizer, gate-observed wake echo, dispose guard, engine-death settle)"
+);
+// Wake envelope round-trip: what deliverOpenFusionWake posts must be filtered
+// out of rehydrated user text and rebuilt as a report row instead.
+{
+  assert(
+    backgroundTaskTitleOf("", "Fix the flaky test\nmore detail") === "Fix the flaky test",
+    "backgroundTaskTitleOf should take the first non-empty prompt line"
+  );
+  assert(
+    buildOpenFusionBackgroundContract("do the thing").includes("## Detached background task") &&
+      buildOpenFusionBackgroundContract("do the thing").includes("OPEN_FUSION_EXECUTOR_REPORT"),
+    "the background contract must mark the task detached and demand the executor report block"
+  );
+  const wakeText = buildOpenFusionBackgroundWakeText({
+    taskId: "obg-3",
+    title: "docs sweep",
+    cancelled: false,
+    result: { status: "completed", report: "OPEN_FUSION_EXECUTOR_REPORT ... Recommendation: COMPLETE", files: ["src/a.ts"] }
+  });
+  assert(
+    wakeText.startsWith(OPEN_FUSION_BACKGROUND_MARKER) &&
+      wakeText.includes("taskId: obg-3") &&
+      wakeText.includes("verify it independently"),
+    "buildOpenFusionBackgroundWakeText must produce the marked report with the review duty"
+  );
+  const parsed = parseOpenFusionBackgroundReport(wakeText);
+  assert(
+    parsed && parsed.taskId === "obg-3" && parsed.title === "docs sweep",
+    "parseOpenFusionBackgroundReport must recover taskId/title"
+  );
+  const rehydrated = rehydrateMessages(
+    [
+      {
+        info: { role: "user" },
+        parts: [
+          { type: "text", text: wakeText },
+          { type: "text", text: OPEN_FUSION_GATE_REMINDER }
+        ]
+      }
+    ],
+    ROOT
+  );
+  assert(
+    rehydrated.length === 1 &&
+      rehydrated[0].type === "user" &&
+      rehydrated[0].backgroundReport === true &&
+      rehydrated[0].taskId === "obg-3" &&
+      rehydrated[0].title === "docs sweep",
+    "a resumed wake prompt must rehydrate as a backgroundReport row, never as user text"
+  );
+}
 
 console.log("Open Fusion chat parse smoke passed");

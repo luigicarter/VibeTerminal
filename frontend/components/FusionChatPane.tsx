@@ -55,13 +55,15 @@ import {
 } from "./fusionSlashMenu";
 import {
   OC_LOGO_FUSION,
+  OcBackgroundPin,
   OcChatRow,
   OcLogo,
   OcSpinner,
   asRecord,
   clip,
   firstString,
-  formatDurationShort
+  formatDurationShort,
+  type OcBackgroundTask
 } from "./ocChat";
 
 interface FusionChatPaneProps {
@@ -683,6 +685,42 @@ export default function FusionChatPane({
   const [implementingPlan, setImplementingPlan] = useState(false);
   const [modeSwitching, setModeSwitching] = useState(false);
   const [modeFlash, setModeFlash] = useState(false);
+  // Detached background delegations: taskId → row key + live tally. Rebuilt
+  // from replayed started/settled events, so the composer pin and the rows
+  // survive a remount; settled tasks leave the map (the row keeps the report).
+  const bgTasksRef = useRef(
+    new Map<
+      string,
+      { key: string; title: string; kind: string; task?: string; startedAt: number; updates: number }
+    >()
+  );
+  const [bgTasks, setBgTasks] = useState<OcBackgroundTask[]>([]);
+  const [bgNow, setBgNow] = useState(() => Date.now());
+  // codex_implement/investigate calls launched with background:true — their
+  // own tool rows are suppressed (the background-task events own the row).
+  const suppressedBgToolIdsRef = useRef(new Set<string>());
+  const syncBgPin = useCallback(() => {
+    setBgTasks(
+      Array.from(bgTasksRef.current.entries()).map(([taskId, task]) => ({
+        taskId,
+        title: task.title,
+        startedAt: task.startedAt,
+        updates: task.updates
+      }))
+    );
+  }, []);
+  // Elapsed-time ticker for the pin, armed only while tasks run.
+  useEffect(() => {
+    if (!bgTasks.length) return;
+    const timer = window.setInterval(() => setBgNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [bgTasks.length]);
+  const stopBackgroundTask = useCallback(
+    (taskId: string) => {
+      void window.vibe?.fusionChat?.backgroundCancel?.(session.id, taskId);
+    },
+    [session.id]
+  );
   // Stable identity so memoized rows don't re-render when the pane does.
   const toggleExpanded = useCallback(
     (key: string) =>
@@ -1043,6 +1081,11 @@ export default function FusionChatPane({
     if (session.status === "idle" || session.status === "starting") {
       onStatusChangeRef.current("starting");
     }
+    // Background pin state resets on every (re)launch: a reattach replay
+    // rebuilds it from the started/settled history; a fresh/restarted session
+    // has no live background tasks by definition.
+    bgTasksRef.current.clear();
+    setBgTasks([]);
     let cancelled = false;
     const resumeThreadRef =
       session.nextLaunchMode === "resume" &&
@@ -1205,7 +1248,10 @@ export default function FusionChatPane({
       delegationRef.current = null;
       setMessages((prev) =>
         prev.map((m) => {
-          if (m.kind !== "tool" || m.toolStatus !== "running") return m;
+          // Background rows are NOT settled by a foreground interrupt/abort:
+          // the detached work keeps running and its own settled event (or the
+          // host's orphan settle after a close) owns the row's ending.
+          if (m.kind !== "tool" || m.toolStatus !== "running" || m.background) return m;
           const toolOutput =
             aborted && m.key === aborted.key && abortedBlock
               ? [m.toolOutput, abortedBlock].filter(Boolean).join("\n\n")
@@ -1279,6 +1325,27 @@ export default function FusionChatPane({
             publishClaudeThreadRef();
           }
 
+          if (event.backgroundReport) {
+            // A host-delivered background-task report wake: a collapsible
+            // report row, never a user bubble. Live wakes carry a compact
+            // label (the settled Task row above holds the full report);
+            // rehydrated wakes carry the whole stored envelope — expandable.
+            push({
+              role: "codex",
+              kind: "tool",
+              text: "",
+              toolName: "task",
+              toolStatus: "done",
+              backgroundReport: true,
+              toolInput: {
+                subagent_type: "executor",
+                description: event.title || "background task"
+              },
+              toolOutput:
+                event.text && event.text.length > 200 ? event.text : undefined
+            });
+            break;
+          }
           if (decisionTurnLabelsRef.current.has(event.text)) {
             const label = decisionTurnLabelsRef.current.get(event.text) || "Decision sent.";
             decisionTurnLabelsRef.current.delete(event.text);
@@ -1363,6 +1430,13 @@ export default function FusionChatPane({
             // live "↳ …" line ticked by the Codex side-channel activity.
             const scout = event.name.endsWith("codex_investigate");
             const delegationInput = asRecord(event.input);
+            if (delegationInput.background === true) {
+              // Background launches render via their background-task events;
+              // the launch call itself is suppressed (a second Task row here
+              // would duplicate the background row and settle as "started").
+              suppressedBgToolIdsRef.current.add(event.toolId);
+              break;
+            }
             const fanoutTasks = Array.isArray(delegationInput.tasks)
               ? delegationInput.tasks.filter(
                   (task): task is string => typeof task === "string" && task.trim().length > 0
@@ -1406,6 +1480,11 @@ export default function FusionChatPane({
           break;
         }
         case "tool-result": {
+          if (suppressedBgToolIdsRef.current.delete(event.toolId)) {
+            // The suppressed background launch's {status:"started"} reply —
+            // the background-task events own the visible lifecycle.
+            break;
+          }
           const meta = toolRoleRef.current.get(event.toolId);
           const fromCodex = meta?.isCodexBridge ?? false;
           setActiveRole(fromCodex ? "codex" : "claude");
@@ -1554,6 +1633,108 @@ export default function FusionChatPane({
             reportStatus("failed");
             reportAttention("failed", "error", message);
           }
+          break;
+        }
+        case "background-task": {
+          if (event.phase === "started") {
+            if (bgTasksRef.current.has(event.taskId)) break;
+            const key = push({
+              role: "codex",
+              kind: "tool",
+              text: "",
+              toolName: "task",
+              toolStatus: "running",
+              background: true,
+              toolInput: {
+                subagent_type: event.kind === "investigate" ? "scout" : "executor",
+                description: event.title || event.taskId
+              },
+              toolOutput: event.task ? delegationPromptBlock(event.task) : undefined
+            });
+            bgTasksRef.current.set(event.taskId, {
+              key,
+              title: event.title || event.taskId,
+              kind: event.kind,
+              task: event.task,
+              startedAt: Date.now(),
+              updates: 0
+            });
+            syncBgPin();
+            break;
+          }
+          const entry = bgTasksRef.current.get(event.taskId);
+          if (event.phase === "progress") {
+            if (!entry) break;
+            entry.updates = event.updates || entry.updates + 1;
+            const detail =
+              event.activityKind === "command"
+                ? `$ ${clip(event.text, 80)}`
+                : clip(event.text, 80);
+            setMessages((prev) =>
+              prev.map((row) => (row.key === entry.key ? { ...row, taskDetail: detail } : row))
+            );
+            syncBgPin();
+            break;
+          }
+          // settled
+          const result = event.result ?? {
+            status: "failed",
+            error: "background task returned no result"
+          };
+          const ok = result.status === "completed" && !event.cancelled;
+          const updates = event.updates ?? entry?.updates ?? 0;
+          const duration = event.durationMs
+            ? formatDurationShort(event.durationMs)
+            : entry
+              ? formatDurationShort(Date.now() - entry.startedAt)
+              : "";
+          const taskDetail = [
+            updates > 0 ? `${updates} update${updates === 1 ? "" : "s"}` : "",
+            duration,
+            event.cancelled ? "cancelled" : ""
+          ]
+            .filter(Boolean)
+            .join(" · ");
+          let report = ok
+            ? codexTaskReport(result as unknown as Record<string, unknown>, "")
+            : clip(result.error || "background task failed", 2000);
+          if (entry?.task) {
+            report = `${delegationPromptBlock(entry.task)}\n\n${report}`.trim();
+          }
+          if (entry) {
+            setMessages((prev) =>
+              prev.map((row) =>
+                row.key === entry.key
+                  ? {
+                      ...row,
+                      toolStatus: ok ? ("done" as const) : ("error" as const),
+                      toolOutput: report || undefined,
+                      taskDetail: taskDetail || row.taskDetail
+                    }
+                  : row
+              )
+            );
+            bgTasksRef.current.delete(event.taskId);
+          } else {
+            // No live row (remount mid-task without the started event in the
+            // replay window): synthesize a settled row — the OF pane's
+            // snapshot-edge precedent.
+            push({
+              role: "codex",
+              kind: "tool",
+              text: "",
+              toolName: "task",
+              toolStatus: ok ? "done" : "error",
+              background: true,
+              toolInput: {
+                subagent_type: event.kind === "investigate" ? "scout" : "executor",
+                description: event.title || event.taskId
+              },
+              toolOutput: report || undefined,
+              taskDetail: taskDetail || undefined
+            });
+          }
+          syncBgPin();
           break;
         }
         case "turn-end":
@@ -2245,6 +2426,8 @@ export default function FusionChatPane({
     if (normalized === "/clear") {
       setInput("");
       setMessages([]);
+      bgTasksRef.current.clear();
+      setBgTasks([]);
       setPlanActionReady(false);
       setInterruptingState(false);
       setBusyState(false);
@@ -2846,6 +3029,7 @@ export default function FusionChatPane({
               </button>
             </div>
           )}
+          <OcBackgroundPin tasks={bgTasks} now={bgNow} onStop={stopBackgroundTask} />
           {steering.length > 0 && (
             <div className="fusion-steering" role="status" aria-label="Queued steering">
               {steering.map((item) => (

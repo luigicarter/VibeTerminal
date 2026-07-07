@@ -2421,3 +2421,72 @@ button {
   color: #6f766f;
   font-size: 10px;
 }
+
+/* Background-tasks pin (Fusion + Open Fusion panes): detached delegations
+   running after the planner's turn ended. Neutral by design — persistent
+   while tasks run, cleared per task as they settle. */
+.oc-bgtasks {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 9px;
+  border: 1px solid color-mix(in srgb, var(--pane-accent, #6fbf73) 35%, #2c322c);
+  border-radius: 8px;
+  background: #121611;
+}
+.oc-bgtasks-head {
+  color: color-mix(in srgb, var(--pane-accent, #6fbf73) 75%, #cfd8cf);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.oc-bgtasks-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.oc-bgtasks-title {
+  min-width: 0;
+  color: #d8e2d8;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.oc-bgtasks-meta {
+  flex: 1 0 auto;
+  color: #79817a;
+  font-size: 10px;
+  text-align: right;
+}
+.oc-bgtasks-stop {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  border: 1px solid #3a403a;
+  border-radius: 4px;
+  background: transparent;
+  color: #9aa39a;
+  font-size: 10px;
+  cursor: pointer;
+}
+.oc-bgtasks-stop:hover {
+  border-color: color-mix(in srgb, var(--pane-accent, #6fbf73) 55%, #3a403a);
+  color: #d8e2d8;
+}
+
+/* "background" tag chip on detached Task rows (shared oc-skin row kit). */
+.oc-task-bg {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  border: 1px solid color-mix(in srgb, var(--pane-accent, #6fbf73) 40%, #2c322c);
+  color: color-mix(in srgb, var(--pane-accent, #6fbf73) 80%, #cfd8cf);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  vertical-align: 1px;
+}

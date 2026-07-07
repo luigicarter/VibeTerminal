@@ -127,6 +127,10 @@ declare global {
         setMode: (id: string, mode: FusionRunMode | string) => Promise<{ ok: boolean; mode?: FusionRunMode; error?: string }>;
         steer: (id: string, text: string) => void;
         interrupt: (id: string) => Promise<boolean>;
+        backgroundCancel: (
+          id: string,
+          taskId: string
+        ) => Promise<{ status?: string; error?: string }>;
         stop: (id: string) => Promise<boolean>;
         onEvent: (callback: (event: FusionChatEvent) => void) => () => void;
       };
@@ -213,6 +217,10 @@ declare global {
         ) => Promise<{ ok: boolean; error?: string }>;
         compact: (id: string) => Promise<{ ok: boolean; error?: string }>;
         interrupt: (id: string) => Promise<boolean>;
+        backgroundCancel: (
+          id: string,
+          taskId: string
+        ) => Promise<{ ok: boolean; error?: string }>;
         stop: (id: string) => Promise<boolean>;
         onEvent: (callback: (event: OpenFusionChatEvent) => void) => () => void;
       };

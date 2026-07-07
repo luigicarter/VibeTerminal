@@ -147,6 +147,24 @@ function openFusionPlannerPrompt() {
     "- Do not micro-slice: a milestone is an independently verifiable increment,",
     "  not an individual edit. A small single-stage task stays one delegation.",
     "",
+    "Background delegation (detached executor tasks):",
+    "- The background_task tool runs ONE executor delegation DETACHED: it returns",
+    "  {status:'started', taskId, title} immediately, the work runs while you and",
+    "  the user keep talking, and the executor's full report arrives later as an",
+    "  [Open Fusion background report] message that opens a new turn for you.",
+    "- Default stays the FOREGROUND task tool (blocking). Go background only when",
+    "  the user asked for it, or when the work is long, INDEPENDENT, and the user",
+    "  wants to keep the conversation available while it runs. After launching,",
+    "  end your turn and tell the user exactly what is running in the background.",
+    "- Review the arriving report with the SAME completion rule as any executor",
+    "  return: independent check first (git evidence, read the changed files, or",
+    "  an investigator pass), then present the outcome. Never run milestones that",
+    "  depend on each other as concurrent background tasks - a dependent milestone",
+    "  waits for the previous report and your review.",
+    "- Cancel a running background task with background_cancel {taskId}. A",
+    "  detached task cannot ask mid-turn questions; ambiguity comes back in its",
+    "  report instead.",
+    "",
     "Completion rule (mandatory before telling the user delegated work is done):",
     "1. Perform at least ONE independent check of the executor's claims: run git diff or",
     "   git status yourself, read the changed files, or send the investigator to verify",
@@ -872,10 +890,41 @@ function openFusionReadOnlyPermissionBase() {
   };
 }
 
+// The app-owned "vibeterminal" MCP server every Open Fusion pane carries: it
+// exposes background_task/background_cancel to the Brain (dynamic tool names
+// vibeterminal_background_task / vibeterminal_background_cancel) and relays
+// the requests to the pane's host via the telemetry callback server.
+function openFusionBackgroundBridgeMcp(bridge) {
+  return {
+    type: "local",
+    command: [bridge.nodePath, bridge.scriptPath],
+    environment: {
+      ELECTRON_RUN_AS_NODE: "1",
+      VIBE_TERMINAL_CALLBACK_URL: bridge.callbackUrl,
+      VIBE_TERMINAL_TELEMETRY_TOKEN: bridge.token,
+      VIBE_TERMINAL_SESSION_ID: bridge.sessionId
+    },
+    enabled: true
+  };
+}
+
 function openFusionConfigContents(options = {}) {
   const { plannerModel, executorModel } = openFusionResolvedModels(options);
   const inlinePrompts = options.inlinePrompts === true;
-  const mcp = openFusionWorkspaceMcpConfig(options.cwd);
+  const backgroundBridge =
+    options.backgroundBridge && typeof options.backgroundBridge === "object"
+      ? options.backgroundBridge
+      : null;
+  const workspaceMcp = openFusionWorkspaceMcpConfig(options.cwd);
+  const mcp =
+    workspaceMcp || backgroundBridge
+      ? {
+          ...(workspaceMcp || {}),
+          ...(backgroundBridge
+            ? { vibeterminal: openFusionBackgroundBridgeMcp(backgroundBridge) }
+            : {})
+        }
+      : undefined;
   const skills = openFusionWorkspaceSkillsConfig(options.cwd);
 
   return {
@@ -923,7 +972,16 @@ function openFusionConfigContents(options = {}) {
             executor: "allow",
             investigator: "allow"
           },
-          skill: "deny"
+          skill: "deny",
+          // The app-owned background bridge is a planner-only capability: the
+          // leading "*" deny blocks its dynamic tool names everywhere else
+          // (plan/investigator inherit the base without these allows).
+          ...(backgroundBridge
+            ? {
+                vibeterminal_background_task: "allow",
+                vibeterminal_background_cancel: "allow"
+              }
+            : {})
         }
       },
       plan: {
@@ -968,6 +1026,24 @@ function openFusionConfigContents(options = {}) {
           ? openFusionExecutorPrompt()
           : "{file:./openfusion-executor.md}"
       },
+      // Detached background executor: PRIMARY on purpose — it drives a
+      // host-created session (a subagent as the driving agent of a fresh
+      // session is unverified on 1.17.11; a primary agent is the shipped
+      // steer-router precedent). Same prompt/model as the executor.
+      ...(backgroundBridge
+        ? {
+            "executor-bg": {
+              description:
+                "Open Fusion detached background executor. Runs one background delegation on a host-created session and reports like the executor.",
+              mode: "primary",
+              model: executorModel || undefined,
+              hidden: true,
+              prompt: inlinePrompts
+                ? openFusionExecutorPrompt()
+                : "{file:./openfusion-executor.md}"
+            }
+          }
+        : {}),
       investigator: {
         description:
           "Open Fusion read-only investigator. Scouts repo context for the planner; cannot edit, run commands, or delegate.",
@@ -2467,6 +2543,25 @@ function buildFusionSystemPrompt(opts = {}) {
     "passes; anything whose correctness depends on reviewing a previous",
     "milestone stays sequential.",
     "",
+    "## Background delegation",
+    "codex_implement and codex_investigate accept `background: true`: the call",
+    "returns {status:'started', taskId, title} immediately, the work runs",
+    "detached, and the full report arrives later as a FUSION BACKGROUND TASK",
+    "REPORT message that opens a new turn for you. Default stays FOREGROUND",
+    "(blocking): background a delegation only when the user asked for it, or",
+    "when the work is long, INDEPENDENT, and the user wants to keep talking",
+    "with you while it runs. After launching, end your turn and tell the user",
+    "exactly what is running in the background.",
+    "When the report arrives, review it with the SAME rules as a normal",
+    "codex_implement return: run your independent check (Read the changed",
+    "files, codex_investigate, or git evidence) before presenting the work,",
+    "and let the verifier verdict gate completion. Never run milestones that",
+    "depend on each other as concurrent background tasks - a dependent",
+    "milestone waits for the previous report and your review. Cancel a",
+    "background task with codex_cancel {taskId}. A background task cannot ask",
+    "mid-turn questions or approvals; anything ambiguous comes back in its",
+    "report instead.",
+    "",
     "## Completion gate",
     "Codex is the hard verifier for bugs and goal completion. If Codex says the",
     "goal is not reached, continue unless the human explicitly tells you to stop",
@@ -2871,6 +2966,40 @@ function createAgentTelemetryManager(options = {}) {
                 text: event.text,
                 ts: event.ts
               });
+            } else if (event.type === "fusion.background-task") {
+              // Detached background delegation lifecycle from the adapter
+              // (started/progress/settled). main routes it into the fusion
+              // chat host, which mirrors it to the pane and wakes the planner
+              // with the settled report. Not an attention signal.
+              emit({
+                id: event.sessionId,
+                type: "fusion-background-task",
+                phase: event.phase,
+                taskId: event.taskId,
+                title: event.title,
+                kind: event.kind,
+                task: event.task,
+                activityKind: event.activityKind,
+                text: event.text,
+                updates: event.updates,
+                cancelled: event.cancelled,
+                durationMs: event.durationMs,
+                result: event.result,
+                ts: event.ts
+              });
+            } else if (event.type === "openfusion.background-task") {
+              // Brain-initiated background delegation request from the pane's
+              // MCP bridge (start/cancel). main routes it to the Open Fusion
+              // host, which owns the detached executor session and the wake.
+              emit({
+                id: event.sessionId,
+                type: "openfusion-background-request",
+                action: event.action === "cancel" ? "cancel" : "start",
+                taskId: event.taskId,
+                description: event.description,
+                prompt: event.prompt,
+                ts: event.ts
+              });
             } else if (event.type === "agent.backgroundActivity") {
               const activity = event.backgroundActivity && typeof event.backgroundActivity === "object"
                 ? event.backgroundActivity
@@ -3033,16 +3162,28 @@ function createAgentTelemetryManager(options = {}) {
     fs.writeFileSync(planPromptPath, `${openFusionPlanPrompt()}\n`);
     fs.writeFileSync(executorPromptPath, `${openFusionExecutorPrompt()}\n`);
     fs.writeFileSync(investigatorPromptPath, `${openFusionInvestigatorPrompt()}\n`);
+    // The pane's app-owned background bridge (Brain-facing background_task
+    // MCP tool). The script is spawned by opencode itself, so it gets the
+    // callback wiring via the mcp entry's environment.
+    const backgroundBridge = {
+      nodePath,
+      scriptPath: path.join(__dirname, "openFusionBackgroundMcp.cjs"),
+      callbackUrl,
+      token,
+      sessionId: normalizedSessionId
+    };
     const fileConfig = openFusionConfigContents({
       plannerModel,
       executorModel,
-      cwd: effectiveOpts.cwd
+      cwd: effectiveOpts.cwd,
+      backgroundBridge
     });
     const envConfig = openFusionConfigContents({
       plannerModel,
       executorModel,
       cwd: effectiveOpts.cwd,
-      inlinePrompts: true
+      inlinePrompts: true,
+      backgroundBridge
     });
     fs.writeFileSync(configPath, `${JSON.stringify(fileConfig, null, 2)}\n`);
     for (const [name, command] of Object.entries(openFusionCommandContents({
@@ -3416,6 +3557,10 @@ function createAgentTelemetryManager(options = {}) {
     return postFusionAdapterControl(sessionId, "/interrupt");
   }
 
+  function cancelFusionBackgroundTask(sessionId, taskId) {
+    return postFusionAdapterControl(sessionId, "/background-cancel", { taskId });
+  }
+
   function stopFusionSession(sessionId) {
     return postFusionAdapterControl(sessionId, "/stop");
   }
@@ -3542,6 +3687,7 @@ function createAgentTelemetryManager(options = {}) {
     releaseSession,
     steerFusionSession,
     interruptFusionSession,
+    cancelFusionBackgroundTask,
     setFusionSessionMode,
     stopFusionSession,
     runDir,

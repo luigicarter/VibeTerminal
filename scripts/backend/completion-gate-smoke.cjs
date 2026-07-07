@@ -278,4 +278,55 @@ function observeAll(tracker, events) {
   assert(gate.getState().latchOpen, "aborted settle keeps the latch");
 }
 
+// ---- Background delegation wake: the report echo opens the latch ----
+// The latch opens on the WAKE echo (the moment the work is presented for
+// review), not at the settle — a settle can land mid-way through an unrelated
+// turn. Hosts attach `files` to the echo only for a completed implement-style
+// task; failed/cancelled wakes present no work as done.
+{
+  const gate = createFusionGateTracker({ cwd: CWD });
+  gate.observe({
+    type: "user",
+    text: "Background task report — x",
+    backgroundReport: true,
+    taskId: "bg-1",
+    title: "x"
+  });
+  assert(!gate.getState().latchOpen, "a failed/cancelled background wake (no files) must not open the latch");
+  gate.observe({
+    type: "user",
+    text: "Background task report — y",
+    backgroundReport: true,
+    taskId: "bg-2",
+    title: "y",
+    files: ["src/bg.ts"]
+  });
+  assert(gate.getState().latchOpen, "a completed background wake opens the latch with its file set");
+  const unverified = gate.observe({ type: "result", subtype: "success", isError: false });
+  assert(
+    unverified.gate && unverified.gate.status === "unverified",
+    "an unreviewed background wake settles unverified"
+  );
+  observeAll(gate, [
+    { type: "tool-call", toolId: "r1", name: "Read", input: { file_path: "C:\\repo\\src\\bg.ts" } },
+    { type: "tool-result", toolId: "r1", text: "contents" }
+  ]);
+  const verified = gate.observe({ type: "result", subtype: "success", isError: false });
+  assert(
+    verified.gate && verified.gate.status === "verified" && verified.gate.evidence[0] === "read changed file",
+    "reading the background task's changed file verifies the wake turn"
+  );
+  // The echo shape is tracker-generic: the Open Fusion factory latches too.
+  const ofGate = createOpenFusionGateTracker({ cwd: CWD });
+  ofGate.observe({
+    type: "user",
+    text: "Background task report — z",
+    backgroundReport: true,
+    taskId: "obg-1",
+    title: "z",
+    files: ["src/of.ts"]
+  });
+  assert(ofGate.getState().latchOpen, "the Open Fusion tracker latches on the background wake echo too");
+}
+
 console.log("Completion gate smoke passed");

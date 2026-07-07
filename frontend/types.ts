@@ -413,9 +413,73 @@ export interface CompletionGateVerdict {
 // replay: true marks a reattach replay of buffered history (pane remount onto a
 // live host session). Replayed events rebuild the pane transcript only — they
 // carry no new status/attention information and must not disturb either.
+// Detached background delegation lifecycle, shared by both chat modes.
+// started/settled are history-recorded (rows + composer pin rebuild on
+// replay); progress is transient live ticking only.
+export interface BackgroundTaskResult {
+  status: "completed" | "failed" | string;
+  // Fusion implement / investigate report fields.
+  summary?: string;
+  findings?: string;
+  // Open Fusion executor report text.
+  report?: string;
+  files?: string[];
+  error?: string;
+  goalReached?: boolean;
+  bugsFound?: string[];
+  missingRequirements?: string[];
+  nextAction?: string;
+  verifierSummary?: string;
+}
+
+export type BackgroundTaskEvent =
+  | {
+      type: "background-task";
+      phase: "started";
+      taskId: string;
+      title: string;
+      kind: string;
+      // The full delegation prompt (clipped) for the row's expandable report.
+      task?: string;
+    }
+  | {
+      type: "background-task";
+      phase: "progress";
+      taskId: string;
+      activityKind: string;
+      text: string;
+      updates: number;
+    }
+  | {
+      type: "background-task";
+      phase: "settled";
+      taskId: string;
+      title?: string;
+      kind?: string;
+      cancelled?: boolean;
+      // The host/engine died while the task ran (no report exists).
+      orphaned?: boolean;
+      updates?: number;
+      durationMs?: number;
+      result: BackgroundTaskResult;
+    };
+
 export type FusionChatEvent = (
   | { id: string; type: "session"; sessionId: string }
-  | { id: string; type: "user"; text: string; steer?: boolean }
+  // backgroundReport marks a host-delivered background-task report wake: the
+  // pane renders a collapsible report row, never a user bubble. files (when
+  // present) is the completed task's changed-file set (gate latch payload).
+  | {
+      id: string;
+      type: "user";
+      text: string;
+      steer?: boolean;
+      backgroundReport?: boolean;
+      taskId?: string;
+      title?: string;
+      files?: string[];
+    }
+  | ({ id: string } & BackgroundTaskEvent)
   | { id: string; type: "turn-start" }
   | { id: string; type: "assistant-text"; delta: string }
   | { id: string; type: "thinking"; delta: string }
@@ -486,7 +550,20 @@ export type OpenFusionChatEvent = (
   // mode: the run mode the host actually sent this turn as ("plan" | "auto").
   // Ground truth for plan-accept arming — emitted by the same call that chose
   // the opencode agent, so it stays correct across mid-turn mode flips.
-  | { id: string; type: "user"; text: string; queued?: boolean; mode?: string }
+  // backgroundReport: a host-delivered background-task report wake (renders as
+  // a collapsible report row, never a user bubble); files arms the gate latch.
+  | {
+      id: string;
+      type: "user";
+      text: string;
+      queued?: boolean;
+      mode?: string;
+      backgroundReport?: boolean;
+      taskId?: string;
+      title?: string;
+      files?: string[];
+    }
+  | ({ id: string } & BackgroundTaskEvent)
   | { id: string; type: "turn-start" }
   // A new Brain step began (new root assistant message): any pinned queued
   // message is now part of the model's context.
@@ -683,6 +760,9 @@ export interface OpenFusionChatMessage {
   taskRole?: string;
   // kind:"result" rows: completion-gate verdict chip for the settled turn.
   gate?: CompletionGateVerdict;
+  // Detached background delegation rows (see OcChatMessage).
+  background?: boolean;
+  backgroundReport?: boolean;
 }
 
 export type ChatRole = "user" | "opus" | "codex";
@@ -724,4 +804,7 @@ export interface ChatMessage {
   taskRole?: string;
   // kind:"result" rows: completion-gate verdict chip for the settled turn.
   gate?: CompletionGateVerdict;
+  // Detached background delegation rows (see OcChatMessage).
+  background?: boolean;
+  backgroundReport?: boolean;
 }

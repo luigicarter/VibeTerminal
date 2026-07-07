@@ -47,6 +47,7 @@ import {
 import {
   OC_LOGO_FUSION,
   OC_LOGO_OPEN,
+  OcBackgroundPin,
   OcChatRow,
   OcLogo,
   OcSpinner,
@@ -56,7 +57,8 @@ import {
   firstString,
   formatDurationShort,
   titlecase,
-  toolLabel
+  toolLabel,
+  type OcBackgroundTask
 } from "./ocChat";
 
 export interface OpenFusionSettingsChange {
@@ -480,6 +482,36 @@ export default function OpenFusionChatPane({
     new Map<string, { key: string; startTs: number; toolcalls: number; childSessionId?: string }>()
   );
   const taskChildIndexRef = useRef(new Map<string, string>());
+  // Detached background delegations: taskId → row key + live tally. Rebuilt
+  // from replayed started/settled events; settled tasks leave the map (the
+  // row keeps the report). Deliberately NOT cleared on turn-start — these
+  // tasks outlive Brain turns by design.
+  const bgTasksRef = useRef(
+    new Map<string, { key: string; title: string; task?: string; startedAt: number; updates: number }>()
+  );
+  const [bgTasks, setBgTasks] = useState<OcBackgroundTask[]>([]);
+  const [bgNow, setBgNow] = useState(() => Date.now());
+  const syncBgPin = useCallback(() => {
+    setBgTasks(
+      Array.from(bgTasksRef.current.entries()).map(([taskId, task]) => ({
+        taskId,
+        title: task.title,
+        startedAt: task.startedAt,
+        updates: task.updates
+      }))
+    );
+  }, []);
+  useEffect(() => {
+    if (!bgTasks.length) return;
+    const timer = window.setInterval(() => setBgNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [bgTasks.length]);
+  const stopBackgroundTask = useCallback(
+    (taskId: string) => {
+      void window.vibe?.openFusionChat?.backgroundCancel?.(session.id, taskId);
+    },
+    [session.id]
+  );
   const threadIdRef = useRef("");
   const threadTitleRef = useRef("");
   const onThreadRefChangeRef = useRef(onThreadRefChange);
@@ -767,6 +799,11 @@ export default function OpenFusionChatPane({
     steeringRef.current = [];
     setSteering([]);
     interruptSettledRef.current = false;
+    // Background pin state resets on every (re)launch: a reattach replay
+    // rebuilds it from the started/settled history; a fresh/restarted session
+    // has no live background tasks by definition.
+    bgTasksRef.current.clear();
+    setBgTasks([]);
     // Every fresh-launch path (create/restart/resume/clear/settings-restart/
     // boot restore) resets status to "idle" before this effect runs, so
     // anything else means a remount onto a LIVE host session (project switch
@@ -968,7 +1005,10 @@ export default function OpenFusionChatPane({
       taskChildIndexRef.current.clear();
       setMessages((prev) =>
         prev.map((m) =>
-          m.kind === "tool" && m.toolStatus === "running"
+          // Background rows are NOT settled by a foreground interrupt/abort:
+          // the detached work keeps running and its own settled event (or the
+          // host's engine-death settle) owns the row's ending.
+          m.kind === "tool" && m.toolStatus === "running" && !m.background
             ? { ...m, toolStatus: "error" as const, toolOutput: m.toolOutput || "aborted" }
             : m
         )
@@ -1034,6 +1074,27 @@ export default function OpenFusionChatPane({
           void window.vibe?.openFusionChat?.requestProviders(session.id);
           break;
         case "user":
+          if (event.backgroundReport) {
+            // A host-delivered background-task report wake: a collapsible
+            // report row, never a user bubble. Rehydrated wakes carry the
+            // whole stored envelope — expandable; live wakes carry a compact
+            // label (the settled row above holds the full report).
+            push({
+              role: "executor",
+              kind: "tool",
+              text: "",
+              toolName: "task",
+              toolStatus: "done",
+              backgroundReport: true,
+              toolInput: {
+                subagent_type: "executor",
+                description: event.title || "background task"
+              },
+              toolOutput:
+                event.text && event.text.length > 200 ? event.text : undefined
+            });
+            break;
+          }
           if (!threadTitleRef.current) {
             threadTitleRef.current = titleFromFirstPrompt(event.text);
             publishThreadRef();
@@ -1126,6 +1187,11 @@ export default function OpenFusionChatPane({
           break;
         }
         case "tool-call": {
+          if (event.name.startsWith("vibeterminal_background")) {
+            // The Brain's background_task/background_cancel MCP calls are
+            // suppressed: the background-task events own the visible rows.
+            break;
+          }
           setActiveRole(event.role);
           const isDelegation = event.name === "task" && event.role === "brain";
           const agentKind =
@@ -1172,6 +1238,9 @@ export default function OpenFusionChatPane({
           break;
         }
         case "tool-result": {
+          if (event.name.startsWith("vibeterminal_background")) {
+            break;
+          }
           setActiveRole(event.role);
           const isDelegation = event.name === "task";
           const text = isDelegation
@@ -1229,6 +1298,116 @@ export default function OpenFusionChatPane({
               }
             ];
           });
+          break;
+        }
+        case "background-task": {
+          if (event.phase === "started") {
+            if (bgTasksRef.current.has(event.taskId)) break;
+            const key = push({
+              role: "executor",
+              kind: "tool",
+              text: "",
+              toolName: "task",
+              toolStatus: "running",
+              background: true,
+              taskRole: "executor",
+              toolInput: {
+                subagent_type: "executor",
+                description: event.title || event.taskId
+              },
+              toolOutput: event.task
+                ? `**Delegation**\n\n${clip(event.task, 8000)}`
+                : undefined
+            });
+            bgTasksRef.current.set(event.taskId, {
+              key,
+              title: event.title || event.taskId,
+              task: event.task,
+              startedAt: Date.now(),
+              updates: 0
+            });
+            syncBgPin();
+            break;
+          }
+          const entry = bgTasksRef.current.get(event.taskId);
+          if (event.phase === "progress") {
+            if (!entry) break;
+            entry.updates = event.updates || entry.updates + 1;
+            const detail =
+              event.activityKind === "command" && !event.text.startsWith("$")
+                ? `$ ${clip(event.text, 80)}`
+                : clip(event.text, 80);
+            setMessages((prev) =>
+              prev.map((row) => (row.key === entry.key ? { ...row, taskDetail: detail } : row))
+            );
+            syncBgPin();
+            break;
+          }
+          // settled
+          const result = event.result ?? {
+            status: "failed",
+            error: "background task returned no result"
+          };
+          const ok = result.status === "completed" && !event.cancelled;
+          const updates = event.updates ?? entry?.updates ?? 0;
+          const duration = event.durationMs
+            ? formatDurationShort(event.durationMs)
+            : entry
+              ? formatDurationShort(Date.now() - entry.startedAt)
+              : "";
+          const taskDetail = [
+            updates > 0 ? `${updates} update${updates === 1 ? "" : "s"}` : "",
+            duration,
+            event.cancelled ? "cancelled" : ""
+          ]
+            .filter(Boolean)
+            .join(" · ");
+          const reportParts: string[] = [];
+          if (entry?.task) reportParts.push(`**Delegation**\n\n${clip(entry.task, 8000)}`);
+          if (ok) {
+            reportParts.push(extractTaskResult(result.report || "") || "(no report returned)");
+            const files = Array.isArray(result.files)
+              ? result.files.filter((file): file is string => typeof file === "string")
+              : [];
+            if (files.length) {
+              reportParts.push(["**Files**", ...files.map((file) => `- ${file}`)].join("\n"));
+            }
+          } else {
+            reportParts.push(clip(result.error || "background task failed", 2000));
+          }
+          const report = reportParts.join("\n\n").trim();
+          if (entry) {
+            setMessages((prev) =>
+              prev.map((row) =>
+                row.key === entry.key
+                  ? {
+                      ...row,
+                      toolStatus: ok ? ("done" as const) : ("error" as const),
+                      toolOutput: report || undefined,
+                      taskDetail: taskDetail || row.taskDetail
+                    }
+                  : row
+              )
+            );
+            bgTasksRef.current.delete(event.taskId);
+          } else {
+            push({
+              role: "executor",
+              kind: "tool",
+              text: "",
+              toolName: "task",
+              toolStatus: ok ? "done" : "error",
+              background: true,
+              taskRole: "executor",
+              toolInput: {
+                subagent_type: "executor",
+                description: event.title || event.taskId
+              },
+              toolOutput: report || undefined,
+              taskDetail: taskDetail || undefined
+            });
+          }
+          syncBgPin();
           break;
         }
         case "permission": {
@@ -2364,6 +2543,8 @@ export default function OpenFusionChatPane({
         return true;
       case "/clear":
       case "/new":
+        bgTasksRef.current.clear();
+        setBgTasks([]);
         onClear();
         return true;
       case "/details":
@@ -3551,6 +3732,7 @@ export default function OpenFusionChatPane({
               </button>
             </div>
           )}
+          <OcBackgroundPin tasks={bgTasks} now={bgNow} onStop={stopBackgroundTask} />
           {steering.length > 0 && (
             <div className="openfusion-steering" role="status" aria-label="Queued messages">
               {steering.map((item) => (

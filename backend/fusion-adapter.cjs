@@ -636,7 +636,7 @@ function postTelemetry(entry, timeout = 1000) {
       port: url.port,
       path: url.pathname,
       method: "POST",
-      timeout: 1000,
+      timeout,
       headers: {
         "content-type": "application/json",
         "content-length": Buffer.byteLength(body),
@@ -700,6 +700,17 @@ const FANOUT_MAX_TASKS = 4;
 const fanoutWorkers = new Map(); // worker threadId -> worker
 let fanoutActive = false; // covers the codex fan-out AND the claude sequential batch window
 let activeFanoutRun = null; // {aborted} - abort skips finalize's aggregate resolve
+// ---- detached background delegations ----
+// codex_implement/codex_investigate {background:true} run ONE task detached:
+// the tool call returns {status:"started", taskId} immediately, the work runs
+// on an ephemeral worker (own thread + timers, fan-out routing rules), and
+// the settle is relayed to the host as fusion.background-task telemetry — the
+// host wakes the planner with the report as a NEW turn. Background workers
+// never touch currentTurn/fanoutActive, never park decisions, and never sync
+// the native goal.
+const BACKGROUND_MAX_TASKS = 4;
+const backgroundWorkers = new Map(); // routeKey (codex worker threadId | claude synthetic id) -> worker
+let backgroundTaskSeq = 0;
 
 function isCurrentCodexChild(child) {
   return Boolean(child && codexChild === child);
@@ -1028,6 +1039,7 @@ function resetCodexProcessState(options = {}) {
   activeTurnId = null;
   activeTurnKind = null;
   abortFanoutWorkers("Fusion execution process was reset.");
+  abortBackgroundWorkers("Fusion execution process was reset.", { engines: "codex" });
   clearSteerRoutingState();
   currentGoal = null;
   goalFeatureAvailable = null;
@@ -1035,6 +1047,7 @@ function resetCodexProcessState(options = {}) {
 
 function resetHarness(reason = "Fusion stopped.") {
   parked.clear();
+  abortBackgroundWorkers(reason);
   failAll(new Error(reason));
   killCodex();
   killClaudeExecutor();
@@ -1048,7 +1061,10 @@ function resetHarness(reason = "Fusion stopped.") {
 function startControlServer() {
   if (controlServer || !TOKEN || !SESSION_ID) return;
   controlServer = http.createServer((request, response) => {
-    if (request.method !== "POST" || !["/steer", "/interrupt", "/stop", "/mode"].includes(request.url)) {
+    if (
+      request.method !== "POST" ||
+      !["/steer", "/interrupt", "/stop", "/mode", "/background-cancel"].includes(request.url)
+    ) {
       response.writeHead(404);
       response.end();
       return;
@@ -1083,6 +1099,8 @@ function startControlServer() {
         } else if (request.url === "/mode") {
           runMode = normalizeFusionRunMode(parsed.mode);
           result = { status: "ok", mode: runMode };
+        } else if (request.url === "/background-cancel") {
+          result = cancelBackgroundTask(String(parsed.taskId || ""));
         } else {
           result = await codexSteer(parsed.text);
         }
@@ -1166,10 +1184,20 @@ function connect() {
         const line = codexBuffer.slice(0, index).trim();
         codexBuffer = codexBuffer.slice(index + 1);
         if (!line) continue;
+        let parsed = null;
         try {
-          handleSouth(JSON.parse(line));
+          parsed = JSON.parse(line);
         } catch {
-          // ignore non-JSON lines
+          continue; // ignore non-JSON lines
+        }
+        try {
+          handleSouth(parsed);
+        } catch (error) {
+          // A throw inside notification/response handling used to be swallowed
+          // with the JSON noise, silently stranding turns. Surface it.
+          logErr(
+            `south handler error (${(parsed && parsed.method) || "response"}): ${error?.message || error}`
+          );
         }
       }
     });
@@ -1228,6 +1256,7 @@ function failAll(error) {
   pendingReq.clear();
   parked.clear();
   abortFanoutWorkers(message);
+  abortBackgroundWorkers(message, { engines: "codex" });
   activeTurnId = null;
   activeTurnKind = null;
   latchedTurnResult = null;
@@ -1299,34 +1328,23 @@ function ensureExecutorFamily(family) {
   return family;
 }
 
-function claudeSend(obj) {
-  if (
-    !claudeChild ||
-    !claudeChild.stdin ||
-    claudeChild.stdin.destroyed ||
-    !claudeChild.stdin.writable
-  ) {
+function writeChildJson(child, obj) {
+  if (!child || !child.stdin || child.stdin.destroyed || !child.stdin.writable) {
     return false;
   }
   try {
-    claudeChild.stdin.write(`${JSON.stringify(obj)}\n`);
+    child.stdin.write(`${JSON.stringify(obj)}\n`);
     return true;
   } catch {
     return false;
   }
 }
 
-function killClaudeExecutor() {
-  const child = claudeChild;
-  claudeChild = null;
-  claudeNormalizer = null;
-  claudeStdoutBuffer = "";
-  claudeSpawnedModel = null;
-  claudeSpawnedEffort = null;
-  claudeSpawnedFast = null;
-  claudeTurnActive = false;
-  claudeInterruptRequested = false;
-  claudeTextParts = [];
+function claudeSend(obj) {
+  return writeChildJson(claudeChild, obj);
+}
+
+function killChildProcessTree(child) {
   if (!child || child.killed) return;
   if (isWin && child.pid) {
     try {
@@ -1345,6 +1363,20 @@ function killClaudeExecutor() {
   } catch {
     // ignore
   }
+}
+
+function killClaudeExecutor() {
+  const child = claudeChild;
+  claudeChild = null;
+  claudeNormalizer = null;
+  claudeStdoutBuffer = "";
+  claudeSpawnedModel = null;
+  claudeSpawnedEffort = null;
+  claudeSpawnedFast = null;
+  claudeTurnActive = false;
+  claudeInterruptRequested = false;
+  claudeTextParts = [];
+  killChildProcessTree(child);
 }
 
 function buildClaudeExecutorArgs(settings = {}) {
@@ -1840,7 +1872,14 @@ function accumulateTurnItems(items, options = {}) {
 function resolveCompletedTurn(turn) {
   const turnId = extractTurnId(turn);
   if (activeTurnId && turnId && activeTurnId !== turnId) {
-    return;
+    // Main-thread completions are authoritative even on an id mismatch:
+    // turn/start on an already-busy thread (the native goal turn) returns a
+    // SUBMISSION id that never becomes a turn, and dropping the real
+    // TurnCompleted here stranded the waiter until the idle/hard timers fired
+    // a false "exceeded the maximum duration" failure. Child-thread traffic
+    // never reaches this handler (thread routing in handleNotification), so
+    // log the mismatch and resolve anyway.
+    logErr(`turn/completed id mismatch (active ${activeTurnId}, completed ${turnId}); resolving anyway`);
   }
   if (!currentTurn && !activeTurnId && parked.size === 0) {
     return;
@@ -1862,7 +1901,12 @@ function resolveCompletedTurn(turn) {
 
 function handleTurnStartResponse(response) {
   const nextTurnId = extractTurnId(response);
-  if (nextTurnId) {
+  // The response's turn id is the SUBMISSION id (turn_processor returns it as
+  // turn_id). When the thread was already running a turn — the native goal
+  // turn started by thread/goal/set — the submission is absorbed into that
+  // turn and its id never becomes a real turn. A turn/started notification is
+  // authoritative; never let the response overwrite an id one already set.
+  if (nextTurnId && !activeTurnId) {
     activeTurnId = nextTurnId;
   }
   const turn = response && response.turn;
@@ -1934,15 +1978,43 @@ function handleSouth(msg) {
   }
 }
 
+function notificationThreadId(params) {
+  if (!params || typeof params !== "object") return null;
+  const candidates = [
+    params.threadId,
+    params.thread_id,
+    params.conversationId,
+    params.conversation_id,
+    params.thread && params.thread.id
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return null;
+}
+
 function handleNotification(msg) {
   const method = msg.method;
   const params = msg.params || {};
-  // Fan-out worker events route to their scoped state and must never touch
-  // the global single-turn machinery (a worker's turn/completed would
-  // otherwise resolve the aggregate with a bogus single-turn result).
+  // Fan-out and background worker events route to their scoped state and must
+  // never touch the global single-turn machinery (a worker's turn/completed
+  // would otherwise resolve the aggregate with a bogus single-turn result).
   const fanoutWorker = fanoutWorkerForParams(params);
   if (fanoutWorker) {
     handleFanoutNotification(fanoutWorker, method, params);
+    return;
+  }
+  // Executor-spawned child threads (subagent/review children with their own
+  // thread ids) stream on this same client. Their lifecycle must never touch
+  // the main-thread turn machinery: a child turn/started used to hijack
+  // activeTurnId, and a child's deltas/items polluted the main turn buffers.
+  const sourceThreadId = notificationThreadId(params);
+  if (sourceThreadId && sourceThreadId !== threadId) {
+    if (method === "turn/started" || method === "turn/completed" || method === "turn/failed") {
+      logErr(`ignored ${method} from non-main thread ${sourceThreadId}`);
+    }
     return;
   }
   if (isTurnProgressNotification(method, params)) {
@@ -2634,7 +2706,8 @@ function normalizeFanoutTasks(taskValue, tasksValue) {
 }
 
 function fanoutWorkerForParams(params) {
-  if (!params || typeof params !== "object" || fanoutWorkers.size === 0) return null;
+  if (!params || typeof params !== "object") return null;
+  if (fanoutWorkers.size === 0 && backgroundWorkers.size === 0) return null;
   const candidates = [
     params.threadId,
     params.thread_id,
@@ -2643,8 +2716,11 @@ function fanoutWorkerForParams(params) {
     params.thread && params.thread.id
   ];
   for (const candidate of candidates) {
-    if (typeof candidate === "string" && candidate && fanoutWorkers.has(candidate)) {
-      return fanoutWorkers.get(candidate);
+    if (typeof candidate === "string" && candidate) {
+      if (fanoutWorkers.has(candidate)) return fanoutWorkers.get(candidate);
+      // Background workers route exactly like fan-out workers: scoped state,
+      // never the global single-turn machinery.
+      if (backgroundWorkers.has(candidate)) return backgroundWorkers.get(candidate);
     }
   }
   // Fallback for payloads that carry only a turn id.
@@ -2653,11 +2729,19 @@ function fanoutWorkerForParams(params) {
   for (const worker of fanoutWorkers.values()) {
     if (worker.turnId && worker.turnId === turnId) return worker;
   }
+  for (const worker of backgroundWorkers.values()) {
+    if (worker.turnId && worker.turnId === turnId) return worker;
+  }
   return null;
 }
 
 function fanoutWorkerLabel(worker) {
+  if (worker.background) return `background: ${worker.title}`;
   return `${worker.kind === "investigate" ? "scout" : "workstream"} ${worker.index + 1}/${worker.count}`;
+}
+
+function fanoutWorkerNoun(worker) {
+  return worker && worker.background ? "background task" : "parallel worker";
 }
 
 function clearFanoutWorkerTimers(worker) {
@@ -2679,7 +2763,7 @@ function refreshFanoutWorkerIdleTimer(worker, reason = "progress") {
   worker.idleTimer = setTimeout(() => {
     settleFanoutWorker(worker, {
       status: "failed",
-      error: `Fusion parallel worker stalled after ${reason}.`
+      error: `Fusion ${fanoutWorkerNoun(worker)} stalled after ${reason}.`
     });
   }, TURN_IDLE_TIMEOUT_MS);
 }
@@ -2727,6 +2811,10 @@ function createFanoutWorker(kind, task, index, count, workerThreadId) {
 }
 
 function relayFanoutItem(worker, item) {
+  if (worker.background) {
+    relayBackgroundItem(worker, item);
+    return;
+  }
   const label = fanoutWorkerLabel(worker);
   if (item.type === "agentMessage" && item.text) {
     relay({
@@ -2811,7 +2899,8 @@ function finishFanoutWorkerTurn(worker, turn) {
   if (status === "interrupted") {
     settleFanoutWorker(worker, {
       status: "failed",
-      error: "Fusion parallel worker was interrupted."
+      error: `Fusion ${fanoutWorkerNoun(worker)} was interrupted.`,
+      cancelled: worker.cancelled === true
     });
     return;
   }
@@ -2829,8 +2918,12 @@ function handleFanoutNotification(worker, method, params) {
   if (worker.settled) return;
   refreshFanoutWorkerIdleTimer(worker, method);
   // Worker progress is aggregate progress: keep the aggregate waiter's idle
-  // backstop from firing while any worker is still streaming.
-  refreshTurnIdleTimer(`fanout ${method}`);
+  // backstop from firing while any worker is still streaming. Background
+  // workers have NO aggregate waiter — their progress must never keep an
+  // unrelated foreground turn alive.
+  if (!worker.background) {
+    refreshTurnIdleTimer(`fanout ${method}`);
+  }
   if (method === "turn/started") {
     const turnId = extractTurnId(params);
     if (turnId) worker.turnId = turnId;
@@ -2854,13 +2947,19 @@ function handleFanoutNotification(worker, method, params) {
   }
   if (method === "turn/failed" || method === "error") {
     const message =
-      (params.error && params.error.message) || params.message || "Fusion parallel worker failed";
+      (params.error && params.error.message) ||
+      params.message ||
+      `Fusion ${fanoutWorkerNoun(worker)} failed`;
     settleFanoutWorker(worker, { status: "failed", error: message });
   }
 }
 
 const FANOUT_QUESTION_ANSWER =
   "This task is running as one of several parallel Fusion workers, so no mid-turn questions are available. " +
+  "Choose the most reasonable interpretation within your stated scope, or stop and report the blocker in your final report.";
+
+const BACKGROUND_QUESTION_ANSWER =
+  "This task is running as a detached background Fusion task, so no mid-turn questions are available. " +
   "Choose the most reasonable interpretation within your stated scope, or stop and report the blocker in your final report.";
 
 // During a fan-out, server->client requests are answered inline (never
@@ -2875,8 +2974,10 @@ function resolveFanoutServerRequest(worker, msg) {
   };
   if (method.endsWith("requestUserInput")) {
     const answers = {};
+    const autoAnswer =
+      worker && worker.background ? BACKGROUND_QUESTION_ANSWER : FANOUT_QUESTION_ANSWER;
     for (const q of params.questions || []) {
-      answers[q.id] = { answers: [FANOUT_QUESTION_ANSWER] };
+      answers[q.id] = { answers: [autoAnswer] };
     }
     codexSend({ id: msg.id, result: { answers } });
     note(`question auto-answered (report blockers in the final report): ${approvalDetail(method, params)}`);
@@ -3179,6 +3280,408 @@ async function runClaudeFanoutSequential(kind, tasks, settings) {
   }
 }
 
+// ---- detached background delegation engine ----
+// A background worker is a fan-out-shaped worker (same routing map lookups,
+// same buffers, own idle/hard timers, inline server-request resolution) whose
+// settle feeds fusion.background-task telemetry instead of an aggregate turn
+// latch. It never touches currentTurn/fanoutActive, so foreground turns and
+// user conversation stay fully available while it runs.
+
+function backgroundTaskTitle(task) {
+  const firstLine =
+    String(task || "")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean) || "background task";
+  return clippedText(firstLine, 64);
+}
+
+function buildBackgroundTaskText(kind, task) {
+  const base =
+    kind === "investigate" ? buildCodexInvestigationTask(task) : buildCodexVerifierTask(task);
+  return [
+    base,
+    "",
+    "## Detached background task",
+    "You are running as a DETACHED background Fusion task: the planner is not blocked on this call and no mid-turn questions or approvals are available.",
+    "If something is ambiguous, choose the most reasonable interpretation within your stated scope, or stop and report the blocker in your final report" +
+      (kind === "investigate" ? "." : " and verdict."),
+    "Your final report is delivered to the planner when you finish; make it self-contained."
+  ].join("\n");
+}
+
+function createBackgroundWorker(kind, task, taskId, routeKey) {
+  const worker = {
+    background: true,
+    taskId,
+    title: backgroundTaskTitle(task),
+    startedAt: Date.now(),
+    kind,
+    task,
+    index: 0,
+    count: 1,
+    threadId: routeKey,
+    child: null,
+    normalizer: null,
+    stdoutBuffer: "",
+    textParts: [],
+    turnId: null,
+    summary: [],
+    files: [],
+    notes: [],
+    itemIds: new Set(),
+    deltas: new Map(),
+    idleTimer: null,
+    hardTimer: null,
+    settled: false,
+    cancelled: false,
+    updates: 0,
+    resolve: null,
+    promise: null
+  };
+  worker.promise = new Promise((resolve) => {
+    worker.resolve = resolve;
+  });
+  worker.hardTimer = setTimeout(() => {
+    settleFanoutWorker(worker, {
+      status: "failed",
+      error: "Fusion background task exceeded the maximum duration."
+    });
+  }, TURN_HARD_TIMEOUT_MS);
+  refreshFanoutWorkerIdleTimer(worker, "background start");
+  return worker;
+}
+
+function postBackgroundProgress(worker, activityKind, text) {
+  if (!activityKind || worker.settled) return;
+  worker.updates += 1;
+  postTelemetry({
+    type: "fusion.background-task",
+    phase: "progress",
+    taskId: worker.taskId,
+    title: worker.title,
+    activityKind,
+    text: clippedText(text, 400),
+    updates: worker.updates
+  });
+}
+
+function relayBackgroundItem(worker, item) {
+  if (item.type === "agentMessage" && item.text) {
+    postBackgroundProgress(worker, "message", summarizeAgentMessageForDisplay(item.text));
+  } else if (item.type === "commandExecution") {
+    postBackgroundProgress(worker, "command", commandExecutionDisplayText(item));
+  } else if (item.type === "fileChange") {
+    const files = (item.changes || [])
+      .map((c) => `${c.type || "edit"} ${c.path || c.move_path || ""}`.trim())
+      .join(", ");
+    postBackgroundProgress(worker, "file", files || "file changes");
+  }
+}
+
+// The settled payload rides the telemetry callback server (64 KiB body cap);
+// clip the long fields so a verbose executor cannot drop its own report.
+function clipBackgroundResult(result) {
+  const out = { ...(result || { status: "failed", error: "background worker returned no result" }) };
+  if (typeof out.summary === "string") out.summary = clippedText(out.summary, 24000);
+  if (typeof out.findings === "string") out.findings = clippedText(out.findings, 24000);
+  if (typeof out.error === "string") out.error = clippedText(out.error, 2000);
+  if (typeof out.verifierSummary === "string") {
+    out.verifierSummary = clippedText(out.verifierSummary, 2000);
+  }
+  if (Array.isArray(out.files)) out.files = out.files.slice(0, 64);
+  return out;
+}
+
+function finalizeBackgroundWorker(worker, result) {
+  backgroundWorkers.delete(worker.threadId);
+  clearFanoutWorkerTimers(worker);
+  if (worker.child) {
+    const child = worker.child;
+    worker.child = null;
+    killChildProcessTree(child);
+  }
+  const settled = result || { status: "failed", error: "background worker returned no result" };
+  postTelemetry(
+    {
+      type: "fusion.background-task",
+      phase: "settled",
+      taskId: worker.taskId,
+      title: worker.title,
+      kind: worker.kind,
+      cancelled: worker.cancelled === true || settled.cancelled === true,
+      updates: worker.updates,
+      durationMs: Date.now() - worker.startedAt,
+      result: clipBackgroundResult(settled)
+    },
+    3000
+  );
+}
+
+async function startCodexBackgroundWorker(kind, task, taskId, settings) {
+  // Boots the shared app-server child if needed; background threads ride it.
+  await ensureThread();
+  const workerThreadId = await startFanoutThread(kind, settings);
+  const worker = createBackgroundWorker(kind, task, taskId, workerThreadId);
+  backgroundWorkers.set(workerThreadId, worker);
+  const params = {
+    threadId: workerThreadId,
+    input: [{ type: "text", text: buildBackgroundTaskText(kind, task), text_elements: [] }],
+    approvalPolicy: "never",
+    sandboxPolicy:
+      kind === "investigate" ? fusionCodexInvestigateSandboxPolicy() : fusionCodexSandboxPolicy()
+  };
+  await applyCodexTurnSettings(params);
+  rpc("turn/start", params)
+    .then((response) => {
+      const turnId = extractTurnId(response);
+      if (turnId && !worker.turnId) worker.turnId = turnId;
+      const turn = response && response.turn;
+      if (!turn || typeof turn !== "object" || worker.settled) return;
+      accumulateFanoutItems(worker, turn.items, { relay: false });
+      if (["completed", "failed", "interrupted"].includes(turn.status)) {
+        finishFanoutWorkerTurn(worker, turn);
+      }
+    })
+    .catch((error) => settleFanoutWorker(worker, { status: "failed", error: error.message }));
+  return worker;
+}
+
+function handleBackgroundClaudeEvent(worker, event) {
+  if (!event || worker.settled) return;
+  switch (event.type) {
+    case "assistant-text":
+      worker.textParts.push(event.delta || "");
+      refreshFanoutWorkerIdleTimer(worker, "executor text");
+      break;
+    case "thinking":
+      refreshFanoutWorkerIdleTimer(worker, "executor thinking");
+      break;
+    case "tool-call": {
+      const name = claudeToolBaseName(event.name);
+      const input = event.input && typeof event.input === "object" ? event.input : {};
+      if (name === "Bash") {
+        postBackgroundProgress(worker, "command", clippedCommandPreview(input.command));
+      } else if (CLAUDE_FILE_TOOLS.has(name)) {
+        const filePath = input.file_path || input.notebook_path || input.path || "";
+        if (filePath) {
+          worker.files.push(String(filePath));
+          postBackgroundProgress(worker, "file", `edit ${filePath}`);
+        }
+      }
+      refreshFanoutWorkerIdleTimer(worker, `executor ${name || "tool"}`);
+      break;
+    }
+    case "tool-result":
+      refreshFanoutWorkerIdleTimer(worker, "executor tool result");
+      break;
+    case "result": {
+      const text = worker.textParts.join("").trim();
+      worker.textParts = [];
+      if (text) worker.summary.push(text);
+      if (event.isError) {
+        settleFanoutWorker(worker, {
+          status: "failed",
+          error:
+            (typeof event.resultText === "string" && event.resultText) ||
+            "Fusion background executor turn failed"
+        });
+        return;
+      }
+      settleFanoutWorker(
+        worker,
+        worker.kind === "investigate"
+          ? fanoutWorkerInvestigationResult(worker)
+          : fanoutWorkerTurnResult(worker)
+      );
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+function startClaudeBackgroundWorker(kind, task, taskId, settings) {
+  const worker = createBackgroundWorker(kind, task, taskId, `claude-${taskId}`);
+  backgroundWorkers.set(worker.threadId, worker);
+  const { windowsCmdArg, createStreamNormalizer } = require("./fusionChatHost.cjs");
+  const args = buildClaudeExecutorArgs({
+    model: settings.model || "sonnet",
+    effort: settings.effort || null,
+    fast: settings.fast === true
+  });
+  let child;
+  try {
+    if (isWin) {
+      const shell = process.env.ComSpec || "cmd.exe";
+      child = spawn(
+        shell,
+        ["/d", "/s", "/c", [CLAUDE_EXEC_BIN, ...args].map(windowsCmdArg).join(" ")],
+        { cwd: CWD, stdio: ["pipe", "pipe", "pipe"], windowsHide: true }
+      );
+    } else {
+      child = spawn(CLAUDE_EXEC_BIN, args, {
+        cwd: CWD,
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true
+      });
+    }
+  } catch (error) {
+    backgroundWorkers.delete(worker.threadId);
+    clearFanoutWorkerTimers(worker);
+    throw error;
+  }
+  worker.child = child;
+  worker.normalizer = createStreamNormalizer();
+  child.stdout.on("data", (chunk) => {
+    if (worker.child !== child) return;
+    worker.stdoutBuffer += chunk.toString("utf8");
+    let index;
+    while ((index = worker.stdoutBuffer.indexOf("\n")) !== -1) {
+      const line = worker.stdoutBuffer.slice(0, index).trim();
+      worker.stdoutBuffer = worker.stdoutBuffer.slice(index + 1);
+      if (!line) continue;
+      for (const event of worker.normalizer(line)) {
+        handleBackgroundClaudeEvent(worker, event);
+      }
+    }
+  });
+  child.stderr.on("data", () => {});
+  child.on("error", (error) => {
+    settleFanoutWorker(worker, {
+      status: "failed",
+      error: `Fusion background executor failed: ${error.message}`
+    });
+  });
+  child.on("exit", () => {
+    settleFanoutWorker(worker, {
+      status: "failed",
+      error: "Fusion background executor process exited before finishing.",
+      cancelled: worker.cancelled === true
+    });
+  });
+  if (!writeChildJson(child, {
+    type: "user",
+    message: { role: "user", content: buildBackgroundTaskText(kind, task) }
+  })) {
+    settleFanoutWorker(worker, {
+      status: "failed",
+      error: "Fusion background executor channel is not writable"
+    });
+  }
+  return worker;
+}
+
+function findBackgroundWorkerByTaskId(taskId) {
+  const wanted = String(taskId || "").trim();
+  if (!wanted) return null;
+  for (const worker of backgroundWorkers.values()) {
+    if (worker.taskId === wanted) return worker;
+  }
+  return null;
+}
+
+function activeBackgroundTaskList() {
+  return Array.from(backgroundWorkers.values()).map((worker) => ({
+    taskId: worker.taskId,
+    title: worker.title,
+    kind: worker.kind
+  }));
+}
+
+function cancelBackgroundTask(taskId) {
+  const worker = findBackgroundWorkerByTaskId(taskId);
+  if (!worker) {
+    return {
+      status: "error",
+      error: `Unknown background taskId: ${taskId || "(none)"}`,
+      backgroundTasks: activeBackgroundTaskList()
+    };
+  }
+  worker.cancelled = true;
+  if (worker.child) {
+    writeChildJson(worker.child, {
+      type: "control_request",
+      request_id: `fusion_bg_int_${worker.taskId}`,
+      request: { subtype: "interrupt" }
+    });
+  } else if (worker.turnId) {
+    rpc("turn/interrupt", { threadId: worker.threadId, turnId: worker.turnId }).catch(() => {});
+  }
+  settleFanoutWorker(worker, {
+    status: "failed",
+    error: "Background task cancelled.",
+    cancelled: true
+  });
+  relay({ role: "opus", kind: "cancel", text: `background task cancelled: ${worker.title}` });
+  return { status: "cancelled", taskId: worker.taskId, title: worker.title };
+}
+
+// Hard-stops background workers on process-level failures. engines:"codex"
+// scopes the abort to workers riding the app-server child (a codex crash must
+// not kill an unrelated claude-family background child); "all" is the
+// stop/reset path. Every abort still settles → finalize → settled telemetry,
+// so the planner is woken with the failure instead of the task vanishing.
+function abortBackgroundWorkers(reason, options = {}) {
+  const { engines = "all" } = options;
+  if (backgroundWorkers.size === 0) return false;
+  for (const worker of Array.from(backgroundWorkers.values())) {
+    if (engines === "codex" && worker.child) continue;
+    if (!worker.settled && !worker.child && worker.turnId) {
+      rpc("turn/interrupt", { threadId: worker.threadId, turnId: worker.turnId }).catch(() => {});
+    }
+    if (worker.child) {
+      // Kill synchronously: the stop path may exit the process before the
+      // async finalize (promise microtask) would get to it.
+      const child = worker.child;
+      worker.child = null;
+      killChildProcessTree(child);
+    }
+    settleFanoutWorker(worker, { status: "failed", error: reason });
+  }
+  return true;
+}
+
+async function startBackgroundDelegation(kind, task) {
+  if (backgroundWorkers.size >= BACKGROUND_MAX_TASKS) {
+    return {
+      status: "error",
+      error: `At most ${BACKGROUND_MAX_TASKS} background tasks may run at once; wait for one to settle or cancel one with codex_cancel {taskId}.`,
+      backgroundTasks: activeBackgroundTaskList()
+    };
+  }
+  const settings = readCodexSettings();
+  const family = ensureExecutorFamily(settings.family);
+  backgroundTaskSeq += 1;
+  const taskId = `bg-${backgroundTaskSeq}`;
+  let worker;
+  try {
+    worker =
+      family === "claude"
+        ? startClaudeBackgroundWorker(kind, task, taskId, settings)
+        : await startCodexBackgroundWorker(kind, task, taskId, settings);
+  } catch (error) {
+    return { status: "failed", error: error?.message || String(error) };
+  }
+  postTelemetry({
+    type: "fusion.background-task",
+    phase: "started",
+    taskId,
+    title: worker.title,
+    kind,
+    task: clippedText(task, 8000)
+  });
+  worker.promise.then((result) => finalizeBackgroundWorker(worker, result));
+  return {
+    status: "started",
+    taskId,
+    title: worker.title,
+    note:
+      "The delegation is running as a detached background task. End your turn and tell the user what is running; the full report arrives as a FUSION BACKGROUND TASK REPORT message in a later turn. Review that report with your normal independent verification before acting on it."
+  };
+}
+
 async function ensureThread() {
   const settings = readCodexSettings();
   const requestedModel = settings.model || null;
@@ -3349,7 +3852,12 @@ async function codexGoalClear() {
 // so the next codex_implement starts fresh, without restarting the pane. The
 // Codex thread and native goal stay alive. Unlike resetHarness (host-only, kills
 // the child), this keeps the bridge warm and never blocks on the child.
-function codexCancel() {
+function codexCancel(taskId) {
+  // With a taskId this is a scoped background-task cancel: the foreground
+  // turn, parked decisions, and other background tasks stay untouched.
+  if (taskId) {
+    return cancelBackgroundTask(taskId);
+  }
   const hadActiveTurn = Boolean(
     currentTurn || activeTurnId || claudeTurnActive || steerRoutingPending || fanoutWorkers.size > 0
   );
@@ -3381,7 +3889,14 @@ function codexCancel() {
   activeTurnId = null;
   activeTurnKind = null;
   relay({ role: "opus", kind: "cancel", text: "turn cancelled" });
-  return { status: "cancelled", hadActiveTurn, clearedDecisions };
+  const result = { status: "cancelled", hadActiveTurn, clearedDecisions };
+  if (backgroundWorkers.size > 0) {
+    // A plain cancel never touches detached background tasks; tell the
+    // planner they are still running so it does not assume they were killed.
+    result.backgroundTasks = activeBackgroundTaskList();
+    result.note = "Detached background tasks keep running; cancel one with codex_cancel {taskId}.";
+  }
+  return result;
 }
 
 async function codexSteerResolve(decisionValue, text) {
@@ -3478,7 +3993,7 @@ async function syncGoalAfterTurn(result) {
   return { ...result, goalSync: goalResult };
 }
 
-async function codexImplement(taskValue, tasksValue) {
+async function codexImplement(taskValue, tasksValue, backgroundValue) {
   const normalized = normalizeFanoutTasks(taskValue, tasksValue);
   if (normalized.error) return { status: "error", error: normalized.error };
   const task = normalized.task || null;
@@ -3496,6 +4011,16 @@ async function codexImplement(taskValue, tasksValue) {
   });
   if (pendingDecision) {
     return pendingDecision;
+  }
+  if (backgroundValue) {
+    if (!task) {
+      return {
+        status: "error",
+        error:
+          "background:true requires a single `task`; background fan-out is not supported. Run one background delegation per independent milestone."
+      };
+    }
+    return startBackgroundDelegation("implement", task);
   }
   if (steerRoutingPending) {
     await codexInterrupt();
@@ -3579,7 +4104,7 @@ async function codexImplement(taskValue, tasksValue) {
   return withGoal;
 }
 
-async function codexInvestigate(taskValue, tasksValue) {
+async function codexInvestigate(taskValue, tasksValue, backgroundValue) {
   const normalized = normalizeFanoutTasks(taskValue, tasksValue);
   if (normalized.error) return { status: "error", error: normalized.error };
   const task = normalized.task || null;
@@ -3589,6 +4114,16 @@ async function codexInvestigate(taskValue, tasksValue) {
   });
   if (pendingDecision) {
     return pendingDecision;
+  }
+  if (backgroundValue) {
+    if (!task) {
+      return {
+        status: "error",
+        error:
+          "background:true requires a single `task`; background fan-out is not supported. Run one background delegation per independent milestone."
+      };
+    }
+    return startBackgroundDelegation("investigate", task);
   }
   if (steerRoutingPending) {
     await codexInterrupt();
@@ -3788,6 +4323,11 @@ const TOOLS = [
           items: { type: "string" },
           description:
             "2-4 self-contained, non-overlapping scouting tasks to run as PARALLEL read-only scouts. Each scout sees only its own task, so make every entry independently answerable. Use instead of task, not alongside it."
+        },
+        background: {
+          type: "boolean",
+          description:
+            "Run this investigation as a DETACHED background task: the call returns {status:'started', taskId, title} immediately so you can end your turn and keep talking with the user; the findings arrive later as a FUSION BACKGROUND TASK REPORT message opening a new turn. Use only when the user asked for background work or wants to keep the conversation available during a long scout. Requires task (not tasks)."
         }
       }
     }
@@ -3809,6 +4349,11 @@ const TOOLS = [
           items: { type: "string" },
           description:
             "2-4 self-contained workstreams to run as PARALLEL executors on this same checkout. ONLY for verified-disjoint work: no shared file ownership, no ordering dependency, no shared artifacts (lockfiles, generated files, the same tests). Name each workstream's files and scope explicitly. The combined result reports per-workstream verdicts plus fileConflicts when workstreams touched the same file; it never auto-completes the native goal - review every verdict and run an integration verification before declaring done. Use instead of task, not alongside it."
+        },
+        background: {
+          type: "boolean",
+          description:
+            "Run this delegation as a DETACHED background task: the call returns {status:'started', taskId, title} immediately so you can end your turn and keep talking with the user; the full report (summary, files, verifier verdict) arrives later as a FUSION BACKGROUND TASK REPORT message opening a new turn - review it with your normal independent verification before acting on it. Use only when the user asked for background work or wants to keep chatting during long INDEPENDENT work; never run dependent milestones in the background concurrently. Requires task (not tasks). Cancel with codex_cancel {taskId}."
         }
       }
     }
@@ -3852,10 +4397,16 @@ const TOOLS = [
   {
     name: "codex_cancel",
     description:
-      "Abort the in-flight Codex turn and clear any pending approvals for this Fusion pane WITHOUT restarting the pane. Use it as the escape hatch when a turn is wedged - e.g. codex_implement keeps returning a 'turn already in progress' error with no decision to answer, or a parked approval can no longer be resolved. The Codex thread and native goal stay alive, so you can re-delegate with codex_implement afterwards. Returns {status:'cancelled', hadActiveTurn, clearedDecisions}.",
+      "Abort the in-flight Codex turn and clear any pending approvals for this Fusion pane WITHOUT restarting the pane. Use it as the escape hatch when a turn is wedged - e.g. codex_implement keeps returning a 'turn already in progress' error with no decision to answer, or a parked approval can no longer be resolved. The Codex thread and native goal stay alive, so you can re-delegate with codex_implement afterwards. Returns {status:'cancelled', hadActiveTurn, clearedDecisions}. With `taskId` it instead cancels ONLY that detached background task (foreground turn and other background tasks untouched) and returns {status:'cancelled', taskId, title}.",
     inputSchema: {
       type: "object",
-      properties: {}
+      properties: {
+        taskId: {
+          type: "string",
+          description:
+            "Optional background taskId (from a {status:'started'} background delegation) to cancel just that task."
+        }
+      }
     }
   }
 ];
@@ -3893,9 +4444,9 @@ async function handleToolCall(id, params) {
     } else if (name === "codex_goal_clear") {
       result = await codexGoalClear();
     } else if (name === "codex_investigate") {
-      result = await codexInvestigate(String(args.task || ""), args.tasks);
+      result = await codexInvestigate(String(args.task || ""), args.tasks, args.background === true);
     } else if (name === "codex_implement") {
-      result = await codexImplement(String(args.task || ""), args.tasks);
+      result = await codexImplement(String(args.task || ""), args.tasks, args.background === true);
     } else if (name === "codex_respond") {
       result = await codexRespond(
         String(args.pendingId || ""),
@@ -3908,7 +4459,7 @@ async function handleToolCall(id, params) {
         args.text != null ? String(args.text) : ""
       );
     } else if (name === "codex_cancel") {
-      result = codexCancel();
+      result = codexCancel(args.taskId != null ? String(args.taskId).trim() : "");
     } else {
       sendMcp({ jsonrpc: "2.0", id, error: { code: -32602, message: `Unknown tool: ${name}` } });
       return;
@@ -4004,7 +4555,11 @@ function startMcpServer() {
 module.exports = {
   FAST_SERVICE_TIER,
   FANOUT_MAX_TASKS,
+  BACKGROUND_MAX_TASKS,
   VERDICT_MARKER,
+  backgroundTaskTitle,
+  buildBackgroundTaskText,
+  clipBackgroundResult,
   buildClaudeExecutorArgs,
   buildCodexInvestigationTask,
   buildCodexVerifierTask,

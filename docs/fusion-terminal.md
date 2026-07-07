@@ -191,6 +191,36 @@ falls back to the planner-thread path (no push/replan into N workers), and a
 claude-family executor runs batched tasks SEQUENTIALLY through its persistent
 child (same combined result shape, `parallel:false`).
 
+**Background delegations (2026-07-07)** (locked by `fusion-adapter-smoke`
+anchors + `fusion-chat-parse-smoke` + `completion-gate-smoke` +
+`fusion-launch-smoke` prompt anchors): `codex_implement`/`codex_investigate`
+accept `background: true` — the tool returns `{status:"started", taskId,
+title}` immediately, the planner's turn ends so the user can keep chatting,
+and the work runs DETACHED on a fan-out-shaped worker (`backgroundWorkers`
+registry: own ephemeral app-server thread or per-task ephemeral claude child,
+own 10-min idle / 15-min hard timers, inline auto-resolved approvals, never
+`currentTurn`/`fanoutActive`). Opt-in by contract: the planner backgrounds a
+delegation only when the user asks or wants to keep talking during long
+INDEPENDENT work; dependent milestones never run background concurrently. On
+settle the adapter relays `fusion.background-task` telemetry (started/
+progress/settled ride the same callback channel as `fusion.activity`; main
+routes it into `fusionChatHost`), the host mirrors it to the pane
+(`background-task` events — started/settled enter history for replay,
+progress is transient) and **wakes the planner**: the report is delivered as
+a `FUSION BACKGROUND TASK REPORT` envelope opening a NEW turn, queued
+host-side while a turn is in flight (flushed on `result` — never steered into
+a running turn). The wake echo (`user{backgroundReport:true, files?}`)
+renders as a report row, opens the completion-gate latch for completed
+implement tasks (the wake turn is the review point — same independent-check
+rules), and never auto-syncs the native goal. Esc/turn-interrupt leaves
+background tasks alone; cancel is explicit (`codex_cancel {taskId}`, the pane
+row/pin stop button → adapter `/background-cancel`); process death settles
+tasks as failed WITH a report (or the host's orphan settle after `closed`) —
+they never vanish silently. UI: the Task row stays live after the ▣ turn
+line with a "background" chip, a neutral composer pin lists running tasks
+(title · updates · elapsed · stop), and resume rehydration rebuilds stored
+wake envelopes as report rows.
+
 **Completion-gate detection (2026-07-04)** (locked by `completion-gate-smoke` +
 `fusion-chat-parse-smoke`): Codex's verifier verdict remains the first gate;
 this observes whether Claude ran its independent second check. A host-side

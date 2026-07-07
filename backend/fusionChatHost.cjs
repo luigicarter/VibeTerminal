@@ -66,6 +66,78 @@ const FUSION_GATE_NUDGE = [
   "state which check you ran."
 ].join("\n");
 
+// Wake envelope for detached background delegations: the adapter's settled
+// report is delivered to the planner as a NEW turn whose text starts with
+// this header. The pane renders the echo as a report row (backgroundReport
+// flag), and rehydration recognizes the header so a resumed transcript never
+// shows the envelope as the user's words.
+const FUSION_BACKGROUND_REPORT_HEADER = "FUSION BACKGROUND TASK REPORT";
+
+function buildBackgroundWakeText(event) {
+  const result = event.result && typeof event.result === "object" ? event.result : {};
+  const status = event.cancelled
+    ? "cancelled"
+    : result.status === "completed"
+      ? "completed"
+      : "failed";
+  const lines = [
+    FUSION_BACKGROUND_REPORT_HEADER,
+    `taskId: ${event.taskId}`,
+    `title: ${event.title || "background task"}`,
+    `kind: ${event.kind || "implement"}`,
+    `status: ${status}`,
+    ""
+  ];
+  if (result.status === "completed") {
+    if (event.kind === "investigate") {
+      lines.push("Findings:", String(result.findings || "(none)"));
+    } else {
+      lines.push("Summary:", String(result.summary || "(none)"));
+      if (Array.isArray(result.files) && result.files.length) {
+        lines.push("", `Files: ${result.files.join(", ")}`);
+      }
+      const verdict =
+        result.verifierVerdict && typeof result.verifierVerdict === "object"
+          ? result.verifierVerdict
+          : {
+              goalReached: result.goalReached === true,
+              bugsFound: Array.isArray(result.bugsFound) ? result.bugsFound : [],
+              missingRequirements: Array.isArray(result.missingRequirements)
+                ? result.missingRequirements
+                : [],
+              nextAction: result.nextAction || "continue",
+              summary: result.verifierSummary || ""
+            };
+      lines.push("", `Verifier verdict: ${JSON.stringify(verdict)}`);
+    }
+  } else {
+    lines.push(`Error: ${String(result.error || "background task failed")}`);
+  }
+  lines.push(
+    "",
+    event.kind === "investigate"
+      ? "Treat these findings exactly like a codex_investigate result and continue the work they were gathered for. Report the outcome to the user."
+      : "Treat this exactly like a codex_implement result that just returned: run your independent check (Read the changed files, codex_investigate, or git evidence) before presenting the work or releasing a dependent milestone, then report the outcome to the user."
+  );
+  return lines.join("\n");
+}
+
+// Recognize a stored wake envelope in a resumed transcript and recover the
+// row metadata (title/taskId) plus the report body for the collapsible row.
+function parseBackgroundReportEnvelope(text) {
+  const value = String(text || "");
+  if (!value.startsWith(FUSION_BACKGROUND_REPORT_HEADER)) return null;
+  const lines = value.split(/\r?\n/);
+  const meta = { taskId: "", title: "" };
+  for (const line of lines.slice(1, 5)) {
+    const taskIdMatch = /^taskId:\s*(.*)$/.exec(line);
+    if (taskIdMatch) meta.taskId = taskIdMatch[1].trim();
+    const titleMatch = /^title:\s*(.*)$/.exec(line);
+    if (titleMatch) meta.title = titleMatch[1].trim();
+  }
+  return { taskId: meta.taskId, title: meta.title, text: value };
+}
+
 function buildFusionInputContent(text, mode, steer, nudge) {
   if (mode !== "plan") {
     if (steer) {
@@ -221,7 +293,12 @@ function buildClaudeRehydrationEvents(transcriptPath) {
     if (record.type === "user" && record.message) {
       const text = unwrapFusionUserText(claudeContentText(record.message.content));
       if (text && !isClaudeMetaText(text)) {
-        events.push({ type: "user", text });
+        const bg = parseBackgroundReportEnvelope(text);
+        events.push(
+          bg
+            ? { type: "user", text: bg.text, backgroundReport: true, taskId: bg.taskId, title: bg.title }
+            : { type: "user", text }
+        );
         lastWasAssistant = false;
       }
       continue;
@@ -269,7 +346,12 @@ function buildCodexRehydrationEvents(rolloutPath) {
     if (record.payload.type === "user_message") {
       const text = unwrapFusionUserText(record.payload.message);
       if (text && !text.startsWith("<")) {
-        events.push({ type: "user", text });
+        const bg = parseBackgroundReportEnvelope(text);
+        events.push(
+          bg
+            ? { type: "user", text: bg.text, backgroundReport: true, taskId: bg.taskId, title: bg.title }
+            : { type: "user", text }
+        );
         lastWasAssistant = false;
       }
     } else if (record.payload.type === "agent_message") {
@@ -683,6 +765,192 @@ function runHost() {
       state.history.splice(0, state.history.length - MAX_HISTORY_EVENTS);
     }
     emit({ type: "event", id, event });
+    // Host-side wake queueing for background delegations: a settled report
+    // only opens a NEW planner turn when no turn is in flight — it is never
+    // steered into a running one (that would hijack the live turn's topic).
+    if (event.type === "user") {
+      state.turnActive = true;
+    } else if (
+      event.type === "result" ||
+      event.type === "interrupted" ||
+      event.type === "error" ||
+      event.type === "closed"
+    ) {
+      state.turnActive = false;
+      if (event.type === "closed") {
+        settleOrphanedBackgroundTasks(id, state);
+      }
+      if (Array.isArray(state.pendingWakes) && state.pendingWakes.length) {
+        setImmediate(() => {
+          if (sessions.get(id) !== state) return;
+          maybeFlushBackgroundWakes(id, state);
+        });
+      }
+    }
+  }
+
+  // The planner child (and the adapter with it) died while background tasks
+  // were still running: their settled telemetry may never arrive, so settle
+  // the rows here. No wake — the work is gone with the adapter.
+  function settleOrphanedBackgroundTasks(id, state) {
+    if (!(state.backgroundTasks instanceof Map) || state.backgroundTasks.size === 0) return;
+    const orphans = Array.from(state.backgroundTasks.values());
+    state.backgroundTasks.clear();
+    for (const task of orphans) {
+      emitSessionEvent(id, state, {
+        type: "background-task",
+        phase: "settled",
+        taskId: task.taskId,
+        title: task.title,
+        kind: task.kind,
+        cancelled: false,
+        orphaned: true,
+        result: {
+          status: "failed",
+          error: "Fusion closed while this background task was running."
+        }
+      });
+    }
+  }
+
+  function buildBackgroundWake(event) {
+    const result = event.result && typeof event.result === "object" ? event.result : {};
+    const wake = {
+      taskId: event.taskId,
+      title: event.title || "background task",
+      text: buildBackgroundWakeText(event),
+      echoText: `Background task report — ${event.title || event.taskId}`
+    };
+    // The changed-file set rides the wake echo ONLY for a completed
+    // implement-style task: that is what arms the completion-gate latch for
+    // the review turn. Failed/cancelled tasks present no work as done.
+    if (event.kind !== "investigate" && !event.cancelled && result.status === "completed") {
+      wake.files = Array.isArray(result.files) ? result.files : [];
+    }
+    return wake;
+  }
+
+  function queueBackgroundWake(id, state, settledEvent) {
+    if (!Array.isArray(state.pendingWakes)) state.pendingWakes = [];
+    state.pendingWakes.push(buildBackgroundWake(settledEvent));
+    maybeFlushBackgroundWakes(id, state);
+  }
+
+  function maybeFlushBackgroundWakes(id, state) {
+    if (state.turnActive) return;
+    if (!Array.isArray(state.pendingWakes) || state.pendingWakes.length === 0) return;
+    // One wake at a time: the delivered wake's own turn must settle before
+    // the next queued report opens a turn.
+    const wake = state.pendingWakes.shift();
+    deliverBackgroundWake(id, state, wake);
+  }
+
+  function deliverBackgroundWake(id, state, wake) {
+    if (!state.child) {
+      const restartedState = restartCleanClosedSession(id, state);
+      if (restartedState?.child) {
+        state = restartedState;
+      } else {
+        emitSessionEvent(id, state, {
+          type: "error",
+          message: `Fusion background task "${wake.title}" finished, but the planner is closed. Restart Fusion to review the report.`
+        });
+        return;
+      }
+    }
+    const runMode = normalizeFusionRunMode(state.mode);
+    const content = buildFusionInputContent(wake.text, runMode, false, false);
+    const echo = {
+      type: "user",
+      text: wake.echoText,
+      backgroundReport: true,
+      taskId: wake.taskId,
+      title: wake.title
+    };
+    if (Array.isArray(wake.files)) echo.files = wake.files;
+    if (state.engine === "codex") {
+      emitSessionEvent(id, state, echo);
+      state.brain.sendInput(content, false).catch((error) => {
+        if (sessions.get(id) !== state) return;
+        emitSessionEvent(id, state, {
+          type: "error",
+          message: `Could not deliver the background task report: ${error.message || "planner is gone"}`
+        });
+      });
+      return;
+    }
+    try {
+      emitSessionEvent(id, state, echo);
+      state.child.stdin.write(
+        JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n"
+      );
+    } catch (error) {
+      emitSessionEvent(id, state, {
+        type: "error",
+        message: `Could not deliver the background task report: ${error.message || "child process is gone"}`
+      });
+    }
+  }
+
+  // fusion.background-task telemetry relayed by main: track the registry,
+  // mirror it to the pane (started/settled enter history so replay rebuilds
+  // the rows; progress is transient ticking only), and queue the wake.
+  function backgroundTask(payload) {
+    const id = payload?.id;
+    const state = sessions.get(id);
+    if (!state) return;
+    const phase = String(payload.phase || "");
+    const taskId = String(payload.taskId || "");
+    if (!taskId) return;
+    if (!(state.backgroundTasks instanceof Map)) state.backgroundTasks = new Map();
+    if (phase === "started") {
+      const task = {
+        taskId,
+        title: String(payload.title || ""),
+        kind: String(payload.kind || "implement"),
+        startedAt: Date.now()
+      };
+      state.backgroundTasks.set(taskId, task);
+      emitSessionEvent(id, state, {
+        type: "background-task",
+        phase: "started",
+        taskId,
+        title: task.title,
+        kind: task.kind,
+        task: typeof payload.task === "string" ? payload.task : ""
+      });
+      return;
+    }
+    if (phase === "progress") {
+      // Transient by design: a long task would flood the replay history.
+      emitDirectSessionEvent(id, {
+        type: "background-task",
+        phase: "progress",
+        taskId,
+        activityKind: String(payload.activityKind || "activity"),
+        text: String(payload.text || ""),
+        updates: Number(payload.updates) || 0
+      });
+      return;
+    }
+    if (phase !== "settled") return;
+    state.backgroundTasks.delete(taskId);
+    const settledEvent = {
+      type: "background-task",
+      phase: "settled",
+      taskId,
+      title: String(payload.title || ""),
+      kind: String(payload.kind || "implement"),
+      cancelled: payload.cancelled === true,
+      updates: Number(payload.updates) || 0,
+      durationMs: Number(payload.durationMs) || 0,
+      result:
+        payload.result && typeof payload.result === "object"
+          ? payload.result
+          : { status: "failed", error: "background task returned no result" }
+    };
+    emitSessionEvent(id, state, settledEvent);
+    queueBackgroundWake(id, state, settledEvent);
   }
 
   function emitDirectSessionEvent(id, event) {
@@ -727,7 +995,13 @@ function runHost() {
     const options = {
       history: cloneHistory(state.history),
       gate: state.gate,
-      preserveHistory: true
+      preserveHistory: true,
+      // Undelivered wake reports survive a clean planner restart (the work
+      // finished; only the report delivery is pending). The task registry is
+      // carried too — a clean exit mid-task is settled by the closed handler
+      // before this restart path can run.
+      backgroundTasks: state.backgroundTasks,
+      pendingWakes: state.pendingWakes
     };
     clearPlannerResultBackstop(state);
     sessions.delete(id);
@@ -780,7 +1054,11 @@ function runHost() {
       plannerFast: payload.plannerFast === true,
       fastSeq: 0,
       mode: normalizeFusionRunMode(payload.mode),
-      gate: options.gate || createFusionGateTracker({ cwd })
+      gate: options.gate || createFusionGateTracker({ cwd }),
+      backgroundTasks:
+        options.backgroundTasks instanceof Map ? options.backgroundTasks : new Map(),
+      pendingWakes: Array.isArray(options.pendingWakes) ? options.pendingWakes : [],
+      turnActive: false
     };
     sessions.set(id, state);
 
@@ -855,7 +1133,11 @@ function runHost() {
       launchPayload: clonePayload(payload),
       lastExitCode: null,
       mode: normalizeFusionRunMode(payload.mode),
-      gate: options.gate || createFusionGateTracker({ cwd })
+      gate: options.gate || createFusionGateTracker({ cwd }),
+      backgroundTasks:
+        options.backgroundTasks instanceof Map ? options.backgroundTasks : new Map(),
+      pendingWakes: Array.isArray(options.pendingWakes) ? options.pendingWakes : [],
+      turnActive: false
     };
     sessions.set(id, state);
 
@@ -1122,6 +1404,7 @@ function runHost() {
       if (msg.type === "start") start(msg.payload);
       else if (msg.type === "input") input(msg.payload);
       else if (msg.type === "activity") activity(msg.payload);
+      else if (msg.type === "background-task") backgroundTask(msg.payload);
       else if (msg.type === "mode") mode(msg.payload);
       else if (msg.type === "settings") settings(msg.payload);
       else if (msg.type === "interrupt") interrupt(msg.payload);
@@ -1227,10 +1510,13 @@ module.exports = {
   buildClaudeRehydrationEvents,
   buildCodexRehydrationEvents,
   buildFusionInputContent,
+  buildBackgroundWakeText,
+  parseBackgroundReportEnvelope,
   applyPlannerTurnSettleState,
   createStreamNormalizer,
   unwrapFusionUserText,
   windowsCmdArg,
+  FUSION_BACKGROUND_REPORT_HEADER,
   FUSION_GATE_NUDGE
 };
 

@@ -120,6 +120,75 @@ const OPEN_FUSION_GATE_NUDGE =
 const OPEN_FUSION_EXECUTOR_STEER_PREFIX =
   "Live user steering for this active Open Fusion executor task:\n";
 
+// ---- detached background delegations ----
+// The Brain's background_task MCP tool (app-owned "vibeterminal" bridge in the
+// generated config) relays here via main. The host runs the delegation on a
+// HOST-CREATED session driven by the executor-bg primary agent, watches the
+// raw SSE feed for its completion, and — when it settles — wakes the Brain
+// with the report as a NEW turn (queued host-side while the root is busy).
+const OPEN_FUSION_BACKGROUND_MARKER = "[Open Fusion background report]";
+const BACKGROUND_MAX_TASKS = 4;
+const BACKGROUND_IDLE_TIMEOUT_MS = 600_000;
+const BACKGROUND_HARD_TIMEOUT_MS = 900_000;
+const BACKGROUND_REPORT_MAX_CHARS = 24_000;
+
+function backgroundTaskTitleOf(description, prompt) {
+  const source = String(description || "").trim() || String(prompt || "").trim();
+  const firstLine =
+    source
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean) || "background task";
+  return firstLine.length > 64 ? `${firstLine.slice(0, 61)}...` : firstLine;
+}
+
+function buildOpenFusionBackgroundContract(prompt) {
+  return [
+    String(prompt || "").trim(),
+    "",
+    "## Detached background task",
+    "You are running as a DETACHED background Open Fusion task: the Brain is not blocked on this call and nobody can answer mid-turn questions.",
+    "If something is ambiguous, choose the most reasonable interpretation within your stated scope, or stop and record the blocker in your report.",
+    "Finish with your standard OPEN_FUSION_EXECUTOR_REPORT block; your final message is delivered to the Brain when you finish, so make it self-contained."
+  ].join("\n");
+}
+
+function buildOpenFusionBackgroundWakeText(event) {
+  const result = event.result && typeof event.result === "object" ? event.result : {};
+  const status = event.cancelled
+    ? "cancelled"
+    : result.status === "completed"
+      ? "completed"
+      : "failed";
+  return [
+    OPEN_FUSION_BACKGROUND_MARKER,
+    `taskId: ${event.taskId}`,
+    `title: ${event.title || "background task"}`,
+    `status: ${status}`,
+    "",
+    result.status === "completed"
+      ? `Executor report:\n${String(result.report || "(no report returned)")}`
+      : `Error: ${String(result.error || "background task failed")}`,
+    "",
+    "Treat this exactly like a task tool result that just returned: verify it independently (git evidence, read the changed files, or an investigator pass) before presenting the work or releasing a dependent milestone, then report the outcome to the user."
+  ].join("\n");
+}
+
+// Recognize a stored wake part in a resumed transcript and recover the row
+// metadata (title/taskId) plus the report body for the collapsible row.
+function parseOpenFusionBackgroundReport(text) {
+  const value = String(text || "");
+  if (!value.startsWith(OPEN_FUSION_BACKGROUND_MARKER)) return null;
+  const meta = { taskId: "", title: "" };
+  for (const line of value.split(/\r?\n/).slice(1, 5)) {
+    const taskIdMatch = /^taskId:\s*(.*)$/.exec(line);
+    if (taskIdMatch) meta.taskId = taskIdMatch[1].trim();
+    const titleMatch = /^title:\s*(.*)$/.exec(line);
+    if (titleMatch) meta.title = titleMatch[1].trim();
+  }
+  return { taskId: meta.taskId, title: meta.title, text: value };
+}
+
 function buildPlannerTurnParts(text, mode, options = {}) {
   const parts = [
     { type: "text", text: String(text ?? "") },
@@ -743,9 +812,26 @@ function rehydrateMessages(messages, rootSessionId) {
     const parts = Array.isArray(entry && entry.parts) ? entry.parts : [];
     const role = String(info.role || "");
     if (role === "user") {
-      const text = parts
+      const rawTexts = parts
         .filter((part) => part && part.type === "text")
-        .map((part) => String(part.text || ""))
+        .map((part) => String(part.text || ""));
+      // A stored background-report wake renders as a report row, never as the
+      // user's own words.
+      const bgPart = rawTexts.find((partText) =>
+        partText.startsWith(OPEN_FUSION_BACKGROUND_MARKER)
+      );
+      if (bgPart) {
+        const parsed = parseOpenFusionBackgroundReport(bgPart);
+        events.push({
+          type: "user",
+          text: parsed.text,
+          backgroundReport: true,
+          taskId: parsed.taskId,
+          title: parsed.title
+        });
+        continue;
+      }
+      const text = rawTexts
         // The host appends a marked gate-reminder part to every Brain turn;
         // a resumed transcript must not render it as the user's own words.
         .filter((partText) => !partText.startsWith(OPEN_FUSION_GATE_MARKER))
@@ -1175,6 +1261,376 @@ function runHost() {
     return fallback("router_session_recreate_failed");
   }
 
+  // ---- detached background delegations (host side) ----
+
+  function clearBackgroundTaskTimers(task) {
+    if (task.idleTimer) {
+      clearTimeout(task.idleTimer);
+      task.idleTimer = null;
+    }
+    if (task.hardTimer) {
+      clearTimeout(task.hardTimer);
+      task.hardTimer = null;
+    }
+  }
+
+  function refreshBackgroundIdleTimer(id, state, task) {
+    if (task.settled) return;
+    if (task.idleTimer) clearTimeout(task.idleTimer);
+    task.idleTimer = setTimeout(() => {
+      if (sessions.get(id) !== state) return;
+      settleBackgroundTask(id, state, task, {
+        status: "failed",
+        error: "Open Fusion background task stalled."
+      });
+    }, BACKGROUND_IDLE_TIMEOUT_MS);
+    task.idleTimer.unref?.();
+  }
+
+  function settleBackgroundTask(id, state, task, result, options = {}) {
+    if (task.settled) return;
+    task.settled = true;
+    clearBackgroundTaskTimers(task);
+    state.backgroundTasks.delete(task.taskId);
+    if (task.childSessionId) state.backgroundBySession.delete(task.childSessionId);
+    const settledEvent = {
+      type: "background-task",
+      phase: "settled",
+      taskId: task.taskId,
+      title: task.title,
+      kind: "task",
+      cancelled: task.cancelled === true || result.cancelled === true,
+      updates: task.updates,
+      durationMs: Date.now() - task.startedAt,
+      result:
+        result.status === "completed"
+          ? {
+              status: "completed",
+              report: clipText(result.report || "", BACKGROUND_REPORT_MAX_CHARS),
+              files: Array.isArray(result.files) ? result.files.slice(0, 64) : []
+            }
+          : { status: "failed", error: clipText(result.error || "background task failed", 2_000) }
+    };
+    emitSessionEvent(id, state, settledEvent);
+    // Engine-death settles have nobody to wake (the serve is gone with the
+    // work); the row settle above is the whole story.
+    if (options.wake !== false) {
+      queueOpenFusionWake(id, state, settledEvent);
+    }
+  }
+
+  function settleAllBackgroundTasks(id, state, reason) {
+    if (!state.backgroundTasks || state.backgroundTasks.size === 0) return;
+    for (const task of Array.from(state.backgroundTasks.values())) {
+      settleBackgroundTask(id, state, task, { status: "failed", error: reason }, { wake: false });
+    }
+  }
+
+  function queueOpenFusionWake(id, state, settledEvent) {
+    const result =
+      settledEvent.result && typeof settledEvent.result === "object" ? settledEvent.result : {};
+    const wake = {
+      taskId: settledEvent.taskId,
+      title: settledEvent.title || "background task",
+      text: buildOpenFusionBackgroundWakeText(settledEvent),
+      echoText: `Background task report — ${settledEvent.title || settledEvent.taskId}`
+    };
+    // Changed-file set on the echo arms the completion-gate latch for the
+    // review turn — completed tasks only (failed/cancelled present no work).
+    if (!settledEvent.cancelled && result.status === "completed") {
+      wake.files = Array.isArray(result.files) ? result.files : [];
+    }
+    state.pendingWakes.push(wake);
+    maybeFlushOpenFusionWakes(id, state);
+  }
+
+  function maybeFlushOpenFusionWakes(id, state) {
+    if (state.turnBusy) return;
+    if (!state.child || !state.port || !state.sessionId) return;
+    if (!Array.isArray(state.pendingWakes) || state.pendingWakes.length === 0) return;
+    // One wake at a time: the delivered wake's own turn must settle before
+    // the next queued report opens a turn.
+    const wake = state.pendingWakes.shift();
+    deliverOpenFusionWake(id, state, wake);
+  }
+
+  function deliverOpenFusionWake(id, state, wake) {
+    const model = splitModelId(state.plannerModel);
+    if (!model) {
+      emitSessionEvent(id, state, {
+        type: "error",
+        message: `Background task "${wake.title}" finished, but no Brain model is set — its report could not be delivered. Pick one with /brain-model.`
+      });
+      return;
+    }
+    const echo = {
+      type: "user",
+      text: wake.echoText,
+      backgroundReport: true,
+      taskId: wake.taskId,
+      title: wake.title
+    };
+    if (Array.isArray(wake.files)) echo.files = wake.files;
+    // Host-emitted echo — route it through the gate explicitly (only the
+    // normalizer loop is gate-observed by default).
+    emitSessionEvent(id, state, state.gate ? state.gate.observe(echo) : echo);
+    // Hold the queue until this wake's turn settles; the normalizer's
+    // turn-start re-asserts this as soon as the server goes busy.
+    state.turnBusy = true;
+    request(state, "POST", `/session/${encodeURIComponent(state.sessionId)}/prompt_async`, {
+      agent: "planner",
+      parts: buildPlannerTurnParts(wake.text, "auto", { nudge: false }),
+      model
+    }).catch((error) => {
+      if (sessions.get(id) !== state) return;
+      state.turnBusy = false;
+      emitSessionEvent(id, state, {
+        type: "error",
+        message: `Could not deliver the background task report: ${error.message || error}`
+      });
+    });
+  }
+
+  async function startOpenFusionBackgroundTask(id, state, taskId, description, prompt) {
+    if (state.backgroundTasks.has(taskId)) return;
+    const title = backgroundTaskTitleOf(description, prompt);
+    const task = {
+      taskId,
+      title,
+      prompt: clipText(String(prompt || ""), 8_000),
+      childSessionId: "",
+      updates: 0,
+      startedAt: Date.now(),
+      settled: false,
+      cancelled: false,
+      running: false,
+      files: new Set(),
+      seenCalls: new Set(),
+      idleTimer: null,
+      hardTimer: null
+    };
+    state.backgroundTasks.set(taskId, task);
+    emitSessionEvent(id, state, {
+      type: "background-task",
+      phase: "started",
+      taskId,
+      title,
+      kind: "task",
+      task: task.prompt
+    });
+    const fail = (message) =>
+      settleBackgroundTask(id, state, task, { status: "failed", error: message });
+    if (!state.child || !state.port) {
+      fail("Open Fusion engine is not ready.");
+      return;
+    }
+    if (!state.backgroundAgent) {
+      fail("Background tasks need a pane restart to load the background executor agent.");
+      return;
+    }
+    const model = splitModelId(state.executorModel);
+    if (!model) {
+      fail("No Executor model is set. Pick one with /executor-model, then retry.");
+      return;
+    }
+    if (state.backgroundTasks.size > BACKGROUND_MAX_TASKS) {
+      fail(`At most ${BACKGROUND_MAX_TASKS} background tasks may run at once; wait for one to settle or cancel one.`);
+      return;
+    }
+    if (!String(prompt || "").trim()) {
+      fail("The background task had an empty prompt.");
+      return;
+    }
+    task.hardTimer = setTimeout(() => {
+      if (sessions.get(id) !== state) return;
+      settleBackgroundTask(id, state, task, {
+        status: "failed",
+        error: "Open Fusion background task exceeded the maximum duration."
+      });
+    }, BACKGROUND_HARD_TIMEOUT_MS);
+    task.hardTimer.unref?.();
+    refreshBackgroundIdleTimer(id, state, task);
+    try {
+      const created = await request(state, "POST", "/session", {
+        title: `(fusion background) ${title}`
+      });
+      if (!created || !created.id) {
+        throw new Error("OpenCode did not return a background session id");
+      }
+      if (sessions.get(id) !== state || task.settled) return;
+      task.childSessionId = String(created.id);
+      state.backgroundBySession.set(task.childSessionId, task);
+      await request(
+        state,
+        "POST",
+        `/session/${encodeURIComponent(task.childSessionId)}/prompt_async`,
+        {
+          agent: "executor-bg",
+          parts: [{ type: "text", text: buildOpenFusionBackgroundContract(prompt) }],
+          model
+        }
+      );
+    } catch (error) {
+      if (sessions.get(id) !== state) return;
+      settleBackgroundTask(id, state, task, {
+        status: "failed",
+        error: `Could not start the background executor: ${error.message || error}`
+      });
+    }
+  }
+
+  async function finishOpenFusionBackgroundTask(id, state, task) {
+    if (task.settled) return;
+    try {
+      const messages = await request(
+        state,
+        "GET",
+        `/session/${encodeURIComponent(task.childSessionId)}/message`
+      );
+      if (sessions.get(id) !== state || task.settled) return;
+      const texts = extractOpenFusionAssistantTexts(messages);
+      const report = texts.length ? texts[texts.length - 1] : "";
+      if (task.cancelled) {
+        settleBackgroundTask(id, state, task, {
+          status: "failed",
+          error: "Background task cancelled.",
+          cancelled: true
+        });
+        return;
+      }
+      settleBackgroundTask(id, state, task, {
+        status: "completed",
+        report: report || "(no report returned)",
+        files: Array.from(task.files)
+      });
+    } catch (error) {
+      if (sessions.get(id) !== state) return;
+      settleBackgroundTask(id, state, task, {
+        status: "failed",
+        error: `Could not read the background report: ${error.message || error}`
+      });
+    }
+  }
+
+  function cancelOpenFusionBackgroundTask(id, state, taskId) {
+    const task = state.backgroundTasks.get(String(taskId || "").trim());
+    if (!task || task.settled) return;
+    task.cancelled = true;
+    if (!task.childSessionId) {
+      settleBackgroundTask(id, state, task, {
+        status: "failed",
+        error: "Background task cancelled.",
+        cancelled: true
+      });
+      return;
+    }
+    request(state, "POST", `/session/${encodeURIComponent(task.childSessionId)}/abort`).catch(
+      () => {}
+    );
+    // Belt: an abort whose error/idle never lands on the feed must still settle.
+    const forceTimer = setTimeout(() => {
+      if (sessions.get(id) === state && !task.settled) {
+        settleBackgroundTask(id, state, task, {
+          status: "failed",
+          error: "Background task cancelled.",
+          cancelled: true
+        });
+      }
+    }, 10_000);
+    forceTimer.unref?.();
+  }
+
+  // Raw-SSE watcher for background children: they are host-created sessions,
+  // deliberately OUTSIDE the normalizer tree, so their lifecycle is tracked
+  // here (pre-normalizer) and surfaced only through background-task events.
+  function observeBackgroundSseEvent(id, state, raw) {
+    if (!state.backgroundBySession || state.backgroundBySession.size === 0) return;
+    const type = String(raw?.type || "");
+    const props = raw?.properties && typeof raw.properties === "object" ? raw.properties : {};
+    const sessionID = String(props.sessionID || "");
+    const task = sessionID ? state.backgroundBySession.get(sessionID) : null;
+    if (!task || task.settled) return;
+    refreshBackgroundIdleTimer(id, state, task);
+    if (type === "session.status") {
+      if (String((props.status && props.status.type) || "") === "busy") task.running = true;
+      return;
+    }
+    if (type === "session.idle") {
+      if (!task.running) return;
+      void finishOpenFusionBackgroundTask(id, state, task);
+      return;
+    }
+    if (type === "session.error") {
+      const error = props.error && typeof props.error === "object" ? props.error : {};
+      const data = error.data && typeof error.data === "object" ? error.data : {};
+      const message = String(data.message || error.name || "background executor error");
+      if (/abort/i.test(String(error.name || "")) || /abort/i.test(message)) {
+        settleBackgroundTask(id, state, task, {
+          status: "failed",
+          error: "Background task cancelled.",
+          cancelled: true
+        });
+        return;
+      }
+      settleBackgroundTask(id, state, task, { status: "failed", error: message });
+      return;
+    }
+    if (type !== "message.part.updated") return;
+    const part = props.part && typeof props.part === "object" ? props.part : {};
+    if (String(part.type || "") !== "tool") return;
+    const st = part.state && typeof part.state === "object" ? part.state : {};
+    const status = String(st.status || "");
+    if (status !== "completed" && status !== "error") return;
+    const callID = String(part.callID || part.id || "");
+    if (callID) {
+      if (task.seenCalls.has(callID)) return;
+      task.seenCalls.add(callID);
+      if (task.seenCalls.size > 512) {
+        const oldest = task.seenCalls.values().next().value;
+        task.seenCalls.delete(oldest);
+      }
+    }
+    const name = String(part.tool || "tool");
+    const input = st.input && typeof st.input === "object" ? st.input : {};
+    const filePath = String(input.filePath || input.file_path || input.path || "");
+    if ((name === "edit" || name === "write") && filePath) {
+      task.files.add(filePath);
+    }
+    task.updates += 1;
+    const detail =
+      name === "bash" && input.command
+        ? `$ ${compactWhitespace(input.command, 160)}`
+        : `${name} ${compactWhitespace(st.title || filePath || input.pattern || "", 160)}`.trim();
+    emitDirectSessionEvent(id, {
+      type: "background-task",
+      phase: "progress",
+      taskId: task.taskId,
+      activityKind:
+        name === "bash" ? "command" : name === "edit" || name === "write" ? "file" : "activity",
+      text: detail,
+      updates: task.updates
+    });
+  }
+
+  function backgroundRequest(payload) {
+    const id = payload?.id;
+    const state = sessions.get(id);
+    if (!state) return;
+    const taskId = String(payload?.taskId || "").trim();
+    if (!taskId) return;
+    if (String(payload?.action || "start") === "cancel") {
+      cancelOpenFusionBackgroundTask(id, state, taskId);
+      return;
+    }
+    void startOpenFusionBackgroundTask(
+      id,
+      state,
+      taskId,
+      String(payload?.description || ""),
+      String(payload?.prompt || "")
+    );
+  }
+
   function observeOpenFusionTaskEvent(state, event) {
     if (!event || typeof event !== "object") return;
     const activityTask = getActiveExecutorTaskBySession(state, event.sessionID);
@@ -1398,6 +1854,9 @@ function runHost() {
               response.destroy();
               return;
             }
+            // Background children are host-created sessions outside the
+            // normalizer tree; their lifecycle rides the raw feed.
+            observeBackgroundSseEvent(id, state, parsed);
             if (!state.normalizer) continue;
             for (const event of state.normalizer(parsed)) {
               observeOpenFusionTaskEvent(state, event);
@@ -1410,6 +1869,13 @@ function runHost() {
                 event.type === "error"
               ) {
                 state.turnBusy = false;
+                // A settled root turn is the wake window for queued
+                // background reports (never steered into a running turn).
+                if (Array.isArray(state.pendingWakes) && state.pendingWakes.length) {
+                  setImmediate(() => {
+                    if (sessions.get(id) === state) maybeFlushOpenFusionWakes(id, state);
+                  });
+                }
               }
               // Completion-gate tracking sees ONLY live normalizer output —
               // rehydration and reattach replay bypass it by design. observe()
@@ -1560,11 +2026,19 @@ function runHost() {
       history: [],
       plannerModel: String(payload.plannerModel || ""),
       executorModel: String(payload.executorModel || ""),
+      // Detached background delegations: taskId → task, childSessionId → task,
+      // plus report wakes queued while the root turn is busy.
+      backgroundTasks: new Map(),
+      backgroundBySession: new Map(),
+      pendingWakes: [],
       // Capability flag from the start payload: the generated config this
       // serve loaded includes the plan agent. Deliberately NOT set on the
       // reattach path — reattached state keeps the flag of the start that
       // actually launched its serve.
-      planAgent: payload.planAgent === true
+      planAgent: payload.planAgent === true,
+      // Same idea: the generated config carries the vibeterminal MCP bridge
+      // and the executor-bg agent this feature needs.
+      backgroundAgent: payload.backgroundAgent === true
     };
     sessions.set(id, state);
 
@@ -1611,6 +2085,9 @@ function runHost() {
       if (sessions.get(id) !== state) return;
       state.child = null;
       clearSteerRoutingState(state);
+      // The serve died with the background work; settle the rows (no wake —
+      // there is nobody left to deliver a report to).
+      settleAllBackgroundTasks(id, state, "Open Fusion engine closed while this background task was running.");
       try {
         state.sseRequest?.destroy();
       } catch {
@@ -1863,7 +2340,9 @@ function runHost() {
       const refresh = () => {
         if (sessions.get(sid) === s) providers({ id: sid });
       };
-      if (s.turnBusy) {
+      // A running detached background task counts as busy for dispose: its
+      // executor turn lives in the instance a dispose would tear down.
+      if (s.turnBusy || (s.backgroundTasks && s.backgroundTasks.size > 0)) {
         refresh();
       } else {
         const nudge = reloadConfig
@@ -2300,6 +2779,9 @@ function runHost() {
       else if (msg.type === "oauth-callback") oauthCallback(msg.payload);
       else if (msg.type === "custom-provider-set") customProviderSet(msg.payload);
       else if (msg.type === "custom-provider-remove") customProviderRemove(msg.payload);
+      else if (msg.type === "background-request") backgroundRequest(msg.payload);
+      else if (msg.type === "background-cancel")
+        backgroundRequest({ ...msg.payload, action: "cancel" });
       else if (msg.type === "interrupt") interrupt(msg.payload);
       else if (msg.type === "stop") stop(msg.payload);
       else if (msg.type === "shutdown") shutdown();
@@ -2333,7 +2815,12 @@ module.exports = {
   OPEN_FUSION_GATE_MARKER,
   OPEN_FUSION_GATE_REMINDER,
   OPEN_FUSION_GATE_NUDGE,
-  OPEN_FUSION_PLAN_REMINDER
+  OPEN_FUSION_PLAN_REMINDER,
+  OPEN_FUSION_BACKGROUND_MARKER,
+  backgroundTaskTitleOf,
+  buildOpenFusionBackgroundContract,
+  buildOpenFusionBackgroundWakeText,
+  parseOpenFusionBackgroundReport
 };
 
 if (require.main === module) {

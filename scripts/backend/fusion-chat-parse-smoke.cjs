@@ -16,9 +16,12 @@ const {
   buildClaudeArgs,
   buildClaudeSpawn,
   buildFusionInputContent,
+  buildBackgroundWakeText,
+  parseBackgroundReportEnvelope,
   createStreamNormalizer,
   unwrapFusionUserText,
   windowsCmdArg,
+  FUSION_BACKGROUND_REPORT_HEADER,
   FUSION_GATE_NUDGE
 } = require("../../backend/fusionChatHost.cjs");
 const { createFusionGateTracker } = require("../../backend/completionGate.cjs");
@@ -446,6 +449,195 @@ const fixture = [
   { type: "system", subtype: "status", status: null, compact_result: "success", session_id: "sess-abc" }
 ];
 
+// Detached background delegation wake, end-to-end at the host level: a
+// settled background-task control must emit the pane events (started/settled,
+// backgroundReport user echo with the file set) AND write the marked report
+// envelope to the planner child as a NEW user turn.
+async function assertFusionChatHostBackgroundWake() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-chat-host-bg-"));
+  // Fake planner that logs every stdin user message (the wake write target).
+  const scriptPath = path.join(tempDir, "fake-claude-planner.js");
+  fs.writeFileSync(
+    scriptPath,
+    `
+const fs = require("fs");
+const path = require("path");
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on("line", (line) => {
+  if (!line.trim()) return;
+  let msg;
+  try { msg = JSON.parse(line); } catch { return; }
+  if (msg.type === "user") {
+    fs.appendFileSync(path.join(__dirname, "claude-user.jsonl"), JSON.stringify(msg) + "\\n");
+  }
+});
+setInterval(() => {}, 1000);
+`
+  );
+  let fakeClaude;
+  if (isWin) {
+    fakeClaude = path.join(tempDir, "fake-claude-planner.cmd");
+    fs.writeFileSync(fakeClaude, `@"${process.execPath}" "%~dp0fake-claude-planner.js" %*\r\n`);
+  } else {
+    fakeClaude = path.join(tempDir, "fake-claude-planner");
+    fs.writeFileSync(fakeClaude, `#!/bin/sh\nexec "${process.execPath}" "${scriptPath}" "$@"\n`);
+    fs.chmodSync(fakeClaude, 0o755);
+  }
+  const hostPath = path.join(__dirname, "..", "..", "backend", "fusionChatHost.cjs");
+  const child = spawn(process.execPath, [hostPath], {
+    cwd: tempDir,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, VIBE_CLAUDE_BIN: fakeClaude }
+  });
+
+  let stdout = "";
+  let stderr = "";
+  let finished = false;
+  let controlsSent = false;
+  const userFile = path.join(tempDir, "claude-user.jsonl");
+
+  function cleanup() {
+    try {
+      child.stdin.end();
+    } catch {
+      // ignore
+    }
+    killProcessTree(child);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      finished = true;
+      cleanup();
+      reject(
+        new Error(`timed out waiting for the background wake; stdout=${stdout}; stderr=${stderr}`)
+      );
+    }, 15000);
+
+    function fail(error) {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      cleanup();
+      reject(error);
+    }
+
+    function pass() {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      cleanup();
+      resolve();
+    }
+
+    child.on("error", fail);
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("exit", (code) => {
+      if (!finished) {
+        fail(new Error(`fusionChatHost exited early with code ${code}; stderr=${stderr}`));
+      }
+    });
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+      if (!controlsSent && stdout.includes('"ready"')) {
+        controlsSent = true;
+        const send = (message) => child.stdin.write(`${JSON.stringify(message)}\n`);
+        send({
+          type: "start",
+          payload: { id: "bg-wake", cwd: tempDir, plannerFamily: "claude", model: "opus" }
+        });
+        setTimeout(() => {
+          send({
+            type: "background-task",
+            payload: {
+              id: "bg-wake",
+              phase: "started",
+              taskId: "bg-1",
+              title: "add OAuth catalog",
+              kind: "implement",
+              task: "do the thing"
+            }
+          });
+          send({
+            type: "background-task",
+            payload: {
+              id: "bg-wake",
+              phase: "settled",
+              taskId: "bg-1",
+              title: "add OAuth catalog",
+              kind: "implement",
+              cancelled: false,
+              updates: 3,
+              durationMs: 1200,
+              result: { status: "completed", summary: "done", files: ["src/a.ts"] }
+            }
+          });
+        }, 300);
+      }
+    });
+
+    const poll = setInterval(() => {
+      if (finished) {
+        clearInterval(poll);
+        return;
+      }
+      try {
+        const events = stdout
+          .split(/\r?\n/)
+          .filter(Boolean)
+          .flatMap((line) => {
+            try {
+              const parsed = JSON.parse(line);
+              return parsed.type === "event" ? [parsed.event] : [];
+            } catch {
+              return [];
+            }
+          });
+        const started = events.find(
+          (event) => event.type === "background-task" && event.phase === "started"
+        );
+        const settled = events.find(
+          (event) => event.type === "background-task" && event.phase === "settled"
+        );
+        const echo = events.find((event) => event.type === "user" && event.backgroundReport);
+        if (!started || !settled || !echo) return;
+        assert(
+          settled.result?.status === "completed" && settled.taskId === "bg-1",
+          "settled event should carry the clipped result"
+        );
+        assert(
+          Array.isArray(echo.files) && echo.files[0] === "src/a.ts" && echo.taskId === "bg-1",
+          "the wake echo must carry the changed-file set (the gate latch payload)"
+        );
+        if (!fs.existsSync(userFile)) return;
+        const wakes = fs
+          .readFileSync(userFile, "utf8")
+          .split(/\r?\n/)
+          .filter(Boolean)
+          .map((line) => JSON.parse(line));
+        const wake = wakes.find((message) =>
+          String(message.message?.content || "").startsWith(FUSION_BACKGROUND_REPORT_HEADER)
+        );
+        if (!wake) return;
+        assert(
+          String(wake.message.content).includes("taskId: bg-1") &&
+            String(wake.message.content).includes("independent check"),
+          "the planner must receive the marked report envelope with the review duty"
+        );
+        clearInterval(poll);
+        pass();
+      } catch (error) {
+        clearInterval(poll);
+        fail(error);
+      }
+    }, 100);
+  });
+}
+
 async function main() {
   const normalize = createStreamNormalizer();
   const events = [];
@@ -832,6 +1024,70 @@ async function main() {
     "Claude planner path must settle completed bridge turns once and forward late real usage without a second terminal result"
   );
 
+  // ---- detached background delegations (host wake machinery) ----
+  assert(
+    hostSource.includes("function backgroundTask") &&
+      hostSource.includes("function deliverBackgroundWake") &&
+      hostSource.includes("function maybeFlushBackgroundWakes") &&
+      hostSource.includes("function settleOrphanedBackgroundTasks") &&
+      hostSource.includes("state.turnActive = true") &&
+      hostSource.includes("backgroundReport: true") &&
+      hostSource.includes('else if (msg.type === "background-task") backgroundTask(msg.payload)'),
+    "Fusion host must own the background-task registry, the host-side wake queue (flush on settle only), and the orphan settle"
+  );
+  // Wake envelope round-trip: what deliverBackgroundWake writes into the CLI
+  // must be recognized by the resume rehydration as a report row, never as
+  // the user's own words.
+  {
+    const wakeText = buildBackgroundWakeText({
+      taskId: "bg-7",
+      title: "add OAuth catalog",
+      kind: "implement",
+      cancelled: false,
+      result: {
+        status: "completed",
+        summary: "done",
+        files: ["src/a.ts"],
+        verifierVerdict: { goalReached: true, nextAction: "done", bugsFound: [], missingRequirements: [], summary: "ok" }
+      }
+    });
+    assert(
+      wakeText.startsWith(FUSION_BACKGROUND_REPORT_HEADER) &&
+        wakeText.includes("taskId: bg-7") &&
+        wakeText.includes("status: completed") &&
+        wakeText.includes("independent check"),
+      "buildBackgroundWakeText must produce the marked report envelope with the review duty"
+    );
+    const parsed = parseBackgroundReportEnvelope(wakeText);
+    assert(
+      parsed && parsed.taskId === "bg-7" && parsed.title === "add OAuth catalog",
+      "parseBackgroundReportEnvelope must recover taskId/title from a stored wake"
+    );
+    assert(
+      parseBackgroundReportEnvelope("just a normal prompt") === null,
+      "parseBackgroundReportEnvelope must ignore ordinary user text"
+    );
+    // The plan-mode directive wraps wakes too; unwrap must expose the header
+    // so rehydration still recognizes the report.
+    const wrapped = buildFusionInputContent(wakeText, "plan", false, false);
+    const unwrapped = unwrapFusionUserText(wrapped);
+    assert(
+      unwrapped.startsWith(FUSION_BACKGROUND_REPORT_HEADER),
+      "a plan-mode-wrapped wake must unwrap back to the report envelope"
+    );
+    const failedWake = buildBackgroundWakeText({
+      taskId: "bg-8",
+      title: "docs sweep",
+      kind: "investigate",
+      cancelled: true,
+      result: { status: "failed", error: "Background task cancelled." }
+    });
+    assert(
+      failedWake.includes("status: cancelled") && failedWake.includes("Background task cancelled."),
+      "cancelled wakes must carry the cancelled status and error"
+    );
+  }
+
   // ---- codex-brain planner normalizer (per-role families) ----
   // Feed the pure normalizer real notification shapes recorded from the live
   // codex-cli 0.142.5 probe (2026-07-03) and assert the pane-vocabulary
@@ -1076,6 +1332,7 @@ async function main() {
 
   await assertFusionChatHostRestartsCleanClosedClaude();
   await assertFusionChatHostClaudeFastLive();
+  await assertFusionChatHostBackgroundWake();
 
   console.log("Fusion chat parse smoke passed");
 }

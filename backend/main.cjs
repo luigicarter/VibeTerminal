@@ -653,6 +653,28 @@ function broadcastTerminalEvent(event) {
     sendToFusionChatHost({ type: "activity", payload: event });
   }
 
+  // Detached background delegation lifecycle (adapter telemetry): the fusion
+  // chat host owns the registry, the pane events, and the planner wake.
+  if (
+    event?.type === "fusion-background-task" &&
+    event.id &&
+    fusionChatHost &&
+    fusionChatHost.stdin.writable
+  ) {
+    sendToFusionChatHost({ type: "background-task", payload: event });
+  }
+
+  // Brain-initiated background delegation request (Open Fusion MCP bridge):
+  // the Open Fusion host owns the detached executor session and the wake.
+  if (
+    event?.type === "openfusion-background-request" &&
+    event.id &&
+    openFusionChatHost &&
+    openFusionChatHost.stdin.writable
+  ) {
+    sendToOpenFusionChatHost({ type: "background-request", payload: event });
+  }
+
   BrowserWindow.getAllWindows().forEach((window) => {
     window.webContents.send("terminal:event", event);
   });
@@ -1756,6 +1778,15 @@ ipcMain.handle("fusion-chat:interrupt", (_event, payload) => {
   return true;
 });
 
+ipcMain.handle("fusion-chat:background-cancel", async (_event, payload) => {
+  if (!payload?.id || !payload.taskId) {
+    return { status: "failed", error: "id and taskId are required" };
+  }
+  return getAgentTelemetry()
+    .cancelFusionBackgroundTask(payload.id, String(payload.taskId))
+    .catch((error) => ({ status: "failed", error: error?.message || "cancel failed" }));
+});
+
 ipcMain.handle("fusion-chat:stop", (_event, payload) => {
   if (payload?.id) {
     getAgentTelemetry()
@@ -1846,7 +1877,10 @@ ipcMain.handle("openfusion-chat:start", async (_event, payload) => {
         resumeId: payload.resumeId || undefined,
         // Capability flag: this start's generated config includes the plan
         // agent. Guards plan-mode turns against a stale serve without it.
-        planAgent: true
+        planAgent: true,
+        // Same idea for background delegations: the generated config carries
+        // the vibeterminal MCP bridge + the executor-bg agent.
+        backgroundAgent: true
       }
     });
     if (!sent) {
@@ -2116,6 +2150,17 @@ ipcMain.handle("openfusion-chat:interrupt", (_event, payload) => {
     sendToOpenFusionChatHost({ type: "interrupt", payload: { id: payload.id } });
   }
   return true;
+});
+
+ipcMain.handle("openfusion-chat:background-cancel", (_event, payload) => {
+  if (!payload?.id || !payload.taskId) {
+    return { ok: false, error: "id and taskId are required" };
+  }
+  const sent = sendToOpenFusionChatHost({
+    type: "background-cancel",
+    payload: { id: payload.id, taskId: String(payload.taskId) }
+  });
+  return sent ? { ok: true } : { ok: false, error: "Open Fusion chat host is not running." };
 });
 
 ipcMain.handle("openfusion-chat:stop", (_event, payload) => {

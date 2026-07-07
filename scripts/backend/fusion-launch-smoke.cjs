@@ -167,6 +167,14 @@ async function main() {
       "buildFusionSystemPrompt is missing the checkpointed delegation protocol"
     );
     assert(
+      buildFusionSystemPrompt().includes("## Background delegation") &&
+        buildFusionSystemPrompt().includes("FUSION BACKGROUND TASK") &&
+        buildFusionSystemPrompt().includes("Default stays FOREGROUND") &&
+        buildFusionSystemPrompt().includes("codex_cancel {taskId}") &&
+        buildFusionSystemPrompt().includes("Never run milestones that"),
+      "buildFusionSystemPrompt is missing the background delegation contract"
+    );
+    assert(
       buildFusionSystemPrompt().includes("switch families mid-thread"),
       "buildFusionSystemPrompt is missing the mid-thread engine/model identity clause"
     );

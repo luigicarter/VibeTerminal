@@ -114,6 +114,17 @@ function createCompletionGateTracker(config = {}) {
   function observe(event) {
     if (!event || typeof event !== "object") return event;
     switch (event.type) {
+      case "user": {
+        // A background-delegation wake: the host delivers the executor's
+        // report as a new planner turn and attaches the changed-file set to
+        // the echo ONLY for a completed implement-style task. That is the
+        // moment the work is presented for review, so the latch opens here —
+        // not at the settle, which can land mid-way through an unrelated turn.
+        if (event.backgroundReport === true && Array.isArray(event.files)) {
+          openLatch(event.files);
+        }
+        return event;
+      }
       case "tool-call": {
         if (event.toolId) {
           const input = event.input && typeof event.input === "object" ? event.input : {};

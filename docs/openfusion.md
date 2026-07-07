@@ -64,6 +64,41 @@
 > the user exactly which server or skill to connect and holds the dependent
 > work until the user confirms. Locked by `agent-telemetry-smoke`.
 >
+> **Background delegations (2026-07-07):** the Brain can run ONE executor
+> delegation DETACHED so the user keeps talking while it works. The generated
+> config carries an app-owned `vibeterminal` local MCP server
+> (`backend/openFusionBackgroundMcp.cjs`, spawned by opencode itself with the
+> telemetry-callback env) exposing `background_task {description, prompt}` +
+> `background_cancel {taskId}` to the planner ONLY (dynamic-tool allow keys
+> placed AFTER the `"*"` deny in the planner permission map — findLast
+> semantics; plan/investigator inherit the deny; the executor keeps no
+> permission block and its prompt never mentions the tool). The tool returns
+> `{status:"started", taskId}` immediately; the request rides the callback
+> server → main → `openFusionChatHost`, which creates a session (`POST
+> /session`, titled `(fusion background) …`) and drives it with the
+> **`executor-bg` agent — a hidden PRIMARY clone of the executor** (a
+> subagent driving a fresh session is unverified on 1.17.11; a primary agent
+> on a host-created session is the shipped steer-router precedent). The child
+> stays OUT of the normalizer tree: `observeBackgroundSseEvent` watches the
+> raw SSE feed pre-normalizer (tool ticks → transient `background-task`
+> progress events; edit/write paths accumulate for the gate; 10-min idle /
+> 15-min hard timers; `session.idle` after busy → report = last assistant
+> message via `GET /session/{id}/message`). On settle the host emits a
+> history-recorded `background-task settled` event and **wakes the Brain**:
+> an `[Open Fusion background report]`-marked prompt part opens a new
+> planner turn, queued host-side while `turnBusy` (flushed on result — never
+> absorbed into a running turn). The wake echo
+> (`user{backgroundReport:true, files?}`) is routed through the completion
+> gate explicitly (latch opens for completed tasks; the wake turn is the
+> review point) and rehydrates as a report row (marker-parsed), never as
+> user text. Root interrupt leaves background tasks alone; cancel is
+> explicit (tool or pane pin stop → `/session/{child}/abort` with a 10s
+> force-settle belt); provider-auth disposes treat a running background task
+> as busy; engine death settles the rows without a wake. Locked by
+> `agent-telemetry-smoke` (config/permission shape) +
+> `openfusion-chat-parse-smoke` (host anchors + wake envelope round-trip) +
+> `completion-gate-smoke` (wake-echo latch).
+>
 > **Parallel executor children (2026-07-05):** Open Fusion preserves
 > OpenCode's native ability to run multiple `task` children inside one pane.
 > The Planner prompt permits multiple same-turn task calls only for genuinely

@@ -117,6 +117,8 @@ contextBridge.exposeInMainWorld("vibe", {
     setMode: (id, mode) => ipcRenderer.invoke("fusion-chat:set-mode", { id, mode }),
     steer: (id, text) => ipcRenderer.send("fusion-chat:steer", { id, text }),
     interrupt: (id) => ipcRenderer.invoke("fusion-chat:interrupt", { id }),
+    backgroundCancel: (id, taskId) =>
+      ipcRenderer.invoke("fusion-chat:background-cancel", { id, taskId }),
     stop: (id) => ipcRenderer.invoke("fusion-chat:stop", { id }),
     onEvent: (callback) => {
       const listener = (_event, payload) => callback(payload);
@@ -175,6 +177,8 @@ contextBridge.exposeInMainWorld("vibe", {
       ipcRenderer.send("openfusion-chat:input", { id, text, mode }),
     permission: (id, requestId, reply) =>
       ipcRenderer.invoke("openfusion-chat:permission", { id, requestId, reply }),
+    backgroundCancel: (id, taskId) =>
+      ipcRenderer.invoke("openfusion-chat:background-cancel", { id, taskId }),
     answerQuestion: (id, requestId, answers) =>
       ipcRenderer.invoke("openfusion-chat:question", { id, requestId, answers }),
     rejectQuestion: (id, requestId) =>

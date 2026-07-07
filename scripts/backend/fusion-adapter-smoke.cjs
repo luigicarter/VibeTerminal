@@ -3116,6 +3116,48 @@ function assertFanoutHelpers() {
   const investigateTool = source.includes('"2-4 self-contained, non-overlapping scouting tasks');
   const implementTool = source.includes("ONLY for verified-disjoint work");
   assert(investigateTool && implementTool, "both bridge tools must document the tasks[] fan-out surface");
+
+  // ---- main-thread turn discipline (the goal-turn completion-drop fix) ----
+  assert(
+    source.includes("function notificationThreadId") &&
+      source.includes("sourceThreadId && sourceThreadId !== threadId") &&
+      source.includes("resolving anyway") &&
+      source.includes("if (nextTurnId && !activeTurnId) {") &&
+      source.includes("south handler error"),
+    "handleNotification must thread-filter child traffic, resolveCompletedTurn must resolve (log) on id mismatch, the turn/start response must not clobber a notification-set id, and handler throws must be logged"
+  );
+
+  // ---- detached background delegations ----
+  assert(
+    source.includes("const backgroundWorkers = new Map()") &&
+      source.includes("function startBackgroundDelegation") &&
+      source.includes("function finalizeBackgroundWorker") &&
+      source.includes('type: "fusion.background-task"') &&
+      source.includes("BACKGROUND_QUESTION_ANSWER") &&
+      source.includes("function cancelBackgroundTask") &&
+      source.includes('"/background-cancel"'),
+    "the adapter must own the detached background worker engine (registry, telemetry relay, cancel surface)"
+  );
+  assert(
+    source.includes("if (backgroundWorkers.has(candidate)) return backgroundWorkers.get(candidate);") &&
+      source.includes("if (!worker.background) {"),
+    "background workers must route like fan-out workers WITHOUT refreshing the foreground turn's idle timer"
+  );
+  assert(
+    (source.match(/abortBackgroundWorkers\(/g) || []).length >= 4,
+    "failAll/resetCodexProcessState/resetHarness must settle background workers (they never vanish silently)"
+  );
+  assert(
+    source.includes('engines === "codex" && worker.child') &&
+      source.includes('{ engines: "codex" }'),
+    "a codex process failure must not kill claude-family background children"
+  );
+  assert(
+    source.includes("background: {") &&
+      source.includes("codex_cancel {taskId}") &&
+      source.includes("if (taskId) {"),
+    "codex_implement/codex_investigate must expose background:true and codex_cancel must take a scoped taskId"
+  );
 }
 
 function writeFanoutFakeAppServer(dir, options = {}) {

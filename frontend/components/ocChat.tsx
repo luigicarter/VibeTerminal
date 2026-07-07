@@ -59,6 +59,11 @@ export interface OcChatMessage {
   // planner independently check the last executor delegation? Neutral chip,
   // both states muted by design.
   gate?: { status: "verified" | "unverified"; evidence?: string[]; pendingSince?: number };
+  // Detached background delegation rows: `background` marks a task row that
+  // keeps running after the planner's turn ended; `backgroundReport` marks the
+  // host-delivered wake row that opens the review turn.
+  background?: boolean;
+  backgroundReport?: boolean;
 }
 
 export function clip(value: string, max: number) {
@@ -270,6 +275,54 @@ export function OcSpinner() {
   );
 }
 
+// Composer pin for detached background delegations: a neutral persistent
+// panel in the queued-pin slot listing each running task with elapsed time
+// and a stop control. Unlike the steer pin it survives turn ends — it clears
+// per task as the tasks settle.
+export interface OcBackgroundTask {
+  taskId: string;
+  title: string;
+  startedAt: number;
+  updates: number;
+}
+
+export function OcBackgroundPin({
+  tasks,
+  now,
+  onStop
+}: {
+  tasks: OcBackgroundTask[];
+  now: number;
+  onStop?: (taskId: string) => void;
+}) {
+  if (!tasks.length) return null;
+  return (
+    <div className="oc-bgtasks" role="status">
+      <div className="oc-bgtasks-head">
+        ◍ Background · {tasks.length} running
+      </div>
+      {tasks.map((task) => (
+        <div key={task.taskId} className="oc-bgtasks-item">
+          <span className="oc-bgtasks-title">{clip(task.title || task.taskId, 60)}</span>
+          <span className="oc-bgtasks-meta">
+            {task.updates > 0 ? `${task.updates} updates · ` : ""}
+            {formatDurationShort(Math.max(0, now - task.startedAt))}
+          </span>
+          {onStop && (
+            <button
+              type="button"
+              className="oc-bgtasks-stop"
+              onClick={() => onStop(task.taskId)}
+            >
+              stop
+            </button>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // Prose renders as markdown like the OpenCode TUI. Links must open in the
 // system browser — a plain anchor would navigate the Electron window.
 export const Markdown = memo(function Markdown({ text }: { text: string }) {
@@ -441,6 +494,12 @@ export const OcChatRow = memo(function OcChatRow({
     if (name === "task") {
       const report = (m.toolOutput ?? "").trim();
       const taskRole = (m.taskRole ?? "").trim();
+      const label = m.backgroundReport
+        ? `Background report — ${clip(
+            firstString(asRecord(m.toolInput).description) || m.text || "background task",
+            160
+          )}`
+        : subagentTitle(m.toolInput, m.text);
       return (
         <div className={clsx("oc-tool", "oc-task", `is-${status}`, denied && "is-denied", failed && "is-failed")}>
           <div
@@ -456,7 +515,10 @@ export const OcChatRow = memo(function OcChatRow({
                   {titlecase(taskRole)}
                 </span>
               )}
-              {subagentTitle(m.toolInput, m.text)}
+              {m.background && !m.backgroundReport && (
+                <span className="oc-task-bg">background</span>
+              )}
+              {label}
               {m.taskDetail && <span className="oc-task-detail">{"\n"}↳ {m.taskDetail}</span>}
             </span>
           </div>
