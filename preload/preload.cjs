@@ -31,14 +31,34 @@ function getPathForDroppedFile(file) {
   }
 }
 
-const screenshotFixture =
-  process.env.VIBE_SCREENSHOT_SEED_OPEN_FUSION === "1"
-    ? {
-        mode: "openfusion",
-        cwd: process.env.VIBE_SCREENSHOT_FIXTURE_CWD || process.cwd(),
-        openCodeCommand: process.env.VIBE_SCREENSHOT_OPENCODE_COMMAND || ""
-      }
-    : null;
+function screenshotFixtureFromEnv() {
+  if (process.env.VIBE_SCREENSHOT_SEED_OPEN_FUSION === "1") {
+    return {
+      mode: "openfusion",
+      cwd: process.env.VIBE_SCREENSHOT_FIXTURE_CWD || process.cwd(),
+      openCodeCommand: process.env.VIBE_SCREENSHOT_OPENCODE_COMMAND || ""
+    };
+  }
+  if (process.env.VIBE_SCREENSHOT_SEED_FUSION_PICKER === "1") {
+    const role = process.env.VIBE_SCREENSHOT_FUSION_PICKER_ROLE === "executor" ? "executor" : "planner";
+    const family = process.env.VIBE_SCREENSHOT_FUSION_PICKER_FAMILY === "codex" ? "codex" : "claude";
+    return {
+      mode: "fusion-picker",
+      cwd: process.env.VIBE_SCREENSHOT_FIXTURE_CWD || process.cwd(),
+      role,
+      family
+    };
+  }
+  if (process.env.VIBE_SCREENSHOT_SEED_FUSION_BUILDS === "1") {
+    return {
+      mode: "fusion-builds",
+      cwd: process.env.VIBE_SCREENSHOT_FIXTURE_CWD || process.cwd()
+    };
+  }
+  return null;
+}
+
+const screenshotFixture = screenshotFixtureFromEnv();
 
 contextBridge.exposeInMainWorld("vibe", {
   // The launch command is typed into the platform shell (PowerShell on Windows,
@@ -119,12 +139,17 @@ contextBridge.exposeInMainWorld("vibe", {
     interrupt: (id) => ipcRenderer.invoke("fusion-chat:interrupt", { id }),
     backgroundCancel: (id, taskId) =>
       ipcRenderer.invoke("fusion-chat:background-cancel", { id, taskId }),
+    buildCancel: (id, buildId) =>
+      ipcRenderer.invoke("fusion-chat:build-cancel", { id, buildId }),
     stop: (id) => ipcRenderer.invoke("fusion-chat:stop", { id }),
     onEvent: (callback) => {
       const listener = (_event, payload) => callback(payload);
       ipcRenderer.on("fusion-chat:event", listener);
       return () => ipcRenderer.removeListener("fusion-chat:event", listener);
     }
+  },
+  fusionModelCatalog: {
+    list: (payload) => ipcRenderer.invoke("fusion-model-catalog:list", payload)
   },
   // Headless OpenCode chat for Open Fusion panes (no PTY, no TUI). `start`
   // spawns a per-pane `opencode serve`; `sendUserTurn` posts a planner prompt;

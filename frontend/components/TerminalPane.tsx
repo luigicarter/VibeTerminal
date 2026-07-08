@@ -32,6 +32,11 @@ import {
   isTerminalCopyShortcut,
   isTerminalPasteShortcut
 } from "../terminalClipboard";
+import {
+  cwdConflictChipLabel,
+  cwdConflictTitle,
+  type CwdConflict
+} from "../cwdConflicts";
 import type {
   AgentProfile,
   AgentSession,
@@ -81,6 +86,7 @@ interface TerminalPaneProps {
   profile: AgentProfile;
   providerLogoSrc?: string;
   claimedThreadIds: string[];
+  cwdConflict?: CwdConflict;
   isMaximized: boolean;
   isArranging: boolean;
   onClose: () => void;
@@ -121,6 +127,7 @@ export default function TerminalPane({
   profile,
   providerLogoSrc,
   claimedThreadIds,
+  cwdConflict,
   isMaximized,
   isArranging,
   onAdd,
@@ -1122,6 +1129,17 @@ export default function TerminalPane({
             {session.threadRef?.title || session.name}
           </span>
           <small>{profile.label}</small>
+          {cwdConflict && (
+            <span
+              className={clsx(
+                "pane-cwd-conflict-chip",
+                cwdConflict.active && "is-active"
+              )}
+              title={cwdConflictTitle(cwdConflict)}
+            >
+              {cwdConflictChipLabel(cwdConflict)}
+            </span>
+          )}
         </div>
 
         <div className="pane-status">

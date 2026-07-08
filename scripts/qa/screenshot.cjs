@@ -19,11 +19,25 @@ const electronCommand = isWindows ? `"${electronBin}" .` : electronBin;
 const electronArgs = isWindows ? [] : ["."];
 const artifactDir = path.join(rootDir, "artifacts");
 const args = new Set(process.argv.slice(2));
-const screenshotFixture = args.has("--openfusion") ? "openfusion" : "default";
+const screenshotFixture = args.has("--openfusion")
+  ? "openfusion"
+  : args.has("--fusion-picker-claude")
+    ? "fusion-picker-claude"
+    : args.has("--fusion-picker-codex")
+      ? "fusion-picker-codex"
+      : args.has("--fusion-builds")
+        ? "fusion-builds"
+      : "default";
 const screenshotPath = path.join(
   artifactDir,
   screenshotFixture === "openfusion"
     ? "vibe-terminal-openfusion-screenshot.png"
+    : screenshotFixture === "fusion-picker-claude"
+      ? "vibe-terminal-fusion-picker-claude.png"
+      : screenshotFixture === "fusion-picker-codex"
+        ? "vibe-terminal-fusion-picker-codex.png"
+        : screenshotFixture === "fusion-builds"
+          ? "vibe-terminal-fusion-builds.png"
     : "vibe-terminal-screenshot.png"
 );
 const screenshotUserData = path.join(
@@ -52,7 +66,14 @@ const screenshotPtyDebugPath = path.join(
   `screenshot-pty-debug-${Date.now()}-${process.pid}.jsonl`
 );
 const screenshotTimeoutMs = 30000;
-const screenshotDelayMs = screenshotFixture === "openfusion" ? 8500 : 4500;
+const screenshotDelayMs =
+  screenshotFixture === "openfusion"
+    ? 8500
+    : screenshotFixture === "fusion-builds"
+      ? 6500
+    : screenshotFixture.startsWith("fusion-picker-")
+      ? 10000
+      : 4500;
 const shimBaseDir = path.join(rootDir, ".tmp", "vibe-agent-shims");
 
 function electronAppEnv(extra = {}) {
@@ -323,6 +344,16 @@ async function main() {
     electronEnv.VIBE_SCREENSHOT_FIXTURE_CWD = rootDir;
     electronEnv.VIBE_SCREENSHOT_OPENCODE_COMMAND = quoteShellCommand(fakeOpenCodeCommand);
     electronEnv.VIBE_SCREENSHOT_FAKE_OPENCODE_MARKER = screenshotFakeOpenCodeMarker;
+  } else if (screenshotFixture.startsWith("fusion-picker-")) {
+    electronEnv.VIBE_SCREENSHOT_SEED_FUSION_PICKER = "1";
+    electronEnv.VIBE_SCREENSHOT_FIXTURE_CWD = rootDir;
+    electronEnv.VIBE_SCREENSHOT_FUSION_PICKER_FAMILY =
+      screenshotFixture === "fusion-picker-codex" ? "codex" : "claude";
+    electronEnv.VIBE_SCREENSHOT_FUSION_PICKER_ROLE =
+      screenshotFixture === "fusion-picker-codex" ? "executor" : "planner";
+  } else if (screenshotFixture === "fusion-builds") {
+    electronEnv.VIBE_SCREENSHOT_SEED_FUSION_BUILDS = "1";
+    electronEnv.VIBE_SCREENSHOT_FIXTURE_CWD = rootDir;
   }
 
   const rendererPort = await findFreePort();

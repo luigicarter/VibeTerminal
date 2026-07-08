@@ -611,11 +611,13 @@ assert(
     fusionChatPaneSource.includes('normalized === "/resume"') &&
     fusionChatPaneSource.includes('normalized === "/fast"') &&
     fusionChatPaneSource.includes('normalized === "/speed"') &&
-    fusionSlashMenuSource.includes('"Fusion Speed / Planning"') &&
-    fusionSlashMenuSource.includes('"Fusion Speed / Execution"') &&
-    fusionSlashMenuSource.includes('"Fusion Effort / Whole Harness"') &&
-    fusionSlashMenuSource.includes('"Fusion Effort / Planning"') &&
-    fusionSlashMenuSource.includes('"Fusion Effort / Execution"') &&
+    fusionSlashMenuSource.includes("function roleControlMenu") &&
+    fusionSlashMenuSource.includes('name: "/planner"') &&
+    fusionSlashMenuSource.includes('name: "/executor"') &&
+    fusionSlashMenuSource.includes('command: modelCommand') &&
+    fusionSlashMenuSource.includes('command: `/effort ${scopeCommand(scope)} ${effort}`') &&
+    fusionSlashMenuSource.includes('command: `/fast ${role} on`') &&
+    fusionSlashMenuSource.includes('label: "Fast serving — On"') &&
     fusionChatPaneSource.includes('raw.match(/^\\/(?:claude|model\\s+claude)\\s+(.+)$/i)') &&
     fusionChatPaneSource.includes('raw.match(/^\\/(?:codex|model\\s+codex)\\s+(.+)$/i)') &&
     fusionChatPaneSource.includes("pendingRestartNoticeRef") &&
@@ -652,20 +654,21 @@ assert(
     fusionChatPaneSource.includes('if (normalized === "/auto")') &&
     fusionChatPaneSource.includes('applySpeedPreset("execution"') &&
     fusionChatPaneSource.includes('applyEffortLevel(normalizeRoleScope(effortMatch[1]), effortMatch[2])') &&
-    fusionSlashMenuSource.includes('"Planning role"') &&
-    fusionSlashMenuSource.includes('"Execution role"') &&
+    fusionSlashMenuSource.includes('`Planner (${familyDisplayName(contextPlannerFamily(context))})`') &&
+    fusionSlashMenuSource.includes('`Executor (${familyDisplayName(contextExecutorFamily(context))})`') &&
     fusionChatPaneSource.includes('const FUSION_SPEAKER_LABEL = "Fusion"') &&
-    fusionChatPaneSource.includes("function fusionRoleLabel") &&
-    fusionChatPaneSource.includes("return FUSION_SPEAKER_LABEL") &&
+    fusionChatPaneSource.includes("function fusionPipelineNodeLabel") &&
+    fusionChatPaneSource.includes("const plannerPipelineLabel") &&
+    fusionChatPaneSource.includes("const executorPipelineLabel") &&
+    fusionChatPaneSource.includes("text: FUSION_SPEAKER_LABEL") &&
     !fusionChatPaneSource.includes('"Fusion - Claude Code"') &&
     !fusionChatPaneSource.includes('"Fusion - Codex"') &&
-    fusionChatPaneSource.includes("activeRoleLabel") &&
     fusionChatPaneSource.includes("formatBackgroundActivityTitle") &&
     fusionChatPaneSource.includes('className="fusion-background-activity"') &&
     fusionChatPaneSource.includes("backgroundActivity.count > 1") &&
     fusionChatPaneSource.includes('proseRole="opus"') &&
     ocChatSource.includes('(m.kind === "thinking" || isSubagentStream) && !m.text.trim()'),
-  "FusionChatPane should drive harness-specific speed/effort submenus, unified role labels, and empty-thinking suppression"
+  "FusionChatPane should drive per-role settings submenus, legacy speed/effort commands, unified role labels, and empty-thinking suppression"
 );
 assert(
   fusionSlashMenuSource.includes("function normalizeFusionModel(value: unknown)") &&
@@ -684,7 +687,7 @@ assert(
     fusionChatPaneSource.includes("claudeSessionIdRef.current = event.sessionId") &&
     fusionChatPaneSource.includes("claudeThreadTitleRef.current = titleFromFirstPrompt(event.text)") &&
     fusionChatPaneSource.includes("function publishClaudeThreadRef()") &&
-    fusionChatPaneSource.includes("session.threadRef?.title ||") &&
+    fusionChatPaneSource.includes("title: claudeThreadTitleRef.current || session.threadRef?.title") &&
     !fusionChatPaneSource.includes("session.resumeRef?.title ||"),
   "Fusion resume should use captured Claude session/title refs without discovery or silent fresh fallback"
 );

@@ -464,6 +464,23 @@ export type BackgroundTaskEvent =
       result: BackgroundTaskResult;
     };
 
+export type BuildTaskEvent =
+  | {
+      type: "build-task";
+      phase: "started";
+      buildId: string;
+      command: string;
+      startedAt: number;
+    }
+  | {
+      type: "build-task";
+      phase: "settled";
+      buildId: string;
+      status: string;
+      exitCode: number | null;
+      command: string;
+    };
+
 export type FusionChatEvent = (
   | { id: string; type: "session"; sessionId: string }
   // backgroundReport marks a host-delivered background-task report wake: the
@@ -480,13 +497,21 @@ export type FusionChatEvent = (
       files?: string[];
     }
   | ({ id: string } & BackgroundTaskEvent)
+  | ({ id: string } & BuildTaskEvent)
   | { id: string; type: "turn-start" }
   | { id: string; type: "assistant-text"; delta: string }
   | { id: string; type: "thinking"; delta: string }
   | { id: string; type: "tool-call"; toolId: string; name: string; input: unknown }
   // isError mirrors the stream-json tool_result's is_error flag so the pane's
   // OpenCode-style tool rows can settle red instead of guessing from text.
-  | { id: string; type: "tool-result"; toolId: string; text: string; isError?: boolean }
+  | {
+      id: string;
+      type: "tool-result";
+      toolId: string;
+      text: string;
+      isError?: boolean;
+      completedBridgeResult?: unknown;
+    }
   // Internal completion-gate evidence observation (codex-planner native shell
   // — git evidence, file reads). Panes ignore this type entirely.
   | {
@@ -499,8 +524,8 @@ export type FusionChatEvent = (
     }
   | { id: string; type: "activity"; role: "opus" | "codex"; kind: string; text?: string }
   | { id: string; type: "background-activity"; backgroundActivity: AgentBackgroundActivity }
-  | { id: string; type: "turn-end" }
-  | { id: string; type: "turn-error"; message: string }
+  | { id: string; type: "turn-end"; awaitsToolResult?: boolean }
+  | { id: string; type: "turn-error"; message: string; isError?: boolean; synthetic?: boolean }
   // "/compact" sent as a user message: the CLI runs a compaction pass
   // (system/status status:"compacting" → compact_result success|failed).
   | { id: string; type: "compact-start" }
@@ -508,11 +533,14 @@ export type FusionChatEvent = (
   | {
       id: string;
       type: "result";
-      subtype?: string;
+      subtype?: "restored" | "aborted" | "success" | "error" | (string & {});
+      usage?: unknown;
       costUsd?: number;
       isError?: boolean;
       resultText?: string;
       gate?: CompletionGateVerdict;
+      synthetic?: boolean;
+      reason?: string;
     }
   | { id: string; type: "interrupted" }
   | { id: string; type: "stderr"; text: string }
@@ -725,6 +753,16 @@ export interface OpenFusionToolMeta {
   diff?: string;
   count?: number;
   matches?: number;
+  tone?: "success" | "error" | "muted";
+}
+
+export interface TaskVerdict {
+  goalReached?: boolean;
+  bugs?: number;
+  missing?: number;
+  nextAction?: "continue" | "done" | "ask_human";
+  summary?: string;
+  files?: number;
 }
 
 // One rendered entry in an Open Fusion pane's chat transcript.
@@ -758,6 +796,7 @@ export interface OpenFusionChatMessage {
   // completion stats, rendered as the "↳ …" second line like OpenCode.
   taskDetail?: string;
   taskRole?: string;
+  verdict?: TaskVerdict;
   // kind:"result" rows: completion-gate verdict chip for the settled turn.
   gate?: CompletionGateVerdict;
   // Detached background delegation rows (see OcChatMessage).
@@ -802,6 +841,7 @@ export interface ChatMessage {
   // Task (delegation) rows: live "↳ …" progress line / completion stats.
   taskDetail?: string;
   taskRole?: string;
+  verdict?: TaskVerdict;
   // kind:"result" rows: completion-gate verdict chip for the settled turn.
   gate?: CompletionGateVerdict;
   // Detached background delegation rows (see OcChatMessage).

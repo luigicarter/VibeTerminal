@@ -20,6 +20,11 @@ import {
 } from "lucide-react";
 import clsx from "clsx";
 import { shouldShowAttentionDot } from "../attention";
+import {
+  cwdConflictChipLabel,
+  cwdConflictTitle,
+  type CwdConflict
+} from "../cwdConflicts";
 import type {
   AgentAttentionEvent,
   AgentProfile,
@@ -75,6 +80,7 @@ interface OpenFusionChatPaneProps {
   // Thread ids active in OTHER panes: the resume picker marks them and refuses
   // to open the same conversation twice (two panes writing one session id).
   claimedThreadIds?: string[];
+  cwdConflict?: CwdConflict;
   isMaximized: boolean;
   isSelected: boolean;
   onClose: () => void;
@@ -343,6 +349,7 @@ export default function OpenFusionChatPane({
   session,
   profile,
   claimedThreadIds,
+  cwdConflict,
   isMaximized,
   isSelected,
   onClose,
@@ -3069,6 +3076,17 @@ export default function OpenFusionChatPane({
           <span className={clsx("openfusion-role-chip", `is-${activeRole}`)} title={modelsLine}>
             {activeRoleLabel}
           </span>
+          {cwdConflict && (
+            <span
+              className={clsx(
+                "pane-cwd-conflict-chip",
+                cwdConflict.active && "is-active"
+              )}
+              title={cwdConflictTitle(cwdConflict)}
+            >
+              {cwdConflictChipLabel(cwdConflict)}
+            </span>
+          )}
         </div>
         <div className="pane-status">
           {/* waiting outranks busy: a permission ask leaves the server turn

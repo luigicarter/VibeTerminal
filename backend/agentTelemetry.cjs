@@ -2987,6 +2987,22 @@ function createAgentTelemetryManager(options = {}) {
                 result: event.result,
                 ts: event.ts
               });
+            } else if (event.type === "fusion.build-task") {
+              // Detached build lifecycle from the adapter. main owns registry
+              // mutation/cancellation and mirrors lifecycle events to the pane.
+              emit({
+                id: event.sessionId,
+                type: "fusion-build-task",
+                phase: event.phase,
+                buildId: event.buildId,
+                command: event.command,
+                cwd: event.cwd,
+                pid: event.pid,
+                logPath: event.logPath,
+                sentinelPath: event.sentinelPath,
+                startedAt: event.startedAt,
+                ts: event.ts
+              });
             } else if (event.type === "openfusion.background-task") {
               // Brain-initiated background delegation request from the pane's
               // MCP bridge (start/cancel). main routes it to the Open Fusion
@@ -3418,6 +3434,7 @@ function createAgentTelemetryManager(options = {}) {
             VIBE_TERMINAL_SESSION_ID: normalizedSessionId,
             VIBE_TERMINAL_CALLBACK_URL: callbackUrl,
             VIBE_TERMINAL_TELEMETRY_TOKEN: token,
+            VIBE_BUILD_SUPERVISOR_DIR: opts.buildSupervisorDir || "",
             VIBE_FUSION_EAGER_BOOT: "1",
             VIBE_FUSION_RUN_MODE: runMode,
             VIBE_FUSION_RUN_MODE_FILE: runModeFile,

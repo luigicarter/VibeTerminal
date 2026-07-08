@@ -1318,6 +1318,27 @@ button {
   font-size: 11px;
 }
 
+.pane-title .pane-cwd-conflict-chip {
+  flex: 0 0 auto;
+  border: 1px solid #4a5148;
+  border-radius: 999px;
+  background: #20251f;
+  color: #aeb5aa;
+  padding: 1px 6px;
+  font-family:
+    "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.pane-cwd-conflict-chip.is-active {
+  border-color: #7a6425;
+  background: #352b14;
+  color: #ffd86f;
+}
+
 .pane-status {
   min-width: 62px;
   text-align: right;
@@ -1525,16 +1546,90 @@ button {
 }
 
 /* Fusion pane: faithful Claude-Code-style headless chat UI. */
-.fusion-pane .pane-title .fusion-chip {
-  font-size: 9px;
-  text-transform: uppercase;
+.fusion-agentic-pane .pane-header {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  min-height: 38px;
+  border-bottom-color: color-mix(in srgb, var(--pane-accent) 26%, #252d28);
+  background:
+    linear-gradient(90deg, #15201b 0%, #20251f 48%, #232824 100%);
+  box-shadow: inset 0 -1px 0 #ffffff08;
+}
+
+.fusion-agentic-pane.oc-skin {
+  --of-executor: #64d6b1;
+}
+
+.fusion-agentic-pane .fusion-goalbar-title {
+  gap: 6px;
+}
+
+.fusion-agentic-pane .fusion-goalbar-mark {
+  color: color-mix(in srgb, var(--pane-accent) 84%, #d7ffd9);
+  fill: color-mix(in srgb, var(--pane-accent) 26%, transparent);
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--pane-accent) 34%, transparent));
+}
+
+.fusion-agentic-pane .fusion-goalbar-pipeline {
+  display: inline-flex;
+  min-width: 0;
+  max-width: min(100%, 520px);
+  align-items: center;
+  gap: 6px;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, var(--pane-accent) 28%, #384038);
+  border-radius: 7px;
+  background: #111711;
+}
+
+.fusion-agentic-pane .fusion-goalbar-node {
+  min-width: 0;
+  color: #e5ece3;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.fusion-agentic-pane .fusion-goalbar-node.is-executor {
+  color: #9ee5ca;
+}
+
+.fusion-agentic-pane .fusion-goalbar-arrow {
+  flex: 0 0 auto;
+  color: #7f8b80;
+  font-size: 11px;
+}
+
+.fusion-agentic-pane .fusion-goalbar-status {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.fusion-agentic-pane .status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 78px;
+  justify-content: center;
+  padding: 3px 9px;
+  border-radius: 7px;
+  background: #111711;
   letter-spacing: 0.04em;
-  padding: 1px 6px;
+}
+
+.fusion-agentic-pane .fusion-status-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
   border-radius: 999px;
-  border: 1px solid #ffffff1a;
-  color: var(--pane-accent);
-  border-color: color-mix(in srgb, var(--pane-accent) 40%, transparent);
-  font-weight: 600;
+  background: currentColor;
+  box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 18%, transparent);
+}
+
+.fusion-agentic-pane .status-running .fusion-status-dot,
+.fusion-agentic-pane .status-starting .fusion-status-dot {
+  animation: fusion-background-breathe 1.6s ease-in-out infinite;
 }
 
 .fusion-pane .pane-title .fusion-background-activity {
@@ -1548,6 +1643,41 @@ button {
   gap: 3px;
   overflow: visible;
   color: #7f887d;
+}
+
+.fusion-agentic-pane .fusion-goalbar-status .fusion-background-activity {
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 8px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 0 4px;
+  overflow: visible;
+  color: #7f887d;
+}
+
+.fusion-agentic-pane .fusion-goalbar-status .fusion-background-dot {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #95a08f;
+  opacity: 0.38;
+  box-shadow: 0 0 0 0 #95a08f33;
+  animation: fusion-background-breathe 1.9s ease-in-out infinite;
+}
+
+.fusion-agentic-pane .fusion-goalbar-status .fusion-background-count {
+  flex: 0 0 auto;
+  overflow: visible;
+  color: #7f887d;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
 }
 
 .fusion-pane .pane-title .fusion-background-dot {
@@ -1952,6 +2082,277 @@ button {
 .oc-skin .oc-task-report .oc-md,
 .oc-skin .oc-task-report p { margin: 0 0 6px; padding-left: 0; }
 .oc-skin .oc-task-report p:last-child { margin-bottom: 0; }
+
+.fusion-agentic-pane .fusion-chat-scroll > .oc-md {
+  margin-top: 12px;
+  padding: 8px 11px 8px 13px;
+  border-left: 2px solid #b58cff;
+  border-radius: 0 7px 7px 0;
+  background: linear-gradient(90deg, #20172c 0%, color-mix(in srgb, var(--oc-bg-panel) 82%, transparent) 100%);
+  color: #e2eadf;
+}
+
+.fusion-agentic-pane .fusion-chat-scroll > .oc-md:first-child {
+  margin-top: 12px;
+}
+
+.fusion-agentic-pane .oc-prose-label {
+  display: block;
+  margin-bottom: 4px;
+  color: #c7adff;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.fusion-agentic-pane .fusion-chat-scroll > .oc-tool.oc-task {
+  position: relative;
+  margin: 12px 0 2px 18px;
+  padding: 9px 10px 9px 12px;
+  border: 1px solid color-mix(in srgb, var(--of-executor) 42%, var(--oc-border));
+  border-left: 3px solid var(--of-executor);
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--of-executor) 10%, transparent), transparent 38%),
+    #121814;
+  box-shadow:
+    inset 0 1px 0 #ffffff08,
+    0 8px 18px #00000024;
+}
+
+.fusion-agentic-pane .fusion-chat-scroll > .oc-tool.oc-task::before {
+  position: absolute;
+  top: 13px;
+  left: -18px;
+  width: 11px;
+  height: 1px;
+  background: color-mix(in srgb, var(--of-executor) 58%, #384038);
+  content: "";
+}
+
+.fusion-agentic-pane .fusion-chat-scroll > .oc-tool.oc-task.is-running {
+  border-color: color-mix(in srgb, var(--of-executor) 60%, var(--oc-border));
+  box-shadow:
+    inset 0 1px 0 #ffffff0a,
+    0 0 0 1px color-mix(in srgb, var(--of-executor) 12%, transparent),
+    0 10px 22px #00000028;
+}
+
+.fusion-agentic-pane .fusion-chat-scroll > .oc-tool.oc-task.is-done {
+  border-color: color-mix(in srgb, var(--of-executor) 30%, var(--oc-border));
+  border-left-color: color-mix(in srgb, var(--of-executor) 68%, #d8e4d6);
+  background: #121713;
+}
+
+.fusion-agentic-pane .fusion-chat-scroll > .oc-tool.oc-task.is-failed {
+  border-color: color-mix(in srgb, var(--oc-error) 58%, var(--oc-border));
+  border-left-color: var(--oc-error);
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--oc-error) 11%, transparent), transparent 42%),
+    #181312;
+}
+
+.fusion-agentic-pane .fusion-chat-scroll > .oc-tool.oc-build {
+  position: relative;
+  margin: 12px 0 2px 18px;
+  padding: 9px 10px 9px 12px;
+  border: 1px solid color-mix(in srgb, var(--oc-warning) 42%, var(--oc-border));
+  border-left: 3px solid var(--oc-warning);
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--oc-warning) 9%, transparent), transparent 38%),
+    #121814;
+  box-shadow:
+    inset 0 1px 0 #ffffff08,
+    0 8px 18px #00000024;
+}
+
+.fusion-agentic-pane .fusion-chat-scroll > .oc-tool.oc-build::before {
+  position: absolute;
+  top: 13px;
+  left: -18px;
+  width: 11px;
+  height: 1px;
+  background: color-mix(in srgb, var(--oc-warning) 58%, #384038);
+  content: "";
+}
+
+.fusion-agentic-pane .fusion-chat-scroll > .oc-tool.oc-build.is-running {
+  border-color: color-mix(in srgb, var(--oc-warning) 60%, var(--oc-border));
+  box-shadow:
+    inset 0 1px 0 #ffffff0a,
+    0 0 0 1px color-mix(in srgb, var(--oc-warning) 12%, transparent),
+    0 10px 22px #00000028;
+}
+
+.fusion-agentic-pane .fusion-chat-scroll > .oc-tool.oc-build.is-success {
+  border-color: color-mix(in srgb, var(--oc-success) 45%, var(--oc-border));
+  border-left-color: var(--oc-success);
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--oc-success) 9%, transparent), transparent 42%),
+    #111713;
+}
+
+.fusion-agentic-pane .fusion-chat-scroll > .oc-tool.oc-build.is-success .oc-tool-row {
+  color: color-mix(in srgb, var(--oc-success) 74%, var(--oc-text));
+}
+
+.fusion-agentic-pane .fusion-chat-scroll > .oc-tool.oc-build.is-error,
+.fusion-agentic-pane .fusion-chat-scroll > .oc-tool.oc-build.is-failed {
+  border-color: color-mix(in srgb, var(--oc-error) 58%, var(--oc-border));
+  border-left-color: var(--oc-error);
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--oc-error) 11%, transparent), transparent 42%),
+    #181312;
+}
+
+.fusion-agentic-pane .fusion-chat-scroll > .oc-tool.oc-build.is-muted {
+  border-color: color-mix(in srgb, var(--oc-muted) 28%, var(--oc-border));
+  border-left-color: color-mix(in srgb, var(--oc-muted) 55%, var(--oc-border));
+  background: #111512;
+}
+
+.fusion-agentic-pane .fusion-chat-scroll > .oc-tool.oc-build.is-muted .oc-tool-row {
+  color: var(--oc-muted);
+}
+
+.fusion-agentic-pane .fusion-chat-scroll > .oc-tool.oc-task .oc-tool-row {
+  align-items: flex-start;
+}
+
+.fusion-agentic-pane .fusion-chat-scroll > .oc-tool.oc-build .oc-tool-row {
+  align-items: flex-start;
+}
+
+.fusion-agentic-pane .fusion-chat-scroll > .oc-tool.oc-task .oc-tool-icon {
+  padding-top: 2px;
+}
+
+.fusion-agentic-pane .fusion-chat-scroll > .oc-tool.oc-build .oc-tool-icon {
+  padding-top: 2px;
+}
+
+.fusion-agentic-pane .fusion-chat-scroll > .oc-tool.oc-task .oc-tool-label {
+  display: block;
+  width: 100%;
+  color: #e4ece5;
+  font-weight: 700;
+}
+
+.fusion-agentic-pane .fusion-chat-scroll > .oc-tool.oc-build .oc-tool-label {
+  display: block;
+  width: 100%;
+  color: #e9e6d8;
+  font-weight: 700;
+}
+
+.fusion-agentic-pane .oc-task-role {
+  border-color: color-mix(in srgb, var(--of-executor) 42%, var(--oc-border));
+  background: color-mix(in srgb, var(--of-executor) 12%, transparent);
+}
+
+.fusion-agentic-pane .oc-task-role-scout {
+  border-color: color-mix(in srgb, var(--of-scout) 46%, var(--oc-border));
+  color: var(--of-scout);
+  background: color-mix(in srgb, var(--of-scout) 12%, transparent);
+}
+
+.fusion-agentic-pane .oc-task-detail {
+  display: block;
+  margin: 7px 0 0 2px;
+  padding: 5px 0 1px 12px;
+  border-left: 1px solid color-mix(in srgb, var(--of-executor) 38%, var(--oc-border));
+  color: #8da595;
+  font-weight: 500;
+}
+
+.fusion-agentic-pane .oc-task-bg {
+  background: color-mix(in srgb, var(--of-executor) 13%, transparent);
+}
+
+.fusion-agentic-pane .oc-build .oc-task-bg {
+  color: color-mix(in srgb, var(--oc-warning) 82%, var(--oc-text));
+  background: color-mix(in srgb, var(--oc-warning) 15%, transparent);
+}
+
+.fusion-agentic-pane .oc-task-report {
+  margin: 8px 0 0 22px;
+  border-color: color-mix(in srgb, var(--of-executor) 40%, var(--oc-border));
+  border-radius: 0 7px 7px 0;
+  background: #0f140f;
+}
+
+.fusion-agentic-pane .oc-task-verdict {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 9px -2px -1px 22px;
+  padding: 7px 0 0;
+  border-top: 1px solid color-mix(in srgb, var(--of-executor) 26%, #28342e);
+  color: var(--oc-muted);
+  font-size: 11px;
+}
+
+.fusion-agentic-pane .oc-task-verdict-token {
+  flex: 0 0 auto;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.fusion-agentic-pane .oc-task-verdict.is-success .oc-task-verdict-token {
+  color: #8af0bd;
+}
+
+.fusion-agentic-pane .oc-task-verdict.is-continue .oc-task-verdict-token {
+  color: #8fb7ff;
+}
+
+.fusion-agentic-pane .oc-task-verdict.is-attention .oc-task-verdict-token {
+  color: var(--oc-warning);
+}
+
+.fusion-agentic-pane .oc-task-verdict.is-warning .oc-task-verdict-token {
+  color: #ff8787;
+}
+
+.fusion-agentic-pane .oc-task-verdict-summary {
+  min-width: 120px;
+  flex: 1 1 180px;
+  overflow: hidden;
+  color: #9fb4a8;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.fusion-agentic-pane .oc-task-verdict-chip {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid #2a382f;
+  border-radius: 999px;
+  color: #91a69a;
+  background: #0e1510;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.fusion-agentic-pane .oc-task-verdict-chip.is-bugs {
+  border-color: color-mix(in srgb, var(--oc-error) 40%, #332827);
+  color: #ff9a9a;
+  background: color-mix(in srgb, var(--oc-error) 12%, #0e1510);
+}
+
+.fusion-agentic-pane .oc-task-verdict-chip.is-missing {
+  border-color: color-mix(in srgb, var(--oc-warning) 42%, #332f22);
+  color: #f3c96d;
+  background: color-mix(in srgb, var(--oc-warning) 12%, #0e1510);
+}
+
+.fusion-agentic-pane .oc-task-verdict-chip.is-files {
+  border-color: #2a382f;
+  color: #8da595;
+}
 
 /* Block panels (bash output, diffs, todos): OpenCode's BlockTool. */
 .oc-skin .oc-block {
@@ -2474,6 +2875,60 @@ button {
 .oc-bgtasks-stop:hover {
   border-color: color-mix(in srgb, var(--pane-accent, #6fbf73) 55%, #3a403a);
   color: #d8e2d8;
+}
+
+.fusion-agentic-pane .fusion-input-area > .oc-bgtasks {
+  gap: 6px;
+  padding: 7px 9px;
+  border-color: color-mix(in srgb, var(--of-executor) 45%, #26322c);
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--of-executor) 10%, transparent), transparent 45%),
+    #0f150f;
+  box-shadow:
+    inset 0 1px 0 #ffffff08,
+    0 8px 18px #00000030;
+}
+
+.fusion-agentic-pane .oc-bgtasks-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #a7e6c7;
+}
+
+.fusion-agentic-pane .oc-bgtasks-head::before {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #95d8b8;
+  box-shadow: 0 0 0 0 #95d8b833;
+  animation: fusion-background-breathe 1.9s ease-in-out infinite;
+  content: "";
+}
+
+.fusion-agentic-pane .oc-bgtasks-item {
+  min-height: 24px;
+  padding: 3px 5px 3px 7px;
+  border: 1px solid #26342c;
+  border-radius: 7px;
+  background: #121a13;
+}
+
+.fusion-agentic-pane .oc-bgtasks-title {
+  color: #e0ece2;
+  font-weight: 700;
+}
+
+.fusion-agentic-pane .oc-bgtasks-meta {
+  color: #86a894;
+}
+
+.fusion-agentic-pane .oc-bgtasks-stop {
+  border-color: #345142;
+  color: #a7ceb7;
+  background: #101711;
 }
 
 /* "background" tag chip on detached Task rows (shared oc-skin row kit). */

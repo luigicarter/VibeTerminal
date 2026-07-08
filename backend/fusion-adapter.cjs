@@ -7,6 +7,7 @@
 //   - codex_goal_set/get/clear: use Codex's native per-thread goal store.
 //   - codex_implement(task): run a Codex turn; returns {status:"completed",...}
 //     OR {status:"needs_decision", pendingId, ...} OR {status:"failed",...}.
+//   - codex_watch_build(command): launch a host-supervised detached build.
 //   - codex_respond(pendingId, decision, note?): answer a parked approval/
 //     question, then continue the turn.
 // South side: a JSON-RPC client over stdio to this pane's own app-server. It
@@ -22,6 +23,7 @@ const http = require("http");
 const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
+const { tailFile } = require("./buildSupervisor.cjs");
 
 const isWin = process.platform === "win32";
 
@@ -57,6 +59,18 @@ const TURN_AFTER_COMMAND_TIMEOUT_MS = Number(
 // churn (the broken-sandbox retry loop) or misconfigured to 0.
 const TURN_HARD_TIMEOUT_MS = Math.max(
   Number(process.env.VIBE_FUSION_TURN_HARD_TIMEOUT_MS) || 900000,
+  60000
+);
+// Detached background work is non-blocking and long builds can legitimately run
+// for much longer than foreground turns while still streaming progress. The
+// refreshable idle timer is the liveness guard; the hard cap is only an
+// absolute ceiling against truly orphaned work.
+const BACKGROUND_HARD_TIMEOUT_MS = Math.max(
+  Number(process.env.VIBE_FUSION_BACKGROUND_HARD_TIMEOUT_MS) || 14400000,
+  60000
+);
+const BACKGROUND_IDLE_TIMEOUT_MS = Math.max(
+  Number(process.env.VIBE_FUSION_BACKGROUND_IDLE_TIMEOUT_MS) || 1200000,
   60000
 );
 const STEER_ROUTE_TIMEOUT_MS = Math.max(
@@ -740,6 +754,200 @@ function clippedText(value, maxChars) {
   return `${text.slice(0, Math.max(0, maxChars - 3))}...`;
 }
 
+function buildSupervisorDir() {
+  return process.env.VIBE_BUILD_SUPERVISOR_DIR || path.join(os.tmpdir(), "fusion-builds");
+}
+
+function buildIdForWatch() {
+  return `build-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function watchedBuildPaths(buildId, buildsDir = buildSupervisorDir()) {
+  return {
+    logPath: path.join(buildsDir, `${buildId}.log`),
+    sentinelPath: path.join(buildsDir, `${buildId}.exit`),
+    runnerPath: path.join(buildsDir, `${buildId}.runner.cjs`)
+  };
+}
+
+function watchedBuildRunnerSource({ command, cwd, logPath, sentinelPath }) {
+  return `const fs = require("fs");
+const { spawn } = require("child_process");
+
+const command = ${JSON.stringify(String(command || ""))};
+const cwd = ${JSON.stringify(String(cwd || process.cwd()))};
+const logPath = ${JSON.stringify(String(logPath || ""))};
+const sentinelPath = ${JSON.stringify(String(sentinelPath || ""))};
+const isWin = process.platform === "win32";
+let logFd = null;
+let settled = false;
+
+function writeSentinel(code) {
+  fs.writeFileSync(sentinelPath, String(Number.isInteger(code) ? code : 1) + "\\n", "utf8");
+}
+
+function finish(code) {
+  if (settled) return;
+  settled = true;
+  try {
+    writeSentinel(code);
+  } finally {
+    if (logFd !== null) {
+      try { fs.closeSync(logFd); } catch {}
+    }
+  }
+  process.exit(Number.isInteger(code) ? code : 1);
+}
+
+try {
+  fs.mkdirSync(require("path").dirname(logPath), { recursive: true });
+  logFd = fs.openSync(logPath, "a");
+  const shell = isWin ? (process.env.ComSpec || "cmd.exe") : "/bin/sh";
+  const args = isWin
+    ? ["/d", "/s", "/v:on", "/c", command]
+    : ["-c", command];
+  const child = spawn(shell, args, {
+    cwd,
+    stdio: ["ignore", logFd, logFd],
+    windowsHide: true,
+    windowsVerbatimArguments: isWin
+  });
+  child.on("error", (error) => {
+    try { fs.writeSync(logFd, "build command failed to start: " + error.message + "\\n"); } catch {}
+    finish(1);
+  });
+  child.on("exit", (code, signal) => {
+    finish(Number.isInteger(code) ? code : signal ? 1 : 0);
+  });
+} catch (error) {
+  try {
+    fs.appendFileSync(logPath, "build runner failed: " + (error && error.message ? error.message : String(error)) + "\\n", "utf8");
+  } catch {}
+  finish(1);
+}
+`;
+}
+
+function watchedBuildSpawnSpec(runnerPath) {
+  return {
+    command: process.execPath,
+    args: [runnerPath]
+  };
+}
+
+function buildRegistryPath(buildsDir = buildSupervisorDir()) {
+  return path.join(buildsDir, "registry.json");
+}
+
+function normalizeBuildRegistryEntry(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const buildId = String(raw.buildId || "").trim();
+  if (!buildId) return null;
+  return {
+    buildId,
+    sessionId: raw.sessionId != null ? String(raw.sessionId) : "",
+    command: raw.command != null ? String(raw.command) : "",
+    cwd: raw.cwd != null ? String(raw.cwd) : "",
+    pid: Number.isFinite(Number(raw.pid)) ? Number(raw.pid) : null,
+    logPath: raw.logPath != null ? String(raw.logPath) : "",
+    sentinelPath: raw.sentinelPath != null ? String(raw.sentinelPath) : "",
+    status: raw.status != null ? String(raw.status) : "running",
+    exitCode:
+      Number.isInteger(raw.exitCode) || raw.exitCode === null ? raw.exitCode : null,
+    startedAt: Number.isFinite(Number(raw.startedAt)) ? Number(raw.startedAt) : null,
+    endedAt: Number.isFinite(Number(raw.endedAt)) ? Number(raw.endedAt) : null
+  };
+}
+
+function readBuildRegistry(buildsDir = buildSupervisorDir()) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(buildRegistryPath(buildsDir), "utf8"));
+    const entries = Array.isArray(raw) ? raw : Object.values(raw || {});
+    return entries.map(normalizeBuildRegistryEntry).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function applyFinishingHint(build, entry) {
+  if (entry.status === "running" && entry.sentinelPath) {
+    try {
+      if (fs.existsSync(entry.sentinelPath) && fs.statSync(entry.sentinelPath).size > 0) {
+        build.status = "finishing";
+      }
+    } catch {
+      // The supervisor owns registry mutation; status hints are best-effort.
+    }
+  }
+}
+
+function buildEntryForStatus(entry) {
+  const build = {
+    buildId: entry.buildId,
+    status: entry.status,
+    exitCode: entry.exitCode,
+    pid: entry.pid,
+    command: entry.command,
+    cwd: entry.cwd,
+    startedAt: entry.startedAt,
+    endedAt: entry.endedAt
+  };
+  applyFinishingHint(build, entry);
+  return build;
+}
+
+function buildEntryForList(entry) {
+  const build = {
+    buildId: entry.buildId,
+    status: entry.status,
+    command: entry.command,
+    startedAt: entry.startedAt,
+    endedAt: entry.endedAt
+  };
+  applyFinishingHint(build, entry);
+  return build;
+}
+
+async function codexBuildStatus(buildId) {
+  const id = String(buildId || "").trim();
+  const builds = readBuildRegistry().sort(
+    (a, b) => Number(b.startedAt || 0) - Number(a.startedAt || 0)
+  );
+  if (!id) {
+    return { status: "ok", builds: builds.map(buildEntryForList) };
+  }
+  const entry = builds.find((item) => item.buildId === id);
+  if (!entry) {
+    return { status: "not_found", buildId: id };
+  }
+  return {
+    status: "ok",
+    build: buildEntryForStatus(entry),
+    tail: tailFile(entry.logPath)
+  };
+}
+
+async function codexBuildCancel(buildId) {
+  const id = String(buildId || "").trim();
+  if (!id) {
+    return {
+      status: "failed",
+      error: "codex_build_cancel requires buildId"
+    };
+  }
+  postTelemetry({
+    type: "fusion.build-task",
+    phase: "cancel-request",
+    buildId: id
+  });
+  return {
+    status: "cancel-requested",
+    buildId: id,
+    note:
+      "Cancellation requested; the build supervisor will kill the process tree and send a cancelled report."
+  };
+}
+
 function bufferedSteerText() {
   return steerBuffer.map((item) => String(item || "").trim()).filter(Boolean).join("\n");
 }
@@ -1273,7 +1481,7 @@ function failAll(error) {
 // awaitTurn/resolveTurn, verdict extraction), so the north side and result
 // shapes are identical for both engines.
 const CLAUDE_EXEC_BIN = process.env.VIBE_FUSION_CLAUDE_BIN || "claude";
-const CLAUDE_FILE_TOOLS = new Set(["Edit", "Write", "NotebookEdit"]);
+const CLAUDE_FILE_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
 let activeExecutorFamily = null;
 let claudeChild = null;
 let claudeNormalizer = null;
@@ -1285,6 +1493,7 @@ let claudeTurnActive = false;
 let claudeInterruptRequested = false;
 let claudeTurnErrorText = "";
 let claudeTextParts = [];
+let claudeProgressTextParts = [];
 let claudeInterruptSeq = 0;
 let claudeFastSeq = 0;
 
@@ -1502,17 +1711,38 @@ function claudeToolBaseName(name) {
   return String(name || "").replace(/^mcp__[^_]+__/, "");
 }
 
+function shouldRelayClaudeProgressMessage(text) {
+  const trimmed = String(text || "").trim();
+  return Boolean(trimmed && !trimmed.includes(VERDICT_MARKER));
+}
+
+function flushClaudeProgressMessage() {
+  const text = claudeProgressTextParts.join("").trim();
+  claudeProgressTextParts = [];
+  if (!shouldRelayClaudeProgressMessage(text)) return;
+  relay({ role: "codex", kind: "message", text: summarizeAgentMessageForDisplay(text) });
+}
+
+function flushBackgroundClaudeProgressMessage(worker) {
+  const text = (worker.progressTextParts || []).join("").trim();
+  worker.progressTextParts = [];
+  if (!shouldRelayClaudeProgressMessage(text)) return;
+  postBackgroundProgress(worker, "message", summarizeAgentMessageForDisplay(text));
+}
+
 function handleClaudeExecutorEvent(event) {
   if (!event || !claudeTurnActive) return;
   switch (event.type) {
     case "assistant-text":
       claudeTextParts.push(event.delta || "");
+      claudeProgressTextParts.push(event.delta || "");
       refreshTurnIdleTimer("executor text");
       break;
     case "thinking":
       refreshTurnIdleTimer("executor thinking");
       break;
     case "tool-call": {
+      flushClaudeProgressMessage();
       const name = claudeToolBaseName(event.name);
       const input = event.input && typeof event.input === "object" ? event.input : {};
       if (name === "Bash") {
@@ -1536,6 +1766,9 @@ function handleClaudeExecutorEvent(event) {
       break;
     case "turn-start":
     case "turn-end":
+      if (event.type === "turn-end" && event.awaitsToolResult) {
+        flushClaudeProgressMessage();
+      }
       refreshTurnIdleTimer(event.type);
       break;
     case "result":
@@ -1551,6 +1784,7 @@ function finishClaudeExecutorTurn(event) {
   claudeTurnActive = false;
   const text = claudeTextParts.join("").trim();
   claudeTextParts = [];
+  claudeProgressTextParts = [];
   if (text) turnSummary.push(text);
   if (claudeInterruptRequested) {
     claudeInterruptRequested = false;
@@ -1595,6 +1829,7 @@ async function claudeExecutorTurn(task, settings, kind) {
     resetTurnBuffers();
     latchedTurnResult = null;
     claudeTextParts = [];
+    claudeProgressTextParts = [];
     claudeTurnErrorText = "";
     claudeInterruptRequested = false;
     relay({
@@ -2756,16 +2991,31 @@ function clearFanoutWorkerTimers(worker) {
 }
 
 function refreshFanoutWorkerIdleTimer(worker, reason = "progress") {
-  if (worker.settled || !Number.isFinite(TURN_IDLE_TIMEOUT_MS) || TURN_IDLE_TIMEOUT_MS <= 0) {
+  const idleTimeoutMs =
+    Number.isFinite(Number(worker.idleTimeoutMs)) && Number(worker.idleTimeoutMs) > 0
+      ? Number(worker.idleTimeoutMs)
+      : TURN_IDLE_TIMEOUT_MS;
+  if (worker.settled || !Number.isFinite(idleTimeoutMs) || idleTimeoutMs <= 0) {
     return;
   }
   if (worker.idleTimer) clearTimeout(worker.idleTimer);
   worker.idleTimer = setTimeout(() => {
+    if (worker.background) interruptTimedOutBackgroundWorker(worker);
     settleFanoutWorker(worker, {
       status: "failed",
       error: `Fusion ${fanoutWorkerNoun(worker)} stalled after ${reason}.`
     });
-  }, TURN_IDLE_TIMEOUT_MS);
+  }, idleTimeoutMs);
+}
+
+function interruptTimedOutBackgroundWorker(worker) {
+  if (!worker || worker.settled || !worker.background) return;
+  // Codex-family background workers ride the shared app-server, so there is no
+  // process tree to kill here; interrupt the specific turn. Claude-family
+  // background workers have worker.child and are reaped in finalizeBackgroundWorker.
+  if (!worker.child && worker.turnId) {
+    rpc("turn/interrupt", { threadId: worker.threadId, turnId: worker.turnId }).catch(() => {});
+  }
 }
 
 // Settles the worker's promise. The worker stays in the registry until the
@@ -2791,6 +3041,7 @@ function createFanoutWorker(kind, task, index, count, workerThreadId) {
     notes: [],
     itemIds: new Set(),
     deltas: new Map(),
+    idleTimeoutMs: TURN_IDLE_TIMEOUT_MS,
     idleTimer: null,
     hardTimer: null,
     settled: false,
@@ -2972,6 +3223,13 @@ function resolveFanoutServerRequest(worker, msg) {
   const note = (text) => {
     if (worker) worker.notes.push(text);
   };
+  const reportAutoHandledRequest = (mainText, backgroundText = mainText) => {
+    if (worker && worker.background) {
+      postBackgroundProgress(worker, "approval", backgroundText);
+      return;
+    }
+    relay({ role: "codex", kind: "approval", text: `[${label}] ${mainText}` });
+  };
   if (method.endsWith("requestUserInput")) {
     const answers = {};
     const autoAnswer =
@@ -2981,21 +3239,14 @@ function resolveFanoutServerRequest(worker, msg) {
     }
     codexSend({ id: msg.id, result: { answers } });
     note(`question auto-answered (report blockers in the final report): ${approvalDetail(method, params)}`);
-    relay({
-      role: "codex",
-      kind: "approval",
-      text: `[${label}] question auto-deferred to the final report`
-    });
+    reportAutoHandledRequest("question auto-deferred to the final report");
     return;
   }
   if (PARKED_REQUEST_METHODS.has(method)) {
     codexSend({ id: msg.id, result: buildDecisionResult(method, params, "decline") });
-    note(`${approvalKind(method)} auto-declined: ${approvalDetail(method, params)}`);
-    relay({
-      role: "codex",
-      kind: "approval",
-      text: `[${label}] ${approvalKind(method)} auto-declined (parallel worker)`
-    });
+    const kind = approvalKind(method);
+    note(`${kind} auto-declined: ${approvalDetail(method, params)}`);
+    reportAutoHandledRequest(`${kind} auto-declined (parallel worker)`, `${kind} auto-declined`);
     return;
   }
   sendServerError(msg.id, `Fusion parallel workers do not support ${method}.`);
@@ -3326,12 +3577,14 @@ function createBackgroundWorker(kind, task, taskId, routeKey) {
     normalizer: null,
     stdoutBuffer: "",
     textParts: [],
+    progressTextParts: [],
     turnId: null,
     summary: [],
     files: [],
     notes: [],
     itemIds: new Set(),
     deltas: new Map(),
+    idleTimeoutMs: BACKGROUND_IDLE_TIMEOUT_MS,
     idleTimer: null,
     hardTimer: null,
     settled: false,
@@ -3344,11 +3597,12 @@ function createBackgroundWorker(kind, task, taskId, routeKey) {
     worker.resolve = resolve;
   });
   worker.hardTimer = setTimeout(() => {
+    interruptTimedOutBackgroundWorker(worker);
     settleFanoutWorker(worker, {
       status: "failed",
       error: "Fusion background task exceeded the maximum duration."
     });
-  }, TURN_HARD_TIMEOUT_MS);
+  }, BACKGROUND_HARD_TIMEOUT_MS);
   refreshFanoutWorkerIdleTimer(worker, "background start");
   return worker;
 }
@@ -3453,12 +3707,14 @@ function handleBackgroundClaudeEvent(worker, event) {
   switch (event.type) {
     case "assistant-text":
       worker.textParts.push(event.delta || "");
+      worker.progressTextParts.push(event.delta || "");
       refreshFanoutWorkerIdleTimer(worker, "executor text");
       break;
     case "thinking":
       refreshFanoutWorkerIdleTimer(worker, "executor thinking");
       break;
     case "tool-call": {
+      flushBackgroundClaudeProgressMessage(worker);
       const name = claudeToolBaseName(event.name);
       const input = event.input && typeof event.input === "object" ? event.input : {};
       if (name === "Bash") {
@@ -3476,9 +3732,16 @@ function handleBackgroundClaudeEvent(worker, event) {
     case "tool-result":
       refreshFanoutWorkerIdleTimer(worker, "executor tool result");
       break;
+    case "turn-end":
+      if (event.awaitsToolResult) {
+        flushBackgroundClaudeProgressMessage(worker);
+      }
+      refreshFanoutWorkerIdleTimer(worker, "executor turn end");
+      break;
     case "result": {
       const text = worker.textParts.join("").trim();
       worker.textParts = [];
+      worker.progressTextParts = [];
       if (text) worker.summary.push(text);
       if (event.isError) {
         settleFanoutWorker(worker, {
@@ -3614,7 +3877,6 @@ function cancelBackgroundTask(taskId) {
     error: "Background task cancelled.",
     cancelled: true
   });
-  relay({ role: "opus", kind: "cancel", text: `background task cancelled: ${worker.title}` });
   return { status: "cancelled", taskId: worker.taskId, title: worker.title };
 }
 
@@ -3845,6 +4107,68 @@ async function codexGoalClear() {
     return { status: "ok", cleared: Boolean(response && response.cleared) };
   } catch (error) {
     return goalsUnavailableResult(error);
+  }
+}
+
+async function codexWatchBuild(command, cwd) {
+  const normalizedCommand = String(command || "").trim();
+  if (!normalizedCommand) {
+    return {
+      status: "failed",
+      error: "codex_watch_build requires a non-empty command"
+    };
+  }
+  const resolvedCwd = path.resolve(String(cwd || CWD || process.cwd()));
+  const buildsDir = buildSupervisorDir();
+  const buildId = buildIdForWatch();
+  const { logPath, sentinelPath, runnerPath } = watchedBuildPaths(buildId, buildsDir);
+  const startedAt = Date.now();
+  try {
+    fs.mkdirSync(buildsDir, { recursive: true });
+    fs.rmSync(sentinelPath, { force: true });
+    fs.writeFileSync(logPath, "", "utf8");
+    fs.writeFileSync(
+      runnerPath,
+      watchedBuildRunnerSource({
+        command: normalizedCommand,
+        cwd: resolvedCwd,
+        logPath,
+        sentinelPath
+      }),
+      "utf8"
+    );
+    const spec = watchedBuildSpawnSpec(runnerPath);
+    const child = spawn(spec.command, spec.args, {
+      cwd: resolvedCwd,
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true
+    });
+    child.unref();
+    postTelemetry({
+      type: "fusion.build-task",
+      phase: "started",
+      buildId,
+      command: clippedText(normalizedCommand, 8000),
+      cwd: resolvedCwd,
+      pid: child.pid,
+      logPath,
+      sentinelPath,
+      startedAt
+    });
+    return {
+      status: "watching",
+      buildId,
+      logPath,
+      pid: child.pid,
+      note:
+        "Build launched detached; it survives turn boundaries. End your turn - a completion report will arrive in a later turn."
+    };
+  } catch (error) {
+    return {
+      status: "failed",
+      error: error?.message || String(error)
+    };
   }
 }
 
@@ -4359,6 +4683,55 @@ const TOOLS = [
     }
   },
   {
+    name: "codex_watch_build",
+    description:
+      "Launch a long-running build/compile command detached and monitored by Fusion, decoupled from the 15-minute agent-turn cap. Returns {status:'watching', buildId, logPath, pid} immediately; the planner should end its turn and will later receive a completion report in a later turn.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        command: {
+          type: "string",
+          description: "Exact build/compile command line to run in the host shell."
+        },
+        cwd: {
+          type: "string",
+          description:
+            "Optional working directory. Defaults to this Fusion pane's working directory."
+        }
+      },
+      required: ["command"]
+    }
+  },
+  {
+    name: "codex_build_status",
+    description:
+      "Read Fusion's host-supervised detached build registry. With buildId, returns the build status, exit code, process metadata, and a log tail; without buildId, lists known builds most-recent first. Safe in Plan mode.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        buildId: {
+          type: "string",
+          description: "Optional buildId returned by codex_watch_build."
+        }
+      }
+    }
+  },
+  {
+    name: "codex_build_cancel",
+    description:
+      "Request cancellation of a host-supervised detached build by buildId. The build supervisor kills the process tree and sends a cancelled completion report. This terminates a process and is blocked in Plan mode.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        buildId: {
+          type: "string",
+          description: "buildId returned by codex_watch_build."
+        }
+      },
+      required: ["buildId"]
+    }
+  },
+  {
     name: "codex_respond",
     description:
       "Answer a pending Codex approval or question returned by codex_implement, then continue the turn. For a command or patch approval, set decision to accept | acceptForSession | decline | cancel. For a clarifying question, set decision to 'accept' and put your answer in note. Returns the same result shapes as codex_implement.",
@@ -4414,6 +4787,7 @@ const TOOLS = [
 const PLAN_MODE_ALLOWED_TOOLS = new Set([
   "codex_goal_get",
   "codex_investigate",
+  "codex_build_status",
   "codex_cancel",
   "codex_steer_resolve"
 ]);
@@ -4458,6 +4832,15 @@ async function handleToolCall(id, params) {
         String(args.decision || ""),
         args.text != null ? String(args.text) : ""
       );
+    } else if (name === "codex_watch_build") {
+      result = await codexWatchBuild(
+        String(args.command || ""),
+        args.cwd != null ? String(args.cwd) : ""
+      );
+    } else if (name === "codex_build_status") {
+      result = await codexBuildStatus(args.buildId != null ? String(args.buildId) : "");
+    } else if (name === "codex_build_cancel") {
+      result = await codexBuildCancel(args.buildId != null ? String(args.buildId) : "");
     } else if (name === "codex_cancel") {
       result = codexCancel(args.taskId != null ? String(args.taskId).trim() : "");
     } else {
@@ -4565,7 +4948,11 @@ module.exports = {
   buildCodexVerifierTask,
   buildFanoutScoutTask,
   buildFanoutWorkstreamTask,
+  buildSupervisorDir,
+  codexBuildCancel,
+  codexBuildStatus,
   combineFanoutResults,
+  codexWatchBuild,
   fanoutFileConflicts,
   normalizeFanoutTasks,
   cleanClaudeEffort,
@@ -4586,6 +4973,9 @@ module.exports = {
   stripVerifierVerdictFromSummary,
   translateWorkspaceMcpServerConfig,
   unwrapShellCommand,
+  readBuildRegistry,
+  watchedBuildRunnerSource,
+  watchedBuildSpawnSpec,
   workspaceMcpConfigOverrides,
   turnErrorMessage
 };

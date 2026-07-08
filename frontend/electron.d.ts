@@ -15,6 +15,23 @@ import type {
   UpdateState
 } from "./types";
 
+type ScreenshotFixture =
+  | {
+      mode: "openfusion";
+      cwd: string;
+      openCodeCommand?: string;
+    }
+  | {
+      mode: "fusion-picker";
+      cwd: string;
+      role: "planner" | "executor";
+      family: FusionFamily;
+    }
+  | {
+      mode: "fusion-builds";
+      cwd: string;
+    };
+
 export interface FilePathDescription {
   path: string;
   kind: "text" | "image" | "directory" | "file" | "missing";
@@ -29,16 +46,8 @@ declare global {
       platform: string;
       app: {
         getCwd: () => Promise<string>;
-        screenshotFixture?: {
-          mode: "openfusion";
-          cwd: string;
-          openCodeCommand?: string;
-        } | null;
-        getScreenshotFixture?: () => Promise<{
-          mode: "openfusion";
-          cwd: string;
-          openCodeCommand?: string;
-        } | null>;
+        screenshotFixture?: ScreenshotFixture | null;
+        getScreenshotFixture?: () => Promise<ScreenshotFixture | null>;
       };
       clipboard: {
         readText: () => string;
@@ -131,8 +140,20 @@ declare global {
           id: string,
           taskId: string
         ) => Promise<{ status?: string; error?: string }>;
+        buildCancel: (
+          id: string,
+          buildId: string
+        ) => Promise<{ status?: string; error?: string }>;
         stop: (id: string) => Promise<boolean>;
         onEvent: (callback: (event: FusionChatEvent) => void) => () => void;
+      };
+      fusionModelCatalog?: {
+        list: (payload: { family: string }) => Promise<{
+          ok: boolean;
+          family: string;
+          models: { id: string; label: string }[] | null;
+          error?: string;
+        }>;
       };
       openFusionChat: {
         start: (payload: {

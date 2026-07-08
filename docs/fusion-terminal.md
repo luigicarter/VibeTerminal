@@ -60,6 +60,12 @@
 > every layer). The claude effort NEVER backfills the codex effort (main's old
 > `payload.codexEffort ?? payload.effort` fallback silently ran every
 > delegation at the claude level while the UI said "Execution Auto").
+> The picker also merges live available models per family under the curated
+> head: Claude comes from a main-process Anthropic `/v1/models` call using the
+> local Claude Code login token (only sanitized `{id,label}` rows reach the
+> renderer), and Codex comes from `codex debug models`. Catalogs refresh on pane
+> launch and family switch, cache briefly in main, fall back to curated when
+> offline/unavailable, and free-text model ids remain accepted.
 > Selection semantics (the 2026-07-03 pass — each of these was a live "my
 > pick didn't stick" bug): the `/claude`/`/codex` submenus lead with the
 > CURRENT model marked `· current`, so Enter on the bare command is a no-op

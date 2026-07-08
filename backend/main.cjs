@@ -13,6 +13,9 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const { createAgentTelemetryManager } = require("./agentTelemetry.cjs");
+const { createBuildSupervisor } = require("./buildSupervisor.cjs");
+const { fetchClaudeModelCatalog } = require("./claudeModels.cjs");
+const { fetchCodexModelCatalog } = require("./codexModels.cjs");
 const { getCodeChangeSummary } = require("./codeChanges.cjs");
 const { resolveLaunchCwd } = require("./launchCwd.cjs");
 
@@ -87,6 +90,8 @@ const TEXT_FILE_EXTENSIONS = new Set([
 ]);
 const MAX_DESCRIBE_PATHS = 32;
 const TEXT_SAMPLE_BYTES = 4096;
+const FUSION_MODEL_CATALOG_TTL_MS = 5 * 60 * 1000;
+const fusionModelCatalogCache = new Map();
 
 if (isScreenshotMode) {
   const screenshotUserData =
@@ -108,6 +113,7 @@ let agentThreadHostReady = false;
 let nextAgentThreadRequestId = 1;
 const pendingAgentThreadRequests = new Map();
 let agentTelemetry = null;
+let buildSupervisor = null;
 let fusionChatHost = null;
 let fusionChatHostBuffer = "";
 let openFusionChatHost = null;
@@ -135,6 +141,9 @@ const FUSION_CODEX_BRIDGE_TOOLS = [
   "mcp__fusion-codex__codex_goal_set",
   "mcp__fusion-codex__codex_goal_get",
   "mcp__fusion-codex__codex_goal_clear",
+  "mcp__fusion-codex__codex_watch_build",
+  "mcp__fusion-codex__codex_build_status",
+  "mcp__fusion-codex__codex_build_cancel",
   // The wedge escape hatch: without it on the strict --tools/--allowedTools
   // surface, a stuck Codex turn leaves pane-restart as the only recovery.
   "mcp__fusion-codex__codex_cancel"
@@ -384,6 +393,13 @@ function getOpenFusionBaseDir() {
   );
 }
 
+function getBuildSupervisorDir() {
+  return (
+    process.env.VIBE_BUILD_SUPERVISOR_DIR ||
+    path.join(app.getPath("userData"), "builds")
+  );
+}
+
 function getAgentTelemetry() {
   if (!agentTelemetry) {
     agentTelemetry = createAgentTelemetryManager({
@@ -400,6 +416,18 @@ function getAgentTelemetry() {
   }
 
   return agentTelemetry;
+}
+
+function getBuildSupervisor() {
+  if (!buildSupervisor) {
+    buildSupervisor = createBuildSupervisor({
+      baseDir: getBuildSupervisorDir(),
+      emit: broadcastTerminalEvent
+    });
+    buildSupervisor.start();
+  }
+
+  return buildSupervisor;
 }
 
 function serializeUpdateInfo(info = {}) {
@@ -662,6 +690,71 @@ function broadcastTerminalEvent(event) {
     fusionChatHost.stdin.writable
   ) {
     sendToFusionChatHost({ type: "background-task", payload: event });
+  }
+
+  // Detached build lifecycle. Started events from the adapter register with
+  // the host-owned supervisor; settled supervisor events wake the planner
+  // through the Fusion chat host's build-task path.
+  if (event?.type === "fusion-build-task" && event.phase === "started") {
+    if (
+      event.buildId &&
+      event.command &&
+      event.cwd &&
+      event.pid &&
+      event.logPath &&
+      event.sentinelPath
+    ) {
+      try {
+        getBuildSupervisor().register({
+          buildId: event.buildId,
+          sessionId: event.id,
+          command: event.command,
+          cwd: event.cwd,
+          pid: event.pid,
+          logPath: event.logPath,
+          sentinelPath: event.sentinelPath,
+          startedAt: event.startedAt
+        });
+      } catch (error) {
+        broadcastTerminalEvent({
+          type: "host-error",
+          message: `Build supervisor registration failed: ${error.message}`
+        });
+      }
+    }
+    if (event.id && fusionChatHost && fusionChatHost.stdin.writable) {
+      sendToFusionChatHost({
+        type: "build-task",
+        payload: {
+          ...event,
+          id: event.id,
+          phase: "started"
+        }
+      });
+    }
+  }
+
+  if (event?.type === "fusion-build-task" && event.phase === "cancel-request") {
+    try {
+      getBuildSupervisor().cancel(String(event.buildId || ""));
+    } catch (error) {
+      broadcastTerminalEvent({
+        type: "host-error",
+        message: `Build supervisor cancellation failed: ${error.message}`
+      });
+    }
+  }
+
+  if (event?.type === "build-task" && event.phase === "settled") {
+    if (event.sessionId && fusionChatHost && fusionChatHost.stdin.writable) {
+      sendToFusionChatHost({
+        type: "build-task",
+        payload: {
+          ...event,
+          id: event.sessionId
+        }
+      });
+    }
   }
 
   // Brain-initiated background delegation request (Open Fusion MCP bridge):
@@ -986,6 +1079,36 @@ function normalizeFusionModel(value) {
   return model;
 }
 
+function normalizeFusionCatalogFamily(value) {
+  const family = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return family === "claude" || family === "codex" ? family : family || "unknown";
+}
+
+async function listFusionModelCatalog(family) {
+  if (family !== "claude" && family !== "codex") {
+    return { ok: true, family, models: null };
+  }
+  const cached = fusionModelCatalogCache.get(family);
+  if (cached && Date.now() - cached.fetchedAt < FUSION_MODEL_CATALOG_TTL_MS) {
+    return { ok: true, family, models: cached.models };
+  }
+  let models;
+  if (family === "codex") {
+    let codexBin;
+    try {
+      codexBin = resolveCodexBin();
+    } catch {
+      codexBin = null;
+    }
+    models = codexBin ? await fetchCodexModelCatalog({ codexBin }) : null;
+  } else {
+    models = await fetchClaudeModelCatalog();
+  }
+  const catalog = Array.isArray(models) ? models : null;
+  fusionModelCatalogCache.set(family, { fetchedAt: Date.now(), models: catalog });
+  return { ok: true, family, models: catalog };
+}
+
 function normalizeFusionCodexModel(value) {
   const model = normalizeFusionModelId(value, "auto");
   const lower = model.toLowerCase();
@@ -1219,6 +1342,81 @@ function createMainWindow() {
     }, delayMs);
   }
 
+  function scheduleFusionBuildFixtureEvents() {
+    if (process.env.VIBE_SCREENSHOT_SEED_FUSION_BUILDS !== "1") {
+      return;
+    }
+    setTimeout(() => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      const id = "screenshot-fusion-builds";
+      const now = Date.now();
+      const events = [
+        {
+          id,
+          type: "build-task",
+          phase: "started",
+          buildId: "build-running",
+          command: "npm run build -- --watch",
+          startedAt: now - 46_000
+        },
+        {
+          id,
+          type: "build-task",
+          phase: "started",
+          buildId: "build-success",
+          command: "npm run compile",
+          startedAt: now - 96_000
+        },
+        {
+          id,
+          type: "build-task",
+          phase: "settled",
+          buildId: "build-success",
+          command: "npm run compile",
+          status: "exited",
+          exitCode: 0
+        },
+        {
+          id,
+          type: "build-task",
+          phase: "started",
+          buildId: "build-failed",
+          command: "npm run test:ci",
+          startedAt: now - 74_000
+        },
+        {
+          id,
+          type: "build-task",
+          phase: "settled",
+          buildId: "build-failed",
+          command: "npm run test:ci",
+          status: "failed",
+          exitCode: 2
+        },
+        {
+          id,
+          type: "build-task",
+          phase: "started",
+          buildId: "build-cancelled",
+          command: "npm run storybook",
+          startedAt: now - 33_000
+        },
+        {
+          id,
+          type: "build-task",
+          phase: "settled",
+          buildId: "build-cancelled",
+          command: "npm run storybook",
+          status: "cancelled",
+          exitCode: null
+        }
+      ];
+      for (const event of events) {
+        mainWindow.webContents.send("fusion-chat:event", event);
+      }
+    }, 1500);
+  }
+
   mainWindow = new BrowserWindow({
     x: isScreenshotMode ? screenshotBounds.x : undefined,
     y: isScreenshotMode ? screenshotBounds.y : undefined,
@@ -1243,6 +1441,7 @@ function createMainWindow() {
       mainWindow.maximize();
     }
     mainWindow.show();
+    scheduleFusionBuildFixtureEvents();
     scheduleScreenshotCapture();
   });
 
@@ -1262,6 +1461,7 @@ function createMainWindow() {
 
 app.whenReady().then(() => {
   getAgentTelemetry();
+  getBuildSupervisor();
   startPtyHost();
   startAgentThreadHost();
   createMainWindow();
@@ -1278,6 +1478,11 @@ app.on("window-all-closed", () => {
   if (agentTelemetry) {
     agentTelemetry.cleanup();
     agentTelemetry = null;
+  }
+
+  if (buildSupervisor) {
+    buildSupervisor.cleanup();
+    buildSupervisor = null;
   }
 
   if (ptyHost && !ptyHost.killed) {
@@ -1308,14 +1513,34 @@ app.on("window-all-closed", () => {
 ipcMain.handle("app:get-cwd", () => getDefaultRuntimeCwd());
 
 ipcMain.handle("app:get-screenshot-fixture", () => {
-  if (!isScreenshotMode || process.env.VIBE_SCREENSHOT_SEED_OPEN_FUSION !== "1") {
+  if (!isScreenshotMode) {
     return null;
   }
 
-  return {
-    mode: "openfusion",
-    cwd: getDefaultRuntimeCwd()
-  };
+  if (process.env.VIBE_SCREENSHOT_SEED_OPEN_FUSION === "1") {
+    return {
+      mode: "openfusion",
+      cwd: getDefaultRuntimeCwd()
+    };
+  }
+
+  if (process.env.VIBE_SCREENSHOT_SEED_FUSION_PICKER === "1") {
+    return {
+      mode: "fusion-picker",
+      cwd: getDefaultRuntimeCwd(),
+      role: process.env.VIBE_SCREENSHOT_FUSION_PICKER_ROLE === "executor" ? "executor" : "planner",
+      family: process.env.VIBE_SCREENSHOT_FUSION_PICKER_FAMILY === "codex" ? "codex" : "claude"
+    };
+  }
+
+  if (process.env.VIBE_SCREENSHOT_SEED_FUSION_BUILDS === "1") {
+    return {
+      mode: "fusion-builds",
+      cwd: getDefaultRuntimeCwd()
+    };
+  }
+
+  return null;
 });
 
 ipcMain.handle("updates:get-state", () => updateState);
@@ -1661,7 +1886,8 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
       executorModel: fusionExecutorModel,
       executorEffort: fusionExecutorEffort,
       executorFast,
-      runMode: fusionRunMode
+      runMode: fusionRunMode,
+      buildSupervisorDir: getBuildSupervisorDir()
     });
     if (!files) {
       return { ok: false, error: "could not prepare Fusion files" };
@@ -1697,6 +1923,20 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
     return { ok: true };
   } catch (error) {
     return { ok: false, error: error.message };
+  }
+});
+
+ipcMain.handle("fusion-model-catalog:list", async (_event, payload) => {
+  const family = normalizeFusionCatalogFamily(payload?.family);
+  try {
+    return await listFusionModelCatalog(family);
+  } catch (error) {
+    return {
+      ok: false,
+      family,
+      models: null,
+      error: error.message || "could not list Fusion model catalog"
+    };
   }
 });
 
@@ -1785,6 +2025,17 @@ ipcMain.handle("fusion-chat:background-cancel", async (_event, payload) => {
   return getAgentTelemetry()
     .cancelFusionBackgroundTask(payload.id, String(payload.taskId))
     .catch((error) => ({ status: "failed", error: error?.message || "cancel failed" }));
+});
+
+ipcMain.handle("fusion-chat:build-cancel", (_event, payload) => {
+  if (!payload?.id || !payload.buildId) {
+    return { status: "failed", error: "id and buildId are required" };
+  }
+  const entry = getBuildSupervisor().cancel(String(payload.buildId));
+  if (!entry) {
+    return { status: "not_found", buildId: String(payload.buildId) };
+  }
+  return { status: "cancelled", buildId: entry.buildId };
 });
 
 ipcMain.handle("fusion-chat:stop", (_event, payload) => {

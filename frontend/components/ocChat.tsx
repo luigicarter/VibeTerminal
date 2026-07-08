@@ -18,6 +18,16 @@ export interface OcToolMeta {
   diff?: string;
   count?: number;
   matches?: number;
+  tone?: "success" | "error" | "muted";
+}
+
+export interface OcTaskVerdict {
+  goalReached?: boolean;
+  bugs?: number;
+  missing?: number;
+  nextAction?: "continue" | "done" | "ask_human";
+  summary?: string;
+  files?: number;
 }
 
 // The structural row model OcChatRow renders. Both panes' transcript message
@@ -55,6 +65,7 @@ export interface OcChatMessage {
   // completion stats, rendered as the "↳ …" second line like OpenCode.
   taskDetail?: string;
   taskRole?: string;
+  verdict?: OcTaskVerdict;
   // kind:"result" rows: completion-gate verdict for the settled turn — did the
   // planner independently check the last executor delegation? Neutral chip,
   // both states muted by design.
@@ -99,6 +110,24 @@ export function formatDurationShort(ms: number) {
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
+function verdictState(verdict: OcTaskVerdict) {
+  const bugs = Math.max(0, Math.floor(Number(verdict.bugs) || 0));
+  const missing = Math.max(0, Math.floor(Number(verdict.missing) || 0));
+  if (bugs > 0 || missing > 0) {
+    return {
+      tone: bugs > 0 ? "warning" : "attention",
+      token: `⚠ ${verdict.nextAction === "ask_human" ? "needs input" : "needs follow-up"}`
+    };
+  }
+  if (verdict.goalReached === true || verdict.nextAction === "done") {
+    return { tone: "success", token: "✓ goal reached" };
+  }
+  if (verdict.nextAction === "ask_human") {
+    return { tone: "attention", token: "⚠ needs input" };
+  }
+  return { tone: "continue", token: "⧗ continue" };
+}
+
 export function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -133,6 +162,7 @@ export const TOOL_ICONS: Record<string, string> = {
   edit: "←",
   apply_patch: "%",
   task: "│",
+  build: "$",
   question: "→",
   skill: "→"
 };
@@ -148,6 +178,7 @@ export const TOOL_PENDING: Record<string, string> = {
   edit: "Preparing edit...",
   apply_patch: "Preparing patch...",
   task: "Delegating...",
+  build: "Running build...",
   todowrite: "Updating todos...",
   question: "Asking questions...",
   skill: "Loading skill..."
@@ -155,6 +186,8 @@ export const TOOL_PENDING: Record<string, string> = {
 
 export function toolIcon(name: string, status: OcChatMessage["toolStatus"]) {
   if (name === "task" && status === "done") return "✓";
+  if (name === "build" && status === "done") return "✓";
+  if (name === "build" && status === "error") return "×";
   return TOOL_ICONS[name] ?? "⚙";
 }
 
@@ -186,6 +219,8 @@ export function toolLabel(name: string, input: unknown, meta?: OcToolMeta): stri
       return `Write ${firstString(data.filePath, data.path, data.file_path) || "file"}`;
     case "bash":
       return firstString(data.command, data.description) || "command";
+    case "build":
+      return `Build ${firstString(data.command, data.description) || "command"}`;
     case "glob": {
       const where = firstString(data.path);
       const count = meta?.count;
@@ -289,17 +324,19 @@ export interface OcBackgroundTask {
 export function OcBackgroundPin({
   tasks,
   now,
-  onStop
+  onStop,
+  label = "Background"
 }: {
   tasks: OcBackgroundTask[];
   now: number;
   onStop?: (taskId: string) => void;
+  label?: string;
 }) {
   if (!tasks.length) return null;
   return (
     <div className="oc-bgtasks" role="status">
       <div className="oc-bgtasks-head">
-        ◍ Background · {tasks.length} running
+        ◍ {label} · {tasks.length} running
       </div>
       {tasks.map((task) => (
         <div key={task.taskId} className="oc-bgtasks-item">
@@ -468,11 +505,13 @@ export function OcLogo({
 export const OcChatRow = memo(function OcChatRow({
   m,
   proseRole,
+  proseLabel,
   isExpanded,
   onToggle
 }: {
   m: OcChatMessage;
   proseRole: string;
+  proseLabel?: string;
   isExpanded: boolean;
   onToggle: (key: string) => void;
 }) {
@@ -494,6 +533,11 @@ export const OcChatRow = memo(function OcChatRow({
     if (name === "task") {
       const report = (m.toolOutput ?? "").trim();
       const taskRole = (m.taskRole ?? "").trim();
+      const verdict = m.verdict;
+      const verdictDisplay = verdict ? verdictState(verdict) : null;
+      const verdictBugs = Math.max(0, Math.floor(Number(verdict?.bugs) || 0));
+      const verdictMissing = Math.max(0, Math.floor(Number(verdict?.missing) || 0));
+      const verdictFiles = Math.max(0, Math.floor(Number(verdict?.files) || 0));
       const label = m.backgroundReport
         ? `Background report — ${clip(
             firstString(asRecord(m.toolInput).description) || m.text || "background task",
@@ -518,6 +562,66 @@ export const OcChatRow = memo(function OcChatRow({
               {m.background && !m.backgroundReport && (
                 <span className="oc-task-bg">background</span>
               )}
+              {label}
+              {m.taskDetail && <span className="oc-task-detail">{"\n"}↳ {m.taskDetail}</span>}
+            </span>
+          </div>
+          {isExpanded && report && (
+            <div className="oc-task-report">
+              <Markdown text={report} />
+            </div>
+          )}
+          {verdict && verdictDisplay && (
+            <div className={clsx("oc-task-verdict", `is-${verdictDisplay.tone}`)}>
+              <span className="oc-task-verdict-token">{verdictDisplay.token}</span>
+              {verdict.summary && (
+                <span className="oc-task-verdict-summary">{clip(verdict.summary, 140)}</span>
+              )}
+              {verdictBugs > 0 && (
+                <span className="oc-task-verdict-chip is-bugs">
+                  {verdictBugs} bug{verdictBugs === 1 ? "" : "s"}
+                </span>
+              )}
+              {verdictMissing > 0 && (
+                <span className="oc-task-verdict-chip is-missing">
+                  {verdictMissing} missing
+                </span>
+              )}
+              {verdictFiles > 0 && (
+                <span className="oc-task-verdict-chip is-files">
+                  {verdictFiles} file{verdictFiles === 1 ? "" : "s"}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    if (name === "build") {
+      const command = firstString(data.command, data.description) || "build";
+      const report = (m.toolOutput ?? "").trim();
+      const label = m.toolTitle || `Build · ${clip(command, 160)}`;
+      return (
+        <div
+          className={clsx(
+            "oc-tool",
+            "oc-build",
+            `is-${status}`,
+            m.meta?.tone && `is-${m.meta.tone}`,
+            denied && "is-denied",
+            failed && "is-failed"
+          )}
+        >
+          <div
+            className={clsx("oc-tool-row", report && "oc-clickable")}
+            onClick={report ? () => onToggle(m.key) : undefined}
+          >
+            <span className="oc-tool-icon">
+              {status === "running" ? <OcSpinner /> : toolIcon(name, status)}
+            </span>
+            <span className="oc-tool-label">
+              {m.background && <span className="oc-task-bg">build</span>}
               {label}
               {m.taskDetail && <span className="oc-task-detail">{"\n"}↳ {m.taskDetail}</span>}
             </span>
@@ -706,6 +810,7 @@ export const OcChatRow = memo(function OcChatRow({
   // Primary-voice prose: markdown, OpenCode's TextPart.
   return (
     <div className={clsx("oc-md", m.streaming && "is-streaming")}>
+      {proseLabel && <span className="oc-prose-label">{proseLabel}</span>}
       <Markdown text={m.text} />
       {m.streaming && <span className="oc-caret">▋</span>}
     </div>

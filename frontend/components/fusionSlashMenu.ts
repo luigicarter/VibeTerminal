@@ -90,11 +90,12 @@ export const FUSION_FAMILY_OPTIONS: { id: FusionFamily; name: string; desc: stri
 // ids stay possible via free text, validated before anything restarts.
 export const FAMILY_MODEL_OPTIONS: Record<
   FusionFamily,
-  { id: string; label: string; desc: string }[]
+  FusionModelOption[]
 > = {
   claude: [
     { id: "opus", label: OPUS_LABEL, desc: "Most capable Anthropic model" },
-    { id: "sonnet", label: SONNET_LABEL, desc: "Fast, lighter Anthropic model" }
+    { id: "sonnet", label: SONNET_LABEL, desc: "Fast, lighter Anthropic model" },
+    { id: "fable", label: "Fable", desc: "Latest creative Anthropic model" }
   ],
   codex: [
     { id: "auto", label: "Codex default", desc: "Use codex's configured default model" },
@@ -140,6 +141,17 @@ export interface SlashMenu {
   items: SlashMenuItem[];
 }
 
+export interface FusionModelOption {
+  id: string;
+  label: string;
+  desc: string;
+}
+
+export interface FusionLiveModelOption {
+  id: string;
+  label: string;
+}
+
 // What the menu needs to know about the pane's live settings: used to mark and
 // front-load the CURRENT family/model so Enter on a bare picker is a harmless
 // no-op ("Already using …") instead of silently committing a reset (the old
@@ -154,6 +166,7 @@ export interface SlashMenuContext {
   executorModel?: string;
   executorEffort?: string;
   executorFast?: boolean;
+  liveCatalog?: Partial<Record<FusionFamily, FusionLiveModelOption[]>>;
 }
 
 // The "/" palette — the Fusion equivalent of the slash menu a real CLI draws
@@ -162,11 +175,16 @@ export const FUSION_SLASH_COMMANDS: SlashCommand[] = [
   { name: "/plan", desc: "Switch Fusion to Plan mode" },
   { name: "/auto", desc: "Switch Fusion to Auto mode" },
   { name: "/mode", desc: "Toggle Auto/Plan mode" },
-  { name: "/planner-model", desc: "Pick the planner family and model", picker: "planner" },
-  { name: "/executor-model", desc: "Pick the executor family and model", picker: "executor" },
-  { name: "/speed", desc: "Fusion speed presets", submenu: true },
-  { name: "/effort", desc: "Fusion reasoning effort", submenu: true },
-  { name: "/fast", desc: "Toggle real fast serving (same model, faster tokens, higher cost)" },
+  {
+    name: "/planner",
+    desc: "Planner (Claude): model, effort, fast serving",
+    submenu: true
+  },
+  {
+    name: "/executor",
+    desc: "Executor (Codex): model, effort, fast serving",
+    submenu: true
+  },
   { name: "/models", desc: "Show the current models and effort" },
   { name: "/details", desc: "Toggle tool execution details" },
   { name: "/compact", desc: "Summarize the conversation to free context" },
@@ -310,6 +328,31 @@ export function hasFreeTextSlashArgument(input: string) {
 
 const markCurrent = (desc: string) => `${desc} · current`;
 
+function liveFamilyModelOptions(
+  family: FusionFamily,
+  context: SlashMenuContext | undefined
+): FusionLiveModelOption[] {
+  const curatedIds = new Set(FAMILY_MODEL_OPTIONS[family].map((model) => model.id.toLowerCase()));
+  const live = context?.liveCatalog?.[family] ?? [];
+  const seen = new Set(curatedIds);
+  const rows: FusionLiveModelOption[] = [];
+  for (const model of live) {
+    const id = typeof model?.id === "string" ? model.id.trim() : "";
+    if (!id || !isValidFamilyModelId(family, id)) continue;
+    const key = id.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const label =
+      typeof model?.label === "string" && model.label.trim() ? model.label.trim() : id;
+    rows.push({ id, label });
+  }
+  return rows;
+}
+
+function familyModelOptionCount(family: FusionFamily, context?: SlashMenuContext): number {
+  return FAMILY_MODEL_OPTIONS[family].length + liveFamilyModelOptions(family, context).length;
+}
+
 const roleCurrent = (role: FusionRole, context?: SlashMenuContext) =>
   role === "planner"
     ? {
@@ -341,6 +384,8 @@ export function familyModelRows(
   const current = roleCurrent(role, context);
   const isCurrentFamily = current.family === family;
   const options = FAMILY_MODEL_OPTIONS[family];
+  const liveOptions = liveFamilyModelOptions(family, context);
+  const optionIds = [...options.map((model) => model.id), ...liveOptions.map((model) => model.id)];
   const rows = options.map((model) => ({
     key: `${role}-${family}-model-${model.id}`,
     label: model.label,
@@ -348,8 +393,19 @@ export function familyModelRows(
       isCurrentFamily && current.model === model.id ? markCurrent(model.desc) : model.desc,
     command: commandFor(family, model.id)
   }));
+  rows.push(
+    ...liveOptions.map((model) => ({
+      key: `${role}-${family}-live-${model.id}`,
+      label: model.label,
+      desc:
+        isCurrentFamily && current.model === model.id
+          ? markCurrent("Available for your subscription")
+          : "Available for your subscription",
+      command: commandFor(family, model.id)
+    }))
+  );
   if (!isCurrentFamily) return rows;
-  const currentIndex = options.findIndex((model) => model.id === current.model);
+  const currentIndex = optionIds.findIndex((id) => id === current.model);
   if (currentIndex > 0) {
     const [row] = rows.splice(currentIndex, 1);
     rows.unshift(row);
@@ -384,14 +440,14 @@ export function buildFusionPicker(
 
   if (!picker.family) {
     const families = FUSION_FAMILY_OPTIONS.map((family) => {
-      const models = FAMILY_MODEL_OPTIONS[family.id];
+      const modelCount = familyModelOptionCount(family.id, context);
       const isCurrent = current.family === family.id;
       return {
         key: `picker-${picker.role}-family-${family.id}`,
         label: family.name,
         desc: isCurrent
-          ? markCurrent(`${models.length} models · ${family.desc}`)
-          : `${models.length} models · ${family.desc}`,
+          ? markCurrent(`${modelCount} models · ${family.desc}`)
+          : `${modelCount} models · ${family.desc}`,
         command: `__family:${family.id}`
       };
     });
@@ -434,6 +490,71 @@ export function buildFusionPicker(
     }`,
     items
   };
+}
+
+function roleControlMenu(role: FusionRole, context?: SlashMenuContext): SlashMenuItem[] {
+  const scope: FusionRoleScope = role === "planner" ? "planning" : "execution";
+  const family =
+    role === "planner" ? contextPlannerFamily(context) : contextExecutorFamily(context);
+  const model = normalizeFusionRoleModel(
+    family,
+    role,
+    role === "planner" ? context?.plannerModel : context?.executorModel
+  );
+  const currentEffort = normalizeFusionRoleEffort(
+    family,
+    role === "planner" ? context?.plannerEffort : context?.executorEffort
+  );
+  const currentFast =
+    role === "planner" ? context?.plannerFast === true : context?.executorFast === true;
+  const label = role === "planner" ? "planner" : "executor";
+  const modelCommand = role === "planner" ? "/planner-model" : "/executor-model";
+  const effortRows = familyEffortValues(family).map((effort) => {
+    const isCurrent = effort === currentEffort;
+    const desc =
+      effort === "auto"
+        ? "Use the runtime default"
+        : `Set ${label} effort to ${effort}`;
+    return {
+      key: `${role}-control-effort-${effort}`,
+      label: `Effort — ${familyEffortLabel(family, effort)}`,
+      desc: isCurrent ? markCurrent(desc) : desc,
+      command: `/effort ${scopeCommand(scope)} ${effort}`,
+      isCurrent
+    };
+  });
+  effortRows.sort((a, b) => Number(b.isCurrent) - Number(a.isCurrent));
+
+  const fastRows = [
+    {
+      key: `${role}-control-fast-on`,
+      label: "Fast serving — On",
+      desc: currentFast
+        ? markCurrent("Faster tokens, same model, higher cost")
+        : "Faster tokens, same model, higher cost",
+      command: `/fast ${role} on`,
+      isCurrent: currentFast
+    },
+    {
+      key: `${role}-control-fast-off`,
+      label: "Fast serving — Off",
+      desc: !currentFast ? markCurrent("Standard serving") : "Standard serving",
+      command: `/fast ${role} off`,
+      isCurrent: !currentFast
+    }
+  ];
+  fastRows.sort((a, b) => Number(b.isCurrent) - Number(a.isCurrent));
+
+  return [
+    {
+      key: `${role}-control-model`,
+      label: `Model — ${fusionRoleModelLabel(family, model, context?.liveCatalog)}`,
+      desc: "Pick family and model",
+      command: modelCommand
+    },
+    ...effortRows.map(({ isCurrent: _isCurrent, ...row }) => row),
+    ...fastRows.map(({ isCurrent: _isCurrent, ...row }) => row)
+  ];
 }
 
 export function buildSlashMenu(input: string, context?: SlashMenuContext): SlashMenu {
@@ -520,6 +641,24 @@ export function buildSlashMenu(input: string, context?: SlashMenuContext): Slash
         ]
       };
     }
+    return { title, items };
+  }
+
+  if (lower === "/planner" || lower.startsWith("/planner ")) {
+    const { title, items } = submenu(
+      "/planner",
+      `Planner (${familyDisplayName(contextPlannerFamily(context))})`,
+      roleControlMenu("planner", context)
+    );
+    return { title, items };
+  }
+
+  if (lower === "/executor" || lower.startsWith("/executor ")) {
+    const { title, items } = submenu(
+      "/executor",
+      `Executor (${familyDisplayName(contextExecutorFamily(context))})`,
+      roleControlMenu("executor", context)
+    );
     return { title, items };
   }
 
@@ -782,9 +921,15 @@ export function normalizeFusionRoleSettings(raw: {
 
 // Display label for a (family, model) pair — used by the composer meta row,
 // notices, and /models output.
-export function fusionRoleModelLabel(family: FusionFamily, model: string): string {
+export function fusionRoleModelLabel(
+  family: FusionFamily,
+  model: string,
+  liveCatalog?: Partial<Record<FusionFamily, FusionLiveModelOption[]>>
+): string {
   const match = FAMILY_MODEL_OPTIONS[family].find((option) => option.id === model);
   if (match) return match.label;
+  const liveMatch = liveCatalog?.[family]?.find((option) => option.id === model);
+  if (liveMatch?.label) return liveMatch.label;
   return model;
 }
 

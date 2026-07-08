@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -59,6 +60,7 @@ import {
   createThreadRef,
   isThreadedAgentKind
 } from "./sessionLaunch";
+import { computeCwdConflicts } from "./cwdConflicts";
 import type {
   AgentAttentionEvent,
   AgentBackgroundActivity,
@@ -931,17 +933,34 @@ function moveWorkspace(
 export default function App() {
   const [initialState] = useState(() => {
     const screenshotFixture = window.vibe?.app.screenshotFixture;
-    if (screenshotFixture?.mode === "openfusion") {
+    if (
+      screenshotFixture?.mode === "openfusion" ||
+      screenshotFixture?.mode === "fusion-picker" ||
+      screenshotFixture?.mode === "fusion-builds"
+    ) {
       const workspace = starterWorkspace(screenshotFixture.cwd);
+      const kind = screenshotFixture.mode === "openfusion" ? "openfusion" : "fusion";
       const session = createSession(
-        "openfusion",
+        kind,
         screenshotFixture.cwd,
         [],
-        "Open Fusion"
+        screenshotFixture.mode === "openfusion"
+          ? "Open Fusion"
+          : screenshotFixture.mode === "fusion-builds"
+            ? "Fusion Build Rows"
+            : "Fusion Picker"
       );
       const screenshotSession: AgentSession = {
         ...session,
-        command: screenshotFixture.openCodeCommand?.trim() || session.command,
+        id: screenshotFixture.mode === "fusion-builds" ? "screenshot-fusion-builds" : session.id,
+        command:
+          screenshotFixture.mode === "openfusion"
+            ? screenshotFixture.openCodeCommand?.trim() || session.command
+            : session.command,
+        started:
+          screenshotFixture.mode === "openfusion"
+            ? session.started
+            : false,
         layout: {
           x: LEGACY_BOARD_PADDING,
           y: LEGACY_BOARD_PADDING,
@@ -1041,6 +1060,14 @@ export default function App() {
     activeView === "multi"
       ? "Free terminal board"
       : activeWorkspace?.path ?? "Open a folder to start";
+  const activeScreenshotFixture = window.vibe?.app.screenshotFixture;
+  const screenshotFusionPicker =
+    activeScreenshotFixture?.mode === "fusion-picker"
+      ? {
+          role: activeScreenshotFixture.role,
+          family: activeScreenshotFixture.family
+        }
+      : undefined;
   const workspaceChangeFingerprint = workspaces
     .map((workspace) => `${workspace.id}:${workspace.path}`)
     .join("|");
@@ -1051,6 +1078,22 @@ export default function App() {
     ...multiSessions,
     ...workspaces.flatMap((workspace) => workspace.sessions)
   ];
+  const cwdConflicts = useMemo(
+    () =>
+      computeCwdConflicts([
+        ...multiSessions.map((session) => ({
+          session,
+          scopeLabel: "Multi"
+        })),
+        ...workspaces.flatMap((workspace) =>
+          workspace.sessions.map((session) => ({
+            session,
+            scopeLabel: workspace.name
+          }))
+        )
+      ]),
+    [multiSessions, workspaces]
+  );
   const workspaceClosePending =
     workspaces.find((workspace) => workspace.id === workspaceClosePendingId) ??
     null;
@@ -1068,7 +1111,9 @@ export default function App() {
     window.vibe?.app.getScreenshotFixture?.().then((fixture) => {
       if (
         cancelled ||
-        fixture?.mode !== "openfusion" ||
+        (fixture?.mode !== "openfusion" &&
+          fixture?.mode !== "fusion-picker" &&
+          fixture?.mode !== "fusion-builds") ||
         boardSessions.length > 0 ||
         multiSessions.length > 0
       ) {
@@ -1079,14 +1124,21 @@ export default function App() {
         activeWorkspace?.sessions.length === 0
           ? { ...activeWorkspace, path: fixture.cwd, name: folderName(fixture.cwd) }
           : starterWorkspace(fixture.cwd);
+      const kind = fixture.mode === "openfusion" ? "openfusion" : "fusion";
       const session = createSession(
-        "openfusion",
+        kind,
         fixture.cwd,
         [],
-        "Open Fusion CLI"
+        fixture.mode === "openfusion"
+          ? "Open Fusion CLI"
+          : fixture.mode === "fusion-builds"
+            ? "Fusion Build Rows"
+            : "Fusion Picker"
       );
       const screenshotSession: AgentSession = {
         ...session,
+        id: fixture.mode === "fusion-builds" ? "screenshot-fusion-builds" : session.id,
+        started: fixture.mode === "openfusion" ? session.started : false,
         layout: {
           x: LEGACY_BOARD_PADDING,
           y: LEGACY_BOARD_PADDING,
@@ -3289,7 +3341,9 @@ export default function App() {
                   <FusionChatPane
                     session={session}
                     profile={getProfile("fusion")}
+                    initialPicker={screenshotFusionPicker}
                     claimedThreadIds={claimedThreadIds(session.id)}
+                    cwdConflict={cwdConflicts.get(session.id)}
                     isMaximized={session.id === maximizedSessionId}
                     isSelected={session.id === selectedSessionId}
                     onClose={() => closeSession(activeScope, session)}
@@ -3326,6 +3380,7 @@ export default function App() {
                     session={session}
                     profile={getProfile("openfusion")}
                     claimedThreadIds={claimedThreadIds(session.id)}
+                    cwdConflict={cwdConflicts.get(session.id)}
                     isMaximized={session.id === maximizedSessionId}
                     isSelected={session.id === selectedSessionId}
                     onClose={() => closeSession(activeScope, session)}
@@ -3364,6 +3419,7 @@ export default function App() {
                       session.fusion ? getProfile("fusion") : getProfile(session.kind)
                     }
                     claimedThreadIds={claimedThreadIds(session.id)}
+                    cwdConflict={cwdConflicts.get(session.id)}
                     isMaximized={session.id === maximizedSessionId}
                     isArranging={isArranging}
                     onClose={() => closeSession(activeScope, session)}

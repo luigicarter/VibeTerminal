@@ -9,8 +9,10 @@
 const { execFileSync, spawn } = require("child_process");
 const fs = require("fs");
 const http = require("http");
+const { createRequire } = require("module");
 const os = require("os");
 const path = require("path");
+const vm = require("vm");
 
 const adapterPath = path.join(__dirname, "..", "..", "backend", "fusion-adapter.cjs");
 const isWin = process.platform === "win32";
@@ -106,7 +108,7 @@ function main() {
       reject(error);
     });
 
-    child.stdout.on("data", (chunk) => {
+    child.stdout.on("data", async (chunk) => {
       buffer += chunk.toString("utf8");
       let index;
       while ((index = buffer.indexOf("\n")) !== -1) {
@@ -139,6 +141,7 @@ function main() {
             assert(names.includes("codex_goal_clear"), "tools/list missing codex_goal_clear");
             assert(names.includes("codex_investigate"), "tools/list missing codex_investigate");
             assert(names.includes("codex_implement"), "tools/list missing codex_implement");
+            assert(names.includes("codex_watch_build"), "tools/list missing codex_watch_build");
             assert(names.includes("codex_respond"), "tools/list missing codex_respond");
             assert(names.includes("codex_steer_resolve"), "tools/list missing codex_steer_resolve");
             assert(names.includes("codex_cancel"), "tools/list missing codex_cancel");
@@ -1860,6 +1863,7 @@ function postJson(urlString, token, payload) {
 
 function createFusionCallbackServer(token) {
   let controlUrl = "";
+  const events = [];
   const server = http.createServer((request, response) => {
     if (request.method !== "POST") {
       response.writeHead(404);
@@ -1878,6 +1882,7 @@ function createFusionCallbackServer(token) {
     request.on("end", () => {
       try {
         const event = JSON.parse(body || "{}");
+        events.push(event);
         if (event.type === "fusion.adapterReady" && event.controlUrl) {
           controlUrl = String(event.controlUrl).replace(/\/$/, "");
         }
@@ -1895,7 +1900,8 @@ function createFusionCallbackServer(token) {
       resolve({
         server,
         callbackUrl: `http://127.0.0.1:${address.port}/agent-event`,
-        getControlUrl: () => controlUrl
+        getControlUrl: () => controlUrl,
+        getEvents: () => events.slice()
       });
     });
   });
@@ -2217,7 +2223,7 @@ function assertAdapterRunsHostFree() {
             );
             const tools = responses.get(2).result && responses.get(2).result.tools ? responses.get(2).result.tools : [];
             const names = tools.map((t) => t.name);
-            for (const tool of ["codex_goal_set", "codex_goal_get", "codex_goal_clear", "codex_investigate", "codex_implement", "codex_respond", "codex_steer_resolve", "codex_cancel"]) {
+            for (const tool of ["codex_goal_set", "codex_goal_get", "codex_goal_clear", "codex_investigate", "codex_implement", "codex_watch_build", "codex_respond", "codex_steer_resolve", "codex_cancel"]) {
               assert(names.includes(tool), `host-free tools/list missing ${tool}`);
             }
             const callText = responses.get(3).result.content[0].text;
@@ -2671,8 +2677,8 @@ function assertClaudeExecutorArgs() {
   );
 }
 
-// A fake claude CLI: consumes one stream-json user message, replays a
-// Bash+Edit tool pass, streams a final text with the verifier verdict, then
+// A fake claude CLI: consumes one stream-json user message, replays assistant
+// narration + Bash + MultiEdit progress, streams a final verdict, then
 // emits the result line. Records its argv so the cmd.exe quoting path is
 // asserted end-to-end.
 function writeFakeClaudeExecutor(dir) {
@@ -2699,10 +2705,13 @@ rl.on("line", (line) => {
   if (msg.type !== "user") return;
   send({ type: "system", subtype: "init", session_id: "fake-claude-exec" });
   ev({ type: "message_start" });
+  ev({ type: "content_block_start", content_block: { type: "text" } });
+  ev({ type: "content_block_delta", delta: { type: "text_delta", text: "I will inspect the failure and update the file." } });
+  ev({ type: "content_block_stop" });
   ev({ type: "content_block_start", content_block: { type: "tool_use", id: "t1", name: "Bash" } });
   ev({ type: "content_block_delta", delta: { type: "input_json_delta", partial_json: JSON.stringify({ command: "echo hi" }) } });
   ev({ type: "content_block_stop" });
-  ev({ type: "content_block_start", content_block: { type: "tool_use", id: "t2", name: "Edit" } });
+  ev({ type: "content_block_start", content_block: { type: "tool_use", id: "t2", name: "MultiEdit" } });
   ev({ type: "content_block_delta", delta: { type: "input_json_delta", partial_json: JSON.stringify({ file_path: "src/app.ts" }) } });
   ev({ type: "content_block_stop" });
   ev({ type: "content_block_start", content_block: { type: "text" } });
@@ -2735,47 +2744,61 @@ function callAdapterImplementWithFakeClaudeExecutor() {
   const fakeClaudeBin = writeFakeClaudeExecutor(tempDir);
   const settingsFile = path.join(tempDir, "fusion-settings.json");
   fs.writeFileSync(settingsFile, JSON.stringify({ executorFamily: "claude", executorModel: "sonnet", executorFast: true }));
-  const child = spawn(process.execPath, [adapterPath], {
-    cwd: tempDir,
-    stdio: ["pipe", "pipe", "pipe"],
-    env: {
-      ...process.env,
-      VIBE_FUSION_CODEX_BIN: process.execPath,
-      VIBE_FUSION_CLAUDE_BIN: fakeClaudeBin,
-      VIBE_TERMINAL_FUSION_CWD: tempDir,
-      VIBE_TERMINAL_SESSION_ID: "fusion-adapter-claude-exec",
-      VIBE_FUSION_CODEX_SETTINGS: settingsFile,
-      VIBE_FUSION_TURN_IDLE_TIMEOUT_MS: "8000"
-    }
-  });
-
+  const token = `claude-exec-token-${Date.now()}-${Math.random()}`;
+  let callback = null;
+  let child = null;
   const responses = new Map();
   let buffer = "";
   let stderr = "";
   let finished = false;
 
   function cleanup() {
-    try {
-      child.stdin.end();
-    } catch {
-      // ignore
-    }
-    try {
-      child.kill();
-    } catch {
-      // ignore
-    }
-    if (isWin && child.pid) {
+    if (callback && callback.server) {
       try {
-        execFileSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
+        callback.server.close();
       } catch {
-        // best-effort
+        // ignore
+      }
+    }
+    if (child) {
+      try {
+        child.stdin.end();
+      } catch {
+        // ignore
+      }
+      try {
+        child.kill();
+      } catch {
+        // ignore
+      }
+      if (isWin && child.pid) {
+        try {
+          execFileSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
+        } catch {
+          // best-effort
+        }
       }
     }
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 
-  return new Promise((resolve, reject) => {
+  return createFusionCallbackServer(token).then((createdCallback) => new Promise((resolve, reject) => {
+    callback = createdCallback;
+    child = spawn(process.execPath, [adapterPath], {
+      cwd: tempDir,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        VIBE_FUSION_CODEX_BIN: process.execPath,
+        VIBE_FUSION_CLAUDE_BIN: fakeClaudeBin,
+        VIBE_TERMINAL_FUSION_CWD: tempDir,
+        VIBE_TERMINAL_SESSION_ID: "fusion-adapter-claude-exec",
+        VIBE_TERMINAL_CALLBACK_URL: callback.callbackUrl,
+        VIBE_TERMINAL_TELEMETRY_TOKEN: token,
+        VIBE_FUSION_CODEX_SETTINGS: settingsFile,
+        VIBE_FUSION_TURN_IDLE_TIMEOUT_MS: "8000"
+      }
+    });
     const timer = setTimeout(() => {
       finished = true;
       cleanup();
@@ -2821,8 +2844,9 @@ function callAdapterImplementWithFakeClaudeExecutor() {
             assert(parsed.status === "completed", `claude executor implement should complete: ${text}`);
             assert(parsed.goalReached === true, `claude executor verdict should parse: ${text}`);
             assert(
-              parsed.summary === "Implemented via fake claude executor.",
-              `claude executor summary should strip the verdict: ${text}`
+              /Implemented via fake claude executor/.test(parsed.summary || "") &&
+                !(parsed.summary || "").includes(VERDICT_MARKER),
+              `claude executor summary should keep assistant text but strip the verdict: ${text}`
             );
             assert(
               Array.isArray(parsed.files) && parsed.files.includes("src/app.ts"),
@@ -2888,15 +2912,66 @@ function callAdapterImplementWithFakeClaudeExecutor() {
               ),
               `fast-only Claude executor change should apply fastMode=false live: ${JSON.stringify(controls)}`
             );
-            // Flip the settings file to codex: the NEXT call must re-route to
-            // the app-server engine (fake app-server boots, thread marker).
-            fs.writeFileSync(settingsFile, JSON.stringify({ executorFamily: "codex" }));
             child.stdin.write(
-              `${JSON.stringify({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "codex_goal_get", arguments: {} } })}\n`
+              `${JSON.stringify({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "codex_implement", arguments: { task: "background fake claude pass", background: true } } })}\n`
             );
           } else if (msg.id === 5) {
-            finished = true;
-            clearTimeout(timer);
+            const text = msg.result.content[0].text;
+            const parsed = JSON.parse(text);
+            assert(parsed.status === "started", `background claude executor should detach: ${text}`);
+            waitForCondition(() => {
+              const backgroundEvents = callback.getEvents().filter(
+                (event) => event.type === "fusion.background-task"
+              );
+              const progressKinds = backgroundEvents
+                .filter((event) => event.phase === "progress")
+                .map((event) => event.activityKind);
+              return (
+                progressKinds.includes("message") &&
+                progressKinds.includes("command") &&
+                progressKinds.includes("file") &&
+                backgroundEvents.some((event) => event.phase === "settled")
+              )
+                ? backgroundEvents
+                : null;
+            }, 5000, "claude background executor progress telemetry")
+              .then((backgroundEvents) => {
+                assert(
+                  backgroundEvents.some(
+                    (event) =>
+                      event.phase === "progress" &&
+                      event.activityKind === "message" &&
+                      /inspect the failure and update the file/.test(event.text || "")
+                  ),
+                  `background claude executor should relay assistant narration as message progress: ${JSON.stringify(backgroundEvents)}`
+                );
+                assert(
+                  backgroundEvents.some(
+                    (event) =>
+                      event.phase === "progress" &&
+                      event.activityKind === "command" &&
+                      /echo hi/.test(event.text || "")
+                  ),
+                  `background claude executor should relay Bash as command progress: ${JSON.stringify(backgroundEvents)}`
+                );
+                assert(
+                  backgroundEvents.some(
+                    (event) =>
+                      event.phase === "progress" &&
+                      event.activityKind === "file" &&
+                      /src\/app\.ts/.test(event.text || "")
+                  ),
+                  `background claude executor should relay MultiEdit as file progress: ${JSON.stringify(backgroundEvents)}`
+                );
+                // Flip the settings file to codex: the NEXT call must re-route to
+                // the app-server engine (fake app-server boots, thread marker).
+                fs.writeFileSync(settingsFile, JSON.stringify({ executorFamily: "codex" }));
+                child.stdin.write(
+                  `${JSON.stringify({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "codex_goal_get", arguments: {} } })}\n`
+                );
+              })
+              .catch(fail);
+          } else if (msg.id === 6) {
             const text = msg.result.content[0].text;
             const parsed = JSON.parse(text);
             assert(parsed.status === "ok", `codex goal_get after family flip should succeed: ${text}`);
@@ -2905,8 +2980,38 @@ function callAdapterImplementWithFakeClaudeExecutor() {
               fs.existsSync(markerFile),
               "family flip to codex should boot the app-server engine"
             );
-            cleanup();
-            resolve();
+            waitForCondition(() => {
+              const activities = callback.getEvents().filter(
+                (event) => event.type === "fusion.activity" && event.role === "codex"
+              );
+              const byKind = new Map(activities.map((event) => [event.kind, event.text || ""]));
+              return byKind.has("message") && byKind.has("command") && byKind.has("file")
+                ? activities
+                : null;
+            }, 5000, "claude executor progress telemetry")
+              .then((activities) => {
+                assert(
+                  activities.some(
+                    (event) =>
+                      event.kind === "message" &&
+                      /inspect the failure and update the file/.test(event.text || "")
+                  ),
+                  `claude executor should relay assistant narration as message progress: ${JSON.stringify(activities)}`
+                );
+                assert(
+                  activities.some((event) => event.kind === "command" && /echo hi/.test(event.text || "")),
+                  `claude executor should relay Bash as command progress: ${JSON.stringify(activities)}`
+                );
+                assert(
+                  activities.some((event) => event.kind === "file" && /src\/app\.ts/.test(event.text || "")),
+                  `claude executor should relay MultiEdit as file progress: ${JSON.stringify(activities)}`
+                );
+                finished = true;
+                clearTimeout(timer);
+                cleanup();
+                resolve();
+              })
+              .catch(fail);
           }
         } catch (error) {
           fail(error);
@@ -2934,7 +3039,7 @@ function callAdapterImplementWithFakeClaudeExecutor() {
         params: { name: "codex_implement", arguments: { task: "do executor work" } }
       })}\n`
     );
-  });
+  }));
 }
 
 // ---- parallel fan-out coverage ----
@@ -3158,6 +3263,229 @@ function assertFanoutHelpers() {
       source.includes("if (taskId) {"),
     "codex_implement/codex_investigate must expose background:true and codex_cancel must take a scoped taskId"
   );
+  assert(
+    source.includes("const BACKGROUND_HARD_TIMEOUT_MS") &&
+      source.includes("VIBE_FUSION_BACKGROUND_HARD_TIMEOUT_MS") &&
+      source.includes("const BACKGROUND_IDLE_TIMEOUT_MS") &&
+      source.includes("VIBE_FUSION_BACKGROUND_IDLE_TIMEOUT_MS") &&
+      source.includes("idleTimeoutMs: BACKGROUND_IDLE_TIMEOUT_MS") &&
+      source.includes("idleTimeoutMs: TURN_IDLE_TIMEOUT_MS") &&
+      source.includes("}, BACKGROUND_HARD_TIMEOUT_MS);") &&
+      !/Fusion background task exceeded the maximum duration\."\s*\}\);\s*\}, TURN_HARD_TIMEOUT_MS\);/.test(source),
+    "background workers must use separate idle/hard timeouts without changing foreground/fan-out hard caps"
+  );
+  assert(
+    source.includes("function interruptTimedOutBackgroundWorker") &&
+      source.includes('rpc("turn/interrupt", { threadId: worker.threadId, turnId: worker.turnId })') &&
+      source.includes("if (worker.background) interruptTimedOutBackgroundWorker(worker);") &&
+      source.includes("// Codex-family background workers ride the shared app-server"),
+    "background timeout paths must interrupt codex-family worker turns instead of only settling locally"
+  );
+  assert(
+    source.includes('name: "codex_watch_build"') &&
+      source.includes("async function codexWatchBuild(command, cwd)") &&
+      source.includes('type: "fusion.build-task"') &&
+      source.includes('phase: "started"') &&
+      source.includes("detached: true") &&
+      source.includes("watchedBuildRunnerSource") &&
+      source.includes("child.unref()"),
+    "codex_watch_build must launch a detached process and emit started build telemetry"
+  );
+  assert(
+    source.includes('"/v:on"') &&
+      source.includes("windowsVerbatimArguments: isWin") &&
+      source.includes('"/bin/sh"') &&
+      source.includes("writeSentinel(code)"),
+    "codex_watch_build must write real exit-code sentinels on win32 and posix"
+  );
+  const planToolsBlock = source.match(/const PLAN_MODE_ALLOWED_TOOLS = new Set\(\[([\s\S]*?)\]\);/);
+  assert(
+    planToolsBlock && !planToolsBlock[1].includes("codex_watch_build"),
+    "codex_watch_build must not be allowed in Fusion Plan mode"
+  );
+}
+
+function loadAdapterInternalsWithFakeTimers(env = {}) {
+  const adapterRequire = createRequire(adapterPath);
+  const source = `${fs.readFileSync(adapterPath, "utf8")}\n
+module.exports.__backgroundTimeoutTest = {
+  createBackgroundWorker,
+  refreshFanoutWorkerIdleTimer,
+  finishFanoutWorkerTurn,
+  interruptTimedOutBackgroundWorker,
+  setRpcStub(fn) { rpc = fn; }
+};
+`;
+  const timers = [];
+  const context = {
+    require: adapterRequire,
+    module: { exports: {} },
+    exports: {},
+    __filename: adapterPath,
+    __dirname: path.dirname(adapterPath),
+    console,
+    Buffer,
+    URL,
+    process: {
+      ...process,
+      env: { ...process.env, ...env },
+      stdout: { write() {} },
+      stderr: { write() {} },
+      stdin: { setEncoding() {}, on() {} },
+      cwd: () => process.cwd()
+    },
+    setTimeout(fn, ms) {
+      const timer = { fn, ms, cleared: false, unref() {} };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimeout(timer) {
+      if (timer) timer.cleared = true;
+    },
+    setInterval(fn, ms) {
+      const timer = { fn, ms, cleared: false, unref() {} };
+      timers.push(timer);
+      return timer;
+    },
+    clearInterval(timer) {
+      if (timer) timer.cleared = true;
+    }
+  };
+  context.global = context;
+  context.globalThis = context;
+  vm.runInNewContext(source, context, {
+    filename: adapterPath,
+    timeout: 5000
+  });
+  return {
+    api: context.module.exports.__backgroundTimeoutTest,
+    timers
+  };
+}
+
+async function assertBackgroundTimeoutCapsAndInterrupts() {
+  const hardEnv = "120000";
+  const idleEnv = "90000";
+  const { api, timers } = loadAdapterInternalsWithFakeTimers({
+    VIBE_FUSION_TURN_HARD_TIMEOUT_MS: "60000",
+    VIBE_FUSION_TURN_IDLE_TIMEOUT_MS: "1000",
+    VIBE_FUSION_BACKGROUND_HARD_TIMEOUT_MS: hardEnv,
+    VIBE_FUSION_BACKGROUND_IDLE_TIMEOUT_MS: idleEnv
+  });
+  const interrupts = [];
+  api.setRpcStub((method, params) => {
+    interrupts.push({ method, params });
+    return Promise.resolve({});
+  });
+
+  const completed = api.createBackgroundWorker("implement", "finish a long build", "bg-complete", "thread-bg-complete");
+  completed.turnId = "turn-bg-complete";
+  const completeResultPromise = completed.promise;
+  const completeHardTimer = completed.hardTimer;
+  const completeIdleTimer = completed.idleTimer;
+  assert(
+    completeHardTimer.ms === Number(hardEnv),
+    `background hard timer should use BACKGROUND_HARD_TIMEOUT_MS, got ${completeHardTimer.ms}`
+  );
+  assert(
+    completeIdleTimer.ms === Number(idleEnv),
+    `background idle timer should use BACKGROUND_IDLE_TIMEOUT_MS, got ${completeIdleTimer.ms}`
+  );
+  api.refreshFanoutWorkerIdleTimer(completed, "progress after long command");
+  assert(
+    completed.idleTimer.ms === Number(idleEnv),
+    `refreshed background idle timer should keep BACKGROUND_IDLE_TIMEOUT_MS, got ${completed.idleTimer.ms}`
+  );
+  api.finishFanoutWorkerTurn(completed, {
+    status: "completed",
+    items: [
+      {
+        type: "fileChange",
+        id: "change-1",
+        changes: [{ type: "edit", path: "src/background.js" }],
+        status: "completed"
+      },
+      {
+        type: "agentMessage",
+        id: "agent-1",
+        text: `Long build really completed.\n${VERDICT_MARKER} {"goalReached":true,"bugsFound":[],"missingRequirements":[],"nextAction":"done","summary":"Long build completed."}`,
+        phase: null,
+        memoryCitation: null
+      }
+    ]
+  });
+  const completeResult = await completeResultPromise;
+  assert(
+    completeResult.status === "completed" &&
+      completeResult.summary.includes("Long build really completed") &&
+      completeResult.files.includes("src/background.js"),
+    `normal background completion should settle with real result: ${JSON.stringify(completeResult)}`
+  );
+  completeHardTimer.fn();
+  assert(
+    interrupts.length === 0,
+    `normal background completion must not interrupt the worker turn: ${JSON.stringify(interrupts)}`
+  );
+
+  const hardTimedOut = api.createBackgroundWorker("implement", "timeout hard", "bg-hard", "thread-bg-hard");
+  hardTimedOut.turnId = "turn-bg-hard";
+  const hardResultPromise = hardTimedOut.promise;
+  hardTimedOut.hardTimer.fn();
+  const hardResult = await hardResultPromise;
+  assert(
+    hardResult.status === "failed" &&
+      hardResult.error === "Fusion background task exceeded the maximum duration.",
+    `hard timeout should settle with timeout failure: ${JSON.stringify(hardResult)}`
+  );
+  assert(
+    interrupts.some(
+      (entry) =>
+        entry.method === "turn/interrupt" &&
+        entry.params.threadId === "thread-bg-hard" &&
+        entry.params.turnId === "turn-bg-hard"
+    ),
+    `hard timeout should interrupt the codex worker turn: ${JSON.stringify(interrupts)}`
+  );
+
+  const idleTimedOut = api.createBackgroundWorker("implement", "timeout idle", "bg-idle", "thread-bg-idle");
+  idleTimedOut.turnId = "turn-bg-idle";
+  const idleResultPromise = idleTimedOut.promise;
+  idleTimedOut.idleTimer.fn();
+  const idleResult = await idleResultPromise;
+  assert(
+    idleResult.status === "failed" && /stalled after background start/.test(idleResult.error || ""),
+    `idle timeout should settle with stalled failure: ${JSON.stringify(idleResult)}`
+  );
+  assert(
+    interrupts.some(
+      (entry) =>
+        entry.method === "turn/interrupt" &&
+        entry.params.threadId === "thread-bg-idle" &&
+        entry.params.turnId === "turn-bg-idle"
+    ),
+    `idle timeout should interrupt the codex worker turn: ${JSON.stringify(interrupts)}`
+  );
+
+  const fanout = {
+    kind: "implement",
+    index: 0,
+    count: 1,
+    threadId: "thread-fanout",
+    turnId: "turn-fanout",
+    idleTimeoutMs: 1000,
+    settled: false,
+    resolve() {}
+  };
+  api.refreshFanoutWorkerIdleTimer(fanout, "worker start");
+  assert(
+    fanout.idleTimer.ms === 1000,
+    `parallel fan-out should still use its own foreground idle timeout, got ${fanout.idleTimer.ms}`
+  );
+  assert(
+    timers.some((timer) => timer.ms === Number(hardEnv)) &&
+      timers.some((timer) => timer.ms === Number(idleEnv)),
+    "fake timer harness should have observed separate background hard and idle timers"
+  );
 }
 
 function writeFanoutFakeAppServer(dir, options = {}) {
@@ -3280,6 +3608,324 @@ function readFanoutLog(logFile) {
     .split(/\r?\n/)
     .filter(Boolean)
     .map((line) => JSON.parse(line));
+}
+
+function writeBackgroundIsolationFakeAppServer(dir, options = {}) {
+  const logFile = JSON.stringify(options.logFile);
+  const verdict = JSON.stringify(
+    `Background worker completed.\n${VERDICT_MARKER} {"goalReached":true,"bugsFound":[],"missingRequirements":[],"nextAction":"done","summary":"Background worker completed."}`
+  );
+  fs.writeFileSync(
+    path.join(dir, "app-server"),
+    `
+const fs = require("fs");
+const readline = require("readline");
+const logFile = ${logFile};
+const verdict = ${verdict};
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+let nextThread = 0;
+let nextTurn = 0;
+let pendingBackground = null;
+let backgroundRequestResponses = 0;
+function send(msg) { process.stdout.write(JSON.stringify(msg) + "\\n"); }
+function log(entry) { fs.appendFileSync(logFile, JSON.stringify(entry) + "\\n"); }
+function turnShape(turnId, status, items = []) {
+  return { id: turnId, items, itemsView: "full", status, error: null, startedAt: 1, completedAt: status === "completed" ? 2 : null, durationMs: 1 };
+}
+function commandItem(threadId) {
+  return {
+    type: "commandExecution",
+    id: "cmd-" + threadId,
+    command: "npm test -- --runInBand",
+    cwd: process.cwd(),
+    processId: null,
+    source: "shell",
+    status: "completed",
+    commandActions: [],
+    aggregatedOutput: "ok\\n",
+    exitCode: 0,
+    durationMs: 7
+  };
+}
+function fileItem(threadId) {
+  return {
+    type: "fileChange",
+    id: "file-" + threadId,
+    changes: [{ type: "edit", path: "src/background-worker.js" }],
+    status: "completed"
+  };
+}
+function agentItem(threadId) {
+  return {
+    type: "agentMessage",
+    id: "msg-" + threadId,
+    text: verdict,
+    phase: null,
+    memoryCitation: null
+  };
+}
+function maybeCompleteBackground() {
+  if (!pendingBackground || backgroundRequestResponses < 2) return;
+  const { threadId, turnId } = pendingBackground;
+  pendingBackground = null;
+  const agent = agentItem(threadId);
+  send({ method: "turn/completed", params: { threadId, turn: turnShape(turnId, "completed", [agent]) } });
+}
+rl.on("line", (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+  if (msg.id !== undefined && msg.result && !msg.method) {
+    log({ kind: "serverRequestResponse", id: msg.id, result: msg.result });
+    if (msg.id === 700 || msg.id === 701) {
+      backgroundRequestResponses += 1;
+      maybeCompleteBackground();
+    }
+    return;
+  }
+  if (msg.method === "initialize") { send({ id: msg.id, result: {} }); return; }
+  if (msg.method === "model/list") {
+    send({ id: msg.id, result: { data: [{ id: "gpt-5.5", model: "gpt-5.5", isDefault: true, serviceTiers: [] }], nextCursor: null } });
+    return;
+  }
+  if (msg.method === "thread/start") {
+    nextThread += 1;
+    const threadId = "thread-" + nextThread;
+    log({ kind: "thread/start", threadId, params: msg.params });
+    send({ id: msg.id, result: { thread: { id: threadId } } });
+    return;
+  }
+  if (msg.method === "turn/interrupt") {
+    log({ kind: "turn/interrupt", params: msg.params });
+    send({ id: msg.id, result: {} });
+    return;
+  }
+  if (msg.method === "turn/start") {
+    nextTurn += 1;
+    const threadId = msg.params.threadId;
+    const turnId = "turn-" + nextTurn;
+    log({ kind: "turn/start", threadId, turnId, params: msg.params });
+    send({ id: msg.id, result: { turn: turnShape(turnId, "running") } });
+    send({ method: "turn/started", params: { threadId, turn: turnShape(turnId, "running") } });
+    if (threadId !== "thread-2") return;
+    pendingBackground = { threadId, turnId };
+    send({ method: "item/agentMessage/delta", params: { threadId, turnId, itemId: "msg-" + threadId, delta: "Background worker delta." } });
+    send({ method: "item/completed", params: { threadId, turnId, item: commandItem(threadId) } });
+    send({ method: "item/completed", params: { threadId, turnId, item: fileItem(threadId) } });
+    send({
+      id: 700,
+      method: "item/tool/requestUserInput",
+      params: {
+        threadId,
+        turnId,
+        itemId: "question-" + threadId,
+        questions: [{ id: "scope", header: "Scope", question: "Which background scope should be used?" }]
+      }
+    });
+    send({
+      id: 701,
+      method: "item/commandExecution/requestApproval",
+      params: {
+        threadId,
+        turnId,
+        itemId: "approval-" + threadId,
+        reason: "background command needs approval",
+        command: "Remove-Item -Recurse build",
+        cwd: process.cwd(),
+        commandActions: [{ command: "Remove-Item -Recurse build" }],
+        availableDecisions: ["accept", "acceptForSession", "decline", "cancel"]
+      }
+    });
+    return;
+  }
+  if (msg.id !== undefined) send({ id: msg.id, result: {} });
+});
+`
+  );
+}
+
+function callAdapterBackgroundTelemetryIsolation() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-adapter-background-"));
+  const logFile = path.join(tempDir, "background-log.jsonl");
+  writeBackgroundIsolationFakeAppServer(tempDir, { logFile });
+  const token = `background-token-${Date.now()}-${Math.random()}`;
+  const sessionId = "fusion-adapter-background";
+  let callback = null;
+  let child = null;
+  let finished = false;
+  let buffer = "";
+  let stderr = "";
+  const responses = new Map();
+
+  function cleanup() {
+    if (callback && callback.server) {
+      try {
+        callback.server.close();
+      } catch {
+        // ignore
+      }
+    }
+    if (child) {
+      try {
+        child.stdin.end();
+      } catch {
+        // ignore
+      }
+      try {
+        child.kill();
+      } catch {
+        // ignore
+      }
+      if (isWin && child.pid) {
+        try {
+          execFileSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
+        } catch {
+          // best-effort
+        }
+      }
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+
+  return createFusionCallbackServer(token).then((createdCallback) => {
+    callback = createdCallback;
+    child = spawn(process.execPath, [adapterPath], {
+      cwd: tempDir,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        VIBE_FUSION_CODEX_BIN: process.execPath,
+        VIBE_TERMINAL_FUSION_CWD: tempDir,
+        VIBE_TERMINAL_SESSION_ID: sessionId,
+        VIBE_TERMINAL_CALLBACK_URL: callback.callbackUrl,
+        VIBE_TERMINAL_TELEMETRY_TOKEN: token,
+        VIBE_FUSION_TURN_IDLE_TIMEOUT_MS: "5000",
+        VIBE_FUSION_TURN_AFTER_COMMAND_TIMEOUT_MS: "5000"
+      }
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+
+    child.stdout.on("data", async (chunk) => {
+      buffer += chunk.toString("utf8");
+      let index;
+      while ((index = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, index).trim();
+        buffer = buffer.slice(index + 1);
+        if (!line) continue;
+        try {
+          const msg = JSON.parse(line);
+          if (msg.id !== undefined) responses.set(msg.id, msg);
+        } catch {
+          // ignore
+        }
+      }
+    });
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        finished = true;
+        cleanup();
+        reject(new Error(`timed out waiting for background isolation; stderr=${stderr}`));
+      }, 15000);
+
+      function fail(error) {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        cleanup();
+        reject(error);
+      }
+
+      child.on("error", fail);
+      child.on("exit", (code) => {
+        if (finished) return;
+        fail(new Error(`adapter exited before background isolation completed: code=${code}; stderr=${stderr}`));
+      });
+
+      (async () => {
+        try {
+          child.stdin.write(
+            `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fusion-background-isolation", version: "0.0.0" } } })}\n`
+          );
+          child.stdin.write(
+            `${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "codex_implement", arguments: { task: "Run the detached background telemetry isolation check", background: true } } })}\n`
+          );
+
+          const startedResponse = await waitForCondition(
+            () => responses.get(2),
+            5000,
+            "background launch response"
+          );
+          const started = JSON.parse(startedResponse.result.content[0].text);
+          assert(started.status === "started", `background launch should detach: ${startedResponse.result.content[0].text}`);
+
+          await waitForCondition(
+            () =>
+              callback
+                .getEvents()
+                .some((event) => event.type === "fusion.background-task" && event.phase === "settled"),
+            10000,
+            "background settled telemetry"
+          );
+
+          const events = callback.getEvents();
+          const mainRows = events.filter(
+            (event) =>
+              event.type === "fusion.activity" &&
+              event.role === "codex" &&
+              ["command", "message", "file", "approval"].includes(event.kind)
+          );
+          assert(
+            mainRows.length === 0,
+            `background worker action telemetry leaked into main chat: ${JSON.stringify(mainRows)}`
+          );
+
+          const backgroundEvents = events.filter((event) => event.type === "fusion.background-task");
+          assert(
+            backgroundEvents.some((event) => event.phase === "started") &&
+              backgroundEvents.some((event) => event.phase === "settled"),
+            `background task should emit started and settled telemetry: ${JSON.stringify(backgroundEvents)}`
+          );
+          const progressKinds = backgroundEvents
+            .filter((event) => event.phase === "progress")
+            .map((event) => event.activityKind);
+          for (const kind of ["command", "file", "message", "approval"]) {
+            assert(
+              progressKinds.includes(kind),
+              `background progress should include ${kind} activity, got ${JSON.stringify(progressKinds)}`
+            );
+          }
+
+          const log = readFanoutLog(logFile);
+          const requestResponses = log.filter((entry) => entry.kind === "serverRequestResponse");
+          assert(
+            requestResponses.some((entry) => entry.id === 700 && entry.result?.answers?.scope),
+            `background question should be auto-answered on the wire: ${JSON.stringify(requestResponses)}`
+          );
+          assert(
+            requestResponses.some((entry) => entry.id === 701 && entry.result?.decision === "decline"),
+            `background approval should be auto-declined on the wire: ${JSON.stringify(requestResponses)}`
+          );
+          const backgroundTurn = log.find(
+            (entry) => entry.kind === "turn/start" && entry.threadId === "thread-2"
+          );
+          assert(
+            backgroundTurn && /Detached background task/.test(backgroundTurn.params.input[0].text),
+            `background worker turn should carry the detached-task contract: ${JSON.stringify(backgroundTurn)}`
+          );
+
+          finished = true;
+          clearTimeout(timer);
+          cleanup();
+          resolve();
+        } catch (error) {
+          fail(error);
+        }
+      })();
+    });
+  });
 }
 
 function callAdapterScoutFanoutWithFakeAppServer() {
@@ -3682,7 +4328,7 @@ function callAdapterCancelDuringFanout() {
       }
     }, 50);
 
-    child.stdout.on("data", (chunk) => {
+    child.stdout.on("data", async (chunk) => {
       buffer += chunk.toString("utf8");
       let index;
       while ((index = buffer.indexOf("\n")) !== -1) {
@@ -3706,7 +4352,10 @@ function callAdapterCancelDuringFanout() {
             fanout.status === "cancelled",
             `the hung fan-out call should resolve as cancelled: ${fanoutText}`
           );
-          const interrupts = readFanoutLog(logFile).filter((entry) => entry.kind === "turn/interrupt");
+          const interrupts = await waitForCondition(() => {
+            const rows = readFanoutLog(logFile).filter((entry) => entry.kind === "turn/interrupt");
+            return new Set(rows.map((entry) => entry.params.threadId)).size >= 2 ? rows : null;
+          }, 2000, "fan-out worker interrupts");
           assert(
             new Set(interrupts.map((entry) => entry.params.threadId)).size >= 2,
             `cancel must interrupt every fan-out worker thread: ${JSON.stringify(interrupts)}`
@@ -3769,6 +4418,8 @@ main()
     await callAdapterDeadWindowSteerSkips();
     await callAdapterImplementWithFakeClaudeExecutor();
     assertFanoutHelpers();
+    await assertBackgroundTimeoutCapsAndInterrupts();
+    await callAdapterBackgroundTelemetryIsolation();
     await callAdapterScoutFanoutWithFakeAppServer();
     await callAdapterImplementFanoutWithFakeAppServer();
     await callAdapterCancelDuringFanout();

@@ -3,6 +3,7 @@ import {
   Ban,
   Check,
   CopyPlus,
+  Diamond,
   GripVertical,
   Maximize2,
   Minimize2,
@@ -11,12 +12,16 @@ import {
   RefreshCcw,
   RotateCcw,
   ShieldCheck,
-  Sparkles,
   X,
   XCircle
 } from "lucide-react";
 import clsx from "clsx";
 import { shouldShowAttentionDot } from "../attention";
+import {
+  cwdConflictChipLabel,
+  cwdConflictTitle,
+  type CwdConflict
+} from "../cwdConflicts";
 import type {
   AgentAttentionEvent,
   AgentBackgroundActivity,
@@ -29,7 +34,8 @@ import type {
   FusionFamily,
   FusionRunMode,
   FusionSettings,
-  SessionStatus
+  SessionStatus,
+  TaskVerdict
 } from "../types";
 import {
   buildFusionPicker,
@@ -47,6 +53,7 @@ import {
   normalizeFusionRoleSettings,
   resolveModelArgument,
   scopeEffortValues,
+  type FusionLiveModelOption,
   type FusionPickerState,
   type FusionRoleScope,
   type FusionSpeedPreset,
@@ -63,15 +70,18 @@ import {
   clip,
   firstString,
   formatDurationShort,
+  previewText,
   type OcBackgroundTask
 } from "./ocChat";
 
 interface FusionChatPaneProps {
   session: AgentSession;
   profile: AgentProfile;
+  initialPicker?: FusionPickerState;
   // Thread ids active in OTHER panes: the resume picker marks them and refuses
   // to open the same conversation twice (two panes writing one session id).
   claimedThreadIds?: string[];
+  cwdConflict?: CwdConflict;
   isMaximized: boolean;
   isSelected: boolean;
   onClose: () => void;
@@ -235,6 +245,19 @@ function fusionSettingsSummary(settings: FusionSettings) {
   return `Mode ${fusionRunModeLabel(settings.mode)} · Planning ${planner} · Planning effort ${familyEffortLabel(settings.plannerFamily, String(settings.plannerEffort))} · Planning fast ${plannerFast} · Execution ${executor} · Execution effort ${familyEffortLabel(settings.executorFamily, String(settings.executorEffort))} · Execution fast ${executorFast}`;
 }
 
+function fusionPipelineNodeLabel(family: FusionFamily, modelLabel: string): string {
+  const familyName = familyDisplayName(family);
+  const trimmed = modelLabel.trim();
+  if (!trimmed) return familyName;
+  if (family === "claude" && /^(opus|sonnet|fable|claude)\b/i.test(trimmed)) {
+    return trimmed;
+  }
+  const escapedFamily = familyName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${escapedFamily}\\b\\s*`, "i").test(trimmed)
+    ? trimmed
+    : `${familyName} ${trimmed}`;
+}
+
 interface ToolMeta {
   name: string;
   isCodexBridge: boolean;
@@ -247,13 +270,17 @@ interface PendingFusionDecision {
   detail: string;
 }
 
-type FusionActiveRole = "claude" | "codex";
 const FUSION_SPEAKER_LABEL = "Fusion";
+type PendingDelegationActivity = { role: "opus" | "codex"; kind: string; text: string };
+
+function fusionTaskRole(scout: boolean) {
+  return scout ? "scout" : "executor";
+}
 
 // Opus makes every tool call. Fusion bridge calls are plumbing; Codex's
 // user-facing voice is the concise result/status we derive from those calls.
 function isCodexBridgeTool(name: string): boolean {
-  return /codex_investigate|codex_implement|codex_respond|codex_steer_resolve/.test(name);
+  return /codex_(?:investigate|implement|respond|steer_resolve|build_status|build_cancel|watch_build)$/.test(name);
 }
 
 function isCodexGoalTool(name: string): boolean {
@@ -271,10 +298,6 @@ function isExitPlanTool(name: string): boolean {
 
 function isInternalActivity(kind: string): boolean {
   return ["delegate", "decision", "goal", "warmup"].includes(kind);
-}
-
-function fusionRoleLabel(_role: FusionActiveRole) {
-  return FUSION_SPEAKER_LABEL;
 }
 
 function formatBackgroundActivityTitle(activity: AgentBackgroundActivity | null) {
@@ -445,6 +468,58 @@ function codexTaskReport(parsed: Record<string, unknown> | null, raw: string): s
   return parts.join("\n\n") || clip(raw ?? "", 8000);
 }
 
+function normalizeVerdictNextAction(value: unknown): TaskVerdict["nextAction"] | undefined {
+  return value === "continue" || value === "done" || value === "ask_human"
+    ? value
+    : undefined;
+}
+
+function countStrings(value: unknown): number | undefined {
+  return Array.isArray(value)
+    ? value.filter((item) => typeof item === "string" && item.trim()).length
+    : undefined;
+}
+
+function codexTaskVerdict(parsed: Record<string, unknown> | null): TaskVerdict | undefined {
+  if (!parsed) return undefined;
+  const verifier = asRecord(parsed.verifierVerdict);
+  const bugs = countStrings(parsed.bugsFound ?? verifier.bugsFound);
+  const missing = countStrings(parsed.missingRequirements ?? verifier.missingRequirements);
+  const files = countStrings(parsed.files);
+  const goalReached =
+    typeof parsed.goalReached === "boolean"
+      ? parsed.goalReached
+      : typeof verifier.goalReached === "boolean"
+        ? verifier.goalReached
+        : undefined;
+  const nextAction = normalizeVerdictNextAction(parsed.nextAction ?? verifier.nextAction);
+  const summary = firstString(
+    parsed.verifierSummary,
+    verifier.verifierSummary,
+    verifier.summary,
+    parsed.verifierVerdict,
+    parsed.summary,
+    parsed.findings,
+    parsed.error
+  );
+  const hasVerifierSignal =
+    goalReached !== undefined ||
+    nextAction !== undefined ||
+    bugs !== undefined ||
+    missing !== undefined ||
+    files !== undefined ||
+    Boolean(summary);
+  if (!hasVerifierSignal) return undefined;
+  return {
+    goalReached,
+    bugs,
+    missing,
+    nextAction,
+    summary: summary || undefined,
+    files
+  };
+}
+
 // The planner's full delegation directive, shown as the leading section of the
 // Task row's click-to-expand report (never as a transcript note — see the
 // "delegate" branch of the activity handler).
@@ -478,7 +553,7 @@ function parseJsonObject(text: string): Record<string, unknown> | null {
 
 function formatCodexBridgeResult(name: string, text: string): string {
   const parsed = parseJsonObject(text);
-  if (!parsed) return previewToolResult(text);
+  if (!parsed) return previewText(text);
 
   if (isCodexGoalTool(name)) {
     const goal = parsed.goal as Record<string, unknown> | null | undefined;
@@ -499,6 +574,29 @@ function formatCodexBridgeResult(name: string, text: string): string {
 
   if (status === "steer_replan_ready") {
     return "ready to replan";
+  }
+
+  if (name.endsWith("codex_watch_build")) {
+    return status === "watching"
+      ? `watching build ${clip(String(parsed.buildId ?? ""), 80)}`
+      : previewText(text);
+  }
+
+  if (name.endsWith("codex_build_status")) {
+    if (status === "not_found") return `build not found: ${clip(String(parsed.buildId ?? ""), 80)}`;
+    const build = asRecord(parsed.build);
+    if (build.buildId) {
+      const exitCode = build.exitCode == null ? "" : ` · exit ${String(build.exitCode)}`;
+      return `build ${String(build.status ?? "unknown")}${exitCode}: ${clip(String(build.command ?? build.buildId), 140)}`;
+    }
+    const builds = Array.isArray(parsed.builds) ? parsed.builds.length : 0;
+    return `${builds} build${builds === 1 ? "" : "s"} tracked`;
+  }
+
+  if (name.endsWith("codex_build_cancel")) {
+    return status === "cancel-requested"
+      ? `build cancel requested: ${clip(String(parsed.buildId ?? ""), 80)}`
+      : previewText(text);
   }
 
   if (status === "completed") {
@@ -538,7 +636,7 @@ function formatCodexBridgeResult(name: string, text: string): string {
     return status;
   }
 
-  return previewToolResult(text);
+  return previewText(text);
 }
 
 function pendingFusionDecisionFromResult(
@@ -552,6 +650,18 @@ function pendingFusionDecisionFromResult(
     kind: typeof parsed.kind === "string" && parsed.kind ? parsed.kind : "decision",
     detail: typeof parsed.detail === "string" && parsed.detail ? parsed.detail : "Fusion needs a decision."
   };
+}
+
+function askHumanPromptFromResult(parsed: Record<string, unknown> | null): string {
+  if (parsed) {
+    for (const field of ["detail", "question", "message", "summary", "error"]) {
+      const value = parsed[field];
+      if (typeof value === "string" && value.trim()) {
+        return value.trim();
+      }
+    }
+  }
+  return "Fusion needs your input to continue — reply below.";
 }
 
 function fusionDecisionInstruction(
@@ -580,16 +690,6 @@ function fusionDecisionInstruction(
   ].join(" ");
 }
 
-// Collapsed one-line preview of a tool result; the full text shows on expand
-// (Claude-Code style), so nothing is lost — it's just folded away by default.
-function previewToolResult(text: string): string {
-  const line = (text ?? "")
-    .split("\n")
-    .map((value) => value.trim())
-    .find(Boolean);
-  return line ? clip(line, 120) : "(no output)";
-}
-
 function titleFromFirstPrompt(text: string) {
   return clip(text.replace(/\s+/g, " ").trim(), 80);
 }
@@ -597,7 +697,9 @@ function titleFromFirstPrompt(text: string) {
 export default function FusionChatPane({
   session,
   profile,
+  initialPicker,
   claimedThreadIds,
+  cwdConflict,
   isMaximized,
   isSelected,
   onClose,
@@ -626,7 +728,6 @@ export default function FusionChatPane({
   // context includes them) absorbs them, then they join the transcript at that
   // point instead of drowning mid-stream.
   const [steering, setSteering] = useState<{ key: string; text: string }[]>([]);
-  const [activeRole, setActiveRole] = useState<FusionActiveRole>("claude");
   const [slashIndex, setSlashIndex] = useState(0);
   // Esc hides the menu for the CURRENT input without erasing what the user
   // typed (it used to wipe the whole command). Any input change re-arms it.
@@ -635,7 +736,12 @@ export default function FusionChatPane({
   // family→model drill-in; /resume opens the saved-chat picker. While one is
   // open the composer input only filters.
   const [picker, setPicker] = useState<FusionPanePickerState>(null);
+  const [liveModelCatalog, setLiveModelCatalog] = useState<
+    Partial<Record<FusionFamily, FusionLiveModelOption[]>>
+  >({});
   const resumeListRequestRef = useRef(0);
+  const modelCatalogRequestRef = useRef(0);
+  const initialPickerAppliedRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   // Follow the stream only while the user is at the bottom — auto-scroll used
   // to yank the view down on EVERY delta, which made reading scrollback during
@@ -681,6 +787,9 @@ export default function FusionChatPane({
     // activity), folded into the same report instead of a transcript note.
     prompt?: string;
   } | null>(null);
+  // Codex-planner tool calls and adapter progress use separate transports. When
+  // adapter activity wins the race, hold it until the Task row exists.
+  const pendingDelegationActivityRef = useRef<PendingDelegationActivity[]>([]);
   const [planActionReady, setPlanActionReady] = useState(false);
   const [implementingPlan, setImplementingPlan] = useState(false);
   const [modeSwitching, setModeSwitching] = useState(false);
@@ -695,10 +804,15 @@ export default function FusionChatPane({
     >()
   );
   const [bgTasks, setBgTasks] = useState<OcBackgroundTask[]>([]);
+  const buildTasksRef = useRef(
+    new Map<string, { key: string; command: string; startedAt: number }>()
+  );
+  const [buildTasks, setBuildTasks] = useState<OcBackgroundTask[]>([]);
   const [bgNow, setBgNow] = useState(() => Date.now());
   // codex_implement/investigate calls launched with background:true — their
   // own tool rows are suppressed (the background-task events own the row).
   const suppressedBgToolIdsRef = useRef(new Set<string>());
+  const suppressedBuildToolIdsRef = useRef(new Set<string>());
   const syncBgPin = useCallback(() => {
     setBgTasks(
       Array.from(bgTasksRef.current.entries()).map(([taskId, task]) => ({
@@ -709,15 +823,47 @@ export default function FusionChatPane({
       }))
     );
   }, []);
+  const syncBuildPin = useCallback(() => {
+    setBuildTasks(
+      Array.from(buildTasksRef.current.entries()).map(([buildId, build]) => ({
+        taskId: buildId,
+        title: `Build: ${build.command || buildId}`,
+        startedAt: build.startedAt,
+        updates: 0
+      }))
+    );
+  }, []);
   // Elapsed-time ticker for the pin, armed only while tasks run.
   useEffect(() => {
-    if (!bgTasks.length) return;
+    if (!bgTasks.length && !buildTasks.length) return;
     const timer = window.setInterval(() => setBgNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [bgTasks.length]);
+  }, [bgTasks.length, buildTasks.length]);
+  useEffect(() => {
+    if (!buildTasks.length) return;
+    const details = new Map(
+      Array.from(buildTasksRef.current.values()).map((build) => [
+        build.key,
+        `running · ${formatDurationShort(Math.max(0, bgNow - build.startedAt))}`
+      ])
+    );
+    setMessages((prev) =>
+      prev.map((row) =>
+        row.kind === "tool" && row.toolName === "build" && row.toolStatus === "running"
+          ? { ...row, taskDetail: details.get(row.key) || row.taskDetail }
+          : row
+      )
+    );
+  }, [bgNow, buildTasks.length]);
   const stopBackgroundTask = useCallback(
     (taskId: string) => {
       void window.vibe?.fusionChat?.backgroundCancel?.(session.id, taskId);
+    },
+    [session.id]
+  );
+  const stopBuild = useCallback(
+    (buildId: string) => {
+      void window.vibe?.fusionChat?.buildCancel?.(session.id, buildId);
     },
     [session.id]
   );
@@ -761,13 +907,14 @@ export default function FusionChatPane({
   } = roleSettings;
   const fusionRunMode = normalizeFusionRunMode(session.fusionRunMode);
   const fusionRunModeText = fusionRunModeLabel(fusionRunMode);
-  const fusionModelLabel = fusionRoleModelLabel(plannerFamily, plannerModel);
-  const executorModelLabel = fusionRoleModelLabel(executorFamily, executorModel);
+  const fusionModelLabel = fusionRoleModelLabel(plannerFamily, plannerModel, liveModelCatalog);
+  const executorModelLabel = fusionRoleModelLabel(executorFamily, executorModel, liveModelCatalog);
+  const plannerPipelineLabel = fusionPipelineNodeLabel(plannerFamily, fusionModelLabel);
+  const executorPipelineLabel = fusionPipelineNodeLabel(executorFamily, executorModelLabel);
   const fusionSettingsLine = fusionSettingsSummary({
     mode: fusionRunMode,
     ...roleSettings
   });
-  const activeRoleLabel = fusionRoleLabel(activeRole);
   const inputIsSlashCommand = input.trim().startsWith("/");
   const showAttention = shouldShowAttentionDot(session);
   const backgroundActivity =
@@ -779,7 +926,58 @@ export default function FusionChatPane({
   // id means nothing to a codex planner and vice versa.
   const canResumeClaude =
     session.resumeRef?.provider === plannerFamily && Boolean(session.resumeRef.id);
-  const slashMenuContext = roleSettings;
+  const slashMenuContext = { ...roleSettings, liveCatalog: liveModelCatalog };
+  useEffect(() => {
+    if (!initialPicker || initialPickerAppliedRef.current) return;
+    initialPickerAppliedRef.current = true;
+    setPicker(initialPicker);
+    setInput("");
+    setSlashMenuDismissed(false);
+    window.setTimeout(() => composerRef.current?.focus(), 0);
+  }, [initialPicker]);
+
+  useEffect(() => {
+    const listCatalog = window.vibe?.fusionModelCatalog?.list;
+    if (!listCatalog) return;
+    const families = Array.from(new Set<FusionFamily>([plannerFamily, executorFamily]));
+    const requestId = ++modelCatalogRequestRef.current;
+    let cancelled = false;
+
+    Promise.all(
+      families.map(async (family) => {
+        try {
+          const result = await listCatalog({ family });
+          if (
+            result?.ok &&
+            result.family === family &&
+            Array.isArray(result.models)
+          ) {
+            return { family, models: result.models };
+          }
+        } catch {
+          // Missing auth/offline/errors all fall back to the curated catalog.
+        }
+        return { family, models: null };
+      })
+    ).then((results) => {
+      if (cancelled || requestId !== modelCatalogRequestRef.current) return;
+      setLiveModelCatalog((prev) => {
+        const next = { ...prev };
+        for (const result of results) {
+          if (Array.isArray(result.models)) {
+            next[result.family] = result.models;
+          } else {
+            delete next[result.family];
+          }
+        }
+        return next;
+      });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [plannerFamily, executorFamily]);
   // Saved-chat picker rows: title + age, newest first, chats open in other
   // panes marked, typed input only filters. Mirrors the Open Fusion picker.
   const buildResumeMenu = (): SlashMenu => {
@@ -895,6 +1093,7 @@ export default function FusionChatPane({
   const planResponseModeRef = useRef<FusionRunMode>("auto");
   const planResponseHadTextRef = useRef(false);
   const planExitSignaledRef = useRef(false);
+  const interruptSettledRef = useRef(false);
   const previousRunModeRef = useRef(fusionRunMode);
 
   useEffect(() => {
@@ -1061,9 +1260,10 @@ export default function FusionChatPane({
     setExpanded(new Set());
     toolRoleRef.current.clear();
     delegationRef.current = null;
+    pendingDelegationActivityRef.current = [];
     turnStartRef.current = 0;
+    interruptSettledRef.current = false;
     setUsage(null);
-    setActiveRole("claude");
     setWaitingState(false);
     setInterruptingState(false);
     setBusyState(false);
@@ -1083,9 +1283,11 @@ export default function FusionChatPane({
     }
     // Background pin state resets on every (re)launch: a reattach replay
     // rebuilds it from the started/settled history; a fresh/restarted session
-    // has no live background tasks by definition.
+    // has no live background tasks or builds by definition.
     bgTasksRef.current.clear();
     setBgTasks([]);
+    buildTasksRef.current.clear();
+    setBuildTasks([]);
     let cancelled = false;
     const resumeThreadRef =
       session.nextLaunchMode === "resume" &&
@@ -1246,6 +1448,7 @@ export default function FusionChatPane({
       const aborted = delegationRef.current;
       const abortedBlock = aborted ? activityLogBlock(aborted.activities) : "";
       delegationRef.current = null;
+      pendingDelegationActivityRef.current = [];
       setMessages((prev) =>
         prev.map((m) => {
           // Background rows are NOT settled by a foreground interrupt/abort:
@@ -1278,12 +1481,50 @@ export default function FusionChatPane({
         gate
       });
     };
+    const applyDelegationActivity = (
+      delegation: NonNullable<typeof delegationRef.current>,
+      kind: string,
+      text: string
+    ) => {
+      if (kind === "command" || kind === "file" || kind === "message") {
+        delegation.toolcalls += 1;
+        const detail = kind === "command" ? `$ ${clip(text, 80)}` : clip(text, 80);
+        delegation.activities.push(kind === "command" ? `$ ${text}` : text);
+        setMessages((prev) =>
+          prev.map((row) =>
+            row.key === delegation.key ? { ...row, taskDetail: detail } : row
+          )
+        );
+        return true;
+      }
+      if (kind === "delegate") {
+        delegation.prompt = text;
+        setMessages((prev) =>
+          prev.map((row) =>
+            row.key === delegation.key
+              ? { ...row, toolOutput: delegationPromptBlock(text) }
+              : row
+          )
+        );
+        return true;
+      }
+      return false;
+    };
+    const drainPendingDelegationActivity = () => {
+      const delegation = delegationRef.current;
+      if (!delegation || pendingDelegationActivityRef.current.length === 0) return;
+      const pending = pendingDelegationActivityRef.current.splice(0);
+      for (const item of pending) {
+        applyDelegationActivity(delegation, item.kind, item.text);
+      }
+    };
 
     const handleChat = (event: FusionChatEvent) => {
       if (!("id" in event) || event.id !== session.id) {
         if (event.type === "host-error") {
           push({ role: "opus", kind: "error", text: event.message });
           setInterruptingState(false);
+          interruptSettledRef.current = false;
           setBusyState(false);
           emitAttention("failed", "error", event.message);
         }
@@ -1337,6 +1578,7 @@ export default function FusionChatPane({
               toolName: "task",
               toolStatus: "done",
               backgroundReport: true,
+              taskRole: "executor",
               toolInput: {
                 subagent_type: "executor",
                 description: event.title || "background task"
@@ -1369,7 +1611,8 @@ export default function FusionChatPane({
           if (!turnStartRef.current) {
             turnStartRef.current = Date.now();
           }
-          setActiveRole("claude");
+          pendingDelegationActivityRef.current = [];
+          interruptSettledRef.current = false;
           setInterruptingState(false);
           setWaitingState(false);
           setFailed(false);
@@ -1396,14 +1639,12 @@ export default function FusionChatPane({
           });
           break;
         case "assistant-text":
-          setActiveRole("claude");
           if (event.delta.trim()) {
             planResponseHadTextRef.current = true;
           }
           appendStreaming("text", event.delta);
           break;
         case "thinking":
-          setActiveRole("claude");
           appendStreaming("thinking", event.delta);
           break;
         case "tool-call": {
@@ -1411,7 +1652,6 @@ export default function FusionChatPane({
           // result can be voiced as concise Codex implementation status.
           const isCodexBridge = isCodexBridgeTool(event.name);
           const isGoalTool = isCodexGoalTool(event.name);
-          setActiveRole(isCodexBridge ? "codex" : "claude");
           // Honor Claude Code's ExitPlanMode as a first-class plan-ready trigger.
           // Dormant under the current acceptEdits mode (the tool isn't registered),
           // exact the moment a real plan permission mode is enabled.
@@ -1449,6 +1689,7 @@ export default function FusionChatPane({
               toolId: event.toolId,
               toolName: "task",
               toolStatus: "running",
+              taskRole: fusionTaskRole(scout),
               toolInput: {
                 subagent_type: scout ? "scout" : "executor",
                 description:
@@ -1465,6 +1706,11 @@ export default function FusionChatPane({
               toolcalls: 0,
               activities: []
             };
+            drainPendingDelegationActivity();
+            break;
+          }
+          if (event.name.endsWith("codex_watch_build")) {
+            suppressedBuildToolIdsRef.current.add(event.toolId);
             break;
           }
           push({
@@ -1480,6 +1726,9 @@ export default function FusionChatPane({
           break;
         }
         case "tool-result": {
+          if (suppressedBuildToolIdsRef.current.delete(event.toolId)) {
+            break;
+          }
           if (suppressedBgToolIdsRef.current.delete(event.toolId)) {
             // The suppressed background launch's {status:"started"} reply —
             // the background-task events own the visible lifecycle.
@@ -1487,7 +1736,6 @@ export default function FusionChatPane({
           }
           const meta = toolRoleRef.current.get(event.toolId);
           const fromCodex = meta?.isCodexBridge ?? false;
-          setActiveRole(fromCodex ? "codex" : "claude");
           const parsed = meta ? parseJsonObject(event.text ?? "") : null;
           const needsDecision =
             fromCodex &&
@@ -1511,6 +1759,7 @@ export default function FusionChatPane({
               ? formatCodexBridgeResult(meta.name, event.text ?? "")
               : clip(event.text ?? "", 8000);
           let taskDetail: string | undefined;
+          const verdict = isDelegation ? codexTaskVerdict(parsed) : undefined;
           if (delegation) {
             const duration = formatDurationShort(Date.now() - delegation.startTs);
             taskDetail =
@@ -1545,12 +1794,19 @@ export default function FusionChatPane({
                   row.toolName === "edit" && !failed
                     ? { diff: buildEditDiff(row.toolInput) }
                     : row.meta,
-                taskDetail: taskDetail ?? row.taskDetail
+                taskDetail: taskDetail ?? row.taskDetail,
+                verdict: verdict ?? row.verdict
               };
             })
           );
           if (needsDecision) {
-            setPendingDecision(pendingFusionDecisionFromResult(parsed));
+            const pending = pendingFusionDecisionFromResult(parsed);
+            if (pending) {
+              setPendingDecision(pending);
+            } else {
+              clearPendingDecision();
+              push({ role: "opus", kind: "activity", text: askHumanPromptFromResult(parsed) });
+            }
             setWaitingState(true);
             setBusyState(false);
             reportStatus("waiting");
@@ -1566,13 +1822,12 @@ export default function FusionChatPane({
           break;
         }
         case "activity": {
-          setActiveRole(event.role === "codex" ? "codex" : "claude");
           const kind = event.kind || "";
           const text = event.text ?? "";
           const delegation = delegationRef.current;
           if (
-            event.role === "codex" &&
             delegation &&
+            event.role === "codex" &&
             (kind === "command" || kind === "file" || kind === "message")
           ) {
             // The Codex side-channel IS the delegation's live progress: tick
@@ -1582,14 +1837,7 @@ export default function FusionChatPane({
             // flattened every Codex tool call into its own sibling "↳ …" line,
             // duplicating the "N updates" summary and burying the parent Task.
             // The full activity list now lives inside the delegation report.
-            delegation.toolcalls += 1;
-            const detail = kind === "command" ? `$ ${clip(text, 80)}` : clip(text, 80);
-            delegation.activities.push(kind === "command" ? `$ ${text}` : text);
-            setMessages((prev) =>
-              prev.map((row) =>
-                row.key === delegation.key ? { ...row, taskDetail: detail } : row
-              )
-            );
+            applyDelegationActivity(delegation, kind, text);
             break;
           }
           // The planner's delegation directive belongs to the Task row: the
@@ -1599,14 +1847,17 @@ export default function FusionChatPane({
           // row's expandable report instead (readable while running; the
           // tool-result folds it into the final report above the findings).
           if (kind === "delegate" && delegation) {
-            delegation.prompt = text;
-            setMessages((prev) =>
-              prev.map((row) =>
-                row.key === delegation.key
-                  ? { ...row, toolOutput: delegationPromptBlock(text) }
-                  : row
-              )
-            );
+            applyDelegationActivity(delegation, kind, text);
+            break;
+          }
+          if (
+            busyRef.current &&
+            !delegation &&
+            (kind === "delegate" ||
+              (event.role === "codex" &&
+                (kind === "command" || kind === "file" || kind === "message")))
+          ) {
+            pendingDelegationActivityRef.current.push({ role: event.role, kind, text });
             break;
           }
           // Internal bridge mechanics outside a running turn are engine
@@ -1645,6 +1896,7 @@ export default function FusionChatPane({
               toolName: "task",
               toolStatus: "running",
               background: true,
+              taskRole: fusionTaskRole(event.kind === "investigate"),
               toolInput: {
                 subagent_type: event.kind === "investigate" ? "scout" : "executor",
                 description: event.title || event.taskId
@@ -1698,6 +1950,7 @@ export default function FusionChatPane({
           let report = ok
             ? codexTaskReport(result as unknown as Record<string, unknown>, "")
             : clip(result.error || "background task failed", 2000);
+          const verdict = codexTaskVerdict(result as unknown as Record<string, unknown>);
           if (entry?.task) {
             report = `${delegationPromptBlock(entry.task)}\n\n${report}`.trim();
           }
@@ -1709,7 +1962,8 @@ export default function FusionChatPane({
                       ...row,
                       toolStatus: ok ? ("done" as const) : ("error" as const),
                       toolOutput: report || undefined,
-                      taskDetail: taskDetail || row.taskDetail
+                      taskDetail: taskDetail || row.taskDetail,
+                      verdict: verdict ?? row.verdict
                     }
                   : row
               )
@@ -1726,15 +1980,114 @@ export default function FusionChatPane({
               toolName: "task",
               toolStatus: ok ? "done" : "error",
               background: true,
+              taskRole: fusionTaskRole(event.kind === "investigate"),
               toolInput: {
                 subagent_type: event.kind === "investigate" ? "scout" : "executor",
                 description: event.title || event.taskId
               },
               toolOutput: report || undefined,
-              taskDetail: taskDetail || undefined
+              taskDetail: taskDetail || undefined,
+              verdict
             });
           }
           syncBgPin();
+          break;
+        }
+        case "build-task": {
+          const command = event.command || event.buildId;
+          if (event.phase === "started") {
+            if (buildTasksRef.current.has(event.buildId)) break;
+            const startedAt = Number.isFinite(Number(event.startedAt)) ? Number(event.startedAt) : Date.now();
+            const key = push({
+              role: "codex",
+              kind: "tool",
+              text: "",
+              toolName: "build",
+              toolStatus: "running",
+              background: true,
+              toolTitle: `Build · ${clip(command, 160)}`,
+              toolInput: {
+                buildId: event.buildId,
+                command
+              },
+              taskDetail: `running · ${formatDurationShort(Math.max(0, Date.now() - startedAt))}`
+            });
+            buildTasksRef.current.set(event.buildId, {
+              key,
+              command,
+              startedAt
+            });
+            syncBuildPin();
+            break;
+          }
+
+          const entry = buildTasksRef.current.get(event.buildId);
+          const exitCode = event.exitCode;
+          const cancelled = event.status === "cancelled";
+          const ok = event.status === "exited" && exitCode === 0;
+          const failed = !ok && !cancelled;
+          const title = ok
+            ? `Build exited 0 · ${clip(command, 160)}`
+            : cancelled
+              ? `Build cancelled · ${clip(command, 160)}`
+              : exitCode === null
+                ? `Build failed · ${clip(command, 160)}`
+                : `Build failed (exit ${exitCode}) · ${clip(command, 160)}`;
+          const statusDetail = ok
+            ? "exit 0"
+            : cancelled
+              ? "cancelled"
+              : exitCode === null
+                ? "failed"
+                : `exit ${exitCode}`;
+          const report = [
+            title,
+            "",
+            `Build id: ${event.buildId}`,
+            `Status: ${event.status || "unknown"}`,
+            `Exit code: ${exitCode === null ? "unknown" : exitCode}`,
+            `Command: ${command}`,
+            "",
+            "The full log tail was sent to the planner in the FUSION BUILD REPORT."
+          ].join("\n");
+          const patch = {
+            toolStatus: failed ? ("error" as const) : ("done" as const),
+            toolTitle: title,
+            toolInput: {
+              buildId: event.buildId,
+              command,
+              status: event.status,
+              exitCode
+            },
+            toolOutput: report,
+            taskDetail: statusDetail,
+            meta: {
+              tone: cancelled ? ("muted" as const) : ok ? ("success" as const) : ("error" as const)
+            }
+          };
+          if (entry) {
+            setMessages((prev) =>
+              prev.map((row) =>
+                row.key === entry.key
+                  ? {
+                      ...row,
+                      ...patch
+                    }
+                  : row
+              )
+            );
+            buildTasksRef.current.delete(event.buildId);
+          } else {
+            push({
+              role: "codex",
+              kind: "tool",
+              text: "",
+              toolName: "build",
+              background: true,
+              ...patch
+            });
+          }
+          syncBuildPin();
           break;
         }
         case "turn-end":
@@ -1756,20 +2109,19 @@ export default function FusionChatPane({
         case "turn-error":
           // A non-streamed error (e.g. the picked model is unavailable for
           // this account) — surface it instead of ending the turn silently,
-          // but keep the session alive: the next /claude pick can fix it.
-          setActiveRole("claude");
+          // but keep the session alive: the next planner-model pick can fix it.
           stopStreaming();
           push({
             role: "opus",
             kind: "error",
             text: /model/i.test(event.message)
-              ? `${event.message} — the planning model may be unavailable to this account. Pick another with /claude.`
+              ? `${event.message} — the planning model may be unavailable to this account. Pick another with /planner-model.`
               : event.message
           });
           break;
         case "result":
-          setActiveRole("claude");
           stopStreaming();
+          pendingDelegationActivityRef.current = [];
           // Steering that never got absorbed (turn ended first) still reached
           // Claude's history — surface it as the freshest entry, right above
           // the composer, instead of dropping it.
@@ -1786,7 +2138,15 @@ export default function FusionChatPane({
             reportStatus("idle");
             break;
           }
+          if (interruptSettledRef.current && !event.isError) {
+            interruptSettledRef.current = false;
+            turnStartRef.current = 0;
+            setInterruptingState(false);
+            setBusyState(false);
+            break;
+          }
           if (event.isError) {
+            interruptSettledRef.current = false;
             settleRunningTools();
             turnStartRef.current = 0;
             if (event.resultText) {
@@ -1794,7 +2154,7 @@ export default function FusionChatPane({
                 role: "opus",
                 kind: "error",
                 text: /model/i.test(event.resultText)
-                  ? `${event.resultText} — the planning model may be unavailable to this account. Pick another with /claude.`
+                  ? `${event.resultText} — the planning model may be unavailable to this account. Pick another with /planner-model.`
                   : event.resultText
               });
             }
@@ -1822,7 +2182,6 @@ export default function FusionChatPane({
             pendingSteerFlushRef.current = null;
             steeringRef.current = [];
             setSteering([]);
-            setActiveRole("claude");
             stopStreaming();
             settleRunningTools();
             setInterruptingState(false);
@@ -1835,7 +2194,6 @@ export default function FusionChatPane({
             onStatusChangeRef.current("running");
             break;
           }
-          setActiveRole("claude");
           stopStreaming();
           settleRunningTools();
           // A steer queued before the interrupt is still on Claude's stdin
@@ -1848,6 +2206,7 @@ export default function FusionChatPane({
           clearPendingDecision();
           setPlanActionReady(false);
           setBusyState(false);
+          interruptSettledRef.current = true;
           reportStatus("waiting");
           pushTurnEnd(true);
           break;
@@ -1864,7 +2223,6 @@ export default function FusionChatPane({
           break;
         }
         case "error":
-          setActiveRole("claude");
           stopStreaming();
           settleRunningTools();
           turnStartRef.current = 0;
@@ -1873,18 +2231,19 @@ export default function FusionChatPane({
           setWaitingState(false);
           push({ role: "opus", kind: "error", text: event.message });
           setBusyState(false);
+          interruptSettledRef.current = false;
           setFailed(true);
           clearPendingDecision();
           setPlanActionReady(false);
           reportAttention("failed", "error", event.message);
           break;
         case "closed":
-          setActiveRole("claude");
           stopStreaming();
           settleRunningTools();
           turnStartRef.current = 0;
           flushSteering();
           setInterruptingState(false);
+          interruptSettledRef.current = false;
           if (event.code != null && event.code !== 0) {
             const message = `Fusion process exited with code ${event.code}.`;
             setBusyState(false);
@@ -2287,13 +2646,46 @@ export default function FusionChatPane({
 
   function normalizeRoleScope(value: string | undefined): FusionRoleScope {
     const normalized = String(value || "").toLowerCase();
-    if (["planning", "planner", "claude", "opus"].includes(normalized)) {
+    if (["planning", "planner", "opus"].includes(normalized)) {
       return "planning";
     }
-    if (["execution", "executor", "codex"].includes(normalized)) {
+    if (["execution", "executor"].includes(normalized)) {
       return "execution";
     }
+    if (normalized === "claude") {
+      return normalizeFamilyAliasScope("claude", "planning");
+    }
+    if (normalized === "codex") {
+      return normalizeFamilyAliasScope("codex", "execution");
+    }
     return "harness";
+  }
+
+  function normalizeFamilyAliasScope(
+    family: FusionFamily,
+    legacyScope: FusionRoleScope
+  ): FusionRoleScope {
+    const plannerMatches = plannerFamily === family;
+    const executorMatches = executorFamily === family;
+    if (plannerMatches !== executorMatches) {
+      return plannerMatches ? "planning" : "execution";
+    }
+    return legacyScope;
+  }
+
+  function isRoleScopeToken(value: string) {
+    return [
+      "fusion",
+      "harness",
+      "all",
+      "planning",
+      "planner",
+      "claude",
+      "opus",
+      "execution",
+      "executor",
+      "codex"
+    ].includes(value);
   }
 
   function normalizeSpeedPreset(value: string | undefined): FusionSpeedPreset | null {
@@ -2341,12 +2733,8 @@ export default function FusionChatPane({
         scope = "harness";
         continue;
       }
-      if (["planning", "planner", "claude", "opus"].includes(lower)) {
-        scope = "planning";
-        continue;
-      }
-      if (["execution", "executor", "codex"].includes(lower)) {
-        scope = "execution";
+      if (isRoleScopeToken(lower)) {
+        scope = normalizeRoleScope(lower);
         continue;
       }
       pushCommandStatus("Unknown fast serving scope. Use /fast, /fast planner, /fast executor, /fast on, or /fast off.");
@@ -2372,7 +2760,7 @@ export default function FusionChatPane({
     if (normalized === "/help") {
       setInput("");
       pushCommandStatus(
-        "commands: /plan, /auto, /mode, /planner-model, /executor-model, /fast, /speed, /effort, /models, /details, /clear, /resume. Advanced: /claude <model> (planner → Claude), /codex <model> (executor → Codex)."
+        "commands: /plan, /auto, /mode, /planner, /executor, /models, /details, /clear, /resume. Use /planner and /executor to set each role's model, effort, and fast serving. Advanced: /planner-model, /executor-model, /claude <model> (planner -> Claude), /codex <model> (executor -> Codex)."
       );
       return true;
     }
@@ -2413,6 +2801,10 @@ export default function FusionChatPane({
         pushCommandStatus("Finish or interrupt the current turn before compacting.");
         return true;
       }
+      if (plannerFamilyRef.current !== "claude") {
+        pushCommandStatus("Context compaction isn't available for the Codex planner.");
+        return true;
+      }
       // The CLI interprets "/compact" from stream-json input (verified by
       // fusion-compact-spike). Label the echo so the transcript shows intent
       // instead of a bare slash command.
@@ -2428,9 +2820,12 @@ export default function FusionChatPane({
       setMessages([]);
       bgTasksRef.current.clear();
       setBgTasks([]);
+      buildTasksRef.current.clear();
+      setBuildTasks([]);
       setPlanActionReady(false);
       setInterruptingState(false);
       setBusyState(false);
+      interruptSettledRef.current = false;
       onClear();
       return true;
     }
@@ -2449,14 +2844,14 @@ export default function FusionChatPane({
     // Open Fusion-parity pickers: bare command opens the family→model
     // drill-in; with an argument the pick applies directly (family/model
     // slug, or a bare id attributed by shape).
-    if (normalized === "/planner-model" || normalized === "/planner") {
+    if (normalized === "/planner-model") {
       setInput("");
       setPicker({ role: "planner" });
       composerRef.current?.focus();
       return true;
     }
 
-    if (normalized === "/executor-model" || normalized === "/executor") {
+    if (normalized === "/executor-model") {
       setInput("");
       setPicker({ role: "executor" });
       composerRef.current?.focus();
@@ -2504,6 +2899,8 @@ export default function FusionChatPane({
       normalized === "/speed execution" ||
       normalized === "/claude" ||
       normalized === "/codex" ||
+      normalized === "/planner" ||
+      normalized === "/executor" ||
       normalized === "/effort" ||
       normalized === "/effort fusion" ||
       normalized === "/effort planning" ||
@@ -2858,13 +3255,22 @@ export default function FusionChatPane({
         ? "failed"
         : (settledStatus ?? "idle");
   const pillLabel =
-    pillStatus === "running" ? "working" : pillStatus === "idle" ? "ready" : pillStatus;
+    pillStatus === "running"
+      ? "Working"
+      : pillStatus === "idle"
+        ? "Ready"
+        : pillStatus === "waiting"
+          ? "Waiting"
+          : pillStatus === "failed"
+            ? "Failed"
+            : pillStatus;
 
   return (
     <article
       className={clsx(
         "terminal-pane",
         "fusion-pane",
+        "fusion-agentic-pane",
         "oc-skin",
         showAttention && "terminal-pane-attention",
         showAttention &&
@@ -2875,14 +3281,30 @@ export default function FusionChatPane({
       onPointerDown={handlePanePointerDown}
     >
       <header className="pane-header pane-drag-zone" title="Drag header to move pane">
-        <div className="pane-title">
+        <div className="pane-title fusion-goalbar-title">
           <GripVertical className="drag-grip" size={15} />
-          <Sparkles size={15} />
-          <span title={session.threadRef?.title || session.name}>
-            {session.threadRef?.title || session.name}
+          <Diamond className="fusion-goalbar-mark" size={12} />
+          <span className="fusion-goalbar-pipeline" title={fusionSettingsLine}>
+            <span className="fusion-goalbar-node">{plannerPipelineLabel}</span>
+            <span className="fusion-goalbar-arrow">→</span>
+            <span className="fusion-goalbar-node is-executor">{executorPipelineLabel}</span>
           </span>
-          <span className="fusion-chip" title={fusionSettingsLine}>
-            {activeRoleLabel}
+          {cwdConflict && (
+            <span
+              className={clsx(
+                "pane-cwd-conflict-chip",
+                cwdConflict.active && "is-active"
+              )}
+              title={cwdConflictTitle(cwdConflict)}
+            >
+              {cwdConflictChipLabel(cwdConflict)}
+            </span>
+          )}
+        </div>
+        <div className="pane-status fusion-goalbar-status">
+          <span className={`status-pill status-${pillStatus}`}>
+            <span className="fusion-status-dot" aria-hidden="true" />
+            {pillLabel}
           </span>
           {backgroundActivity && (
             <span
@@ -2896,9 +3318,6 @@ export default function FusionChatPane({
               )}
             </span>
           )}
-        </div>
-        <div className="pane-status">
-          <span className={`status-pill status-${pillStatus}`}>{pillLabel}</span>
         </div>
         <div className="pane-actions">
           <button title="Add matching pane" onClick={onAdd}>
@@ -2945,6 +3364,7 @@ export default function FusionChatPane({
                 key={m.key}
                 m={m}
                 proseRole="opus"
+                proseLabel="Planner"
                 isExpanded={expanded.has(m.key)}
                 onToggle={toggleExpanded}
               />
@@ -3030,6 +3450,7 @@ export default function FusionChatPane({
             </div>
           )}
           <OcBackgroundPin tasks={bgTasks} now={bgNow} onStop={stopBackgroundTask} />
+          <OcBackgroundPin tasks={buildTasks} now={bgNow} onStop={stopBuild} label="Build" />
           {steering.length > 0 && (
             <div className="fusion-steering" role="status" aria-label="Queued steering">
               {steering.map((item) => (

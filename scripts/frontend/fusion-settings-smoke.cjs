@@ -202,23 +202,120 @@ assert(
   );
 }
 {
-  // The palette carries both picker commands as COMMANDS (the pane opens the
-  // state picker), never as text fills.
-  const plannerCmd = FUSION_SLash_COMMANDS_lookup("/planner-model");
-  const executorCmd = FUSION_SLash_COMMANDS_lookup("/executor-model");
+  const visibleCommands = FUSION_SLASH_COMMANDS.map((cmd) => cmd.name);
   assert(
-    plannerCmd && executorCmd,
-    "the palette must list /planner-model and /executor-model"
+    JSON.stringify(visibleCommands) ===
+      JSON.stringify([
+        "/plan",
+        "/auto",
+        "/mode",
+        "/planner",
+        "/executor",
+        "/models",
+        "/details",
+        "/compact",
+        "/resume",
+        "/clear",
+        "/help"
+      ]),
+    "the visible Fusion slash palette must expose one settings submenu per role"
   );
-  const menu = buildSlashMenu("/planner-model");
-  const row = menu.items.find((item) => item.key === "/planner-model");
   assert(
-    row && row.command === "/planner-model" && !row.fill,
-    "/planner-model palette row must be a command (opens the picker), not a fill"
+    !visibleCommands.includes("/planner-model") &&
+      !visibleCommands.includes("/executor-model") &&
+      !visibleCommands.includes("/speed") &&
+      !visibleCommands.includes("/effort") &&
+      !visibleCommands.includes("/fast"),
+    "legacy typed settings commands must not remain as top-level visible menu entries"
+  );
+  const menu = buildSlashMenu("/");
+  assert(
+    menu.items.map((item) => item.command || item.fill).includes("/planner ") &&
+      menu.items.map((item) => item.command || item.fill).includes("/executor ") &&
+      !menu.items.some((item) =>
+        ["/planner-model", "/executor-model", "/speed ", "/effort ", "/fast"].includes(
+          item.command || item.fill
+        )
+      ),
+    "top-level slash menu rows must drill into /planner and /executor, not the old overlapping settings trees"
   );
 }
-function FUSION_SLash_COMMANDS_lookup(name) {
-  return FUSION_SLASH_COMMANDS.find((cmd) => cmd.name === name);
+
+// ---- role settings submenus: model + effort + fast per role ----
+{
+  const context = {
+    plannerFamily: "claude",
+    plannerModel: "sonnet",
+    plannerEffort: "high",
+    plannerFast: true,
+    executorFamily: "codex",
+    executorModel: "gpt-5.5",
+    executorEffort: "ultra",
+    executorFast: false
+  };
+  const menu = buildSlashMenu("/planner ", context);
+  const model = menu.items.find((item) => item.key === "planner-control-model");
+  const effort = menu.items.find((item) => item.command === "/effort planning high");
+  const fastOn = menu.items.find((item) => item.command === "/fast planner on");
+  const fastOff = menu.items.find((item) => item.command === "/fast planner off");
+  assert(
+    menu.title === "Planner (Claude)" &&
+      model?.label === "Model — Sonnet 4.5" &&
+      model.command === "/planner-model" &&
+      effort?.label === "Effort — High" &&
+      effort.desc.includes("current") &&
+      fastOn?.label === "Fast serving — On" &&
+      fastOn.desc.includes("current") &&
+      fastOff?.label === "Fast serving — Off" &&
+      !fastOff.desc.includes("current"),
+    "/planner submenu must expose model picker, current effort, and current fast-serving controls"
+  );
+}
+{
+  const context = {
+    plannerFamily: "claude",
+    plannerModel: "opus",
+    plannerEffort: "auto",
+    plannerFast: false,
+    executorFamily: "codex",
+    executorModel: "gpt-5.5",
+    executorEffort: "ultra",
+    executorFast: false
+  };
+  const menu = buildSlashMenu("/executor ", context);
+  const model = menu.items.find((item) => item.key === "executor-control-model");
+  const effort = menu.items.find((item) => item.command === "/effort execution ultra");
+  const fastOn = menu.items.find((item) => item.command === "/fast executor on");
+  const fastOff = menu.items.find((item) => item.command === "/fast executor off");
+  assert(
+    menu.title === "Executor (Codex)" &&
+      model?.label === "Model — GPT-5.5" &&
+      model.command === "/executor-model" &&
+      effort?.label === "Effort — Ultra" &&
+      effort.desc.includes("current") &&
+      fastOn?.label === "Fast serving — On" &&
+      fastOff?.label === "Fast serving — Off" &&
+      fastOff.desc.includes("current") &&
+      !menu.items.some((item) => item.label === "Effort — Max"),
+    "/executor submenu must expose the Codex effort enum (Ultra present, Max absent) and current fast-serving controls"
+  );
+}
+{
+  const plannerFast = buildSlashMenu("/planner fast", {
+    plannerFamily: "claude",
+    plannerFast: true
+  });
+  const executorEffort = buildSlashMenu("/executor effort", {
+    executorFamily: "codex",
+    executorEffort: "ultra"
+  });
+  assert(
+    plannerFast.items.some((item) => item.command === "/fast planner on") &&
+      plannerFast.items.some((item) => item.command === "/fast planner off") &&
+      executorEffort.items.some((item) => item.command === "/effort execution ultra") &&
+      !executorEffort.items.some((item) => item.command === "/effort execution max"),
+    "role submenu filtering must keep per-role fast and effort settings reachable by clicking"
+  );
 }
 
 // ---- menu behavior: bare '/claude' must NOT commit a model reset ----
@@ -289,6 +386,47 @@ assert(
   );
 }
 {
+  const context = {
+    plannerFamily: "claude",
+    plannerModel: "opus",
+    liveCatalog: {
+      claude: [
+        { id: "claude-sonnet-5", label: "Claude Sonnet 5" },
+        { id: "sonnet", label: "Duplicate Sonnet Alias" }
+      ]
+    }
+  };
+  const menu = buildSlashMenu("/claude", context);
+  assert(
+    menu.items[0]?.command === "/claude opus" &&
+      menu.items[1]?.command === "/claude sonnet" &&
+      menu.items[2]?.command === "/claude fable" &&
+      menu.items[3]?.command === "/claude claude-sonnet-5" &&
+      menu.items[3]?.label === "Claude Sonnet 5" &&
+      !menu.items.some((item) => item.key.includes("live-sonnet")),
+    "live Claude catalog rows must append below curated aliases and dedupe ids already in the curated list"
+  );
+  const picker = buildFusionPicker({ role: "planner" }, "", context);
+  assert(
+    picker.items.find((item) => item.command === "__family:claude")?.desc.includes("4 models"),
+    "family picker counts must include curated + deduped live Claude models"
+  );
+}
+{
+  const menu = buildSlashMenu("/claude", {
+    plannerFamily: "claude",
+    plannerModel: "claude-sonnet-5",
+    liveCatalog: {
+      claude: [{ id: "claude-sonnet-5", label: "Claude Sonnet 5" }]
+    }
+  });
+  assert(
+    menu.items[0]?.command === "/claude claude-sonnet-5" &&
+      menu.items[0]?.desc.includes("current"),
+    "a selected live Claude model must be marked current and moved to the front"
+  );
+}
+{
   const menu = buildSlashMenu("/codex gpt-5.4-custom", {
     executorFamily: "codex",
     executorModel: "auto"
@@ -334,6 +472,7 @@ const pane = fs.readFileSync(
 );
 const app = fs.readFileSync(path.join(rootDir, "frontend", "App.tsx"), "utf8");
 const main = fs.readFileSync(path.join(rootDir, "backend", "main.cjs"), "utf8");
+const preload = fs.readFileSync(path.join(rootDir, "preload", "preload.cjs"), "utf8");
 const adapter = fs.readFileSync(
   path.join(rootDir, "backend", "fusion-adapter.cjs"),
   "utf8"
@@ -352,6 +491,23 @@ assert(
     !main.includes("payload.executorEffort ?? payload.effort") &&
     main.includes("payload.executorEffort ?? payload.codexEffort"),
   "main must read the executor effort ONLY from executor fields (legacy codexEffort ok, planner effort never)"
+);
+assert(
+  main.includes('ipcMain.handle("fusion-model-catalog:list"') &&
+    main.includes("fetchClaudeModelCatalog") &&
+    main.includes('return { ok: true, family, models: null };'),
+  "main must expose Claude live model catalog IPC with null fallback for non-live families/failures"
+);
+assert(
+  preload.includes("fusionModelCatalog") &&
+    preload.includes('ipcRenderer.invoke("fusion-model-catalog:list", payload)'),
+  "preload must expose only the sanitized Fusion model catalog IPC surface"
+);
+assert(
+  pane.includes("liveModelCatalog") &&
+    pane.includes("window.vibe?.fusionModelCatalog?.list") &&
+    pane.includes("liveCatalog: liveModelCatalog"),
+  "FusionChatPane must fetch live catalogs and pass them into the shared picker context"
 );
 // All three layers route legacy "max" through per-family coercion.
 assert(
@@ -406,8 +562,35 @@ assert(
   !pane.includes('applySpeedPreset("harness", "fast")') &&
     pane.includes('applySettings({ plannerFast: next, executorFast: next }, "fast serving")') &&
     pane.includes('normalized === "/fast" || normalized.startsWith("/fast ")') &&
-    pane.includes("/planner-model, /executor-model, /fast, /speed"),
+    pane.includes("Use /planner and /executor to set each role's model, effort, and fast serving") &&
+    pane.includes("Advanced: /planner-model, /executor-model"),
   "/fast must toggle real fast serving flags instead of invoking the old speed preset"
+);
+assert(
+  pane.includes('function normalizeFamilyAliasScope') &&
+    pane.includes('normalizeFamilyAliasScope("claude", "planning")') &&
+    pane.includes('normalizeFamilyAliasScope("codex", "execution")') &&
+    pane.includes("plannerMatches !== executorMatches") &&
+    pane.includes("scope = normalizeRoleScope(lower)"),
+  "family aliases in /fast, /speed, and /effort must resolve against the selected planner/executor families"
+);
+assert(
+  !pane.includes("Pick another with /claude.") &&
+    pane.includes("Pick another with /planner-model."),
+  "planner model errors must point at /planner-model so Codex planners are not told to use Claude-only shorthand"
+);
+assert(
+  pane.includes('plannerFamilyRef.current !== "claude"') &&
+    pane.includes("Context compaction isn't available for the Codex planner.") &&
+    pane.includes('window.vibe?.fusionChat?.sendUserTurn(session.id, "/compact")'),
+  "/compact must stay Claude-planner only and must not send a literal /compact turn to a Codex planner"
+);
+assert(
+  pane.includes("function askHumanPromptFromResult") &&
+    pane.includes("setPendingDecision(pending)") &&
+    pane.includes("askHumanPromptFromResult(parsed)") &&
+    pane.includes("disabled={modeSwitching || implementingPlan}"),
+  "ask_human tool results must prompt for typed user input without disabling the composer"
 );
 {
   const paneRestartBlock = pane.slice(

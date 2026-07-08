@@ -72,6 +72,7 @@ const FUSION_GATE_NUDGE = [
 // flag), and rehydration recognizes the header so a resumed transcript never
 // shows the envelope as the user's words.
 const FUSION_BACKGROUND_REPORT_HEADER = "FUSION BACKGROUND TASK REPORT";
+const FUSION_BUILD_REPORT_HEADER = "FUSION BUILD REPORT";
 
 function buildBackgroundWakeText(event) {
   const result = event.result && typeof event.result === "object" ? event.result : {};
@@ -136,6 +137,46 @@ function parseBackgroundReportEnvelope(text) {
     if (titleMatch) meta.title = titleMatch[1].trim();
   }
   return { taskId: meta.taskId, title: meta.title, text: value };
+}
+
+function buildBuildWakeText(payload) {
+  const exitCode =
+    Number.isInteger(payload?.exitCode) || payload?.exitCode === null
+      ? payload.exitCode
+      : null;
+  const command = String(payload?.command || "");
+  const lines = [
+    FUSION_BUILD_REPORT_HEADER,
+    `buildId: ${payload?.buildId || payload?.taskId || ""}`,
+    `command: ${command || "(unknown)"}`,
+    `cwd: ${payload?.cwd || "(unknown)"}`,
+    `status: ${payload?.status || "unknown"}`,
+    `exit code: ${exitCode === null ? "unknown" : exitCode}`,
+    "",
+    "--- log tail ---",
+    String(payload?.tail || "(empty)"),
+    "",
+    "Report the build outcome to the user. If it failed (non-zero exit or crash), diagnose from the log tail above and propose the fix; do not silently ignore a failure."
+  ];
+  return lines.join("\n");
+}
+
+function parseBuildReportEnvelope(text) {
+  const value = String(text || "");
+  if (!value.startsWith(FUSION_BUILD_REPORT_HEADER)) return null;
+  const lines = value.split(/\r?\n/);
+  const meta = { taskId: "", title: "" };
+  for (const line of lines.slice(1, 5)) {
+    const buildIdMatch = /^buildId:\s*(.*)$/.exec(line);
+    if (buildIdMatch) meta.taskId = buildIdMatch[1].trim();
+    const commandMatch = /^command:\s*(.*)$/.exec(line);
+    if (commandMatch) meta.title = `Build: ${clipped(commandMatch[1].trim(), 72)}`;
+  }
+  return { taskId: meta.taskId, title: meta.title || "Build report", text: value };
+}
+
+function parseReportEnvelope(text) {
+  return parseBackgroundReportEnvelope(text) || parseBuildReportEnvelope(text);
 }
 
 function buildFusionInputContent(text, mode, steer, nudge) {
@@ -293,7 +334,7 @@ function buildClaudeRehydrationEvents(transcriptPath) {
     if (record.type === "user" && record.message) {
       const text = unwrapFusionUserText(claudeContentText(record.message.content));
       if (text && !isClaudeMetaText(text)) {
-        const bg = parseBackgroundReportEnvelope(text);
+        const bg = parseReportEnvelope(text);
         events.push(
           bg
             ? { type: "user", text: bg.text, backgroundReport: true, taskId: bg.taskId, title: bg.title }
@@ -346,7 +387,7 @@ function buildCodexRehydrationEvents(rolloutPath) {
     if (record.payload.type === "user_message") {
       const text = unwrapFusionUserText(record.payload.message);
       if (text && !text.startsWith("<")) {
-        const bg = parseBackgroundReportEnvelope(text);
+        const bg = parseReportEnvelope(text);
         events.push(
           bg
             ? { type: "user", text: bg.text, backgroundReport: true, taskId: bg.taskId, title: bg.title }
@@ -853,7 +894,7 @@ function runHost() {
       } else {
         emitSessionEvent(id, state, {
           type: "error",
-          message: `Fusion background task "${wake.title}" finished, but the planner is closed. Restart Fusion to review the report.`
+          message: `Fusion task "${wake.title}" finished, but the planner is closed. Restart Fusion to review the report.`
         });
         return;
       }
@@ -874,7 +915,7 @@ function runHost() {
         if (sessions.get(id) !== state) return;
         emitSessionEvent(id, state, {
           type: "error",
-          message: `Could not deliver the background task report: ${error.message || "planner is gone"}`
+          message: `Could not deliver the task report: ${error.message || "planner is gone"}`
         });
       });
       return;
@@ -887,7 +928,7 @@ function runHost() {
     } catch (error) {
       emitSessionEvent(id, state, {
         type: "error",
-        message: `Could not deliver the background task report: ${error.message || "child process is gone"}`
+        message: `Could not deliver the task report: ${error.message || "child process is gone"}`
       });
     }
   }
@@ -953,6 +994,56 @@ function runHost() {
     queueBackgroundWake(id, state, settledEvent);
   }
 
+  function buildTask(payload) {
+    const id = payload?.id;
+    const state = sessions.get(id);
+    if (!state) return;
+    const phase = String(payload?.phase || "");
+    const taskId = String(payload?.buildId || "");
+    if (!taskId) return;
+    const command = String(payload?.command || "");
+    if (!(state.builds instanceof Map)) state.builds = new Map();
+    if (phase === "started") {
+      const build = {
+        buildId: taskId,
+        command,
+        startedAt: Number.isFinite(Number(payload?.startedAt)) ? Number(payload.startedAt) : Date.now()
+      };
+      state.builds.set(taskId, build);
+      emitSessionEvent(id, state, {
+        type: "build-task",
+        phase: "started",
+        buildId: taskId,
+        command: build.command,
+        startedAt: build.startedAt
+      });
+      return;
+    }
+    if (phase !== "settled") return;
+    state.builds.delete(taskId);
+    emitSessionEvent(id, state, {
+      type: "build-task",
+      phase: "settled",
+      buildId: taskId,
+      status: String(payload?.status || ""),
+      exitCode:
+        Number.isInteger(payload?.exitCode) || payload?.exitCode === null
+          ? payload.exitCode
+          : null,
+      command
+    });
+    const title = `Build: ${clipped(command || taskId, 72)}`;
+    const wake = {
+      taskId,
+      title,
+      text: buildBuildWakeText(payload),
+      echoText: `Build ${payload?.status || "settled"} — ${clipped(command || taskId, 72)}`
+    };
+    if (!Array.isArray(state.pendingWakes)) state.pendingWakes = [];
+    state.pendingWakes.push(wake);
+    maybeFlushBackgroundWakes(id, state);
+  }
+
   function emitDirectSessionEvent(id, event) {
     if (id) {
       emit({ type: "event", id, event });
@@ -1001,6 +1092,7 @@ function runHost() {
       // carried too — a clean exit mid-task is settled by the closed handler
       // before this restart path can run.
       backgroundTasks: state.backgroundTasks,
+      builds: state.builds,
       pendingWakes: state.pendingWakes
     };
     clearPlannerResultBackstop(state);
@@ -1057,6 +1149,7 @@ function runHost() {
       gate: options.gate || createFusionGateTracker({ cwd }),
       backgroundTasks:
         options.backgroundTasks instanceof Map ? options.backgroundTasks : new Map(),
+      builds: options.builds instanceof Map ? options.builds : new Map(),
       pendingWakes: Array.isArray(options.pendingWakes) ? options.pendingWakes : [],
       turnActive: false
     };
@@ -1136,6 +1229,7 @@ function runHost() {
       gate: options.gate || createFusionGateTracker({ cwd }),
       backgroundTasks:
         options.backgroundTasks instanceof Map ? options.backgroundTasks : new Map(),
+      builds: options.builds instanceof Map ? options.builds : new Map(),
       pendingWakes: Array.isArray(options.pendingWakes) ? options.pendingWakes : [],
       turnActive: false
     };
@@ -1405,6 +1499,7 @@ function runHost() {
       else if (msg.type === "input") input(msg.payload);
       else if (msg.type === "activity") activity(msg.payload);
       else if (msg.type === "background-task") backgroundTask(msg.payload);
+      else if (msg.type === "build-task") buildTask(msg.payload);
       else if (msg.type === "mode") mode(msg.payload);
       else if (msg.type === "settings") settings(msg.payload);
       else if (msg.type === "interrupt") interrupt(msg.payload);
@@ -1511,12 +1606,15 @@ module.exports = {
   buildCodexRehydrationEvents,
   buildFusionInputContent,
   buildBackgroundWakeText,
+  buildBuildWakeText,
   parseBackgroundReportEnvelope,
+  parseBuildReportEnvelope,
   applyPlannerTurnSettleState,
   createStreamNormalizer,
   unwrapFusionUserText,
   windowsCmdArg,
   FUSION_BACKGROUND_REPORT_HEADER,
+  FUSION_BUILD_REPORT_HEADER,
   FUSION_GATE_NUDGE
 };
 

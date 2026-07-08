@@ -251,6 +251,15 @@ async function main() {
       "Fusion allowlist should expose codex_steer_resolve for planner-first mid-turn steering"
     );
     assert(
+      allowList.some((entry) => entry.includes("codex_watch_build")),
+      "Fusion allowlist should expose codex_watch_build for host-supervised detached builds"
+    );
+    assert(
+      mainSource.includes("getBuildSupervisorDir()") &&
+        mainSource.includes("buildSupervisorDir: getBuildSupervisorDir()"),
+      "Fusion launch should pass the host build-supervisor directory to the adapter"
+    );
+    assert(
       /disallowedTools:\s*fusionClaudeDisallowedTools\(\)/.test(mainSource) &&
         /return \["Bash", \.\.\.FUSION_CLAUDE_EDIT_DENY_TOOLS\]\.join\(","\)/.test(mainSource),
       "Fusion Claude must hard-block Bash plus the edit tools via --disallowedTools"
