@@ -46,9 +46,9 @@ export const FUSION_EFFORT_LABELS: Record<FusionEffort, string> = {
   xhigh: "XHigh",
   max: "Max"
 };
-// Codex-side effort: codex's OWN enum (verified against the 0.142 binary:
-// minimal|low|medium|high|xhigh|ultra). It has NO "max" — offering one poisoned
-// every delegation with an unknown-variant error until the user changed it.
+// Codex-side effort uses its own picker enum, separate from Claude. The 0.144.0
+// catalog verifies minimal|low|medium|high|xhigh|max|ultra, with per-model
+// support varying.
 export const CODEX_EFFORT_LABELS: Record<FusionCodexEffort, string> = {
   auto: "Auto",
   minimal: "Minimal",
@@ -56,13 +56,74 @@ export const CODEX_EFFORT_LABELS: Record<FusionCodexEffort, string> = {
   medium: "Medium",
   high: "High",
   xhigh: "XHigh",
+  max: "Max",
   ultra: "Ultra"
 };
 export const FUSION_EFFORT_VALUES = Object.keys(FUSION_EFFORT_LABELS) as FusionEffort[];
 export const CODEX_EFFORT_VALUES = Object.keys(CODEX_EFFORT_LABELS) as FusionCodexEffort[];
+export const CODEX_REASONING_EFFORT_VALUES = CODEX_EFFORT_VALUES.filter(
+  (effort): effort is Exclude<FusionCodexEffort, "auto"> => effort !== "auto"
+);
+const CONSERVATIVE_CODEX_EFFORT_VALUES: FusionCodexEffort[] = [
+  "auto",
+  "low",
+  "medium",
+  "high",
+  "xhigh"
+];
+const CURATED_CODEX_MODEL_EFFORTS: Record<string, FusionCodexEffort[]> = {
+  "gpt-5.6-sol": ["auto", "low", "medium", "high", "xhigh", "max", "ultra"],
+  "gpt-5.6-terra": ["auto", "low", "medium", "high", "xhigh", "max", "ultra"],
+  "gpt-5.6-luna": ["auto", "low", "medium", "high", "xhigh", "max"],
+  "gpt-5.5": ["auto", "low", "medium", "high", "xhigh"]
+};
 
-export const familyEffortValues = (family: FusionFamily): string[] =>
-  family === "codex" ? (CODEX_EFFORT_VALUES as string[]) : (FUSION_EFFORT_VALUES as string[]);
+function nearestCodexEffort(
+  requested: FusionCodexEffort,
+  supported: FusionCodexEffort[]
+): FusionCodexEffort {
+  if (supported.includes(requested)) return requested;
+  if (requested === "auto") return "auto";
+  const requestedIndex = CODEX_REASONING_EFFORT_VALUES.indexOf(requested);
+  for (let index = requestedIndex - 1; index >= 0; index -= 1) {
+    const effort = CODEX_REASONING_EFFORT_VALUES[index];
+    if (supported.includes(effort)) return effort;
+  }
+  for (let index = requestedIndex + 1; index < CODEX_REASONING_EFFORT_VALUES.length; index += 1) {
+    const effort = CODEX_REASONING_EFFORT_VALUES[index];
+    if (supported.includes(effort)) return effort;
+  }
+  return "auto";
+}
+
+export function codexEffortValuesForModel(
+  model: unknown,
+  liveCatalog?: Partial<Record<FusionFamily, FusionLiveModelOption[]>>
+): FusionCodexEffort[] {
+  const modelId = typeof model === "string" ? model.trim().toLowerCase() : "";
+  const live = liveCatalog?.codex?.find((option) => option.id.trim().toLowerCase() === modelId);
+  const advertised = Array.isArray(live?.supportedEfforts)
+    ? live.supportedEfforts.filter(
+        (effort): effort is FusionCodexEffort =>
+          effort !== "auto" && CODEX_REASONING_EFFORT_VALUES.includes(effort)
+      )
+    : [];
+  if (advertised.length) {
+    return ["auto", ...Array.from(new Set(advertised))];
+  }
+  return [
+    ...(CURATED_CODEX_MODEL_EFFORTS[modelId] || CONSERVATIVE_CODEX_EFFORT_VALUES)
+  ];
+}
+
+export const familyEffortValues = (
+  family: FusionFamily,
+  model?: unknown,
+  liveCatalog?: Partial<Record<FusionFamily, FusionLiveModelOption[]>>
+): string[] =>
+  family === "codex"
+    ? (codexEffortValuesForModel(model, liveCatalog) as string[])
+    : (FUSION_EFFORT_VALUES as string[]);
 
 export const familyEffortLabel = (family: FusionFamily, effort: string): string =>
   family === "codex"
@@ -86,8 +147,8 @@ export const FUSION_FAMILY_OPTIONS: { id: FusionFamily; name: string; desc: stri
 
 // Curated model catalogs per family. Role-neutral descriptions: either role
 // can run either family. Claude's CLI accepts the aliases below (or full
-// claude-* ids); Codex ids were read out of the shipped 0.142 binary. Custom
-// ids stay possible via free text, validated before anything restarts.
+// claude-* ids); Codex ids are a curated subset of the shipped 0.144.0 catalog.
+// Custom ids stay possible via free text, validated before anything restarts.
 export const FAMILY_MODEL_OPTIONS: Record<
   FusionFamily,
   FusionModelOption[]
@@ -99,7 +160,10 @@ export const FAMILY_MODEL_OPTIONS: Record<
   ],
   codex: [
     { id: "auto", label: "Codex default", desc: "Use codex's configured default model" },
-    { id: "gpt-5.5", label: "GPT-5.5", desc: "Latest general OpenAI model" },
+    { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", desc: "Latest frontier agentic coding model" },
+    { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", desc: "Balanced for everyday work" },
+    { id: "gpt-5.6-luna", label: "GPT-5.6 Luna", desc: "Fast and affordable" },
+    { id: "gpt-5.5", label: "GPT-5.5", desc: "Previous general OpenAI model" },
     { id: "gpt-5.3-codex", label: "GPT-5.3 Codex", desc: "Coding-tuned" },
     { id: "gpt-5.1-codex-max", label: "GPT-5.1 Codex Max", desc: "Deep agentic coding (supports XHigh)" },
     { id: "gpt-5.1-codex-mini", label: "GPT-5.1 Codex Mini", desc: "Fast and inexpensive" }
@@ -150,6 +214,8 @@ export interface FusionModelOption {
 export interface FusionLiveModelOption {
   id: string;
   label: string;
+  supportedEfforts?: FusionCodexEffort[];
+  isDefault?: boolean;
 }
 
 // What the menu needs to know about the pane's live settings: used to mark and
@@ -235,15 +301,39 @@ export const contextExecutorFamily = (context?: SlashMenuContext): FusionFamily 
 const scopeFamily = (scope: FusionRoleScope, context?: SlashMenuContext): FusionFamily =>
   scope === "execution" ? contextExecutorFamily(context) : contextPlannerFamily(context);
 
+const scopeModel = (scope: FusionRoleScope, context?: SlashMenuContext): string => {
+  const role: FusionRole = scope === "execution" ? "executor" : "planner";
+  const family = scopeFamily(scope, context);
+  return normalizeFusionRoleModel(
+    family,
+    role,
+    role === "executor" ? context?.executorModel : context?.plannerModel
+  );
+};
+
 // Effort values usable by a SCOPE: a role lists ITS family's enum; the
 // harness scope lists the values BOTH current families accept, so a shared
 // pick can never poison one side with an unknown variant.
 export function scopeEffortValues(scope: FusionRoleScope, context?: SlashMenuContext): string[] {
   if (scope !== "harness") {
-    return familyEffortValues(scopeFamily(scope, context));
+    return familyEffortValues(
+      scopeFamily(scope, context),
+      scopeModel(scope, context),
+      context?.liveCatalog
+    );
   }
-  const plannerValues = familyEffortValues(contextPlannerFamily(context));
-  const executorValues = new Set(familyEffortValues(contextExecutorFamily(context)));
+  const plannerValues = familyEffortValues(
+    contextPlannerFamily(context),
+    scopeModel("planning", context),
+    context?.liveCatalog
+  );
+  const executorValues = new Set(
+    familyEffortValues(
+      contextExecutorFamily(context),
+      scopeModel("execution", context),
+      context?.liveCatalog
+    )
+  );
   return plannerValues.filter((effort) => executorValues.has(effort));
 }
 
@@ -275,9 +365,17 @@ export const effortItems = (
 const quickPlannerModelLabel = (context?: SlashMenuContext) =>
   contextPlannerFamily(context) === "codex" ? "GPT-5.1 Codex Mini" : SONNET_LABEL;
 
-// The "max" preset maps to each family's own top level.
-export const familyMaxEffort = (family: FusionFamily): FusionRoleEffort =>
-  family === "codex" ? "xhigh" : "max";
+// The "max" preset means the highest ordinary reasoning level the selected
+// model advertises. `ultra` remains an explicit opt-in because it also enables
+// automatic task delegation in current Codex models.
+export const familyMaxEffort = (
+  family: FusionFamily,
+  model?: unknown,
+  liveCatalog?: Partial<Record<FusionFamily, FusionLiveModelOption[]>>
+): FusionRoleEffort =>
+  family === "codex"
+    ? nearestCodexEffort("max", codexEffortValuesForModel(model, liveCatalog))
+    : "max";
 
 export const speedItems = (scope: FusionRoleScope, context?: SlashMenuContext): SlashMenuItem[] =>
   FUSION_SPEED_VALUES.map((preset) => ({
@@ -344,7 +442,14 @@ function liveFamilyModelOptions(
     seen.add(key);
     const label =
       typeof model?.label === "string" && model.label.trim() ? model.label.trim() : id;
-    rows.push({ id, label });
+    rows.push({
+      id,
+      label,
+      ...(Array.isArray(model.supportedEfforts)
+        ? { supportedEfforts: [...model.supportedEfforts] }
+        : {}),
+      ...(model.isDefault === true ? { isDefault: true } : {})
+    });
   }
   return rows;
 }
@@ -503,13 +608,15 @@ function roleControlMenu(role: FusionRole, context?: SlashMenuContext): SlashMen
   );
   const currentEffort = normalizeFusionRoleEffort(
     family,
-    role === "planner" ? context?.plannerEffort : context?.executorEffort
+    role === "planner" ? context?.plannerEffort : context?.executorEffort,
+    model,
+    context?.liveCatalog
   );
   const currentFast =
     role === "planner" ? context?.plannerFast === true : context?.executorFast === true;
   const label = role === "planner" ? "planner" : "executor";
   const modelCommand = role === "planner" ? "/planner-model" : "/executor-model";
-  const effortRows = familyEffortValues(family).map((effort) => {
+  const effortRows = familyEffortValues(family, model, context?.liveCatalog).map((effort) => {
     const isCurrent = effort === currentEffort;
     const desc =
       effort === "auto"
@@ -816,19 +923,19 @@ export function normalizeFusionRoleModel(
 // every turn as an unknown variant.
 export function normalizeFusionRoleEffort(
   family: FusionFamily,
-  value: unknown
+  value: unknown,
+  model?: unknown,
+  liveCatalog?: Partial<Record<FusionFamily, FusionLiveModelOption[]>>
 ): FusionRoleEffort {
   const lower = typeof value === "string" ? value.trim().toLowerCase() : "";
   if (family === "codex") {
-    // Legacy saved panes (and old fusion-settings.json files) carry "max",
-    // which codex rejects as an unknown variant: coerce to its nearest real
-    // level instead of letting it fail every delegation.
-    if (lower === "max") {
-      return "xhigh";
+    if (!CODEX_EFFORT_VALUES.includes(lower as FusionCodexEffort)) {
+      return DEFAULT_FUSION_CODEX_EFFORT;
     }
-    return CODEX_EFFORT_VALUES.includes(lower as FusionCodexEffort)
-      ? (lower as FusionCodexEffort)
-      : DEFAULT_FUSION_CODEX_EFFORT;
+    return nearestCodexEffort(
+      lower as FusionCodexEffort,
+      codexEffortValuesForModel(model, liveCatalog)
+    );
   }
   if (lower === "minimal") return "low";
   if (lower === "ultra") return "max";
@@ -901,11 +1008,13 @@ export function normalizeFusionRoleSettings(raw: {
   );
   const plannerEffort = normalizeFusionRoleEffort(
     plannerFamily,
-    source.plannerEffort ?? source.claudeEffort ?? source.effort
+    source.plannerEffort ?? source.claudeEffort ?? source.effort,
+    plannerModel
   );
   const executorEffort = normalizeFusionRoleEffort(
     executorFamily,
-    source.executorEffort ?? source.codexEffort
+    source.executorEffort ?? source.codexEffort,
+    executorModel
   );
   return {
     plannerFamily,

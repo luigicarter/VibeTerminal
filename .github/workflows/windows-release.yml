@@ -42,6 +42,16 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Verify release tag matches package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $packageVersion = node -p "require('./package.json').version"
+          $tagVersion = $env:GITHUB_REF_NAME.TrimStart("v")
+          if ($tagVersion -ne $packageVersion) {
+            throw "Release tag $env:GITHUB_REF_NAME does not match package version $packageVersion."
+          }
+
       - name: Run smoke tests
         shell: pwsh
         run: |
@@ -60,6 +70,7 @@ jobs:
           npm run smoke:frontend:attention
           npm run smoke:frontend:workspace
           npm run smoke:frontend:session-launch
+          npm run smoke:frontend:fusion-settings
           npm run smoke:frontend:tiled-resize
 
       - name: Build installer for release tag
@@ -72,9 +83,18 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         run: |
-          $codex = "release/win-unpacked/resources/codex-bin/win32-x64/codex.exe"
-          if (-not (Test-Path -LiteralPath $codex)) {
-            throw "Missing packaged embedded Codex binary: $codex"
+          $required = @(
+            "release/win-unpacked/resources/codex-bin/win32-x64/codex.exe",
+            "release/win-unpacked/resources/codex-bin/win32-x64/codex-code-mode-host.exe",
+            "release/win-unpacked/resources/codex-bin/win32-x64/codex-package.json",
+            "release/win-unpacked/resources/codex-bin/win32-x64/codex-path/rg.exe",
+            "release/win-unpacked/resources/codex-bin/win32-x64/codex-resources/codex-command-runner.exe",
+            "release/win-unpacked/resources/codex-bin/win32-x64/codex-resources/codex-windows-sandbox-setup.exe"
+          )
+          foreach ($file in $required) {
+            if (-not (Test-Path -LiteralPath $file)) {
+              throw "Missing packaged embedded Codex payload file: $file"
+            }
           }
 
       - name: Publish release assets
@@ -115,9 +135,18 @@ jobs:
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         shell: pwsh
         run: |
-          $codex = "release/win-unpacked/resources/codex-bin/win32-x64/codex.exe"
-          if (-not (Test-Path -LiteralPath $codex)) {
-            throw "Missing packaged embedded Codex binary: $codex"
+          $required = @(
+            "release/win-unpacked/resources/codex-bin/win32-x64/codex.exe",
+            "release/win-unpacked/resources/codex-bin/win32-x64/codex-code-mode-host.exe",
+            "release/win-unpacked/resources/codex-bin/win32-x64/codex-package.json",
+            "release/win-unpacked/resources/codex-bin/win32-x64/codex-path/rg.exe",
+            "release/win-unpacked/resources/codex-bin/win32-x64/codex-resources/codex-command-runner.exe",
+            "release/win-unpacked/resources/codex-bin/win32-x64/codex-resources/codex-windows-sandbox-setup.exe"
+          )
+          foreach ($file in $required) {
+            if (-not (Test-Path -LiteralPath $file)) {
+              throw "Missing packaged embedded Codex payload file: $file"
+            }
           }
 
       - name: Upload installer artifact

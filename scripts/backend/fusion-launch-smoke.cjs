@@ -35,7 +35,7 @@ async function main() {
       executorFamily: "codex",
       codexBin,
       codexModel: "gpt-5.5",
-      codexEffort: "xhigh",
+      codexEffort: "max",
       executorFast: true,
       runMode: "plan"
     });
@@ -116,7 +116,7 @@ async function main() {
     assert(fusionSettings.executorFamily === "codex", "settings file missing the selected executor family");
     assert(fusionSettings.executorFast === true, "settings file missing executorFast");
     assert(fusionSettings.codexModel === "gpt-5.5", "settings file missing the selected Codex model");
-    assert(fusionSettings.codexEffort === "xhigh", "settings file missing the selected Codex effort");
+    assert(fusionSettings.codexEffort === "max", "settings file missing the selected Codex effort");
     assert(
       adapter.env.VIBE_FUSION_CODEX_SETTINGS === files.settingsFile,
       "adapter env should pass the live Codex settings file path"

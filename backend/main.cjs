@@ -1155,13 +1155,12 @@ function normalizeFusionEffort(value) {
     : undefined;
 }
 
-// Codex speaks its own effort enum (verified against the codex 0.142 binary):
-// minimal..ultra, NO "max". Legacy "max" (from panes saved before the
-// per-engine split) coerces to xhigh instead of failing every delegation.
+// Codex effort is normalized separately from Claude. This validates the family
+// union only; both app-server runtimes resolve it against the selected model's
+// live supportedReasoningEfforts before starting a turn.
 function normalizeFusionCodexEffort(value) {
   const effort = normalizeFusionString(value)?.toLowerCase();
-  if (effort === "max") return "xhigh";
-  return ["minimal", "low", "medium", "high", "xhigh", "ultra"].includes(effort)
+  return ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(effort)
     ? effort
     : undefined;
 }

@@ -18,7 +18,7 @@
 // assistant-text, thinking, tool-call, tool-result, turn-end, result,
 // turn-error), so the renderer, telemetry, and replay work unchanged.
 //
-// Protocol facts (generated v2 schema, codex-cli 0.142.5):
+// Protocol facts (generated v2 schema, codex-cli 0.144.0):
 //   - turn terminal states ride in turn/completed: turn.status is
 //     completed | interrupted | failed (no separate turn/failed method).
 //   - MCP tool calls raise mcpServer/elicitation/request even under
@@ -30,22 +30,12 @@
 
 const { spawn } = require("child_process");
 const fs = require("fs");
+const { modelCatalogEntry, resolveCodexEffortForModel } = require("./codexModels.cjs");
 
 const FUSION_BRIDGE_SERVER = "fusion-codex";
 const RPC_TIMEOUT_MS = 30_000;
 const THREAD_RPC_TIMEOUT_MS = 60_000;
 const FAST_SERVICE_TIER = "priority";
-
-function modelCatalogEntry(models, modelId) {
-  if (!Array.isArray(models) || models.length === 0) return null;
-  const wanted = String(modelId || "").trim();
-  if (wanted) {
-    return (
-      models.find((model) => model && (model.id === wanted || model.model === wanted)) || null
-    );
-  }
-  return models.find((model) => model && (model.isDefault || model.is_default)) || null;
-}
 
 function fastTierForModel(models, modelId) {
   const entry = modelCatalogEntry(models, modelId);
@@ -335,6 +325,7 @@ function createCodexBrainSession(options) {
   let fastServing = plannerFast === true;
   let modelCatalog = null;
   let modelCatalogLoaded = false;
+  let lastEffortFallbackKey = "";
   let stopped = false;
 
   function send(obj) {
@@ -412,6 +403,19 @@ function createCodexBrainSession(options) {
       role: "opus",
       kind: "activity",
       text: "Codex planner fast serving is not available for this model; using standard serving."
+    });
+  }
+
+  function noteEffortFallback(resolution) {
+    const resolvedModel = resolution.model || "the selected Codex model";
+    const key = `${resolvedModel}:${resolution.requested}:${resolution.effort}`;
+    if (lastEffortFallbackKey === key) return;
+    lastEffortFallbackKey = key;
+    emitEvent({
+      type: "activity",
+      role: "opus",
+      kind: "activity",
+      text: `planning effort ${resolution.requested} is unavailable for ${resolvedModel}; using ${resolution.effort}`
     });
   }
 
@@ -576,7 +580,19 @@ function createCodexBrainSession(options) {
       approvalPolicy: "never",
       sandboxPolicy: { type: "readOnly" }
     };
-    if (effort) params.effort = String(effort);
+    if (effort) {
+      const effortResolution = resolveCodexEffortForModel(
+        await readModelCatalog(),
+        model || activeModel,
+        effort
+      );
+      if (effortResolution.effort) {
+        params.effort = effortResolution.effort;
+        if (effortResolution.requested !== effortResolution.effort) {
+          noteEffortFallback(effortResolution);
+        }
+      }
+    }
     if (model && !threadModelPinned) params.model = String(model);
     const response = await rpc("turn/start", params);
     return { transport: steer ? "queued-steer" : "turn", response };

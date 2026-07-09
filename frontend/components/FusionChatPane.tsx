@@ -2329,28 +2329,34 @@ export default function FusionChatPane({
     // survives the flip at the nearest real value instead of failing turns.
     const plannerFamilyChanged = nextPlannerFamily !== plannerFamily;
     const executorFamilyChanged = nextExecutorFamily !== executorFamily;
+    const nextPlannerModel = normalizeFusionRoleModel(
+      nextPlannerFamily,
+      "planner",
+      settings.plannerModel ?? (plannerFamilyChanged ? undefined : plannerModel)
+    );
+    const nextExecutorModel = normalizeFusionRoleModel(
+      nextExecutorFamily,
+      "executor",
+      settings.executorModel ?? (executorFamilyChanged ? undefined : executorModel)
+    );
     const nextSettings: FusionSettings = {
       mode: normalizeFusionRunMode(settings.mode ?? fusionRunMode),
       plannerFamily: nextPlannerFamily,
-      plannerModel: normalizeFusionRoleModel(
-        nextPlannerFamily,
-        "planner",
-        settings.plannerModel ?? (plannerFamilyChanged ? undefined : plannerModel)
-      ),
+      plannerModel: nextPlannerModel,
       plannerEffort: normalizeFusionRoleEffort(
         nextPlannerFamily,
-        settings.plannerEffort ?? plannerEffort
+        settings.plannerEffort ?? plannerEffort,
+        nextPlannerModel,
+        liveModelCatalog
       ),
       plannerFast: settings.plannerFast ?? plannerFast,
       executorFamily: nextExecutorFamily,
-      executorModel: normalizeFusionRoleModel(
-        nextExecutorFamily,
-        "executor",
-        settings.executorModel ?? (executorFamilyChanged ? undefined : executorModel)
-      ),
+      executorModel: nextExecutorModel,
       executorEffort: normalizeFusionRoleEffort(
         nextExecutorFamily,
-        settings.executorEffort ?? executorEffort
+        settings.executorEffort ?? executorEffort,
+        nextExecutorModel,
+        liveModelCatalog
       ),
       executorFast: settings.executorFast ?? executorFast
     };
@@ -2560,7 +2566,10 @@ export default function FusionChatPane({
       } else if (preset === "deep") {
         applySettings({ plannerEffort: "high" }, "planning speed");
       } else {
-        applySettings({ plannerEffort: familyMaxEffort(plannerFamily) }, "planning speed");
+        applySettings(
+          { plannerEffort: familyMaxEffort(plannerFamily, plannerModel, liveModelCatalog) },
+          "planning speed"
+        );
       }
       return;
     }
@@ -2573,8 +2582,10 @@ export default function FusionChatPane({
       } else if (preset === "deep") {
         applySettings({ executorEffort: "high" }, "execution speed");
       } else {
-        // Each family's own top level — codex has no "max", claude does.
-        applySettings({ executorEffort: familyMaxEffort(executorFamily) }, "execution speed");
+        applySettings(
+          { executorEffort: familyMaxEffort(executorFamily, executorModel, liveModelCatalog) },
+          "execution speed"
+        );
       }
       return;
     }
@@ -2591,8 +2602,8 @@ export default function FusionChatPane({
     } else {
       applySettings(
         {
-          plannerEffort: familyMaxEffort(plannerFamily),
-          executorEffort: familyMaxEffort(executorFamily)
+          plannerEffort: familyMaxEffort(plannerFamily, plannerModel, liveModelCatalog),
+          executorEffort: familyMaxEffort(executorFamily, executorModel, liveModelCatalog)
         },
         "Fusion speed"
       );
@@ -2602,7 +2613,7 @@ export default function FusionChatPane({
   function applyEffortLevel(scope: FusionRoleScope, effort: string) {
     const normalized = effort.trim().toLowerCase();
     if (scope === "planning") {
-      const values = familyEffortValues(plannerFamily);
+      const values = familyEffortValues(plannerFamily, plannerModel, liveModelCatalog);
       if (!values.includes(normalized)) {
         pushCommandStatus(
           `Planning effort (${familyDisplayName(plannerFamily)}) supports ${values.join(", ")} — not '${effort}'.`
@@ -2610,17 +2621,31 @@ export default function FusionChatPane({
         return;
       }
       applySettings(
-        { plannerEffort: normalizeFusionRoleEffort(plannerFamily, normalized) },
+        {
+          plannerEffort: normalizeFusionRoleEffort(
+            plannerFamily,
+            normalized,
+            plannerModel,
+            liveModelCatalog
+          )
+        },
         "planning effort"
       );
       return;
     }
 
     if (scope === "execution") {
-      // Coerce across enums (claude "max" → codex "xhigh", etc.) instead of
+      // Coerce across enums instead of
       // failing every delegation with an unknown variant.
       applySettings(
-        { executorEffort: normalizeFusionRoleEffort(executorFamily, normalized) },
+        {
+          executorEffort: normalizeFusionRoleEffort(
+            executorFamily,
+            normalized,
+            executorModel,
+            liveModelCatalog
+          )
+        },
         "execution effort"
       );
       return;
@@ -2637,8 +2662,18 @@ export default function FusionChatPane({
     }
     applySettings(
       {
-        plannerEffort: normalizeFusionRoleEffort(plannerFamily, normalized),
-        executorEffort: normalizeFusionRoleEffort(executorFamily, normalized)
+        plannerEffort: normalizeFusionRoleEffort(
+          plannerFamily,
+          normalized,
+          plannerModel,
+          liveModelCatalog
+        ),
+        executorEffort: normalizeFusionRoleEffort(
+          executorFamily,
+          normalized,
+          executorModel,
+          liveModelCatalog
+        )
       },
       "Fusion effort"
     );

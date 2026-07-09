@@ -24,6 +24,7 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const { tailFile } = require("./buildSupervisor.cjs");
+const { modelCatalogEntry, resolveCodexEffortForModel } = require("./codexModels.cjs");
 
 const isWin = process.platform === "win32";
 
@@ -208,7 +209,7 @@ function buildCodexVerifierTask(task) {
     task,
     "",
     "## Fusion verifier contract",
-    "You are Codex GPT-5.5 inside Terminal Fusion. You implement, run tests, debug, and verify whether the user's goal is actually reached.",
+    "You are the Codex executor inside Terminal Fusion. You implement, run tests, debug, and verify whether the user's goal is actually reached.",
     "Claude/Opus may provide strategy, constraints, UI intent, debugging direction, and follow-up corrections; follow that guidance while still independently checking the result.",
     "Earlier turns in this thread may have been authored by a different engine or model - the user can switch families mid-thread. Judge the code and evidence in front of you, not the apparent authorship, and do not infer your own capabilities from a prior turn's byline.",
     "Within Fusion, picture/image generation and browser navigation/control/automation are Codex-owned execution work. Perform those delegated operations here and verify the resulting image or browser state.",
@@ -238,7 +239,7 @@ function buildCodexInvestigationTask(task) {
     task,
     "",
     "## Fusion investigation contract",
-    "You are Codex GPT-5.5 doing a read-only scouting pass for Terminal Fusion.",
+    "You are the Codex executor doing a read-only scouting pass for Terminal Fusion.",
     "Gather the repo context Claude needs for architecture, UI/design decisions, or implementation planning.",
     "Prefer fast file discovery, targeted reads, and concise summaries over broad narration.",
     "Do not edit files, install packages, launch apps, or make irreversible changes.",
@@ -332,13 +333,11 @@ function cleanCodexSetting(value) {
   return normalized === "auto" || normalized === "default" ? null : text;
 }
 
-// Codex's effort enum is minimal..ultra with NO "max". Stale settings files
-// and env values from before the per-engine effort split still carry "max";
-// coerce here so they degrade to xhigh instead of failing every turn with an
-// unknown-variant error.
+// Codex 0.144.0's family union is minimal|low|medium|high|xhigh|max|ultra.
+// Per-model support varies; readCodexSettings preserves the user's choice and
+// applyCodexTurnSettings resolves it against live model/list before every turn.
 function cleanCodexEffort(value) {
-  const effort = cleanCodexSetting(value);
-  return effort && effort.toLowerCase() === "max" ? "xhigh" : effort;
+  return cleanCodexSetting(value);
 }
 
 // Which engine family executes delegations: "codex" (app-server, the
@@ -549,17 +548,6 @@ function applyCodexModelSetting(params, settings = readCodexSettings()) {
   return settings;
 }
 
-function modelCatalogEntry(models, modelId) {
-  if (!Array.isArray(models) || models.length === 0) return null;
-  const wanted = String(modelId || "").trim();
-  if (wanted) {
-    return (
-      models.find((model) => model && (model.id === wanted || model.model === wanted)) || null
-    );
-  }
-  return models.find((model) => model && (model.isDefault || model.is_default)) || null;
-}
-
 function fastTierForModel(models, modelId) {
   const entry = modelCatalogEntry(models, modelId);
   if (!entry) return FAST_SERVICE_TIER;
@@ -581,13 +569,25 @@ function noteExecutorFastUnsupported() {
   });
 }
 
-async function applyCodexFastTier(params, settings = readCodexSettings()) {
+function noteExecutorEffortFallback(resolution) {
+  const model = resolution.model || "the selected Codex model";
+  const key = `${model}:${resolution.requested}:${resolution.effort}`;
+  if (lastExecutorEffortFallbackKey === key) return;
+  lastExecutorEffortFallbackKey = key;
+  relay({
+    role: "codex",
+    kind: "activity",
+    text: `execution effort ${resolution.requested} is unavailable for ${model}; using ${resolution.effort}`
+  });
+}
+
+async function applyCodexFastTier(params, settings = readCodexSettings(), models) {
   if (!settings.fast) {
     params.serviceTier = null;
     return settings;
   }
   const tier = fastTierForModel(
-    await readModelCatalog(),
+    models === undefined ? await readModelCatalog() : models,
     settings.model || activeThreadResolvedModel || activeThreadModel
   );
   params.serviceTier = tier;
@@ -598,12 +598,25 @@ async function applyCodexFastTier(params, settings = readCodexSettings()) {
 }
 
 async function applyCodexTurnSettings(params, settings = readCodexSettings()) {
+  const models = settings.effort || settings.fast ? await readModelCatalog() : undefined;
   if (settings.effort) {
-    params.effort = settings.effort;
+    const resolution = resolveCodexEffortForModel(
+      models,
+      settings.model || activeThreadResolvedModel || activeThreadModel,
+      settings.effort
+    );
+    if (resolution.effort) {
+      params.effort = resolution.effort;
+      if (resolution.requested !== resolution.effort) {
+        noteExecutorEffortFallback(resolution);
+      }
+    } else if (settings.source === "file") {
+      params.effort = null;
+    }
   } else if (settings.source === "file") {
     params.effort = null;
   }
-  await applyCodexFastTier(params, settings);
+  await applyCodexFastTier(params, settings, models);
   return settings;
 }
 
@@ -684,6 +697,7 @@ let activeThreadModel = null;
 let activeThreadResolvedModel = null;
 let modelCatalog = null;
 let modelCatalogLoaded = false;
+let lastExecutorEffortFallbackKey = "";
 const pendingReq = new Map(); // app-server request id -> {resolve, reject}
 const parked = new Map(); // pendingId -> {rpcId, method, params}
 let currentTurn = null; // {resolve, idleTimer, commandTimer} - fulfilled by turn/completed | turn/failed | an approval request
@@ -2858,6 +2872,85 @@ function commandExecutionDisplayText(item) {
   return summary;
 }
 
+function summarizeJsonValue(value, maxChars = 160, depth = 0) {
+  if (value == null) return "";
+  if (typeof value === "string") return clippedText(value, maxChars);
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (depth >= 2) return "";
+  if (Array.isArray(value)) {
+    const parts = [];
+    for (const entry of value.slice(0, 4)) {
+      const remaining = Math.max(16, maxChars - parts.join("; ").length);
+      const summary = summarizeJsonValue(entry, remaining, depth + 1);
+      if (summary) parts.push(summary);
+      if (parts.join("; ").length >= maxChars) break;
+    }
+    return clippedText(parts.join("; "), maxChars);
+  }
+  if (typeof value === "object") {
+    for (const key of ["text", "message", "summary", "result"]) {
+      if (typeof value[key] === "string" && value[key].trim()) {
+        return clippedText(value[key], maxChars);
+      }
+    }
+    const parts = [];
+    for (const key in value) {
+      if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+      const entry = value[key];
+      const remaining = Math.max(16, maxChars - parts.join(", ").length - key.length - 2);
+      const summary = summarizeJsonValue(entry, remaining, depth + 1);
+      if (summary) parts.push(`${key}: ${summary}`);
+      if (parts.length >= 4 || parts.join(", ").length >= maxChars) break;
+    }
+    return clippedText(parts.join(", "), maxChars);
+  }
+  return "";
+}
+
+function mcpToolCallDisplayText(item) {
+  const server = String(item?.server || "server").trim();
+  const tool = String(item?.tool || "tool").trim();
+  const label = `mcp: ${server}.${tool}`;
+  const details = [];
+  if (item?.status) details.push(String(item.status));
+  if (item?.error?.message) {
+    details.push(clippedText(item.error.message, 160));
+  } else if (item?.result?.content) {
+    const summary = summarizeJsonValue(item.result.content);
+    if (summary) details.push(summary);
+  }
+  return details.length ? `${label} - ${clippedText(details.join(": "), 160)}` : label;
+}
+
+function webSearchDisplayText(item) {
+  const action = item?.action || {};
+  const query =
+    item?.query ||
+    action.query ||
+    (Array.isArray(action.queries) ? action.queries.filter(Boolean).join(", ") : "") ||
+    action.url ||
+    action.pattern ||
+    "search";
+  return `web search: ${clippedText(query, 160)}`;
+}
+
+function collabAgentDisplayText(item) {
+  const tool = String(item?.tool || "tool").trim();
+  const details = [];
+  if (item?.status) details.push(String(item.status));
+  if (item?.model) details.push(String(item.model));
+  if (Array.isArray(item?.receiverThreadIds) && item.receiverThreadIds.length) {
+    details.push(`${item.receiverThreadIds.length} agent${item.receiverThreadIds.length === 1 ? "" : "s"}`);
+  }
+  return details.length ? `collab: ${tool} - ${details.join(", ")}` : `collab: ${tool}`;
+}
+
+function subAgentActivityDisplayText(item) {
+  const kind = String(item?.kind || "activity").trim();
+  const agent = path.basename(String(item?.agentPath || "")).trim();
+  return agent ? `sub-agent: ${kind} ${agent}` : `sub-agent: ${kind}`;
+}
+
 function looksLikeInlineCodeDump(text) {
   const source = String(text || "");
   if (source.length < 1200) return false;
@@ -2885,18 +2978,39 @@ function summarizeAgentMessageForDisplay(text) {
   return "working with generated code";
 }
 
-function relayItem(item) {
-  const type = item.type;
-  if (type === "agentMessage" && item.text) {
-    relay({ role: "codex", kind: "message", text: summarizeAgentMessageForDisplay(item.text) });
-  } else if (type === "commandExecution") {
-    relay({ role: "codex", kind: "command", text: commandExecutionDisplayText(item) });
-  } else if (type === "fileChange") {
+function threadItemActivity(item) {
+  if (!item || typeof item !== "object") return null;
+  if (item.type === "agentMessage" && item.text) {
+    return { kind: "message", text: summarizeAgentMessageForDisplay(item.text) };
+  }
+  if (item.type === "commandExecution") {
+    return { kind: "command", text: commandExecutionDisplayText(item) };
+  }
+  if (item.type === "fileChange") {
     const files = (item.changes || [])
       .map((c) => `${c.type || "edit"} ${c.path || c.move_path || ""}`.trim())
       .join(", ");
-    relay({ role: "codex", kind: "file", text: files || "file changes" });
+    return { kind: "file", text: files || "file changes" };
   }
+  if (item.type === "mcpToolCall") {
+    return { kind: "command", text: mcpToolCallDisplayText(item) };
+  }
+  if (item.type === "webSearch") {
+    return { kind: "command", text: webSearchDisplayText(item) };
+  }
+  if (item.type === "collabAgentToolCall") {
+    return { kind: "command", text: collabAgentDisplayText(item) };
+  }
+  if (item.type === "subAgentActivity") {
+    return { kind: "command", text: subAgentActivityDisplayText(item) };
+  }
+  // Reasoning items are intentionally not relayed to the UI activity stream.
+  return null;
+}
+
+function relayItem(item) {
+  const activity = threadItemActivity(item);
+  if (activity) relay({ role: "codex", ...activity });
 }
 
 function accumulate(item) {
@@ -3067,20 +3181,8 @@ function relayFanoutItem(worker, item) {
     return;
   }
   const label = fanoutWorkerLabel(worker);
-  if (item.type === "agentMessage" && item.text) {
-    relay({
-      role: "codex",
-      kind: "message",
-      text: `[${label}] ${summarizeAgentMessageForDisplay(item.text)}`
-    });
-  } else if (item.type === "commandExecution") {
-    relay({ role: "codex", kind: "command", text: `[${label}] ${commandExecutionDisplayText(item)}` });
-  } else if (item.type === "fileChange") {
-    const files = (item.changes || [])
-      .map((c) => `${c.type || "edit"} ${c.path || c.move_path || ""}`.trim())
-      .join(", ");
-    relay({ role: "codex", kind: "file", text: `[${label}] ${files || "file changes"}` });
-  }
+  const activity = threadItemActivity(item);
+  if (activity) relay({ role: "codex", kind: activity.kind, text: `[${label}] ${activity.text}` });
 }
 
 function accumulateFanoutItem(worker, item, options = {}) {
@@ -3622,16 +3724,8 @@ function postBackgroundProgress(worker, activityKind, text) {
 }
 
 function relayBackgroundItem(worker, item) {
-  if (item.type === "agentMessage" && item.text) {
-    postBackgroundProgress(worker, "message", summarizeAgentMessageForDisplay(item.text));
-  } else if (item.type === "commandExecution") {
-    postBackgroundProgress(worker, "command", commandExecutionDisplayText(item));
-  } else if (item.type === "fileChange") {
-    const files = (item.changes || [])
-      .map((c) => `${c.type || "edit"} ${c.path || c.move_path || ""}`.trim())
-      .join(", ");
-    postBackgroundProgress(worker, "file", files || "file changes");
-  }
+  const activity = threadItemActivity(item);
+  if (activity) postBackgroundProgress(worker, activity.kind, activity.text);
 }
 
 // The settled payload rides the telemetry callback server (64 KiB body cap);
@@ -4633,7 +4727,7 @@ const TOOLS = [
   {
     name: "codex_investigate",
     description:
-      "Ask embedded Codex GPT-5.5 to do a read-only scouting pass: file discovery, targeted reads, repo navigation, dependency tracing, or concise context gathering for Claude. Use this to feed Claude findings/files/snippets before Claude does architecture or UI design thinking. Does not create or sync native goals and does not use the implementation verifier contract. Pass `task` for one scout. When the context you need spans 2-4 DISJOINT areas, pass `tasks` instead (2-4 self-contained scouting questions) to run parallel read-only scouts concurrently; the result returns per-scout sections plus a combined findings/files view. Returns {status:'completed', findings, files, scouts?} or {status:'failed', error}.",
+      "Ask the embedded Codex executor to do a read-only scouting pass: file discovery, targeted reads, repo navigation, dependency tracing, or concise context gathering for Claude. Use this to feed Claude findings/files/snippets before Claude does architecture or UI design thinking. Does not create or sync native goals and does not use the implementation verifier contract. Pass `task` for one scout. When the context you need spans 2-4 DISJOINT areas, pass `tasks` instead (2-4 self-contained scouting questions) to run parallel read-only scouts concurrently; the result returns per-scout sections plus a combined findings/files view. Returns {status:'completed', findings, files, scouts?} or {status:'failed', error}.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4659,7 +4753,7 @@ const TOOLS = [
   {
     name: "codex_implement",
     description:
-      "Delegate implementation, testing, compile/runtime fixing, refactors, repo navigation, picture/image generation, browser navigation/control/automation, bug review, or goal-completion verification to embedded Codex GPT-5.5. In Fusion Plan mode this tool refuses execution until the pane is switched back to Auto. Opus 4.8 drives architecture, strategy, UX/UI build-out when appropriate, human-facing orchestration, and guidance for Codex on constraints, UI intent, debugging direction, and follow-up corrections. Codex follows that guidance while independently verifying bugs and goal completion. Use codex_goal_set first for substantial top-level work; codex_implement will create a fallback native Codex goal if none exists and will sync goal status from the verifier verdict. Returns one of: {status:'completed', summary, files, goalReached, bugsFound, missingRequirements, nextAction, verifierVerdict, goal}; {status:'needs_decision', pendingId, kind, detail} - answer it with codex_respond; {status:'steer_routing', userSteer, executorProgress, guidance, nextAction:'steer_resolve'} - answer it with codex_steer_resolve; or {status:'failed', error}. If goalReached is false or nextAction is 'continue', continue/redelegate unless the human or an explicit Opus override says otherwise. Pass `task` for one delegation; pass `tasks` (2-4 entries) ONLY for verified-disjoint parallel workstreams after the mandatory parallel-safety check - the combined result adds workers[] (per-workstream verdicts) and fileConflicts, and never auto-completes the native goal.",
+      "Delegate implementation, testing, compile/runtime fixing, refactors, repo navigation, picture/image generation, browser navigation/control/automation, bug review, or goal-completion verification to the embedded Codex executor. In Fusion Plan mode this tool refuses execution until the pane is switched back to Auto. The Claude planner drives architecture, strategy, UX/UI build-out when appropriate, human-facing orchestration, and guidance for Codex on constraints, UI intent, debugging direction, and follow-up corrections. Codex follows that guidance while independently verifying bugs and goal completion. Use codex_goal_set first for substantial top-level work; codex_implement will create a fallback native Codex goal if none exists and will sync goal status from the verifier verdict. Returns one of: {status:'completed', summary, files, goalReached, bugsFound, missingRequirements, nextAction, verifierVerdict, goal}; {status:'needs_decision', pendingId, kind, detail} - answer it with codex_respond; {status:'steer_routing', userSteer, executorProgress, guidance, nextAction:'steer_resolve'} - answer it with codex_steer_resolve; or {status:'failed', error}. If goalReached is false or nextAction is 'continue', continue/redelegate unless the human or an explicit Opus override says otherwise. Pass `task` for one delegation; pass `tasks` (2-4 entries) ONLY for verified-disjoint parallel workstreams after the mandatory parallel-safety check - the combined result adds workers[] (per-workstream verdicts) and fileConflicts, and never auto-completes the native goal.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4970,6 +5064,7 @@ module.exports = {
   shouldReplaceGoalForTask,
   summarizeAgentMessageForDisplay,
   summarizeCommandExecution,
+  threadItemActivity,
   stripVerifierVerdictFromSummary,
   translateWorkspaceMcpServerConfig,
   unwrapShellCommand,

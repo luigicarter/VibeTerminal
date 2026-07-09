@@ -41,12 +41,17 @@ const {
   shouldReplaceGoalForTask,
   summarizeAgentMessageForDisplay,
   summarizeCommandExecution,
+  threadItemActivity,
   stripVerifierVerdictFromSummary,
   translateWorkspaceMcpServerConfig,
   unwrapShellCommand,
   workspaceMcpConfigOverrides,
   turnErrorMessage
 } = require(adapterPath);
+const {
+  resolveCodexEffortForModel,
+  sanitizeCodexModels
+} = require("../../backend/codexModels.cjs");
 
 function assert(condition, message) {
   if (!condition) {
@@ -1408,26 +1413,40 @@ function callAdapterApprovalResumeWithFakeAppServer(options = {}) {
 function callAdapterClearsParkedApprovalWhenAppServerExits() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-adapter-approval-exit-"));
   writeApprovalExitFakeAppServer(tempDir);
+  const env = {
+    ...process.env,
+    VIBE_FUSION_CODEX_BIN: process.execPath,
+    VIBE_TERMINAL_FUSION_CWD: tempDir,
+    VIBE_TERMINAL_SESSION_ID: "fusion-adapter-approval-exit",
+    VIBE_FUSION_TURN_IDLE_TIMEOUT_MS: "1000",
+    VIBE_FUSION_TURN_AFTER_COMMAND_TIMEOUT_MS: "100"
+  };
+  // This case isolates app-server exit cleanup. A callback inherited from a
+  // live vibeTerminal session adds unrelated host traffic and can race the
+  // deliberately short stale-response delay below.
+  delete env.VIBE_TERMINAL_CALLBACK_URL;
+  delete env.VIBE_TERMINAL_TELEMETRY_TOKEN;
   const child = spawn(process.execPath, [adapterPath], {
     cwd: tempDir,
     stdio: ["pipe", "pipe", "pipe"],
-    env: {
-      ...process.env,
-      VIBE_FUSION_CODEX_BIN: process.execPath,
-      VIBE_TERMINAL_FUSION_CWD: tempDir,
-      VIBE_TERMINAL_SESSION_ID: "fusion-adapter-approval-exit",
-      VIBE_FUSION_TURN_IDLE_TIMEOUT_MS: "1000",
-      VIBE_FUSION_TURN_AFTER_COMMAND_TIMEOUT_MS: "100"
-    }
+    env
   });
 
   let buffer = "";
   let stderr = "";
   let parkedPendingId = "";
+  const probePendingId = "approval-exit-probe";
+  const finalResponseId = 9000;
+  let nextProbeResponseId = 3;
+  let probeTimer = null;
   let sentStaleRespond = false;
   let finished = false;
 
   function cleanup() {
+    if (probeTimer) {
+      clearTimeout(probeTimer);
+      probeTimer = null;
+    }
     try {
       child.stdin.end();
     } catch {
@@ -1448,6 +1467,29 @@ function callAdapterClearsParkedApprovalWhenAppServerExits() {
       }
     }
     fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+
+  function sendRespond(responseId, pendingId) {
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: responseId,
+        method: "tools/call",
+        params: {
+          name: "codex_respond",
+          arguments: { pendingId, decision: "accept" }
+        }
+      })}\n`
+    );
+  }
+
+  function scheduleExitProbe() {
+    probeTimer = setTimeout(() => {
+      if (finished) return;
+      const responseId = nextProbeResponseId;
+      nextProbeResponseId += 1;
+      sendRespond(responseId, probePendingId);
+    }, 50);
   }
 
   return new Promise((resolve, reject) => {
@@ -1491,24 +1533,26 @@ function callAdapterClearsParkedApprovalWhenAppServerExits() {
             assert(parsed.status === "needs_decision", `expected parked approval before exit: ${msg.result.content[0].text}`);
             assert(parsed.pendingId, "parked approval before exit missing pendingId");
             parkedPendingId = parsed.pendingId;
-            setTimeout(() => {
-              if (finished) return;
-              sentStaleRespond = true;
-              child.stdin.write(
-                `${JSON.stringify({
-                  jsonrpc: "2.0",
-                  id: 3,
-                  method: "tools/call",
-                  params: {
-                    name: "codex_respond",
-                    arguments: { pendingId: parkedPendingId, decision: "accept" }
-                  }
-                })}\n`
-              );
-            }, 200);
+            scheduleExitProbe();
             return;
           }
-          if (msg.id === 3) {
+          if (msg.id >= 3 && msg.id < finalResponseId) {
+            const text = msg.result.content[0].text;
+            const parsed = JSON.parse(text);
+            if (parsed.status === "needs_decision") {
+              scheduleExitProbe();
+              return;
+            }
+            assert(parsed.status === "error", `exit probe should eventually be rejected: ${text}`);
+            assert(
+              String(parsed.error || "").includes(`unknown pendingId: ${probePendingId}`),
+              `exit probe should observe cleared parked state: ${text}`
+            );
+            sentStaleRespond = true;
+            sendRespond(finalResponseId, parkedPendingId);
+            return;
+          }
+          if (msg.id === finalResponseId) {
             assert(sentStaleRespond, "stale approval response was not sent");
             const text = msg.result.content[0].text;
             const parsed = JSON.parse(text);
@@ -2288,11 +2332,11 @@ function assertPortabilityGuards() {
 function assertGoalSchema() {
   const rootDir = path.join(__dirname, "..", "..");
   const clientSchema = fs.readFileSync(
-    path.join(rootDir, "vendor", "codex-appserver", "0.142.3", "schema", "ClientRequest.json"),
+    path.join(rootDir, "vendor", "codex-appserver", "0.144.0", "schema", "ClientRequest.json"),
     "utf8"
   );
   const serverSchema = fs.readFileSync(
-    path.join(rootDir, "vendor", "codex-appserver", "0.142.3", "schema", "ServerNotification.json"),
+    path.join(rootDir, "vendor", "codex-appserver", "0.144.0", "schema", "ServerNotification.json"),
     "utf8"
   );
   for (const method of ["thread/goal/set", "thread/goal/get", "thread/goal/clear"]) {
@@ -2576,6 +2620,55 @@ function assertCommandDisplayHelpers() {
     unwrapShellCommand('cmd.exe /c "dir /b"') === "dir /b",
     "cmd.exe /c wrapper should unwrap to the inner command"
   );
+  assert(
+    JSON.stringify(
+      threadItemActivity({
+        type: "mcpToolCall",
+        server: "docs",
+        tool: "search",
+        status: "completed",
+        result: { content: [{ type: "text", text: "found docs" }], structuredContent: null, _meta: null }
+      })
+    ) === JSON.stringify({ kind: "command", text: "mcp: docs.search - completed: found docs" }),
+    "mcpToolCall should map to command activity"
+  );
+  const boundedMcpActivity = threadItemActivity({
+    type: "mcpToolCall",
+    server: "files",
+    tool: "read",
+    status: "completed",
+    result: { content: [{ type: "text", text: "x".repeat(100_000) }] }
+  });
+  assert(
+    boundedMcpActivity?.text.length <= 180 && boundedMcpActivity.text.endsWith("..."),
+    "mcpToolCall activity must bound large result summaries before relaying them"
+  );
+  let deeplyNestedMcpContent = "leaf";
+  for (let depth = 0; depth < 20_000; depth += 1) {
+    deeplyNestedMcpContent = [deeplyNestedMcpContent];
+  }
+  const nestedMcpActivity = threadItemActivity({
+    type: "mcpToolCall",
+    server: "files",
+    tool: "read",
+    status: "completed",
+    result: { content: deeplyNestedMcpContent }
+  });
+  assert(
+    nestedMcpActivity?.text === "mcp: files.read - completed",
+    "mcpToolCall activity must stop traversing deeply nested arrays"
+  );
+  const boundedMcpError = threadItemActivity({
+    type: "mcpToolCall",
+    server: "files",
+    tool: "read",
+    status: "failed",
+    error: { message: "x".repeat(100_000) }
+  });
+  assert(
+    boundedMcpError?.text.length <= 180 && boundedMcpError.text.endsWith("..."),
+    "mcpToolCall activity must clip large errors before joining display details"
+  );
 }
 
 // ---- per-family executor settings + claude engine coverage ----
@@ -2614,7 +2707,7 @@ function assertExecutorSettingsParsing() {
     parsed = readSettingsInChild(file);
     assert(parsed.family === "codex", `legacy file should stay codex: ${JSON.stringify(parsed)}`);
     assert(parsed.model === "gpt-5.5", `legacy codexModel should parse: ${JSON.stringify(parsed)}`);
-    assert(parsed.effort === "xhigh", `legacy codex max should self-heal to xhigh: ${JSON.stringify(parsed)}`);
+    assert(parsed.effort === "max", `codex max should pass through: ${JSON.stringify(parsed)}`);
     assert(parsed.fast === true, `codex executorFast should parse: ${JSON.stringify(parsed)}`);
 
     fs.writeFileSync(file, JSON.stringify({ executorFamily: "codex", executorModel: "auto", executorEffort: "" }));
@@ -3040,6 +3133,67 @@ function callAdapterImplementWithFakeClaudeExecutor() {
       })}\n`
     );
   }));
+}
+
+function assertCodexModelEffortCompatibility() {
+  const model = (id, efforts, isDefault = false) => ({
+    id,
+    model: id,
+    isDefault,
+    supportedReasoningEfforts: efforts.map((reasoningEffort) => ({ reasoningEffort }))
+  });
+  const catalog = [
+    model("gpt-5.6-sol", ["low", "medium", "high", "xhigh", "max", "ultra"], true),
+    model("gpt-5.6-terra", ["low", "medium", "high", "xhigh", "max", "ultra"]),
+    model("gpt-5.6-luna", ["low", "medium", "high", "xhigh", "max"]),
+    model("gpt-5.5", ["low", "medium", "high", "xhigh"])
+  ];
+  const effort = (modelId, requested) =>
+    resolveCodexEffortForModel(catalog, modelId, requested).effort;
+
+  assert(effort("gpt-5.6-sol", "ultra") === "ultra", "Sol should preserve ultra");
+  assert(effort("gpt-5.6-terra", "max") === "max", "Terra should preserve max");
+  assert(effort("gpt-5.6-luna", "ultra") === "max", "Luna ultra should fall back to max");
+  assert(effort("gpt-5.5", "max") === "xhigh", "GPT-5.5 max should fall back to xhigh");
+  assert(effort("gpt-5.5", "ultra") === "xhigh", "GPT-5.5 ultra should fall back to xhigh");
+  assert(effort("gpt-5.5", "minimal") === "low", "GPT-5.5 minimal should fall up to low");
+  assert(
+    resolveCodexEffortForModel(null, "custom-model", "max").effort === "xhigh",
+    "unknown/custom models should conservatively degrade max to xhigh when model/list is unavailable"
+  );
+
+  const sanitized = sanitizeCodexModels({
+    models: [
+      {
+        slug: "gpt-5.6-luna",
+        display_name: "GPT-5.6 Luna",
+        supported_reasoning_levels: [
+          { effort: "low" },
+          { effort: "xhigh" },
+          { effort: "max" }
+        ]
+      }
+    ]
+  });
+  assert(
+    JSON.stringify(sanitized[0]?.supportedEfforts) === JSON.stringify(["low", "xhigh", "max"]),
+    "debug-model sanitization must preserve supported reasoning efforts for the renderer"
+  );
+
+  const adapterSource = fs.readFileSync(adapterPath, "utf8");
+  const brainSource = fs.readFileSync(
+    path.join(__dirname, "..", "..", "backend", "fusionCodexBrain.cjs"),
+    "utf8"
+  );
+  assert(
+    adapterSource.includes("resolveCodexEffortForModel(") &&
+      adapterSource.includes("async function applyCodexTurnSettings"),
+    "the executor runtime must guard every turn against the live model effort catalog"
+  );
+  assert(
+    brainSource.includes("resolveCodexEffortForModel(") && brainSource.includes("async function sendInput"),
+    "the Codex planner runtime must guard every turn against the live model effort catalog"
+  );
 }
 
 // ---- parallel fan-out coverage ----
@@ -4400,6 +4554,7 @@ main()
     assertCommandDisplayHelpers();
     assertPortabilityGuards();
     assertExecutorSettingsParsing();
+    assertCodexModelEffortCompatibility();
     assertClaudeExecutorArgs();
     await assertWorkspaceMcpConfigInjectedIntoThreadStart();
     await assertEagerBootStartsThread();

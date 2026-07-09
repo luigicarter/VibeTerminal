@@ -43,7 +43,7 @@ assert(
     appSource.includes("threadRef: isFusion") &&
     // Per-role family settings restore through the shared migration funnel
     // (legacy model/claudeEffort → planner, codexModel/codexEffort → executor;
-    // codex "max" coerces to "xhigh" — never the Claude enum).
+    // codex "max" stays on the Codex enum — never the Claude enum).
     appSource.includes("function normalizedFusionSessionFields(session: AgentSession)") &&
     appSource.includes("normalizeFusionRoleSettings({") &&
     appSource.includes("...(isFusion ? normalizedFusionSessionFields(session) : {})") &&

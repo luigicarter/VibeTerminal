@@ -1,5 +1,5 @@
-// Embed the Codex binary for Fusion. Locates the native `codex` executable that
-// the `@openai/codex` npm package installs and copies it into
+// Embed the Codex binaries for Fusion. Locates the native `codex` executable that
+// the `@openai/codex` npm package installs and copies it plus its helper files into
 // vendor/codex-bin/<platform>-<arch>/ so electron-builder `extraResources` can
 // bundle it and each Fusion pane can spawn its own embedded instance
 // (see backend/fusion-adapter.cjs + resolveCodexBin in backend/main.cjs).
@@ -59,6 +59,68 @@ function findLargest(baseDir) {
     }
   }
   return bestSize >= MIN_NATIVE_BYTES ? best : null;
+}
+
+function platformPayloadRoot(source) {
+  const binDir = path.dirname(source);
+  const payloadRoot = path.dirname(binDir);
+  if (path.basename(binDir) === "bin" && fs.existsSync(path.join(payloadRoot, "codex-package.json"))) {
+    return payloadRoot;
+  }
+  return null;
+}
+
+function walkFiles(dir) {
+  const files = [];
+  const stack = [dir];
+  while (stack.length) {
+    const current = stack.pop();
+    let entries;
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(full);
+      } else if (entry.isFile()) {
+        files.push(full);
+      }
+    }
+  }
+  return files.sort();
+}
+
+function payloadCopyPlan(source) {
+  const plan = new Map();
+  const payloadRoot = platformPayloadRoot(source);
+  if (!payloadRoot) {
+    plan.set(source, dest);
+    return { payloadRoot: null, files: Array.from(plan.entries()) };
+  }
+
+  const binDir = path.join(payloadRoot, "bin");
+  for (const file of walkFiles(binDir)) {
+    // Fusion spawns codex.exe directly from outDir; Codex 0.144 also spawns
+    // codex-code-mode-host.exe as a sibling of the running executable.
+    plan.set(file, path.join(outDir, path.basename(file)));
+  }
+
+  for (const entry of fs.readdirSync(payloadRoot, { withFileTypes: true })) {
+    const full = path.join(payloadRoot, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === "bin") continue;
+      for (const file of walkFiles(full)) {
+        plan.set(file, path.join(outDir, entry.name, path.relative(full, file)));
+      }
+    } else if (entry.isFile()) {
+      plan.set(full, path.join(outDir, entry.name));
+    }
+  }
+
+  return { payloadRoot, files: Array.from(plan.entries()) };
 }
 
 function candidateSearchBases() {
@@ -131,7 +193,7 @@ function checkVersion(source) {
   console.warn(`WARN prepare:codex-bin: ${message}`);
 }
 
-function preparedBinaryReady() {
+function preparedBinaryReady(source) {
   try {
     const stat = fs.statSync(dest);
     if (stat.size < MIN_NATIVE_BYTES) return false;
@@ -145,16 +207,20 @@ function preparedBinaryReady() {
     }
     return false;
   }
+  if (source) {
+    const { files } = payloadCopyPlan(source);
+    for (const [sourceFile, destFile] of files) {
+      try {
+        if (fs.statSync(destFile).size !== fs.statSync(sourceFile).size) return false;
+      } catch {
+        return false;
+      }
+    }
+  }
   return true;
 }
 
 function main() {
-  if (required && preparedBinaryReady()) {
-    const mb = Math.round(fs.statSync(dest).size / 1024 / 1024);
-    console.log(`Embedded Codex already prepared: ${dest} (${mb} MB)`);
-    return;
-  }
-
   const searchBases = candidateSearchBases().filter((base) => fs.existsSync(base));
   if (!searchBases.length) {
     skip("SKIP prepare:codex-bin: @openai/codex not found in configured or global npm roots.");
@@ -187,14 +253,37 @@ function main() {
     return;
   }
 
+  if (required && preparedBinaryReady(source)) {
+    const mb = Math.round(fs.statSync(dest).size / 1024 / 1024);
+    console.log(`Embedded Codex already prepared: ${dest} (${mb} MB)`);
+    return;
+  }
+
   checkVersion(source);
+  const { files } = payloadCopyPlan(source);
   fs.mkdirSync(outDir, { recursive: true });
-  fs.copyFileSync(source, dest);
-  if (!isWin) {
-    fs.chmodSync(dest, 0o755);
+  for (const [sourceFile, destFile] of files) {
+    fs.mkdirSync(path.dirname(destFile), { recursive: true });
+    fs.copyFileSync(sourceFile, destFile);
+    if (!isWin && path.basename(destFile) === exeName) {
+      fs.chmodSync(destFile, 0o755);
+    }
+  }
+
+  for (const [sourceFile, destFile] of files) {
+    const sourceSize = fs.statSync(sourceFile).size;
+    const destSize = fs.statSync(destFile).size;
+    if (sourceSize !== destSize) {
+      throw new Error(`Copied Codex payload file has wrong size: ${destFile}`);
+    }
   }
   const mb = Math.round(fs.statSync(dest).size / 1024 / 1024);
   console.log(`Embedded Codex: ${source}\n             → ${dest} (${mb} MB)`);
+  for (const [, destFile] of files) {
+    if (destFile !== dest) {
+      console.log(`Embedded Codex helper: ${path.relative(outDir, destFile)}`);
+    }
+  }
 }
 
 main();

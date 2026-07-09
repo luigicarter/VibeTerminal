@@ -4,6 +4,7 @@ import type {
   AgentThreadLookupResult,
   AgentThreadRef,
   CodeChangeSummary,
+  FusionCodexEffort,
   FusionFamily,
   FusionRunMode,
   FusionChatEvent,
@@ -151,7 +152,14 @@ declare global {
         list: (payload: { family: string }) => Promise<{
           ok: boolean;
           family: string;
-          models: { id: string; label: string }[] | null;
+          models:
+            | {
+                id: string;
+                label: string;
+                supportedEfforts?: FusionCodexEffort[];
+                isDefault?: boolean;
+              }[]
+            | null;
           error?: string;
         }>;
       };

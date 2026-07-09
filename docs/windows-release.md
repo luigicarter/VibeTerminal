@@ -4,10 +4,10 @@ vibeTerminal ships to Windows users as an Electron Builder NSIS installer hosted
 
 ## Current Public Release
 
-The current public Windows release is `v0.1.53`:
+The current public Windows release is `v0.1.54`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.53`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.53/vibeTerminal-Setup-0.1.53.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.54`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.54/vibeTerminal-Setup-0.1.54.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -32,8 +32,9 @@ The packaged app keeps only runtime files needed by Electron:
 - `preload/` - Context bridge IPC surface.
 - `dist/` - Compiled renderer UI produced by Vite.
 - `frontend/assets/` - Runtime app icons and logo assets.
-- `resources/codex-bin/win32-x64/codex.exe` - Embedded private Codex CLI used
-  only by Fusion panes.
+- `resources/codex-bin/win32-x64/` - Embedded private Codex CLI payload used
+  only by Fusion panes: `codex.exe`, its code-mode host, package metadata,
+  bundled ripgrep, command runner, and Windows sandbox setup helper.
 - production `node_modules/` dependencies.
 - unpacked `node-pty` native files.
 
@@ -75,6 +76,7 @@ npm run smoke:backend:fusion-appserver:embedded
 npm run smoke:frontend:attention
 npm run smoke:frontend:workspace
 npm run smoke:frontend:session-launch
+npm run smoke:frontend:fusion-settings
 npm run smoke:frontend:tiled-resize
 npm run dist:win -- --publish never
 ```
@@ -95,7 +97,10 @@ After `npm run dist:win -- --publish never`, verify:
 1. `release/vibeTerminal-Setup-<version>.exe` exists.
 2. `release/latest.yml` points at the installer for the same version.
 3. `release/win-unpacked/vibeTerminal.exe` launches.
-4. `release/win-unpacked/resources/codex-bin/win32-x64/codex.exe` exists.
+4. The complete embedded Codex payload exists under
+   `release/win-unpacked/resources/codex-bin/win32-x64/`: `codex.exe`,
+   `codex-code-mode-host.exe`, `codex-package.json`, `codex-path/rg.exe`, and
+   both executables under `codex-resources/`.
 5. A packaged PTY can start PowerShell and run a command.
 6. A packaged Fusion pane does not fall back to the user's global `codex` if the
    embedded binary is removed; it should fail start with a clear Fusion error.
@@ -117,13 +122,23 @@ must include a package version bump, matching README/docs release links, a pushe
 installer plus `latest.yml`. Installed apps discover updates from GitHub Releases
 and `latest.yml`, so pushing code to `main` alone does not update users.
 
-To publish:
+To publish, create the version metadata without npm's automatic commit/tag so
+the package version and public download links can be committed together:
 
 ```powershell
-npm version patch
-git push
-git push origin v<version>
+npm version patch --no-git-tag-version
+$version = node -p "require('./package.json').version"
+# Update README.md and this file's current-release links to v$version.
+git add -A
+git commit -m "Release v$version"
+git tag "v$version"
+git push origin main
+git push origin "v$version"
 ```
+
+Before committing, verify `git status --short` includes the new vendored Codex
+app-server version and removal of the old one; the new version directory is
+untracked during an upgrade and is easy to omit with a path-specific `git add`.
 
 When a `v*` tag is pushed, the workflow runs:
 
@@ -148,6 +163,7 @@ npm run smoke:backend:fusion-appserver:embedded
 npm run smoke:frontend:attention
 npm run smoke:frontend:workspace
 npm run smoke:frontend:session-launch
+npm run smoke:frontend:fusion-settings
 npm run smoke:frontend:tiled-resize
 npm run dist:win -- --publish never
 ```

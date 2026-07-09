@@ -3,9 +3,9 @@
 // Locks the Fusion pane's per-role FAMILY/model/effort selection behavior:
 // each role (planner/executor) picks a family — Claude (claude CLI) or Codex
 // (codex app-server) — then a model, through an Open Fusion-style two-stage
-// picker. Per-family effort enums (codex has NO "max" — verified against the
-// codex 0.142 binary: minimal|low|medium|high|xhigh|ultra), legacy
-// "max"→"xhigh" coercion at every layer, legacy field migration
+// picker. Per-family effort enums stay split; Codex 0.144.0 exposes
+// minimal|low|medium|high|xhigh|max|ultra with per-model support enforced in
+// both the UI and app-server runtimes. Legacy field migration
 // (model/claudeEffort → planner, codexModel/codexEffort → executor), model
 // validation before restart, and the menu-activation semantics.
 //
@@ -41,6 +41,7 @@ new Function("module", "exports", "require", compiled)(
 const {
   buildFusionPicker,
   buildSlashMenu,
+  codexEffortValuesForModel,
   familyMaxEffort,
   normalizeFusionCodexEffort,
   normalizeFusionModel,
@@ -56,14 +57,14 @@ const {
 
 // ---- per-engine effort enums ----
 assert(
-  !CODEX_EFFORT_VALUES.includes("max") &&
+  CODEX_EFFORT_VALUES.includes("max") &&
     CODEX_EFFORT_VALUES.includes("minimal") &&
     CODEX_EFFORT_VALUES.includes("ultra"),
-  "codex effort enum must be codex's own (minimal..ultra, NO 'max' — codex rejects it)"
+  "codex effort enum must be codex's own (minimal..ultra, including max)"
 );
 assert(
   normalizeFusionCodexEffort("max") === "xhigh",
-  "legacy codex effort 'max' must coerce to 'xhigh'"
+  "codex effort 'max' without a known model must conservatively fall back to xhigh"
 );
 assert(
   normalizeFusionCodexEffort(undefined) === "auto",
@@ -74,12 +75,26 @@ assert(
 assert(
   normalizeFusionRoleEffort("claude", "ultra") === "max" &&
     normalizeFusionRoleEffort("claude", "minimal") === "low" &&
-    normalizeFusionRoleEffort("codex", "max") === "xhigh",
-  "efforts must coerce across families at the nearest real level"
+    normalizeFusionRoleEffort("codex", "max", "gpt-5.6-sol") === "max" &&
+    normalizeFusionRoleEffort("codex", "ultra", "gpt-5.6-luna") === "max" &&
+    normalizeFusionRoleEffort("codex", "max", "gpt-5.5") === "xhigh" &&
+    normalizeFusionRoleEffort("codex", "minimal", "gpt-5.5") === "low",
+  "efforts must normalize to the nearest level the selected model supports"
 );
 assert(
-  familyMaxEffort("claude") === "max" && familyMaxEffort("codex") === "xhigh",
-  "the 'max' preset must map to each family's own top level"
+  familyMaxEffort("claude") === "max" &&
+    familyMaxEffort("codex", "gpt-5.6-sol") === "max" &&
+    familyMaxEffort("codex", "gpt-5.5") === "xhigh",
+  "the 'max' preset must map to the highest ordinary level the selected model supports"
+);
+assert(
+  JSON.stringify(codexEffortValuesForModel("gpt-5.6-sol")) ===
+      JSON.stringify(["auto", "low", "medium", "high", "xhigh", "max", "ultra"]) &&
+    JSON.stringify(codexEffortValuesForModel("gpt-5.6-luna")) ===
+      JSON.stringify(["auto", "low", "medium", "high", "xhigh", "max"]) &&
+    JSON.stringify(codexEffortValuesForModel("gpt-5.5")) ===
+      JSON.stringify(["auto", "low", "medium", "high", "xhigh"]),
+  "the curated Codex picker must preserve the live 0.144.0 model/effort matrix"
 );
 
 // ---- model validation ----
@@ -114,7 +129,7 @@ assert(
       migrated.executorModel === "gpt-5.5" &&
       migrated.executorEffort === "xhigh" &&
       migrated.executorFast === false,
-    "legacy settings must migrate to planner(claude)/executor(codex) with per-family effort coercion"
+    "legacy GPT-5.5 + max settings must self-heal to xhigh during migration"
   );
 }
 {
@@ -143,6 +158,7 @@ assert(
 // ---- typed model arguments resolve to a family (or refuse) ----
 assert(
   resolveModelArgument("codex/gpt-5.5")?.family === "codex" &&
+    resolveModelArgument("gpt-5.6-sol")?.family === "codex" &&
     resolveModelArgument("claude/sonnet")?.family === "claude" &&
     resolveModelArgument("opus")?.family === "claude" &&
     resolveModelArgument("gpt-5.5")?.family === "codex" &&
@@ -160,6 +176,19 @@ assert(
       menu.items[0]?.desc.includes("current") &&
       menu.items.some((item) => item.command === "__family:claude"),
     "planner family stage must lead with the current family marked as current"
+  );
+}
+{
+  const menu = buildFusionPicker({ role: "executor", family: "codex" }, "", {
+    executorFamily: "codex",
+    executorModel: "auto"
+  });
+  const commands = menu.items.map((item) => item.command);
+  assert(
+    commands.includes("__model:codex/gpt-5.6-sol") &&
+      commands.includes("__model:codex/gpt-5.6-terra") &&
+      commands.includes("__model:codex/gpt-5.6-luna"),
+    "codex picker must list all three GPT-5.6 models"
   );
 }
 {
@@ -279,25 +308,45 @@ assert(
     plannerFast: false,
     executorFamily: "codex",
     executorModel: "gpt-5.5",
-    executorEffort: "ultra",
+    executorEffort: "max",
     executorFast: false
   };
   const menu = buildSlashMenu("/executor ", context);
   const model = menu.items.find((item) => item.key === "executor-control-model");
-  const effort = menu.items.find((item) => item.command === "/effort execution ultra");
+  const effort = menu.items.find((item) => item.command === "/effort execution xhigh");
   const fastOn = menu.items.find((item) => item.command === "/fast executor on");
   const fastOff = menu.items.find((item) => item.command === "/fast executor off");
   assert(
     menu.title === "Executor (Codex)" &&
       model?.label === "Model — GPT-5.5" &&
       model.command === "/executor-model" &&
-      effort?.label === "Effort — Ultra" &&
+      effort?.label === "Effort — XHigh" &&
       effort.desc.includes("current") &&
       fastOn?.label === "Fast serving — On" &&
       fastOff?.label === "Fast serving — Off" &&
       fastOff.desc.includes("current") &&
-      !menu.items.some((item) => item.label === "Effort — Max"),
-    "/executor submenu must expose the Codex effort enum (Ultra present, Max absent) and current fast-serving controls"
+      !menu.items.some((item) => item.command === "/effort execution max") &&
+      !menu.items.some((item) => item.command === "/effort execution ultra"),
+    "/executor submenu must self-heal GPT-5.5 max to xhigh and hide unsupported levels"
+  );
+}
+{
+  const sol = buildSlashMenu("/executor effort", {
+    executorFamily: "codex",
+    executorModel: "gpt-5.6-sol",
+    executorEffort: "ultra"
+  });
+  const luna = buildSlashMenu("/executor effort", {
+    executorFamily: "codex",
+    executorModel: "gpt-5.6-luna",
+    executorEffort: "ultra"
+  });
+  assert(
+    sol.items.some((item) => item.command === "/effort execution max") &&
+      sol.items.some((item) => item.command === "/effort execution ultra") &&
+      luna.items.some((item) => item.command === "/effort execution max") &&
+      !luna.items.some((item) => item.command === "/effort execution ultra"),
+    "Codex effort menus must follow the selected model's advertised levels"
   );
 }
 {
@@ -307,13 +356,14 @@ assert(
   });
   const executorEffort = buildSlashMenu("/executor effort", {
     executorFamily: "codex",
+    executorModel: "gpt-5.6-sol",
     executorEffort: "ultra"
   });
   assert(
     plannerFast.items.some((item) => item.command === "/fast planner on") &&
       plannerFast.items.some((item) => item.command === "/fast planner off") &&
       executorEffort.items.some((item) => item.command === "/effort execution ultra") &&
-      !executorEffort.items.some((item) => item.command === "/effort execution max"),
+      executorEffort.items.some((item) => item.command === "/effort execution max"),
     "role submenu filtering must keep per-role fast and effort settings reachable by clicking"
   );
 }
@@ -509,21 +559,19 @@ assert(
     pane.includes("liveCatalog: liveModelCatalog"),
   "FusionChatPane must fetch live catalogs and pass them into the shared picker context"
 );
-// All three layers route legacy "max" through per-family coercion.
 assert(
   app.includes("normalizeFusionRoleSettings"),
   "App must normalize Fusion settings through the shared per-role funnel"
 );
 assert(
-  /if \(lower === "max"\) \{\s*\n\s*return "xhigh";/.test(
-    fs.readFileSync(menuSource, "utf8")
-  ),
-  "the menu module must coerce legacy codex effort 'max' to 'xhigh'"
+  fs.readFileSync(menuSource, "utf8").includes('max: "Max"') &&
+    fs.readFileSync(menuSource, "utf8").includes("codexEffortValuesForModel"),
+  "the menu module must expose Codex max only through model-aware effort choices"
 );
 assert(
   adapter.includes("function cleanCodexEffort") &&
-    adapter.includes('=== "max" ? "xhigh"'),
-  "fusion-adapter must self-heal stale fusion-settings.json/env carrying 'max'"
+    adapter.includes("resolveCodexEffortForModel("),
+  "fusion-adapter must guard Codex effort against the selected live model catalog"
 );
 
 // Model validation before restart + speed-preset honesty.
@@ -555,8 +603,8 @@ assert(
   "balanced/deep presets must be effort-only (model-preserving)"
 );
 assert(
-  pane.includes("familyMaxEffort(executorFamily)"),
-  "the top execution level must come from the executor family's own enum (xhigh for codex), never codex 'max'"
+  pane.includes("familyMaxEffort(executorFamily, executorModel, liveModelCatalog)"),
+  "the top execution level must come from the selected model's supported efforts"
 );
 assert(
   !pane.includes('applySpeedPreset("harness", "fast")') &&

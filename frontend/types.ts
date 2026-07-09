@@ -26,9 +26,8 @@ export type FusionClaudeModel = string;
 export type FusionCodexModel = string;
 
 // Claude-side effort: the exact `claude --effort` enum plus "auto" (= omit the
-// flag). Codex speaks a DIFFERENT enum — verified against the codex 0.142
-// binary: minimal|low|medium|high|xhigh|ultra, with NO "max". Sharing one type
-// let the UI offer Codex a "max" it rejects, which broke every delegation.
+// flag). Codex speaks a different family union and each model supports a
+// subset; the picker and both runtimes narrow this type against model/list.
 export type FusionEffort = "auto" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export type FusionCodexEffort =
@@ -38,6 +37,7 @@ export type FusionCodexEffort =
   | "medium"
   | "high"
   | "xhigh"
+  | "max"
   | "ultra";
 
 export type FusionRunMode = "auto" | "plan";

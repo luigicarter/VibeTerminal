@@ -54,10 +54,14 @@
 > `frontend/components/fusionSlashMenu.ts` (extracted so the smoke executes
 > real behavior). Curated model catalogs (Claude: Opus 4.8 / Sonnet 4.5 /
 > fable aliases + validated `claude-*` ids; Codex: ids read from the shipped
-> 0.142 binary + custom escape hatch); **per-engine effort enums** — planning
-> uses the `claude --effort` enum (low..max), execution uses codex's own
-> (minimal..ultra — codex has NO "max"; legacy "max" coerces to "xhigh" at
-> every layer). The claude effort NEVER backfills the codex effort (main's old
+> 0.144.0 binary + custom escape hatch: GPT-5.6 Sol, Terra, Luna, then older
+> GPT-5.x options); **per-engine effort enums** — planning uses the
+> `claude --effort` enum (low..max), execution uses Codex's own
+> minimal/low/medium/high/xhigh/max/ultra enum, with per-model support varying.
+> The picker filters those levels for the selected live model, and both Codex
+> app-server runtimes enforce the same catalog before every turn (for example,
+> GPT-5.5 max falls back to xhigh and GPT-5.6 Luna ultra falls back to max).
+> The claude effort NEVER backfills the codex effort (main's old
 > `payload.codexEffort ?? payload.effort` fallback silently ran every
 > delegation at the claude level while the UI said "Execution Auto").
 > The picker also merges live available models per family under the curated
@@ -273,9 +277,9 @@ still-running tool rows as aborted and closing the turn with a
 "▣ Fusion · model · interrupted" line — so the session stays up for the next
 message. Restart/Close remain the hard kill (`fusion-chat:stop` → `killChild`).
 
-## Key finding: Codex 0.142.3 ships the app-server stack natively
+## Key finding: Codex 0.144.0 ships the app-server stack natively
 
-A scan of the installed `codex-cli 0.142.3` (see the verified-facts memo) collapses
+A scan of the installed `codex-cli 0.144.0` (see the verified-facts memo) collapses
 the build. We do **not** write a server, transport, auth, or protocol types:
 
 | We assumed we'd build | Codex provides |
@@ -408,7 +412,7 @@ for later unrelated work, and only auto-syncs the native goal to `complete` afte
 a true done verifier verdict. It does not auto-reactivate Codex-managed
 `blocked`, `usageLimited`, or `budgetLimited` states.
 
-Codex subagents are different from goals. In Codex 0.142.3 the native goal API is
+Codex subagents are different from goals. In Codex 0.144.0 the native goal API is
 an app-server client RPC, but multi-agent/subagent control is primarily exposed
 as tools inside Codex turns, and Fusion currently rejects generic dynamic
 `item/tool/call` requests from the embedded app-server. Fusion therefore does not
