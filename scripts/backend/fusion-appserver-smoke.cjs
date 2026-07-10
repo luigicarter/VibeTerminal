@@ -18,6 +18,7 @@ const path = require("path");
 const isWin = process.platform === "win32";
 const REQUEST_ID = 1;
 const TIMEOUT_MS = 20000;
+const VERSION_PROBE_TIMEOUT_MS = 60_000;
 const requireEmbedded =
   process.argv.includes("--require-embedded") || process.env.VIBE_REQUIRE_EMBEDDED_CODEX === "1";
 
@@ -58,7 +59,7 @@ function readCodexVersion(binary) {
   try {
     const output = execFileSync(binary, ["--version"], {
       encoding: "utf8",
-      timeout: 10000
+      timeout: VERSION_PROBE_TIMEOUT_MS
     });
     const match = output.match(/(\d+\.\d+\.\d+)/);
     return match ? match[1] : null;

@@ -17,6 +17,11 @@ const path = require("path");
 const isWin = process.platform === "win32";
 const exeName = isWin ? "codex.exe" : "codex";
 const MIN_NATIVE_BYTES = 50 * 1024 * 1024; // the real Rust binary, not the JS shim
+// Cold GitHub-hosted Windows runners can spend more than 10 seconds starting
+// the 300+ MB executable on its first invocation (for example, while Defender
+// scans it). Keep the release version gate strict without treating that cold
+// start as an unreadable binary.
+const VERSION_PROBE_TIMEOUT_MS = 60_000;
 const rootDir = path.join(__dirname, "..", "..");
 const outDir = path.join(rootDir, "vendor", "codex-bin", `${process.platform}-${process.arch}`);
 const dest = path.join(outDir, exeName);
@@ -163,7 +168,7 @@ function readCodexVersion(binary) {
   try {
     const output = execFileSync(binary, ["--version"], {
       encoding: "utf8",
-      timeout: 10000
+      timeout: VERSION_PROBE_TIMEOUT_MS
     });
     const match = output.match(/(\d+\.\d+\.\d+)/);
     return match ? match[1] : null;
