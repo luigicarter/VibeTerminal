@@ -513,6 +513,14 @@ function createCodexBrainSession(options) {
       developerInstructions: developerInstructions || undefined,
       config: {
         ...bridgeConfigFromMcpFile(mcpConfigPath),
+        // The planner orchestrates only through the Fusion adapter. Disable
+        // Codex-native goal continuation and nested agent trees here too.
+        "features.goals": false,
+        "features.multi_agent": false,
+        "features.multi_agent_v2": false,
+        "features.enable_fanout": false,
+        "features.multi_agent_v2.max_concurrent_threads_per_session": 1,
+        "agents.max_threads": 1,
         "features.fast_mode": true
       }
     };

@@ -3,8 +3,8 @@
 // Validates that the Codex `app-server` JSON-RPC protocol that Terminal Fusion
 // drives (see docs/fusion-terminal.md) still speaks the handshake we build
 // against. It spawns `codex app-server` (stdio transport), validates the
-// initialize response, then exercises native thread goals without a model turn,
-// auth, or network. If the bundled/pinned Codex bumps to a version whose
+// initialize response, then proves Fusion's single-worker feature overrides are
+// accepted without a model turn, auth, or network. If the bundled/pinned Codex bumps to a version whose
 // protocol drifts, this fails CI instead of users.
 //
 // Skips cleanly when codex is not installed (dev machines without it; Fusion
@@ -195,13 +195,13 @@ async function withAppServer(env, run) {
   }
 }
 
-async function smokeGoalProtocol() {
-  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-goal-home-"));
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-goal-cwd-"));
+async function smokeSingleWorkerConfig() {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-worker-home-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-worker-cwd-"));
   try {
     await withAppServer({ CODEX_HOME: codexHome }, async ({ rpc }) => {
       await rpc("initialize", {
-        clientInfo: { name: "vibeTerminal-fusion-goal-smoke", version: "0.0.0" },
+        clientInfo: { name: "vibeTerminal-fusion-worker-smoke", version: "0.0.0" },
         capabilities: { experimentalApi: true }
       });
       const start = await rpc("thread/start", {
@@ -209,29 +209,18 @@ async function smokeGoalProtocol() {
         sandbox: "workspace-write",
         approvalPolicy: "on-request",
         approvalsReviewer: "user",
-        config: { "features.goals": true }
+        config: {
+          "features.goals": false,
+          "features.multi_agent": false,
+          "features.multi_agent_v2": false,
+          "features.enable_fanout": false,
+          "features.multi_agent_v2.max_concurrent_threads_per_session": 1,
+          "agents.max_threads": 1,
+          "features.fast_mode": true
+        }
       });
       const threadId = start && start.thread && start.thread.id;
       assert(threadId, `thread/start returned no thread id: ${JSON.stringify(start)}`);
-
-      const set = await rpc("thread/goal/set", {
-        threadId,
-        objective: "verify Fusion native goal protocol",
-        status: "active"
-      });
-      assert(
-        set && set.goal && set.goal.objective === "verify Fusion native goal protocol",
-        `thread/goal/set returned unexpected result: ${JSON.stringify(set)}`
-      );
-
-      const get = await rpc("thread/goal/get", { threadId });
-      assert(
-        get && get.goal && get.goal.status === "active",
-        `thread/goal/get returned unexpected result: ${JSON.stringify(get)}`
-      );
-
-      const clear = await rpc("thread/goal/clear", { threadId });
-      assert(clear && clear.cleared === true, `thread/goal/clear failed: ${JSON.stringify(clear)}`);
     });
   } finally {
     try {
@@ -360,9 +349,9 @@ async function main() {
     `initialize response missing a result object: ${JSON.stringify(result)}`
   );
 
-  await smokeGoalProtocol();
+  await smokeSingleWorkerConfig();
 
-  console.log("PASS fusion-appserver-smoke: app-server initialize and goal protocol OK.");
+  console.log("PASS fusion-appserver-smoke: app-server initialize and single-worker config OK.");
 }
 
 main().catch((error) => {

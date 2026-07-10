@@ -85,10 +85,11 @@ You ──▶ Claude Opus/Sonnet 5 (headless `claude`, read + UI-write tools, Ba
    `goalReached:false, nextAction:"continue"`. The system prompt instructs Opus
    to continue/redelegate until the verdict says done.
 
-5. **Goals as long-horizon state** — `codex_goal_*`. Codex's native per-thread
-   goal tracks the standing objective; the adapter auto-creates a fallback goal
-   and syncs `complete` only after a true done verdict (it never overwrites
-   Codex-managed `blocked`/`usageLimited`/`budgetLimited`).
+5. **Passive objective as long-horizon state** — `codex_goal_*`. The adapter,
+   not Codex native Goal mode, tracks the standing objective; it auto-creates a
+   fallback record and syncs `complete` only after a true done verdict (it never
+   overwrites `blocked`/`usageLimited`/`budgetLimited`). This avoids automatic
+   idle continuation competing with Claude's orchestration.
 
 6. **Control plane** — `startControlServer` (`/steer`, `/interrupt`, `/stop`,
    `127.0.0.1`, session-id-scoped) plus the host's `interrupt`/`steer`/`stop`.
@@ -174,8 +175,8 @@ injected/returned block must be **hard-capped**.
 | B2 | **Optional `context` arg on `codex_implement`** for Opus's architectural intent + read-findings; delete the "Codex does not share your context" caveat once B1/B3 make it false. | `fusion-adapter.cjs` (TOOLS schema, `codexImplement`), `agentTelemetry.cjs` prompt | **M** | Opus passes context as data; still read-only. |
 | B3 | **Host-driven shared-context push** — the host owns the merged transcript and sees every Opus Read/Grep/Glob; accumulate a digest (intent + files inspected) and POST it to the adapter via a new awaited `/context` control endpoint (reuse the `/steer` transport, **not** the best-effort 1s POST). | `fusionChatHost.cjs`, `main.cjs`, `agentTelemetry.cjs`, `fusion-adapter.cjs` `startControlServer` | **M** | Closes the file-read seam automatically. |
 | B4 | **Return Codex's real work product** (size-capped diffs + command exits) to Opus, not just file paths, so review is grounded in what actually happened. Render as an expandable diff behind Details. | `fusion-adapter.cjs` (`accumulate`, `completedTurnResult`), `FusionChatPane.tsx` | **M** | Cap diff bytes; redact secrets. |
-| B5 | **Unify resume** — persist the Codex `threadId` + goal and rejoin via `thread/resume` (a verified app-server method) instead of always `thread/start`. The *deepest* memory seam. | `fusion-adapter.cjs` `ensureThread`, `main.cjs` persist, `agentTelemetry.cjs` env, `fusionChatHost.cjs` | **L** | Must degrade to a fresh thread with a visible "context reset" note on failure — never silent half-memory. Persist via `AgentThreadRef`/`AgentSession` in `types.ts` (like the Claude `resumeId`), not an in-memory map. |
-| B6 | **Reframe the goal store as one shared working memory** in copy (tool descriptions + prompt) — it already *is* the single source of truth; only the "Codex's native goal" vocabulary leaks. | `fusion-adapter.cjs` goal tool descriptions, `agentTelemetry.cjs` prompt | **S** | Pure wording. |
+| B5 | **Unify resume** — persist the Codex `threadId` + passive objective and rejoin via `thread/resume` (a verified app-server method) instead of always `thread/start`. The *deepest* memory seam. | `fusion-adapter.cjs` `ensureThread`, `main.cjs` persist, `agentTelemetry.cjs` env, `fusionChatHost.cjs` | **L** | Must degrade to a fresh thread with a visible "context reset" note on failure — never silent half-memory. Persist via `AgentThreadRef`/`AgentSession` in `types.ts` (like the Claude `resumeId`), not an in-memory map. |
+| B6 | **Keep the objective store passive and shared** — implemented 2026-07-10: `codex_goal_*` is adapter-owned state and never calls native `thread/goal/*`. | `fusion-adapter.cjs` goal tool descriptions, `agentTelemetry.cjs` prompt | **S** | Prevents hidden idle continuation while preserving Claude's long-horizon record. |
 | B7 | **(Optional, guarded) internal verify→fix loop** — auto-retry mechanical `bugsFound` fixes inside the adapter (low cap) so the most common round-trip disappears; bubble re-scopes / `ask_human` to Opus. | `fusion-adapter.cjs` `codexImplement` | **M** | See cost-loop warning in §5. |
 
 ---
@@ -203,10 +204,9 @@ injected/returned block must be **hard-capped**.
    closed safelist with vetted arguments and explicit reject rules, or keep the
    request parked for Opus/human review.
 
-3. **(Loop cost, B7)** The internal verify→fix loop relies on
-   `currentGoal.tokenBudget` as a backstop, but `tokensUsed` is **stale** (only
-   refreshed via `thread/goal/updated`), so the budget check is decorative — the
-   **iteration cap is the only real guard**. Keep it low and short-circuit on
+3. **(Loop cost, B7)** The internal verify→fix loop cannot rely on the passive
+   objective's `tokenBudget`: it is planning metadata, not a native accounting
+   backstop. The **iteration cap is the only real guard**. Keep it low and short-circuit on
    `status!=='completed'` (a parked approval mid-loop has no verdict).
 
 ---

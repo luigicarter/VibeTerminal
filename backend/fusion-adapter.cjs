@@ -4,7 +4,7 @@
 //   Opus  ──stdio MCP──▶  this adapter  ──stdio JSON-RPC──▶  codex app-server (child)
 //
 // North side: a hand-rolled MCP stdio server exposing tools to Opus:
-//   - codex_goal_set/get/clear: use Codex's native per-thread goal store.
+//   - codex_goal_set/get/clear: keep passive Fusion-owned objective state.
 //   - codex_implement(task): run a Codex turn; returns {status:"completed",...}
 //     OR {status:"needs_decision", pendingId, ...} OR {status:"failed",...}.
 //   - codex_watch_build(command): launch a host-supervised detached build.
@@ -93,6 +93,21 @@ const PARKED_REQUEST_METHODS = new Set([
 const CONTROL_MAX_BYTES = 16 * 1024;
 const VERDICT_MARKER = "FUSION_VERDICT_JSON:";
 const NEXT_ACTIONS = new Set(["continue", "ask_human", "done"]);
+const CODEX_WORKER_FEATURE_CONFIG = Object.freeze({
+  // Fusion's planner owns continuation and orchestration. Native Codex goals
+  // auto-start turns while idle, and native multi-agent tools can create a
+  // second, hidden orchestration tree inside one explicit Fusion delegation.
+  "features.goals": false,
+  "features.multi_agent": false,
+  "features.multi_agent_v2": false,
+  "features.enable_fanout": false,
+  // Current model-catalog metadata can select a multi-agent generation even
+  // when its feature flag is false. These limits close that catalog-selected
+  // path too: V2 counts the root in the per-session value (1 => zero children),
+  // while V1 is minimized and the prompt contract forbids the remaining slot.
+  "features.multi_agent_v2.max_concurrent_threads_per_session": 1,
+  "agents.max_threads": 1
+});
 const GOAL_STATUSES = new Set([
   "active",
   "paused",
@@ -215,6 +230,7 @@ function buildCodexVerifierTask(task) {
     "## Fusion verifier contract",
     "You are the Codex executor inside Terminal Fusion. You implement, run tests, debug, and verify whether the user's goal is actually reached.",
     "Claude/Opus may provide strategy, constraints, UI intent, debugging direction, and follow-up corrections; follow that guidance while still independently checking the result.",
+    "Work as the single Codex worker assigned by Fusion. Do not spawn, delegate to, or manage subagents; the Claude planner owns orchestration, and the Fusion adapter creates any explicit scout or workstream fan-out.",
     "Earlier turns in this thread may have been authored by a different engine or model - the user can switch families mid-thread. Judge the code and evidence in front of you, not the apparent authorship, and do not infer your own capabilities from a prior turn's byline.",
     "Within Fusion, picture/image generation and browser navigation/control/automation are Codex-owned execution work. Perform those delegated operations here and verify the resulting image or browser state.",
     "When the delegated outcome is visual - UI layout or styling, rendered pages, generated images, charts, terminal UI - do not verify it by code reading and tests alone: run or render the artifact (dev server, headless browser, the app's remote-debugging port, or the project's own preview/screenshot tooling), capture the actual visual state to an image file, VIEW that image with your image-viewing tool, and judge what you see against the intent. Name the screenshot/image path and what you observed in your summary. If you genuinely cannot render or view it in this environment, say so plainly, record it in `missingRequirements`, and set `goalReached:false` rather than passing off a code-read as a visual check; never describe an image you did not actually view.",
@@ -244,6 +260,7 @@ function buildCodexInvestigationTask(task) {
     "",
     "## Fusion investigation contract",
     "You are the Codex executor doing a read-only scouting pass for Terminal Fusion.",
+    "Work as the single scout assigned by Fusion. Do not spawn, delegate to, or manage subagents; the Claude planner owns orchestration and explicit fan-out.",
     "Gather the repo context Claude needs for architecture, UI/design decisions, or implementation planning.",
     "Prefer fast file discovery, targeted reads, and concise summaries over broad narration.",
     "Do not edit files, install packages, launch apps, or make irreversible changes.",
@@ -302,24 +319,6 @@ function shouldReplaceGoalForTask(goal) {
 
 function shouldAutoSyncGoalStatus(goal, status) {
   return Boolean(goal && status && !PRESERVED_GOAL_STATUSES.has(goal.status));
-}
-
-function goalsUnavailableResult(error) {
-  goalFeatureAvailable = false;
-  return {
-    status: "failed",
-    goalFeatureAvailable: false,
-    error: error && error.message ? error.message : String(error || "Codex goals unavailable")
-  };
-}
-
-function goalsSkippedResult(reason, goal = currentGoal) {
-  return {
-    status: "skipped",
-    goalFeatureAvailable,
-    reason,
-    goal
-  };
 }
 
 function logErr(message) {
@@ -628,8 +627,6 @@ function resetCodexThreadForModelChange(nextModel) {
   if (!threadId || nextModel === activeThreadModel) return false;
   threadId = null;
   threadReady = null;
-  currentGoal = null;
-  goalFeatureAvailable = null;
   activeThreadModel = null;
   activeThreadResolvedModel = null;
   relay({ role: "codex", kind: "activity", text: "execution model updated; starting a fresh Codex thread" });
@@ -721,7 +718,6 @@ let turnFiles = [];
 let completedItemIds = new Set();
 let agentMessageDeltas = new Map();
 let currentGoal = null;
-let goalFeatureAvailable = null;
 let controlServer = null;
 // ---- parallel fan-out state (batched scouts / executor workstreams) ----
 // A batched codex_investigate/codex_implement call runs 2-4 concurrent turns
@@ -740,7 +736,7 @@ let activeFanoutRun = null; // {aborted} - abort skips finalize's aggregate reso
 // the settle is relayed to the host as fusion.background-task telemetry — the
 // host wakes the planner with the report as a NEW turn. Background workers
 // never touch currentTurn/fanoutActive, never park decisions, and never sync
-// the native goal.
+// the passive Fusion objective record.
 const BACKGROUND_MAX_TASKS = 4;
 const backgroundWorkers = new Map(); // routeKey (codex worker threadId | claude synthetic id) -> worker
 const settledBackgroundTasks = []; // most-recent first; capped in finalizeBackgroundWorker
@@ -1337,8 +1333,6 @@ function resetCodexProcessState(options = {}) {
   abortFanoutWorkers("Fusion execution process was reset.");
   abortBackgroundWorkers("Fusion execution process was reset.", { engines: "codex" });
   clearSteerRoutingState();
-  currentGoal = null;
-  goalFeatureAvailable = null;
 }
 
 function resetHarness(reason = "Fusion stopped.") {
@@ -1556,8 +1550,6 @@ function failAll(error) {
   activeTurnId = null;
   activeTurnKind = null;
   latchedTurnResult = null;
-  currentGoal = null;
-  goalFeatureAvailable = null;
   resolveTurn({ status: "failed", error: message });
 }
 
@@ -1597,7 +1589,7 @@ function writeClaudeExecutorSettingsFile(fast) {
 
 // Engine selection is per delegation (the settings file is re-read every
 // call), but NEVER mid-turn: a live settings flip applies to the NEXT
-// delegation, otherwise a goal-sync inside the running turn would tear down
+// delegation, otherwise an objective-state sync inside the running turn would tear down
 // the engine that is executing it.
 function ensureExecutorFamily(family) {
   if (activeExecutorFamily === family) return activeExecutorFamily;
@@ -1614,9 +1606,7 @@ function ensureExecutorFamily(family) {
     threadReady = null;
     activeThreadModel = null;
     activeThreadResolvedModel = null;
-    goalFeatureAvailable = null;
   }
-  currentGoal = null;
   relay({
     role: "codex",
     kind: "activity",
@@ -1949,11 +1939,11 @@ async function claudeExecutorTurn(task, settings, kind) {
   return withGoal;
 }
 
-// Local goal store for the claude executor: claude has no native per-thread
-// goal RPC, so the adapter keeps the SAME normalized goal shape locally and
-// the north-side contract (codex_goal_* results, ensureGoalForTask,
-// syncGoalAfterTurn) works unchanged.
-function claudeGoalSet(options = {}) {
+// Passive Fusion-owned objective store shared by both executor families. This
+// deliberately never calls Codex's native thread/goal RPC: an active native
+// goal automatically starts idle continuation turns, while Claude must remain
+// the sole owner of continuation and orchestration in Fusion.
+function fusionGoalSet(options = {}) {
   const objective = truncateGoalObjective(options.objective);
   const hasTokenBudget = options.tokenBudget != null && options.tokenBudget !== "";
   if (!objective && options.status == null && !hasTokenBudget) {
@@ -1968,9 +1958,8 @@ function claudeGoalSet(options = {}) {
       tokenBudget = Math.floor(numeric);
     }
   }
-  goalFeatureAvailable = true;
   currentGoal = normalizeGoal({
-    threadId: "claude-executor",
+    threadId: "fusion-executor",
     objective: objective || (base ? base.objective : ""),
     status:
       options.status != null ? normalizeGoalStatus(options.status) : base ? base.status : "active",
@@ -1983,13 +1972,11 @@ function claudeGoalSet(options = {}) {
   return { status: "ok", goal: currentGoal };
 }
 
-function claudeGoalGet() {
-  goalFeatureAvailable = true;
+function fusionGoalGet() {
   return { status: "ok", goal: currentGoal };
 }
 
-function claudeGoalClear() {
-  goalFeatureAvailable = true;
+function fusionGoalClear() {
   const cleared = Boolean(currentGoal);
   currentGoal = null;
   return { status: "ok", cleared };
@@ -2201,13 +2188,10 @@ function resolveCompletedTurn(turn) {
     return;
   }
   if (activeTurnId && turnId && activeTurnId !== turnId) {
-    // Main-thread completions are authoritative even on an id mismatch:
-    // turn/start on an already-busy thread (the native goal turn) returns a
-    // SUBMISSION id that never becomes a turn, and dropping the real
-    // TurnCompleted here stranded the waiter until the idle/hard timers fired
-    // a false "exceeded the maximum duration" failure. Child-thread traffic
-    // never reaches this handler (thread routing in handleNotification), so
-    // log the mismatch and resolve anyway.
+    // Main-thread completions are authoritative even on an id mismatch. The
+    // turn/start response carries a submission id while turn notifications
+    // carry the actual turn id; child-thread traffic never reaches this
+    // handler (thread routing in handleNotification), so resolve anyway.
     logErr(`turn/completed id mismatch (active ${activeTurnId}, completed ${turnId}); resolving anyway`);
   }
   if (!currentTurn && !activeTurnId && parked.size === 0) {
@@ -2244,10 +2228,8 @@ function handleTurnStartResponse(response, requestedTurn = null) {
     return;
   }
   // The response's turn id is the SUBMISSION id (turn_processor returns it as
-  // turn_id). When the thread was already running a turn — the native goal
-  // turn started by thread/goal/set — the submission is absorbed into that
-  // turn and its id never becomes a real turn. A turn/started notification is
-  // authoritative; never let the response overwrite an id one already set.
+  // turn_id). A turn/started notification is authoritative; never let the
+  // response overwrite an id one already set.
   if (nextTurnId && !activeTurnId) {
     activeTurnId = nextTurnId;
   }
@@ -2385,16 +2367,6 @@ function handleNotification(msg) {
   }
   if (isStrongCodexProgressNotification(method, params)) {
     refreshTurnHardTimer(method);
-  }
-  if (method === "thread/goal/updated" && params.goal) {
-    goalFeatureAvailable = true;
-    currentGoal = normalizeGoal(params.goal);
-    return;
-  }
-  if (method === "thread/goal/cleared") {
-    goalFeatureAvailable = true;
-    currentGoal = null;
-    return;
   }
   if (method === "turn/started") {
     const nextTurnId = extractTurnId(params);
@@ -3570,7 +3542,10 @@ async function startFanoutThread(kind, settings) {
     approvalPolicy: "never",
     // Executor workstreams get the same workspace MCP surface as the main
     // executor thread; scouts stay minimal (no goals, no MCP injection).
-    config: kind === "implement" ? { ...workspaceMcpConfigOverrides(CWD) } : {}
+    config: {
+      ...CODEX_WORKER_FEATURE_CONFIG,
+      ...(kind === "implement" ? workspaceMcpConfigOverrides(CWD) : {})
+    }
   };
   applyCodexModelSetting(params, settings);
   await applyCodexFastTier(params, settings);
@@ -4342,7 +4317,7 @@ async function ensureThread() {
         sandbox: "danger-full-access",
         approvalPolicy: "never",
         config: {
-          "features.goals": true,
+          ...CODEX_WORKER_FEATURE_CONFIG,
           "features.fast_mode": true,
           ...workspaceMcpConfigOverrides(CWD)
         }
@@ -4368,8 +4343,6 @@ async function ensureThread() {
     if (readyThreadId && latestModel !== activeThreadModel) {
       threadId = null;
       threadReady = null;
-      currentGoal = null;
-      goalFeatureAvailable = null;
       activeThreadModel = null;
       activeThreadResolvedModel = null;
       return ensureThread();
@@ -4428,68 +4401,15 @@ function awaitTurn(kind = "implement") {
 }
 
 async function codexGoalSet(options = {}) {
-  const family = ensureExecutorFamily(readCodexSettings().family);
-  if (family === "claude") {
-    return claudeGoalSet(options);
-  }
-  await ensureThread();
-  const params = { threadId };
-  const objective = truncateGoalObjective(options.objective);
-  if (objective) params.objective = objective;
-  if (options.status != null) params.status = normalizeGoalStatus(options.status);
-  if (options.tokenBudget != null && options.tokenBudget !== "") {
-    const tokenBudget = Number(options.tokenBudget);
-    if (Number.isFinite(tokenBudget) && tokenBudget > 0) {
-      params.tokenBudget = Math.floor(tokenBudget);
-    }
-  }
-  if (!params.objective && params.status == null && params.tokenBudget == null) {
-    return {
-      status: "error",
-      error: "objective, status, or tokenBudget is required"
-    };
-  }
-
-  try {
-    const response = await rpc("thread/goal/set", params);
-    goalFeatureAvailable = true;
-    currentGoal = normalizeGoal(response && response.goal);
-    return { status: "ok", goal: currentGoal };
-  } catch (error) {
-    return goalsUnavailableResult(error);
-  }
+  return fusionGoalSet(options);
 }
 
 async function codexGoalGet() {
-  const family = ensureExecutorFamily(readCodexSettings().family);
-  if (family === "claude") {
-    return claudeGoalGet();
-  }
-  await ensureThread();
-  try {
-    const response = await rpc("thread/goal/get", { threadId });
-    goalFeatureAvailable = true;
-    currentGoal = normalizeGoal(response && response.goal);
-    return { status: "ok", goal: currentGoal };
-  } catch (error) {
-    return goalsUnavailableResult(error);
-  }
+  return fusionGoalGet();
 }
 
 async function codexGoalClear() {
-  const family = ensureExecutorFamily(readCodexSettings().family);
-  if (family === "claude") {
-    return claudeGoalClear();
-  }
-  await ensureThread();
-  try {
-    const response = await rpc("thread/goal/clear", { threadId });
-    goalFeatureAvailable = true;
-    currentGoal = null;
-    return { status: "ok", cleared: Boolean(response && response.cleared) };
-  } catch (error) {
-    return goalsUnavailableResult(error);
-  }
+  return fusionGoalClear();
 }
 
 async function codexWatchBuild(command, cwd) {
@@ -4556,7 +4476,7 @@ async function codexWatchBuild(command, cwd) {
 
 // Orchestrator-reachable escape hatch for a wedged turn: clears local turn state
 // so the next codex_implement starts fresh, without restarting the pane. The
-// Codex thread and native goal stay alive. Unlike resetHarness (host-only, kills
+// Codex thread and passive objective record stay alive. Unlike resetHarness (host-only, kills
 // the child), this keeps the bridge warm and never blocks on the child.
 function codexCancel(taskId) {
   // With a taskId this is a scoped background-task cancel: the foreground
@@ -4786,7 +4706,7 @@ async function codexImplement(taskValue, tasksValue, backgroundValue) {
   if (tasks) {
     runCodexFanout("implement", tasks);
     const result = await done;
-    // A fan-out never auto-syncs the native goal (parallel workstreams are
+    // A fan-out never auto-syncs the passive objective (parallel workstreams are
     // mid-plan milestones by contract); attach the goal state for review only.
     const withGoal = currentGoal ? { ...result, goal: currentGoal } : result;
     if (goalSetup.status === "failed" && withGoal.status === "completed") {
@@ -4991,14 +4911,14 @@ const TOOLS = [
   {
     name: "codex_goal_set",
     description:
-      "Create or update the native Codex per-thread goal for this Fusion pane. Use this at the start of substantial work so Codex tracks the user's top-level objective, usage, and status. Status may be active, paused, blocked, usageLimited, budgetLimited, or complete. Returns {status:'ok', goal} or {status:'failed', goalFeatureAvailable:false, error}.",
+      "Create or update the passive Fusion objective record for this pane. Use it at the start of substantial work so Claude can track the user's top-level objective and status across explicit Codex delegations. This does NOT activate Codex native Goal mode or start executor turns. Status may be active, paused, blocked, usageLimited, budgetLimited, or complete. Returns {status:'ok', goal}.",
     inputSchema: {
       type: "object",
       properties: {
         objective: {
           type: "string",
           description:
-            "Top-level user objective or updated objective. Keep it concise; Codex enforces a 4000-character limit."
+            "Top-level user objective or updated objective. Keep it concise; Fusion enforces a 4000-character limit."
         },
         status: {
           type: "string",
@@ -5006,7 +4926,7 @@ const TOOLS = [
         },
         tokenBudget: {
           type: "number",
-          description: "Optional native Codex token budget for the goal."
+          description: "Optional planning budget stored with the passive objective record; it does not enable native Codex Goal mode."
         }
       }
     }
@@ -5014,7 +4934,7 @@ const TOOLS = [
   {
     name: "codex_goal_get",
     description:
-      "Read the native Codex per-thread goal for this Fusion pane. Use it before deciding whether to continue, pause, or finish a long-running request. Returns {status:'ok', goal:null|ThreadGoal} or a failed goalFeatureAvailable:false result.",
+      "Read the passive Fusion objective record for this pane. Use it before deciding whether to continue, pause, or finish a long-running request. Reading it never starts or continues a Codex turn. Returns {status:'ok', goal:null|ThreadGoal}.",
     inputSchema: {
       type: "object",
       properties: {}
@@ -5023,7 +4943,7 @@ const TOOLS = [
   {
     name: "codex_goal_clear",
     description:
-      "Clear the native Codex per-thread goal for this Fusion pane after the human explicitly abandons the objective or starts a separate unrelated objective.",
+      "Clear the passive Fusion objective record after the human explicitly abandons the objective or starts a separate unrelated objective.",
     inputSchema: {
       type: "object",
       properties: {}
@@ -5032,7 +4952,7 @@ const TOOLS = [
   {
     name: "codex_investigate",
     description:
-      "Ask the embedded Codex executor to do a read-only scouting pass: file discovery, targeted reads, repo navigation, dependency tracing, or concise context gathering for Claude. Use this to feed Claude findings/files/snippets before Claude does architecture or UI design thinking. Does not create or sync native goals and does not use the implementation verifier contract. Pass `task` for one scout. When the context you need spans 2-4 DISJOINT areas, pass `tasks` instead (2-4 self-contained scouting questions) to run parallel read-only scouts concurrently; the result returns per-scout sections plus a combined findings/files view. Returns {status:'completed', findings, files, scouts?} or {status:'failed', error}.",
+      "Ask the embedded Codex executor to do a read-only scouting pass: file discovery, targeted reads, repo navigation, dependency tracing, or concise context gathering for Claude. Use this to feed Claude findings/files/snippets before Claude does architecture or UI design thinking. Does not create or sync the passive objective record and does not use the implementation verifier contract. Pass `task` for one scout. When the context you need spans 2-4 DISJOINT areas, pass `tasks` instead (2-4 self-contained questions) so CLAUDE explicitly runs parallel read-only scouts; each Codex worker handles one task and cannot create nested agents. Returns {status:'completed', findings, files, scouts?} or {status:'failed', error}.",
     inputSchema: {
       type: "object",
       properties: {
@@ -5058,7 +4978,7 @@ const TOOLS = [
   {
     name: "codex_implement",
     description:
-      "Delegate implementation, testing, compile/runtime fixing, refactors, repo navigation, picture/image generation, browser navigation/control/automation, bug review, or goal-completion verification to the embedded Codex executor. In Fusion Plan mode this tool refuses execution until the pane is switched back to Auto. The Claude planner drives architecture, strategy, UX/UI build-out when appropriate, human-facing orchestration, and guidance for Codex on constraints, UI intent, debugging direction, and follow-up corrections. Codex follows that guidance while independently verifying bugs and goal completion. Use codex_goal_set first for substantial top-level work; codex_implement will create a fallback native Codex goal if none exists and will sync goal status from the verifier verdict. Returns one of: {status:'completed', summary, files, goalReached, bugsFound, missingRequirements, nextAction, verifierVerdict, goal}; {status:'needs_decision', pendingId, kind, detail} - answer it with codex_respond; {status:'steer_routing', userSteer, executorProgress, guidance, nextAction:'steer_resolve'} - answer it with codex_steer_resolve; or {status:'failed', error}. If goalReached is false or nextAction is 'continue', continue/redelegate unless the human or an explicit Opus override says otherwise. Pass `task` for one delegation; pass `tasks` (2-4 entries) ONLY for verified-disjoint parallel workstreams after the mandatory parallel-safety check - the combined result adds workers[] (per-workstream verdicts) and fileConflicts, and never auto-completes the native goal.",
+      "Delegate implementation, testing, compile/runtime fixing, refactors, repo navigation, picture/image generation, browser navigation/control/automation, bug review, or goal-completion verification to the embedded Codex executor. In Fusion Plan mode this tool refuses execution until this pane returns to Auto. Claude owns architecture, strategy, human-facing orchestration, and every decision to continue, correct, or fan out. Each Codex worker behaves like normal Codex inside ONE assigned scope - inspect, edit, test, debug, and verify - then returns and stops; native Codex Goal continuation and nested Codex agents are disabled. Use codex_goal_set first for substantial work; codex_implement creates a passive fallback objective if needed and syncs it from the verifier verdict. Returns one of: {status:'completed', summary, files, goalReached, bugsFound, missingRequirements, nextAction, verifierVerdict, goal}; {status:'needs_decision', pendingId, kind, detail}; {status:'steer_routing', userSteer, executorProgress, guidance, nextAction:'steer_resolve'}; or {status:'failed', error}. If goalReached is false or nextAction is 'continue', Claude decides whether to continue or redelegate. Pass `task` for one delegation; pass `tasks` (2-4 entries) ONLY when Claude verified disjoint parallel workstreams - the combined result adds workers[] and fileConflicts, and never auto-completes the passive objective.",
     inputSchema: {
       type: "object",
       properties: {
@@ -5071,7 +4991,7 @@ const TOOLS = [
           type: "array",
           items: { type: "string" },
           description:
-            "2-4 self-contained workstreams to run as PARALLEL executors on this same checkout. ONLY for verified-disjoint work: no shared file ownership, no ordering dependency, no shared artifacts (lockfiles, generated files, the same tests). Name each workstream's files and scope explicitly. The combined result reports per-workstream verdicts plus fileConflicts when workstreams touched the same file; it never auto-completes the native goal - review every verdict and run an integration verification before declaring done. Use instead of task, not alongside it."
+            "2-4 self-contained workstreams that CLAUDE explicitly runs as parallel Codex workers on this same checkout. ONLY for verified-disjoint work: no shared file ownership, no ordering dependency, no shared artifacts (lockfiles, generated files, the same tests). Each worker handles one task and cannot create nested agents. The combined result reports per-workstream verdicts plus fileConflicts; it never auto-completes the passive objective. Use instead of task, not alongside it."
         },
         background: {
           type: "boolean",
@@ -5183,7 +5103,7 @@ const TOOLS = [
   {
     name: "codex_cancel",
     description:
-      "Abort the in-flight Codex turn and clear any pending approvals for this Fusion pane WITHOUT restarting the pane. Use it as the escape hatch when a turn is wedged - e.g. codex_implement keeps returning a 'turn already in progress' error with no decision to answer, or a parked approval can no longer be resolved. The Codex thread and native goal stay alive, so you can re-delegate with codex_implement afterwards. Returns {status:'cancelled', hadActiveTurn, clearedDecisions}. With `taskId` it instead cancels ONLY that detached background task (foreground turn and other background tasks untouched) and returns {status:'cancelled', taskId, title}.",
+      "Abort the in-flight Codex turn and clear any pending approvals for this Fusion pane WITHOUT restarting the pane. Use it as the escape hatch when a turn is wedged. The Codex thread and passive objective record stay alive, so Claude can re-delegate afterwards. Returns {status:'cancelled', hadActiveTurn, clearedDecisions}. With `taskId` it instead cancels ONLY that detached background task and returns {status:'cancelled', taskId, title}.",
     inputSchema: {
       type: "object",
       properties: {

@@ -51,7 +51,10 @@ async function main() {
     assert(/goal-completion verifier/i.test(prompt), "system prompt missing Codex verifier role");
     assert(/Guiding Codex/i.test(prompt), "system prompt missing Claude-guides-Codex rule");
     assert(/Following Claude's guidance/i.test(prompt), "system prompt missing Codex-guidance scope");
-    assert(/Codex native goals/i.test(prompt), "system prompt missing native Codex goals section");
+    assert(
+      /Fusion objective tracking \(passive - never native Goal mode\)/i.test(prompt),
+      "system prompt missing passive Fusion objective section"
+    );
     assert(/codex_goal_set/.test(prompt), "system prompt missing codex_goal_set");
     assert(/codex_goal_get/.test(prompt), "system prompt missing codex_goal_get");
     assert(/codex_implement/.test(prompt), "system prompt missing codex_implement");
@@ -153,8 +156,16 @@ async function main() {
       "buildFusionSystemPrompt is missing the structured verifier fields"
     );
     assert(
-      buildFusionSystemPrompt().includes("Codex-managed blocked"),
-      "buildFusionSystemPrompt is missing protected native goal status behavior"
+      buildFusionSystemPrompt().includes("never lets Codex continue while idle") &&
+        buildFusionSystemPrompt().includes("passive fallback objective"),
+      "buildFusionSystemPrompt is missing passive objective behavior"
+    );
+    assert(
+      buildFusionSystemPrompt().includes("## One orchestration tree") &&
+        buildFusionSystemPrompt().includes("sole orchestration layer") &&
+        buildFusionSystemPrompt().includes("Each Codex worker handles one explicit delegation") &&
+        buildFusionSystemPrompt().includes("codex_investigate/codex_implement"),
+      "buildFusionSystemPrompt is missing Claude-owned orchestration boundaries"
     );
     assert(
       buildFusionSystemPrompt().includes("Concurrent edits (shared checkout)") &&
@@ -204,7 +215,7 @@ async function main() {
         buildFusionSystemPrompt().includes("No ordering dependency") &&
         buildFusionSystemPrompt().includes("fileConflicts") &&
         buildFusionSystemPrompt().includes("integration verification") &&
-        buildFusionSystemPrompt().includes("never auto-completes the native goal"),
+        buildFusionSystemPrompt().includes("never auto-completes the passive Fusion objective"),
       "buildFusionSystemPrompt is missing the mandatory parallel execution safety check"
     );
     assert(
@@ -247,11 +258,13 @@ async function main() {
       ["codex_goal_set", "codex_goal_get", "codex_goal_clear"].every((tool) =>
         allowList.some((entry) => entry.includes(tool))
       ),
-      "Fusion allowlist should expose the codex_goal_* native-goal tools so the prompt's goal instructions work"
+      "Fusion allowlist should expose the codex_goal_* passive-objective tools so the prompt's tracking instructions work"
     );
     assert(
-      allowList.some((entry) => entry.includes("codex_investigate")),
-      "Fusion allowlist should expose codex_investigate for Codex-fed exploration"
+      ["codex_investigate", "codex_implement"].every((tool) =>
+        allowList.some((entry) => entry.includes(tool))
+      ),
+      "Fusion allowlist should expose Claude-owned scout and implementation delegation"
     );
     assert(
       allowList.some((entry) => entry.includes("codex_steer_resolve")),

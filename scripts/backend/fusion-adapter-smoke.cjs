@@ -61,6 +61,19 @@ function assert(condition, message) {
   }
 }
 
+function assertCodexWorkerConfig(params, label) {
+  const config = params?.config || {};
+  assert(config["features.goals"] === false, `${label} must disable native Goals`);
+  assert(config["features.multi_agent"] === false, `${label} must disable v1 nested agents`);
+  assert(config["features.multi_agent_v2"] === false, `${label} must disable v2 nested agents`);
+  assert(config["features.enable_fanout"] === false, `${label} must disable native fan-out`);
+  assert(
+    config["features.multi_agent_v2.max_concurrent_threads_per_session"] === 1,
+    `${label} must leave zero V2 child capacity`
+  );
+  assert(config["agents.max_threads"] === 1, `${label} must minimize V1 child capacity`);
+}
+
 function main() {
   const child = spawn(process.execPath, [adapterPath], {
     stdio: ["pipe", "pipe", "pipe"],
@@ -155,17 +168,25 @@ function main() {
             assert(names.includes("codex_cancel"), "tools/list missing codex_cancel");
             const goalTool = tools.find((t) => t.name === "codex_goal_set");
             assert(
-              goalTool && /native Codex per-thread goal/i.test(goalTool.description),
-              "codex_goal_set description missing native-goal contract"
+              goalTool && /passive Fusion objective/i.test(goalTool.description) && /does NOT activate/i.test(goalTool.description),
+              "codex_goal_set description missing passive-objective contract"
             );
             const implementTool = tools.find((t) => t.name === "codex_implement");
+            const investigateTool = tools.find((t) => t.name === "codex_investigate");
             assert(
               implementTool &&
-                /guidance for Codex/i.test(implementTool.description) &&
-                /independently verifying/i.test(implementTool.description) &&
+                /Claude owns architecture, strategy/i.test(implementTool.description) &&
+                /normal Codex/i.test(implementTool.description) &&
                 /picture\/image generation/i.test(implementTool.description) &&
-                /browser navigation\/control\/automation/i.test(implementTool.description),
+                /browser navigation\/control\/automation/i.test(implementTool.description) &&
+                /ONE assigned scope/i.test(implementTool.description) &&
+                /nested Codex agents are disabled/i.test(implementTool.description),
               "codex_implement description missing Claude-guides-Codex contract"
+            );
+            assert(
+              investigateTool?.inputSchema?.properties?.tasks?.type === "array" &&
+                implementTool?.inputSchema?.properties?.tasks?.type === "array",
+              "Claude-owned investigate/implement fan-out must remain exposed through tasks[]"
             );
             const taskStatusTool = tools.find((t) => t.name === "codex_task_status");
             assert(
@@ -193,11 +214,14 @@ function main() {
             );
             assert(source.includes("goalReached"), "adapter does not return the structured verifier fields");
             assert(
-              source.includes('"features.goals": true') &&
+              source.includes('"features.goals": false') &&
+                source.includes('"features.multi_agent": false') &&
+                source.includes('"features.multi_agent_v2": false') &&
+                source.includes('"features.enable_fanout": false') &&
                 source.includes('"features.fast_mode": true') &&
                 source.includes("params.serviceTier") &&
                 source.includes('rpc("model/list"'),
-              "adapter must enable native Codex goals + FastMode and resolve serviceTier through model/list"
+              "adapter must disable native continuation/fan-out, keep FastMode, and resolve serviceTier through model/list"
             );
             assert(
               source.includes('sandbox: "danger-full-access"') &&
@@ -225,9 +249,7 @@ function main() {
                 source.includes("const PLAN_MODE_ALLOWED_TOOLS = new Set(["),
               "Plan mode should allow steering-route resolution while keeping implementation blocked"
             );
-            assert(source.includes('rpc("thread/goal/set"'), "adapter does not call native goal set");
-            assert(source.includes('rpc("thread/goal/get"'), "adapter does not call native goal get");
-            assert(source.includes('rpc("thread/goal/clear"'), "adapter does not call native goal clear");
+            assert(!source.includes('rpc("thread/goal/'), "adapter must not issue native Goal RPCs");
             assert(source.includes("buildCodexVerifierTask(task)"), "adapter does not wrap Codex tasks with the verifier contract");
             const cancelResponseText = responses.get(3).result.content[0].text;
             const cancelResponse = JSON.parse(cancelResponseText);
@@ -457,7 +479,8 @@ async function assertWorkspaceMcpConfigInjectedIntoThreadStart() {
       ...process.env,
       VIBE_FUSION_CODEX_BIN: process.execPath,
       VIBE_TERMINAL_FUSION_CWD: tempDir,
-      VIBE_TERMINAL_SESSION_ID: "fusion-adapter-thread-mcp"
+      VIBE_TERMINAL_SESSION_ID: "fusion-adapter-thread-mcp",
+      VIBE_FUSION_EAGER_BOOT: "1"
     }
   });
 
@@ -513,10 +536,10 @@ async function assertWorkspaceMcpConfigInjectedIntoThreadStart() {
     await waitForFile(threadStartParamsFile);
     const params = JSON.parse(fs.readFileSync(threadStartParamsFile, "utf8"));
     assert(params.cwd === tempDir, `thread/start should use workspace cwd: ${JSON.stringify(params)}`);
+    assertCodexWorkerConfig(params, "main executor thread/start");
     assert(
-      params.config?.["features.goals"] === true &&
-        params.config?.["features.fast_mode"] === true,
-      `thread/start should preserve existing feature flags: ${JSON.stringify(params)}`
+      params.config?.["features.fast_mode"] === true,
+      `thread/start should preserve FastMode: ${JSON.stringify(params)}`
     );
     assert(
       params.config?.["mcp_servers.docs"]?.command === "node" &&
@@ -671,7 +694,7 @@ function callAdapterToolDuringEagerBootUsesOneThreadStart() {
             const text = response.result.content[0].text;
             const parsed = JSON.parse(text);
             const starts = fs.readFileSync(markerFile, "utf8").trim().split(/\r?\n/).filter(Boolean);
-            assert(parsed.status === "ok", `goal get should succeed after eager boot: ${text}`);
+            assert(parsed.status === "failed", `investigate should reach the fake executor after eager boot: ${text}`);
             assert(starts.length === 1, `expected one thread/start during eager boot race, got ${starts.length}`);
             cleanup();
             resolve();
@@ -700,7 +723,7 @@ function callAdapterToolDuringEagerBootUsesOneThreadStart() {
         jsonrpc: "2.0",
         id: 2,
         method: "tools/call",
-        params: { name: "codex_goal_get", arguments: {} }
+        params: { name: "codex_investigate", arguments: { task: "exercise eager-boot de-duping" } }
       })}\n`
     );
   });
@@ -2358,21 +2381,19 @@ function assertPortabilityGuards() {
   );
 }
 
-function assertGoalSchema() {
-  const rootDir = path.join(__dirname, "..", "..");
-  const clientSchema = fs.readFileSync(
-    path.join(rootDir, "vendor", "codex-appserver", "0.144.0", "schema", "ClientRequest.json"),
-    "utf8"
+function assertPassiveGoalBoundary() {
+  const source = fs.readFileSync(adapterPath, "utf8");
+  assert(!source.includes('rpc("thread/goal/'), "Fusion objective helpers must not call native Goal RPCs");
+  assert(
+    source.includes("function fusionGoalSet") &&
+      source.includes("function fusionGoalGet") &&
+      source.includes("function fusionGoalClear"),
+    "Fusion objective helpers should remain adapter-owned passive state"
   );
-  const serverSchema = fs.readFileSync(
-    path.join(rootDir, "vendor", "codex-appserver", "0.144.0", "schema", "ServerNotification.json"),
-    "utf8"
+  assert(
+    (source.match(/currentGoal = null/g) || []).length === 2,
+    "only initial state and explicit fusionGoalClear may clear the passive objective"
   );
-  for (const method of ["thread/goal/set", "thread/goal/get", "thread/goal/clear"]) {
-    assert(clientSchema.includes(method), `generated client schema missing ${method}`);
-  }
-  assert(serverSchema.includes("thread/goal/updated"), "generated server schema missing goal update notification");
-  assert(serverSchema.includes("thread/goal/cleared"), "generated server schema missing goal clear notification");
 }
 
 function assertVerifierHelpers() {
@@ -2380,6 +2401,10 @@ function assertVerifierHelpers() {
   assert(investigation.includes("read-only scouting pass"), "investigation task should be read-only");
   assert(investigation.includes("Findings"), "investigation task should request findings");
   assert(!investigation.includes(VERDICT_MARKER), "investigation task should not use verifier verdicts");
+  assert(
+    investigation.includes("Do not spawn, delegate to, or manage subagents"),
+    "investigation task should enforce the single-worker boundary"
+  );
 
   const wrapped = buildCodexVerifierTask("implement the thing");
   assert(wrapped.includes(VERDICT_MARKER), "wrapped task missing verdict marker");
@@ -2387,6 +2412,10 @@ function assertVerifierHelpers() {
   assert(
     wrapped.includes("follow that guidance while still independently checking"),
     "wrapped task missing Claude-guides-Codex rule"
+  );
+  assert(
+    wrapped.includes("Do not spawn, delegate to, or manage subagents"),
+    "wrapped task should enforce the single-worker boundary"
   );
   assert(
     wrapped.includes("picture/image generation") &&
@@ -2467,11 +2496,11 @@ function assertVerifierHelpers() {
   });
   assert(normalizedGoal.status === "paused", "goal status should normalize");
   assert(normalizedGoal.tokensUsed === 7, "goal usage should normalize");
-  assert(goalStatusForVerdict(doneVerdict) === "complete", "done verdict should complete native goal");
-  assert(goalStatusForVerdict(verdict) === null, "continue verdict should not overwrite native goal");
+  assert(goalStatusForVerdict(doneVerdict) === "complete", "done verdict should complete the passive objective");
+  assert(goalStatusForVerdict(verdict) === null, "continue verdict should not overwrite the passive objective");
   assert(
     goalStatusForVerdict({ goalReached: false, nextAction: "ask_human" }) === null,
-    "ask_human verdict should not overwrite native goal"
+    "ask_human verdict should not overwrite the passive objective"
   );
   assert(shouldReplaceGoalForTask(null), "missing goal should create fallback goal");
   assert(
@@ -2856,8 +2885,8 @@ rl.on("line", (line) => {
 }
 
 // Behavioral: executorFamily "claude" routes codex_implement through the
-// claude engine (fake app-server untouched), the local goal store fills the
-// native-goal contract, and flipping the settings file to codex re-routes the
+// claude engine (fake app-server untouched), the local objective store fills the
+// passive tracking contract, and flipping the settings file to codex re-routes the
 // NEXT call to the app-server engine.
 function callAdapterImplementWithFakeClaudeExecutor() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-adapter-claude-exec-"));
@@ -3004,7 +3033,7 @@ function callAdapterImplementWithFakeClaudeExecutor() {
             const parsed = JSON.parse(text);
             assert(parsed.status === "ok", `local goal store should answer goal_get: ${text}`);
             assert(
-              parsed.goal && parsed.goal.threadId === "claude-executor",
+              parsed.goal && parsed.goal.threadId === "fusion-executor",
               `claude executor goal should come from the local store: ${text}`
             );
             assert(
@@ -3085,22 +3114,34 @@ function callAdapterImplementWithFakeClaudeExecutor() {
                   ),
                   `background claude executor should relay MultiEdit as file progress: ${JSON.stringify(backgroundEvents)}`
                 );
-                // Flip the settings file to codex: the NEXT call must re-route to
-                // the app-server engine (fake app-server boots, thread marker).
+                // Flip the settings file to Codex. The next explicit delegation
+                // must route through that executor and use Fusion-owned objective state.
                 fs.writeFileSync(settingsFile, JSON.stringify({ executorFamily: "codex" }));
                 child.stdin.write(
-                  `${JSON.stringify({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "codex_goal_get", arguments: {} } })}\n`
+                  `${JSON.stringify({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "codex_implement", arguments: { task: "route through the fake Codex executor" } } })}\n`
                 );
               })
               .catch(fail);
           } else if (msg.id === 6) {
             const text = msg.result.content[0].text;
             const parsed = JSON.parse(text);
-            assert(parsed.status === "ok", `codex goal_get after family flip should succeed: ${text}`);
-            assert(parsed.goal === null, `family flip should reset the goal store: ${text}`);
+            assert(parsed.status === "failed", `family flip should route through the fake Codex executor: ${text}`);
             assert(
               fs.existsSync(markerFile),
-              "family flip to codex should boot the app-server engine"
+              "family flip to Codex should boot the app-server engine"
+            );
+            child.stdin.write(
+              `${JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "codex_goal_get", arguments: {} } })}\n`
+            );
+          } else if (msg.id === 7) {
+            const text = msg.result.content[0].text;
+            const parsed = JSON.parse(text);
+            assert(parsed.status === "ok", `codex goal_get after family flip should succeed: ${text}`);
+            assert(
+              parsed.goal?.objective === "route through the fake Codex executor" &&
+                parsed.goal?.status === "active" &&
+                parsed.goal?.threadId === "fusion-executor",
+              `family flip should use the shared passive objective store: ${text}`
             );
             waitForCondition(() => {
               const activities = callback.getEvents().filter(
@@ -3452,7 +3493,7 @@ function assertFanoutHelpers() {
   );
   assert(
     source.includes("const withGoal = currentGoal ? { ...result, goal: currentGoal } : result;"),
-    "a fan-out implement result must never auto-sync the native goal"
+    "a fan-out implement result must never auto-sync the passive objective"
   );
   const investigateTool = source.includes('"2-4 self-contained, non-overlapping scouting tasks');
   const implementTool = source.includes("ONLY for verified-disjoint work");
@@ -4688,9 +4729,8 @@ function callAdapterScoutFanoutWithFakeAppServer() {
             `scout fan-out should start main + 2 worker threads, got ${threadStarts.length}`
           );
           const workerStarts = threadStarts.slice(1);
-          assert(
-            workerStarts.every((entry) => entry.params?.config?.["features.goals"] !== true),
-            `scout worker threads must not enable goals: ${JSON.stringify(workerStarts)}`
+          threadStarts.forEach((entry, index) =>
+            assertCodexWorkerConfig(entry.params, `scout fan-out thread ${index + 1}`)
           );
           const turnStarts = log.filter((entry) => entry.kind === "turn/start");
           assert(
@@ -4852,16 +4892,10 @@ function callAdapterImplementFanoutWithFakeAppServer() {
             `a worker's exceptional approval should be auto-declined and reported: ${text}`
           );
           const log = readFanoutLog(logFile);
-          const goalSets = log.filter((entry) => entry.kind === "thread/goal/set");
-          assert(goalSets.length === 1, `fan-out should create one fallback goal, got ${goalSets.length}`);
+          const nativeGoalRpcs = log.filter((entry) => /^thread\/goal\//.test(entry.kind));
           assert(
-            /workstream A/.test(goalSets[0].params.objective) &&
-              /workstream B/.test(goalSets[0].params.objective),
-            `fallback goal objective should join the workstream tasks: ${JSON.stringify(goalSets[0])}`
-          );
-          assert(
-            !goalSets.some((entry) => entry.params.status === "complete"),
-            "a fan-out must never auto-complete the native goal"
+            nativeGoalRpcs.length === 0,
+            `fan-out must not issue native Goal RPCs: ${JSON.stringify(nativeGoalRpcs)}`
           );
           const declineResponse = log.find(
             (entry) => entry.kind === "serverRequestResponse" && entry.id > 900
@@ -4871,6 +4905,11 @@ function callAdapterImplementFanoutWithFakeAppServer() {
             `the worker approval should be auto-declined on the wire: ${JSON.stringify(declineResponse)}`
           );
           const turnStarts = log.filter((entry) => entry.kind === "turn/start");
+          log
+            .filter((entry) => entry.kind === "thread/start")
+            .forEach((entry, index) =>
+              assertCodexWorkerConfig(entry.params, `implement fan-out thread ${index + 1}`)
+            );
           assert(
             turnStarts.every((entry) => /Parallel workstream \d of 2/.test(entry.params.input[0].text)),
             "worker turns must carry the parallel-workstream contract"
@@ -5053,7 +5092,7 @@ function callAdapterCancelDuringFanout() {
 
 main()
   .then(async () => {
-    assertGoalSchema();
+    assertPassiveGoalBoundary();
     assertVerifierHelpers();
     assertWorkspaceMcpConfigOverrides();
     assertCommandDisplayHelpers();

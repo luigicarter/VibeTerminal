@@ -1118,6 +1118,21 @@ async function main() {
     createCodexBrainNormalizer,
     bridgeConfigFromMcpFile
   } = require("../../backend/fusionCodexBrain.cjs");
+  const codexBrainSource = fs.readFileSync(
+    path.join(__dirname, "..", "..", "backend", "fusionCodexBrain.cjs"),
+    "utf8"
+  );
+  for (const setting of [
+    '"features.goals": false',
+    '"features.multi_agent": false',
+    '"features.multi_agent_v2": false',
+    '"features.enable_fanout": false',
+    '"features.multi_agent_v2.max_concurrent_threads_per_session": 1',
+    '"agents.max_threads": 1',
+    '"features.fast_mode": true'
+  ]) {
+    assert(codexBrainSource.includes(setting), `Codex planner thread config missing ${setting}`);
+  }
   const brain = createCodexBrainNormalizer();
   const collect = (msg) => brain.normalize(msg);
 

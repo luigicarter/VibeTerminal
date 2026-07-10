@@ -99,7 +99,7 @@
 
 Goal: a **Fusion** terminal that fuses the *capabilities* of two coding agents
 behind one surface — Claude (Opus or Sonnet 5) as the read-only orchestrator/architect/designer and
-long-horizon coding controller using Codex native goals, and Codex (GPT-5.5) as
+sole long-horizon controller, and Codex (GPT-5.5) as
 the sole code writer, executor, tester, bug reviewer, and completion verifier — so the user talks to
 one terminal and the right model handles each sub-task. Think "OpenRouter, but for **complementary
 specialists** rather than interchangeable models": the router doesn't pick one
@@ -170,7 +170,7 @@ against its spec BEFORE delegating the next milestone, folding corrections
 into that next delegation. The verifier contract tells Codex that a milestone
 task's `goalReached` refers to the LARGER goal, so mid-plan milestones come
 back `goalReached:false`/`nextAction:"continue"` (the expected checkpoint
-state) and the adapter's verdict→goal sync cannot mark the native Codex goal
+state) and the adapter's verdict→objective sync cannot mark the passive Fusion objective
 complete before the final milestone. Milestones don't license micro-slicing:
 within one milestone the fewer-larger-chunks delegation rule still applies,
 and small single-stage tasks stay one delegation.
@@ -194,7 +194,7 @@ are auto-resolved inline (decline / "report the blocker in your verdict") —
 fan-outs never park `needs_decision`; per-worker verifier verdicts parse as
 usual (fail closed) and the combined result unions `files`, flags
 `fileConflicts` (per-worker file-set intersection — detection, not blocking),
-and NEVER auto-completes the native goal (aggregate `nextAction` stays
+and NEVER auto-completes the passive Fusion objective (aggregate `nextAction` stays
 `continue` unless every workstream is done and conflict-free). Esc/cancel
 interrupt every worker thread. Known v1 limits: steering during a fan-out
 falls back to the planner-thread path (no push/replan into N workers), and a
@@ -245,7 +245,7 @@ host-side while a turn is in flight (flushed on `result` — never steered into
 a running turn). The wake echo (`user{backgroundReport:true, files?}`)
 renders as a report row, opens the completion-gate latch for completed
 implement tasks (the wake turn is the review point — same independent-check
-rules), and never auto-syncs the native goal. Esc/turn-interrupt leaves
+rules), and never auto-syncs the passive Fusion objective. Esc/turn-interrupt leaves
 background tasks alone; cancel is explicit (`codex_cancel {taskId}`, the pane
 row/pin stop button → adapter `/background-cancel`); process death settles
 tasks as failed WITH a report (or the host's orphan settle after `closed`) —
@@ -352,12 +352,12 @@ The **only substantial custom component** is the per-pane MCP↔app-server adapt
 **dual-protocol**: MCP server to Claude (north), app-server JSON-RPC client to its
 own embedded Codex child (south). It exposes a small tool surface:
 
-- `codex_goal_set(objective, status?, tokenBudget?)` — create/update Codex's
-  native per-thread goal for the pane.
-- `codex_goal_get()` — read Codex's native goal state, including usage and
-  status.
-- `codex_goal_clear()` — clear the native goal when the human abandons or
-  replaces the objective.
+- `codex_goal_set(objective, status?, tokenBudget?)` — create/update the
+  passive Fusion-owned objective record. It never activates Codex Goal mode.
+- `codex_goal_get()` — read that passive objective record without starting or
+  continuing an executor turn.
+- `codex_goal_clear()` — clear the passive objective when the human abandons
+  or replaces it.
 - `codex_investigate(task | tasks[2..4])` — run a read-only Codex scouting pass
   that returns concise findings and relevant file paths/snippets for Claude's
   planning. With `tasks`, 2–4 read-only scouts run CONCURRENTLY on ephemeral
@@ -372,11 +372,28 @@ own embedded Codex child (south). It exposes a small tool surface:
 - `codex_cancel()` — abort a stuck Codex turn locally (the wedge escape hatch);
   the thread survives so Claude can re-delegate without a pane restart.
 
-Fusion starts the app-server thread with `config: { "features.goals": true }`,
-the verified app-server override for enabling goals on that pane without
-mutating the user's global Codex config. If a future/older/managed Codex build
-rejects native goals, the goal tools return
-`goalFeatureAvailable:false` instead of pretending goal state was stored.
+Fusion explicitly starts every Codex planner/executor thread with native Goals,
+multi-agent, and native fan-out disabled. Goals and v1 multi-agent default on in
+Codex 0.144.0, so omission is not sufficient. The per-thread overrides include
+`features.goals:false`, `features.multi_agent:false`,
+`features.multi_agent_v2:false`, `features.enable_fanout:false`, plus the
+minimum v1/v2 concurrency limits as defense in depth. These settings do not
+affect Claude-owned adapter fan-out: `tasks` still creates independent root
+worker threads explicitly.
+
+### Codex effort, speed, and usage behavior
+
+Fusion preserves the selected Codex model and resolves the selected effort
+against the live `model/list` catalog for each explicit executor turn. The Fast
+toggle is also real Codex Fast mode: Fusion resolves the model's supported fast
+service tier and sends it on thread/turn settings. Therefore one Fusion Codex
+worker, given the same model, effort, Fast setting, context, and task, uses the
+same Codex-side serving controls as regular Codex. Total Fusion usage is not
+guaranteed to equal a single regular-Codex task because Claude planning and any
+explicit scouts, verification passes, or parallel workstreams are additional
+work. What Fusion now avoids is unrequested Codex work: passive objective
+updates cannot start turns, and a worker cannot recursively create more Codex
+workers.
 
 ## Approval / review loop (route to Opus, escalate to human rarely)
 
@@ -389,11 +406,11 @@ is **turn-based**:
 
 ```
 Claude → codex_goal_set({ objective: top-level user goal, status: "active" })
-   adapter → app-server: thread/start with goals enabled if needed, then thread/goal/set
+   adapter → update passive Fusion objective only (no app-server turn)
 Claude → codex_investigate(task)             (optional read-only scouting)
    adapter → app-server: turn/start without verifier, returns findings + files
 Claude → codex_implement(plan)
-   adapter → app-server: thread/start with goals enabled (or reuse thread), send turn, stream items
+   adapter → app-server: thread/start (or reuse thread), send ONE explicit turn, stream items
    ...Codex edits / runs tests in the workspace...
    app-server → adapter: exceptional request/question      ← Codex may pause here
    adapter PARKS the request, returns to Claude:
@@ -427,23 +444,23 @@ verifier JSON fails closed as `goalReached:false` / `nextAction:"continue"`.
 Claude must continue/redelegate unless the human says otherwise or Claude makes
 an explicit override visible in the transcript.
 
-Native Codex goals complement that verifier gate; they do not replace it. Claude
-uses the native goal as the long-horizon coding objective, then delegates concrete
-execution to Codex. The adapter creates a fallback goal from the first delegated
-task if Claude did not call `codex_goal_set`, replaces completed fallback goals
-for later unrelated work, and only auto-syncs the native goal to `complete` after
-a true done verifier verdict. It does not auto-reactivate Codex-managed
-`blocked`, `usageLimited`, or `budgetLimited` states.
+The passive Fusion objective complements the verifier gate; it does not replace
+it. The adapter creates a fallback objective from the first delegated task when
+Claude did not call `codex_goal_set`, replaces completed fallbacks for unrelated
+work, and marks it `complete` only after a true done verifier verdict. No
+`thread/goal/*` RPC is sent to Codex, so an `active` objective cannot start an
+idle continuation turn.
 
-Codex subagents are different from goals. In Codex 0.144.0 the native goal API is
-an app-server client RPC, but multi-agent/subagent control is primarily exposed
-as tools inside Codex turns, and Fusion currently rejects generic dynamic
-`item/tool/call` requests from the embedded app-server. Fusion therefore does not
-directly spawn or supervise Codex subagents yet; any internal Codex subagent
-availability depends on Codex's own configured tool surface. The external
-Claude-facing bridge stays at the goal/delegate/approval/verifier layer until
-there is a stable app-server client method for spawning and supervising subagents
-directly.
+Claude owns the only orchestration tree. It can launch one scout, parallel
+scouts, one executor, parallel workstreams, background work, or sequential
+milestones through `codex_investigate` / `codex_implement`. Each Codex worker
+then behaves like regular Codex inside that assigned scope — inspect, edit,
+test, debug, and verify — but cannot create a nested Codex agent tree and stops
+after returning its findings or verifier verdict. The executor prompt repeats
+that boundary because current model-catalog metadata can select a multi-agent
+generation independently of feature flags; the V2 thread cap structurally
+allows zero children, while the v1 path also has the feature/fan-out disable,
+minimum concurrency cap, and explicit no-subagent instruction.
 
 ## Isolation — capability scoping among the same user's panes
 
