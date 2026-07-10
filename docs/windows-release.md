@@ -4,10 +4,10 @@ vibeTerminal ships to Windows users as an Electron Builder NSIS installer hosted
 
 ## Current Public Release
 
-The current public Windows release is `v0.1.54`:
+The current public Windows release is `v0.1.55`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.54`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.54/vibeTerminal-Setup-0.1.54.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.55`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.55/vibeTerminal-Setup-0.1.55.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -71,6 +71,7 @@ npm run smoke:backend:fusion-adapter
 npm run smoke:backend:fusion-chat-parse
 npm run smoke:backend:completion-gate
 npm run smoke:backend:openfusion-chat-parse
+npm run smoke:backend:openfusion-background-status
 npm run smoke:backend:openfusion-custom-provider
 npm run smoke:backend:fusion-appserver:embedded
 npm run smoke:frontend:attention
@@ -158,6 +159,7 @@ npm run smoke:backend:fusion-adapter
 npm run smoke:backend:fusion-chat-parse
 npm run smoke:backend:completion-gate
 npm run smoke:backend:openfusion-chat-parse
+npm run smoke:backend:openfusion-background-status
 npm run smoke:backend:openfusion-custom-provider
 npm run smoke:backend:fusion-appserver:embedded
 npm run smoke:frontend:attention

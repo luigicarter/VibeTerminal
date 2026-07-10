@@ -33,6 +33,10 @@ const fs = require("fs");
 const { modelCatalogEntry, resolveCodexEffortForModel } = require("./codexModels.cjs");
 
 const FUSION_BRIDGE_SERVER = "fusion-codex";
+const BACKGROUND_TASK_STATUS_GUIDANCE = [
+  "While a background task runs, use codex_task_status (optionally with its taskId) to peek at progress when the user asks how it is going.",
+  "Peeking is read-only and never replaces reviewing the final FUSION BACKGROUND TASK REPORT."
+].join("\n");
 const RPC_TIMEOUT_MS = 30_000;
 const THREAD_RPC_TIMEOUT_MS = 60_000;
 const FAST_SERVICE_TIER = "priority";
@@ -278,12 +282,16 @@ function bridgeConfigFromMcpFile(mcpConfigPath) {
   if (!entry || !entry.command) {
     throw new Error(`no MCP server entry found in ${mcpConfigPath}`);
   }
+  const toolTimeoutSec = Number(entry.tool_timeout_sec);
   return {
     mcp_servers: {
       [FUSION_BRIDGE_SERVER]: {
         command: entry.command,
         args: Array.isArray(entry.args) ? entry.args : [],
-        env: entry.env && typeof entry.env === "object" ? entry.env : {}
+        env: entry.env && typeof entry.env === "object" ? entry.env : {},
+        ...(Number.isFinite(toolTimeoutSec) && toolTimeoutSec > 0
+          ? { tool_timeout_sec: toolTimeoutSec }
+          : {})
       }
     }
   };
@@ -495,6 +503,9 @@ function createCodexBrainSession(options) {
       // A missing prompt file must not kill the pane; the planner just runs
       // without the architect contract (and the adapter still enforces mode).
     }
+    developerInstructions = [developerInstructions.trim(), BACKGROUND_TASK_STATUS_GUIDANCE]
+      .filter(Boolean)
+      .join("\n\n");
     const baseParams = {
       cwd: cwd || undefined,
       sandbox: "read-only",

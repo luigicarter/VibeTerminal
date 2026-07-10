@@ -54,13 +54,17 @@ const TURN_IDLE_TIMEOUT_MS = (() => {
 const TURN_AFTER_COMMAND_TIMEOUT_MS = Number(
   process.env.VIBE_FUSION_TURN_AFTER_COMMAND_TIMEOUT_MS || 180000
 );
-// Absolute per-turn ceiling: armed once at turn start, never refreshed, and
-// floored so env cannot disable it. Guarantees the turn waiter (`await done`)
-// always resolves even if the refreshable idle watchdog is starved by progress
-// churn (the broken-sandbox retry loop) or misconfigured to 0.
+// Verifiable-progress watchdog: text/status churn cannot refresh it, while
+// completed tool/file/command activity can keep legitimate long turns alive.
 const TURN_HARD_TIMEOUT_MS = Math.max(
   Number(process.env.VIBE_FUSION_TURN_HARD_TIMEOUT_MS) || 900000,
   60000
+);
+// Never refreshed. This preserves the guarantee that every foreground turn
+// waiter resolves even when strong progress continues indefinitely.
+const TURN_ABSOLUTE_TIMEOUT_MS = Math.max(
+  Number(process.env.VIBE_FUSION_TURN_ABSOLUTE_TIMEOUT_MS) || 3600000,
+  TURN_HARD_TIMEOUT_MS
 );
 // Detached background work is non-blocking and long builds can legitimately run
 // for much longer than foreground turns while still streaming progress. The
@@ -700,7 +704,7 @@ let modelCatalogLoaded = false;
 let lastExecutorEffortFallbackKey = "";
 const pendingReq = new Map(); // app-server request id -> {resolve, reject}
 const parked = new Map(); // pendingId -> {rpcId, method, params}
-let currentTurn = null; // {resolve, idleTimer, commandTimer} - fulfilled by turn/completed | turn/failed | an approval request
+let currentTurn = null; // fulfilled by turn/completed | turn/failed | an approval request
 // True while codex_implement/codex_investigate is between its currentTurn
 // check and awaitTurn (both await the thread first): a concurrent tool call in
 // that window must be rejected, not allowed to reset the turn buffers.
@@ -708,6 +712,7 @@ let turnArming = false;
 let activeTurnId = null;
 let activeTurnKind = null;
 let latchedTurnResult = null;
+const timedOutTurnIds = new Set();
 let steerBuffer = [];
 let steerRoutingPending = false;
 let steerRoutingTimer = null;
@@ -738,6 +743,9 @@ let activeFanoutRun = null; // {aborted} - abort skips finalize's aggregate reso
 // the native goal.
 const BACKGROUND_MAX_TASKS = 4;
 const backgroundWorkers = new Map(); // routeKey (codex worker threadId | claude synthetic id) -> worker
+const settledBackgroundTasks = []; // most-recent first; capped in finalizeBackgroundWorker
+const BACKGROUND_ACTIVITY_MAX_ITEMS = 20;
+const BACKGROUND_SETTLED_MAX_TASKS = 8;
 let backgroundTaskSeq = 0;
 
 function isCurrentCodexChild(child) {
@@ -1198,6 +1206,71 @@ function clearCurrentTurnTimers(turn = currentTurn) {
     clearTimeout(turn.hardTimer);
     turn.hardTimer = null;
   }
+  if (turn.absoluteTimer) {
+    clearTimeout(turn.absoluteTimer);
+    turn.absoluteTimer = null;
+  }
+}
+
+function timeoutMinutes(timeoutMs) {
+  return Math.max(1, Math.ceil(timeoutMs / 60000));
+}
+
+function rememberTimedOutTurnId(turnId) {
+  if (!turnId) return;
+  timedOutTurnIds.add(turnId);
+  while (timedOutTurnIds.size > 32) {
+    timedOutTurnIds.delete(timedOutTurnIds.values().next().value);
+  }
+}
+
+function isTimedOutTurnLifecycle(value) {
+  const turnId = extractTurnId(value);
+  return Boolean(turnId && timedOutTurnIds.has(turnId));
+}
+
+function interruptCurrentTurnForCeiling(error) {
+  if (fanoutActive || fanoutWorkers.size > 0) {
+    abortFanoutWorkers(error, { interrupt: true });
+    return;
+  }
+  if (activeExecutorFamily === "claude") {
+    if (!claudeTurnActive) return;
+    claudeTurnActive = false;
+    claudeInterruptRequested = false;
+    claudeTextParts = [];
+    claudeProgressTextParts = [];
+    sendClaudeInterruptRequest();
+    // Claude stream events carry no turn id. Retire this child after requesting
+    // the interrupt so an old result cannot arrive during the next delegation.
+    killClaudeExecutor();
+    return;
+  }
+  if (!threadId || !activeTurnId) return;
+  const turnId = activeTurnId;
+  rememberTimedOutTurnId(turnId);
+  rpc("turn/interrupt", { threadId, turnId }).catch(() => {});
+}
+
+function failCurrentTurnForCeiling(error) {
+  if (!currentTurn) return;
+  currentTurn.timedOut = true;
+  interruptCurrentTurnForCeiling(error);
+  resolveTurn({ status: "failed", error });
+}
+
+function refreshTurnHardTimer(reason = "verifiable progress") {
+  if (!currentTurn) return;
+  if (currentTurn.hardTimer) clearTimeout(currentTurn.hardTimer);
+  const turn = currentTurn;
+  turn.hardProgressReason = reason;
+  const timer = setTimeout(() => {
+    if (currentTurn !== turn || turn.hardTimer !== timer) return;
+    failCurrentTurnForCeiling(
+      `Fusion turn made no verifiable progress (tool/file/command activity) for ${timeoutMinutes(TURN_HARD_TIMEOUT_MS)} minutes and was interrupted.`
+    );
+  }, TURN_HARD_TIMEOUT_MS);
+  turn.hardTimer = timer;
 }
 
 function refreshTurnIdleTimer(reason = "progress") {
@@ -1260,6 +1333,7 @@ function resetCodexProcessState(options = {}) {
   activeThreadResolvedModel = null;
   activeTurnId = null;
   activeTurnKind = null;
+  timedOutTurnIds.clear();
   abortFanoutWorkers("Fusion execution process was reset.");
   abortBackgroundWorkers("Fusion execution process was reset.", { engines: "codex" });
   clearSteerRoutingState();
@@ -1769,10 +1843,12 @@ function handleClaudeExecutorEvent(event) {
         }
       }
       refreshTurnIdleTimer(`executor ${name || "tool"}`);
+      refreshTurnHardTimer(`executor ${name || "tool"}`);
       break;
     }
     case "tool-result":
       refreshTurnIdleTimer("executor tool result");
+      refreshTurnHardTimer("executor tool result");
       break;
     case "turn-error":
       claudeTurnErrorText = event.message || claudeTurnErrorText;
@@ -2120,6 +2196,10 @@ function accumulateTurnItems(items, options = {}) {
 
 function resolveCompletedTurn(turn) {
   const turnId = extractTurnId(turn);
+  if (isTimedOutTurnLifecycle(turn)) {
+    logErr(`ignored late turn/completed from timed-out turn ${turnId}`);
+    return;
+  }
   if (activeTurnId && turnId && activeTurnId !== turnId) {
     // Main-thread completions are authoritative even on an id mismatch:
     // turn/start on an already-busy thread (the native goal turn) returns a
@@ -2148,8 +2228,21 @@ function resolveCompletedTurn(turn) {
   );
 }
 
-function handleTurnStartResponse(response) {
+function handleTurnStartResponse(response, requestedTurn = null) {
   const nextTurnId = extractTurnId(response);
+  if (requestedTurn && requestedTurn.timedOut) {
+    if (nextTurnId) {
+      rememberTimedOutTurnId(nextTurnId);
+      if (threadId) {
+        rpc("turn/interrupt", { threadId, turnId: nextTurnId }).catch(() => {});
+      }
+    }
+    return;
+  }
+  if (nextTurnId && timedOutTurnIds.has(nextTurnId)) {
+    logErr(`ignored late turn/start response from timed-out turn ${nextTurnId}`);
+    return;
+  }
   // The response's turn id is the SUBMISSION id (turn_processor returns it as
   // turn_id). When the thread was already running a turn — the native goal
   // turn started by thread/goal/set — the submission is absorbed into that
@@ -2201,6 +2294,18 @@ function isTurnProgressNotification(method, params = {}) {
     return true;
   }
   return Boolean(params.turnId || params.itemId || (params.turn && params.turn.id));
+}
+
+function isStrongCodexProgressNotification(method, params = {}) {
+  if (method === "item/completed") {
+    return Boolean(params.item && typeof params.item === "object");
+  }
+  return Boolean(
+    method === "item/started" &&
+      params.item &&
+      typeof params.item === "object" &&
+      params.item.type === "commandExecution"
+  );
 }
 
 function appendAgentMessageDelta(params = {}) {
@@ -2266,8 +2371,20 @@ function handleNotification(msg) {
     }
     return;
   }
+  const staleTurnId = extractTurnId(params);
+  if (
+    staleTurnId &&
+    timedOutTurnIds.has(staleTurnId) &&
+    (method.startsWith("turn/") || method.startsWith("item/"))
+  ) {
+    logErr(`ignored late ${method} from timed-out turn ${staleTurnId}`);
+    return;
+  }
   if (isTurnProgressNotification(method, params)) {
     refreshTurnIdleTimer(method);
+  }
+  if (isStrongCodexProgressNotification(method, params)) {
+    refreshTurnHardTimer(method);
   }
   if (method === "thread/goal/updated" && params.goal) {
     goalFeatureAvailable = true;
@@ -2310,6 +2427,10 @@ function handleNotification(msg) {
     // park a stale failure that the next waiter would drain, nor clear live
     // turn state via resolveOrLatchTurn.
     const notificationTurnId = extractTurnId(params);
+    if (isTimedOutTurnLifecycle(params)) {
+      logErr(`ignored late ${method} from timed-out turn ${notificationTurnId}`);
+      return;
+    }
     if (
       !currentTurn &&
       (!activeTurnId || (notificationTurnId && notificationTurnId !== activeTurnId))
@@ -3102,6 +3223,10 @@ function clearFanoutWorkerTimers(worker) {
     clearTimeout(worker.hardTimer);
     worker.hardTimer = null;
   }
+  if (worker.absoluteTimer) {
+    clearTimeout(worker.absoluteTimer);
+    worker.absoluteTimer = null;
+  }
 }
 
 function refreshFanoutWorkerIdleTimer(worker, reason = "progress") {
@@ -3124,12 +3249,58 @@ function refreshFanoutWorkerIdleTimer(worker, reason = "progress") {
 
 function interruptTimedOutBackgroundWorker(worker) {
   if (!worker || worker.settled || !worker.background) return;
+  worker.timedOut = true;
   // Codex-family background workers ride the shared app-server, so there is no
   // process tree to kill here; interrupt the specific turn. Claude-family
   // background workers have worker.child and are reaped in finalizeBackgroundWorker.
   if (!worker.child && worker.turnId) {
     rpc("turn/interrupt", { threadId: worker.threadId, turnId: worker.turnId }).catch(() => {});
   }
+}
+
+function interruptTimedOutFanoutWorker(worker) {
+  if (!worker || worker.settled) return;
+  worker.timedOut = true;
+  if (worker.background) {
+    interruptTimedOutBackgroundWorker(worker);
+    return;
+  }
+  if (worker.turnId) {
+    rpc("turn/interrupt", { threadId: worker.threadId, turnId: worker.turnId }).catch(() => {});
+  }
+}
+
+function fanoutWorkerHardTimeoutError(worker) {
+  if (worker.background) {
+    return "Fusion background task exceeded the maximum duration.";
+  }
+  return `Fusion parallel worker made no verifiable progress (tool/file/command activity) for ${timeoutMinutes(TURN_HARD_TIMEOUT_MS)} minutes and was interrupted.`;
+}
+
+function refreshFanoutWorkerHardTimer(worker, reason = "verifiable progress") {
+  if (!worker || worker.settled) return;
+  const hardTimeoutMs = Number(worker.hardTimeoutMs);
+  const absoluteTimeoutMs = Number(worker.absoluteTimeoutMs);
+  if (!Number.isFinite(hardTimeoutMs) || hardTimeoutMs <= 0) return;
+  const now = Date.now();
+  if (!Number.isFinite(worker.absoluteDeadline)) {
+    worker.absoluteDeadline = now + absoluteTimeoutMs;
+  }
+  const remainingAbsolute = Math.max(0, worker.absoluteDeadline - now);
+  const delay = Number.isFinite(remainingAbsolute)
+    ? Math.min(hardTimeoutMs, remainingAbsolute)
+    : hardTimeoutMs;
+  if (worker.hardTimer) clearTimeout(worker.hardTimer);
+  worker.hardProgressReason = reason;
+  const timer = setTimeout(() => {
+    if (worker.settled || worker.hardTimer !== timer) return;
+    interruptTimedOutFanoutWorker(worker);
+    settleFanoutWorker(worker, {
+      status: "failed",
+      error: fanoutWorkerHardTimeoutError(worker)
+    });
+  }, delay);
+  worker.hardTimer = timer;
 }
 
 // Settles the worker's promise. The worker stays in the registry until the
@@ -3156,8 +3327,12 @@ function createFanoutWorker(kind, task, index, count, workerThreadId) {
     itemIds: new Set(),
     deltas: new Map(),
     idleTimeoutMs: TURN_IDLE_TIMEOUT_MS,
+    hardTimeoutMs: TURN_HARD_TIMEOUT_MS,
+    absoluteTimeoutMs: TURN_ABSOLUTE_TIMEOUT_MS,
+    absoluteDeadline: null,
     idleTimer: null,
     hardTimer: null,
+    absoluteTimer: null,
     settled: false,
     resolve: null,
     promise: null
@@ -3165,12 +3340,16 @@ function createFanoutWorker(kind, task, index, count, workerThreadId) {
   worker.promise = new Promise((resolve) => {
     worker.resolve = resolve;
   });
-  worker.hardTimer = setTimeout(() => {
+  worker.absoluteTimer = setTimeout(() => {
+    if (worker.settled) return;
+    interruptTimedOutFanoutWorker(worker);
     settleFanoutWorker(worker, {
       status: "failed",
-      error: "Fusion parallel worker exceeded the maximum duration."
+      error:
+        "Fusion parallel worker exceeded the maximum duration and was interrupted. Re-delegate a smaller milestone or use background delegation."
     });
-  }, TURN_HARD_TIMEOUT_MS);
+  }, TURN_ABSOLUTE_TIMEOUT_MS);
+  refreshFanoutWorkerHardTimer(worker, "worker start");
   refreshFanoutWorkerIdleTimer(worker, "worker start");
   return worker;
 }
@@ -3270,12 +3449,17 @@ function finishFanoutWorkerTurn(worker, turn) {
 function handleFanoutNotification(worker, method, params) {
   if (worker.settled) return;
   refreshFanoutWorkerIdleTimer(worker, method);
+  const strongProgress = isStrongCodexProgressNotification(method, params);
+  if (strongProgress) {
+    refreshFanoutWorkerHardTimer(worker, method);
+  }
   // Worker progress is aggregate progress: keep the aggregate waiter's idle
   // backstop from firing while any worker is still streaming. Background
   // workers have NO aggregate waiter — their progress must never keep an
   // unrelated foreground turn alive.
   if (!worker.background) {
     refreshTurnIdleTimer(`fanout ${method}`);
+    if (strongProgress) refreshTurnHardTimer(`fanout ${method}`);
   }
   if (method === "turn/started") {
     const turnId = extractTurnId(params);
@@ -3427,6 +3611,10 @@ async function runFanoutWorker(kind, task, index, count, run) {
     .then((response) => {
       const turnId = extractTurnId(response);
       if (turnId && !worker.turnId) worker.turnId = turnId;
+      if (worker.timedOut && worker.turnId) {
+        rpc("turn/interrupt", { threadId: worker.threadId, turnId: worker.turnId }).catch(() => {});
+        return;
+      }
       const turn = response && response.turn;
       if (!turn || typeof turn !== "object" || worker.settled) return;
       accumulateFanoutItems(worker, turn.items, { relay: false });
@@ -3683,12 +3871,17 @@ function createBackgroundWorker(kind, task, taskId, routeKey) {
     turnId: null,
     summary: [],
     files: [],
+    recentActivity: [],
     notes: [],
     itemIds: new Set(),
     deltas: new Map(),
     idleTimeoutMs: BACKGROUND_IDLE_TIMEOUT_MS,
+    hardTimeoutMs: BACKGROUND_HARD_TIMEOUT_MS,
+    absoluteTimeoutMs: BACKGROUND_HARD_TIMEOUT_MS,
+    absoluteDeadline: null,
     idleTimer: null,
     hardTimer: null,
+    absoluteTimer: null,
     settled: false,
     cancelled: false,
     updates: 0,
@@ -3698,13 +3891,7 @@ function createBackgroundWorker(kind, task, taskId, routeKey) {
   worker.promise = new Promise((resolve) => {
     worker.resolve = resolve;
   });
-  worker.hardTimer = setTimeout(() => {
-    interruptTimedOutBackgroundWorker(worker);
-    settleFanoutWorker(worker, {
-      status: "failed",
-      error: "Fusion background task exceeded the maximum duration."
-    });
-  }, BACKGROUND_HARD_TIMEOUT_MS);
+  refreshFanoutWorkerHardTimer(worker, "background start");
   refreshFanoutWorkerIdleTimer(worker, "background start");
   return worker;
 }
@@ -3712,6 +3899,17 @@ function createBackgroundWorker(kind, task, taskId, routeKey) {
 function postBackgroundProgress(worker, activityKind, text) {
   if (!activityKind || worker.settled) return;
   worker.updates += 1;
+  worker.recentActivity.push({
+    ts: Date.now(),
+    kind: activityKind,
+    text: clippedText(text, 400)
+  });
+  if (worker.recentActivity.length > BACKGROUND_ACTIVITY_MAX_ITEMS) {
+    worker.recentActivity.splice(
+      0,
+      worker.recentActivity.length - BACKGROUND_ACTIVITY_MAX_ITEMS
+    );
+  }
   postTelemetry({
     type: "fusion.background-task",
     phase: "progress",
@@ -3751,6 +3949,31 @@ function finalizeBackgroundWorker(worker, result) {
     killChildProcessTree(child);
   }
   const settled = result || { status: "failed", error: "background worker returned no result" };
+  const settledAt = Date.now();
+  const clippedResult = clipBackgroundResult(settled);
+  const cancelled = worker.cancelled === true || settled.cancelled === true;
+  settledBackgroundTasks.unshift({
+    taskId: worker.taskId,
+    title: worker.title,
+    kind: worker.kind,
+    state: cancelled ? "cancelled" : settled.status === "completed" ? "completed" : "failed",
+    task: worker.task,
+    startedAt: worker.startedAt,
+    cancelled,
+    durationMs: settledAt - worker.startedAt,
+    elapsedMs: settledAt - worker.startedAt,
+    settledAt,
+    updates: worker.updates,
+    files: Array.from(
+      new Set([
+        ...worker.files,
+        ...(Array.isArray(clippedResult.files) ? clippedResult.files : [])
+      ].filter(Boolean))
+    ).slice(0, 64),
+    recentActivity: worker.recentActivity.slice(),
+    result: clippedResult
+  });
+  settledBackgroundTasks.splice(BACKGROUND_SETTLED_MAX_TASKS);
   postTelemetry(
     {
       type: "fusion.background-task",
@@ -3758,10 +3981,10 @@ function finalizeBackgroundWorker(worker, result) {
       taskId: worker.taskId,
       title: worker.title,
       kind: worker.kind,
-      cancelled: worker.cancelled === true || settled.cancelled === true,
+      cancelled,
       updates: worker.updates,
       durationMs: Date.now() - worker.startedAt,
-      result: clipBackgroundResult(settled)
+      result: clippedResult
     },
     3000
   );
@@ -3785,6 +4008,10 @@ async function startCodexBackgroundWorker(kind, task, taskId, settings) {
     .then((response) => {
       const turnId = extractTurnId(response);
       if (turnId && !worker.turnId) worker.turnId = turnId;
+      if (worker.timedOut && worker.turnId) {
+        rpc("turn/interrupt", { threadId: worker.threadId, turnId: worker.turnId }).catch(() => {});
+        return;
+      }
       const turn = response && response.turn;
       if (!turn || typeof turn !== "object" || worker.settled) return;
       accumulateFanoutItems(worker, turn.items, { relay: false });
@@ -3821,10 +4048,12 @@ function handleBackgroundClaudeEvent(worker, event) {
         }
       }
       refreshFanoutWorkerIdleTimer(worker, `executor ${name || "tool"}`);
+      refreshFanoutWorkerHardTimer(worker, `executor ${name || "tool"}`);
       break;
     }
     case "tool-result":
       refreshFanoutWorkerIdleTimer(worker, "executor tool result");
+      refreshFanoutWorkerHardTimer(worker, "executor tool result");
       break;
     case "turn-end":
       if (event.awaitsToolResult) {
@@ -3945,6 +4174,60 @@ function activeBackgroundTaskList() {
     title: worker.title,
     kind: worker.kind
   }));
+}
+
+function runningBackgroundTaskSnapshot(worker, now = Date.now()) {
+  const assistantText =
+    worker.summary.join("\n") + (worker.child ? worker.textParts.join("") : "");
+  return {
+    taskId: worker.taskId,
+    title: worker.title,
+    kind: worker.kind,
+    state: "running",
+    task: clippedText(worker.task, 400),
+    startedAt: worker.startedAt,
+    elapsedMs: now - worker.startedAt,
+    updates: worker.updates,
+    files: Array.from(new Set(worker.files)).slice(0, 64),
+    recentActivity: worker.recentActivity.slice(),
+    latestText: clippedText(assistantText.slice(-1000), 1000)
+  };
+}
+
+function codexTaskStatus(taskId) {
+  const wanted = String(taskId || "").trim();
+  const now = Date.now();
+  if (!wanted) {
+    return {
+      status: "ok",
+      active: Array.from(backgroundWorkers.values())
+        .sort((a, b) => b.startedAt - a.startedAt)
+        .map((worker) => runningBackgroundTaskSnapshot(worker, now)),
+      recentlySettled: settledBackgroundTasks.slice(),
+      note:
+        "This peek is read-only and never blocks or settles a background task. The full report still arrives as a FUSION BACKGROUND TASK REPORT."
+    };
+  }
+  const worker = findBackgroundWorkerByTaskId(wanted);
+  if (worker) {
+    return { status: "ok", task: runningBackgroundTaskSnapshot(worker, now) };
+  }
+  const settled = settledBackgroundTasks.find((entry) => entry.taskId === wanted);
+  if (settled) {
+    return {
+      status: "ok",
+      task: { ...settled },
+      note:
+        "This task already settled; its full report was (or is being) delivered as a FUSION BACKGROUND TASK REPORT message."
+    };
+  }
+  return {
+    status: "not_found",
+    taskId: wanted,
+    error: `Unknown background taskId: ${wanted}`,
+    active: activeBackgroundTaskList(),
+    recentlySettled: settledBackgroundTasks.slice()
+  };
 }
 
 function cancelBackgroundTask(taskId) {
@@ -4125,17 +4408,22 @@ function awaitTurn(kind = "implement") {
   activeTurnKind = kind;
   return new Promise((resolve) => {
     clearCurrentTurnTimers();
-    currentTurn = { resolve, idleTimer: null, commandTimer: null, hardTimer: null };
+    currentTurn = {
+      resolve,
+      idleTimer: null,
+      commandTimer: null,
+      hardTimer: null,
+      absoluteTimer: null
+    };
     refreshTurnIdleTimer("turn start");
-    // Absolute ceiling: never refreshed by refreshTurnIdleTimer, so progress
-    // churn cannot keep the turn alive forever. This is the backstop that makes
-    // `await done` guaranteed to resolve even when the idle watchdog is starved.
-    currentTurn.hardTimer = setTimeout(() => {
-      resolveTurn({
-        status: "failed",
-        error: "Fusion turn exceeded the maximum duration."
-      });
-    }, TURN_HARD_TIMEOUT_MS);
+    refreshTurnHardTimer("turn start");
+    const turn = currentTurn;
+    turn.absoluteTimer = setTimeout(() => {
+      if (currentTurn !== turn) return;
+      failCurrentTurnForCeiling(
+        "Fusion turn exceeded the maximum duration and was interrupted. Re-delegate a smaller milestone or use background delegation."
+      );
+    }, TURN_ABSOLUTE_TIMEOUT_MS);
   });
 }
 
@@ -4476,6 +4764,7 @@ async function codexImplement(taskValue, tasksValue, backgroundValue) {
   // reset this turn's accumulation buffers mid-flight.
   turnArming = true;
   let done;
+  let turnWaiter;
   let goalSetup;
   try {
     await ensureThread();
@@ -4490,6 +4779,7 @@ async function codexImplement(taskValue, tasksValue, backgroundValue) {
         : task
     });
     done = awaitTurn();
+    turnWaiter = currentTurn;
   } finally {
     turnArming = false;
   }
@@ -4511,9 +4801,15 @@ async function codexImplement(taskValue, tasksValue, backgroundValue) {
     sandboxPolicy: fusionCodexSandboxPolicy()
   };
   await applyCodexTurnSettings(params);
-  rpc("turn/start", params)
-    .then(handleTurnStartResponse)
-    .catch((error) => resolveTurn({ status: "failed", error: error.message }));
+  if (currentTurn === turnWaiter) {
+    rpc("turn/start", params)
+      .then((response) => handleTurnStartResponse(response, turnWaiter))
+      .catch((error) => {
+        if (currentTurn === turnWaiter) {
+          resolveTurn({ status: "failed", error: error.message });
+        }
+      });
+  }
   const result = await done;
   const withGoal = await syncGoalAfterTurn(result);
   if (goalSetup.status === "failed" && withGoal.status === "completed") {
@@ -4567,6 +4863,7 @@ async function codexInvestigate(taskValue, tasksValue, backgroundValue) {
   }
   turnArming = true;
   let done;
+  let turnWaiter;
   try {
     await ensureThread();
     resetTurnBuffers();
@@ -4579,6 +4876,7 @@ async function codexInvestigate(taskValue, tasksValue, backgroundValue) {
         : `investigate: ${task}`
     });
     done = awaitTurn("investigate");
+    turnWaiter = currentTurn;
   } finally {
     turnArming = false;
   }
@@ -4593,9 +4891,15 @@ async function codexInvestigate(taskValue, tasksValue, backgroundValue) {
     sandboxPolicy: fusionCodexInvestigateSandboxPolicy()
   };
   await applyCodexTurnSettings(params);
-  rpc("turn/start", params)
-    .then(handleTurnStartResponse)
-    .catch((error) => resolveTurn({ status: "failed", error: error.message }));
+  if (currentTurn === turnWaiter) {
+    rpc("turn/start", params)
+      .then((response) => handleTurnStartResponse(response, turnWaiter))
+      .catch((error) => {
+        if (currentTurn === turnWaiter) {
+          resolveTurn({ status: "failed", error: error.message });
+        }
+      });
+  }
   return done;
 }
 
@@ -4661,6 +4965,7 @@ async function codexRespond(pendingId, decision, note) {
   // needs_decision, so an investigate turn that parked a question must complete
   // as an investigation result, not a verifier-verdict implement result.
   const done = hasQueuedDecision ? null : awaitTurn(activeTurnKind || "implement");
+  if (done) refreshTurnHardTimer("approval resolved");
   if (!codexSend({ id: item.rpcId, result })) {
     if (done) {
       resolveTurn({ status: "failed", error: "Fusion execution channel is not writable" });
@@ -4811,6 +5116,20 @@ const TOOLS = [
     }
   },
   {
+    name: "codex_task_status",
+    description:
+      "Peek at Fusion's detached background delegations WITHOUT blocking or affecting them. Without taskId, returns {status:'ok', active, recentlySettled}: active contains running snapshots (title, kind, elapsed, update count, recent activity) and recentlySettled is bounded newest-first memory. With taskId, returns that task's detail including recent activity, files touched so far, and the latest assistant text. Read-only and safe in Plan mode; the full report still arrives later as a FUSION BACKGROUND TASK REPORT. Cancel with codex_cancel {taskId}.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: {
+          type: "string",
+          description: "Optional taskId returned by a detached background delegation."
+        }
+      }
+    }
+  },
+  {
     name: "codex_build_cancel",
     description:
       "Request cancellation of a host-supervised detached build by buildId. The build supervisor kills the process tree and sends a cancelled completion report. This terminates a process and is blocked in Plan mode.",
@@ -4882,6 +5201,7 @@ const PLAN_MODE_ALLOWED_TOOLS = new Set([
   "codex_goal_get",
   "codex_investigate",
   "codex_build_status",
+  "codex_task_status",
   "codex_cancel",
   "codex_steer_resolve"
 ]);
@@ -4933,6 +5253,8 @@ async function handleToolCall(id, params) {
       );
     } else if (name === "codex_build_status") {
       result = await codexBuildStatus(args.buildId != null ? String(args.buildId) : "");
+    } else if (name === "codex_task_status") {
+      result = codexTaskStatus(args.taskId != null ? String(args.taskId).trim() : "");
     } else if (name === "codex_build_cancel") {
       result = await codexBuildCancel(args.buildId != null ? String(args.buildId) : "");
     } else if (name === "codex_cancel") {
@@ -5033,6 +5355,8 @@ module.exports = {
   FAST_SERVICE_TIER,
   FANOUT_MAX_TASKS,
   BACKGROUND_MAX_TASKS,
+  BACKGROUND_ACTIVITY_MAX_ITEMS,
+  BACKGROUND_SETTLED_MAX_TASKS,
   VERDICT_MARKER,
   backgroundTaskTitle,
   buildBackgroundTaskText,
@@ -5045,6 +5369,7 @@ module.exports = {
   buildSupervisorDir,
   codexBuildCancel,
   codexBuildStatus,
+  codexTaskStatus,
   combineFanoutResults,
   codexWatchBuild,
   fanoutFileConflicts,
@@ -5069,6 +5394,7 @@ module.exports = {
   translateWorkspaceMcpServerConfig,
   unwrapShellCommand,
   readBuildRegistry,
+  settledBackgroundTasks,
   watchedBuildRunnerSource,
   watchedBuildSpawnSpec,
   workspaceMcpConfigOverrides,

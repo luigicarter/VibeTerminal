@@ -3739,15 +3739,28 @@ export default function OpenFusionChatPane({
           {showPlanActionBar && (
             <div className="fusion-plan-action-bar" role="group" aria-label="Plan actions">
               <span className="fusion-plan-action-label">Implement this plan?</span>
-              <button
-                className="fusion-plan-action-button is-primary"
-                type="button"
-                title="Switch to Auto and send: Implement the plan."
-                onClick={handleImplementPlan}
-              >
-                <Play size={14} />
-                <span>Implement plan</span>
-              </button>
+              <div className="fusion-plan-action-buttons">
+                <button
+                  className="fusion-plan-action-button"
+                  type="button"
+                  title="Stay in Plan mode and keep refining (Esc)"
+                  onClick={() => {
+                    setPlanActionReady(false);
+                    composerRef.current?.focus();
+                  }}
+                >
+                  <span>Keep planning</span>
+                </button>
+                <button
+                  className="fusion-plan-action-button is-primary"
+                  type="button"
+                  title="Switch to Auto and send: Implement the plan."
+                  onClick={handleImplementPlan}
+                >
+                  <Play size={14} />
+                  <span>Implement plan</span>
+                </button>
+              </div>
             </div>
           )}
           <OcBackgroundPin tasks={bgTasks} now={bgNow} onStop={stopBackgroundTask} />
@@ -3765,7 +3778,7 @@ export default function OpenFusionChatPane({
             </div>
           )}
           <div className="oc-prompt">
-            <div className="oc-prompt-box">
+            <div className={clsx("oc-prompt-box", runMode === "plan" && "is-plan-mode")}>
               <textarea
                 className="oc-prompt-input"
                 ref={composerRef}
@@ -3779,7 +3792,9 @@ export default function OpenFusionChatPane({
                         ? "Connect a provider and pick models to start…"
                         : showPlanActionBar
                           ? "Implement the plan, or type to refine it…"
-                          : `Ask anything... "${PROMPT_EXAMPLES[placeholderIndex % PROMPT_EXAMPLES.length]}"`
+                          : runMode === "plan"
+                            ? "Describe the work — Fusion plans first, read-only…"
+                            : `Ask anything... "${PROMPT_EXAMPLES[placeholderIndex % PROMPT_EXAMPLES.length]}"`
                 }
                 onChange={(e) => {
                   setInput(e.target.value);
@@ -3872,10 +3887,17 @@ export default function OpenFusionChatPane({
                       return;
                     }
                   }
-                  if (e.key === "Escape" && busy) {
-                    e.preventDefault();
-                    escInterrupt();
-                    return;
+                  if (e.key === "Escape") {
+                    if (busy) {
+                      e.preventDefault();
+                      escInterrupt();
+                      return;
+                    }
+                    if (!input && showPlanActionBar) {
+                      e.preventDefault();
+                      setPlanActionReady(false);
+                      return;
+                    }
                   }
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();

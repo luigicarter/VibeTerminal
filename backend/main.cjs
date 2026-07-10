@@ -143,6 +143,7 @@ const FUSION_CODEX_BRIDGE_TOOLS = [
   "mcp__fusion-codex__codex_goal_clear",
   "mcp__fusion-codex__codex_watch_build",
   "mcp__fusion-codex__codex_build_status",
+  "mcp__fusion-codex__codex_task_status",
   "mcp__fusion-codex__codex_build_cancel",
   // The wedge escape hatch: without it on the strict --tools/--allowedTools
   // surface, a stuck Codex turn leaves pane-restart as the only recovery.
@@ -2124,6 +2125,7 @@ ipcMain.handle("openfusion-chat:start", async (_event, payload) => {
         env: files.env,
         plannerModel: files.env.VIBE_TERMINAL_OPEN_FUSION_PLANNER_MODEL,
         executorModel: files.env.VIBE_TERMINAL_OPEN_FUSION_EXECUTOR_MODEL,
+        backgroundStatusPath: files.backgroundStatusPath,
         resumeId: payload.resumeId || undefined,
         // Capability flag: this start's generated config includes the plan
         // agent. Guards plan-mode turns against a stale serve without it.

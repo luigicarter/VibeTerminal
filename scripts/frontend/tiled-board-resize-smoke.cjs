@@ -1,193 +1,65 @@
 const assert = require("assert");
 const fs = require("fs");
+const Module = require("module");
 const path = require("path");
+const ts = require("typescript");
 
-// Regression guard for tiled-board resize geometry.
+// Regression guard for tiled-board resize and drop geometry.
 //
-// The board supports split-resizing into a neighboring pane, but shrinking away
-// from a touching neighbor must detach and leave a gap. An older freed-space
-// follow path let a tall neighbor sweep over a third pane, then the commit-time
-// gravity pass buried that third pane below the neighbor's full height.
-//
-// The current fix is directional: a neighbor only joins the resize when the
-// active edge pushes into it. Dragging away leaves the neighbor fixed, so the old
-// sweep path is gone. This test pins that behavior on a faithful copy of the
-// geometry, and source-tripwires the real component so the predicates do not
-// drift back.
+// This smoke transpiles and executes the real production geometry module in
+// memory, so every fixture below exercises the same functions TiledBoard uses.
+const geometryPath = path.join(
+  __dirname,
+  "..",
+  "..",
+  "frontend",
+  "components",
+  "tiledBoardGeometry.ts"
+);
+const tiledBoardPath = path.join(
+  __dirname,
+  "..",
+  "..",
+  "frontend",
+  "components",
+  "TiledBoard.tsx"
+);
+const geometrySource = fs.readFileSync(geometryPath, "utf8");
+const compiledGeometry = ts.transpileModule(geometrySource, {
+  compilerOptions: {
+    module: ts.ModuleKind.CommonJS,
+    target: ts.ScriptTarget.ES2022
+  },
+  fileName: geometryPath
+}).outputText;
+const geometryModule = new Module(geometryPath, module);
+geometryModule.filename = geometryPath;
+geometryModule.paths = Module._nodeModulePaths(path.dirname(geometryPath));
+geometryModule._compile(compiledGeometry, geometryPath);
 
-// ---------------------------------------------------------------------------
-// Faithful copy of the pure geometry from TiledBoard.tsx (kept in lockstep by
-// the source tripwires at the bottom).
-// ---------------------------------------------------------------------------
-const BOARD_GAP = 4;
-const BOARD_PADDING = 10;
-const DEFAULT_MIN_W = 280;
-const DEFAULT_MIN_H = 170;
-const ADJACENT_RESIZE_TOLERANCE = 32;
-const OVERLAP_EPSILON = 0.5;
-
-const clamp = (v, min, max) => Math.min(Math.max(v, min), max);
-const percentToPx = (v, iw) => (v / 100) * iw;
-const pxToPercent = (v, iw) => (iw <= 0 ? 0 : (v / iw) * 100);
-const layoutToRect = (l, iw) => ({ left: percentToPx(l.x, iw), top: l.y, width: percentToPx(l.w, iw), height: l.h });
-const rectToLayout = (r, iw) => ({ x: pxToPercent(r.left, iw), y: r.top, w: pxToPercent(r.width, iw), h: r.height, unit: "fluid" });
-const rectRight = (r) => r.left + r.width;
-const rectBottom = (r) => r.top + r.height;
-const rangeOverlap = (as, ae, bs, be) => Math.max(0, Math.min(ae, be) - Math.max(as, bs));
-const rangesOverlap = (as, ae, bs, be) => rangeOverlap(as, ae, bs, be) > 0;
-const itemSizing = (opts, id) => opts.get(id) ?? { minW: DEFAULT_MIN_W, minH: DEFAULT_MIN_H };
-
-function sanitizeLayout(layout, innerWidth, minW = DEFAULT_MIN_W, minH = DEFAULT_MIN_H) {
-  const minWidth = Math.min(minW, innerWidth);
-  const width = clamp(percentToPx(layout.w, innerWidth), minWidth, innerWidth);
-  const left = clamp(percentToPx(layout.x, innerWidth), 0, Math.max(0, innerWidth - width));
-  const height = Math.max(minH, layout.h);
-  return rectToLayout({ left, top: Math.max(BOARD_PADDING, layout.y), width, height }, innerWidth);
-}
-function rectsOverlap(a, b, gap = BOARD_GAP) {
-  const g = gap - OVERLAP_EPSILON;
-  return a.left < b.left + b.width + g && a.left + a.width + g > b.left && a.top < b.top + b.height + g && a.top + a.height + g > b.top;
-}
-function horizontalOverlap(a, b, gap = BOARD_GAP) {
-  const g = gap - OVERLAP_EPSILON;
-  return a.left < b.left + b.width + g && a.left + a.width + g > b.left;
-}
-function isLayoutWithinBounds(candidate, innerWidth, minW, minH) {
-  const rect = layoutToRect(candidate, innerWidth);
-  return (
-    rect.left >= -OVERLAP_EPSILON &&
-    rect.top >= BOARD_PADDING - OVERLAP_EPSILON &&
-    rect.width >= Math.min(minW, innerWidth) - OVERLAP_EPSILON &&
-    rect.height >= minH - OVERLAP_EPSILON &&
-    rect.left + rect.width <= innerWidth + OVERLAP_EPSILON
-  );
-}
-function normalizeLayouts(items, innerWidth, pinnedId) {
-  const sanitized = items
-    .map((item) => ({ ...item, layout: sanitizeLayout(item.layout, innerWidth, item.minW ?? DEFAULT_MIN_W, item.minH ?? DEFAULT_MIN_H) }))
-    .sort((a, b) => {
-      if (a.id === pinnedId && b.id !== pinnedId) return -1;
-      if (b.id === pinnedId && a.id !== pinnedId) return 1;
-      if (a.layout.y !== b.layout.y) return a.layout.y - b.layout.y;
-      if (a.layout.x !== b.layout.x) return a.layout.x - b.layout.x;
-      return a.index - b.index;
-    });
-  const placed = [];
-  const out = {};
-  sanitized.forEach((item) => {
-    const rect = layoutToRect(item.layout, innerWidth);
-    rect.top = placed.reduce((top, p) => (horizontalOverlap(rect, p.rect) ? Math.max(top, p.rect.top + p.rect.height + BOARD_GAP) : top), BOARD_PADDING);
-    placed.push({ id: item.id, rect });
-    out[item.id] = rectToLayout(rect, innerWidth);
-  });
-  return out;
-}
-function committedLayoutsOverlap(layouts, innerWidth) {
-  const rects = Object.values(layouts).map((layout) => layoutToRect(layout, innerWidth));
-  for (let i = 0; i < rects.length; i++) {
-    for (let j = i + 1; j < rects.length; j++) {
-      if (rectsOverlap(rects[i], rects[j])) return true;
-    }
-  }
-  return false;
-}
-function isRightResizeNeighbor(s, a, n) {
-  return rangesOverlap(a.top, rectBottom(a), n.top, rectBottom(n)) && n.left >= rectRight(s) - ADJACENT_RESIZE_TOLERANCE && rectRight(a) + BOARD_GAP > n.left;
-}
-function isLeftResizeNeighbor(s, a, n) {
-  return rangesOverlap(a.top, rectBottom(a), n.top, rectBottom(n)) && rectRight(n) <= s.left + ADJACENT_RESIZE_TOLERANCE && a.left < rectRight(n) + BOARD_GAP;
-}
-function isBelowResizeNeighbor(s, a, n) {
-  return rangesOverlap(a.left, rectRight(a), n.left, rectRight(n)) && n.top >= rectBottom(s) - ADJACENT_RESIZE_TOLERANCE && rectBottom(a) + BOARD_GAP > n.top;
-}
-function isAboveResizeNeighbor(s, a, n) {
-  return rangesOverlap(a.left, rectRight(a), n.left, rectRight(n)) && rectBottom(n) <= s.top + ADJACENT_RESIZE_TOLERANCE && a.top < rectBottom(n) + BOARD_GAP;
-}
-function buildResizeLayout(s, axis, dx, dy, iw, minW, minH) {
-  let left = s.left, top = s.top, width = s.width, height = s.height;
-  if (axis.includes("e")) width = clamp(s.width + dx, Math.min(minW, iw), iw - s.left);
-  if (axis.includes("w")) { const right = s.left + s.width; left = clamp(s.left + dx, 0, Math.max(0, right - minW)); width = right - left; }
-  if (axis.includes("n")) { const bottom = s.top + s.height; top = clamp(s.top + dy, BOARD_PADDING, Math.max(BOARD_PADDING, bottom - minH)); height = bottom - top; }
-  if (axis.includes("s")) height = Math.max(minH, s.height + dy);
-  return rectToLayout({ left, top, width, height }, iw);
-}
-function buildAdjacentResizeLayouts(interaction, resizedLayout, innerWidth, options) {
-  const axis = interaction.axis;
-  const activeOption = itemSizing(options, interaction.itemId);
-  const activeMinWidth = Math.min(activeOption.minW, innerWidth);
-  const startRect = interaction.startRect;
-  const neighborEntries = Object.entries(interaction.layoutsAtStart)
-    .filter(([id]) => id !== interaction.itemId)
-    .map(([id, layout]) => {
-      const option = itemSizing(options, id);
-      return { id, option, rect: layoutToRect(sanitizeLayout(layout, innerWidth, option.minW, option.minH), innerWidth) };
-    });
-  const neighborRects = new Map(neighborEntries.map(({ id, rect }) => [id, { ...rect }]));
-  const activeRect = layoutToRect(sanitizeLayout(resizedLayout, innerWidth, activeOption.minW, activeOption.minH), innerWidth);
-  if (axis.includes("e")) {
-    const rightNeighbors = neighborEntries.filter(({ rect }) => isRightResizeNeighbor(startRect, activeRect, rect));
-    const rightLimit = rightNeighbors.reduce((limit, { rect, option }) => Math.min(limit, rectRight(rect) - Math.min(option.minW, innerWidth) - BOARD_GAP), innerWidth);
-    const activeRight = Math.min(rectRight(activeRect), rightLimit);
-    activeRect.width = Math.max(activeMinWidth, activeRight - activeRect.left);
-    rightNeighbors.forEach(({ id, rect }) => {
-      if (!isRightResizeNeighbor(startRect, activeRect, rect)) return;
-      const nextLeft = rectRight(activeRect) + BOARD_GAP;
-      const current = neighborRects.get(id);
-      if (!current) return;
-      current.left = nextLeft;
-      current.width = rectRight(rect) - nextLeft;
-    });
-  }
-  if (axis.includes("w")) {
-    const leftNeighbors = neighborEntries.filter(({ rect }) => isLeftResizeNeighbor(startRect, activeRect, rect));
-    const leftLimit = leftNeighbors.reduce((limit, { rect, option }) => Math.max(limit, rect.left + Math.min(option.minW, innerWidth) + BOARD_GAP), 0);
-    const activeRight = rectRight(activeRect);
-    activeRect.left = Math.min(Math.max(activeRect.left, leftLimit), activeRight - activeMinWidth);
-    activeRect.width = activeRight - activeRect.left;
-    leftNeighbors.forEach(({ id, rect }) => {
-      if (!isLeftResizeNeighbor(startRect, activeRect, rect)) return;
-      const nextRight = activeRect.left - BOARD_GAP;
-      const current = neighborRects.get(id);
-      if (!current) return;
-      current.width = nextRight - rect.left;
-    });
-  }
-  if (axis.includes("s")) {
-    const belowNeighbors = neighborEntries.filter(({ rect }) => isBelowResizeNeighbor(startRect, activeRect, rect));
-    const bottomLimit = belowNeighbors.reduce((limit, { rect, option }) => Math.min(limit, rectBottom(rect) - option.minH - BOARD_GAP), Infinity);
-    const activeBottom = Math.min(rectBottom(activeRect), bottomLimit);
-    activeRect.height = Math.max(activeOption.minH, activeBottom - activeRect.top);
-    belowNeighbors.forEach(({ id, rect }) => {
-      if (!isBelowResizeNeighbor(startRect, activeRect, rect)) return;
-      const nextTop = rectBottom(activeRect) + BOARD_GAP;
-      const current = neighborRects.get(id);
-      if (!current) return;
-      current.top = nextTop;
-      current.height = rectBottom(rect) - nextTop;
-    });
-  }
-  if (axis.includes("n")) {
-    const aboveNeighbors = neighborEntries.filter(({ rect }) => isAboveResizeNeighbor(startRect, activeRect, rect));
-    const topLimit = aboveNeighbors.reduce((limit, { rect, option }) => Math.max(limit, rect.top + option.minH + BOARD_GAP), BOARD_PADDING);
-    const activeBottom = rectBottom(activeRect);
-    activeRect.top = Math.min(Math.max(activeRect.top, topLimit), activeBottom - activeOption.minH);
-    activeRect.height = activeBottom - activeRect.top;
-    aboveNeighbors.forEach(({ id, rect }) => {
-      if (!isAboveResizeNeighbor(startRect, activeRect, rect)) return;
-      const nextBottom = activeRect.top - BOARD_GAP;
-      const current = neighborRects.get(id);
-      if (!current) return;
-      current.height = nextBottom - rect.top;
-    });
-  }
-
-  const nextLayouts = { ...interaction.layoutsAtStart, [interaction.itemId]: rectToLayout(activeRect, innerWidth) };
-  neighborRects.forEach((rect, id) => {
-    const option = itemSizing(options, id);
-    nextLayouts[id] = sanitizeLayout(rectToLayout(rect, innerWidth), innerWidth, option.minW, option.minH);
-  });
-  return nextLayouts;
-}
+const {
+  BOARD_GAP,
+  BOARD_PADDING,
+  DEFAULT_MIN_H,
+  DEFAULT_MIN_W,
+  OVERLAP_EPSILON,
+  buildAdjacentResizeLayouts,
+  buildMoveDropRect,
+  buildResizeLayout,
+  changedLayoutEntries,
+  committedLayoutsOverlap,
+  findSwapTargetId,
+  isLayoutWithinBounds,
+  layoutToRect,
+  normalizeLayouts,
+  pxToPercent,
+  rectBottom,
+  rectRight,
+  rectToLayout,
+  resolveDropLayout,
+  sanitizeLayout,
+  settleLayouts
+} = geometryModule.exports;
 
 const IW = 1200;
 function L(x, y, w, h) { return { x, y, w, h, unit: "fluid" }; }
@@ -435,40 +307,295 @@ function simulateResize(items, itemId, axis, dx, dy) {
   assert.strictEqual(overlaps, 0, `committed layouts must never overlap; found ${overlaps}`);
 }
 
-// --- 5. Source tripwires: the real component must keep directional push
-//        predicates, or this whole spec is testing dead behavior. ---
+// --- 5. Narrow boards clamp panes to the available width. ---
 {
-  const source = fs.readFileSync(
-    path.join(__dirname, "..", "..", "frontend", "components", "TiledBoard.tsx"),
-    "utf8"
+  const innerWidth = 200;
+  const sanitized = sanitizeLayout(
+    { x: 75, y: 0, w: 20, h: 100, unit: "fluid" },
+    innerWidth,
+    280,
+    170
   );
-  assert.ok(!source.includes("const initialGap"), "TiledBoard must not reattach panes based only on initial proximity");
-  assert.ok(!source.includes("const blockersFor ="), "TiledBoard should not keep the obsolete freed-space blocker helper");
-  for (const marker of [
-    "activeRight + BOARD_GAP > neighborRect.left",
-    "activeRect.left < neighborRight + BOARD_GAP",
-    "activeBottom + BOARD_GAP > neighborRect.top",
-    "activeRect.top < neighborBottom + BOARD_GAP",
-    "if (!isRightResizeNeighbor(startRect, activeRect, rect))",
-    "if (!isLeftResizeNeighbor(startRect, activeRect, rect))",
-    "if (!isBelowResizeNeighbor(startRect, activeRect, rect))",
-    "if (!isAboveResizeNeighbor(startRect, activeRect, rect))",
-    "const nextLeft = rectRight(activeRect) + BOARD_GAP;",
-    "current.left = nextLeft;",
-    "current.width = rectRight(rect) - nextLeft;",
-    "const nextRight = activeRect.left - BOARD_GAP;",
-    "current.width = nextRight - rect.left;",
-    "const nextTop = rectBottom(activeRect) + BOARD_GAP;",
-    "current.top = nextTop;",
-    "current.height = rectBottom(rect) - nextTop;",
-    "const nextBottom = activeRect.top - BOARD_GAP;",
-    "current.height = nextBottom - rect.top;"
-  ]) {
-    assert.ok(
-      source.includes(marker),
-      `TiledBoard adjacency predicates must stay directional (missing ${marker})`
-    );
-  }
+  const rect = layoutToRect(sanitized, innerWidth);
+
+  assert.strictEqual(rect.left, 0, "narrow sanitize should clamp x to zero");
+  assert.strictEqual(rect.width, innerWidth, "narrow sanitize should use the full board width");
+  assert.strictEqual(rect.top, BOARD_PADDING, "narrow sanitize should retain board padding");
+  assert.strictEqual(rect.height, 170, "narrow sanitize should retain the pane minimum height");
 }
 
-console.log("tiled board resize smoke passed");
+// --- 6. Adjacent resize honors a heterogeneous neighbor minimum. ---
+{
+  const base = [
+    { id: "A", layout: LP(0, 10, 360, 300), minW: 280, minH: 170 },
+    { id: "C", layout: LP(364, 10, 500, 300), minW: 420, minH: 170 }
+  ];
+  const res = simulateResize(base, "A", "e", 500, 0);
+  const active = rectOf(res.committed.A);
+  const neighbor = rectOf(res.committed.C);
+
+  assert.ok(Math.abs(neighbor.width - 420) < 0.001, "east neighbor must stop at its own 420px minimum");
+  assert.ok(Math.abs(rectRight(neighbor) - 864) < 0.001, "east neighbor must keep its far edge anchored");
+  assert.ok(Math.abs(neighbor.left - rectRight(active) - BOARD_GAP) < 0.001, "heterogeneous resize must retain the board gap");
+}
+
+// --- 7. Exact BOARD_GAP survives percent round-trips without stacking. ---
+{
+  const left = rectToLayout({ left: 0, top: 10, width: 400, height: 200 }, IW);
+  const right = rectToLayout({ left: 404, top: 10, width: 400, height: 200 }, IW);
+  const roundTripped = {
+    A: rectToLayout(layoutToRect(left, IW), IW),
+    B: rectToLayout(layoutToRect(right, IW), IW)
+  };
+
+  assert.strictEqual(
+    committedLayoutsOverlap(roundTripped, IW),
+    false,
+    "an exact BOARD_GAP must not report as overlapping after a round-trip"
+  );
+  const normalized = normalizeLayouts([
+    { id: "A", layout: roundTripped.A, minW: 280, minH: 170, index: 0 },
+    { id: "B", layout: roundTripped.B, minW: 280, minH: 170, index: 1 }
+  ], IW);
+  assert.ok(
+    Math.abs(rectOf(normalized.B).top - 10) <= OVERLAP_EPSILON,
+    "gravity must not stack an exact-gap neighbor"
+  );
+}
+
+// --- 8. Lock the current max-bottom behavior for a staggered A/B/C chain. ---
+{
+  // A pushes B down. C overlaps B horizontally but not A, so the current
+  // max-bottom skyline still places C below B even though a higher hole exists.
+  const normalized = normalizeLayouts([
+    { id: "A", layout: LP(0, 10, 400, 300), minW: 280, minH: 170, index: 0 },
+    { id: "B", layout: LP(300, 10, 400, 170), minW: 280, minH: 170, index: 1 },
+    { id: "C", layout: LP(600, 500, 400, 170), minW: 280, minH: 170, index: 2 }
+  ], IW);
+  const b = rectOf(normalized.B);
+  const c = rectOf(normalized.C);
+
+  assert.ok(Math.abs(b.top - 314) < 0.001, "B should land below A");
+  assert.ok(Math.abs(c.top - (rectBottom(b) + BOARD_GAP)) < 0.001, "C should retain current max-bottom placement below B");
+}
+
+// --- 9. A colliding drop with no visible fit grows below the lowest pane. ---
+{
+  const desired = LP(0, 10, IW, 200);
+  const fixed = LP(0, 10, IW, 300);
+  const layoutsAtStart = { A: desired, B: fixed };
+  const options = new Map([
+    ["A", { minW: 280, minH: 170 }],
+    ["B", { minW: 280, minH: 170 }]
+  ]);
+  const resolved = resolveDropLayout(
+    "A",
+    desired,
+    layoutsAtStart,
+    IW,
+    300,
+    options
+  );
+  const resolvedRect = rectOf(resolved);
+  const fixedRect = rectOf(fixed);
+
+  assert.ok(
+    Math.abs(resolvedRect.top - (rectBottom(fixedRect) + BOARD_GAP)) < 0.001,
+    "no-visible-fit fallback should place the drop below the lowest pane"
+  );
+  assert.ok(Number.isFinite(resolvedRect.left) && Number.isFinite(resolvedRect.top), "fallback coordinates must stay finite");
+}
+
+// --- 10. Sparse layout diffs include only exact per-entry changes. ---
+{
+  const base = {
+    A: L(0, 10, 40, 230),
+    B: L(50, 300, 40, 230)
+  };
+
+  assert.deepStrictEqual(
+    changedLayoutEntries(base, { ...base }),
+    {},
+    "identical layout records should produce an empty sparse commit"
+  );
+
+  const movedB = L(50, 480, 40, 230);
+  assert.deepStrictEqual(
+    changedLayoutEntries(base, { ...base, B: movedB }),
+    { B: movedB },
+    "only the moved pane should be included"
+  );
+
+  const addedC = L(5, 720, 30, 200);
+  assert.deepStrictEqual(
+    changedLayoutEntries(base, { ...base, C: addedC }),
+    { C: addedC },
+    "an entry absent from before should be included"
+  );
+
+  const exactFloat = 100 / 3;
+  const floatLayout = L(exactFloat, 10, exactFloat, 230);
+  assert.deepStrictEqual(
+    changedLayoutEntries({ A: floatLayout }, { A: { ...floatLayout } }),
+    {},
+    "bit-identical floating-point values should be excluded"
+  );
+}
+
+// --- 11. Non-colliding free-form layouts retain deliberate vertical gaps. ---
+{
+  const items = [
+    { id: "A", layout: LP(0, 10, 400, 220), minW: 280, minH: 170, index: 0 },
+    { id: "B", layout: LP(0, 620, 400, 220), minW: 280, minH: 170, index: 1 }
+  ];
+  const expected = Object.fromEntries(
+    items.map((item) => [
+      item.id,
+      sanitizeLayout(item.layout, IW, item.minW, item.minH)
+    ])
+  );
+  const settled = settleLayouts(items, IW);
+
+  assert.deepStrictEqual(settled, expected, "non-overlapping layouts should only be sanitized");
+  assert.ok(
+    Math.abs(rectOf(settled.B).top - 620) < 0.001,
+    "the pane below a deliberate vertical gap must not be pulled upward"
+  );
+}
+
+// --- 12. Colliding prop layouts still use the existing gravity pass. ---
+{
+  const items = [
+    { id: "A", layout: LP(0, 10, 500, 260), minW: 280, minH: 170, index: 0 },
+    { id: "B", layout: LP(300, 100, 500, 220), minW: 280, minH: 170, index: 1 }
+  ];
+
+  assert.deepStrictEqual(
+    settleLayouts(items, IW),
+    normalizeLayouts(items, IW),
+    "overlapping layouts should settle through normalizeLayouts"
+  );
+}
+
+// --- 13. Narrow-board projections stack panes after min-width sanitization. ---
+{
+  const innerWidth = 200;
+  const items = [
+    { id: "A", layout: L(0, 10, 45, 200), minW: 280, minH: 170, index: 0 },
+    { id: "B", layout: L(55, 10, 45, 200), minW: 280, minH: 170, index: 1 }
+  ];
+  const settled = settleLayouts(items, innerWidth);
+  const a = layoutToRect(settled.A, innerWidth);
+  const b = layoutToRect(settled.B, innerWidth);
+
+  assert.strictEqual(a.width, innerWidth, "the first narrow pane should become full-width");
+  assert.strictEqual(b.width, innerWidth, "the second narrow pane should become full-width");
+  assert.ok(
+    Math.abs(b.top - (rectBottom(a) + BOARD_GAP)) < 0.001,
+    "overlapping narrow projections should be stacked by gravity"
+  );
+  assert.strictEqual(
+    committedLayoutsOverlap(settled, innerWidth),
+    false,
+    "the stacked narrow projection must not overlap"
+  );
+}
+
+// --- 14. A no-move gesture cannot persist a transient narrow projection. ---
+{
+  const wideItems = [
+    { id: "A", layout: LP(0, 10, 500, 240), minW: 280, minH: 170, index: 0 },
+    { id: "B", layout: LP(600, 10, 500, 240), minW: 280, minH: 170, index: 1 }
+  ];
+  const wideLayouts = settleLayouts(wideItems, IW);
+  const narrowWidth = 200;
+  const narrowItems = wideItems.map((item) => ({
+    ...item,
+    layout: wideLayouts[item.id]
+  }));
+  const narrowProjection = settleLayouts(narrowItems, narrowWidth);
+  const narrowA = layoutToRect(narrowProjection.A, narrowWidth);
+  const narrowB = layoutToRect(narrowProjection.B, narrowWidth);
+
+  assert.ok(
+    Math.abs(narrowB.top - (rectBottom(narrowA) + BOARD_GAP)) < 0.001,
+    "the transient narrow projection should stack"
+  );
+  assert.notDeepStrictEqual(
+    narrowProjection,
+    wideLayouts,
+    "the narrow projection should differ from canonical wide geometry"
+  );
+  assert.deepStrictEqual(
+    Object.keys(changedLayoutEntries(wideLayouts, narrowProjection)).sort(),
+    ["A", "B"],
+    "persisting the old full snapshot would poison both canonical wide layouts"
+  );
+
+  // finishInteraction diffs the full on-screen result against layoutsAtStart.
+  // Resolve the active pane through the real zero-delta drop path. The full
+  // result still matches the transient start projection, so no pane—including
+  // untouched panes—is sent to persistence.
+  const layoutsAtStart = { ...narrowProjection };
+  const options = new Map(wideItems.map((item) => [
+    item.id,
+    { minW: item.minW, minH: item.minH }
+  ]));
+  const startRect = layoutToRect(layoutsAtStart.A, narrowWidth);
+  const committedLayout = resolveDropLayout(
+    "A",
+    layoutsAtStart.A,
+    layoutsAtStart,
+    narrowWidth,
+    500,
+    options,
+    buildMoveDropRect(startRect, 0, 0)
+  );
+  const committedLayouts = {
+    ...layoutsAtStart,
+    A: committedLayout
+  };
+  assert.deepStrictEqual(
+    changedLayoutEntries(layoutsAtStart, committedLayouts),
+    {},
+    "a no-move release must not persist the transient projection"
+  );
+}
+
+// --- 15. Swap selection keeps score ordering and stable tie behavior. ---
+{
+  const dragged = LP(300, 100, 400, 300);
+  const scoredCandidates = {
+    A: dragged,
+    B: LP(500, 100, 400, 300),
+    C: LP(320, 100, 400, 300)
+  };
+  assert.strictEqual(
+    findSwapTargetId("A", dragged, scoredCandidates, IW),
+    "C",
+    "the higher-scoring overlapping candidate should win"
+  );
+
+  const tiedTarget = LP(320, 100, 400, 300);
+  const tiedCandidates = {
+    A: dragged,
+    B: tiedTarget,
+    C: { ...tiedTarget }
+  };
+  assert.strictEqual(
+    findSwapTargetId("A", dragged, tiedCandidates, IW),
+    "B",
+    "equal scores should retain the earlier Object.entries candidate"
+  );
+}
+
+// --- 16. Wiring guard: the component consumes the extracted engine. ---
+{
+  const tiledBoardSource = fs.readFileSync(tiledBoardPath, "utf8");
+  assert.ok(
+    tiledBoardSource.includes('from "./tiledBoardGeometry"'),
+    "TiledBoard must import the production geometry module"
+  );
+}
+
+console.log("tiled board resize smoke passed (executed real tiledBoardGeometry.ts module)");

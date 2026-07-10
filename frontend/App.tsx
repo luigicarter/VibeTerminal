@@ -40,11 +40,13 @@ import {
   isTurnTelemetryKind,
   normalizeAttention,
   reconcileStatus,
+  shouldMarkCompletedTurnUnread,
   shouldMarkAttentionUnread,
   shouldShowAttentionDot,
   shouldUseTerminalEventAttention,
   statusFromAttentionState,
-  statusFromTerminalEvent
+  statusFromTerminalEvent,
+  updateDetachedTaskIds
 } from "./attention";
 import TerminalPane from "./components/TerminalPane";
 import FusionChatPane from "./components/FusionChatPane";
@@ -761,6 +763,7 @@ function restoreSession(session: AgentSession): AgentSession {
     status: shouldAutoStart ? "idle" : previousStatus,
     attention: normalizeAttention(session.attention),
     backgroundActivity: undefined,
+    detachedTaskIds: undefined,
     layout: migrateLayout(session.layout)
   };
 }
@@ -1833,7 +1836,8 @@ export default function App() {
             threadLookupMessage: undefined,
             status: "idle",
             attention: EMPTY_ATTENTION,
-            backgroundActivity: undefined
+            backgroundActivity: undefined,
+            detachedTaskIds: undefined
           };
         })
       );
@@ -1842,6 +1846,16 @@ export default function App() {
 
   function applyFusionChatLifecycle(event: FusionChatEvent) {
     if (!("id" in event) || typeof event.id !== "string") {
+      return;
+    }
+
+    // Detached task history is the exception to replay neutrality: replayed
+    // starts without a matching settle rehydrate real work still owned by the
+    // live host. The id reducer is idempotent and touches no status/attention.
+    if (event.type === "background-task") {
+      updateAnySession(event.id, (session) =>
+        session.fusion ? updateDetachedTaskIds(session, event) : session
+      );
       return;
     }
 
@@ -1947,14 +1961,18 @@ export default function App() {
           source: "provider",
           updatedAt: Date.now()
         };
-
         return {
           ...session,
           status: reconcileStatus(session.status, "done"),
           backgroundActivity: undefined,
           attention: attentionFromEvent(
             attentionEvent,
-            shouldMarkFusionAttentionUnread(event.id, attentionEvent)
+            // This result only ends the foreground launcher turn. Keep the
+            // spinner unopposed; the wake-report turn owns the real done dot.
+            shouldMarkCompletedTurnUnread(
+              session,
+              shouldMarkFusionAttentionUnread(event.id, attentionEvent)
+            )
           )
         };
       });
@@ -1992,10 +2010,15 @@ export default function App() {
         const inFlight =
           session.status === "running" ||
           session.status === "waiting" ||
-          session.status === "starting";
+          session.status === "starting" ||
+          Boolean(session.detachedTaskIds?.length);
         if (!inFlight) {
-          return session.backgroundActivity
-            ? { ...session, backgroundActivity: undefined }
+          return session.backgroundActivity || session.detachedTaskIds
+            ? {
+                ...session,
+                backgroundActivity: undefined,
+                detachedTaskIds: undefined
+              }
             : session;
         }
 
@@ -2017,6 +2040,7 @@ export default function App() {
           ...session,
           status: "failed",
           backgroundActivity: undefined,
+          detachedTaskIds: undefined,
           attention: attentionFromEvent(
             attentionEvent,
             shouldMarkFusionAttentionUnread(event.id, attentionEvent)
@@ -2108,6 +2132,15 @@ export default function App() {
       return;
     }
 
+    // Process replayed starts/settles before the neutrality guard for the same
+    // live-host rehydration contract as Fusion. Progress remains state-neutral.
+    if (event.type === "background-task") {
+      updateAnySession(event.id, (session) =>
+        session.openFusion ? updateDetachedTaskIds(session, event) : session
+      );
+      return;
+    }
+
     // Same replay contract as applyFusionChatLifecycle: a reattach replay
     // carries no new status/attention information — skip it.
     if (event.replay) {
@@ -2162,13 +2195,17 @@ export default function App() {
           source: "provider",
           updatedAt: Date.now()
         };
-
         return {
           ...session,
           status: reconcileStatus(session.status, "done"),
           attention: attentionFromEvent(
             attentionEvent,
-            shouldMarkFusionAttentionUnread(event.id, attentionEvent)
+            // The detached task still owns sidebar working state. Its later
+            // wake-report turn will produce the completed attention signal.
+            shouldMarkCompletedTurnUnread(
+              session,
+              shouldMarkFusionAttentionUnread(event.id, attentionEvent)
+            )
           )
         };
       });
@@ -2205,9 +2242,12 @@ export default function App() {
         const inFlight =
           session.status === "running" ||
           session.status === "waiting" ||
-          session.status === "starting";
+          session.status === "starting" ||
+          Boolean(session.detachedTaskIds?.length);
         if (!inFlight) {
-          return session;
+          return session.detachedTaskIds
+            ? { ...session, detachedTaskIds: undefined }
+            : session;
         }
 
         const message =
@@ -2227,6 +2267,7 @@ export default function App() {
         return {
           ...session,
           status: "failed",
+          detachedTaskIds: undefined,
           attention: attentionFromEvent(
             attentionEvent,
             shouldMarkFusionAttentionUnread(event.id, attentionEvent)
@@ -2300,7 +2341,8 @@ export default function App() {
             threadLookupMessage: undefined,
             status: "idle",
             attention: EMPTY_ATTENTION,
-            backgroundActivity: undefined
+            backgroundActivity: undefined,
+            detachedTaskIds: undefined
           };
         })
       );
@@ -2338,7 +2380,8 @@ export default function App() {
             threadLookupMessage: undefined,
             status: "idle",
             attention: EMPTY_ATTENTION,
-            backgroundActivity: undefined
+            backgroundActivity: undefined,
+            detachedTaskIds: undefined
           };
         })
       );
@@ -2449,7 +2492,8 @@ export default function App() {
                   threadLookupStatus: relaunchResumeRef?.id ? "found" : "idle",
                   threadLookupMessage: undefined,
                   status: "idle" as const,
-                  attention: EMPTY_ATTENTION
+                  attention: EMPTY_ATTENTION,
+                  detachedTaskIds: undefined
                 }
               : {})
           };
@@ -2536,7 +2580,8 @@ export default function App() {
                     | "idle",
                   threadLookupMessage: undefined,
                   status: "idle" as const,
-                  attention: EMPTY_ATTENTION
+                  attention: EMPTY_ATTENTION,
+                  detachedTaskIds: undefined
                 }
               : {})
           };

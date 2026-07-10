@@ -40,7 +40,9 @@
 
 const { spawn, execFileSync } = require("child_process");
 const crypto = require("crypto");
+const fs = require("fs");
 const http = require("http");
+const path = require("path");
 const { windowsCmdArg } = require("./fusionChatHost.cjs");
 const { createOpenFusionGateTracker } = require("./completionGate.cjs");
 
@@ -97,7 +99,10 @@ const OPEN_FUSION_GATE_MARKER = "[Open Fusion standing reminder]";
 const OPEN_FUSION_GATE_REMINDER =
   `${OPEN_FUSION_GATE_MARKER} Executor reports are evidence, not verdicts: ` +
   "before presenting delegated work as done, verify it independently (git diff/status, " +
-  "read the changed files, or an investigator pass) and state which check you ran.";
+  "read the changed files, or an investigator pass) and state which check you ran. " +
+  "While a background task runs, use the vibeterminal background_status tool to peek " +
+  "at progress when the user asks; peeking is read-only and never replaces independently " +
+  "reviewing the final report.";
 // Plan-mode variant: the executor-verification copy is inapplicable while the
 // executor is permission-denied. Same marker prefix — rehydration filters
 // reminder parts by that prefix, so a new prefix would leak into resumed
@@ -129,8 +134,10 @@ const OPEN_FUSION_EXECUTOR_STEER_PREFIX =
 const OPEN_FUSION_BACKGROUND_MARKER = "[Open Fusion background report]";
 const BACKGROUND_MAX_TASKS = 4;
 const BACKGROUND_IDLE_TIMEOUT_MS = 600_000;
-const BACKGROUND_HARD_TIMEOUT_MS = 900_000;
+const BACKGROUND_HARD_TIMEOUT_MS = 14_400_000;
 const BACKGROUND_REPORT_MAX_CHARS = 24_000;
+const BACKGROUND_STATUS_MAX_ACTIVITY = 20;
+const BACKGROUND_STATUS_MAX_SETTLED = 8;
 
 function backgroundTaskTitleOf(description, prompt) {
   const source = String(description || "").trim() || String(prompt || "").trim();
@@ -1056,6 +1063,66 @@ function buildServeSpawn(extraEnv, cwd, password) {
   };
 }
 
+function backgroundStatusFileForEnv(extraEnv, explicitPath = "") {
+  const explicit = String(explicitPath || "").trim();
+  if (explicit) return explicit;
+  const configured = String(extraEnv?.VIBE_TERMINAL_BG_STATUS_FILE || "").trim();
+  if (configured) return configured;
+  const paneDir = String(extraEnv?.VIBE_TERMINAL_OPEN_FUSION_DIR || "").trim();
+  return paneDir ? path.join(paneDir, "background-status.json") : "";
+}
+
+function withBackgroundStatusEnv(extraEnv, statusFile) {
+  const env = { ...(extraEnv && typeof extraEnv === "object" ? extraEnv : {}) };
+  if (!statusFile) return env;
+  env.VIBE_TERMINAL_BG_STATUS_FILE = statusFile;
+  try {
+    const config = JSON.parse(String(env.OPENCODE_CONFIG_CONTENT || ""));
+    const bridge = config?.mcp?.vibeterminal;
+    if (bridge && typeof bridge === "object") {
+      bridge.environment = {
+        ...(bridge.environment && typeof bridge.environment === "object"
+          ? bridge.environment
+          : {}),
+        VIBE_TERMINAL_BG_STATUS_FILE: statusFile
+      };
+      env.OPENCODE_CONFIG_CONTENT = JSON.stringify(config);
+    }
+  } catch {
+    // The inherited env still reaches the local MCP child; malformed config
+    // remains OpenCode's own startup error rather than a host-loop failure.
+  }
+  return env;
+}
+
+function writeBackgroundStatusSnapshotFile(statusFile, snapshot) {
+  const file = String(statusFile || "").trim();
+  if (!file) return false;
+  let tempFile = "";
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    tempFile = `${file}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
+    fs.writeFileSync(tempFile, `${JSON.stringify(snapshot, null, 2)}\n`);
+    fs.renameSync(tempFile, file);
+    return true;
+  } catch (error) {
+    try {
+      process.stderr.write(`[openfusion-host] background status write failed: ${error?.message || error}\n`);
+    } catch {
+      // ignore logging failures
+    }
+    return false;
+  } finally {
+    if (tempFile) {
+      try {
+        fs.rmSync(tempFile, { force: true });
+      } catch {
+        // ignore cleanup failures
+      }
+    }
+  }
+}
+
 // ---- the host (only runs when executed as a process, not when required) ----
 function runHost() {
   const sessions = new Map(); // paneId -> state
@@ -1263,6 +1330,33 @@ function runHost() {
 
   // ---- detached background delegations (host side) ----
 
+  function writeBackgroundStatusFile(id, state) {
+    const statusFile = String(state?.backgroundStatusFile || "").trim();
+    if (!statusFile) return;
+    const now = Date.now();
+    const tasks = Array.from(state.backgroundTasks.values())
+      .filter((task) => !task.settled)
+      .map((task) => ({
+        taskId: task.taskId,
+        title: task.title,
+        state: task.cancelled ? "cancelling" : task.running ? "running" : "starting",
+        startedAt: task.startedAt,
+        elapsedMs: Math.max(0, now - task.startedAt),
+        updates: task.updates,
+        files: Array.from(task.files).slice(0, 64),
+        recentActivity: Array.isArray(task.recentActivity)
+          ? task.recentActivity.slice(-BACKGROUND_STATUS_MAX_ACTIVITY)
+          : []
+      }));
+    writeBackgroundStatusSnapshotFile(statusFile, {
+      updatedAt: now,
+      tasks,
+      settled: Array.isArray(state.backgroundSettled)
+        ? state.backgroundSettled.slice(0, BACKGROUND_STATUS_MAX_SETTLED)
+        : []
+    });
+  }
+
   function clearBackgroundTaskTimers(task) {
     if (task.idleTimer) {
       clearTimeout(task.idleTimer);
@@ -1272,6 +1366,12 @@ function runHost() {
       clearTimeout(task.hardTimer);
       task.hardTimer = null;
     }
+  }
+
+  function abortOpenFusionBackgroundSession(state, childSessionId) {
+    const sessionId = String(childSessionId || "").trim();
+    if (!sessionId) return;
+    request(state, "POST", `/session/${encodeURIComponent(sessionId)}/abort`).catch(() => {});
   }
 
   function refreshBackgroundIdleTimer(id, state, task) {
@@ -1289,6 +1389,7 @@ function runHost() {
 
   function settleBackgroundTask(id, state, task, result, options = {}) {
     if (task.settled) return;
+    const settledAt = Date.now();
     task.settled = true;
     clearBackgroundTaskTimers(task);
     state.backgroundTasks.delete(task.taskId);
@@ -1301,7 +1402,7 @@ function runHost() {
       kind: "task",
       cancelled: task.cancelled === true || result.cancelled === true,
       updates: task.updates,
-      durationMs: Date.now() - task.startedAt,
+      durationMs: settledAt - task.startedAt,
       result:
         result.status === "completed"
           ? {
@@ -1311,6 +1412,29 @@ function runHost() {
             }
           : { status: "failed", error: clipText(result.error || "background task failed", 2_000) }
     };
+    state.backgroundSettled.unshift({
+      taskId: task.taskId,
+      title: task.title,
+      status: settledEvent.result.status,
+      cancelled: settledEvent.cancelled,
+      startedAt: task.startedAt,
+      durationMs: settledEvent.durationMs,
+      elapsedMs: settledEvent.durationMs,
+      settledAt,
+      updates: task.updates,
+      files: Array.from(
+        new Set([
+          ...task.files,
+          ...(Array.isArray(settledEvent.result.files) ? settledEvent.result.files : [])
+        ])
+      ).slice(0, 64),
+      recentActivity: task.recentActivity.slice(-BACKGROUND_STATUS_MAX_ACTIVITY),
+      result: settledEvent.result
+    });
+    if (state.backgroundSettled.length > BACKGROUND_STATUS_MAX_SETTLED) {
+      state.backgroundSettled.length = BACKGROUND_STATUS_MAX_SETTLED;
+    }
+    writeBackgroundStatusFile(id, state);
     emitSessionEvent(id, state, settledEvent);
     // Engine-death settles have nobody to wake (the serve is gone with the
     // work); the row settle above is the whole story.
@@ -1405,11 +1529,13 @@ function runHost() {
       cancelled: false,
       running: false,
       files: new Set(),
+      recentActivity: [],
       seenCalls: new Set(),
       idleTimer: null,
       hardTimer: null
     };
     state.backgroundTasks.set(taskId, task);
+    writeBackgroundStatusFile(id, state);
     emitSessionEvent(id, state, {
       type: "background-task",
       phase: "started",
@@ -1443,6 +1569,7 @@ function runHost() {
     }
     task.hardTimer = setTimeout(() => {
       if (sessions.get(id) !== state) return;
+      abortOpenFusionBackgroundSession(state, task.childSessionId);
       settleBackgroundTask(id, state, task, {
         status: "failed",
         error: "Open Fusion background task exceeded the maximum duration."
@@ -1457,7 +1584,10 @@ function runHost() {
       if (!created || !created.id) {
         throw new Error("OpenCode did not return a background session id");
       }
-      if (sessions.get(id) !== state || task.settled) return;
+      if (sessions.get(id) !== state || task.settled) {
+        abortOpenFusionBackgroundSession(state, created.id);
+        return;
+      }
       task.childSessionId = String(created.id);
       state.backgroundBySession.set(task.childSessionId, task);
       await request(
@@ -1516,6 +1646,7 @@ function runHost() {
     const task = state.backgroundTasks.get(String(taskId || "").trim());
     if (!task || task.settled) return;
     task.cancelled = true;
+    writeBackgroundStatusFile(id, state);
     if (!task.childSessionId) {
       settleBackgroundTask(id, state, task, {
         status: "failed",
@@ -1524,9 +1655,7 @@ function runHost() {
       });
       return;
     }
-    request(state, "POST", `/session/${encodeURIComponent(task.childSessionId)}/abort`).catch(
-      () => {}
-    );
+    abortOpenFusionBackgroundSession(state, task.childSessionId);
     // Belt: an abort whose error/idle never lands on the feed must still settle.
     const forceTimer = setTimeout(() => {
       if (sessions.get(id) === state && !task.settled) {
@@ -1552,7 +1681,10 @@ function runHost() {
     if (!task || task.settled) return;
     refreshBackgroundIdleTimer(id, state, task);
     if (type === "session.status") {
-      if (String((props.status && props.status.type) || "") === "busy") task.running = true;
+      if (String((props.status && props.status.type) || "") === "busy") {
+        task.running = true;
+        writeBackgroundStatusFile(id, state);
+      }
       return;
     }
     if (type === "session.idle") {
@@ -1601,12 +1733,21 @@ function runHost() {
       name === "bash" && input.command
         ? `$ ${compactWhitespace(input.command, 160)}`
         : `${name} ${compactWhitespace(st.title || filePath || input.pattern || "", 160)}`.trim();
+    const activityKind =
+      name === "bash" ? "command" : name === "edit" || name === "write" ? "file" : "activity";
+    task.recentActivity.push({ ts: Date.now(), kind: activityKind, text: detail });
+    if (task.recentActivity.length > BACKGROUND_STATUS_MAX_ACTIVITY) {
+      task.recentActivity.splice(
+        0,
+        task.recentActivity.length - BACKGROUND_STATUS_MAX_ACTIVITY
+      );
+    }
+    writeBackgroundStatusFile(id, state);
     emitDirectSessionEvent(id, {
       type: "background-task",
       phase: "progress",
       taskId: task.taskId,
-      activityKind:
-        name === "bash" ? "command" : name === "edit" || name === "write" ? "file" : "activity",
+      activityKind,
       text: detail,
       updates: task.updates
     });
@@ -1994,7 +2135,22 @@ function runHost() {
     }
 
     const password = crypto.randomBytes(24).toString("hex");
-    const launch = buildServeSpawn(env && typeof env === "object" ? env : {}, cwd, password);
+    const paneEnv = env && typeof env === "object" ? env : {};
+    const backgroundStatusFile = backgroundStatusFileForEnv(
+      paneEnv,
+      payload.backgroundStatusPath
+    );
+    // Clear stale active state before OpenCode can spawn the bridge process.
+    writeBackgroundStatusSnapshotFile(backgroundStatusFile, {
+      updatedAt: Date.now(),
+      tasks: [],
+      settled: []
+    });
+    const launch = buildServeSpawn(
+      withBackgroundStatusEnv(paneEnv, backgroundStatusFile),
+      cwd,
+      password
+    );
     let child;
     try {
       child = spawn(launch.command, launch.args, launch.options);
@@ -2030,6 +2186,8 @@ function runHost() {
       // plus report wakes queued while the root turn is busy.
       backgroundTasks: new Map(),
       backgroundBySession: new Map(),
+      backgroundSettled: [],
+      backgroundStatusFile,
       pendingWakes: [],
       // Capability flag from the start payload: the generated config this
       // serve loaded includes the plan agent. Deliberately NOT set on the
@@ -2041,6 +2199,7 @@ function runHost() {
       backgroundAgent: payload.backgroundAgent === true
     };
     sessions.set(id, state);
+    writeBackgroundStatusFile(id, state);
 
     const portTimer = setTimeout(() => {
       if (sessions.get(id) !== state || state.port) return;
@@ -2725,6 +2884,11 @@ function runHost() {
     const state = sessions.get(payload?.id);
     if (state) {
       state.stopping = true;
+      settleAllBackgroundTasks(
+        payload.id,
+        state,
+        "Open Fusion stopped while this background task was running."
+      );
       clearSteerRoutingState(state);
       try {
         state.sseRequest?.destroy();
@@ -2737,8 +2901,13 @@ function runHost() {
   }
 
   function shutdown() {
-    for (const state of sessions.values()) {
+    for (const [id, state] of sessions) {
       state.stopping = true;
+      settleAllBackgroundTasks(
+        id,
+        state,
+        "Open Fusion shut down while this background task was running."
+      );
       clearSteerRoutingState(state);
       try {
         state.sseRequest?.destroy();
@@ -2797,6 +2966,8 @@ module.exports = {
   rehydrateMessages,
   buildCustomProviderPatch,
   buildServeSpawn,
+  backgroundStatusFileForEnv,
+  withBackgroundStatusEnv,
   normalizeAuthMethods,
   splitModelId,
   buildPlannerTurnParts,
@@ -2818,6 +2989,7 @@ module.exports = {
   OPEN_FUSION_PLAN_REMINDER,
   OPEN_FUSION_BACKGROUND_MARKER,
   backgroundTaskTitleOf,
+  writeBackgroundStatusSnapshotFile,
   buildOpenFusionBackgroundContract,
   buildOpenFusionBackgroundWakeText,
   parseOpenFusionBackgroundReport

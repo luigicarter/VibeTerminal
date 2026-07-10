@@ -973,7 +973,24 @@ async function main() {
     "trailing backslashes must be doubled so the closing quote survives"
   );
 
-  const spawnPlan = buildClaudeSpawn({ cwd: "C:\\repo dir\\a&b" });
+  const previousMcpToolTimeout = process.env.MCP_TOOL_TIMEOUT;
+  let spawnPlan;
+  try {
+    delete process.env.MCP_TOOL_TIMEOUT;
+    spawnPlan = buildClaudeSpawn({ cwd: "C:\\repo dir\\a&b" });
+    assert(
+      spawnPlan.env.MCP_TOOL_TIMEOUT === "14400000",
+      "Claude planner MCP tool calls should default to the four-hour ceiling"
+    );
+    process.env.MCP_TOOL_TIMEOUT = "987654";
+    assert(
+      buildClaudeSpawn({}).env.MCP_TOOL_TIMEOUT === "987654",
+      "Claude planner spawn should preserve an explicit MCP_TOOL_TIMEOUT override"
+    );
+  } finally {
+    if (previousMcpToolTimeout === undefined) delete process.env.MCP_TOOL_TIMEOUT;
+    else process.env.MCP_TOOL_TIMEOUT = previousMcpToolTimeout;
+  }
   if (process.platform === "win32") {
     assert(spawnPlan.command.toLowerCase().endsWith("cmd.exe"), "Windows should use cmd.exe for the global claude wrapper");
     assert(spawnPlan.args[3].includes('"C:\\repo dir\\a&b"'), "Windows launch command should quote shell metacharacters without caret escapes");
@@ -1307,7 +1324,12 @@ async function main() {
     tmpMcp,
     JSON.stringify({
       mcpServers: {
-        "fusion-codex": { command: "node", args: ["adapter.cjs"], env: { A: "1" } }
+        "fusion-codex": {
+          command: "node",
+          args: ["adapter.cjs"],
+          env: { A: "1" },
+          tool_timeout_sec: 14_400
+        }
       }
     })
   );
@@ -1316,7 +1338,8 @@ async function main() {
     assert(
       config.mcp_servers["fusion-codex"].command === "node" &&
         config.mcp_servers["fusion-codex"].args[0] === "adapter.cjs" &&
-        config.mcp_servers["fusion-codex"].env.A === "1",
+        config.mcp_servers["fusion-codex"].env.A === "1" &&
+        config.mcp_servers["fusion-codex"].tool_timeout_sec === 14_400,
       "bridgeConfigFromMcpFile should map the mcpServers entry to codex mcp_servers"
     );
   } finally {

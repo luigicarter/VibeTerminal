@@ -357,6 +357,7 @@ function bridgeToolTitle(name: string, input: unknown): string | undefined {
   if (name.endsWith("codex_goal_set")) return "Goal updated";
   if (name.endsWith("codex_goal_get")) return "Goal checked";
   if (name.endsWith("codex_goal_clear")) return "Goal cleared";
+  if (name.endsWith("codex_task_status")) return "Background status checked";
   if (name.endsWith("codex_cancel")) return "Cancel delegation";
   if (name.endsWith("codex_steer_resolve")) {
     return `Resolve steer · ${firstString(data.decision) || "push"}`;
@@ -580,6 +581,17 @@ function formatCodexBridgeResult(name: string, text: string): string {
     return status === "watching"
       ? `watching build ${clip(String(parsed.buildId ?? ""), 80)}`
       : previewText(text);
+  }
+
+  if (name.endsWith("codex_task_status")) {
+    const task = asRecord(parsed.task);
+    if (task.taskId) {
+      const files = Array.isArray(task.files) ? task.files.length : 0;
+      return `background ${String(task.state ?? "unknown")} · ${formatDurationShort(Number(task.elapsedMs) || 0)}${files ? ` · ${files} file${files === 1 ? "" : "s"}` : ""}`;
+    }
+    const active = Array.isArray(parsed.active) ? parsed.active.length : 0;
+    const recent = Array.isArray(parsed.recentlySettled) ? parsed.recentlySettled.length : 0;
+    return `${active} running · ${recent} recently settled`;
   }
 
   if (name.endsWith("codex_build_status")) {
@@ -3470,18 +3482,31 @@ export default function FusionChatPane({
           {showPlanActionBar && (
             <div className="fusion-plan-action-bar" role="group" aria-label="Plan actions">
               <span className="fusion-plan-action-label">Implement this plan?</span>
-              <button
-                className="fusion-plan-action-button is-primary"
-                type="button"
-                title="Switch to Auto and send: Implement the plan."
-                disabled={implementingPlan || modeSwitching}
-                onClick={() => {
-                  void handleImplementPlan();
-                }}
-              >
-                <Play size={14} />
-                <span>Implement plan</span>
-              </button>
+              <div className="fusion-plan-action-buttons">
+                <button
+                  className="fusion-plan-action-button"
+                  type="button"
+                  title="Stay in Plan mode and keep refining (Esc)"
+                  onClick={() => {
+                    setPlanActionReady(false);
+                    composerRef.current?.focus();
+                  }}
+                >
+                  <span>Keep planning</span>
+                </button>
+                <button
+                  className="fusion-plan-action-button is-primary"
+                  type="button"
+                  title="Switch to Auto and send: Implement the plan."
+                  disabled={implementingPlan || modeSwitching}
+                  onClick={() => {
+                    void handleImplementPlan();
+                  }}
+                >
+                  <Play size={14} />
+                  <span>Implement plan</span>
+                </button>
+              </div>
             </div>
           )}
           <OcBackgroundPin tasks={bgTasks} now={bgNow} onStop={stopBackgroundTask} />
@@ -3500,7 +3525,7 @@ export default function FusionChatPane({
             </div>
           )}
           <div className="oc-prompt">
-            <div className="oc-prompt-box">
+            <div className={clsx("oc-prompt-box", fusionRunMode === "plan" && "is-plan-mode")}>
               <textarea
                 className="oc-prompt-input"
                 ref={composerRef}
@@ -3516,7 +3541,9 @@ export default function FusionChatPane({
                         : "Answer Fusion to continue…"
                       : showPlanActionBar
                         ? "Implement the plan, or type to refine it…"
-                        : "Ask Fusion to build, fix, or design…"
+                        : fusionRunMode === "plan"
+                          ? "Describe the work — Fusion plans first, read-only…"
+                          : "Ask Fusion to build, fix, or design…"
                 }
                 onChange={(e) => {
                   inputRef.current = e.target.value;
@@ -3596,6 +3623,11 @@ export default function FusionChatPane({
                     if (input) {
                       e.preventDefault();
                       setInput("");
+                      return;
+                    }
+                    if (showPlanActionBar) {
+                      e.preventDefault();
+                      setPlanActionReady(false);
                       return;
                     }
                   }

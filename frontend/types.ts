@@ -261,6 +261,10 @@ export interface AgentSession {
   status: SessionStatus;
   attention?: AgentAttention;
   backgroundActivity?: AgentBackgroundActivity;
+  // Detached Fusion/Open Fusion delegations outlive the planner turn that
+  // launched them. Their ids keep sidebar working state accurate until each
+  // task settles, including across a chat-pane replay/reattach.
+  detachedTaskIds?: string[];
   layout: LayoutBox;
 }
 

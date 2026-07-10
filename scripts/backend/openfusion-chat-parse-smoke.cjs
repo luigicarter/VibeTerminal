@@ -961,6 +961,28 @@ assert(
     hostSource.includes("settleAllBackgroundTasks(id, state,"),
   "Open Fusion host must own the detached background engine (host-created executor-bg sessions watched pre-normalizer, gate-observed wake echo, dispose guard, engine-death settle)"
 );
+assert(
+  hostSource.includes("const BACKGROUND_IDLE_TIMEOUT_MS = 600_000;") &&
+    hostSource.includes("const BACKGROUND_HARD_TIMEOUT_MS = 14_400_000;") &&
+    /task\.hardTimer = setTimeout\(\(\) => \{[\s\S]*?abortOpenFusionBackgroundSession\(state, task\.childSessionId\);[\s\S]*?settleBackgroundTask/.test(
+      hostSource
+    ) &&
+    hostSource.includes("abortOpenFusionBackgroundSession(state, created.id);") &&
+    hostSource.includes("function cancelOpenFusionBackgroundTask") &&
+    (hostSource.match(/abortOpenFusionBackgroundSession\(state, task\.childSessionId\);/g) || [])
+      .length >= 2,
+  "Open Fusion background tasks should keep the 10-minute idle guard, use a four-hour absolute cap, and abort timed-out/cancelled sessions"
+);
+assert(
+  hostSource.includes("function writeBackgroundStatusSnapshotFile") &&
+    hostSource.includes("VIBE_TERMINAL_BG_STATUS_FILE") &&
+    hostSource.includes("backgroundSettled") &&
+    hostSource.includes("recentActivity") &&
+    hostSource.includes("writeBackgroundStatusFile(id, state);") &&
+    hostSource.includes("payload.backgroundStatusPath") &&
+    hostSource.includes("Open Fusion stopped while this background task was running."),
+  "Open Fusion host must maintain the pane-bound running/settled background status snapshot across progress, settlement, and stop"
+);
 // Wake envelope round-trip: what deliverOpenFusionWake posts must be filtered
 // out of rehydrated user text and rebuilt as a report row instead.
 {

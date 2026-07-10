@@ -11,13 +11,19 @@
 //
 // stdout is the MCP channel: NOTHING but MCP JSON-RPC may be written there.
 
+const fs = require("fs");
 const http = require("http");
 
 const CALLBACK_URL = process.env.VIBE_TERMINAL_CALLBACK_URL;
 const TOKEN = process.env.VIBE_TERMINAL_TELEMETRY_TOKEN;
 const SESSION_ID = process.env.VIBE_TERMINAL_SESSION_ID;
+const STATUS_MAX_BYTES = 1_000_000;
 
 let taskSeq = 0;
+
+const EMPTY_STATUS_NOTE = "No background tasks have run in this pane session.";
+const STATUS_NOTE =
+  "Read-only snapshot: peeking does not affect running tasks. The full report still arrives later as an [Open Fusion background report] message.";
 
 function logErr(message) {
   try {
@@ -75,6 +81,71 @@ function postBackgroundRequest(entry) {
   });
 }
 
+function emptyBackgroundStatus() {
+  return { status: "ok", tasks: [], settled: [], note: EMPTY_STATUS_NOTE };
+}
+
+function readBackgroundStatus(
+  taskId,
+  statusPath = process.env.VIBE_TERMINAL_BG_STATUS_FILE
+) {
+  const statusFile = String(statusPath || "").trim();
+  let snapshot;
+  try {
+    if (!statusFile) return emptyBackgroundStatus();
+    const stat = fs.statSync(statusFile);
+    if (!stat.isFile()) throw new Error("snapshot path is not a file");
+    if (stat.size > STATUS_MAX_BYTES) throw new Error(`snapshot is too large (${stat.size} bytes)`);
+    const raw = fs.readFileSync(statusFile, "utf8");
+    if (!raw.trim()) return emptyBackgroundStatus();
+    snapshot = JSON.parse(raw);
+  } catch {
+    return emptyBackgroundStatus();
+  }
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    return emptyBackgroundStatus();
+  }
+
+  const now = Date.now();
+  const tasks = (Array.isArray(snapshot.tasks) ? snapshot.tasks : []).map((entry) => {
+    const task = entry && typeof entry === "object" ? { ...entry } : {};
+    if (!task.state) task.state = "running";
+    const startedAt = Number(task.startedAt);
+    if (Number.isFinite(startedAt)) {
+      task.elapsedMs = Math.max(0, now - startedAt);
+    }
+    return task;
+  });
+  const settled = (Array.isArray(snapshot.settled) ? snapshot.settled : []).map((entry) => ({
+    ...(entry && typeof entry === "object" ? entry : {}),
+    state: "settled"
+  }));
+  if (tasks.length === 0 && settled.length === 0) {
+    return emptyBackgroundStatus();
+  }
+
+  const requestedId = String(taskId || "").trim();
+  if (!requestedId) {
+    return {
+      status: "ok",
+      updatedAt: snapshot.updatedAt ?? null,
+      tasks,
+      settled,
+      note: STATUS_NOTE
+    };
+  }
+
+  const task = tasks.find((entry) => String(entry.taskId || "") === requestedId);
+  if (task) return { status: "ok", task, note: STATUS_NOTE };
+  const settledTask = settled.find((entry) => String(entry.taskId || "") === requestedId);
+  if (settledTask) return { status: "ok", task: settledTask, note: STATUS_NOTE };
+  return {
+    status: "error",
+    error: `Unknown background taskId: ${requestedId}`,
+    tasks
+  };
+}
+
 const TOOLS = [
   {
     name: "background_task",
@@ -106,6 +177,17 @@ const TOOLS = [
         taskId: { type: "string" }
       },
       required: ["taskId"]
+    }
+  },
+  {
+    name: "background_status",
+    description:
+      "Peek at your detached background tasks WITHOUT blocking or affecting them. Without taskId, returns {status:'ok', tasks, settled}: tasks contains running snapshots (title, elapsed, update count, recent activity) and settled is bounded newest-first memory. With taskId, returns that task's detail including files touched so far. Read-only and safe in Plan mode; the full report still arrives later as an [Open Fusion background report] message. Cancel with background_cancel {taskId}.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: { type: "string" }
+      }
     }
   }
 ];
@@ -159,6 +241,8 @@ async function handleToolCall(id, params) {
         await postBackgroundRequest({ action: "cancel", taskId });
         result = { status: "cancelling", taskId };
       }
+    } else if (name === "background_status") {
+      result = readBackgroundStatus(args.taskId);
     } else {
       sendMcp({ jsonrpc: "2.0", id, error: { code: -32602, message: `Unknown tool: ${name}` } });
       return;
@@ -231,7 +315,7 @@ function startMcpServer() {
   logErr(`started (session=${SESSION_ID || "?"})`);
 }
 
-module.exports = { taskTitle, TOOLS };
+module.exports = { taskTitle, TOOLS, readBackgroundStatus };
 
 if (require.main === module) {
   startMcpServer();

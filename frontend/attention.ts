@@ -4,6 +4,7 @@ import type {
   AgentAttentionState,
   AgentKind,
   AgentSession,
+  BackgroundTaskEvent,
   SessionStatus,
   TerminalEvent
 } from "./types";
@@ -29,12 +30,49 @@ export function shouldShowAttentionDot(session: AgentSession) {
   );
 }
 
-// The pane is actively working when its status is "running". This is the signal
+// The pane is actively working while its foreground turn is "running" or a
+// detached Fusion/Open Fusion delegation is still in flight. This is the signal
 // behind the sidebar "working" spinner. It is deliberately narrow: "starting"
-// (a booting agent that hasn't been given a turn yet) and "waiting" do not count
-// as working, so an idle pane never spins.
+// (a booting agent that hasn't been given a turn yet) and "waiting" alone do not
+// count as working, so an idle pane never spins.
 export function isSessionWorking(session: AgentSession) {
-  return session.status === "running";
+  return session.status === "running" || Boolean(session.detachedTaskIds?.length);
+}
+
+export function updateDetachedTaskIds(
+  session: AgentSession,
+  event: BackgroundTaskEvent
+): AgentSession {
+  if (event.phase === "progress") {
+    return session;
+  }
+
+  const currentTaskIds = session.detachedTaskIds ?? [];
+  if (event.phase === "started") {
+    return currentTaskIds.includes(event.taskId)
+      ? session
+      : { ...session, detachedTaskIds: [...currentTaskIds, event.taskId] };
+  }
+
+  if (!currentTaskIds.includes(event.taskId)) {
+    return session;
+  }
+
+  const detachedTaskIds = currentTaskIds.filter((taskId) => taskId !== event.taskId);
+  return {
+    ...session,
+    detachedTaskIds: detachedTaskIds.length ? detachedTaskIds : undefined
+  };
+}
+
+// A detached task outlives the launcher turn, so that foreground result is not
+// the user-facing completion. Once every task id is settled, the host's fresh
+// wake-report turn uses the normal unread decision again.
+export function shouldMarkCompletedTurnUnread(
+  session: AgentSession,
+  unread: boolean
+) {
+  return session.detachedTaskIds?.length ? false : unread;
 }
 
 // claude, opencode, and cursor expose a turn-START signal (claude's

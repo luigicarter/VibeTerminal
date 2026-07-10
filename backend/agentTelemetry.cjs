@@ -164,6 +164,9 @@ function openFusionPlannerPrompt() {
     "- Cancel a running background task with background_cancel {taskId}. A",
     "  detached task cannot ask mid-turn questions; ambiguity comes back in its",
     "  report instead.",
+    "- Use background_status with no taskId to peek at running and recently settled",
+    "  tasks, or background_status {taskId} for elapsed time, recent activity, and",
+    "  files observed so far. It is a read-only snapshot, never a wait operation.",
     "",
     "Completion rule (mandatory before telling the user delegated work is done):",
     "1. Perform at least ONE independent check of the executor's claims: run git diff or",
@@ -209,6 +212,9 @@ function openFusionPlanPrompt() {
     "- You must not delegate implementation: the executor subagent is",
     "  permission-denied in plan mode. Do not attempt the call - it will fail.",
     "  Implementation starts only after the user accepts the plan.",
+    "- The read-only background_status tool remains available: omit taskId to",
+    "  list running/recent tasks, or pass taskId for elapsed time, recent activity,",
+    "  and files-so-far. It only peeks; do not poll it in a blocking loop.",
     "",
     "Workspace capabilities (MCP servers & skills):",
     "- This workspace may define MCP servers in `.mcp.json` and skills in",
@@ -891,9 +897,9 @@ function openFusionReadOnlyPermissionBase() {
 }
 
 // The app-owned "vibeterminal" MCP server every Open Fusion pane carries: it
-// exposes background_task/background_cancel to the Brain (dynamic tool names
-// vibeterminal_background_task / vibeterminal_background_cancel) and relays
-// the requests to the pane's host via the telemetry callback server.
+// exposes background_task/background_cancel/background_status to the Brain
+// (dynamic vibeterminal_* tool names). Mutating requests relay to the pane's
+// host; status reads the host-maintained pane snapshot at a fixed env-bound path.
 function openFusionBackgroundBridgeMcp(bridge) {
   return {
     type: "local",
@@ -902,7 +908,8 @@ function openFusionBackgroundBridgeMcp(bridge) {
       ELECTRON_RUN_AS_NODE: "1",
       VIBE_TERMINAL_CALLBACK_URL: bridge.callbackUrl,
       VIBE_TERMINAL_TELEMETRY_TOKEN: bridge.token,
-      VIBE_TERMINAL_SESSION_ID: bridge.sessionId
+      VIBE_TERMINAL_SESSION_ID: bridge.sessionId,
+      VIBE_TERMINAL_BG_STATUS_FILE: bridge.statusPath
     },
     enabled: true
   };
@@ -974,12 +981,13 @@ function openFusionConfigContents(options = {}) {
           },
           skill: "deny",
           // The app-owned background bridge is a planner-only capability: the
-          // leading "*" deny blocks its dynamic tool names everywhere else
-          // (plan/investigator inherit the base without these allows).
+          // leading "*" deny blocks its dynamic tool names everywhere else;
+          // Plan mode gets only the read-only status exception below.
           ...(backgroundBridge
             ? {
                 vibeterminal_background_task: "allow",
-                vibeterminal_background_cancel: "allow"
+                vibeterminal_background_cancel: "allow",
+                vibeterminal_background_status: "allow"
               }
             : {})
         }
@@ -1013,7 +1021,10 @@ function openFusionConfigContents(options = {}) {
             "*": "deny",
             investigator: "allow"
           },
-          skill: "deny"
+          skill: "deny",
+          // Status is read-only and useful while planning. Starting/cancelling
+          // detached work remains denied by the leading catch-all.
+          ...(backgroundBridge ? { vibeterminal_background_status: "allow" } : {})
         }
       },
       executor: {
@@ -1024,7 +1035,16 @@ function openFusionConfigContents(options = {}) {
         hidden: false,
         prompt: inlinePrompts
           ? openFusionExecutorPrompt()
-          : "{file:./openfusion-executor.md}"
+          : "{file:./openfusion-executor.md}",
+        ...(backgroundBridge
+          ? {
+              permission: {
+                vibeterminal_background_task: "deny",
+                vibeterminal_background_cancel: "deny",
+                vibeterminal_background_status: "deny"
+              }
+            }
+          : {})
       },
       // Detached background executor: PRIMARY on purpose — it drives a
       // host-created session (a subagent as the driving agent of a fresh
@@ -1040,7 +1060,12 @@ function openFusionConfigContents(options = {}) {
               hidden: true,
               prompt: inlinePrompts
                 ? openFusionExecutorPrompt()
-                : "{file:./openfusion-executor.md}"
+                : "{file:./openfusion-executor.md}",
+              permission: {
+                vibeterminal_background_task: "deny",
+                vibeterminal_background_cancel: "deny",
+                vibeterminal_background_status: "deny"
+              }
             }
           }
         : {}),
@@ -2561,6 +2586,10 @@ function buildFusionSystemPrompt(opts = {}) {
     "background task with codex_cancel {taskId}. A background task cannot ask",
     "mid-turn questions or approvals; anything ambiguous comes back in its",
     "report instead.",
+    "Use codex_task_status with no taskId to peek at running and recently",
+    "settled detached tasks, or codex_task_status {taskId} for elapsed time,",
+    "recent activity, and files observed so far. It is read-only, works in",
+    "Plan mode, and must not be used as a blocking poll loop.",
     "",
     "## Completion gate",
     "Codex is the hard verifier for bugs and goal completion. If Codex says the",
@@ -3165,6 +3194,7 @@ function createAgentTelemetryManager(options = {}) {
     const executorPromptPath = path.join(configDir, "openfusion-executor.md");
     const investigatorPromptPath = path.join(configDir, "openfusion-investigator.md");
     const modelStatePath = path.join(openFusionDir, "models.json");
+    const backgroundStatusPath = path.join(openFusionDir, "background-status.json");
     const tuiPluginPath = path.join(pluginsDir, "vibeterminal-openfusion-tui.js");
     const savedModels = readOpenFusionModelState(modelStatePath);
     const effectiveOpts = {
@@ -3186,7 +3216,8 @@ function createAgentTelemetryManager(options = {}) {
       scriptPath: path.join(__dirname, "openFusionBackgroundMcp.cjs"),
       callbackUrl,
       token,
-      sessionId: normalizedSessionId
+      sessionId: normalizedSessionId,
+      statusPath: backgroundStatusPath
     };
     const fileConfig = openFusionConfigContents({
       plannerModel,
@@ -3256,6 +3287,7 @@ function createAgentTelemetryManager(options = {}) {
       tuiConfigPath,
       themePath,
       modelStatePath,
+      backgroundStatusPath,
       tuiPluginPath,
       plannerPromptPath,
       planPromptPath,
@@ -3423,6 +3455,9 @@ function createAgentTelemetryManager(options = {}) {
         "fusion-codex": {
           command: nodePath,
           args: [adapterPath],
+          // Vendored Codex 0.144 maps this per-server value to the MCP client's
+          // tool deadline. Keep planner delegations alive for the 4h ceiling.
+          tool_timeout_sec: 14_400,
           env: {
             ELECTRON_RUN_AS_NODE: "1",
             VIBE_FUSION_CODEX_BIN: opts.codexBin || "codex",

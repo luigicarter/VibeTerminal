@@ -69,10 +69,11 @@
 > config carries an app-owned `vibeterminal` local MCP server
 > (`backend/openFusionBackgroundMcp.cjs`, spawned by opencode itself with the
 > telemetry-callback env) exposing `background_task {description, prompt}` +
-> `background_cancel {taskId}` to the planner ONLY (dynamic-tool allow keys
-> placed AFTER the `"*"` deny in the planner permission map — findLast
-> semantics; plan/investigator inherit the deny; the executor keeps no
-> permission block and its prompt never mentions the tool). The tool returns
+> `background_cancel {taskId}` + `background_status {taskId?}`. Start/cancel
+> are planner-only; the read-only status peek is also available in Plan mode.
+> Dynamic-tool allow keys stay AFTER the `"*"` deny in each permission map
+> (findLast semantics), while investigator/executor roles explicitly deny the
+> bridge tools. The start tool returns
 > `{status:"started", taskId}` immediately; the request rides the callback
 > server → main → `openFusionChatHost`, which creates a session (`POST
 > /session`, titled `(fusion background) …`) and drives it with the
@@ -82,8 +83,20 @@
 > stays OUT of the normalizer tree: `observeBackgroundSseEvent` watches the
 > raw SSE feed pre-normalizer (tool ticks → transient `background-task`
 > progress events; edit/write paths accumulate for the gate; 10-min idle /
-> 15-min hard timers; `session.idle` after busy → report = last assistant
-> message via `GET /session/{id}/message`). On settle the host emits a
+> 4-hour absolute timers; hard expiry aborts the child session before settling;
+> `session.idle` after busy → report = last assistant
+> message via `GET /session/{id}/message`). On start, progress, cancel, and
+> settle, the host atomically replaces a per-pane `background-status.json`
+> snapshot in the pane's isolated Open Fusion directory; the effective
+> `vibeterminal` MCP environment carries that stable path as
+> `VIBE_TERMINAL_BG_STATUS_FILE`, and
+> `background_status` reads it directly without a callback request or any
+> effect on the detached task. With no `taskId` it lists running summaries and
+> the eight most recently settled tasks; with one it returns that task's detail,
+> including files and recent activity accumulated so far. This peek is only a
+> read-only progress view: the final `[Open Fusion background report]` still
+> arrives separately and requires the Brain's independent review. On settle
+> the host emits a
 > history-recorded `background-task settled` event and **wakes the Brain**:
 > an `[Open Fusion background report]`-marked prompt part opens a new
 > planner turn, queued host-side while `turnBusy` (flushed on result — never
@@ -96,6 +109,7 @@
 > force-settle belt); provider-auth disposes treat a running background task
 > as busy; engine death settles the rows without a wake. Locked by
 > `agent-telemetry-smoke` (config/permission shape) +
+> `openfusion-background-status-smoke` (snapshot read/list/detail + MCP call) +
 > `openfusion-chat-parse-smoke` (host anchors + wake envelope round-trip) +
 > `completion-gate-smoke` (wake-echo latch).
 >

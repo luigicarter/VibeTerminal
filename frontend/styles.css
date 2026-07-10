@@ -1829,10 +1829,15 @@ button {
   justify-content: space-between;
   gap: 10px;
   padding: 6px 8px;
-  border: 1px solid color-mix(in srgb, var(--pane-accent) 42%, #3a403a);
+  border: 1px solid color-mix(in srgb, var(--oc-plan, #8ab8e8) 45%, #3a403a);
   border-radius: 8px;
   background: #151815;
   box-shadow: 0 8px 18px #0004;
+}
+.fusion-plan-action-buttons {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
 }
 .fusion-plan-action-label {
   min-width: 0;
@@ -1949,6 +1954,7 @@ button {
   --oc-border: #2c3733;
   --oc-border-subtle: #222b28;
   --oc-primary: var(--pane-accent);
+  --oc-plan: #8ab8e8;
   --oc-error: #ff6571;
   --oc-warning: #f5b944;
   --oc-success: #62e66f;
@@ -2529,6 +2535,9 @@ button {
   border-left: 2px solid color-mix(in srgb, var(--oc-primary) 75%, var(--oc-border));
   background: var(--oc-bg-element);
 }
+.oc-skin .oc-prompt:has(.oc-prompt-box.is-plan-mode) {
+  border-left-color: color-mix(in srgb, var(--oc-plan) 45%, var(--oc-border));
+}
 .oc-skin .oc-prompt-box {
   display: flex;
   flex-direction: column;
@@ -2704,6 +2713,7 @@ button {
   cursor: pointer;
   color: var(--oc-primary);
 }
+.oc-skin button.oc-prompt-agent.is-plan { color: var(--oc-plan); }
 .oc-skin button.oc-prompt-agent:hover { text-decoration: underline; }
 .oc-skin button.oc-prompt-agent:disabled { cursor: wait; opacity: 0.72; }
 .oc-skin button.oc-prompt-agent.is-flashing {

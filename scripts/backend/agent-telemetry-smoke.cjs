@@ -583,8 +583,10 @@ function postTelemetry(callbackUrl, token, payload) {
     assert(
       openFusionConfig.agent?.executor?.mode === "subagent" &&
         openFusionConfig.agent?.executor?.model === "opencode/gpt-5.1-codex" &&
-        openFusionConfig.agent?.executor?.permission === undefined,
-      "Open Fusion executor should be a model-pinned subagent with default permissions"
+        openFusionConfig.agent?.executor?.permission?.vibeterminal_background_task === "deny" &&
+        openFusionConfig.agent?.executor?.permission?.vibeterminal_background_cancel === "deny" &&
+        openFusionConfig.agent?.executor?.permission?.vibeterminal_background_status === "deny",
+      "Open Fusion executor should be model-pinned with only the Brain background bridge denied"
     );
     assert(
       resolveOpenCodePermission(plannerPermission, "linear_create_issue") === "deny" &&
@@ -683,27 +685,52 @@ function postTelemetry(callbackUrl, token, payload) {
         typeof bgBridge?.environment?.VIBE_TERMINAL_TELEMETRY_TOKEN === "string" &&
         typeof bgBridge?.environment?.VIBE_TERMINAL_SESSION_ID === "string" &&
         bgBridge?.environment?.VIBE_TERMINAL_SESSION_ID.length > 0 &&
+        bgBridge?.environment?.VIBE_TERMINAL_BG_STATUS_FILE ===
+          openFusionFiles.backgroundStatusPath &&
+        openFusionFiles.backgroundStatusPath.startsWith(`${openFusionFiles.openFusionDir}${path.sep}`) &&
         JSON.stringify(openFusionEnvConfig.mcp?.vibeterminal) === JSON.stringify(bgBridge),
-      "Open Fusion config should carry the vibeterminal background-bridge MCP server in both config forms"
+      "Open Fusion config should carry the pane-bound vibeterminal background bridge and snapshot path in both config forms"
     );
     const plannerKeys = Object.keys(plannerPermission || {});
     assert(
       plannerPermission?.vibeterminal_background_task === "allow" &&
         plannerPermission?.vibeterminal_background_cancel === "allow" &&
+        plannerPermission?.vibeterminal_background_status === "allow" &&
         plannerKeys.indexOf("*") !== -1 &&
         plannerKeys.indexOf("*") < plannerKeys.indexOf("vibeterminal_background_task") &&
         resolveOpenCodePermission(plannerPermission, "vibeterminal_background_task") === "allow" &&
+        resolveOpenCodePermission(plannerPermission, "vibeterminal_background_status") === "allow" &&
         resolveOpenCodePermission(planPermission, "vibeterminal_background_task") === "deny" &&
+        resolveOpenCodePermission(planPermission, "vibeterminal_background_cancel") === "deny" &&
+        resolveOpenCodePermission(planPermission, "vibeterminal_background_status") === "allow" &&
         resolveOpenCodePermission(investigatorPermission, "vibeterminal_background_task") === "deny",
-      "background bridge tools must be planner-only: allow AFTER the '*' deny; plan/investigator inherit the deny"
+      "background start/cancel must be planner-only while read-only status remains available in planner and Plan mode"
+    );
+    assert(
+      JSON.stringify(plannerKeys.slice(-3)) ===
+        JSON.stringify([
+          "vibeterminal_background_task",
+          "vibeterminal_background_cancel",
+          "vibeterminal_background_status"
+        ]) &&
+        Object.keys(planPermission || {}).at(-1) === "vibeterminal_background_status",
+      "background permission exceptions must be appended after the load-bearing wildcard without reordering existing keys"
     );
     const executorBg = openFusionConfig.agent?.["executor-bg"];
     assert(
       executorBg?.mode === "primary" &&
         executorBg?.model === "opencode/gpt-5.1-codex" &&
         executorBg?.hidden === true &&
-        executorBg?.permission === undefined,
+        executorBg?.permission?.vibeterminal_background_task === "deny" &&
+        executorBg?.permission?.vibeterminal_background_cancel === "deny" &&
+        executorBg?.permission?.vibeterminal_background_status === "deny",
       "executor-bg must be a hidden PRIMARY executor clone (a subagent driving a fresh session is unverified on 1.17.11)"
+    );
+    assert(
+      openFusionEnvConfig.agent?.planner?.prompt?.includes("background_status") &&
+        openFusionEnvConfig.agent?.plan?.prompt?.includes("background_status") &&
+        openFusionEnvConfig.agent?.plan?.prompt?.includes("read-only"),
+      "planner and Plan prompts should explain the on-demand read-only background status peek"
     );
     const emptyWorkspace = path.join(root, "empty-workspace");
     fs.mkdirSync(emptyWorkspace, { recursive: true });

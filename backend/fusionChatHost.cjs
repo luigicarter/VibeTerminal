@@ -30,6 +30,11 @@ const { codexHome, locateCodexRollout } = require("./agentThreads.cjs");
 const isWin = process.platform === "win32";
 const CLAUDE_BIN = process.env.VIBE_CLAUDE_BIN || "claude";
 const MAX_HISTORY_EVENTS = 20_000;
+const FUSION_PLANNER_MCP_TOOL_TIMEOUT_MS = 14_400_000;
+const BACKGROUND_TASK_STATUS_GUIDANCE = [
+  "While a background task runs, use codex_task_status (optionally with its taskId) to peek at progress when the user asks how it is going.",
+  "Peeking is read-only and never replaces reviewing the final FUSION BACKGROUND TASK REPORT."
+].join("\n");
 const CLAUDE_RESULT_BACKSTOP_MS = Math.max(
   100,
   Number.isFinite(Number(process.env.VIBE_FUSION_CLAUDE_RESULT_BACKSTOP_MS))
@@ -1131,7 +1136,8 @@ function runHost() {
     const child = spawn(launch.command, launch.args, {
       cwd: cwd || undefined,
       stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true
+      windowsHide: true,
+      env: launch.env
     });
 
     const normalizer = createStreamNormalizer();
@@ -1553,6 +1559,7 @@ function buildClaudeArgs(payload = {}) {
   if (strictMcpConfig) args.push("--strict-mcp-config");
   if (mcpConfig) args.push("--mcp-config", String(mcpConfig));
   if (systemPromptFile) args.push("--append-system-prompt-file", String(systemPromptFile));
+  args.push("--append-system-prompt", BACKGROUND_TASK_STATUS_GUIDANCE);
   if (cwd) args.push("--add-dir", String(cwd));
   if (resumeId) args.push("--resume", String(resumeId));
   return args;
@@ -1590,13 +1597,21 @@ function windowsCmdArg(value) {
 
 function buildClaudeSpawn(payload = {}) {
   const args = buildClaudeArgs(payload);
+  // Claude Code 2.1.205 exposes MCP_TOOL_TIMEOUT in milliseconds. Preserve an
+  // explicit user value; otherwise keep planner bridge calls alive for 4h.
+  const env = {
+    ...process.env,
+    MCP_TOOL_TIMEOUT:
+      process.env.MCP_TOOL_TIMEOUT ?? String(FUSION_PLANNER_MCP_TOOL_TIMEOUT_MS)
+  };
   if (isWin) {
     return {
       command: process.env.ComSpec || "cmd.exe",
-      args: ["/d", "/s", "/c", [CLAUDE_BIN, ...args].map(windowsCmdArg).join(" ")]
+      args: ["/d", "/s", "/c", [CLAUDE_BIN, ...args].map(windowsCmdArg).join(" ")],
+      env
     };
   }
-  return { command: CLAUDE_BIN, args };
+  return { command: CLAUDE_BIN, args, env };
 }
 
 module.exports = {

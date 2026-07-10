@@ -105,6 +105,10 @@ async function main() {
       "adapter env should eager-boot the Fusion bridge at pane launch"
     );
     assert(
+      adapter.tool_timeout_sec === 14_400,
+      "fusion-codex MCP tool calls should stay alive for the four-hour planner ceiling"
+    );
+    assert(
       adapter.env.CODEX_HOME && adapter.env.CODEX_HOME.endsWith(".codex"),
       "adapter env missing CODEX_HOME (needed so the embedded binary reuses the user's login)"
     );
@@ -171,6 +175,8 @@ async function main() {
         buildFusionSystemPrompt().includes("FUSION BACKGROUND TASK") &&
         buildFusionSystemPrompt().includes("Default stays FOREGROUND") &&
         buildFusionSystemPrompt().includes("codex_cancel {taskId}") &&
+        buildFusionSystemPrompt().includes("codex_task_status") &&
+        buildFusionSystemPrompt().includes("Plan mode") &&
         buildFusionSystemPrompt().includes("Never run milestones that"),
       "buildFusionSystemPrompt is missing the background delegation contract"
     );
@@ -253,6 +259,10 @@ async function main() {
     assert(
       allowList.some((entry) => entry.includes("codex_watch_build")),
       "Fusion allowlist should expose codex_watch_build for host-supervised detached builds"
+    );
+    assert(
+      allowList.some((entry) => entry.includes("codex_task_status")),
+      "Fusion allowlist should expose the read-only detached-task status peek"
     );
     assert(
       mainSource.includes("getBuildSupervisorDir()") &&

@@ -57,13 +57,15 @@ const {
   isTurnTelemetryKind,
   normalizeAttention,
   reconcileStatus,
+  shouldMarkCompletedTurnUnread,
   shouldSettleStatusOnPaneUnmount,
   shouldMarkAttentionUnread,
   shouldShowAttentionDot,
   shouldUseTerminalEventAttention,
   statusAfterUserInput,
   statusFromAttentionState,
-  statusFromTerminalEvent
+  statusFromTerminalEvent,
+  updateDetachedTaskIds
 } = testModule.exports;
 
 const completed = {
@@ -224,13 +226,94 @@ const clearedSession = clearUnreadAttention(unreadSession);
 assert.notStrictEqual(clearedSession, unreadSession);
 assert.strictEqual(clearedSession.attention.unread, false);
 
-// The sidebar "working" spinner only lights for an actively running pane, never
-// for a booting ("starting"), idle, or waiting one.
+// The sidebar "working" spinner lights for a foreground turn or an in-flight
+// detached task, never for a booting ("starting"), idle, or waiting pane alone.
 assert.strictEqual(isSessionWorking({ status: "running" }), true);
+assert.strictEqual(
+  isSessionWorking({ status: "done", detachedTaskIds: ["bg-1"] }),
+  true
+);
+assert.strictEqual(
+  isSessionWorking({ status: "idle", detachedTaskIds: ["bg-1", "bg-2"] }),
+  true
+);
+assert.strictEqual(isSessionWorking({ status: "done", detachedTaskIds: [] }), false);
 assert.strictEqual(isSessionWorking({ status: "starting" }), false);
 assert.strictEqual(isSessionWorking({ status: "waiting" }), false);
 assert.strictEqual(isSessionWorking({ status: "done" }), false);
 assert.strictEqual(isSessionWorking({ status: "idle" }), false);
+
+// Detached task lifecycle is idempotent by id so live events plus reattach
+// replay cannot double-count, and any settled variant releases only its id.
+const detachedBase = { status: "done" };
+const detachedStarted = updateDetachedTaskIds(detachedBase, {
+  type: "background-task",
+  phase: "started",
+  taskId: "bg-1",
+  title: "first",
+  kind: "task"
+});
+assert.deepStrictEqual(detachedStarted.detachedTaskIds, ["bg-1"]);
+assert.strictEqual(
+  updateDetachedTaskIds(detachedStarted, {
+    type: "background-task",
+    phase: "started",
+    taskId: "bg-1",
+    title: "first replay",
+    kind: "task"
+  }),
+  detachedStarted
+);
+const detachedSecond = updateDetachedTaskIds(detachedStarted, {
+  type: "background-task",
+  phase: "started",
+  taskId: "bg-2",
+  title: "second",
+  kind: "task"
+});
+assert.deepStrictEqual(detachedSecond.detachedTaskIds, ["bg-1", "bg-2"]);
+assert.strictEqual(
+  updateDetachedTaskIds(detachedSecond, {
+    type: "background-task",
+    phase: "progress",
+    taskId: "bg-1",
+    activityKind: "file",
+    text: "working",
+    updates: 1
+  }),
+  detachedSecond
+);
+const detachedOneLeft = updateDetachedTaskIds(detachedSecond, {
+  type: "background-task",
+  phase: "settled",
+  taskId: "bg-1",
+  cancelled: true,
+  result: { status: "failed" }
+});
+assert.deepStrictEqual(detachedOneLeft.detachedTaskIds, ["bg-2"]);
+assert.strictEqual(
+  updateDetachedTaskIds(detachedOneLeft, {
+    type: "background-task",
+    phase: "settled",
+    taskId: "unknown",
+    orphaned: true,
+    result: { status: "failed" }
+  }),
+  detachedOneLeft
+);
+assert.strictEqual(
+  updateDetachedTaskIds(detachedOneLeft, {
+    type: "background-task",
+    phase: "settled",
+    taskId: "bg-2",
+    orphaned: true,
+    result: { status: "failed" }
+  }).detachedTaskIds,
+  undefined
+);
+assert.strictEqual(shouldMarkCompletedTurnUnread(detachedStarted, true), false);
+assert.strictEqual(shouldMarkCompletedTurnUnread(detachedBase, true), true);
+assert.strictEqual(shouldMarkCompletedTurnUnread(detachedBase, false), false);
 
 // claude/opencode/cursor have a turn-start signal (cursor's beforeSubmitPrompt
 // hook), so they suppress the output-flow working heuristic. codex and plain
@@ -462,6 +545,34 @@ assert(
     appSource.includes("window.vibe?.openFusionChat?.onEvent(") &&
     appSource.includes("<OpenFusionChatPane"),
   "Open Fusion chat pane should mirror lifecycle app-side and restart only on Executor changes"
+);
+const fusionLifecycleSource = appSource.slice(
+  appSource.indexOf("function applyFusionChatLifecycle("),
+  appSource.indexOf("function parseFusionToolResult(")
+);
+const openFusionLifecycleSource = appSource.slice(
+  appSource.indexOf("function applyOpenFusionChatLifecycle("),
+  appSource.indexOf("function resumeSession(")
+);
+assert(
+  source.includes("export function updateDetachedTaskIds(") &&
+    source.includes('event.phase === "started"') &&
+    source.includes('event.phase === "progress"') &&
+    source.includes("currentTaskIds.filter") &&
+    fusionLifecycleSource.includes('event.type === "background-task"') &&
+    fusionLifecycleSource.includes("updateDetachedTaskIds(session, event)") &&
+    openFusionLifecycleSource.includes('event.type === "background-task"') &&
+    openFusionLifecycleSource.includes("updateDetachedTaskIds(session, event)"),
+  "Fusion and Open Fusion lifecycle mirrors should idempotently track detached task starts/settles before replay guards"
+);
+assert(
+  fusionLifecycleSource.indexOf('event.type === "background-task"') <
+      fusionLifecycleSource.indexOf("if (event.replay)") &&
+    openFusionLifecycleSource.indexOf('event.type === "background-task"') <
+      openFusionLifecycleSource.indexOf("if (event.replay)") &&
+    fusionLifecycleSource.includes("shouldMarkCompletedTurnUnread(") &&
+    openFusionLifecycleSource.includes("shouldMarkCompletedTurnUnread("),
+  "replayed detached task lifecycle should rehydrate working state while launcher results suppress unread done attention"
 );
 assert(
   appSource.includes('event.type === "agent-running"') &&

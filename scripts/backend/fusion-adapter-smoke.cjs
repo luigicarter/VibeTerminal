@@ -30,6 +30,7 @@ const {
   normalizeFanoutTasks,
   cleanClaudeEffort,
   codexMcpServerConfigKey,
+  codexTaskStatus,
   commandExecutionDisplayText,
   displayCommandFromItem,
   extractVerifierVerdict,
@@ -43,6 +44,7 @@ const {
   summarizeCommandExecution,
   threadItemActivity,
   stripVerifierVerdictFromSummary,
+  settledBackgroundTasks,
   translateWorkspaceMcpServerConfig,
   unwrapShellCommand,
   workspaceMcpConfigOverrides,
@@ -147,6 +149,7 @@ function main() {
             assert(names.includes("codex_investigate"), "tools/list missing codex_investigate");
             assert(names.includes("codex_implement"), "tools/list missing codex_implement");
             assert(names.includes("codex_watch_build"), "tools/list missing codex_watch_build");
+            assert(names.includes("codex_task_status"), "tools/list missing codex_task_status");
             assert(names.includes("codex_respond"), "tools/list missing codex_respond");
             assert(names.includes("codex_steer_resolve"), "tools/list missing codex_steer_resolve");
             assert(names.includes("codex_cancel"), "tools/list missing codex_cancel");
@@ -163,6 +166,13 @@ function main() {
                 /picture\/image generation/i.test(implementTool.description) &&
                 /browser navigation\/control\/automation/i.test(implementTool.description),
               "codex_implement description missing Claude-guides-Codex contract"
+            );
+            const taskStatusTool = tools.find((t) => t.name === "codex_task_status");
+            assert(
+              taskStatusTool &&
+                taskStatusTool.inputSchema?.properties?.taskId?.type === "string" &&
+                !(taskStatusTool.inputSchema.required || []).includes("taskId"),
+              "codex_task_status should expose an optional string taskId"
             );
             const source = fs.readFileSync(adapterPath, "utf8");
             assert(source.includes('notify("initialized")'), "adapter does not send initialized notification");
@@ -235,7 +245,7 @@ function main() {
               "adapter should ignore stale app-server stdout/exit after a replacement child starts"
             );
             assert(
-              source.includes(".then(handleTurnStartResponse)") &&
+              source.includes(".then((response) => handleTurnStartResponse(response, turnWaiter))") &&
                 source.includes('refreshTurnIdleTimer("turn/start response")'),
               "adapter should treat the turn/start response itself as live turn progress"
             );
@@ -252,9 +262,12 @@ function main() {
             );
             assert(
               source.includes("TURN_HARD_TIMEOUT_MS") &&
+                source.includes("TURN_ABSOLUTE_TIMEOUT_MS") &&
+                source.includes("VIBE_FUSION_TURN_ABSOLUTE_TIMEOUT_MS") &&
                 source.includes("hardTimer") &&
+                source.includes("absoluteTimer") &&
                 source.includes("Fusion turn exceeded the maximum duration"),
-              "adapter must arm a non-disableable hard turn ceiling so the turn waiter always resolves"
+              "adapter must arm progress and absolute turn ceilings so the turn waiter always resolves"
             );
             assert(
               source.includes("function codexCancel") &&
@@ -876,7 +889,7 @@ function callAdapterPlanModeRejectsImplement() {
         if (!line) continue;
         const msg = JSON.parse(line);
         if (msg.id !== undefined) responses.set(msg.id, msg);
-        if (responses.has(2)) {
+        if (responses.has(2) && responses.has(3)) {
           clearTimeout(timer);
           try {
             const response = responses.get(2);
@@ -885,6 +898,14 @@ function callAdapterPlanModeRejectsImplement() {
             assert(parsed.status === "failed", "Plan mode should fail codex_implement: " + text);
             assert(parsed.mode === "plan", "Plan mode refusal should report mode: " + text);
             assert(/Plan mode is active/i.test(parsed.error), "Plan mode refusal should explain the gate: " + text);
+            const statusText = responses.get(3).result.content[0].text;
+            const status = JSON.parse(statusText);
+            assert(
+              status.status === "ok" &&
+                Array.isArray(status.active) &&
+                Array.isArray(status.recentlySettled),
+              "Plan mode should admit codex_task_status: " + statusText
+            );
             cleanup();
             resolve();
           } catch (error) {
@@ -913,6 +934,14 @@ function callAdapterPlanModeRejectsImplement() {
         id: 2,
         method: "tools/call",
         params: { name: "codex_implement", arguments: { task: "edit a file" } }
+      }) + "\n"
+    );
+    child.stdin.write(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "codex_task_status", arguments: {} }
       }) + "\n"
     );
   });
@@ -2267,7 +2296,7 @@ function assertAdapterRunsHostFree() {
             );
             const tools = responses.get(2).result && responses.get(2).result.tools ? responses.get(2).result.tools : [];
             const names = tools.map((t) => t.name);
-            for (const tool of ["codex_goal_set", "codex_goal_get", "codex_goal_clear", "codex_investigate", "codex_implement", "codex_watch_build", "codex_respond", "codex_steer_resolve", "codex_cancel"]) {
+            for (const tool of ["codex_goal_set", "codex_goal_get", "codex_goal_clear", "codex_investigate", "codex_implement", "codex_watch_build", "codex_task_status", "codex_respond", "codex_steer_resolve", "codex_cancel"]) {
               assert(names.includes(tool), `host-free tools/list missing ${tool}`);
             }
             const callText = responses.get(3).result.content[0].text;
@@ -3198,6 +3227,59 @@ function assertCodexModelEffortCompatibility() {
 
 // ---- parallel fan-out coverage ----
 
+function assertCodexTaskStatusHelpers() {
+  settledBackgroundTasks.splice(0);
+  const empty = codexTaskStatus();
+  assert(
+    empty.status === "ok" &&
+      Array.isArray(empty.active) &&
+      empty.active.length === 0 &&
+      Array.isArray(empty.recentlySettled) &&
+      empty.recentlySettled.length === 0,
+    `empty codex_task_status registry returned the wrong shape: ${JSON.stringify(empty)}`
+  );
+  assert(/read-only/i.test(empty.note || ""), "codex_task_status should explain its read-only contract");
+
+  const unknown = codexTaskStatus("bg-missing");
+  assert(
+    unknown.status === "not_found" &&
+      /Unknown background taskId: bg-missing/.test(unknown.error || "") &&
+      Array.isArray(unknown.active) &&
+      Array.isArray(unknown.recentlySettled),
+    `unknown codex_task_status lookup returned the wrong result: ${JSON.stringify(unknown)}`
+  );
+
+  const settled = {
+    taskId: "bg-settled-smoke",
+    title: "Settled smoke task",
+    kind: "investigate",
+    state: "completed",
+    startedAt: Date.now() - 125,
+    cancelled: false,
+    durationMs: 125,
+    elapsedMs: 125,
+    settledAt: Date.now(),
+    updates: 3,
+    files: ["src/settled.js"],
+    recentActivity: [{ ts: Date.now() - 10, kind: "file", text: "edit src/settled.js" }],
+    result: { status: "completed", summary: "done", files: ["src/settled.js"] }
+  };
+  settledBackgroundTasks.push(settled);
+  const found = codexTaskStatus(settled.taskId);
+  assert(
+      found.status === "ok" &&
+      found.task?.taskId === settled.taskId &&
+      found.task?.state === "completed" &&
+      found.task?.files?.[0] === "src/settled.js" &&
+      found.task?.recentActivity?.length === 1 &&
+      found.task?.result?.summary === "done" &&
+      /full report/i.test(found.note || "") &&
+      settled.state === "completed",
+    `settled codex_task_status lookup returned the wrong result: ${JSON.stringify(found)}`
+  );
+  settledBackgroundTasks.splice(0);
+}
+
 function assertFanoutHelpers() {
   // Input normalization: single task, batch, caps, and mutual exclusion.
   assert(normalizeFanoutTasks("do it").task === "do it", "single task should pass through");
@@ -3424,7 +3506,8 @@ function assertFanoutHelpers() {
       source.includes("VIBE_FUSION_BACKGROUND_IDLE_TIMEOUT_MS") &&
       source.includes("idleTimeoutMs: BACKGROUND_IDLE_TIMEOUT_MS") &&
       source.includes("idleTimeoutMs: TURN_IDLE_TIMEOUT_MS") &&
-      source.includes("}, BACKGROUND_HARD_TIMEOUT_MS);") &&
+      source.includes("hardTimeoutMs: BACKGROUND_HARD_TIMEOUT_MS") &&
+      source.includes("absoluteTimeoutMs: BACKGROUND_HARD_TIMEOUT_MS") &&
       !/Fusion background task exceeded the maximum duration\."\s*\}\);\s*\}, TURN_HARD_TIMEOUT_MS\);/.test(source),
     "background workers must use separate idle/hard timeouts without changing foreground/fan-out hard caps"
   );
@@ -3457,16 +3540,47 @@ function assertFanoutHelpers() {
     planToolsBlock && !planToolsBlock[1].includes("codex_watch_build"),
     "codex_watch_build must not be allowed in Fusion Plan mode"
   );
+  assert(
+    planToolsBlock && planToolsBlock[1].includes("codex_task_status"),
+    "codex_task_status must be allowed in Fusion Plan mode"
+  );
 }
 
 function loadAdapterInternalsWithFakeTimers(env = {}) {
   const adapterRequire = createRequire(adapterPath);
   const source = `${fs.readFileSync(adapterPath, "utf8")}\n
-module.exports.__backgroundTimeoutTest = {
+module.exports.__timeoutTest = {
   createBackgroundWorker,
+  codexTaskStatus,
+  activeBackgroundTaskList,
+  postBackgroundProgress,
+  createFanoutWorker,
+  handleFanoutNotification,
+  handleNotification,
+  handleClaudeExecutorEvent,
+  handleTurnStartResponse,
+  awaitTurn,
   refreshFanoutWorkerIdleTimer,
+  refreshFanoutWorkerHardTimer,
   finishFanoutWorkerTurn,
   interruptTimedOutBackgroundWorker,
+  getCurrentTurn() { return currentTurn; },
+  setCodexTurn(nextThreadId, nextTurnId) {
+    activeExecutorFamily = "codex";
+    threadId = nextThreadId;
+    activeTurnId = nextTurnId;
+  },
+  setClaudeTurn(write) {
+    activeExecutorFamily = "claude";
+    claudeTurnActive = true;
+    claudeChild = {
+      stdin: { destroyed: false, writable: true, write },
+      killed: false,
+      kill() {}
+    };
+  },
+  setActiveTurnId(nextTurnId) { activeTurnId = nextTurnId; },
+  registerBackgroundWorker(worker) { backgroundWorkers.set(worker.threadId, worker); },
   setRpcStub(fn) { rpc = fn; }
 };
 `;
@@ -3512,9 +3626,391 @@ module.exports.__backgroundTimeoutTest = {
     timeout: 5000
   });
   return {
-    api: context.module.exports.__backgroundTimeoutTest,
+    api: context.module.exports.__timeoutTest,
     timers
   };
+}
+
+function fireFakeTimer(timer) {
+  if (timer && !timer.cleared) timer.fn();
+}
+
+function assertRunningTaskStatusSnapshots() {
+  const { api } = loadAdapterInternalsWithFakeTimers();
+  const longTask = `Inspect running status ${"detail ".repeat(100)}`;
+  const worker = api.createBackgroundWorker(
+    "implement",
+    longTask,
+    "bg-running-smoke",
+    "thread-bg-running-smoke"
+  );
+  worker.startedAt = Date.now() - 250;
+  worker.summary.push(`older-${"x".repeat(1100)}`);
+  worker.files.push("src/a.js", "src/a.js", "src/b.js");
+  worker.child = { running: true };
+  worker.textParts.push("-latest-claude-text");
+  api.registerBackgroundWorker(worker);
+  for (let index = 0; index < 25; index += 1) {
+    api.postBackgroundProgress(worker, "message", `activity-${index}`);
+  }
+
+  const hardTimer = worker.hardTimer;
+  const idleTimer = worker.idleTimer;
+  const list = api.codexTaskStatus();
+  assert(
+    list.status === "ok" &&
+      list.active?.length === 1 &&
+      list.active[0].taskId === worker.taskId &&
+      list.active[0].state === "running" &&
+      list.active[0].task.length === 400 &&
+      list.active[0].task === longTask.slice(0, 397) + "..." &&
+      list.active[0].updates === 25 &&
+      list.active[0].recentActivity.length === 20 &&
+      list.active[0].recentActivity[0].text === "activity-5" &&
+      list.active[0].files.join(",") === "src/a.js,src/b.js" &&
+      list.active[0].latestText.endsWith("-latest-claude-text") &&
+      list.active[0].elapsedMs >= 0,
+    `running codex_task_status snapshot returned the wrong detail: ${JSON.stringify(list)}`
+  );
+  const detail = api.codexTaskStatus(worker.taskId);
+  assert(
+    detail.status === "ok" &&
+      detail.task?.taskId === worker.taskId &&
+      worker.hardTimer === hardTimer &&
+      worker.idleTimer === idleTimer &&
+      worker.settled === false &&
+      worker.cancelled === false,
+    `codex_task_status must not mutate or settle a running worker: ${JSON.stringify(detail)}`
+  );
+  assert(
+    JSON.stringify(api.activeBackgroundTaskList()) ===
+      JSON.stringify([{ taskId: worker.taskId, title: worker.title, kind: worker.kind }]),
+    `activeBackgroundTaskList must stay compact because foreground results embed it: ${JSON.stringify(api.activeBackgroundTaskList())}`
+  );
+  const unknown = api.codexTaskStatus("bg-missing");
+  assert(
+    JSON.stringify(unknown.active) ===
+      JSON.stringify([{ taskId: worker.taskId, title: worker.title, kind: worker.kind }]),
+    `unknown codex_task_status results must embed only the compact active list: ${JSON.stringify(unknown)}`
+  );
+}
+
+async function assertForegroundTimeoutSemantics() {
+  const env = {
+    VIBE_FUSION_TURN_HARD_TIMEOUT_MS: "60000",
+    VIBE_FUSION_TURN_ABSOLUTE_TIMEOUT_MS: "180000",
+    VIBE_FUSION_TURN_IDLE_TIMEOUT_MS: "120000"
+  };
+
+  {
+    const { api } = loadAdapterInternalsWithFakeTimers(env);
+    const writes = [];
+    api.setClaudeTurn((line) => {
+      writes.push(JSON.parse(String(line).trim()));
+    });
+    const done = api.awaitTurn();
+    const turn = api.getCurrentTurn();
+    const originalHardTimer = turn.hardTimer;
+    api.handleClaudeExecutorEvent({ type: "assistant-text", delta: "text only" });
+    assert(
+      turn.hardTimer === originalHardTimer && !originalHardTimer.cleared,
+      "Claude assistant text must not refresh the verifiable-progress hard ceiling"
+    );
+    api.handleClaudeExecutorEvent({ type: "tool-call", name: "Bash", input: { command: "pwd" } });
+    const toolCallHardTimer = turn.hardTimer;
+    assert(
+      originalHardTimer.cleared && toolCallHardTimer !== originalHardTimer,
+      "Claude tool-call should refresh the verifiable-progress hard ceiling"
+    );
+    api.handleClaudeExecutorEvent({ type: "tool-result", text: "done" });
+    assert(
+      toolCallHardTimer.cleared && turn.hardTimer !== toolCallHardTimer,
+      "Claude tool-result should refresh the verifiable-progress hard ceiling"
+    );
+    fireFakeTimer(turn.hardTimer);
+    const result = await done;
+    assert(
+      result.status === "failed" && /made no verifiable progress/.test(result.error || ""),
+      `Claude hard ceiling returned the wrong result: ${JSON.stringify(result)}`
+    );
+    assert(
+      writes.some(
+        (message) =>
+          message.type === "control_request" && message.request && message.request.subtype === "interrupt"
+      ),
+      `Claude hard ceiling did not use the executor interrupt path: ${JSON.stringify(writes)}`
+    );
+  }
+
+  {
+    const { api } = loadAdapterInternalsWithFakeTimers(env);
+    const interrupts = [];
+    api.setRpcStub((method, params) => {
+      interrupts.push({ method, params });
+      return Promise.resolve({});
+    });
+    api.setCodexTurn("thread-text-churn", "turn-text-churn");
+    const done = api.awaitTurn();
+    const turn = api.getCurrentTurn();
+    const originalIdleTimer = turn.idleTimer;
+    const hardTimer = turn.hardTimer;
+    api.handleNotification({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "thread-text-churn",
+        turnId: "turn-text-churn",
+        itemId: "message-text-churn",
+        delta: "still talking"
+      }
+    });
+    assert(originalIdleTimer.cleared, "agent text churn should still refresh the idle watchdog");
+    assert(
+      turn.hardTimer === hardTimer && !hardTimer.cleared,
+      "agent text churn must not refresh the verifiable-progress hard ceiling"
+    );
+    fireFakeTimer(hardTimer);
+    const result = await done;
+    assert(
+      result.status === "failed" && /made no verifiable progress/.test(result.error || ""),
+      `text churn hard ceiling returned the wrong result: ${JSON.stringify(result)}`
+    );
+    assert(
+      interrupts.some(
+        (entry) =>
+          entry.method === "turn/interrupt" &&
+          entry.params.threadId === "thread-text-churn" &&
+          entry.params.turnId === "turn-text-churn"
+      ),
+      `text churn hard ceiling did not interrupt the turn: ${JSON.stringify(interrupts)}`
+    );
+
+    const nextDone = api.awaitTurn();
+    api.setActiveTurnId("turn-after-timeout");
+    let nextSettled = false;
+    nextDone.then(() => {
+      nextSettled = true;
+    });
+    api.handleNotification({
+      method: "turn/failed",
+      params: {
+        threadId: "thread-text-churn",
+        turnId: "turn-text-churn",
+        error: { message: "late interrupted failure" }
+      }
+    });
+    await Promise.resolve();
+    assert(!nextSettled, "a late timed-out turn/failed must not resolve the next waiter");
+    api.handleNotification({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-text-churn",
+        turn: { id: "turn-text-churn", status: "completed", items: [] }
+      }
+    });
+    await Promise.resolve();
+    assert(!nextSettled, "a late timed-out turn/completed must not resolve the next waiter");
+    api.handleNotification({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-text-churn",
+        turn: { id: "turn-after-timeout", status: "completed", items: [] }
+      }
+    });
+    const nextResult = await nextDone;
+    assert(
+      nextResult.status === "completed",
+      `the next waiter should resolve only from its own lifecycle: ${JSON.stringify(nextResult)}`
+    );
+  }
+
+  {
+    const { api } = loadAdapterInternalsWithFakeTimers(env);
+    const interrupts = [];
+    api.setRpcStub((method, params) => {
+      interrupts.push({ method, params });
+      return Promise.resolve({});
+    });
+    api.setCodexTurn("thread-strong", "turn-strong");
+    const done = api.awaitTurn();
+    const turn = api.getCurrentTurn();
+    const originalHardTimer = turn.hardTimer;
+    api.handleNotification({
+      method: "item/completed",
+      params: {
+        threadId: "thread-strong",
+        turnId: "turn-strong",
+        item: { id: "tool-strong", type: "mcpToolCall", status: "completed" }
+      }
+    });
+    const refreshedHardTimer = turn.hardTimer;
+    assert(
+      originalHardTimer.cleared && refreshedHardTimer !== originalHardTimer,
+      "item/completed should re-arm the verifiable-progress hard ceiling"
+    );
+    api.handleNotification({
+      method: "item/started",
+      params: {
+        threadId: "thread-strong",
+        turnId: "turn-strong",
+        item: { id: "command-strong", type: "commandExecution", status: "inProgress" }
+      }
+    });
+    const commandStartedHardTimer = turn.hardTimer;
+    assert(
+      refreshedHardTimer.cleared && commandStartedHardTimer !== refreshedHardTimer,
+      "item/started commandExecution should re-arm the verifiable-progress hard ceiling"
+    );
+    let settled = false;
+    done.then(() => {
+      settled = true;
+    });
+    originalHardTimer.fn();
+    await Promise.resolve();
+    assert(!settled, "the superseded hard timer must not end a strongly-progressing turn");
+    fireFakeTimer(commandStartedHardTimer);
+    const result = await done;
+    assert(
+      result.status === "failed" && /made no verifiable progress/.test(result.error || ""),
+      `refreshed hard timer should remain the active backstop: ${JSON.stringify(result)}`
+    );
+    assert(
+      interrupts.some((entry) => entry.method === "turn/interrupt"),
+      "the refreshed hard ceiling should interrupt when progress later stops"
+    );
+  }
+
+  {
+    const { api } = loadAdapterInternalsWithFakeTimers(env);
+    const interrupts = [];
+    api.setRpcStub((method, params) => {
+      interrupts.push({ method, params });
+      return Promise.resolve({});
+    });
+    api.setCodexTurn("thread-absolute", "turn-absolute");
+    const done = api.awaitTurn();
+    const turn = api.getCurrentTurn();
+    const absoluteTimer = turn.absoluteTimer;
+    for (let index = 0; index < 3; index += 1) {
+      api.handleNotification({
+        method: "item/completed",
+        params: {
+          threadId: "thread-absolute",
+          turnId: "turn-absolute",
+          item: { id: `file-${index}`, type: "fileChange", changes: [], status: "completed" }
+        }
+      });
+      assert(
+        turn.absoluteTimer === absoluteTimer && !absoluteTimer.cleared,
+        "strong progress must never refresh the absolute turn cap"
+      );
+    }
+    fireFakeTimer(absoluteTimer);
+    const result = await done;
+    assert(
+      result.status === "failed" && /exceeded the maximum duration/.test(result.error || ""),
+      `absolute cap returned the wrong result: ${JSON.stringify(result)}`
+    );
+    assert(
+      interrupts.some(
+        (entry) =>
+          entry.method === "turn/interrupt" && entry.params.turnId === "turn-absolute"
+      ),
+      `absolute cap did not interrupt the turn: ${JSON.stringify(interrupts)}`
+    );
+  }
+
+  {
+    const { api } = loadAdapterInternalsWithFakeTimers(env);
+    const interrupts = [];
+    api.setRpcStub((method, params) => {
+      interrupts.push({ method, params });
+      return Promise.resolve({});
+    });
+    api.setCodexTurn("thread-late-start", null);
+    const done = api.awaitTurn();
+    const timedOutWaiter = api.getCurrentTurn();
+    fireFakeTimer(timedOutWaiter.hardTimer);
+    await done;
+    api.handleTurnStartResponse(
+      { turn: { id: "turn-late-start", status: "inProgress", items: [] } },
+      timedOutWaiter
+    );
+    assert(
+      interrupts.some(
+        (entry) =>
+          entry.method === "turn/interrupt" && entry.params.turnId === "turn-late-start"
+      ),
+      `a turn whose id arrives after its ceiling must still be interrupted: ${JSON.stringify(interrupts)}`
+    );
+  }
+}
+
+async function assertFanoutTimeoutSemantics() {
+  const { api } = loadAdapterInternalsWithFakeTimers({
+    VIBE_FUSION_TURN_HARD_TIMEOUT_MS: "60000",
+    VIBE_FUSION_TURN_ABSOLUTE_TIMEOUT_MS: "180000",
+    VIBE_FUSION_TURN_IDLE_TIMEOUT_MS: "120000"
+  });
+  const interrupts = [];
+  api.setRpcStub((method, params) => {
+    interrupts.push({ method, params });
+    return Promise.resolve({});
+  });
+  const hardWorker = api.createFanoutWorker("implement", "hard workstream", 0, 2, "thread-fanout-hard");
+  hardWorker.turnId = "turn-fanout-hard";
+  const originalHardTimer = hardWorker.hardTimer;
+  api.handleFanoutNotification(hardWorker, "item/completed", {
+    threadId: hardWorker.threadId,
+    turnId: hardWorker.turnId,
+    item: { id: "command-fanout", type: "commandExecution", exitCode: 0, status: "completed" }
+  });
+  assert(
+    originalHardTimer.cleared && hardWorker.hardTimer !== originalHardTimer,
+    "fan-out item/completed should refresh the worker hard ceiling"
+  );
+  fireFakeTimer(hardWorker.hardTimer);
+  const hardResult = await hardWorker.promise;
+  assert(
+    hardResult.status === "failed" && /made no verifiable progress/.test(hardResult.error || ""),
+    `fan-out hard ceiling returned the wrong result: ${JSON.stringify(hardResult)}`
+  );
+  assert(
+    interrupts.some(
+      (entry) => entry.method === "turn/interrupt" && entry.params.turnId === hardWorker.turnId
+    ),
+    `fan-out hard ceiling did not interrupt the worker: ${JSON.stringify(interrupts)}`
+  );
+
+  const absoluteWorker = api.createFanoutWorker(
+    "implement",
+    "absolute workstream",
+    1,
+    2,
+    "thread-fanout-absolute"
+  );
+  absoluteWorker.turnId = "turn-fanout-absolute";
+  const absoluteTimer = absoluteWorker.absoluteTimer;
+  api.handleFanoutNotification(absoluteWorker, "item/completed", {
+    threadId: absoluteWorker.threadId,
+    turnId: absoluteWorker.turnId,
+    item: { id: "file-fanout", type: "fileChange", changes: [], status: "completed" }
+  });
+  assert(
+    absoluteWorker.absoluteTimer === absoluteTimer && !absoluteTimer.cleared,
+    "fan-out strong progress must not refresh the worker absolute cap"
+  );
+  fireFakeTimer(absoluteTimer);
+  const result = await absoluteWorker.promise;
+  assert(
+    result.status === "failed" && /exceeded the maximum duration/.test(result.error || ""),
+    `fan-out absolute cap returned the wrong result: ${JSON.stringify(result)}`
+  );
+  assert(
+    interrupts.some(
+      (entry) => entry.method === "turn/interrupt" && entry.params.turnId === absoluteWorker.turnId
+    ),
+    `fan-out absolute cap did not interrupt the worker: ${JSON.stringify(interrupts)}`
+  );
 }
 
 async function assertBackgroundTimeoutCapsAndInterrupts() {
@@ -3549,6 +4045,15 @@ async function assertBackgroundTimeoutCapsAndInterrupts() {
   assert(
     completed.idleTimer.ms === Number(idleEnv),
     `refreshed background idle timer should keep BACKGROUND_IDLE_TIMEOUT_MS, got ${completed.idleTimer.ms}`
+  );
+  const backgroundAbsoluteDeadline = completed.absoluteDeadline;
+  api.refreshFanoutWorkerHardTimer(completed, "completed long command");
+  assert(
+    completeHardTimer.cleared &&
+      completed.hardTimer !== completeHardTimer &&
+      completed.absoluteDeadline === backgroundAbsoluteDeadline &&
+      completed.hardTimer.ms <= Number(hardEnv),
+    "background strong progress should re-arm only up to its unchanged four-hour absolute deadline"
   );
   api.finishFanoutWorkerTurn(completed, {
     status: "completed",
@@ -4556,6 +5061,8 @@ main()
     assertExecutorSettingsParsing();
     assertCodexModelEffortCompatibility();
     assertClaudeExecutorArgs();
+    assertCodexTaskStatusHelpers();
+    assertRunningTaskStatusSnapshots();
     await assertWorkspaceMcpConfigInjectedIntoThreadStart();
     await assertEagerBootStartsThread();
     await callAdapterToolDuringEagerBootUsesOneThreadStart();
@@ -4573,6 +5080,8 @@ main()
     await callAdapterDeadWindowSteerSkips();
     await callAdapterImplementWithFakeClaudeExecutor();
     assertFanoutHelpers();
+    await assertForegroundTimeoutSemantics();
+    await assertFanoutTimeoutSemantics();
     await assertBackgroundTimeoutCapsAndInterrupts();
     await callAdapterBackgroundTelemetryIsolation();
     await callAdapterScoutFanoutWithFakeAppServer();

@@ -201,6 +201,22 @@ falls back to the planner-thread path (no push/replan into N workers), and a
 claude-family executor runs batched tasks SEQUENTIALLY through its persistent
 child (same combined result shape, `parallel:false`).
 
+**Turn timeout safety (2026-07-09):** a foreground executor turn has three
+independent guards: the 10-minute idle watchdog refreshes on any live progress;
+the 15-minute hard ceiling refreshes only on verifiable activity
+(`item/completed`, command start, Claude tool call/result, or approval
+resolution); and the 60-minute absolute cap is armed once and never refreshed.
+`VIBE_FUSION_TURN_HARD_TIMEOUT_MS` and
+`VIBE_FUSION_TURN_ABSOLUTE_TIMEOUT_MS` tune the latter two (the absolute cap is
+always at least the hard ceiling). Hard/absolute expiry interrupts the executor;
+Codex lifecycle events carrying the timed-out turn id are quarantined so they
+cannot settle or contaminate the next delegation. Fan-out workers use the same
+strong-progress and absolute-cap rules. Planner MCP calls are pinned at four
+hours so the planner cannot abandon a normal 60-minute executor turn first.
+Detached Fusion work keeps its separate 20-minute idle guard and four-hour
+absolute cap; Open Fusion background work uses a 10-minute idle guard and the
+same four-hour absolute cap.
+
 **Background delegations (2026-07-07)** (locked by `fusion-adapter-smoke`
 anchors + `fusion-chat-parse-smoke` + `completion-gate-smoke` +
 `fusion-launch-smoke` prompt anchors): `codex_implement`/`codex_investigate`
@@ -208,11 +224,18 @@ accept `background: true` — the tool returns `{status:"started", taskId,
 title}` immediately, the planner's turn ends so the user can keep chatting,
 and the work runs DETACHED on a fan-out-shaped worker (`backgroundWorkers`
 registry: own ephemeral app-server thread or per-task ephemeral claude child,
-own 10-min idle / 15-min hard timers, inline auto-resolved approvals, never
+own 20-min idle / 4-hour absolute timers, inline auto-resolved approvals, never
 `currentTurn`/`fanoutActive`). Opt-in by contract: the planner backgrounds a
 delegation only when the user asks or wants to keep talking during long
 INDEPENDENT work; dependent milestones never run background concurrently. On
-settle the adapter relays `fusion.background-task` telemetry (started/
+the planner side, `codex_task_status` is a Plan-mode-safe, read-only peek: with
+no `taskId` it returns `active` running snapshots (elapsed time, update count,
+recent activity, files, and latest assistant text) plus `recentlySettled`
+memory for the eight most recent tasks; with a `taskId` it returns that task's
+detail. Peeking never
+refreshes a timer, blocks, cancels, or settles the worker, and never replaces
+reviewing the later `FUSION BACKGROUND TASK REPORT`. On settle the adapter
+relays `fusion.background-task` telemetry (started/
 progress/settled ride the same callback channel as `fusion.activity`; main
 routes it into `fusionChatHost`), the host mirrors it to the pane
 (`background-task` events — started/settled enter history for replay,
