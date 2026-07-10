@@ -927,6 +927,11 @@ async function main() {
     strictMcpConfig: true,
     resumeId: "resume & id"
   });
+  assert(
+    claudeArgs.includes("--append-system-prompt-file") &&
+      !claudeArgs.includes("--append-system-prompt"),
+    "Claude launch must use only the prompt-file form; Claude rejects both append-system-prompt flags together"
+  );
   assert(!claudeArgs.includes("claude"), "claude executable should not be part of argv args");
   assert(claudeArgs.includes("C:\\repo dir\\a&b"), "cwd should remain one raw argv value");
   assert(

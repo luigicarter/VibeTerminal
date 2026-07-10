@@ -176,6 +176,7 @@ async function main() {
         buildFusionSystemPrompt().includes("Default stays FOREGROUND") &&
         buildFusionSystemPrompt().includes("codex_cancel {taskId}") &&
         buildFusionSystemPrompt().includes("codex_task_status") &&
+        buildFusionSystemPrompt().includes("asks how a background task is going") &&
         buildFusionSystemPrompt().includes("Plan mode") &&
         buildFusionSystemPrompt().includes("Never run milestones that"),
       "buildFusionSystemPrompt is missing the background delegation contract"
