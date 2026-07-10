@@ -874,9 +874,10 @@ function clampSidebarWidth(width: number) {
 }
 
 function loadSidebarWidth() {
-  const savedWidth = Number(localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY));
+  const storedWidth = localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
+  const savedWidth = storedWidth === null ? NaN : Number(storedWidth);
 
-  if (Number.isFinite(savedWidth)) {
+  if (Number.isFinite(savedWidth) && savedWidth > 0) {
     return clampSidebarWidth(savedWidth);
   }
 
@@ -3124,11 +3125,23 @@ export default function App() {
           </span>
         </button>
 
-        <div className="sidebar-section-title">Folders</div>
+        <div className="sidebar-section-title">
+          Folders
+          {workspaces.length > 0 && (
+            <span className="sidebar-section-count">{workspaces.length}</span>
+          )}
+        </div>
         <div
           className="workspace-list"
           onDragLeave={handleWorkspaceListDragLeave}
         >
+          {workspaces.length === 0 && (
+            <div className="workspace-empty-hint">
+              No folders yet.
+              <br />
+              Open one to start working.
+            </div>
+          )}
           {workspaces.map((workspace) => {
             const hasUnreadAttention = workspaceHasUnreadAttention(workspace);
             const hasWorking =

@@ -921,6 +921,9 @@ export default function FusionChatPane({
   const fusionRunModeText = fusionRunModeLabel(fusionRunMode);
   const fusionModelLabel = fusionRoleModelLabel(plannerFamily, plannerModel, liveModelCatalog);
   const executorModelLabel = fusionRoleModelLabel(executorFamily, executorModel, liveModelCatalog);
+  const footerRolesLabel =
+    `Planner: ${fusionModelLabel} - ${familyEffortLabel(plannerFamily, String(plannerEffort))} - ${plannerFast ? "Fast" : "Standard"}` +
+    ` | Executor: ${executorModelLabel} - ${familyEffortLabel(executorFamily, String(executorEffort))} - ${executorFast ? "Fast" : "Standard"}`;
   const plannerPipelineLabel = fusionPipelineNodeLabel(plannerFamily, fusionModelLabel);
   const executorPipelineLabel = fusionPipelineNodeLabel(executorFamily, executorModelLabel);
   const fusionSettingsLine = fusionSettingsSummary({
@@ -3747,6 +3750,9 @@ export default function FusionChatPane({
         <span className="oc-footer-path" title={session.cwd}>
           <span className="oc-footer-parent">{cwdSplit.parent}</span>
           <span className="oc-footer-name">{cwdSplit.name}</span>
+        </span>
+        <span className="oc-footer-roles" title={fusionSettingsLine}>
+          {footerRolesLabel}
         </span>
         <div className="oc-footer-right">
           {pendingDecision && <span className="oc-footer-perm">△ 1 Decision</span>}

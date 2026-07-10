@@ -333,6 +333,9 @@ function waitForRenderer(url, timeoutMs = 30000) {
 
 async function main() {
   fs.mkdirSync(artifactDir, { recursive: true });
+  // A leftover artifact from an earlier run would satisfy the existence check
+  // below even if this run never captures anything.
+  fs.rmSync(screenshotPath, { force: true });
   cleanupDeadShimRuns();
 
   const electronEnv = {};
