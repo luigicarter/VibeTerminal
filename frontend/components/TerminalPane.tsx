@@ -666,7 +666,7 @@ export default function TerminalPane({
       if (event.type === "snapshot") {
         terminal.reset();
         if (event.data) {
-          terminal.write(event.data);
+          terminal.write(event.data, () => terminal.scrollToBottom());
         }
 
         if (event.isRunning) {
@@ -830,6 +830,23 @@ export default function TerminalPane({
     // "starting", then degraded to "waiting" by the settle timers).
     if (sessionRef.current.status === "idle") {
       setStatus("starting");
+    }
+
+    // The terminal opens at xterm's 80x24 default, while the first scheduled
+    // fit runs on the next animation frame. A newly mounted board frame can
+    // also still be at the zero-width start of its CSS transition, so suppress
+    // that transition just for this measurement and fit to its laid-out size.
+    const paneFrame = isArrangingRef.current
+      ? null
+      : containerRef.current?.closest<HTMLElement>(".pane-frame");
+    const paneFrameTransition = paneFrame?.style.transition;
+    if (paneFrame) {
+      paneFrame.style.transition = "none";
+      void paneFrame.offsetWidth;
+    }
+    fitAndResizeRef.current?.();
+    if (paneFrame) {
+      paneFrame.style.transition = paneFrameTransition ?? "";
     }
     lastSentSizeRef.current = {
       cols: terminal.cols,

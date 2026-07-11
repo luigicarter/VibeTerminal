@@ -86,7 +86,9 @@ function createSession(payload) {
     id: payload.id,
     command: payload.command,
     cwd: payload.cwd,
-    launchToken: payload.launchToken
+    launchToken: payload.launchToken,
+    cols: payload.cols,
+    rows: payload.rows
   });
 
   if (!pty) {
@@ -116,10 +118,16 @@ function createSession(payload) {
       sessions.delete(payload.id);
     } else {
       if (existingSession?.terminal && (payload.cols || payload.rows)) {
-        existingSession.terminal.resize(
-          Math.max(20, Number(payload.cols || 100)),
-          Math.max(6, Number(payload.rows || 28))
-        );
+        const cols = Math.max(20, Number(payload.cols || 100));
+        const rows = Math.max(6, Number(payload.rows || 28));
+        if (existingSession.cols !== cols || existingSession.rows !== rows) {
+          existingSession.terminal.resize(cols, rows);
+          existingSession.cols = cols;
+          existingSession.rows = rows;
+          debug({ type: "dedup-resize", id: payload.id, cols, rows });
+        } else {
+          debug({ type: "dedup-resize-skipped", id: payload.id, cols, rows });
+        }
       }
 
       if (existingSession) {
@@ -141,6 +149,8 @@ function createSession(payload) {
   const session = {
     terminal: null,
     buffer: "",
+    cols,
+    rows,
     launchToken: Number(payload.launchToken || 0),
     exitCode: undefined,
     signal: undefined
@@ -227,10 +237,16 @@ function handleMessage(message) {
     case "resize": {
       const session = sessions.get(message.payload.id);
       if (session?.terminal) {
-        session.terminal.resize(
-          Math.max(20, Number(message.payload.cols || 100)),
-          Math.max(6, Number(message.payload.rows || 28))
-        );
+        const cols = Math.max(20, Number(message.payload.cols || 100));
+        const rows = Math.max(6, Number(message.payload.rows || 28));
+        if (session.cols !== cols || session.rows !== rows) {
+          session.terminal.resize(cols, rows);
+          session.cols = cols;
+          session.rows = rows;
+          debug({ type: "resize", id: message.payload.id, cols, rows });
+        } else {
+          debug({ type: "resize-skipped", id: message.payload.id, cols, rows });
+        }
       }
       break;
     }
