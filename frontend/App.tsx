@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -36,9 +37,11 @@ import {
   attentionFromEvent,
   attentionFromTerminalEvent,
   clearUnreadAttention,
+  codexTurnAttentionDecision,
   isSessionWorking,
   isTurnTelemetryKind,
   normalizeAttention,
+  providerAttentionDecision,
   reconcileStatus,
   shouldMarkCompletedTurnUnread,
   shouldMarkAttentionUnread,
@@ -103,6 +106,12 @@ const MIN_SIDEBAR_WIDTH = 220;
 const MAX_SIDEBAR_WIDTH = 520;
 const MIN_WORKSPACE_WIDTH = 360;
 const CODE_CHANGE_REFRESH_MS = 7_500;
+const CODEX_INPUT_GRACE_MS = 450;
+// Trusted Codex lifecycle hooks drive precise starts/waits; bare Enter is the
+// compatibility fallback until trust/older-version gaps are resolved. Every
+// PTY chunk refreshes this App-owned safety watchdog, including while hidden.
+// It is intentionally much longer than the plain-terminal idle heuristic.
+const CODEX_RUNNING_QUIET_MS = 60_000;
 const DEFAULT_FUSION_RUN_MODE: FusionRunMode = "auto";
 
 // Last-used model configuration, per terminal mode. New panes start from the
@@ -187,6 +196,12 @@ interface ThreadLookupPatch {
   threadLookupStartedAt?: number;
   threadLookupStatus: AgentThreadLookupStatus;
   threadLookupMessage?: string;
+}
+
+interface PendingCodexAttention {
+  providerThreadId: string;
+  providerTurnId?: string;
+  attention: AgentAttentionEvent;
 }
 
 const agentProfiles: AgentProfile[] = [
@@ -1023,6 +1038,20 @@ export default function App() {
     selectedSessionId: null,
     visibleSessionIds: []
   });
+  const codexRunningWatchdogsRef = useRef<Map<string, number>>(new Map());
+  const codexWatchdogSettledRef = useRef<Set<string>>(new Set());
+  const codexLastInputAtRef = useRef<Map<string, number>>(new Map());
+  const codexActiveTurnIdsRef = useRef<Map<string, string>>(new Map());
+  const codexSubmitPendingRef = useRef<Map<string, string | null>>(new Map());
+  const codexSettledTurnIdsRef = useRef<Map<string, string[]>>(new Map());
+  // Synchronous event-order latch for provider hooks. React state and the
+  // sessions snapshot ref update after commit, while independent hook POSTs
+  // can race one another in the same tick.
+  const codexTurnLiveRef = useRef<Map<string, boolean>>(new Map());
+  const sessionsByIdRef = useRef<Map<string, AgentSession>>(new Map());
+  const pendingCodexAttentionRef = useRef<
+    Map<string, PendingCodexAttention[]>
+  >(new Map());
   const fusionBridgeToolRef = useRef<Map<string, boolean>>(new Map());
   const [shellMessage, setShellMessage] = useState<string | null>(null);
   const [updateState, setUpdateState] = useState<UpdateState | null>(null);
@@ -1082,6 +1111,11 @@ export default function App() {
     ...multiSessions,
     ...workspaces.flatMap((workspace) => workspace.sessions)
   ];
+  useLayoutEffect(() => {
+    sessionsByIdRef.current = new Map(
+      allSessions.map((session) => [session.id, session])
+    );
+  }, [multiSessions, workspaces]);
   const cwdConflicts = useMemo(
     () =>
       computeCwdConflicts([
@@ -1292,11 +1326,23 @@ export default function App() {
       }
 
       if (event.type === "agent-attention") {
-        applyAgentAttention(event.id, event.attention);
+        applyAgentAttention(
+          event.id,
+          event.attention,
+          event.provider,
+          event.providerThreadId,
+          event.providerTurnId
+        );
       }
 
       if (event.type === "agent-running") {
-        applyAgentRunning(event.id, event.turnStart !== false);
+        applyAgentRunning(
+          event.id,
+          event.turnStart !== false,
+          event.provider,
+          event.providerThreadId,
+          event.providerTurnId
+        );
       }
 
       if (event.type === "agent-background-activity") {
@@ -1305,11 +1351,14 @@ export default function App() {
       }
 
       if ("id" in event && typeof event.id === "string") {
-        // Output ("data") no longer drives the working/idle pill from here: a
-        // pane's working state comes from turn telemetry (claude/opencode) or
-        // the mounted pane's input-aware heuristic (codex/plain terminals), so a
-        // user's own keystroke echo can never read as "working". snapshot/exit/
-        // error still settle status centrally for every pane.
+        if (event.type === "data") {
+          refreshCodexRunningWatchdog(event.id);
+        }
+
+        // Raw output does not directly drive the pill here. It refreshes only
+        // an already-started Codex turn's App-owned safety watchdog; telemetry
+        // drives other agents, and mounted plain terminals retain their
+        // input-aware heuristic. snapshot/exit/error still settle centrally.
         if (event.type !== "data") {
           applyTerminalStatus(event.id, statusFromTerminalEvent(event));
         }
@@ -1320,6 +1369,22 @@ export default function App() {
         }
       }
     });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      for (const timeoutId of codexRunningWatchdogsRef.current.values()) {
+        window.clearTimeout(timeoutId);
+      }
+      codexRunningWatchdogsRef.current.clear();
+      codexWatchdogSettledRef.current.clear();
+      codexLastInputAtRef.current.clear();
+      codexActiveTurnIdsRef.current.clear();
+      codexSubmitPendingRef.current.clear();
+      codexSettledTurnIdsRef.current.clear();
+      codexTurnLiveRef.current.clear();
+      pendingCodexAttentionRef.current.clear();
+    };
   }, []);
 
   useEffect(() => {
@@ -1520,6 +1585,10 @@ export default function App() {
       return;
     }
 
+    if (status === "done" || status === "failed") {
+      clearCodexRunningWatchdog(sessionId);
+    }
+
     updateAnySession(sessionId, (session) => {
       // claude/opencode "working" is telemetry-driven, so never let raw terminal
       // output (a snapshot replay on reconnect, a focus/click redraw) flip them
@@ -1535,15 +1604,50 @@ export default function App() {
     });
   }
 
-  // A claude/opencode/cursor turn signal. A genuine turn START (UserPromptSubmit
-  // / busy event / beforeSubmitPrompt) forces the pane to "running" even past
-  // the done/failed stickiness — a new turn legitimately supersedes the previous
-  // result — and drops any stale unread dot. Mid-turn tool activity (claude
+  // A genuine turn START (provider telemetry, or the renderer-owned Codex
+  // submit fallback) forces the pane to "running" even
+  // past done/failed stickiness and drops stale unread attention. Mid-turn tool activity (claude
   // PreToolUse/PostToolUse, turnStart false) goes through reconcileStatus
   // instead: the hook POSTs ride independent short-lived processes with no
   // ordering guarantee, so a tool event that lands after the turn's Stop must
   // not resurrect a finished pane's spinner (or clear its attention dot).
-  function applyAgentRunning(sessionId: string, turnStart = true) {
+  function applyAgentRunning(
+    sessionId: string,
+    turnStart = true,
+    provider?: string,
+    providerThreadId?: string,
+    providerTurnId?: string
+  ) {
+    if (provider === "codex") {
+      const session = sessionsByIdRef.current.get(sessionId);
+      if (!turnStart && codexTurnLiveRef.current.get(sessionId) === false) {
+        return;
+      }
+      if (
+        !turnStart &&
+        session &&
+        reconcileStatus(session.status, "running") !== "running"
+      ) {
+        return;
+      }
+      const decision = providerAttentionDecision(
+        session,
+        provider,
+        providerThreadId
+      );
+      if (decision === "reject") {
+        return;
+      }
+      if (turnStart) {
+        codexTurnLiveRef.current.set(sessionId, true);
+        codexSubmitPendingRef.current.delete(sessionId);
+      }
+      if (providerTurnId) {
+        codexActiveTurnIdsRef.current.set(sessionId, providerTurnId);
+      }
+      armCodexRunningWatchdog(sessionId);
+    }
+
     updateAnySession(sessionId, (session) => {
       if (!turnStart && reconcileStatus(session.status, "running") !== "running") {
         return session;
@@ -1567,6 +1671,95 @@ export default function App() {
     });
   }
 
+  function clearCodexRunningWatchdog(sessionId: string) {
+    const timeoutId = codexRunningWatchdogsRef.current.get(sessionId);
+    if (timeoutId !== undefined) {
+      window.clearTimeout(timeoutId);
+      codexRunningWatchdogsRef.current.delete(sessionId);
+    }
+    codexWatchdogSettledRef.current.delete(sessionId);
+  }
+
+  function clearCodexTracking(sessionId: string) {
+    clearCodexRunningWatchdog(sessionId);
+    codexLastInputAtRef.current.delete(sessionId);
+    pendingCodexAttentionRef.current.delete(sessionId);
+    codexActiveTurnIdsRef.current.delete(sessionId);
+    codexSubmitPendingRef.current.delete(sessionId);
+    codexSettledTurnIdsRef.current.delete(sessionId);
+    codexTurnLiveRef.current.delete(sessionId);
+  }
+
+  function armCodexRunningWatchdog(sessionId: string) {
+    clearCodexRunningWatchdog(sessionId);
+    const timeoutId = window.setTimeout(() => {
+      if (codexRunningWatchdogsRef.current.get(sessionId) !== timeoutId) {
+        return;
+      }
+      codexRunningWatchdogsRef.current.delete(sessionId);
+      const session = sessionsByIdRef.current.get(sessionId);
+      if (session?.kind !== "codex" || session.status !== "running") {
+        return;
+      }
+      codexWatchdogSettledRef.current.add(sessionId);
+      updateAnySession(sessionId, (session) =>
+        session.kind === "codex" && session.status === "running"
+          ? { ...session, status: "waiting" }
+          : session
+      );
+    }, CODEX_RUNNING_QUIET_MS);
+    codexRunningWatchdogsRef.current.set(sessionId, timeoutId);
+  }
+
+  function refreshCodexRunningWatchdog(sessionId: string) {
+    const lastInputAt = codexLastInputAtRef.current.get(sessionId) ?? 0;
+    if (Date.now() - lastInputAt < CODEX_INPUT_GRACE_MS) {
+      return;
+    }
+
+    if (codexRunningWatchdogsRef.current.has(sessionId)) {
+      armCodexRunningWatchdog(sessionId);
+      return;
+    }
+
+    // A safety timeout is not authoritative turn completion. If real PTY work
+    // resumes later, restore running and start a fresh quiet window even while
+    // the pane is hidden.
+    if (codexWatchdogSettledRef.current.has(sessionId)) {
+      applyAgentRunning(sessionId, true);
+      armCodexRunningWatchdog(sessionId);
+    }
+  }
+
+  function applyCodexTurnStart(sessionId: string) {
+    const session = sessionsByIdRef.current.get(sessionId);
+    const approvalResume =
+      session?.attention?.state === "waiting" &&
+      session.attention.reason === "approval";
+    if (!approvalResume) {
+      pendingCodexAttentionRef.current.delete(sessionId);
+      codexSubmitPendingRef.current.set(
+        sessionId,
+        codexActiveTurnIdsRef.current.get(sessionId) ?? null
+      );
+    }
+    codexTurnLiveRef.current.set(sessionId, true);
+    applyAgentRunning(sessionId, true);
+    armCodexRunningWatchdog(sessionId);
+  }
+
+  function rememberSettledCodexTurn(sessionId: string, turnId: string) {
+    const settled = codexSettledTurnIdsRef.current.get(sessionId) ?? [];
+    codexSettledTurnIdsRef.current.set(
+      sessionId,
+      [...settled.filter((candidate) => candidate !== turnId), turnId].slice(-8)
+    );
+  }
+
+  function recordCodexTerminalInput(sessionId: string) {
+    codexLastInputAtRef.current.set(sessionId, Date.now());
+  }
+
   function applyAgentBackgroundActivity(
     sessionId: string,
     activity: AgentBackgroundActivity
@@ -1584,10 +1777,11 @@ export default function App() {
     });
   }
 
-  function applyAgentAttention(
+  function applyAcceptedAgentAttention(
     sessionId: string,
     attentionEvent: AgentAttentionEvent
   ) {
+    clearCodexRunningWatchdog(sessionId);
     const selection = attentionSelectionRef.current;
     const attentionStatus = statusFromAttentionState(attentionEvent.state);
 
@@ -1610,6 +1804,60 @@ export default function App() {
         )
       };
     });
+  }
+
+  function applyAgentAttention(
+    sessionId: string,
+    attentionEvent: AgentAttentionEvent,
+    provider?: string,
+    providerThreadId?: string,
+    providerTurnId?: string
+  ) {
+    const decision = providerAttentionDecision(
+      sessionsByIdRef.current.get(sessionId),
+      provider,
+      providerThreadId
+    );
+    if (decision === "defer" && providerThreadId) {
+      const pending = pendingCodexAttentionRef.current.get(sessionId) ?? [];
+      pending.push({ providerThreadId, providerTurnId, attention: attentionEvent });
+      // One launch can report several child completions before discovery.
+      // Keep a small bounded tail and decide only after the root id is known.
+      pendingCodexAttentionRef.current.set(sessionId, pending.slice(-8));
+      return;
+    }
+    if (decision === "reject") {
+      return;
+    }
+
+    if (provider === "codex") {
+      const activeTurnId = codexActiveTurnIdsRef.current.get(sessionId);
+      const submitPending = codexSubmitPendingRef.current.has(sessionId);
+      if (
+        codexTurnAttentionDecision(
+          activeTurnId,
+          submitPending,
+          codexSubmitPendingRef.current.get(sessionId),
+          codexSettledTurnIdsRef.current.get(sessionId) ?? [],
+          providerTurnId
+        ) === "reject"
+      ) {
+        return;
+      }
+      codexSubmitPendingRef.current.delete(sessionId);
+      if (providerTurnId) {
+        codexActiveTurnIdsRef.current.set(sessionId, providerTurnId);
+      }
+      if (attentionEvent.state === "completed" || attentionEvent.state === "failed") {
+        if (providerTurnId) {
+          rememberSettledCodexTurn(sessionId, providerTurnId);
+        }
+        codexActiveTurnIdsRef.current.delete(sessionId);
+        codexTurnLiveRef.current.set(sessionId, false);
+      }
+    }
+
+    applyAcceptedAgentAttention(sessionId, attentionEvent);
   }
 
   function applyTerminalAttention(
@@ -1728,6 +1976,7 @@ export default function App() {
   }
 
   function closeSession(scope: SessionScope, session: AgentSession) {
+    clearCodexTracking(session.id);
     void stopSessionProcess(session);
     const sessionId = session.id;
     updateScopeSessions(scope, (sessions) =>
@@ -1770,6 +2019,7 @@ export default function App() {
       workspace.sessions.map((session) => session.id)
     );
     workspace.sessions.forEach((session) => {
+      clearCodexTracking(session.id);
       void stopSessionProcess(session);
     });
 
@@ -1804,6 +2054,7 @@ export default function App() {
   }
 
   function restartSession(scope: SessionScope, session: AgentSession) {
+    clearCodexTracking(session.id);
     stopSessionProcess(session).then(() => {
       updateScopeSessions(scope, (sessions) =>
         sessions.map((item) => {
@@ -2308,6 +2559,7 @@ export default function App() {
       return;
     }
 
+    clearCodexTracking(session.id);
     stopSessionProcess(session).then(() => {
       updateScopeSessions(scope, (sessions) =>
         sessions.map((item) => {
@@ -2681,6 +2933,46 @@ export default function App() {
           : session
       )
     );
+
+    const pending = pendingCodexAttentionRef.current.get(sessionId);
+    if (pending?.length) {
+      pendingCodexAttentionRef.current.delete(sessionId);
+      const rootAttention = [...pending]
+        .reverse()
+        .find((event) => event.providerThreadId === threadRef.id);
+      if (rootAttention) {
+        const activeTurnId = codexActiveTurnIdsRef.current.get(sessionId);
+        if (
+          codexTurnAttentionDecision(
+            activeTurnId,
+            codexSubmitPendingRef.current.has(sessionId),
+            codexSubmitPendingRef.current.get(sessionId),
+            codexSettledTurnIdsRef.current.get(sessionId) ?? [],
+            rootAttention.providerTurnId
+          ) === "reject"
+        ) {
+          return;
+        }
+        codexSubmitPendingRef.current.delete(sessionId);
+        if (
+          rootAttention.attention.state === "completed" ||
+          rootAttention.attention.state === "failed"
+        ) {
+          if (rootAttention.providerTurnId) {
+            rememberSettledCodexTurn(sessionId, rootAttention.providerTurnId);
+          }
+          codexActiveTurnIdsRef.current.delete(sessionId);
+          codexTurnLiveRef.current.set(sessionId, false);
+        }
+        // Functional state updates preserve call order, so the thread binding
+        // above lands before this status/attention update.
+        applyAcceptedAgentAttention(sessionId, rootAttention.attention);
+      } else {
+        // A lifecycle event for a thread other than the discovered pane root
+        // must not poison the next root completion's turn-id latch.
+        codexActiveTurnIdsRef.current.delete(sessionId);
+      }
+    }
   }
 
   function resetSessionThreadForFreshLaunch(
@@ -3509,10 +3801,21 @@ export default function App() {
                     onStatusChange={(status) =>
                       updateSessionStatus(activeScope, session.id, status)
                     }
-                    onInputStatusRelease={(status) =>
+                    onInputStatusRelease={(status) => {
+                      if (session.kind === "codex" && status === "waiting") {
+                        clearCodexRunningWatchdog(session.id);
+                        codexActiveTurnIdsRef.current.delete(session.id);
+                        codexTurnLiveRef.current.set(session.id, false);
+                      }
                       updateSessionStatus(activeScope, session.id, status, {
                         force: true
-                      })
+                      });
+                    }}
+                    onCodexTurnStart={() =>
+                      applyCodexTurnStart(session.id)
+                    }
+                    onCodexInput={() =>
+                      recordCodexTerminalInput(session.id)
                     }
                   />
                 )

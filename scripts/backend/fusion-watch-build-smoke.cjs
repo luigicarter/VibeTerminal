@@ -62,6 +62,7 @@ async function main() {
   process.env.VIBE_TERMINAL_CALLBACK_URL = callbackUrl;
   process.env.VIBE_TERMINAL_TELEMETRY_TOKEN = token;
   process.env.VIBE_TERMINAL_SESSION_ID = "fusion-watch-build-smoke";
+  process.env.VIBE_TERMINAL_LAUNCH_NONCE = "fusion-watch-build-smoke-launch";
 
   const {
     buildSupervisorDir,

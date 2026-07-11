@@ -10,7 +10,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 
 - `scripts/backend/codex-discovery-smoke.cjs` - Creates temporary fake Codex session metadata and validates `backend/agentThreads.cjs` behavior for pending, found, excluded, different-cwd, ambiguous, and remaining-candidate cases.
 - `scripts/backend/claude-discovery-smoke.cjs` - Creates temporary fake Claude transcripts and validates `backend/agentThreadHost.cjs` Claude discovery for title extraction from array content, `excludeIds` filtering, foreign-cwd tolerance, and the `after` cutoff.
-- `scripts/backend/agent-telemetry-smoke.cjs` - Creates temporary fake provider commands, validates per-pane shim PATH injection, telemetry token rejection, lifecycle attention events, and stale owned shim cleanup.
+- `scripts/backend/agent-telemetry-smoke.cjs` - Creates temporary fake provider commands; validates per-pane shim PATH injection, callback token plus per-launch nonce rejection, passive Codex lifecycle config, Codex thread/turn payload parsing, lifecycle attention events, OpenCode plugin refresh, and stale owned shim cleanup.
 - `scripts/backend/code-changes-smoke.cjs` - Validates Git status parsing and non-repository workspace handling for code-change tracking.
 - `scripts/backend/launch-cwd-smoke.cjs` - Validates terminal/Fusion launch cwd resolution rejects missing or file paths without creating them.
 - `scripts/backend/update-smoke.cjs` - Validates packaged update policy, silent Windows update apply behavior, and matching user-facing docs.
@@ -26,7 +26,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 
 ## Frontend Scripts
 
-- `scripts/frontend/attention-smoke.cjs` - Validates the shared terminal attention helpers used to decide whether sidebar workspace dots should appear and when unread attention is cleared.
+- `scripts/frontend/attention-smoke.cjs` - Validates shared terminal attention helpers, Codex root-thread acceptance/defer/rejection, App-owned submit/watchdog/background-remount behavior, interrupt handling, sidebar dots, and unread clearing.
 - `scripts/frontend/workspace-smoke.cjs` - Validates empty-install workspace startup, project folder removal wiring, and sidebar remove control styling.
 - `scripts/frontend/session-launch-smoke.cjs` - Validates launch/resume command construction and launch-mode gating, and guards that the terminal-creation effect stays decoupled from the command string so a resume id discovered mid-session cannot blank a live pane.
 - `scripts/frontend/fusion-settings-smoke.cjs` - Locks the Fusion settings layer: per-engine and per-model effort support (including safe GPT-5.5/Luna fallbacks), planning-model validation before restart, menu-activation trap fixes (/claude submenu, empty fallback, Shift+Tab gate), curated GPT-5.6 catalogs, and transcript preservation across settings restarts.

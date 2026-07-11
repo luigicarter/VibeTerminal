@@ -367,12 +367,21 @@ export type TerminalEvent =
       id: string;
       type: "agent-attention";
       provider?: string;
+      providerThreadId?: string;
+      providerTurnId?: string;
       attention: AgentAttentionEvent;
     }
   // turnStart false marks mid-turn tool activity (claude PreToolUse/
   // PostToolUse): it may re-assert "working" but must not override a finished
   // done/failed pill (the hook POSTs race the turn's Stop).
-  | { id: string; type: "agent-running"; provider?: string; turnStart?: boolean }
+  | {
+      id: string;
+      type: "agent-running";
+      provider?: string;
+      providerThreadId?: string;
+      providerTurnId?: string;
+      turnStart?: boolean;
+    }
   | {
       id: string;
       type: "agent-background-activity";

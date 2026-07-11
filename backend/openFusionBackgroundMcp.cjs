@@ -17,6 +17,7 @@ const http = require("http");
 const CALLBACK_URL = process.env.VIBE_TERMINAL_CALLBACK_URL;
 const TOKEN = process.env.VIBE_TERMINAL_TELEMETRY_TOKEN;
 const SESSION_ID = process.env.VIBE_TERMINAL_SESSION_ID;
+const LAUNCH_NONCE = process.env.VIBE_TERMINAL_LAUNCH_NONCE;
 const STATUS_MAX_BYTES = 1_000_000;
 
 let taskSeq = 0;
@@ -35,7 +36,7 @@ function logErr(message) {
 
 function postBackgroundRequest(entry) {
   return new Promise((resolve, reject) => {
-    if (!CALLBACK_URL || !TOKEN || !SESSION_ID) {
+    if (!CALLBACK_URL || !TOKEN || !SESSION_ID || !LAUNCH_NONCE) {
       reject(new Error("background bridge is not wired to the app (missing callback env)"));
       return;
     }
@@ -46,7 +47,8 @@ function postBackgroundRequest(entry) {
         sessionId: SESSION_ID,
         ts: Date.now(),
         type: "openfusion.background-task",
-        ...entry
+        ...entry,
+        launchNonce: LAUNCH_NONCE
       });
       url = new URL(CALLBACK_URL);
     } catch (error) {

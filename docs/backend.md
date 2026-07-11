@@ -31,16 +31,15 @@ The `backend/` folder contains Electron main-process code and Node-side terminal
 
 The left-sidebar attention dot is driven by `agent-attention` events the telemetry callback server
 (`backend/agentTelemetry.cjs`) emits and the renderer maps onto `session.attention`. Per-turn signals
-come from each agent's native hook/notify mechanism, which POSTs `{type, sessionId}` to the callback
-URL the shim injects (`VIBE_TERMINAL_CALLBACK_URL` / `_TELEMETRY_TOKEN` / `_SESSION_ID`). Each hook
+come from each agent's native hook/notify mechanism, which POSTs `{type, sessionId, launchNonce}` to the callback
+URL the shim injects (`VIBE_TERMINAL_CALLBACK_URL` / `_TELEMETRY_TOKEN` / `_SESSION_ID` / `_LAUNCH_NONCE`). The callback rejects released sessions and prior-launch nonces, so a delayed hook cannot settle a restarted pane. Each hook
 reports `sessionId = VIBE_TERMINAL_SESSION_ID` (the pane id), not the agent's own id.
 
 A separate `agent.running` type reports turn **start** (the sidebar "working" spinner). The server does
 not turn it into attention/unread; it emits a dedicated `agent-running` event the renderer maps onto
-`session.status = "running"` (see `docs/frontend.md`). claude, opencode, and cursor produce it — they have
-a turn-start signal; codex does not, so its working state stays on the output heuristic (a human
-keystroke into the pane is what releases a done/failed pill there — see `statusAfterUserInput` in
-`docs/frontend.md`).
+`session.status = "running"` (see `docs/frontend.md`). Claude, OpenCode, Cursor, and a trusted passive
+Codex `UserPromptSubmit` observer produce it. Codex keeps an Enter/watchdog compatibility fallback when
+the observer has not been trusted or the installed CLI predates lifecycle hooks.
 
 Hooks may pass a whitelisted second argument (`detail`: `tool`/`approval`/`question`/`turn-start`) that
 the notify program forwards. `agent.running` with detail `tool` is emitted as `turnStart:false`: the
@@ -55,9 +54,17 @@ resurrect the spinner. `agent.waiting` details become the attention `reason` (`a
   `agent.waiting approval`, `idle_prompt` fires `agent.waiting question` — so the renderer can flip
   waiting->running on the user's answer keystroke for approvals only (approving has no hook of its
   own: PreToolUse fires before the prompt, PostToolUse only when the tool ends).
-- **codex** - launched with `-c notify=[...]` (injected by the shim) pointing at the per-run notify
-  program. codex only emits turn-complete, so it maps to `agent.completed` (no `agent.running`).
-  codex appends its own JSON payload as an extra argument; the detail whitelist drops it.
+- **codex** - keeps `-c notify=[...]` for final completion, and also receives invocation-local passive
+  `UserPromptSubmit`, `PermissionRequest`, `PreToolUse`, and `PostToolUse` observer hooks. The observer
+  lives at a content-versioned app-owned path, so unchanged code keeps the same `/hooks` trust definition
+  while an observer update requires review again. vibeTerminal never passes
+  `--dangerously-bypass-hook-trust`, writes no user config, emits no hook stdout, and never answers an
+  approval. Codex merges these invocation hooks with matching user/project/plugin hooks. Turn-scoped
+  subagent hooks report the parent session id, so their tool activity correctly keeps the root turn
+  running; explicit subagent event payloads are ignored defensively. Legacy notify remains the final
+  signal because it fires only after Stop-hook continuation
+  is resolved. Its appended `thread-id`/`turn-id` JSON is preserved; the renderer defers until root
+  discovery and rejects child-thread or stale-turn completion.
 - **opencode** - a guarded global plugin in the user's opencode config dir (installed idempotently;
   rewritten only when `OPENCODE_PLUGIN_VERSION` changes — bump it with ANY source change; no-ops
   unless the `VIBE_TERMINAL_*` env vars are set). Maps `session.idle`->`agent.completed`,

@@ -36,6 +36,7 @@ const CWD = process.env.VIBE_TERMINAL_FUSION_CWD || process.cwd();
 const SESSION_ID = process.env.VIBE_TERMINAL_SESSION_ID;
 const CALLBACK_URL = process.env.VIBE_TERMINAL_CALLBACK_URL;
 const TOKEN = process.env.VIBE_TERMINAL_TELEMETRY_TOKEN;
+const LAUNCH_NONCE = process.env.VIBE_TERMINAL_LAUNCH_NONCE;
 const SETTINGS_FILE = process.env.VIBE_FUSION_CODEX_SETTINGS || null;
 const ENV_CODEX_MODEL = process.env.VIBE_FUSION_CODEX_MODEL || null;
 const ENV_CODEX_EFFORT = process.env.VIBE_FUSION_CODEX_EFFORT || null;
@@ -651,12 +652,13 @@ function currentRunMode() {
 
 // ---- read-only activity relay to the renderer (best-effort) ----
 function postTelemetry(entry, timeout = 1000) {
-  if (!CALLBACK_URL || !TOKEN || !SESSION_ID) return;
+  if (!CALLBACK_URL || !TOKEN || !SESSION_ID || !LAUNCH_NONCE) return;
   try {
     const body = JSON.stringify({
       sessionId: SESSION_ID,
       ts: Date.now(),
-      ...entry
+      ...entry,
+      launchNonce: LAUNCH_NONCE
     });
     const url = new URL(CALLBACK_URL);
     const req = http.request({

@@ -16,6 +16,9 @@ const vm = require("vm");
 
 const adapterPath = path.join(__dirname, "..", "..", "backend", "fusion-adapter.cjs");
 const isWin = process.platform === "win32";
+// Every callback-producing adapter child inherits a launch identity, matching
+// the pane instrumentation contract enforced by agentTelemetry.
+process.env.VIBE_TERMINAL_LAUNCH_NONCE ||= "fusion-adapter-smoke-launch";
 const {
   FAST_SERVICE_TIER,
   FANOUT_MAX_TASKS,
@@ -2360,7 +2363,7 @@ function assertAdapterRunsHostFree() {
 }
 
 // Pin the portability boundary at the source level: the adapter's coupling to the
-// Electron host must stay limited to the three documented env vars, each guarded so
+// Electron host must stay limited to the four documented env vars, each guarded so
 // the relay/control surface no-ops when they are unset. Deleting a guard (which
 // would silently re-couple the adapter to the host) fails CI here.
 function assertPortabilityGuards() {
@@ -2368,11 +2371,14 @@ function assertPortabilityGuards() {
   assert(
     source.includes("process.env.VIBE_TERMINAL_CALLBACK_URL") &&
       source.includes("process.env.VIBE_TERMINAL_TELEMETRY_TOKEN") &&
-      source.includes("process.env.VIBE_TERMINAL_SESSION_ID"),
-    "adapter host coupling must stay limited to the three documented env vars"
+      source.includes("process.env.VIBE_TERMINAL_SESSION_ID") &&
+      source.includes("process.env.VIBE_TERMINAL_LAUNCH_NONCE"),
+    "adapter host coupling must stay limited to the four documented env vars"
   );
   assert(
-    source.includes("if (!CALLBACK_URL || !TOKEN || !SESSION_ID) return"),
+    source.includes(
+      "if (!CALLBACK_URL || !TOKEN || !SESSION_ID || !LAUNCH_NONCE) return"
+    ) && source.includes("launchNonce: LAUNCH_NONCE"),
     "postTelemetry must no-op when host telemetry env vars are unset"
   );
   assert(

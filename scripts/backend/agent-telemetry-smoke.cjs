@@ -5,6 +5,8 @@ const url = require("url");
 const { spawn } = require("child_process");
 const {
   buildClaudeSettingsJson,
+  codexLifecycleConfigOverrides,
+  codexLifecycleHookSource,
   cleanupStaleOpenFusionDirs,
   cleanupStaleShimDirs,
   createAgentTelemetryManager,
@@ -13,6 +15,7 @@ const {
   installOpenCodePlugin,
   mapTelemetryToAttention,
   mergeCursorHooks,
+  notifyHookSource,
   openFusionConfigContents,
   openCodePluginSource,
   stripCursorHooks
@@ -142,6 +145,28 @@ function run(command, args, options = {}) {
     child.on("exit", (code, signal) => {
       resolve({ code, signal, stdout, stderr });
     });
+  });
+}
+
+function runWithStdin(command, args, stdin, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      stdio: ["pipe", "pipe", "pipe"],
+      ...options
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", reject);
+    child.on("exit", (code, signal) =>
+      resolve({ code, signal, stdout, stderr })
+    );
+    child.stdin.end(stdin);
   });
 }
 
@@ -325,6 +350,31 @@ function postTelemetry(callbackUrl, token, payload) {
 
   try {
     fs.mkdirSync(root, { recursive: true });
+    const lifecycleSource = codexLifecycleHookSource();
+    assert(
+      lifecycleSource.includes("hook.agent_id || hook.agent_type") &&
+        lifecycleSource.includes('case "UserPromptSubmit"') &&
+        lifecycleSource.includes('case "PermissionRequest"') &&
+        lifecycleSource.includes('case "PreToolUse"') &&
+        lifecycleSource.includes('provider: "codex"') &&
+        !lifecycleSource.includes("dangerously-bypass-hook-trust"),
+      "Codex lifecycle observer should be passive and use normal hook trust"
+    );
+    const lifecycleOverrides = codexLifecycleConfigOverrides(
+      process.execPath,
+      path.join(shimBase, "codex-lifecycle-hook.cjs"),
+      process.platform === "win32"
+    );
+    assert(
+      lifecycleOverrides.length === 4 &&
+        lifecycleOverrides.every(
+          (entry) =>
+            (entry.includes('type = "command"') ||
+              entry.includes("type = 'command'")) &&
+            entry.includes("timeout = 5")
+        ),
+      "Codex lifecycle config should cover start, approval, and tool activity"
+    );
     writeFakeProvider("codex");
     process.env[pathKey] = fakeBin;
 
@@ -423,6 +473,117 @@ function postTelemetry(callbackUrl, token, payload) {
     assert(
       instrumentation.env.VIBE_TERMINAL_SESSION_ID === "pane-one",
       "session id should be present in shim env"
+    );
+    const lifecycleHookName = fs
+      .readdirSync(shimBase)
+      .find((name) => /^codex-lifecycle-hook-[a-f0-9]{12}\.cjs$/.test(name));
+    const lifecycleHookPath = lifecycleHookName
+      ? path.join(shimBase, lifecycleHookName)
+      : "";
+    assert(
+      fs.existsSync(lifecycleHookPath),
+      "content-versioned Codex lifecycle observer should be written"
+    );
+    const lifecycleResult = await runWithStdin(
+      process.execPath,
+      [lifecycleHookPath],
+      JSON.stringify({
+        hook_event_name: "UserPromptSubmit",
+        session_id: "root-thread",
+        turn_id: "turn-one",
+        prompt: "smoke"
+      }),
+      { env: { ...process.env, ...instrumentation.env } }
+    );
+    assert(
+      lifecycleResult.code === 0 &&
+        lifecycleResult.stdout === "" &&
+        lifecycleResult.stderr === "",
+      "Codex lifecycle observer should stay passive and quiet"
+    );
+    const lifecycleRunningEvent = events.find(
+      (event) =>
+        event.type === "agent-running" &&
+        event.id === "pane-one" &&
+        event.providerThreadId === "root-thread" &&
+        event.providerTurnId === "turn-one"
+    );
+    assert(
+      lifecycleRunningEvent?.turnStart === true,
+      "UserPromptSubmit observer should emit an identified turn start"
+    );
+    const eventsBeforeChildHook = events.length;
+    await runWithStdin(
+      process.execPath,
+      [lifecycleHookPath],
+      JSON.stringify({
+        hook_event_name: "PostToolUse",
+        session_id: "root-thread",
+        turn_id: "child-turn",
+        agent_id: "child",
+        agent_type: "worker"
+      }),
+      { env: { ...process.env, ...instrumentation.env } }
+    );
+    assert(
+      events.length === eventsBeforeChildHook,
+      "Codex lifecycle observer should defensively ignore explicit subagent payloads"
+    );
+    assert(
+      typeof instrumentation.env.VIBE_TERMINAL_LAUNCH_NONCE === "string" &&
+        instrumentation.env.VIBE_TERMINAL_LAUNCH_NONCE.length >= 24,
+      "each prepared pane launch should carry a strong callback nonce"
+    );
+    const remountedInstrumentation = await manager.prepareSession("pane-one");
+    assert(
+      remountedInstrumentation.env.VIBE_TERMINAL_LAUNCH_NONCE ===
+        instrumentation.env.VIBE_TERMINAL_LAUNCH_NONCE,
+      "remounting an active pane session should preserve its launch nonce"
+    );
+
+    const stalePaneFirst = await manager.prepareSession("pane-stale-callback");
+    const staleNonce = stalePaneFirst.env.VIBE_TERMINAL_LAUNCH_NONCE;
+    manager.releaseSession("pane-stale-callback");
+    const releasedStatus = await postTelemetry(manager.callbackUrl(), "test-token", {
+      type: "agent.completed",
+      sessionId: "pane-stale-callback",
+      launchNonce: staleNonce
+    });
+    assert(
+      releasedStatus === 409,
+      "callbacks for a released pane session should be rejected"
+    );
+    const stalePaneSecond = await manager.prepareSession("pane-stale-callback");
+    const currentNonce = stalePaneSecond.env.VIBE_TERMINAL_LAUNCH_NONCE;
+    assert(
+      currentNonce !== staleNonce,
+      "restarting a released pane session should create a new launch nonce"
+    );
+    const staleRestartStatus = await postTelemetry(
+      manager.callbackUrl(),
+      "test-token",
+      {
+        type: "agent.completed",
+        sessionId: "pane-stale-callback",
+        launchNonce: staleNonce
+      }
+    );
+    assert(
+      staleRestartStatus === 409,
+      "a delayed callback from the prior pane launch should be rejected"
+    );
+    const currentRestartStatus = await postTelemetry(
+      manager.callbackUrl(),
+      "test-token",
+      {
+        type: "agent.completed",
+        sessionId: "pane-stale-callback",
+        launchNonce: currentNonce
+      }
+    );
+    assert(
+      currentRestartStatus === 204,
+      "the current pane launch nonce should remain accepted"
     );
     assert(
       instrumentation.env.VIBE_TERMINAL_ORIGINAL_PATH === fakeBin,
@@ -1043,6 +1204,21 @@ function postTelemetry(callbackUrl, token, payload) {
           ),
         `codex shim should inject the notify config; got ${JSON.stringify(providerArgs)}`
       );
+      for (const eventName of [
+        "UserPromptSubmit",
+        "PermissionRequest",
+        "PreToolUse",
+        "PostToolUse"
+      ]) {
+        assert(
+          providerArgs.some(
+            (arg) =>
+              typeof arg === "string" &&
+              arg.startsWith(`hooks.${eventName}=`)
+          ),
+          `codex shim should inject the ${eventName} observer hook`
+        );
+      }
 
       const ptyResult = await runInWindowsPty("codex --tty-smoke", {
         cwd: root,
@@ -1113,11 +1289,10 @@ function postTelemetry(callbackUrl, token, payload) {
 
     // The notify program (used by the claude/codex hooks) POSTs a per-turn
     // attention event straight to the live callback server.
+    const notifyInstrumentation = await manager.prepareSession("pane-notify");
     const notifyEnv = {
       ...process.env,
-      VIBE_TERMINAL_CALLBACK_URL: manager.callbackUrl(),
-      VIBE_TERMINAL_TELEMETRY_TOKEN: "test-token",
-      VIBE_TERMINAL_SESSION_ID: "pane-notify"
+      ...notifyInstrumentation.env
     };
     const notifyResult =
       process.platform === "win32"
@@ -1155,10 +1330,8 @@ function postTelemetry(callbackUrl, token, payload) {
     // which the server turns into a dedicated agent-running event (the working
     // spinner), NOT an attention/unread signal. Use a fresh pane id so no earlier
     // attention event for it can mask the "no attention" assertion.
-    const runningEnv = {
-      ...notifyEnv,
-      VIBE_TERMINAL_SESSION_ID: "pane-running"
-    };
+    const runningInstrumentation = await manager.prepareSession("pane-running");
+    const runningEnv = { ...process.env, ...runningInstrumentation.env };
     const runningResult =
       process.platform === "win32"
         ? await run(
@@ -1208,8 +1381,10 @@ function postTelemetry(callbackUrl, token, payload) {
     // Mid-turn tool activity (claude PreToolUse/PostToolUse) carries the "tool"
     // detail and must be flagged turnStart:false so a hook POST racing past the
     // turn's Stop cannot resurrect a finished pane's spinner.
-    const runNotify = (sessionId, args) =>
-      process.platform === "win32"
+    const runNotify = async (sessionId, args) => {
+      const sessionInstrumentation = await manager.prepareSession(sessionId);
+      const sessionEnv = { ...process.env, ...sessionInstrumentation.env };
+      return process.platform === "win32"
         ? run(
             powershellCommand(),
             [
@@ -1220,12 +1395,13 @@ function postTelemetry(callbackUrl, token, payload) {
               notifyProgram,
               ...args
             ],
-            { cwd: root, env: { ...notifyEnv, VIBE_TERMINAL_SESSION_ID: sessionId } }
+            { cwd: root, env: sessionEnv }
           )
         : run(notifyProgram, args, {
             cwd: root,
-            env: { ...notifyEnv, VIBE_TERMINAL_SESSION_ID: sessionId }
+            env: sessionEnv
           });
+    };
 
     await runNotify("pane-tool", ["agent.running", "tool"]);
     assert(
@@ -1252,24 +1428,113 @@ function postTelemetry(callbackUrl, token, payload) {
       "an approval-detailed agent.waiting should carry reason approval"
     );
 
-    // codex invokes the same notify program and appends its own JSON payload as
-    // the second argument; an unknown detail must be dropped, not forwarded.
+    // Codex invokes the same notify program and appends its legacy JSON payload
+    // as the second argument. Preserve its provider thread identity so the
+    // renderer can reject a spawned subagent's completion for the root pane.
+    await runNotify("pane-codex", [
+      "agent.completed",
+      '{"type":"agent-turn-complete","thread-id":"root-thread","turn-id":"root-turn"}'
+    ]);
+    const codexEvent = events.find(
+      (event) =>
+        event.type === "agent-attention" && event.id === "pane-codex"
+    );
+    assert(
+      codexEvent &&
+        codexEvent.provider === "codex" &&
+        codexEvent.providerThreadId === "root-thread" &&
+        codexEvent.providerTurnId === "root-turn" &&
+        codexEvent.attention.state === "completed",
+      "codex's appended JSON should forward provider thread and turn identity"
+    );
+
+    // Exercise the POSIX Node hook directly even when this smoke runs on
+    // Windows, so its Codex JSON parser cannot drift from the PowerShell path.
+    const posixCodexInstrumentation = await manager.prepareSession(
+      "pane-codex-posix-parser"
+    );
+    const posixNotifyProgram = path.join(root, "notify-posix-parser.cjs");
+    fs.writeFileSync(posixNotifyProgram, notifyHookSource());
+    const posixNotifyResult = await run(
+      process.execPath,
+      [
+        posixNotifyProgram,
+        "agent.completed",
+        '{"type":"agent-turn-complete","thread-id":"posix-thread","turn-id":"posix-turn"}'
+      ],
+      { cwd: root, env: { ...process.env, ...posixCodexInstrumentation.env } }
+    );
+    assert(
+      posixNotifyResult.code === 0 &&
+        events.some(
+          (event) =>
+            event.type === "agent-attention" &&
+            event.id === "pane-codex-posix-parser" &&
+            event.provider === "codex" &&
+            event.providerThreadId === "posix-thread" &&
+            event.providerTurnId === "posix-turn"
+        ),
+      "the POSIX notify hook should parse and forward valid Codex identity JSON"
+    );
+
+    // An incomplete JSON argument is not a trusted Codex payload and must
+    // remain neither a known detail nor provider identity metadata.
     await runNotify("pane-codex-junk", [
       "agent.completed",
-      '{"type":"agent-turn-complete"}'
+      '{"type":"agent-turn-complete","thread-id":"incomplete-thread"}'
     ]);
     const codexJunkEvent = events.find(
       (event) =>
         event.type === "agent-attention" && event.id === "pane-codex-junk"
     );
     assert(
-      codexJunkEvent && codexJunkEvent.attention.state === "completed",
-      "codex's appended JSON arg must not break the completed notification"
+      codexJunkEvent &&
+        codexJunkEvent.provider === "codex" &&
+        codexJunkEvent.providerThreadId === undefined &&
+        codexJunkEvent.providerTurnId === undefined &&
+        codexJunkEvent.attention.state === "completed" &&
+        codexJunkEvent.attention.reason === "done",
+      "unknown Codex notify JSON must be identified but not trusted as thread metadata"
     );
 
+    const foreignProviderInstrumentation = await manager.prepareSession(
+      "pane-foreign-provider"
+    );
+    const foreignProviderStatus = await postTelemetry(
+      manager.callbackUrl(),
+      "test-token",
+      {
+        type: "agent.completed",
+        sessionId: "pane-foreign-provider",
+        launchNonce:
+          foreignProviderInstrumentation.env.VIBE_TERMINAL_LAUNCH_NONCE,
+        provider: "claude",
+        providerThreadId: "forged-thread",
+        providerTurnId: "forged-turn"
+      }
+    );
+    assert(
+      foreignProviderStatus === 204,
+      "foreign provider completion telemetry should remain accepted"
+    );
+    const foreignProviderEvent = events.find(
+      (event) =>
+        event.type === "agent-attention" &&
+        event.id === "pane-foreign-provider"
+    );
+    assert(
+      foreignProviderEvent &&
+        foreignProviderEvent.provider === "claude" &&
+        foreignProviderEvent.providerThreadId === undefined &&
+        foreignProviderEvent.providerTurnId === undefined,
+      "provider identity metadata should only be forwarded for Codex"
+    );
+
+    const backgroundInstrumentation = await manager.prepareSession("pane-background");
     const backgroundStatus = await postTelemetry(manager.callbackUrl(), "test-token", {
       type: "agent.backgroundActivity",
       sessionId: "pane-background",
+      launchNonce: backgroundInstrumentation.env.VIBE_TERMINAL_LAUNCH_NONCE,
       provider: "claude",
       backgroundActivity: {
         active: true,
@@ -1302,13 +1567,12 @@ function postTelemetry(callbackUrl, token, payload) {
       "cursor notify program should be written for the run"
     );
 
-    const runCursorNotify = (sessionId, { args = [], stdin = "" } = {}) =>
-      new Promise((resolve, reject) => {
+    const runCursorNotify = async (sessionId, { args = [], stdin = "" } = {}) => {
+      const cursorInstrumentation = await manager.prepareSession(sessionId);
+      return new Promise((resolve, reject) => {
         const cursorEnv = {
           ...process.env,
-          VIBE_TERMINAL_CALLBACK_URL: manager.callbackUrl(),
-          VIBE_TERMINAL_TELEMETRY_TOKEN: "test-token",
-          VIBE_TERMINAL_SESSION_ID: sessionId
+          ...cursorInstrumentation.env
         };
         const child =
           process.platform === "win32"
@@ -1334,6 +1598,7 @@ function postTelemetry(callbackUrl, token, payload) {
         child.stdin.write(stdin);
         child.stdin.end();
       });
+    };
 
     // Turn START: type from the argument, stdin (the prompt payload) drained and
     // ignored. Produces a dedicated agent-running event, not an attention/unread.
@@ -1565,7 +1830,7 @@ function postTelemetry(callbackUrl, token, payload) {
     // while the latch is still up. Version must bump with any source change or
     // installed copies never update.
     assert(
-      pluginSource.includes("vibeterminal-notify-4") &&
+      pluginSource.includes("vibeterminal-notify-5") &&
         !pluginSource.includes("vibeterminal-notify-3") &&
         !pluginSource.includes("vibeterminal-notify-2") &&
         pluginSource.includes("busy = false;") &&

@@ -909,6 +909,7 @@ function openFusionBackgroundBridgeMcp(bridge) {
       VIBE_TERMINAL_CALLBACK_URL: bridge.callbackUrl,
       VIBE_TERMINAL_TELEMETRY_TOKEN: bridge.token,
       VIBE_TERMINAL_SESSION_ID: bridge.sessionId,
+      VIBE_TERMINAL_LAUNCH_NONCE: bridge.launchNonce,
       VIBE_TERMINAL_BG_STATUS_FILE: bridge.statusPath
     },
     enabled: true
@@ -1423,6 +1424,10 @@ function quotePowerShell(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
+function quotePosixShell(value) {
+  return `'${String(value).replace(/'/g, `'"'"'`)}'`;
+}
+
 function windowsPowerShellCommand() {
   const systemRoot = process.env.SystemRoot || "C:\\Windows";
   const candidate = path.join(
@@ -1443,7 +1448,7 @@ function windowsPowerShellShimSource(provider) {
     "",
     "function Send-VibeEvent {",
     "  param([string]$Type, [hashtable]$Extra)",
-    "  if ([string]::IsNullOrEmpty($env:VIBE_TERMINAL_CALLBACK_URL) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_TELEMETRY_TOKEN) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_SESSION_ID)) {",
+    "  if ([string]::IsNullOrEmpty($env:VIBE_TERMINAL_CALLBACK_URL) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_TELEMETRY_TOKEN) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_SESSION_ID) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_LAUNCH_NONCE)) {",
     "    return",
     "  }",
     "",
@@ -1452,6 +1457,7 @@ function windowsPowerShellShimSource(provider) {
     "      type = $Type",
     "      provider = $Provider",
     "      sessionId = $env:VIBE_TERMINAL_SESSION_ID",
+    "      launchNonce = $env:VIBE_TERMINAL_LAUNCH_NONCE",
     "      argv = @($ProviderArgs)",
     "      cwd = (Get-Location).ProviderPath",
     "      pid = $PID",
@@ -1568,6 +1574,13 @@ function windowsPowerShellShimSource(provider) {
     "elseif ($Provider -eq 'codex' -and -not [string]::IsNullOrEmpty($env:VIBE_TERMINAL_NOTIFY_PROGRAM)) {",
     "  $notifyValue = \"notify=['powershell','-NoProfile','-ExecutionPolicy','Bypass','-File','$($env:VIBE_TERMINAL_NOTIFY_PROGRAM)','agent.completed']\"",
     "  $ProviderArgs = @($ProviderArgs) + @('-c', $notifyValue)",
+    "  if (-not [string]::IsNullOrEmpty($env:VIBE_TERMINAL_CODEX_HOOK_OVERRIDES)) {",
+    "    try {",
+    "      foreach ($override in ($env:VIBE_TERMINAL_CODEX_HOOK_OVERRIDES | ConvertFrom-Json)) {",
+    "        $ProviderArgs = @($ProviderArgs) + @('-c', [string]$override)",
+    "      }",
+    "    } catch {}",
+    "  }",
     "}",
     "$env:Path = $env:VIBE_TERMINAL_ORIGINAL_PATH",
     "$ExitCode = 0",
@@ -1662,6 +1675,7 @@ let args = process.argv.slice(3);
 const callbackUrl = process.env.VIBE_TERMINAL_CALLBACK_URL;
 const token = process.env.VIBE_TERMINAL_TELEMETRY_TOKEN;
 const sessionId = process.env.VIBE_TERMINAL_SESSION_ID;
+const launchNonce = process.env.VIBE_TERMINAL_LAUNCH_NONCE;
 const originalPath = process.env.VIBE_TERMINAL_ORIGINAL_PATH || "";
 
 function pathKey(env = process.env) {
@@ -1670,11 +1684,12 @@ function pathKey(env = process.env) {
 }
 
 function post(event) {
-  if (!callbackUrl || !token || !sessionId) return Promise.resolve();
+  if (!callbackUrl || !token || !sessionId || !launchNonce) return Promise.resolve();
   const body = JSON.stringify({
     ...event,
     provider,
     sessionId,
+    launchNonce,
     argv: args,
     cwd: process.cwd(),
     pid: process.pid,
@@ -1790,6 +1805,18 @@ function powershellCommand() {
       "-c",
       "notify=['" + process.env.VIBE_TERMINAL_NOTIFY_PROGRAM + "','agent.completed']"
     ]);
+    try {
+      const overrides = JSON.parse(
+        process.env.VIBE_TERMINAL_CODEX_HOOK_OVERRIDES || "[]"
+      );
+      for (const override of overrides) {
+        if (typeof override === "string" && override) {
+          args = args.concat(["-c", override]);
+        }
+      }
+    } catch {
+      // Lifecycle telemetry is additive; legacy completion still works.
+    }
   }
 
   const isWindowsCommandScript =
@@ -1866,19 +1893,48 @@ const KNOWN_DETAILS = new Set(${JSON.stringify(NOTIFY_KNOWN_DETAILS)});
 const type = process.argv[2];
 const detailArg = process.argv[3] || "";
 const detail = KNOWN_DETAILS.has(detailArg) ? detailArg : "";
+let provider = "";
+let providerThreadId = "";
+let providerTurnId = "";
+if (!detail && detailArg) {
+  if (type === "agent.completed") provider = "codex";
+  try {
+    const providerEvent = JSON.parse(detailArg);
+    const threadId = providerEvent && providerEvent["thread-id"];
+    const turnId = providerEvent && providerEvent["turn-id"];
+    if (
+      providerEvent &&
+      providerEvent.type === "agent-turn-complete" &&
+      typeof threadId === "string" &&
+      threadId.length > 0 &&
+      typeof turnId === "string" &&
+      turnId.length > 0
+    ) {
+      provider = "codex";
+      providerThreadId = threadId;
+      providerTurnId = turnId;
+    }
+  } catch {
+    // An unknown second argument is neither a detail nor provider metadata.
+  }
+}
+
 const callbackUrl = process.env.VIBE_TERMINAL_CALLBACK_URL;
 const token = process.env.VIBE_TERMINAL_TELEMETRY_TOKEN;
 const sessionId = process.env.VIBE_TERMINAL_SESSION_ID;
 
-if (!type || !callbackUrl || !token || !sessionId) {
+const launchNonce = process.env.VIBE_TERMINAL_LAUNCH_NONCE;
+
+if (!type || !callbackUrl || !token || !sessionId || !launchNonce) {
   process.exit(0);
 }
 
-const body = JSON.stringify(
-  detail
-    ? { type, detail, sessionId, timestamp: Date.now() }
-    : { type, sessionId, timestamp: Date.now() }
-);
+const event = { type, sessionId, launchNonce, timestamp: Date.now() };
+if (detail) event.detail = detail;
+if (provider) event.provider = provider;
+if (providerThreadId) event.providerThreadId = providerThreadId;
+if (providerTurnId) event.providerTurnId = providerTurnId;
+const body = JSON.stringify(event);
 
 let url;
 try {
@@ -1915,6 +1971,122 @@ request.end(body);
 `;
 }
 
+const CODEX_LIFECYCLE_EVENTS = [
+  "UserPromptSubmit",
+  "PermissionRequest",
+  "PreToolUse",
+  "PostToolUse"
+];
+
+// App-owned observer used by invocation-local Codex hooks. It consumes the hook
+// JSON from stdin and never writes stdout, so it cannot change a prompt, tool,
+// or approval decision. Turn-scoped subagent hooks intentionally carry the
+// parent session id and therefore still describe activity in the root turn;
+// explicit subagent event payloads are rejected defensively. Codex's normal
+// hook trust review still applies; vibeTerminal never bypasses it.
+function codexLifecycleHookSource() {
+  return String.raw`const http = require("http");
+
+const callbackUrl = process.env.VIBE_TERMINAL_CALLBACK_URL;
+const token = process.env.VIBE_TERMINAL_TELEMETRY_TOKEN;
+const paneId = process.env.VIBE_TERMINAL_SESSION_ID;
+const launchNonce = process.env.VIBE_TERMINAL_LAUNCH_NONCE;
+let raw = "";
+
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  if (raw.length < 1024 * 1024) raw += chunk;
+});
+process.stdin.on("end", () => {
+  if (!callbackUrl || !token || !paneId || !launchNonce) process.exit(0);
+  let hook;
+  try {
+    hook = JSON.parse(raw);
+  } catch {
+    process.exit(0);
+  }
+  if (!hook || hook.subagent || hook.agent_id || hook.agent_type) process.exit(0);
+
+  let type = "";
+  let detail = "";
+  switch (hook.hook_event_name) {
+    case "UserPromptSubmit":
+      type = "agent.running";
+      detail = "turn-start";
+      break;
+    case "PermissionRequest":
+      type = "agent.waiting";
+      detail = "approval";
+      break;
+    case "PreToolUse":
+    case "PostToolUse":
+      type = "agent.running";
+      detail = "tool";
+      break;
+    default:
+      process.exit(0);
+  }
+
+  const body = JSON.stringify({
+    type,
+    detail,
+    provider: "codex",
+    sessionId: paneId,
+    launchNonce,
+    providerThreadId: typeof hook.session_id === "string" ? hook.session_id : undefined,
+    providerTurnId: typeof hook.turn_id === "string" ? hook.turn_id : undefined,
+    timestamp: Date.now()
+  });
+  let url;
+  try {
+    url = new URL(callbackUrl);
+  } catch {
+    process.exit(0);
+  }
+  const request = http.request({
+    hostname: url.hostname,
+    port: url.port,
+    path: url.pathname,
+    method: "POST",
+    timeout: 1000,
+    headers: {
+      "content-type": "application/json",
+      "content-length": Buffer.byteLength(body),
+      "x-vibe-telemetry-token": token
+    }
+  }, (response) => {
+    response.resume();
+    response.on("end", () => process.exit(0));
+  });
+  request.on("error", () => process.exit(0));
+  request.on("timeout", () => {
+    request.destroy();
+    process.exit(0);
+  });
+  request.end(body);
+});
+process.stdin.resume();
+`;
+}
+
+function codexLifecycleConfigOverrides(nodePath, hookPath, isWin) {
+  let handler;
+  if (isWin) {
+    // PowerShell -> .cmd native argv forwarding strips nested double quotes.
+    // An encoded command leaves the complete -c TOML value as one safe arg.
+    const script = `$env:ELECTRON_RUN_AS_NODE='1'; & ${quotePowerShell(nodePath)} ${quotePowerShell(hookPath)}`;
+    const encoded = Buffer.from(script, "utf16le").toString("base64");
+    const command = `powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`;
+    handler = `[{ hooks = [{ type = 'command', command = '${command}', timeout = 5 }] }]`;
+  } else {
+    const command = `ELECTRON_RUN_AS_NODE=1 ${quotePosixShell(nodePath)} ${quotePosixShell(hookPath)}`;
+    handler = `[{ hooks = [{ type = "command", command = ${JSON.stringify(command)}, timeout = 5 }] }]`;
+  }
+  return CODEX_LIFECYCLE_EVENTS.map((eventName) =>
+    `hooks.${eventName}=${handler}`
+  );
+}
+
 // Windows notify program body (PowerShell). Same contract as notifyHookSource
 // but implemented without Node so it works regardless of whether the user has
 // `node` on PATH. `$args[0]` is the attention type, `$args[1]` the optional
@@ -1926,21 +2098,41 @@ function windowsNotifyPs1Source() {
     "$Type = $args[0]",
     `$KnownDetails = @(${knownDetails})`,
     "$Detail = ''",
+    "$Provider = ''",
+    "$ProviderThreadId = ''",
+    "$ProviderTurnId = ''",
     "if ($args.Count -ge 2 -and $KnownDetails -contains [string]$args[1]) {",
     "  $Detail = [string]$args[1]",
+    "} elseif ($args.Count -ge 2) {",
+    "  if ($Type -eq 'agent.completed') { $Provider = 'codex' }",
+    "  try {",
+    "    $ProviderEvent = ([string]$args[1]) | ConvertFrom-Json",
+    "    if ([string]$ProviderEvent.type -eq 'agent-turn-complete' -and -not [string]::IsNullOrEmpty([string]$ProviderEvent.'thread-id') -and -not [string]::IsNullOrEmpty([string]$ProviderEvent.'turn-id')) {",
+    "      $Provider = 'codex'",
+    "      $ProviderThreadId = [string]$ProviderEvent.'thread-id'",
+    "      $ProviderTurnId = [string]$ProviderEvent.'turn-id'",
+    "    }",
+    "  } catch {",
+    "    $ProviderThreadId = ''",
+    "    $ProviderTurnId = ''",
+    "  }",
     "}",
-    "if ([string]::IsNullOrEmpty($Type) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_CALLBACK_URL) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_TELEMETRY_TOKEN) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_SESSION_ID)) {",
+    "if ([string]::IsNullOrEmpty($Type) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_CALLBACK_URL) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_TELEMETRY_TOKEN) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_SESSION_ID) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_LAUNCH_NONCE)) {",
     "  exit 0",
     "}",
     "try {",
     "  $payload = [ordered]@{",
     "    type = $Type",
     "    sessionId = $env:VIBE_TERMINAL_SESSION_ID",
+    "    launchNonce = $env:VIBE_TERMINAL_LAUNCH_NONCE",
     "    timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()",
     "  }",
     "  if ($Detail) {",
     "    $payload['detail'] = $Detail",
     "  }",
+    "  if ($Provider) { $payload['provider'] = $Provider }",
+    "  if ($ProviderThreadId) { $payload['providerThreadId'] = $ProviderThreadId }",
+    "  if ($ProviderTurnId) { $payload['providerTurnId'] = $ProviderTurnId }",
     "  $body = $payload | ConvertTo-Json -Compress",
     "  $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)",
     "  $request = [System.Net.WebRequest]::Create($env:VIBE_TERMINAL_CALLBACK_URL)",
@@ -2015,7 +2207,7 @@ function windowsCursorNotifyPs1Source() {
   return [
     `# ${CURSOR_HOOK_MARKER}`,
     "$ErrorActionPreference = 'SilentlyContinue'",
-    "if ([string]::IsNullOrEmpty($env:VIBE_TERMINAL_CALLBACK_URL) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_TELEMETRY_TOKEN) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_SESSION_ID)) {",
+    "if ([string]::IsNullOrEmpty($env:VIBE_TERMINAL_CALLBACK_URL) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_TELEMETRY_TOKEN) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_SESSION_ID) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_LAUNCH_NONCE)) {",
     "  exit 0",
     "}",
     "$raw = ''",
@@ -2032,6 +2224,7 @@ function windowsCursorNotifyPs1Source() {
     "  $payload = [ordered]@{",
     "    type = $type",
     "    sessionId = $env:VIBE_TERMINAL_SESSION_ID",
+    "    launchNonce = $env:VIBE_TERMINAL_LAUNCH_NONCE",
     "    provider = 'cursor'",
     "    timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()",
     "  }",
@@ -2066,8 +2259,9 @@ const callbackUrl = process.env.VIBE_TERMINAL_CALLBACK_URL;
 const token = process.env.VIBE_TERMINAL_TELEMETRY_TOKEN;
 const sessionId = process.env.VIBE_TERMINAL_SESSION_ID;
 const argType = process.argv[2] || "";
+const launchNonce = process.env.VIBE_TERMINAL_LAUNCH_NONCE;
 
-if (!callbackUrl || !token || !sessionId) {
+if (!callbackUrl || !token || !sessionId || !launchNonce) {
   process.exit(0);
 }
 
@@ -2098,7 +2292,7 @@ function finish() {
     return;
   }
 
-  const body = JSON.stringify({ type, sessionId, provider: "cursor", timestamp: Date.now() });
+  const body = JSON.stringify({ type, sessionId, launchNonce, provider: "cursor", timestamp: Date.now() });
 
   let url;
   try {
@@ -2675,7 +2869,7 @@ function buildClaudeSettingsJson(scriptPath, isWin) {
 
 // Bump on ANY plugin-source change: installOpenCodePlugin only rewrites an
 // installed copy when its version string differs.
-const OPENCODE_PLUGIN_VERSION = "vibeterminal-notify-4";
+const OPENCODE_PLUGIN_VERSION = "vibeterminal-notify-5";
 
 // opencode cannot take a per-invocation hook, so we install one small plugin in
 // the user's opencode config. It is guarded: it only POSTs when the
@@ -2718,7 +2912,8 @@ function openCodePluginSource() {
     "      const url = process.env.VIBE_TERMINAL_CALLBACK_URL;",
     "      const token = process.env.VIBE_TERMINAL_TELEMETRY_TOKEN;",
     "      const sessionId = process.env.VIBE_TERMINAL_SESSION_ID;",
-    '      if (!url || !token || !sessionId || !event || typeof event.type !== "string") {',
+    "      const launchNonce = process.env.VIBE_TERMINAL_LAUNCH_NONCE;",
+    '      if (!url || !token || !sessionId || !launchNonce || !event || typeof event.type !== "string") {',
     "        return;",
     "      }",
     "      const send = async (type, detail) => {",
@@ -2730,7 +2925,7 @@ function openCodePluginSource() {
     '              "x-vibe-telemetry-token": token',
     "            },",
     "            // JSON.stringify drops an undefined detail.",
-    '            body: JSON.stringify({ type, detail, sessionId, provider: "opencode", timestamp: Date.now() })',
+    '            body: JSON.stringify({ type, detail, sessionId, launchNonce, provider: "opencode", timestamp: Date.now() })',
     "          });",
     "        } catch (_error) {",
     "          // Telemetry is best-effort; ignore delivery failures.",
@@ -2883,6 +3078,25 @@ function createAgentTelemetryManager(options = {}) {
   const notifyHookPath = path.join(runDir, "notify-hook.cjs");
   const notifyPs1Path = path.join(runDir, "notify.ps1");
   const notifyShPath = path.join(runDir, "notify.sh");
+  const codexLifecycleSource = codexLifecycleHookSource();
+  // Stable for identical content, but changes when the observer implementation
+  // changes. Codex can retain trust for an unchanged definition without a code
+  // update silently inheriting that trust. The final rename publishes a complete
+  // file atomically when two app instances start together.
+  const codexLifecycleVersion = crypto
+    .createHash("sha256")
+    .update(codexLifecycleSource)
+    .digest("hex")
+    .slice(0, 12);
+  const codexLifecycleHookPath = path.join(
+    baseDir,
+    `codex-lifecycle-hook-${codexLifecycleVersion}.cjs`
+  );
+  const codexHookOverrides = codexLifecycleConfigOverrides(
+    nodePath,
+    codexLifecycleHookPath,
+    isWin
+  );
   const claudeSettingsPath = path.join(runDir, "claude-settings.json");
   // The single "notify program" each agent invokes with the attention type as
   // its first argument: the PowerShell body on Windows, the sh wrapper on POSIX.
@@ -2908,6 +3122,18 @@ function createAgentTelemetryManager(options = {}) {
   const ready = new Promise((resolve, reject) => {
     try {
       fs.mkdirSync(baseDir, { recursive: true });
+      if (!fs.existsSync(codexLifecycleHookPath)) {
+        const temporaryLifecyclePath = `${codexLifecycleHookPath}.tmp-${process.pid}-${crypto.randomUUID()}`;
+        fs.writeFileSync(temporaryLifecyclePath, codexLifecycleSource);
+        try {
+          fs.renameSync(temporaryLifecyclePath, codexLifecycleHookPath);
+        } catch (error) {
+          if (!fs.existsSync(codexLifecycleHookPath)) {
+            throw error;
+          }
+          fs.rmSync(temporaryLifecyclePath, { force: true });
+        }
+      }
       cleanupStaleShimDirs({ baseDir, currentRunId: runId });
       cleanupStaleOpenFusionDirs(openFusionBaseDir);
       writeMarker(runDir, { runId, type: "run" });
@@ -2962,6 +3188,20 @@ function createAgentTelemetryManager(options = {}) {
             const event = JSON.parse(body);
             if (!event.sessionId || typeof event.type !== "string") {
               response.writeHead(400);
+              response.end();
+              return;
+            }
+
+            const normalizedEventSessionId = normalizeSessionId(event.sessionId);
+            const activeSession = normalizedEventSessionId
+              ? sessions.get(normalizedEventSessionId)
+              : null;
+            if (
+              !activeSession ||
+              typeof event.launchNonce !== "string" ||
+              event.launchNonce !== activeSession.launchNonce
+            ) {
+              response.writeHead(409);
               response.end();
               return;
             }
@@ -3070,8 +3310,8 @@ function createAgentTelemetryManager(options = {}) {
                 backgroundActivity: activity
               });
             } else if (event.type === "agent.running") {
-              // A turn started (claude UserPromptSubmit/tool use, opencode busy
-              // event, cursor beforeSubmitPrompt). This drives the pane's
+              // A turn started (provider UserPromptSubmit/busy/before-submit
+              // telemetry) or emitted mid-turn tool activity. This drives the pane's
               // "working" state only; it is not an attention/unread signal, so
               // it rides a dedicated event. Only a genuine turn START may
               // override a finished (done/failed) pill; mid-turn tool activity
@@ -3081,15 +3321,34 @@ function createAgentTelemetryManager(options = {}) {
                 id: event.sessionId,
                 type: "agent-running",
                 provider: event.provider,
+                providerThreadId:
+                  event.provider === "codex" &&
+                  typeof event.providerThreadId === "string"
+                    ? event.providerThreadId
+                    : undefined,
+                providerTurnId:
+                  event.provider === "codex" &&
+                  typeof event.providerTurnId === "string"
+                    ? event.providerTurnId
+                    : undefined,
                 turnStart: event.detail !== "tool"
               });
             } else {
               const attention = mapTelemetryToAttention(event);
               if (attention) {
+                const codexProviderEvent = event.provider === "codex";
                 emit({
                   id: event.sessionId,
                   type: "agent-attention",
                   provider: event.provider,
+                  providerThreadId:
+                    codexProviderEvent && typeof event.providerThreadId === "string"
+                      ? event.providerThreadId
+                      : undefined,
+                  providerTurnId:
+                    codexProviderEvent && typeof event.providerTurnId === "string"
+                      ? event.providerTurnId
+                      : undefined,
                   attention
                 });
               }
@@ -3141,6 +3400,7 @@ function createAgentTelemetryManager(options = {}) {
     const key = pathEnvKey(process.env);
     const originalPath = process.env[key] || "";
     const nextPath = [shimDir, originalPath].filter(Boolean).join(path.delimiter);
+    const launchNonce = crypto.randomBytes(24).toString("base64url");
     const instrumentation = {
       shimDir,
       env: {
@@ -3148,15 +3408,18 @@ function createAgentTelemetryManager(options = {}) {
         VIBE_TERMINAL_SESSION_ID: normalizedSessionId,
         VIBE_TERMINAL_CALLBACK_URL: callbackUrl,
         VIBE_TERMINAL_TELEMETRY_TOKEN: token,
+        VIBE_TERMINAL_LAUNCH_NONCE: launchNonce,
         VIBE_TERMINAL_ORIGINAL_PATH: originalPath,
         VIBE_TERMINAL_SHIM_DIR: shimDir,
         VIBE_TERMINAL_CLAUDE_SETTINGS: claudeSettingsPath,
-        VIBE_TERMINAL_NOTIFY_PROGRAM: notifyProgramPath
+        VIBE_TERMINAL_NOTIFY_PROGRAM: notifyProgramPath,
+        VIBE_TERMINAL_CODEX_HOOK_OVERRIDES: JSON.stringify(codexHookOverrides)
       }
     };
 
     sessions.set(normalizedSessionId, {
       dir: sessionDir,
+      launchNonce,
       instrumentation
     });
     return instrumentation;
@@ -3225,6 +3488,7 @@ function createAgentTelemetryManager(options = {}) {
       callbackUrl,
       token,
       sessionId: normalizedSessionId,
+      launchNonce: instrumentation.env.VIBE_TERMINAL_LAUNCH_NONCE,
       statusPath: backgroundStatusPath
     };
     const fileConfig = openFusionConfigContents({
@@ -3439,6 +3703,11 @@ function createAgentTelemetryManager(options = {}) {
       return null;
     }
 
+    const instrumentation = await prepareSession(normalizedSessionId);
+    if (!instrumentation) {
+      return null;
+    }
+
     const sessionDir = path.join(runDir, sessionDirName(normalizedSessionId));
     fs.mkdirSync(sessionDir, { recursive: true });
 
@@ -3477,6 +3746,8 @@ function createAgentTelemetryManager(options = {}) {
             VIBE_TERMINAL_SESSION_ID: normalizedSessionId,
             VIBE_TERMINAL_CALLBACK_URL: callbackUrl,
             VIBE_TERMINAL_TELEMETRY_TOKEN: token,
+            VIBE_TERMINAL_LAUNCH_NONCE:
+              instrumentation.env.VIBE_TERMINAL_LAUNCH_NONCE,
             VIBE_BUILD_SUPERVISOR_DIR: opts.buildSupervisorDir || "",
             VIBE_FUSION_EAGER_BOOT: "1",
             VIBE_FUSION_RUN_MODE: runMode,
@@ -3759,6 +4030,8 @@ function createAgentTelemetryManager(options = {}) {
 module.exports = {
   buildClaudeSettingsJson,
   buildFusionSystemPrompt,
+  codexLifecycleConfigOverrides,
+  codexLifecycleHookSource,
   ensureOpenFusionOpencodeHome,
   migrateOpenFusionThreadsFromGlobal,
   openFusionCommandContents,

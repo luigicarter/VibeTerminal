@@ -39,6 +39,54 @@ export function isSessionWorking(session: AgentSession) {
   return session.status === "running" || Boolean(session.detachedTaskIds?.length);
 }
 
+export type ProviderAttentionDecision = "accept" | "defer" | "reject";
+
+export function codexTurnAttentionDecision(
+  activeTurnId: string | undefined,
+  submitPending: boolean,
+  submitPendingPriorTurnId: string | null | undefined,
+  settledTurnIds: readonly string[],
+  providerTurnId: string | undefined
+): "accept" | "reject" {
+  if (!providerTurnId || settledTurnIds.includes(providerTurnId)) {
+    return "reject";
+  }
+
+  // Legacy notify is detached, so the previous completion can land after the
+  // user's next Enter. While that submit is awaiting provider identity, reject
+  // the prior id but allow a different id to complete the compatibility path
+  // even when UserPromptSubmit hooks are unavailable.
+  if (submitPending) {
+    return submitPendingPriorTurnId === providerTurnId ? "reject" : "accept";
+  }
+
+  return activeTurnId && activeTurnId !== providerTurnId ? "reject" : "accept";
+}
+
+// Codex's legacy notify also runs inside spawned agent threads. The appended
+// provider thread id is therefore required to prove a completion belongs to the
+// pane's root thread. Before discovery binds that root id, hold the event rather
+// than accepting a child completion or dropping a fast root completion.
+export function providerAttentionDecision(
+  session: Pick<AgentSession, "kind" | "threadRef"> | undefined,
+  provider?: string,
+  providerThreadId?: string
+): ProviderAttentionDecision {
+  if (provider !== "codex") {
+    return "accept";
+  }
+  if (!providerThreadId) {
+    return "reject";
+  }
+  if (!session || session.kind !== "codex") {
+    return "reject";
+  }
+  if (!session.threadRef?.id) {
+    return "defer";
+  }
+  return session.threadRef.id === providerThreadId ? "accept" : "reject";
+}
+
 export function updateDetachedTaskIds(
   session: AgentSession,
   event: BackgroundTaskEvent
@@ -75,13 +123,14 @@ export function shouldMarkCompletedTurnUnread(
   return session.detachedTaskIds?.length ? false : unread;
 }
 
-// claude, opencode, and cursor expose a turn-START signal (claude's
+// claude, opencode, cursor, and current Codex expose a turn-START signal (claude's
 // UserPromptSubmit hook, opencode's busy plugin event, cursor's beforeSubmitPrompt
-// hook), so their "working" state is driven purely by telemetry and is NEVER
+// hook, Codex's passive lifecycle observer), so the first three agents' working
+// state is driven purely by telemetry and is NEVER
 // inferred from terminal output. That is what stops a keystroke, its echo, or a
-// focus/click redraw from reading as "working". codex has no turn-start signal,
-// so it (and plain terminals) fall back to the output-flow heuristic in
-// TerminalPane.
+// focus/click redraw from reading as "working". Codex keeps an App-owned Enter
+// fallback and watchdog for older/untrusted hook configurations. Plain terminals
+// retain the output-flow heuristic in TerminalPane.
 export function isTurnTelemetryKind(kind: AgentKind) {
   return kind === "claude" || kind === "opencode" || kind === "cursor";
 }
@@ -91,7 +140,9 @@ export function shouldSettleStatusOnPaneUnmount(
 ) {
   return (
     session.status === "starting" ||
-    (session.status === "running" && !isTurnTelemetryKind(session.kind))
+    (session.status === "running" &&
+      session.kind !== "codex" &&
+      !isTurnTelemetryKind(session.kind))
   );
 }
 
@@ -187,6 +238,13 @@ export function isHumanTerminalInput(data: string) {
   return !data.startsWith("\x1b") || data.startsWith("\x1b[200~");
 }
 
+// Bare Enter is the compatibility start signal until the passive Codex
+// UserPromptSubmit observer is trusted/available. Keep it deliberately narrow:
+// ordinary typing, navigation/focus reports, and bracketed pastes stay neutral.
+export function isCodexTurnSubmitInput(data: string) {
+  return data === "\r" || data === "\n" || data === "\r\n";
+}
+
 // What a keystroke into the pane means for the status pill, or null to leave
 // it alone.
 //
@@ -196,17 +254,19 @@ export function isHumanTerminalInput(data: string) {
 //   notification. Settle to "waiting" immediately; if the Esc merely
 //   dismissed a menu, the next telemetry event re-asserts "running"
 //   (waiting -> running is never latched), so this self-heals.
+// - codex "running" + bare Esc/Ctrl+C: settle the renderer-owned turn start
+//   immediately and cancel its App-level stale-running watchdog. A later Enter
+//   submission starts a fresh turn.
 // - telemetry kinds waiting on an APPROVAL: the answer keystroke is the only
 //   signal there is (PreToolUse fired before the prompt, PostToolUse fires
 //   only when the tool ends), so flip to "running" immediately instead of
 //   reading "waiting" for the whole tool run. An idle/question wait stays
 //   put — composing a prompt is not working, and UserPromptSubmit will fire.
-// - codex/plain terminals (no turn telemetry): typing is their equivalent of
-//   claude's UserPromptSubmit — the one signal that legitimately supersedes a
-//   finished turn. Release the done/failed latch to "waiting" (it is the
-//   user's turn; the output-flow heuristic flips to "running" once real
-//   output follows). Without this a codex pane latched "done" by its turn-end
-//   telemetry could never show working/waiting again until restart.
+// - codex/plain terminals: typing legitimately
+//   supersedes a finished turn, so release the done/failed latch to "waiting".
+//   Codex's separate submit-input callback moves Enter to "running"; plain
+//   terminals retain the output-flow heuristic. Without this release, a pane
+//   latched by a prior completion could not reflect the next interaction.
 //
 // Callers must apply the returned status DIRECTLY (not through
 // reconcileStatus): releasing the latch is the point.
@@ -214,6 +274,14 @@ export function statusAfterUserInput(
   session: Pick<AgentSession, "kind" | "status" | "attention">,
   data: string
 ): SessionStatus | null {
+  if (
+    session.kind === "codex" &&
+    session.status === "running" &&
+    (data === "\x1b" || data === "\x03")
+  ) {
+    return "waiting";
+  }
+
   if (isTurnTelemetryKind(session.kind)) {
     if (session.status === "running" && data === "\x1b") {
       return "waiting";

@@ -52,9 +52,12 @@ const {
   attentionFromTerminalEvent,
   attentionFromEvent,
   clearUnreadAttention,
+  codexTurnAttentionDecision,
+  isCodexTurnSubmitInput,
   isHumanTerminalInput,
   isSessionWorking,
   isTurnTelemetryKind,
+  providerAttentionDecision,
   normalizeAttention,
   reconcileStatus,
   shouldMarkCompletedTurnUnread,
@@ -324,18 +327,77 @@ assert.strictEqual(isTurnTelemetryKind("cursor"), true);
 assert.strictEqual(isTurnTelemetryKind("codex"), false);
 assert.strictEqual(isTurnTelemetryKind("terminal"), false);
 
-// Plain terminals and Codex use TerminalPane's mounted output-idle heuristic.
-// If that pane unmounts while marked running, the folder spinner must not stay
-// stuck on "working" forever. A telemetry-backed agent that unmounts during its
-// initial boot also must not stay "starting" forever. Telemetry-backed running
-// state is provider-driven and should be preserved.
+assert.strictEqual(
+  providerAttentionDecision(
+    { kind: "codex", threadRef: { provider: "codex", id: "root" } },
+    "codex",
+    "root"
+  ),
+  "accept"
+);
+assert.strictEqual(
+  providerAttentionDecision(
+    { kind: "codex", threadRef: { provider: "codex", id: "root" } },
+    "codex",
+    "child"
+  ),
+  "reject"
+);
+assert.strictEqual(
+  providerAttentionDecision({ kind: "codex" }, "codex", "fast-root"),
+  "defer"
+);
+assert.strictEqual(
+  providerAttentionDecision({ kind: "codex" }, "codex"),
+  "reject"
+);
+assert.strictEqual(
+  providerAttentionDecision({ kind: "claude" }, "codex", "forged"),
+  "reject"
+);
+assert.strictEqual(
+  providerAttentionDecision({ kind: "claude" }, "claude"),
+  "accept"
+);
+
+// Detached legacy completions must not settle a newer Enter-started Codex
+// turn, while the no-hook compatibility path can still accept a different id.
+assert.strictEqual(
+  codexTurnAttentionDecision("old", true, "old", [], "old"),
+  "reject"
+);
+assert.strictEqual(
+  codexTurnAttentionDecision("old", true, "old", [], "new"),
+  "accept"
+);
+assert.strictEqual(
+  codexTurnAttentionDecision("new", false, undefined, [], "old"),
+  "reject"
+);
+assert.strictEqual(
+  codexTurnAttentionDecision("new", false, undefined, [], "new"),
+  "accept"
+);
+// Approval Enter resumes the same provider turn, so it creates no submit latch.
+assert.strictEqual(
+  codexTurnAttentionDecision("approval-turn", false, undefined, [], "approval-turn"),
+  "accept"
+);
+assert.strictEqual(
+  codexTurnAttentionDecision(undefined, false, undefined, ["done-turn"], "done-turn"),
+  "reject"
+);
+
+// Plain terminals use TerminalPane's mounted output-idle heuristic, so their
+// running state must settle on unmount. Codex turn state is submit/notify-driven
+// and must survive pane unmounts just like telemetry-backed agents.
 assert.strictEqual(
   shouldSettleStatusOnPaneUnmount({ kind: "terminal", status: "running" }),
   true
 );
 assert.strictEqual(
   shouldSettleStatusOnPaneUnmount({ kind: "codex", status: "running" }),
-  true
+  false
 );
 assert.strictEqual(
   shouldSettleStatusOnPaneUnmount({ kind: "claude", status: "starting" }),
@@ -379,6 +441,18 @@ assert.strictEqual(isHumanTerminalInput("\x1b[I"), false); // focus in
 assert.strictEqual(isHumanTerminalInput("\x1b[O"), false); // focus out
 assert.strictEqual(isHumanTerminalInput("\x1b[<35;10;5M"), false); // mouse
 assert.strictEqual(isHumanTerminalInput("\x1b[A"), false); // arrow key
+
+// Codex has no provider turn-start hook. Only an actual Enter submission starts
+// a turn; typing, navigation, and bracketed paste must stay status-neutral.
+assert.strictEqual(isCodexTurnSubmitInput("\r"), true);
+assert.strictEqual(isCodexTurnSubmitInput("\n"), true);
+assert.strictEqual(isCodexTurnSubmitInput("\r\n"), true);
+assert.strictEqual(isCodexTurnSubmitInput("h"), false);
+assert.strictEqual(isCodexTurnSubmitInput("\x1b[A"), false);
+assert.strictEqual(
+  isCodexTurnSubmitInput("\x1b[200~prompt\ntext\x1b[201~"),
+  false
+);
 
 // A human keystroke is the non-telemetry pane's turn-start signal: it releases
 // a done/failed pill latched by turn-end telemetry (codex) or a finished
@@ -476,7 +550,11 @@ assert.strictEqual(
 );
 assert.strictEqual(
   statusAfterUserInput({ kind: "codex", status: "running" }, "\x1b"),
-  null
+  "waiting"
+);
+assert.strictEqual(
+  statusAfterUserInput({ kind: "codex", status: "running" }, "\x03"),
+  "waiting"
 );
 
 const appSource = fs.readFileSync(appPath, "utf8");
@@ -629,14 +707,85 @@ assert(
   "terminal pane unmount should settle stale status before clearing the idle timer"
 );
 assert(
+  terminalPaneSource.includes('sessionRef.current.kind === "codex"') &&
+    terminalPaneSource.includes("isCodexTurnSubmitInput(data)") &&
+    terminalPaneSource.includes("onCodexTurnStartRef.current()") &&
+    terminalPaneSource.includes("function armCodexStartingSettle()"),
+  "codex should use submit/notify turn state and reserve the idle timer for boot"
+);
+assert(
+  appSource.includes("onCodexTurnStart={() =>") &&
+    appSource.includes("applyCodexTurnStart(session.id)") &&
+    appSource.includes("codexActiveTurnIdsRef.current.delete(sessionId)") &&
+    appSource.includes("codexTurnLiveRef.current.set(sessionId, true)"),
+  "codex turn start should be lifted into app state so it survives pane unmount"
+);
+assert(
+  appSource.includes("CODEX_RUNNING_QUIET_MS = 60_000") &&
+    appSource.includes("function armCodexRunningWatchdog(sessionId: string)") &&
+    appSource.includes("refreshCodexRunningWatchdog(event.id)") &&
+    appSource.includes("clearCodexRunningWatchdog(sessionId)"),
+  "codex should have an App-owned quiet watchdog refreshed by hidden-pane PTY data"
+);
+assert(
+  appSource.includes("codexWatchdogSettledRef") &&
+    appSource.includes("codexWatchdogSettledRef.current.has(sessionId)") &&
+    appSource.includes("applyAgentRunning(sessionId, true)"),
+  "codex activity after a safety timeout should restore running and re-arm"
+);
+assert(
+  appSource.includes("providerAttentionDecision(") &&
+    appSource.includes("pendingCodexAttentionRef") &&
+    appSource.includes("event.providerThreadId === threadRef.id"),
+  "Codex completion should defer until root discovery and reject child threads"
+);
+assert(
+  appSource.includes("codexActiveTurnIdsRef") &&
+    appSource.includes("codexSubmitPendingRef") &&
+    appSource.includes("codexSettledTurnIdsRef") &&
+    appSource.includes("codexTurnAttentionDecision(") &&
+    appSource.includes("rootAttention.attention.state === \"completed\"") &&
+    appSource.includes("codexTurnLiveRef.current.set(sessionId, false)"),
+  "Codex completion should reject delayed turns and clean accepted deferred turns"
+);
+assert(
+  appSource.includes("const approvalResume =") &&
+    appSource.includes('session.attention.reason === "approval"') &&
+    appSource.includes("if (!approvalResume)"),
+  "Codex approval Enter should preserve the active provider turn"
+);
+assert(
+  appSource.includes("session?.kind !== \"codex\" || session.status !== \"running\"") &&
+    appSource.indexOf("session?.kind !== \"codex\" || session.status !== \"running\"") <
+      appSource.indexOf("codexWatchdogSettledRef.current.add(sessionId)"),
+  "Codex watchdog should only mark a pane settled when it actually times out from running"
+);
+assert(
+  terminalPaneSource.includes("useLayoutEffect(() => {") &&
+    terminalPaneSource.includes("sessionRef.current = session;"),
+  "terminal input should see committed session state before native xterm events"
+);
+assert(
+  appSource.includes("CODEX_INPUT_GRACE_MS = 450") &&
+    appSource.includes("recordCodexTerminalInput(session.id)") &&
+    appSource.includes("Date.now() - lastInputAt < CODEX_INPUT_GRACE_MS") &&
+    terminalPaneSource.includes("onCodexInputRef.current()"),
+  "global codex activity recovery should ignore immediate user echo/redraw output"
+);
+assert(
+  appSource.includes('session.kind === "codex" && status === "waiting"') &&
+    appSource.includes("clearCodexRunningWatchdog(session.id)"),
+  "codex Esc/Ctrl+C input should settle waiting and cancel the stale-running watchdog"
+);
+assert(
   terminalPaneSource.includes('event.type === "host-error" || event.type === "host-exit"') &&
     terminalPaneSource.includes('event.id && event.id !== session.id') &&
     terminalPaneSource.includes('setStatus("failed")'),
   "terminal pane should render host-level PTY failures instead of ignoring id-less events"
 );
 // Keyboard input decides status where no hook or output can: a human keystroke
-// releases a latched done/failed pill (codex has no turn-start telemetry, so
-// without this a completed codex pane could never show working/waiting again),
+// releases a latched done/failed pill (Codex keeps this as its compatibility
+// path when lifecycle hooks are unavailable),
 // answers a pending claude approval, and a bare Esc settles an interrupted
 // telemetry turn. It must bypass reconcileStatus (the dedicated release
 // callback, not onStatusChange); statusAfterUserInput itself filters
@@ -677,7 +826,8 @@ assert(
 // hook POSTs race, so a PostToolUse landing after Stop cannot resurrect the
 // spinner. Only a genuine turn start forces "running".
 assert(
-  appSource.includes("applyAgentRunning(event.id, event.turnStart !== false)") &&
+  appSource.includes("event.turnStart !== false,") &&
+    appSource.includes("event.providerThreadId,") &&
     appSource.includes('!turnStart && reconcileStatus(session.status, "running") !== "running"'),
   "tool-driven agent-running events should go through the done/failed latch"
 );

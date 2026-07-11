@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -21,6 +22,7 @@ import {
 } from "lucide-react";
 import clsx from "clsx";
 import {
+  isCodexTurnSubmitInput,
   isTurnTelemetryKind,
   reconcileStatus,
   shouldSettleStatusOnPaneUnmount,
@@ -49,10 +51,9 @@ const THREAD_LOOKUP_POLL_MS = 8000;
 const THREAD_LOOKUP_TIMEOUT_MS = 90_000;
 const NON_TERMINAL_FOCUS_TARGET =
   ".pane-actions, .pane-actions *, button, input, textarea, select, a";
-// How long a live pane may produce no output before we treat it as idle and
-// surface "waiting" (the agent/shell is quiet, so it's the user's turn). Longer
-// means fewer false "waiting" flips while an agent pauses mid-task, at the cost
-// of a slower idle signal.
+// Plain-terminal output settles to waiting after this quiet gap. The same delay
+// is used only for agent boot states; a real Codex turn never uses a silence
+// timer because model/tool quiet time is still work.
 const IDLE_AFTER_MS = 1500;
 // After the user interacts with a pane (keystroke, paste, or a mouse/focus
 // report a full-screen TUI requests), the bytes that echo straight back — the
@@ -103,6 +104,13 @@ interface TerminalPaneProps {
   // Human keyboard input decided the status (statusAfterUserInput). Applied
   // WITHOUT reconcileStatus — releasing the done/failed latch is the point.
   onInputStatusRelease: (status: SessionStatus) => void;
+  // Bare Enter is Codex's compatibility turn-start signal until the passive
+  // provider lifecycle observer is trusted/available. It is kept above the pane
+  // lifecycle so running survives workspace switches and maximize unmounts.
+  onCodexTurnStart: () => void;
+  // Lift input timing into App so hidden-output recovery retains the same
+  // echo/redraw suppression as the mounted terminal heuristic.
+  onCodexInput: () => void;
 }
 
 function statusLabel(status: SessionStatus) {
@@ -141,7 +149,9 @@ export default function TerminalPane({
   onFreshLaunchFallback,
   onThreadLookupChange,
   onStatusChange,
-  onInputStatusRelease
+  onInputStatusRelease,
+  onCodexTurnStart,
+  onCodexInput
 }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -151,6 +161,8 @@ export default function TerminalPane({
   const lastLaunchTokenRef = useRef(0);
   const onStatusChangeRef = useRef(onStatusChange);
   const onInputStatusReleaseRef = useRef(onInputStatusRelease);
+  const onCodexTurnStartRef = useRef(onCodexTurnStart);
+  const onCodexInputRef = useRef(onCodexInput);
   const onThreadRefChangeRef = useRef(onThreadRefChange);
   const onFreshLaunchFallbackRef = useRef(onFreshLaunchFallback);
   const onThreadLookupChangeRef = useRef(onThreadLookupChange);
@@ -181,7 +193,7 @@ export default function TerminalPane({
     [session, platform]
   );
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     sessionRef.current = session;
   }, [session]);
 
@@ -192,6 +204,14 @@ export default function TerminalPane({
   useEffect(() => {
     onInputStatusReleaseRef.current = onInputStatusRelease;
   }, [onInputStatusRelease]);
+
+  useEffect(() => {
+    onCodexTurnStartRef.current = onCodexTurnStart;
+  }, [onCodexTurnStart]);
+
+  useEffect(() => {
+    onCodexInputRef.current = onCodexInput;
+  }, [onCodexInput]);
 
   useEffect(() => {
     onThreadRefChangeRef.current = onThreadRefChange;
@@ -304,8 +324,39 @@ export default function TerminalPane({
     }
   }
 
+  // Codex boot output proves the TUI is alive, but it is not a user turn. Let
+  // the initial "starting" pill settle after the first quiet gap without ever
+  // applying that silence rule to a real Codex turn.
+  function armCodexStartingSettle() {
+    if (
+      sessionRef.current.kind !== "codex" ||
+      sessionRef.current.status !== "starting"
+    ) {
+      return;
+    }
+
+    clearIdleTimer();
+    idleTimerRef.current = window.setTimeout(() => {
+      idleTimerRef.current = null;
+      if (
+        !terminalExitedRef.current &&
+        sessionRef.current.status === "starting"
+      ) {
+        setStatus("waiting");
+      }
+    }, IDLE_AFTER_MS);
+  }
+
   // Decide whether a chunk of PTY output should read as the agent "working".
   function markActiveFromOutput() {
+    // Codex has provider lifecycle telemetry when its passive observer is
+    // trusted, an Enter fallback otherwise, and provider-owned completion.
+    // PTY silence during thinking/quiet tools is not the mounted idle heuristic.
+    if (sessionRef.current.kind === "codex") {
+      armCodexStartingSettle();
+      return;
+    }
+
     // claude/opencode/cursor own their working state through turn telemetry
     // (UserPromptSubmit / busy events), so their output never sets "running" —
     // otherwise a focus/click redraw or a keystroke echo would look like work.
@@ -315,7 +366,7 @@ export default function TerminalPane({
       return;
     }
 
-    // codex / plain terminals / others: output is "working" unless it lands
+    // plain terminals / other non-agent panes: output is "working" unless it lands
     // inside the input grace window, where it is just the echo of, or the TUI's
     // response to, the user's own keystroke/click.
     if (Date.now() - lastInputAtRef.current < INPUT_GRACE_MS) {
@@ -550,6 +601,10 @@ export default function TerminalPane({
       // into sessionRef so the heuristic reconciles against the released
       // status before the next re-render.
       if (!terminalExitedRef.current) {
+        if (sessionRef.current.kind === "codex") {
+          onCodexInputRef.current();
+        }
+
         const releasedStatus = statusAfterUserInput(sessionRef.current, data);
         if (releasedStatus && releasedStatus !== sessionRef.current.status) {
           sessionRef.current = {
@@ -558,12 +613,24 @@ export default function TerminalPane({
           };
           onInputStatusReleaseRef.current(releasedStatus);
         }
+
+        if (
+          sessionRef.current.kind === "codex" &&
+          isCodexTurnSubmitInput(data)
+        ) {
+          clearIdleTimer();
+          sessionRef.current = {
+            ...sessionRef.current,
+            status: "running"
+          };
+          onCodexTurnStartRef.current();
+        }
       }
 
       window.vibe?.terminal.input(session.id, data);
-      // User interaction (keys, paste, mouse/focus reports) is not the agent
-      // working, so it must not mark the pane active. Record when it happened so
-      // the echo/redraw that follows can be told apart from real output.
+      // User interaction is not plain-terminal work. Record when it happened so
+      // that pane's echo/redraw can be told apart from real output. Codex status
+      // is submit/notify-driven and does not consume this grace timestamp.
       lastInputAtRef.current = Date.now();
 
       // Enter on an untitled thread likely just submitted its first prompt —
