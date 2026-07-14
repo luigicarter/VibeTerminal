@@ -148,7 +148,9 @@ assert(
 
 assert(
   stylesSource.includes("linear-gradient(180deg, #131418 0%, #0d0e11 100%)") &&
-    stylesSource.includes("inset 3px 0 0 #f4cf5a") &&
+    stylesSource.includes("--accent: #2dd4bf") &&
+    stylesSource.includes("--accent-icon: #5eead4") &&
+    stylesSource.includes("inset 3px 0 0 var(--accent)") &&
     stylesSource.includes(".workspace-context-menu button:hover"),
   "sidebar should use the refreshed visual language for rows, active states, and menus"
 );
