@@ -184,6 +184,10 @@ assert.strictEqual(
   false
 );
 assert.strictEqual(
+  shouldUseTerminalEventAttention({ id: "kimi", kind: "kimi" }),
+  false
+);
+assert.strictEqual(
   shouldMarkAttentionUnread("one", "one", ["one"], completed),
   false
 );
@@ -318,12 +322,14 @@ assert.strictEqual(shouldMarkCompletedTurnUnread(detachedStarted, true), false);
 assert.strictEqual(shouldMarkCompletedTurnUnread(detachedBase, true), true);
 assert.strictEqual(shouldMarkCompletedTurnUnread(detachedBase, false), false);
 
-// claude/opencode/cursor have a turn-start signal (cursor's beforeSubmitPrompt
-// hook), so they suppress the output-flow working heuristic. codex and plain
-// terminals fall back to it.
+// claude/opencode/cursor/kimi have a turn-start signal (cursor's
+// beforeSubmitPrompt hook, kimi's config.toml UserPromptSubmit hook), so they
+// suppress the output-flow working heuristic. codex and plain terminals fall
+// back to it.
 assert.strictEqual(isTurnTelemetryKind("claude"), true);
 assert.strictEqual(isTurnTelemetryKind("opencode"), true);
 assert.strictEqual(isTurnTelemetryKind("cursor"), true);
+assert.strictEqual(isTurnTelemetryKind("kimi"), true);
 assert.strictEqual(isTurnTelemetryKind("codex"), false);
 assert.strictEqual(isTurnTelemetryKind("terminal"), false);
 
@@ -531,6 +537,24 @@ assert.strictEqual(
 );
 assert.strictEqual(
   statusAfterUserInput({ kind: "opencode", status: "running" }, "\x1b"),
+  "waiting"
+);
+// kimi hooks report the same events as claude, so the same keystroke rules
+// apply: an approval answer flips waiting->running, and a bare Esc settles a
+// running turn to waiting.
+assert.strictEqual(
+  statusAfterUserInput(
+    {
+      kind: "kimi",
+      status: "waiting",
+      attention: { ...waiting, reason: "approval", unread: false }
+    },
+    "y"
+  ),
+  "running"
+);
+assert.strictEqual(
+  statusAfterUserInput({ kind: "kimi", status: "running" }, "\x1b"),
   "waiting"
 );
 assert.strictEqual(

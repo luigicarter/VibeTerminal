@@ -24,6 +24,7 @@
     "smoke:backend:launch-cwd": "node scripts/backend/launch-cwd-smoke.cjs",
     "smoke:backend:codex-discovery": "node scripts/backend/codex-discovery-smoke.cjs",
     "smoke:backend:claude-discovery": "node scripts/backend/claude-discovery-smoke.cjs",
+    "smoke:backend:kimi-discovery": "node scripts/backend/kimi-discovery-smoke.cjs",
     "smoke:backend:updates": "node scripts/backend/update-smoke.cjs",
     "smoke:backend:fusion-appserver": "node scripts/backend/fusion-appserver-smoke.cjs",
     "smoke:backend:fusion-launch": "node scripts/backend/fusion-launch-smoke.cjs",

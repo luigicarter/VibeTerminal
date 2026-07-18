@@ -6,6 +6,7 @@ export type AgentKind =
   | "gemini"
   | "opencode"
   | "aider"
+  | "kimi"
   // Selection-only kind for the ribbon: a Fusion launch creates a real
   // `kind: "claude"` session with `fusion: true`, so all claude behavior
   // (telemetry, resume, working-state) applies unchanged. No session is ever
@@ -17,7 +18,7 @@ export type AgentKind =
   // pane-scoped OpenCode config.
   | "openfusion";
 
-export type AgentThreadProvider = "codex" | "claude" | "opencode" | "cursor";
+export type AgentThreadProvider = "codex" | "claude" | "opencode" | "cursor" | "kimi";
 
 export type AgentLaunchMode = "new" | "resume";
 

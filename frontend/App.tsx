@@ -260,6 +260,12 @@ const agentProfiles: AgentProfile[] = [
     label: "Aider",
     command: "aider",
     accent: "#ff6b8a"
+  },
+  {
+    kind: "kimi",
+    label: "Kimi",
+    command: "kimi",
+    accent: "#1e88e5"
   }
 ];
 

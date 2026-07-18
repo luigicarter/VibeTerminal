@@ -1706,10 +1706,14 @@ ipcMain.handle("agent-thread:latest", (_event, payload) => {
 });
 
 ipcMain.handle("agent-thread:list", (_event, payload) => {
-  // Saved-chat history for the Fusion resume picker: claude/codex chats live
-  // in the user's own global stores (exactly where `--resume` reads from), so
-  // the lookup passes straight through.
-  if (payload?.provider === "claude" || payload?.provider === "codex") {
+  // Saved-chat history for the Fusion resume picker: claude/codex/kimi chats
+  // live in the user's own global stores (exactly where `--resume` reads
+  // from), so the lookup passes straight through.
+  if (
+    payload?.provider === "claude" ||
+    payload?.provider === "codex" ||
+    payload?.provider === "kimi"
+  ) {
     return findLatestAgentThread({ ...payload, list: true });
   }
 
@@ -1805,6 +1809,13 @@ ipcMain.handle("terminal:create", async (_event, payload) => {
     /\bcursor-agent\b/.test(payload.command)
   ) {
     telemetry.ensureCursorProjectHooks(launchCwd.cwd).catch(() => {});
+  }
+
+  // Kimi's hooks live in the user's config.toml ($KIMI_CODE_HOME or
+  // ~/.kimi-code) rather than per-project, so merge ours (idempotently)
+  // whenever a kimi pane launches — no cwd gate needed.
+  if (typeof payload.command === "string" && /\bkimi\b/.test(payload.command)) {
+    telemetry.ensureKimiHooks().catch(() => {});
   }
 
   return sendToPtyHost({

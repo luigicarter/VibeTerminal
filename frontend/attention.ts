@@ -123,16 +123,22 @@ export function shouldMarkCompletedTurnUnread(
   return session.detachedTaskIds?.length ? false : unread;
 }
 
-// claude, opencode, cursor, and current Codex expose a turn-START signal (claude's
-// UserPromptSubmit hook, opencode's busy plugin event, cursor's beforeSubmitPrompt
-// hook, Codex's passive lifecycle observer), so the first three agents' working
-// state is driven purely by telemetry and is NEVER
+// claude, opencode, cursor, kimi, and current Codex expose a turn-START signal
+// (claude's UserPromptSubmit hook, opencode's busy plugin event, cursor's
+// beforeSubmitPrompt hook, kimi's config.toml UserPromptSubmit hook, Codex's
+// passive lifecycle observer), so those agents' working state is driven purely
+// by telemetry and is NEVER
 // inferred from terminal output. That is what stops a keystroke, its echo, or a
 // focus/click redraw from reading as "working". Codex keeps an App-owned Enter
 // fallback and watchdog for older/untrusted hook configurations. Plain terminals
 // retain the output-flow heuristic in TerminalPane.
 export function isTurnTelemetryKind(kind: AgentKind) {
-  return kind === "claude" || kind === "opencode" || kind === "cursor";
+  return (
+    kind === "claude" ||
+    kind === "opencode" ||
+    kind === "cursor" ||
+    kind === "kimi"
+  );
 }
 
 export function shouldSettleStatusOnPaneUnmount(
@@ -337,7 +343,8 @@ export function shouldUseTerminalEventAttention(session: AgentSession) {
     session.kind === "codex" ||
     session.kind === "claude" ||
     session.kind === "opencode" ||
-    session.kind === "cursor"
+    session.kind === "cursor" ||
+    session.kind === "kimi"
   );
 }
 

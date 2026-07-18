@@ -13,12 +13,15 @@ const {
   cursorHookEntries,
   cursorTypeFromStatus,
   installOpenCodePlugin,
+  kimiHookTomlBlocks,
   mapTelemetryToAttention,
   mergeCursorHooks,
+  mergeKimiHooks,
   notifyHookSource,
   openFusionConfigContents,
   openCodePluginSource,
-  stripCursorHooks
+  stripCursorHooks,
+  stripKimiHooks
 } = require("../../backend/agentTelemetry.cjs");
 
 const CURSOR_HOOK_MARKER = "vibeterminal-cursor-notify";
@@ -33,6 +36,7 @@ const fakeBin = path.join(root, "fake-bin");
 const cmdOnlyFakeBin = path.join(root, "fake-cmd-bin");
 const shimBase = path.join(root, "shims");
 const openFusionBase = path.join(root, "openfusion");
+const previousKimiCodeHome = process.env.KIMI_CODE_HOME;
 
 function assert(condition, message) {
   if (!condition) {
@@ -473,6 +477,17 @@ function postTelemetry(callbackUrl, token, payload) {
     assert(
       instrumentation.env.VIBE_TERMINAL_SESSION_ID === "pane-one",
       "session id should be present in shim env"
+    );
+
+    // The kimi shim wrapper lands alongside the other providers, so PATH
+    // interception gives kimi panes the process-exit fallback too.
+    const kimiWrapper = path.join(
+      instrumentation.shimDir,
+      process.platform === "win32" ? "kimi.cmd" : "kimi"
+    );
+    assert(
+      fs.existsSync(kimiWrapper),
+      "prepareSession should write a kimi shim wrapper"
     );
     const lifecycleHookName = fs
       .readdirSync(shimBase)
@@ -1918,6 +1933,81 @@ function postTelemetry(callbackUrl, token, payload) {
       winToolCmd.includes("agent.running tool"),
       `windows claude tool hook should pass the tool detail; got ${winToolCmd}`
     );
+    // The kimi hook blocks carry the claude event set as config.toml TOML
+    // ([[hooks]] tables), marker-tagged so merge/strip only ever touches
+    // vibeTerminal's own entries.
+    const kimiWinBlocks = kimiHookTomlBlocks("C:\\x\\notify.ps1", true);
+    assert(
+      (kimiWinBlocks.match(/# vibeterminal-kimi-notify/g) || []).length === 6 &&
+        (kimiWinBlocks.match(/\[\[hooks\]\]/g) || []).length === 6,
+      "kimi blocks should be six marker-tagged [[hooks]] tables"
+    );
+    assert(
+      kimiWinBlocks.includes(
+        'powershell -NoProfile -ExecutionPolicy Bypass -File "C:/x/notify.ps1"'
+      ),
+      `windows kimi hooks should invoke the notify ps1 via powershell; got ${kimiWinBlocks}`
+    );
+    const kimiPosixBlocks = kimiHookTomlBlocks("/x/notify.sh", false);
+    const kimiEventCommand = (event) => {
+      const match = kimiPosixBlocks.match(
+        new RegExp(`event = '${event}'\\ncommand = (.*)`)
+      );
+      return match ? match[1] : "";
+    };
+    // Same semantics as claude: an undetailed (latch-overriding) turn start,
+    // tool-tagged mid-turn activity, an approval-tagged wait, and
+    // completed/failed turn ends.
+    const kimiTurnStart = kimiEventCommand("UserPromptSubmit");
+    assert(
+      kimiTurnStart.includes("'/x/notify.sh' 'agent.running'") &&
+        !kimiTurnStart.includes("tool"),
+      `kimi UserPromptSubmit must be an undetailed turn start; got ${kimiTurnStart}`
+    );
+    for (const hookEvent of ["PreToolUse", "PostToolUse"]) {
+      const toolCmd = kimiEventCommand(hookEvent);
+      assert(
+        toolCmd.includes("'agent.running' 'tool'"),
+        `kimi ${hookEvent} should fire agent.running with the tool detail; got ${toolCmd}`
+      );
+    }
+    assert(
+      kimiEventCommand("PermissionRequest").includes(
+        "'agent.waiting' 'approval'"
+      ),
+      "kimi PermissionRequest should fire agent.waiting with the approval detail"
+    );
+    assert(
+      kimiEventCommand("Stop").includes("agent.completed") &&
+        kimiEventCommand("StopFailure").includes("agent.failed"),
+      "kimi Stop/StopFailure should fire agent.completed/agent.failed"
+    );
+
+    // The config.toml merge is conservative and idempotent: user content is
+    // preserved byte-for-byte, repeated launches never duplicate blocks, and a
+    // new run refreshes the (per-run) notify program path.
+    const userToml = '[providers.kimi]\napi_key = "sk-x"\n';
+    const mergedToml = mergeKimiHooks(userToml, kimiPosixBlocks);
+    assert(
+      mergeKimiHooks(mergedToml, kimiPosixBlocks) === mergedToml,
+      "kimi config merge should be idempotent"
+    );
+    const strippedToml = stripKimiHooks(mergedToml);
+    assert(
+      strippedToml.trimmed === '[providers.kimi]\napi_key = "sk-x"' &&
+        strippedToml.hasOtherContent,
+      "kimi strip should restore the user's config exactly"
+    );
+    assert(
+      !stripKimiHooks(mergeKimiHooks("", kimiPosixBlocks)).hasOtherContent,
+      "a hooks-only config should strip back to empty"
+    );
+    const refreshedToml = mergeKimiHooks(mergedToml, kimiWinBlocks);
+    assert(
+      refreshedToml.includes("notify.ps1") && !refreshedToml.includes("notify.sh"),
+      "a re-merge should refresh the notify program path"
+    );
+
     const signaledAttention = mapTelemetryToAttention({
       type: "agent.process.exited",
       exitCode: null,
@@ -1935,10 +2025,60 @@ function postTelemetry(callbackUrl, token, payload) {
       "releaseSession should remove pane shim dir"
     );
 
+    // ensureKimiHooks merges the blocks into $KIMI_CODE_HOME/config.toml;
+    // manager.cleanup strips them back out (deleting a config it created).
+    const kimiCreatedHome = path.join(root, "kimi-created-home");
+    const kimiUserHome = path.join(root, "kimi-user-home");
+    fs.mkdirSync(kimiUserHome, { recursive: true });
+    fs.writeFileSync(
+      path.join(kimiUserHome, "config.toml"),
+      '[providers.kimi]\napi_key = "sk-x"\n'
+    );
+
+    process.env.KIMI_CODE_HOME = kimiCreatedHome;
+    await manager.ensureKimiHooks();
+    const kimiCreatedConfigPath = path.join(kimiCreatedHome, "config.toml");
+    assert(
+      fs
+        .readFileSync(kimiCreatedConfigPath, "utf8")
+        .includes("# vibeterminal-kimi-notify"),
+      "ensureKimiHooks should create a hooks-only config when none exists"
+    );
+
+    process.env.KIMI_CODE_HOME = kimiUserHome;
+    await manager.ensureKimiHooks();
+    const kimiUserConfigPath = path.join(kimiUserHome, "config.toml");
+    const kimiUserConfig = fs.readFileSync(kimiUserConfigPath, "utf8");
+    assert(
+      kimiUserConfig.includes('api_key = "sk-x"') &&
+        kimiUserConfig.includes("# vibeterminal-kimi-notify"),
+      "ensureKimiHooks should merge into an existing config without clobbering it"
+    );
+    await manager.ensureKimiHooks();
+    assert(
+      fs.readFileSync(kimiUserConfigPath, "utf8") === kimiUserConfig,
+      "ensureKimiHooks should be idempotent across launches"
+    );
+    if (previousKimiCodeHome === undefined) {
+      delete process.env.KIMI_CODE_HOME;
+    } else {
+      process.env.KIMI_CODE_HOME = previousKimiCodeHome;
+    }
+
     const runDir = manager.runDir;
     manager.cleanup();
     manager = null;
     assert(!fs.existsSync(runDir), "manager.cleanup should remove the run dir");
+    assert(
+      !fs.existsSync(kimiCreatedConfigPath),
+      "cleanup should remove a config.toml it created"
+    );
+    const strippedUserConfig = fs.readFileSync(kimiUserConfigPath, "utf8");
+    assert(
+      strippedUserConfig.includes('api_key = "sk-x"') &&
+        !strippedUserConfig.includes("vibeterminal-kimi-notify"),
+      "cleanup should strip our hook blocks but keep the user's config"
+    );
 
     console.log("Agent telemetry smoke passed");
   } finally {
@@ -1946,6 +2086,11 @@ function postTelemetry(callbackUrl, token, payload) {
       manager.cleanup();
     }
     process.env[pathKey] = previousPath;
+    if (previousKimiCodeHome === undefined) {
+      delete process.env.KIMI_CODE_HOME;
+    } else {
+      process.env.KIMI_CODE_HOME = previousKimiCodeHome;
+    }
     fs.rmSync(root, { recursive: true, force: true });
   }
 })().catch((error) => {

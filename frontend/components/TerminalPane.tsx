@@ -71,8 +71,10 @@ const TELEMETRY_RUNNING_QUIET_MS = 12_000;
 // Generated-title harvest: providers whose session titles can be read back
 // from local metadata with a cheap bounded file read. opencode/cursor already
 // bind their discovery refs with titles, and opencode's confirm path spawns a
-// CLI per call — too heavy to poll.
-const TITLE_REFRESH_PROVIDERS = new Set<string>(["claude", "codex"]);
+// CLI per call — too heavy to poll. kimi binds with a title too, but a fresh
+// session's generated title lands after the first turn, so it joins the cheap
+// file-read polling set.
+const TITLE_REFRESH_PROVIDERS = new Set<string>(["claude", "codex", "kimi"]);
 const TITLE_REFRESH_DELAY_MS = 4000;
 const TITLE_REFRESH_MAX_ATTEMPTS = 5;
 
