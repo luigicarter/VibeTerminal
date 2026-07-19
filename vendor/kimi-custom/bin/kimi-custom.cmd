@@ -1,6 +1,10 @@
 @echo off
 setlocal EnableExtensions
 
+rem Force UTF-8 console output: legacy conhost windows default to the OEM code
+rem page (usually 437), which renders the TUI's UTF-8 box-drawing as mojibake.
+chcp 65001 >nul 2>&1
+
 rem vibeTerminal vendored launcher for the custom Kimi Code fork
 rem (claude-code profile set). Shares the standard kimi-code environment
 rem (~/.kimi-code): login, theme, and session history carry over. Platform-key

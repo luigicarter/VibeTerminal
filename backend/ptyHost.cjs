@@ -34,7 +34,21 @@ function shellForPlatform() {
   if (process.platform === "win32") {
     return {
       file: process.env.VIBE_TERMINAL_SHELL || "powershell.exe",
-      args: ["-NoLogo"]
+      // ConPTY consoles default to the OEM code page (usually 437), which
+      // mangles the UTF-8 box-drawing output of node-based TUIs (kimi,
+      // claude) into mojibake before xterm.js ever sees it. Run interactive
+      // PowerShell sessions with UTF-8 console encodings (the silent
+      // equivalent of `chcp 65001`) so those bytes decode correctly.
+      args: /powershell|pwsh/i.test(
+        process.env.VIBE_TERMINAL_SHELL || "powershell.exe"
+      )
+        ? [
+            "-NoLogo",
+            "-NoExit",
+            "-Command",
+            "[Console]::InputEncoding=[Text.Encoding]::UTF8; [Console]::OutputEncoding=[Text.Encoding]::UTF8"
+          ]
+        : ["-NoLogo"]
     };
   }
 
