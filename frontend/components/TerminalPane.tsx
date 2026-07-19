@@ -173,6 +173,10 @@ export default function TerminalPane({
   const fitFrameRef = useRef<number | null>(null);
   const fitAndResizeRef = useRef<(() => void) | null>(null);
   const lastSentSizeRef = useRef<{ cols: number; rows: number } | null>(null);
+  // Whether a fit has ever measured this pane's real bounds. Until then
+  // terminal.cols/rows are xterm's 80x24 construction default, which must
+  // never be advertised to the PTY (see the create() call).
+  const fitMeasuredRef = useRef(false);
   const threadLookupTimeoutRef = useRef<number | null>(null);
   const threadLookupAfterRef = useRef(
     session.threadLookupStartedAt ?? session.createdAt
@@ -558,8 +562,18 @@ export default function TerminalPane({
         return;
       }
 
+      // A pane without laid-out bounds (hidden workspace, zero-width start of
+      // a CSS transition) makes fit() a silent no-op that leaves xterm at its
+      // 80x24 default. Skip instead of recording that default as a real size;
+      // the ResizeObserver re-runs this once the pane has actual bounds.
+      const host = containerRef.current;
+      if (!host || host.clientWidth === 0 || host.clientHeight === 0) {
+        return;
+      }
+
       try {
         fitAddon.fit();
+        fitMeasuredRef.current = true;
         const size = {
           cols: terminal.cols,
           rows: terminal.rows
@@ -679,6 +693,15 @@ export default function TerminalPane({
           // "starting"/"running" pill can't outlive the remount; live output
           // then drives the heuristic kinds normally.
           armTelemetrySettle();
+          // The replayed bytes were rendered for the PTY's historical sizes.
+          // Force the next fit to re-send this pane's true size even if it
+          // matches what this component believes was already sent — a live
+          // full-screen TUI painting for a stale PTY width (missed resize,
+          // pre-fix create default) shreds the pane until the sizes agree.
+          // The backend dedups an equal-size resize, so this is free when
+          // nothing drifted.
+          lastSentSizeRef.current = null;
+          scheduleFitAndResize();
         } else {
           terminalExitedRef.current = true;
           terminal.writeln("");
@@ -850,10 +873,12 @@ export default function TerminalPane({
     if (paneFrame) {
       paneFrame.style.transition = paneFrameTransition ?? "";
     }
-    lastSentSizeRef.current = {
-      cols: terminal.cols,
-      rows: terminal.rows
-    };
+    if (fitMeasuredRef.current) {
+      lastSentSizeRef.current = {
+        cols: terminal.cols,
+        rows: terminal.rows
+      };
+    }
     const lookupStartedAt = Date.now();
     threadLookupAfterRef.current = lookupStartedAt;
     if (isThreadedAgentKind(session.kind) && !session.threadRef?.id) {
@@ -889,8 +914,14 @@ export default function TerminalPane({
         openFusion: session.openFusion,
         openFusionPlannerModel: session.openFusionPlannerModel,
         openFusionExecutorModel: session.openFusionExecutorModel,
-        cols: terminalRef.current.cols,
-        rows: terminalRef.current.rows
+        // Advertise a size only once a real fit has measured the pane.
+        // Shipping xterm's 80x24 pre-fit default here resizes a LIVE PTY down
+        // to it on the backend's remount dedup path — a full-screen TUI
+        // (kimi, claude) then repaints for the wrong width and shreds the
+        // pane. Omitted sizes leave the existing PTY size untouched (fresh
+        // spawns fall back to the ptyHost default until the first fit lands).
+        cols: fitMeasuredRef.current ? terminalRef.current.cols : undefined,
+        rows: fitMeasuredRef.current ? terminalRef.current.rows : undefined
       });
       scheduleThreadLookup(5000);
     })();
