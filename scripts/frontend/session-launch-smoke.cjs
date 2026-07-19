@@ -303,6 +303,36 @@ assert.strictEqual(
 );
 assert.strictEqual(
   buildLaunchCommand(
+    session({
+      kind: "kimi-custom",
+      command: "kimi-custom",
+      nextLaunchMode: "resume",
+      threadRef: { id: "session_def-456" }
+    })
+  ),
+  "kimi-custom --session session_def-456",
+  "kimi-custom resume with an id should build a resume command"
+);
+assert.strictEqual(
+  buildLaunchCommand(
+    session({
+      kind: "kimi-custom",
+      command: "kimi-custom",
+      nextLaunchMode: "resume"
+    })
+  ),
+  "kimi-custom",
+  "kimi-custom resume without an id should fall back to a plain launch"
+);
+assert.strictEqual(
+  buildLaunchCommand(
+    session({ kind: "kimi-custom", command: "", nextLaunchMode: "new" })
+  ),
+  "kimi-custom",
+  "kimi-custom new launch should fall back to the kimi-custom binary"
+);
+assert.strictEqual(
+  buildLaunchCommand(
     session({ kind: "terminal", command: "ls -la", nextLaunchMode: "new" })
   ),
   "ls -la",

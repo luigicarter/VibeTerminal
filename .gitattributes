@@ -1,0 +1,7 @@
+# Vendored kimi-custom runtime: keep the prebuilt bundle and native prebuilds
+# byte-identical to the fork (no line-ending conversion), and pin each launcher
+# wrapper to the endings its shell requires.
+vendor/kimi-custom/dist/** -text
+vendor/kimi-custom/native/** -text
+vendor/kimi-custom/bin/kimi-custom text eol=lf
+vendor/kimi-custom/bin/kimi-custom.cmd text eol=crlf

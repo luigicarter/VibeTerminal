@@ -8,3 +8,8 @@ npm-debug.log*
 # Embedded Codex binary (~300 MB) — populated by `npm run prepare:codex-bin`,
 # bundled into the installer via electron-builder extraResources.
 vendor/codex-bin/
+# Vendored custom Kimi Code fork runtime: the top-level `dist/` rule would hide
+# the prebuilt bundle, so re-include it. The API key file is a local secret —
+# never commit it.
+!vendor/kimi-custom/dist/
+vendor/kimi-custom/api.txt

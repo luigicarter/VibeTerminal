@@ -188,6 +188,10 @@ assert.strictEqual(
   false
 );
 assert.strictEqual(
+  shouldUseTerminalEventAttention({ id: "kimi-custom", kind: "kimi-custom" }),
+  false
+);
+assert.strictEqual(
   shouldMarkAttentionUnread("one", "one", ["one"], completed),
   false
 );
@@ -330,6 +334,7 @@ assert.strictEqual(isTurnTelemetryKind("claude"), true);
 assert.strictEqual(isTurnTelemetryKind("opencode"), true);
 assert.strictEqual(isTurnTelemetryKind("cursor"), true);
 assert.strictEqual(isTurnTelemetryKind("kimi"), true);
+assert.strictEqual(isTurnTelemetryKind("kimi-custom"), true);
 assert.strictEqual(isTurnTelemetryKind("codex"), false);
 assert.strictEqual(isTurnTelemetryKind("terminal"), false);
 
@@ -555,6 +560,10 @@ assert.strictEqual(
 );
 assert.strictEqual(
   statusAfterUserInput({ kind: "kimi", status: "running" }, "\x1b"),
+  "waiting"
+);
+assert.strictEqual(
+  statusAfterUserInput({ kind: "kimi-custom", status: "running" }, "\x1b"),
   "waiting"
 );
 assert.strictEqual(

@@ -11,7 +11,8 @@ const THREADED_AGENT_KINDS: AgentThreadProvider[] = [
   "claude",
   "opencode",
   "cursor",
-  "kimi"
+  "kimi",
+  "kimi-custom"
 ];
 
 export function isThreadedAgentKind(
@@ -170,6 +171,17 @@ export function buildLaunchCommand(
     }
 
     return session.command.trim() || "kimi";
+  }
+
+  if (session.kind === "kimi-custom") {
+    if (mode === "resume") {
+      const ref = resumeArg(session);
+      if (ref) {
+        return `kimi-custom --session ${commandArg(ref, platform)}`;
+      }
+    }
+
+    return session.command.trim() || "kimi-custom";
   }
 
   return session.command.trim();

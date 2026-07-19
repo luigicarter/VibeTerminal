@@ -349,6 +349,24 @@ function resolveCodexBin() {
   return "codex";
 }
 
+// Resolve the vendored custom Kimi Code fork (prebuilt bundle + launcher
+// wrapper): packaged builds use resources/kimi-custom, dev the repo's
+// vendor/kimi-custom. A missing bundle makes the launch gate a no-op — the
+// typed `kimi-custom` command then fails in the pane like any missing CLI.
+function resolveKimiCustomDir() {
+  const dir = app.isPackaged
+    ? path.join(process.resourcesPath, "kimi-custom")
+    : path.join(__dirname, "..", "vendor", "kimi-custom");
+  try {
+    if (fs.existsSync(path.join(dir, "dist", "main.mjs"))) {
+      return dir;
+    }
+  } catch {
+    // Fall through to null.
+  }
+  return null;
+}
+
 function getAppIconPath() {
   return path.join(__dirname, "..", "frontend", "assets", "vibeterminal-logo.ico");
 }
@@ -398,6 +416,16 @@ function getBuildSupervisorDir() {
   return (
     process.env.VIBE_BUILD_SUPERVISOR_DIR ||
     path.join(app.getPath("userData"), "builds")
+  );
+}
+
+// App-owned home for the vendored custom Kimi Code fork (kimi-custom): config
+// (telemetry hooks), sessions, and credentials all live here so the fork never
+// reads or writes the user's stock ~/.kimi-code. Env override = smoke tests.
+function getKimiCustomHome() {
+  return (
+    process.env.VIBE_KIMI_CUSTOM_HOME ||
+    path.join(app.getPath("userData"), "kimi-custom-home")
   );
 }
 
@@ -1245,7 +1273,9 @@ function startAgentThreadHost() {
   const nodeBinary = getNodeHostCommand();
   agentThreadHost = spawn(nodeBinary, [getAgentThreadHostPath()], {
     cwd: getDefaultRuntimeCwd(),
-    env: getNodeHostEnv(),
+    // kimi-custom discovery reads the app-owned home from the injected env;
+    // the pane launch gate points the fork itself at the same directory.
+    env: { ...getNodeHostEnv(), VIBE_KIMI_CUSTOM_HOME: getKimiCustomHome() },
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true
   });
@@ -1706,13 +1736,14 @@ ipcMain.handle("agent-thread:latest", (_event, payload) => {
 });
 
 ipcMain.handle("agent-thread:list", (_event, payload) => {
-  // Saved-chat history for the Fusion resume picker: claude/codex/kimi chats
+  // Saved-chat history for the Fusion resume picker: claude/codex/kimi/kimi-custom chats
   // live in the user's own global stores (exactly where `--resume` reads
   // from), so the lookup passes straight through.
   if (
     payload?.provider === "claude" ||
     payload?.provider === "codex" ||
-    payload?.provider === "kimi"
+    payload?.provider === "kimi" ||
+    payload?.provider === "kimi-custom"
   ) {
     return findLatestAgentThread({ ...payload, list: true });
   }
@@ -1811,10 +1842,51 @@ ipcMain.handle("terminal:create", async (_event, payload) => {
     telemetry.ensureCursorProjectHooks(launchCwd.cwd).catch(() => {});
   }
 
+  // kimi-custom panes run the vendored fork: its bin dir joins the session
+  // PATH (and the shim runner's ORIGINAL_PATH) so the shim wrapper resolves
+  // the real launcher, KIMI_CODE_HOME points at the app-owned home, and our
+  // hooks merge there — the stock kimi home below is never touched.
+  if (
+    typeof payload.command === "string" &&
+    /\bkimi-custom\b/.test(payload.command)
+  ) {
+    const kimiCustomDir = resolveKimiCustomDir();
+    if (kimiCustomDir && instrumentation?.env) {
+      const binDir = path.join(kimiCustomDir, "bin");
+      const pathKey = Object.keys(instrumentation.env).find(
+        (key) => key.toLowerCase() === "path"
+      );
+      if (pathKey) {
+        // The vendored bin must sit AFTER the shim dir: the kimi-custom shim
+        // wrapper has to win PATH resolution so the pane keeps the shim's
+        // process-exit fallback; the runner then finds the real launcher via
+        // VIBE_TERMINAL_ORIGINAL_PATH.
+        const currentPath = instrumentation.env[pathKey] || "";
+        const shimPrefix = `${instrumentation.shimDir}${path.delimiter}`;
+        const rest = currentPath.startsWith(shimPrefix)
+          ? currentPath.slice(shimPrefix.length)
+          : currentPath;
+        instrumentation = {
+          ...instrumentation,
+          env: {
+            ...instrumentation.env,
+            [pathKey]: `${instrumentation.shimDir}${path.delimiter}${binDir}${path.delimiter}${rest}`,
+            VIBE_TERMINAL_ORIGINAL_PATH: `${binDir}${path.delimiter}${instrumentation.env.VIBE_TERMINAL_ORIGINAL_PATH || ""}`,
+            KIMI_CODE_HOME: getKimiCustomHome(),
+            ...(app.isPackaged
+              ? { VIBE_KIMI_CUSTOM_NODE: process.execPath }
+              : {})
+          }
+        };
+      }
+    }
+    telemetry.ensureKimiCustomHooks(getKimiCustomHome()).catch(() => {});
+  }
+
   // Kimi's hooks live in the user's config.toml ($KIMI_CODE_HOME or
   // ~/.kimi-code) rather than per-project, so merge ours (idempotently)
   // whenever a kimi pane launches — no cwd gate needed.
-  if (typeof payload.command === "string" && /\bkimi\b/.test(payload.command)) {
+  if (typeof payload.command === "string" && /\bkimi\b(?!-)/.test(payload.command)) {
     telemetry.ensureKimiHooks().catch(() => {});
   }
 

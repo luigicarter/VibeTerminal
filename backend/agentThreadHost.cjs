@@ -894,10 +894,21 @@ function kimiHome() {
   return process.env.KIMI_CODE_HOME || path.join(os.homedir(), ".kimi-code");
 }
 
-function parseKimiSessionIndex() {
+// The vendored custom fork (kimi-custom) keeps the identical on-disk layout in
+// its own app-owned home: main.cjs injects VIBE_KIMI_CUSTOM_HOME (userData
+// kimi-custom-home) when spawning this host; the fallback matches the
+// wrapper's standalone default. Read at call time so tests can repoint it.
+function kimiCustomHome() {
+  return (
+    process.env.VIBE_KIMI_CUSTOM_HOME ||
+    path.join(os.homedir(), ".kimi-code-custom")
+  );
+}
+
+function parseKimiSessionIndex(home = kimiHome()) {
   let raw;
   try {
-    raw = fs.readFileSync(path.join(kimiHome(), "session_index.jsonl"), "utf8");
+    raw = fs.readFileSync(path.join(home, "session_index.jsonl"), "utf8");
   } catch {
     return { entries: [], readable: false };
   }
@@ -949,9 +960,11 @@ function readKimiSessionState(sessionDir) {
 // The latest resumable Kimi session for a folder. The index is append-ordered,
 // but updatedAt from state.json is the real recency signal (a resumed older
 // session jumps ahead), so sort on it. Resume launches `kimi --session <id>`.
-function findLatestKimiThread(cwd, after = 0, excludeIds = []) {
+function findLatestKimiThread(cwd, after = 0, excludeIds = [], options = {}) {
+  const home = options.home || kimiHome();
+  const provider = options.provider || "kimi";
   const excluded = toExcludedSet(excludeIds);
-  const { entries } = parseKimiSessionIndex();
+  const { entries } = parseKimiSessionIndex(home);
   const matches = [];
 
   for (const entry of entries) {
@@ -976,7 +989,7 @@ function findLatestKimiThread(cwd, after = 0, excludeIds = []) {
   matches.sort((a, b) => b.updatedAt - a.updatedAt);
   const latest = matches[0];
   return {
-    provider: "kimi",
+    provider,
     id: latest.id,
     title: latest.title,
     createdAt: latest.createdAt,
@@ -986,9 +999,11 @@ function findLatestKimiThread(cwd, after = 0, excludeIds = []) {
 
 // Every Kimi session for a folder, newest first — the resume picker's data
 // source. An empty or unreadable index is a real empty history, not a failure.
-function listKimiThreads(cwd, after = 0, excludeIds = []) {
+function listKimiThreads(cwd, after = 0, excludeIds = [], options = {}) {
+  const home = options.home || kimiHome();
+  const provider = options.provider || "kimi";
   const excluded = toExcludedSet(excludeIds);
-  const { entries } = parseKimiSessionIndex();
+  const { entries } = parseKimiSessionIndex(home);
   const threads = [];
 
   for (const entry of entries) {
@@ -1000,7 +1015,7 @@ function listKimiThreads(cwd, after = 0, excludeIds = []) {
       continue;
     }
     threads.push({
-      provider: "kimi",
+      provider,
       id: entry.sessionId,
       title: state.title,
       createdAt: state.createdAt,
@@ -1012,8 +1027,8 @@ function listKimiThreads(cwd, after = 0, excludeIds = []) {
   return { status: "found", threads };
 }
 
-function placeholderKimiRef(id) {
-  return { provider: "kimi", id, title: "", createdAt: 0, updatedAt: 0 };
+function placeholderKimiRef(id, provider = "kimi") {
+  return { provider, id, title: "", createdAt: 0, updatedAt: 0 };
 }
 
 // Kimi resumes with `kimi --session <id>`. confirmKimiThread answers "does this
@@ -1021,18 +1036,20 @@ function placeholderKimiRef(id) {
 // instead of erroring in the live shell. Mirrors the other providers'
 // conservative contract: report "missing" only when the index is readable and
 // the id is absent; an unreadable index stays "found" and lets resume try.
-function confirmKimiThread(cwd, id) {
+function confirmKimiThread(cwd, id, options = {}) {
+  const home = options.home || kimiHome();
+  const provider = options.provider || "kimi";
   const target = String(id || "");
   if (!target) {
     return { status: "missing" };
   }
 
-  const { entries, readable } = parseKimiSessionIndex();
+  const { entries, readable } = parseKimiSessionIndex(home);
   const entry = entries.find((candidate) => candidate.sessionId === target);
   if (!entry) {
     return readable
       ? { status: "missing" }
-      : { status: "found", threadRef: placeholderKimiRef(target) };
+      : { status: "found", threadRef: placeholderKimiRef(target, provider) };
   }
 
   const state = readKimiSessionState(entry.sessionDir);
@@ -1040,14 +1057,37 @@ function confirmKimiThread(cwd, id) {
     status: "found",
     threadRef: state
       ? {
-          provider: "kimi",
+          provider,
           id: target,
           title: state.title,
           createdAt: state.createdAt,
           updatedAt: state.updatedAt
         }
-      : placeholderKimiRef(target)
+      : placeholderKimiRef(target, provider)
   };
+}
+
+// kimi-custom (the vendored custom fork) reuses the kimi parsers against its
+// own app-owned home; only the home and the provider label differ.
+function findLatestKimiCustomThread(cwd, after = 0, excludeIds = []) {
+  return findLatestKimiThread(cwd, after, excludeIds, {
+    home: kimiCustomHome(),
+    provider: "kimi-custom"
+  });
+}
+
+function listKimiCustomThreads(cwd, after = 0, excludeIds = []) {
+  return listKimiThreads(cwd, after, excludeIds, {
+    home: kimiCustomHome(),
+    provider: "kimi-custom"
+  });
+}
+
+function confirmKimiCustomThread(cwd, id) {
+  return confirmKimiThread(cwd, id, {
+    home: kimiCustomHome(),
+    provider: "kimi-custom"
+  });
 }
 
 async function findLatestAgentThread(payload) {
@@ -1149,6 +1189,28 @@ async function findLatestAgentThread(payload) {
         };
   }
 
+  if (payload.provider === "kimi-custom") {
+    // Confirm whether a specific session id is still resumable so the launcher
+    // can self-heal instead of running a doomed `kimi-custom --session <id>`.
+    if (payload.confirmId) {
+      return confirmKimiCustomThread(cwd, payload.confirmId);
+    }
+
+    // History listing for the resume picker: every session for this folder,
+    // newest first.
+    if (payload.list) {
+      return listKimiCustomThreads(cwd, after, payload.excludeIds);
+    }
+
+    const threadRef = findLatestKimiCustomThread(cwd, after, payload.excludeIds);
+    return threadRef
+      ? { status: "found", threadRef }
+      : {
+          status: "pending",
+          message: "Waiting for Kimi Custom to create its local session metadata."
+        };
+  }
+
   if (payload.provider === "kimi") {
     // Confirm whether a specific session id is still resumable so the launcher
     // can self-heal instead of running a doomed `kimi --session <id>`.
@@ -1246,6 +1308,7 @@ module.exports = {
   collectJsonlFiles,
   confirmClaudeThread,
   confirmCursorThread,
+  confirmKimiCustomThread,
   confirmKimiThread,
   confirmOpenCodeThread,
   encodeCursorProjectDir,
@@ -1253,10 +1316,12 @@ module.exports = {
   findLatestAgentThread,
   findLatestClaudeThread,
   findLatestCursorThread,
+  findLatestKimiCustomThread,
   findLatestKimiThread,
   findLatestOpenCodeThread,
   isSamePath,
   listClaudeThreads,
+  listKimiCustomThreads,
   listKimiThreads,
   listOpenCodeThreads,
   locateClaudeTranscriptFile,

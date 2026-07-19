@@ -1,0 +1,26 @@
+#!/bin/sh
+# vibeTerminal vendored launcher for the custom Kimi Code fork
+# (kimi-k3 on Moonshot's Anthropic-compatible endpoint, claude-code profile set).
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+
+# Isolated config/session home. vibeTerminal injects KIMI_CODE_HOME per pane
+# (app-owned dir under userData); standalone runs fall back to a per-user dir.
+: "${KIMI_CODE_HOME:=$HOME/.kimi-code-custom}"
+
+# Model defaults (all overridable from the environment).
+: "${KIMI_MODEL_PROVIDER_TYPE:=anthropic}"
+: "${KIMI_MODEL_BASE_URL:=https://api.moonshot.ai/anthropic}"
+: "${KIMI_MODEL_NAME:=kimi-k3}"
+: "${KIMI_MODEL_MAX_CONTEXT_SIZE:=1048576}"
+export KIMI_CODE_HOME KIMI_MODEL_PROVIDER_TYPE KIMI_MODEL_BASE_URL KIMI_MODEL_NAME KIMI_MODEL_MAX_CONTEXT_SIZE
+
+# API key: an existing env var wins; otherwise read the gitignored api.txt next
+# to this package (copy it there once — it is never committed to the repo).
+if [ -z "${KIMI_MODEL_API_KEY:-}" ] && [ -f "$ROOT/api.txt" ]; then
+	KIMI_MODEL_API_KEY="$(tr -d '[:space:]' < "$ROOT/api.txt")"
+	export KIMI_MODEL_API_KEY
+fi
+
+NODE_BIN="${VIBE_KIMI_CUSTOM_NODE:-node}"
+# Harmless for a real node binary; lets Electron's exe act as node when packaged.
+ELECTRON_RUN_AS_NODE=1 exec "$NODE_BIN" "$ROOT/dist/main.mjs" "$@"

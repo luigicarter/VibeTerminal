@@ -7,6 +7,9 @@ export type AgentKind =
   | "opencode"
   | "aider"
   | "kimi"
+  // The vendored custom Kimi Code fork (claude-code profile set): launches the
+  // vendored `kimi-custom` binary with its own app-owned home, not PATH kimi.
+  | "kimi-custom"
   // Selection-only kind for the ribbon: a Fusion launch creates a real
   // `kind: "claude"` session with `fusion: true`, so all claude behavior
   // (telemetry, resume, working-state) applies unchanged. No session is ever
@@ -18,7 +21,7 @@ export type AgentKind =
   // pane-scoped OpenCode config.
   | "openfusion";
 
-export type AgentThreadProvider = "codex" | "claude" | "opencode" | "cursor" | "kimi";
+export type AgentThreadProvider = "codex" | "claude" | "opencode" | "cursor" | "kimi" | "kimi-custom";
 
 export type AgentLaunchMode = "new" | "resume";
 

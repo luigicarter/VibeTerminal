@@ -25,6 +25,7 @@
     "smoke:backend:codex-discovery": "node scripts/backend/codex-discovery-smoke.cjs",
     "smoke:backend:claude-discovery": "node scripts/backend/claude-discovery-smoke.cjs",
     "smoke:backend:kimi-discovery": "node scripts/backend/kimi-discovery-smoke.cjs",
+    "smoke:backend:kimi-custom-discovery": "node scripts/backend/kimi-custom-discovery-smoke.cjs",
     "smoke:backend:updates": "node scripts/backend/update-smoke.cjs",
     "smoke:backend:fusion-appserver": "node scripts/backend/fusion-appserver-smoke.cjs",
     "smoke:backend:fusion-launch": "node scripts/backend/fusion-launch-smoke.cjs",
@@ -94,6 +95,10 @@
       {
         "from": "vendor/codex-bin",
         "to": "codex-bin"
+      },
+      {
+        "from": "vendor/kimi-custom",
+        "to": "kimi-custom"
       }
     ],
     "files": [

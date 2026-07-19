@@ -11,7 +11,7 @@ const SHIM_BASE_DIR =
 const OWNER_MARKER = ".vibe-agent-shims.json";
 const MAX_EVENT_BYTES = 64 * 1024;
 const MAX_SESSION_ID_BYTES = 512;
-const PROVIDERS = ["codex", "claude", "opencode", "cursor-agent", "kimi"];
+const PROVIDERS = ["codex", "claude", "opencode", "cursor-agent", "kimi", "kimi-custom"];
 const OPEN_FUSION_MODEL_ID_PATTERN = /^[A-Za-z0-9._:/@+-]+$/;
 // Open Fusion deliberately ships with NO default models: assuming a vendor pair
 // on pane open fails the moment the app-owned credential store is empty, and it
@@ -2875,6 +2875,9 @@ function buildClaudeSettingsJson(scriptPath, isWin) {
 // the VIBE_TERMINAL_* env is absent, so the hooks stay inert for plain `kimi`
 // runs outside vibeTerminal panes.
 const KIMI_HOOK_MARKER = "vibeterminal-kimi-notify";
+// The vendored custom fork (kimi-custom) gets the identical hook set under its
+// own marker, merged into its own app-owned home — never the stock kimi config.
+const KIMI_CUSTOM_HOOK_MARKER = "vibeterminal-kimi-custom-notify";
 
 // TOML string for a hook command: a literal string when the value allows it (no
 // escaping at all), otherwise a basic string with the escapes TOML needs. The
@@ -2905,7 +2908,7 @@ function kimiHookCommand(notifyProgramPath, isWin, type, detail) {
 // Mirrors the claude settings events one-for-one. `[[hooks]]` entries accept
 // only event/matcher/command/timeout — a malformed edit fails the whole config
 // for kimi, so the merge below never touches anything outside our own blocks.
-function kimiHookTomlBlocks(notifyProgramPath, isWin) {
+function kimiHookTomlBlocks(notifyProgramPath, isWin, marker = KIMI_HOOK_MARKER) {
   const entries = [
     { event: "UserPromptSubmit", type: "agent.running" },
     { event: "PreToolUse", type: "agent.running", detail: "tool" },
@@ -2917,7 +2920,7 @@ function kimiHookTomlBlocks(notifyProgramPath, isWin) {
   return entries
     .map(({ event, type, detail }) =>
       [
-        `# ${KIMI_HOOK_MARKER}`,
+        `# ${marker}`,
         "[[hooks]]",
         `event = ${kimiTomlString(event)}`,
         `command = ${kimiTomlString(
@@ -2929,18 +2932,18 @@ function kimiHookTomlBlocks(notifyProgramPath, isWin) {
     .join("\n\n");
 }
 
-// Strip every block we own: a `# vibeterminal-kimi-notify` comment claims the
+// Strip every block we own: a marker comment claims the
 // `[[hooks]]` table that follows it, up to the next table header or EOF.
 // Returns the trimmed text plus whether anything other than our contribution
 // remains, so the caller can delete a config file vibeTerminal created.
-function stripKimiHooks(existingToml) {
+function stripKimiHooks(existingToml, marker = KIMI_HOOK_MARKER) {
   const source = typeof existingToml === "string" ? existingToml : "";
   const eol = source.includes("\r\n") ? "\r\n" : "\n";
   const lines = source.split(/\r\n|\n/);
   const kept = [];
   let i = 0;
   while (i < lines.length) {
-    if (lines[i].trim() === `# ${KIMI_HOOK_MARKER}`) {
+    if (lines[i].trim() === `# ${marker}`) {
       i += 1;
       // The marker owns the table that follows it: the [[hooks]] header plus
       // the body up to the next table header or EOF. A marker not followed by
@@ -2951,7 +2954,7 @@ function stripKimiHooks(existingToml) {
         while (
           i < lines.length &&
           !/^\s*\[/.test(lines[i]) &&
-          lines[i].trim() !== `# ${KIMI_HOOK_MARKER}`
+          lines[i].trim() !== `# ${marker}`
         ) {
           i += 1;
         }
@@ -2974,10 +2977,10 @@ function stripKimiHooks(existingToml) {
 // current blocks (a refreshed notify path always lands, and repeated launches
 // never accumulate duplicates). User content is preserved byte-for-byte
 // outside our blocks.
-function mergeKimiHooks(existingToml, blocksText) {
+function mergeKimiHooks(existingToml, blocksText, marker = KIMI_HOOK_MARKER) {
   const source = typeof existingToml === "string" ? existingToml : "";
   const eol = source.includes("\r\n") ? "\r\n" : "\n";
-  const { trimmed } = stripKimiHooks(source);
+  const { trimmed } = stripKimiHooks(source, marker);
   const blocks = String(blocksText || "")
     .split("\n")
     .join(eol);
@@ -3234,6 +3237,7 @@ function createAgentTelemetryManager(options = {}) {
   // Kimi config.toml files we have merged our hook blocks into this run —
   // same created-by-us tracking as cursorHookFiles so cleanup can undo it.
   const kimiHookFiles = new Map();
+  const kimiCustomHookFiles = new Map();
   const sessions = new Map();
   const fusionAdapterControls = new Map();
   const fusionAdapterModes = new Map();
@@ -4158,12 +4162,74 @@ function createAgentTelemetryManager(options = {}) {
     kimiHookFiles.clear();
   }
 
+  // kimi-custom (the vendored custom fork) gets the identical hook set, merged
+  // into its own app-owned home under a distinct marker so the two configs
+  // never mix. The launch gate passes the app-owned home explicitly; the
+  // env/fallback mirror the wrapper's standalone default (~/.kimi-code-custom).
+  async function ensureKimiCustomHooks(homeOverride) {
+    try {
+      await ready;
+      const home =
+        homeOverride ||
+        process.env.VIBE_KIMI_CUSTOM_HOME ||
+        path.join(os.homedir(), ".kimi-code-custom");
+      const file = path.join(home, "config.toml");
+
+      let raw = null;
+      try {
+        raw = fs.readFileSync(file, "utf8");
+      } catch {
+        raw = null;
+      }
+
+      const merged = mergeKimiHooks(
+        raw || "",
+        kimiHookTomlBlocks(notifyProgramPath, isWin, KIMI_CUSTOM_HOOK_MARKER),
+        KIMI_CUSTOM_HOOK_MARKER
+      );
+      if (merged === raw) {
+        return;
+      }
+      fs.mkdirSync(home, { recursive: true });
+      fs.writeFileSync(file, merged);
+      if (!kimiCustomHookFiles.has(file)) {
+        kimiCustomHookFiles.set(file, { createdByUs: raw === null });
+      }
+    } catch {
+      // Best-effort; never let hook install break a terminal launch.
+    }
+  }
+
+  function cleanupKimiCustomHooks() {
+    for (const [file, info] of kimiCustomHookFiles) {
+      try {
+        const raw = fs.readFileSync(file, "utf8");
+        const { trimmed, hasOtherContent } = stripKimiHooks(
+          raw,
+          KIMI_CUSTOM_HOOK_MARKER
+        );
+        if (info.createdByUs && !hasOtherContent) {
+          // We created this config purely for our hooks; remove it rather than
+          // leave a dangling file behind.
+          fs.rmSync(file, { force: true });
+        } else {
+          const eol = raw.includes("\r\n") ? "\r\n" : "\n";
+          fs.writeFileSync(file, `${trimmed}${eol}`);
+        }
+      } catch {
+        // File gone, unreadable, or malformed — nothing safe to do.
+      }
+    }
+    kimiCustomHookFiles.clear();
+  }
+
   function cleanup() {
     for (const sessionId of Array.from(sessions.keys())) {
       releaseSession(sessionId);
     }
     cleanupCursorHooks();
     cleanupKimiHooks();
+    cleanupKimiCustomHooks();
     if (server) {
       server.close();
       server = null;
@@ -4178,6 +4244,7 @@ function createAgentTelemetryManager(options = {}) {
     cleanup,
     ensureCursorProjectHooks,
     ensureKimiHooks,
+    ensureKimiCustomHooks,
     // Sync on purpose: thread-discovery lookups need the app-owned OpenCode
     // home paths without awaiting the telemetry bootstrap.
     getOpenFusionOpencodeHome: () => ensureOpenFusionOpencodeHome(openFusionBaseDir),

@@ -479,6 +479,16 @@ function postTelemetry(callbackUrl, token, payload) {
       "session id should be present in shim env"
     );
 
+    // The kimi-custom shim wrapper lands alongside the other providers too, so
+    // PATH interception gives the fork's panes the process-exit fallback.
+    const kimiCustomWrapper = path.join(
+      instrumentation.shimDir,
+      process.platform === "win32" ? "kimi-custom.cmd" : "kimi-custom"
+    );
+    assert(
+      fs.existsSync(kimiCustomWrapper),
+      "prepareSession should write a kimi-custom shim wrapper"
+    );
     // The kimi shim wrapper lands alongside the other providers, so PATH
     // interception gives kimi panes the process-exit fallback too.
     const kimiWrapper = path.join(
@@ -2008,6 +2018,38 @@ function postTelemetry(callbackUrl, token, payload) {
       "a re-merge should refresh the notify program path"
     );
 
+    // The kimi-custom fork gets the same hook set under its own marker, and
+    // the two markers never strip each other's entries.
+    const kimiCustomBlocks = kimiHookTomlBlocks(
+      "/x/notify.sh",
+      false,
+      "vibeterminal-kimi-custom-notify"
+    );
+    assert(
+      (kimiCustomBlocks.match(/# vibeterminal-kimi-custom-notify/g) || [])
+        .length === 6,
+      "kimi-custom blocks should be six marker-tagged [[hooks]] tables"
+    );
+    const bothMarkers = mergeKimiHooks(
+      mergedToml,
+      kimiCustomBlocks,
+      "vibeterminal-kimi-custom-notify"
+    );
+    assert(
+      bothMarkers.includes("# vibeterminal-kimi-notify") &&
+        bothMarkers.includes("# vibeterminal-kimi-custom-notify"),
+      "merging kimi-custom blocks must preserve the stock kimi ones"
+    );
+    const strippedCustom = stripKimiHooks(
+      bothMarkers,
+      "vibeterminal-kimi-custom-notify"
+    );
+    assert(
+      strippedCustom.trimmed.includes("# vibeterminal-kimi-notify") &&
+        !strippedCustom.trimmed.includes("# vibeterminal-kimi-custom-notify"),
+      "stripping the kimi-custom marker must leave stock kimi blocks intact"
+    );
+
     const signaledAttention = mapTelemetryToAttention({
       type: "agent.process.exited",
       exitCode: null,
@@ -2065,6 +2107,24 @@ function postTelemetry(callbackUrl, token, payload) {
       process.env.KIMI_CODE_HOME = previousKimiCodeHome;
     }
 
+    // ensureKimiCustomHooks does the same into the fork's own home (explicit
+    // override, mirroring how the launch gate passes the app-owned home), and
+    // manager.cleanup removes a config it created.
+    const kimiCustomCreatedHome = path.join(root, "kimi-custom-created-home");
+    await manager.ensureKimiCustomHooks(kimiCustomCreatedHome);
+    const kimiCustomConfigPath = path.join(kimiCustomCreatedHome, "config.toml");
+    const kimiCustomConfig = fs.readFileSync(kimiCustomConfigPath, "utf8");
+    assert(
+      kimiCustomConfig.includes("# vibeterminal-kimi-custom-notify") &&
+        !kimiCustomConfig.includes("# vibeterminal-kimi-notify"),
+      "ensureKimiCustomHooks should create a hooks-only config under its own marker"
+    );
+    await manager.ensureKimiCustomHooks(kimiCustomCreatedHome);
+    assert(
+      fs.readFileSync(kimiCustomConfigPath, "utf8") === kimiCustomConfig,
+      "ensureKimiCustomHooks should be idempotent across launches"
+    );
+
     const runDir = manager.runDir;
     manager.cleanup();
     manager = null;
@@ -2078,6 +2138,11 @@ function postTelemetry(callbackUrl, token, payload) {
       strippedUserConfig.includes('api_key = "sk-x"') &&
         !strippedUserConfig.includes("vibeterminal-kimi-notify"),
       "cleanup should strip our hook blocks but keep the user's config"
+    );
+
+    assert(
+      !fs.existsSync(kimiCustomConfigPath),
+      "cleanup should remove a kimi-custom config.toml it created"
     );
 
     console.log("Agent telemetry smoke passed");

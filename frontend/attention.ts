@@ -123,7 +123,7 @@ export function shouldMarkCompletedTurnUnread(
   return session.detachedTaskIds?.length ? false : unread;
 }
 
-// claude, opencode, cursor, kimi, and current Codex expose a turn-START signal
+// claude, opencode, cursor, kimi/kimi-custom, and current Codex expose a
 // (claude's UserPromptSubmit hook, opencode's busy plugin event, cursor's
 // beforeSubmitPrompt hook, kimi's config.toml UserPromptSubmit hook, Codex's
 // passive lifecycle observer), so those agents' working state is driven purely
@@ -137,7 +137,8 @@ export function isTurnTelemetryKind(kind: AgentKind) {
     kind === "claude" ||
     kind === "opencode" ||
     kind === "cursor" ||
-    kind === "kimi"
+    kind === "kimi" ||
+    kind === "kimi-custom"
   );
 }
 
@@ -344,7 +345,8 @@ export function shouldUseTerminalEventAttention(session: AgentSession) {
     session.kind === "claude" ||
     session.kind === "opencode" ||
     session.kind === "cursor" ||
-    session.kind === "kimi"
+    session.kind === "kimi" ||
+    session.kind === "kimi-custom"
   );
 }
 
