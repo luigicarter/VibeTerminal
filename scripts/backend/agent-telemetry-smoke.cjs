@@ -2107,9 +2107,9 @@ function postTelemetry(callbackUrl, token, payload) {
       process.env.KIMI_CODE_HOME = previousKimiCodeHome;
     }
 
-    // ensureKimiCustomHooks does the same into the fork's own home (explicit
-    // override, mirroring how the launch gate passes the app-owned home), and
-    // manager.cleanup removes a config it created.
+    // ensureKimiCustomHooks does the same into the fork's home (an explicit
+    // override stands in for the shared $KIMI_CODE_HOME/~/.kimi-code
+    // resolution), and manager.cleanup removes a config it created.
     const kimiCustomCreatedHome = path.join(root, "kimi-custom-created-home");
     await manager.ensureKimiCustomHooks(kimiCustomCreatedHome);
     const kimiCustomConfigPath = path.join(kimiCustomCreatedHome, "config.toml");

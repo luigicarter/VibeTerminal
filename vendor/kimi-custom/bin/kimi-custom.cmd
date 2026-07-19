@@ -2,25 +2,27 @@
 setlocal EnableExtensions
 
 rem vibeTerminal vendored launcher for the custom Kimi Code fork
-rem (kimi-k3 on Moonshot's Anthropic-compatible endpoint, claude-code profile set).
+rem (claude-code profile set). Shares the standard kimi-code environment
+rem (~/.kimi-code): login, theme, and session history carry over. Platform-key
+rem mode (kimi-k3 on Moonshot's Anthropic-compatible endpoint, 1M context)
+rem activates when a key is available — api.txt next to this package takes
+rem precedence over KIMI_MODEL_API_KEY; with no key, the providers configured
+rem in ~/.kimi-code apply (e.g. a Kimi Code subscription via `kimi-custom login`).
 
 set "ROOT=%~dp0.."
 
-rem Isolated config/session home. vibeTerminal injects KIMI_CODE_HOME per pane
-rem (app-owned dir under userData); standalone runs fall back to a per-user dir.
-if not defined KIMI_CODE_HOME set "KIMI_CODE_HOME=%USERPROFILE%\.kimi-code-custom"
-
-rem Model defaults (all overridable from the environment).
-if not defined KIMI_MODEL_PROVIDER_TYPE set "KIMI_MODEL_PROVIDER_TYPE=anthropic"
-if not defined KIMI_MODEL_BASE_URL set "KIMI_MODEL_BASE_URL=https://api.moonshot.ai/anthropic"
-if not defined KIMI_MODEL_NAME set "KIMI_MODEL_NAME=kimi-k3"
-if not defined KIMI_MODEL_MAX_CONTEXT_SIZE set "KIMI_MODEL_MAX_CONTEXT_SIZE=1048576"
-
-rem API key: an existing env var wins; otherwise read the gitignored api.txt next
-rem to this package (copy it there once — it is never committed to the repo).
-if not defined KIMI_MODEL_API_KEY if exist "%ROOT%\api.txt" (
+if exist "%ROOT%\api.txt" (
 	set "KIMI_API_TXT=%ROOT%\api.txt"
 	for /f "delims=" %%k in ('node -e "process.stdout.write(require('fs').readFileSync(process.env.KIMI_API_TXT,'utf8').replace(/\s+/g,''))"') do set "KIMI_MODEL_API_KEY=%%k"
+)
+
+if defined KIMI_MODEL_API_KEY (
+	if not defined KIMI_MODEL_PROVIDER_TYPE set "KIMI_MODEL_PROVIDER_TYPE=anthropic"
+	if not defined KIMI_MODEL_BASE_URL set "KIMI_MODEL_BASE_URL=https://api.moonshot.ai/anthropic"
+	if not defined KIMI_MODEL_NAME set "KIMI_MODEL_NAME=kimi-k3"
+	if not defined KIMI_MODEL_MAX_CONTEXT_SIZE set "KIMI_MODEL_MAX_CONTEXT_SIZE=1048576"
+) else (
+	echo note: no api.txt / KIMI_MODEL_API_KEY - using providers configured in ~/.kimi-code 1>&2
 )
 
 if not defined VIBE_KIMI_CUSTOM_NODE set "VIBE_KIMI_CUSTOM_NODE=node"

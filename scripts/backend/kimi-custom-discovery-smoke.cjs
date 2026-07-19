@@ -13,9 +13,10 @@ const cwd = path.join(root, "repo");
 const otherCwd = path.join(root, "other-repo");
 const after = Date.parse("2026-06-26T16:00:00.000Z");
 
-// The kimi-custom discovery functions read VIBE_KIMI_CUSTOM_HOME at call time,
-// so point it at our fixture before requiring the host module.
-process.env.VIBE_KIMI_CUSTOM_HOME = kimiCustomHome;
+// The kimi-custom discovery functions resolve the shared kimi-code home
+// ($KIMI_CODE_HOME or ~/.kimi-code) at call time, so point it at our fixture
+// before requiring the host module.
+process.env.KIMI_CODE_HOME = kimiCustomHome;
 
 const {
   confirmKimiCustomThread,

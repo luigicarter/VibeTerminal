@@ -4162,17 +4162,17 @@ function createAgentTelemetryManager(options = {}) {
     kimiHookFiles.clear();
   }
 
-  // kimi-custom (the vendored custom fork) gets the identical hook set, merged
-  // into its own app-owned home under a distinct marker so the two configs
-  // never mix. The launch gate passes the app-owned home explicitly; the
-  // env/fallback mirror the wrapper's standalone default (~/.kimi-code-custom).
+  // kimi-custom (the vendored custom fork) gets the identical hook set under
+  // its own marker, merged into the shared kimi-code home ($KIMI_CODE_HOME or
+  // ~/.kimi-code) — the same config.toml stock kimi uses, so the two markers
+  // coexist; homeOverride only exists so tests can repoint the home.
   async function ensureKimiCustomHooks(homeOverride) {
     try {
       await ready;
       const home =
         homeOverride ||
-        process.env.VIBE_KIMI_CUSTOM_HOME ||
-        path.join(os.homedir(), ".kimi-code-custom");
+        process.env.KIMI_CODE_HOME ||
+        path.join(os.homedir(), ".kimi-code");
       const file = path.join(home, "config.toml");
 
       let raw = null;

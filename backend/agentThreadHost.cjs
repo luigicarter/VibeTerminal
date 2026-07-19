@@ -894,15 +894,12 @@ function kimiHome() {
   return process.env.KIMI_CODE_HOME || path.join(os.homedir(), ".kimi-code");
 }
 
-// The vendored custom fork (kimi-custom) keeps the identical on-disk layout in
-// its own app-owned home: main.cjs injects VIBE_KIMI_CUSTOM_HOME (userData
-// kimi-custom-home) when spawning this host; the fallback matches the
-// wrapper's standalone default. Read at call time so tests can repoint it.
+// kimi-custom shares the standard kimi-code home (matching the harness
+// runner): the same KIMI_CODE_HOME / ~/.kimi-code resolution as stock kimi
+// applies, so login, theme, and session history carry over. The kimi-custom
+// refs below differ from stock kimi refs only by provider label.
 function kimiCustomHome() {
-  return (
-    process.env.VIBE_KIMI_CUSTOM_HOME ||
-    path.join(os.homedir(), ".kimi-code-custom")
-  );
+  return kimiHome();
 }
 
 function parseKimiSessionIndex(home = kimiHome()) {

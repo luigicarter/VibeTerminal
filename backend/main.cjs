@@ -419,16 +419,6 @@ function getBuildSupervisorDir() {
   );
 }
 
-// App-owned home for the vendored custom Kimi Code fork (kimi-custom): config
-// (telemetry hooks), sessions, and credentials all live here so the fork never
-// reads or writes the user's stock ~/.kimi-code. Env override = smoke tests.
-function getKimiCustomHome() {
-  return (
-    process.env.VIBE_KIMI_CUSTOM_HOME ||
-    path.join(app.getPath("userData"), "kimi-custom-home")
-  );
-}
-
 function getAgentTelemetry() {
   if (!agentTelemetry) {
     agentTelemetry = createAgentTelemetryManager({
@@ -1273,9 +1263,7 @@ function startAgentThreadHost() {
   const nodeBinary = getNodeHostCommand();
   agentThreadHost = spawn(nodeBinary, [getAgentThreadHostPath()], {
     cwd: getDefaultRuntimeCwd(),
-    // kimi-custom discovery reads the app-owned home from the injected env;
-    // the pane launch gate points the fork itself at the same directory.
-    env: { ...getNodeHostEnv(), VIBE_KIMI_CUSTOM_HOME: getKimiCustomHome() },
+    env: getNodeHostEnv(),
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true
   });
@@ -1844,8 +1832,10 @@ ipcMain.handle("terminal:create", async (_event, payload) => {
 
   // kimi-custom panes run the vendored fork: its bin dir joins the session
   // PATH (and the shim runner's ORIGINAL_PATH) so the shim wrapper resolves
-  // the real launcher, KIMI_CODE_HOME points at the app-owned home, and our
-  // hooks merge there — the stock kimi home below is never touched.
+  // the real launcher. The fork shares the standard kimi-code home
+  // ($KIMI_CODE_HOME or ~/.kimi-code) — login, theme, and session history
+  // carry over — so our hooks merge into its config.toml under the
+  // kimi-custom marker alongside the stock kimi ones.
   if (
     typeof payload.command === "string" &&
     /\bkimi-custom\b/.test(payload.command)
@@ -1872,7 +1862,6 @@ ipcMain.handle("terminal:create", async (_event, payload) => {
             ...instrumentation.env,
             [pathKey]: `${instrumentation.shimDir}${path.delimiter}${binDir}${path.delimiter}${rest}`,
             VIBE_TERMINAL_ORIGINAL_PATH: `${binDir}${path.delimiter}${instrumentation.env.VIBE_TERMINAL_ORIGINAL_PATH || ""}`,
-            KIMI_CODE_HOME: getKimiCustomHome(),
             ...(app.isPackaged
               ? { VIBE_KIMI_CUSTOM_NODE: process.execPath }
               : {})
@@ -1880,7 +1869,7 @@ ipcMain.handle("terminal:create", async (_event, payload) => {
         };
       }
     }
-    telemetry.ensureKimiCustomHooks(getKimiCustomHome()).catch(() => {});
+    telemetry.ensureKimiCustomHooks().catch(() => {});
   }
 
   // Kimi's hooks live in the user's config.toml ($KIMI_CODE_HOME or
