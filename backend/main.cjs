@@ -367,6 +367,33 @@ function resolveKimiCustomDir() {
   return null;
 }
 
+// Whether a real Node.js binary is reachable through the given PATH value.
+// Decides the kimi-custom runtime: Electron's exe can stand in for node, but
+// on Windows the GUI-subsystem binary cannot attach to the pane's ConPTY
+// console — stdin arrives as an already-closed pipe (isTTY undefined, instant
+// EOF) and stdout loses its TTY size, so the kimi TUI paints at its 80-column
+// fallback and exits within a second, leaving DA/focus replies echoing at the
+// shell prompt. A real node keeps the console handles intact.
+function pathHasNode(pathValue) {
+  const names =
+    process.platform === "win32" ? ["node.exe", "node.cmd"] : ["node"];
+  for (const dir of String(pathValue || "").split(path.delimiter)) {
+    if (!dir) {
+      continue;
+    }
+    for (const name of names) {
+      try {
+        if (fs.statSync(path.join(dir, name)).isFile()) {
+          return true;
+        }
+      } catch {
+        // Missing entry — keep scanning.
+      }
+    }
+  }
+  return false;
+}
+
 function getAppIconPath() {
   return path.join(__dirname, "..", "frontend", "assets", "vibeterminal-logo.ico");
 }
@@ -1862,7 +1889,11 @@ ipcMain.handle("terminal:create", async (_event, payload) => {
             ...instrumentation.env,
             [pathKey]: `${instrumentation.shimDir}${path.delimiter}${binDir}${path.delimiter}${rest}`,
             VIBE_TERMINAL_ORIGINAL_PATH: `${binDir}${path.delimiter}${instrumentation.env.VIBE_TERMINAL_ORIGINAL_PATH || ""}`,
-            ...(app.isPackaged
+            // Prefer the user's real node (the launcher's default) — see
+            // pathHasNode for why Electron-as-node breaks the TUI on
+            // Windows. Electron remains the packaged last resort so panes
+            // still work on machines with no Node.js install at all.
+            ...(app.isPackaged && !pathHasNode(currentPath)
               ? { VIBE_KIMI_CUSTOM_NODE: process.execPath }
               : {})
           }

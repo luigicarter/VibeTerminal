@@ -30,7 +30,9 @@ if defined KIMI_MODEL_API_KEY (
 )
 
 if not defined VIBE_KIMI_CUSTOM_NODE set "VIBE_KIMI_CUSTOM_NODE=node"
-rem Harmless for a real node binary; lets Electron's exe act as node when packaged.
+rem Harmless for a real node binary; lets Electron's exe act as node when the
+rem host found no Node.js install (last resort: Electron's GUI-subsystem exe
+rem cannot attach to a ConPTY console on Windows, so the TUI degrades there).
 set "ELECTRON_RUN_AS_NODE=1"
 
 "%VIBE_KIMI_CUSTOM_NODE%" "%ROOT%\dist\main.mjs" %*
