@@ -1675,13 +1675,17 @@ button {
 .fusion-agentic-pane .pane-header {
   grid-template-columns: minmax(0, 1fr) auto auto;
   min-height: 38px;
-  border-bottom-color: color-mix(in srgb, var(--pane-accent) 26%, var(--border-hairline));
+  border-bottom-color: var(--border-hairline);
   background: var(--bg-panel);
   box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.04);
 }
 
+/* Classic Fusion wears the shared skin neutrally: the pane keeps its purple
+   accent on the outer border/title (generic .terminal-pane chrome), but the
+   chat surface runs on panel grays instead of purple/green branding. */
 .fusion-agentic-pane.oc-skin {
-  --of-executor: #64d6b1;
+  --of-executor: #8b939c;
+  --oc-primary: #c9ced6;
 }
 
 .fusion-agentic-pane .fusion-goalbar-title {
@@ -1689,9 +1693,8 @@ button {
 }
 
 .fusion-agentic-pane .fusion-goalbar-mark {
-  color: color-mix(in srgb, var(--pane-accent) 84%, #d7ffd9);
-  fill: color-mix(in srgb, var(--pane-accent) 26%, transparent);
-  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--pane-accent) 34%, transparent));
+  color: var(--text-muted);
+  fill: color-mix(in srgb, var(--text-muted) 26%, transparent);
 }
 
 .fusion-agentic-pane .fusion-goalbar-pipeline {
@@ -1701,7 +1704,7 @@ button {
   align-items: center;
   gap: 6px;
   padding: 2px 7px;
-  border: 1px solid color-mix(in srgb, var(--pane-accent) 28%, var(--border-hairline));
+  border: 1px solid var(--border-hairline);
   border-radius: 8px;
   background: var(--bg-element);
 }
@@ -1714,7 +1717,7 @@ button {
 }
 
 .fusion-agentic-pane .fusion-goalbar-node.is-executor {
-  color: #9ee5ca;
+  color: var(--text-secondary);
 }
 
 .fusion-agentic-pane .fusion-goalbar-arrow {
@@ -1739,7 +1742,7 @@ button {
   justify-content: center;
   padding: 3px 9px;
   border-radius: 7px;
-  background: #111711;
+  background: var(--bg-element);
   letter-spacing: 0.04em;
 }
 
@@ -1790,9 +1793,9 @@ button {
   width: 6px;
   height: 6px;
   border-radius: 999px;
-  background: #95a08f;
+  background: var(--text-muted);
   opacity: 0.38;
-  box-shadow: 0 0 0 0 #95a08f33;
+  box-shadow: 0 0 0 0 rgba(154, 158, 168, 0.2);
   animation: fusion-background-breathe 1.9s ease-in-out infinite;
 }
 
@@ -1811,9 +1814,9 @@ button {
   width: 6px;
   height: 6px;
   border-radius: 999px;
-  background: #95a08f;
+  background: var(--text-muted);
   opacity: 0.38;
-  box-shadow: 0 0 0 0 #95a08f33;
+  box-shadow: 0 0 0 0 rgba(154, 158, 168, 0.2);
   animation: fusion-background-breathe 1.9s ease-in-out infinite;
 }
 
@@ -1830,12 +1833,12 @@ button {
   0%, 100% {
     opacity: 0.3;
     transform: scale(0.82);
-    box-shadow: 0 0 0 0 #95a08f22;
+    box-shadow: 0 0 0 0 rgba(154, 158, 168, 0.13);
   }
   50% {
     opacity: 0.68;
     transform: scale(1);
-    box-shadow: 0 0 0 3px #95a08f12;
+    box-shadow: 0 0 0 3px rgba(154, 158, 168, 0.07);
   }
 }
 
@@ -1948,6 +1951,19 @@ button {
   border-color: color-mix(in srgb, var(--pane-accent) 72%, var(--border-hairline));
   background: color-mix(in srgb, var(--pane-accent) 18%, var(--bg-element));
   color: var(--text-primary);
+}
+
+/* Classic Fusion: the shared decision controls fall back to panel tones
+   (Open Fusion keeps its accent). */
+.fusion-agentic-pane .fusion-decision-kind {
+  color: var(--text-muted);
+}
+.fusion-agentic-pane .fusion-decision-button:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+.fusion-agentic-pane .fusion-decision-button.is-primary {
+  border-color: var(--border-strong);
+  background: var(--bg-element-hover);
 }
 
 .fusion-plan-action-bar {
@@ -2225,9 +2241,9 @@ button {
 .fusion-agentic-pane .fusion-chat-scroll > .oc-md {
   margin-top: 12px;
   padding: 8px 11px 8px 13px;
-  border-left: 2px solid #b58cff;
+  border-left: 2px solid var(--oc-border);
   border-radius: 0 10px 10px 0;
-  background: linear-gradient(90deg, #20172c 0%, color-mix(in srgb, var(--oc-bg-panel) 82%, transparent) 100%);
+  background: var(--oc-bg-panel);
   color: var(--oc-text);
 }
 
@@ -2238,7 +2254,7 @@ button {
 .fusion-agentic-pane .oc-prose-label {
   display: block;
   margin-bottom: 4px;
-  color: #c7adff;
+  color: var(--oc-muted);
   font-size: 9px;
   font-weight: 800;
   letter-spacing: 0.08em;
@@ -2405,6 +2421,8 @@ button {
 }
 
 .fusion-agentic-pane .oc-task-bg {
+  border-color: var(--oc-border);
+  color: var(--oc-muted);
   background: color-mix(in srgb, var(--of-executor) 13%, transparent);
 }
 
@@ -3031,11 +3049,9 @@ button {
 .fusion-agentic-pane .fusion-input-area > .oc-bgtasks {
   gap: 6px;
   padding: 7px 9px;
-  border-color: color-mix(in srgb, var(--of-executor) 45%, var(--oc-border));
+  border-color: var(--oc-border);
   border-radius: 10px;
-  background:
-    linear-gradient(90deg, color-mix(in srgb, var(--of-executor) 10%, transparent), transparent 45%),
-    var(--oc-bg);
+  background: var(--oc-bg);
   box-shadow:
     0 12px 32px rgba(0, 0, 0, 0.4),
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
@@ -3045,7 +3061,7 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: #a7e6c7;
+  color: var(--oc-muted);
 }
 
 .fusion-agentic-pane .oc-bgtasks-head::before {
@@ -3053,8 +3069,8 @@ button {
   height: 7px;
   flex: 0 0 auto;
   border-radius: 999px;
-  background: #95d8b8;
-  box-shadow: 0 0 0 0 #95d8b833;
+  background: var(--text-muted);
+  box-shadow: 0 0 0 0 rgba(154, 158, 168, 0.2);
   animation: fusion-background-breathe 1.9s ease-in-out infinite;
   content: "";
 }
@@ -3073,12 +3089,12 @@ button {
 }
 
 .fusion-agentic-pane .oc-bgtasks-meta {
-  color: #86a894;
+  color: var(--oc-muted);
 }
 
 .fusion-agentic-pane .oc-bgtasks-stop {
   border-color: var(--oc-border);
-  color: #a7ceb7;
+  color: var(--text-secondary);
   background: var(--oc-bg);
 }
 
