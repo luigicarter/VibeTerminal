@@ -4,6 +4,18 @@
  * Reproduces xterm viewport position after pane remounts using Electron's CDP
  * endpoint. Results and screenshots are written under
  * artifacts/terminal-scroll-repro/.
+ *
+ * Two modes:
+ *   node scripts/diag/terminal-scroll-repro.cjs
+ *     Remount stress (maximize / workspace switch / focus) against a finished
+ *     process — the 2026-07-11 scrolled-to-top-after-remount regression.
+ *   DIAG_LIVE_TAIL=1 DIAG_MAXIMIZE_CYCLES=0 DIAG_WORKSPACE_CYCLES=0 \
+ *   DIAG_FOCUS_SWITCHES=0 DIAG_CONTROL_CYCLES=0 node scripts/diag/terminal-scroll-repro.cjs
+ *     Follow probes against a process that never stops printing: resizes, window
+ *     growth, maximize/restore and workspace switches must leave the pane
+ *     showing the tail (summary.followStoppedFollowing empty), while a pane the
+ *     user scrolled up stays put (summary.userScrollKeptPosition true) — the
+ *     2026-07-26 resize/pane-switch drift to the top of the scrollback.
  */
 const { spawn, spawnSync } = require("child_process");
 const fs = require("fs");
@@ -40,6 +52,11 @@ const CONTROL_CYCLES = Number(process.env.DIAG_CONTROL_CYCLES || 22);
 const CAPTURE_ATTEMPTS = Number(process.env.DIAG_CAPTURE_ATTEMPTS || 40);
 const CPU_THROTTLE_RATE = Number(process.env.DIAG_CPU_THROTTLE_RATE || 1);
 const LIVE_REPAINT = process.env.DIAG_LIVE_REPAINT === "1";
+// Follow probes: keep the pane printing and check that resizes/pane switches
+// leave it showing the tail. Opt in with DIAG_LIVE_TAIL=1 (usually alongside
+// DIAG_*_CYCLES=0, since the remount loops below want a finished process).
+const LIVE_TAIL = process.env.DIAG_LIVE_TAIL === "1";
+const FOLLOW_WATCH_MS = Number(process.env.DIAG_FOLLOW_WATCH_MS || 20000);
 const FINAL_SETTLE_MS = Number(process.env.DIAG_FINAL_SETTLE_MS || 0);
 const CAPTURE_GOOD = process.env.DIAG_CAPTURE_GOOD === "1";
 
@@ -185,11 +202,23 @@ function session(id, name, command, x) {
 function seedData() {
   const longCommand = [
     "$ErrorActionPreference='Stop'",
-    "1..12000 | ForEach-Object {",
+    `1..${LIVE_TAIL ? 40 : 12000} | ForEach-Object {`,
     "  $n=$_",
     "  Write-Output ((\"DIAG-{0:D5} \" -f $n) + ('x' * (35 + ($n % 145))))",
     "}",
     "Write-Output 'DIAG-DONE-12000'",
+    ...(LIVE_TAIL
+      ? [
+          // Keeps printing like a working agent, so the follow probes can watch
+          // whether the pane still shows the newest output.
+          "$i=0",
+          "while ($true) {",
+          "  $i++",
+          "  Write-Output ((\"LIVE-{0:D6} \" -f $i) + ('y' * 40))",
+          "  Start-Sleep -Milliseconds 20",
+          "}"
+        ]
+      : []),
     ...(LIVE_REPAINT
       ? [
           "$i=0",
@@ -472,6 +501,141 @@ async function focusSwitch(cdp, index) {
   return { index, before, after, bad: isTop(after) };
 }
 
+async function rowsSnapshot(cdp, sessionId = LONG_ID) {
+  return evaluate(
+    cdp,
+    `(() => {
+      const rows = document.querySelector('[data-session-id="${sessionId}"] .xterm-rows');
+      if (!rows) return null;
+      const lines = [...rows.children].map((row) => row.textContent.trim()).filter(Boolean);
+      return { first: lines[0] || '', last: lines[lines.length - 1] || '', count: lines.length };
+    })()`
+  );
+}
+
+async function scrollViewportToBottom(cdp, sessionId = LONG_ID) {
+  await evaluate(
+    cdp,
+    `(() => {
+      const viewport = document.querySelector('[data-session-id="${sessionId}"] .xterm-viewport');
+      if (viewport) viewport.scrollTop = viewport.scrollHeight;
+    })()`
+  );
+  await sleep(250);
+}
+
+async function elementPoint(cdp, selector) {
+  const point = await evaluate(
+    cdp,
+    `(() => {
+      const el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    })()`
+  );
+  if (!point) throw new Error(`Element not found: ${selector}`);
+  return point;
+}
+
+async function dragFrom(cdp, selector, dx, dy, steps = 12) {
+  const start = await elementPoint(cdp, selector);
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: start.x,
+    y: start.y,
+    button: "left",
+    buttons: 1,
+    clickCount: 1
+  });
+  for (let step = 1; step <= steps; step += 1) {
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: start.x + (dx * step) / steps,
+      y: start.y + (dy * step) / steps,
+      button: "left",
+      buttons: 1
+    });
+    await sleep(16);
+  }
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: start.x + dx,
+    y: start.y + dy,
+    button: "left",
+    buttons: 0,
+    clickCount: 1
+  });
+}
+
+// Resizing a pane moves the .xterm-viewport element before xterm knows its new
+// size; the browser's scrollTop clamp then reads as a user scroll-up inside
+// xterm, which stops following output and drifts to the top of the scrollback.
+// Each probe pins the pane to the tail, fires one trigger, and watches whether
+// the view keeps up with a process that never stops printing.
+async function followProbe(cdp, label, trigger, watchMs = FOLLOW_WATCH_MS) {
+  await scrollViewportToBottom(cdp);
+  await sleep(600);
+  const before = await metric(cdp);
+  await trigger();
+  const samples = [];
+  const started = Date.now();
+  while (Date.now() - started < watchMs) {
+    const value = await metric(cdp);
+    const rows = await rowsSnapshot(cdp);
+    samples.push({
+      elapsed: Date.now() - started,
+      scrollTop: Math.round(value?.scrollTop ?? 0),
+      maxScrollTop: Math.round((value?.scrollHeight ?? 0) - (value?.clientHeight ?? 0)),
+      lastRow: rows?.last?.slice(0, 20) ?? ""
+    });
+    await sleep(1000);
+  }
+  const last = samples.at(-1);
+  return {
+    label,
+    before,
+    samples,
+    finalGap: last.maxScrollTop - last.scrollTop,
+    reachedTop: last.scrollTop <= 2 && last.maxScrollTop > 500,
+    // One resize's worth of drift would be tens of pixels; a pane that stopped
+    // following falls behind without bound.
+    stoppedFollowing: last.maxScrollTop - last.scrollTop > 50
+  };
+}
+
+// The other half of the contract: a pane the user deliberately scrolled up must
+// stay where they put it when it is resized.
+async function userScrollProbe(cdp) {
+  await scrollViewportToBottom(cdp);
+  await sleep(800);
+  const point = await elementPoint(cdp, `[data-session-id="${LONG_ID}"] .terminal-fit-host`);
+  for (let i = 0; i < 12; i += 1) {
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mouseWheel",
+      x: point.x,
+      y: point.y,
+      deltaX: 0,
+      deltaY: -180
+    });
+    await sleep(40);
+  }
+  await sleep(400);
+  const afterWheel = await metric(cdp);
+  const wheelGap = Math.round(
+    afterWheel.scrollHeight - afterWheel.clientHeight - afterWheel.scrollTop
+  );
+  await dragFrom(cdp, `[data-session-id="${LONG_ID}"] .pane-resize-edge-s`, 0, 130);
+  await sleep(2500);
+  const afterResize = await metric(cdp);
+  const resizeGap = Math.round(
+    afterResize.scrollHeight - afterResize.clientHeight - afterResize.scrollTop
+  );
+  await dragFrom(cdp, `[data-session-id="${LONG_ID}"] .pane-resize-edge-s`, 0, -130);
+  await sleep(800);
+  return { wheelGap, resizeGap, keptPosition: resizeGap > 200 };
+}
+
 async function xtermGeometry(cdp) {
   return evaluate(
     cdp,
@@ -598,6 +762,8 @@ async function main() {
       CAPTURE_ATTEMPTS,
       CPU_THROTTLE_RATE,
       LIVE_REPAINT,
+      LIVE_TAIL,
+      FOLLOW_WATCH_MS,
       FINAL_SETTLE_MS,
       CAPTURE_GOOD
     },
@@ -606,6 +772,8 @@ async function main() {
     workspace: [],
     focus: [],
     control: [],
+    follow: [],
+    userScroll: null,
     controlGeometry: null,
     controlDefaultScreen: null,
     screenshot: { captured: false }
@@ -672,13 +840,87 @@ async function main() {
     );
     await waitFor(
       cdp,
-      `document.querySelector('[data-session-id="${LONG_ID}"] .xterm-rows')?.textContent.includes('DIAG-DONE-12000')`,
+      // The live tail scrolls DIAG-DONE away within a frame or two, so wait on
+      // the printer itself in that mode.
+      `document.querySelector('[data-session-id="${LONG_ID}"] .xterm-rows')?.textContent.includes(${
+        LIVE_TAIL ? "'LIVE-0000'" : "'DIAG-DONE-12000'"
+      })`,
       "long output completion",
       90000
     );
     await sleep(1500);
     await evaluate(cdp, `document.querySelector('[data-session-id="${LONG_ID}"] .xterm-viewport').scrollTop = 1e9`);
     await sleep(200);
+
+    if (LIVE_TAIL) {
+      const probes = [
+        ["control-no-resize", async () => {}],
+        [
+          "drag-grow-height",
+          () => dragFrom(cdp, `[data-session-id="${LONG_ID}"] .pane-resize-edge-s`, 0, 160)
+        ],
+        [
+          "drag-shrink-height",
+          () => dragFrom(cdp, `[data-session-id="${LONG_ID}"] .pane-resize-edge-s`, 0, -160)
+        ],
+        [
+          "window-grow",
+          async () => {
+            await cdp.send("Emulation.setDeviceMetricsOverride", {
+              width: 1500,
+              height: 950,
+              deviceScaleFactor: 0,
+              mobile: false
+            });
+          }
+        ],
+        [
+          "self-maximize",
+          async () => {
+            await clickTitle(cdp, LONG_ID, "Maximize pane");
+            await sleep(1200);
+          }
+        ],
+        [
+          "self-restore",
+          async () => {
+            await clickTitle(cdp, LONG_ID, "Restore pane");
+            await sleep(1200);
+          }
+        ],
+        [
+          "workspace-switch",
+          async () => {
+            await switchWorkspace(cdp, "DIAG B");
+            await sleep(600);
+            await switchWorkspace(cdp, "DIAG A");
+            await waitFor(
+              cdp,
+              `document.querySelector('[data-session-id="${LONG_ID}"] .xterm-viewport')`,
+              "long pane remount"
+            );
+          }
+        ]
+      ];
+      for (const [label, trigger] of probes) {
+        const row = await followProbe(cdp, label, trigger);
+        results.follow.push(row);
+        console.log(
+          `follow ${label}: finalGap=${row.finalGap}px stoppedFollowing=${row.stoppedFollowing} reachedTop=${row.reachedTop} lastRow="${row.samples.at(-1).lastRow}"`
+        );
+        if (row.stoppedFollowing && !results.screenshot.captured) {
+          await capture(cdp, badScreenshotPath);
+          results.screenshot = { captured: true, trigger: label, metrics: row.samples.at(-1) };
+        }
+        if (label === "window-grow") {
+          await cdp.send("Emulation.clearDeviceMetricsOverride");
+        }
+      }
+      results.userScroll = await userScrollProbe(cdp);
+      console.log(
+        `user-scroll-up: gapAfterWheel=${results.userScroll.wheelGap}px gapAfterResize=${results.userScroll.resizeGap}px keptPosition=${results.userScroll.keptPosition}`
+      );
+    }
 
     for (let i = 1; i <= MAXIMIZE_CYCLES; i += 1) {
       const row = await remountCycle(cdp, "maximize", i, results.screenshot);
@@ -734,6 +976,13 @@ async function main() {
     }
   } finally {
     results.summary = {
+      followStoppedFollowing: results.follow
+        .filter((row) => row.stoppedFollowing)
+        .map((row) => row.label),
+      followReachedTop: results.follow
+        .filter((row) => row.reachedTop)
+        .map((row) => row.label),
+      userScrollKeptPosition: results.userScroll?.keptPosition ?? null,
       maximizeTop: results.maximize.filter((row) => row.bad).length,
       workspaceTop: results.workspace.filter((row) => row.bad).length,
       focusTop: results.focus.filter((row) => row.bad).length,

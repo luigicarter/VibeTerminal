@@ -177,6 +177,10 @@ export default function TerminalPane({
   // terminal.cols/rows are xterm's 80x24 construction default, which must
   // never be advertised to the PTY (see the create() call).
   const fitMeasuredRef = useRef(false);
+  // Whether this pane should keep showing the tail of its output. Only the
+  // user's own scrolling flips it — see syncFollowTail().
+  const followTailRef = useRef(true);
+  const terminalPointerRef = useRef(false);
   const threadLookupTimeoutRef = useRef<number | null>(null);
   const threadLookupAfterRef = useRef(
     session.threadLookupStartedAt ?? session.createdAt
@@ -382,6 +386,50 @@ export default function TerminalPane({
     markActive();
   }
 
+  // Resizing a pane moves the .xterm-viewport element before xterm itself knows
+  // its new size, so the browser clamps that element's scrollTop against a
+  // scroll area built for the old geometry. xterm reads the resulting scroll
+  // event as the user dragging the scrollbar up: it latches its internal
+  // isUserScrolling flag, stops following new output, and the view then drifts
+  // further and further behind the process — all the way to the top of the
+  // scrollback once lines start being trimmed. So xterm's own idea of "the user
+  // scrolled up" cannot be trusted across a resize; track it here instead, from
+  // the gestures that actually move the view: the wheel, a scrollbar or
+  // selection drag inside the terminal, and keys (typing scrolls xterm back to
+  // the bottom). Pane chrome — resize edges, the drag header — sits outside
+  // this element, so arranging a pane never counts as scrolling it.
+  function syncFollowTail() {
+    requestAnimationFrame(() => {
+      const buffer = terminalRef.current?.buffer.active;
+      if (buffer) {
+        followTailRef.current = buffer.viewportY >= buffer.baseY;
+      }
+    });
+  }
+
+  function handleTerminalPointerDown() {
+    terminalPointerRef.current = true;
+  }
+
+  function handleWindowPointerMove() {
+    // Dragging with the button down inside the terminal is the user moving the
+    // view — the scrollbar, or a selection that auto-scrolls past an edge — and
+    // every step of it would otherwise look like a stray scroll worth undoing.
+    // A press that never moves is just a click, so following stays armed.
+    if (terminalPointerRef.current) {
+      followTailRef.current = false;
+    }
+  }
+
+  function handleWindowPointerUp() {
+    if (!terminalPointerRef.current) {
+      return;
+    }
+
+    terminalPointerRef.current = false;
+    syncFollowTail();
+  }
+
   function scheduleFitAndResize() {
     if (fitFrameRef.current !== null) {
       return;
@@ -512,6 +560,43 @@ export default function TerminalPane({
     terminal.loadAddon(new WebLinksAddon());
     terminal.open(containerRef.current);
 
+    // Capture phase: these must record the user's intent before xterm's own
+    // handlers scroll the buffer, so the repair below can tell a gesture apart
+    // from a stray scroll.
+    const terminalHost = containerRef.current;
+    terminalHost.addEventListener("wheel", syncFollowTail, {
+      capture: true,
+      passive: true
+    });
+    terminalHost.addEventListener("keydown", syncFollowTail, true);
+    terminalHost.addEventListener("pointerdown", handleTerminalPointerDown, true);
+    window.addEventListener("pointermove", handleWindowPointerMove, true);
+    window.addEventListener("pointerup", handleWindowPointerUp);
+    window.addEventListener("pointercancel", handleWindowPointerUp);
+    terminal.onScroll(() => {
+      const buffer = terminal.buffer.active;
+      // Landing on the tail re-arms following, whoever did it — a gesture, or a
+      // programmatic scroll such as the one that ends a snapshot replay.
+      if (buffer.viewportY >= buffer.baseY) {
+        followTailRef.current = true;
+        return;
+      }
+
+      if (!followTailRef.current) {
+        return;
+      }
+
+      // Scrolled off the tail with no gesture behind it: a layout clamp. Undo it
+      // on the next frame, by which point a gesture that raced this scroll has
+      // cleared the flag. Resizes are repaired by their own fit; this also
+      // catches the ones no fit follows, such as the pane settling into the
+      // board right after it mounts.
+      requestAnimationFrame(() => {
+        if (followTailRef.current) {
+          terminal.scrollToBottom();
+        }
+      });
+    });
 
     terminal.focus();
     terminal.attachCustomKeyEventHandler((event) => {
@@ -573,6 +658,13 @@ export default function TerminalPane({
 
       try {
         fitAddon.fit();
+        // Undo the clamp-induced scroll described on syncFollowTail(). Scrolling
+        // to the bottom also clears xterm's isUserScrolling flag, which is what
+        // restores tail-following; a pane the user had scrolled up stays put.
+        if (followTailRef.current) {
+          terminal.scrollToBottom();
+        }
+
         fitMeasuredRef.current = true;
         const size = {
           cols: terminal.cols,
@@ -747,6 +839,16 @@ export default function TerminalPane({
 
     return () => {
       resizeObserver.disconnect();
+      terminalHost.removeEventListener("wheel", syncFollowTail, true);
+      terminalHost.removeEventListener("keydown", syncFollowTail, true);
+      terminalHost.removeEventListener(
+        "pointerdown",
+        handleTerminalPointerDown,
+        true
+      );
+      window.removeEventListener("pointermove", handleWindowPointerMove, true);
+      window.removeEventListener("pointerup", handleWindowPointerUp);
+      window.removeEventListener("pointercancel", handleWindowPointerUp);
       if (fitFrameRef.current !== null) {
         cancelAnimationFrame(fitFrameRef.current);
         fitFrameRef.current = null;
