@@ -47,6 +47,16 @@ hook POSTs ride independent short-lived processes with no ordering guarantee, so
 start may override a finished done/failed pill — a tool hook racing past the turn's `Stop` cannot
 resurrect the spinner. `agent.waiting` details become the attention `reason` (`approval` vs `question`).
 
+Two more types, `agent.subagent.started` and `agent.subagent.stopped`, report the **delegation bracket**:
+the pane's agent handed work to a subagent, and that subagent finished. They are deliberately TYPES, not
+details — which is why the notify programs needed no change at all, since both forward `argv[2]`/`$args[0]`
+verbatim while the whitelisted detail slot is not always ours (codex appends its own JSON there). The
+server emits a dedicated `agent-subagent` event carrying only `{id, provider, phase}`: no provider hook
+matcher can carry a task id, and reading the hook JSON from stdin is exactly what this transport avoids,
+so the renderer counts brackets rather than tracking ids. It is neither an attention signal nor a turn
+start; see `docs/frontend.md` for how it holds "working" across a turn boundary and suppresses a
+completion it cannot attribute.
+
 - **claude** - launched with `--settings <runDir>/claude-settings.json` (injected by the shim).
   `UserPromptSubmit` fires `agent.running` (undetailed = genuine turn start);
   `PreToolUse`/`PostToolUse` fire `agent.running tool` (mid-turn activity, latch-respecting);
@@ -54,6 +64,11 @@ resurrect the spinner. `agent.waiting` details become the attention `reason` (`a
   `agent.waiting approval`, `idle_prompt` fires `agent.waiting question` — so the renderer can flip
   waiting->running on the user's answer keystroke for approvals only (approving has no hook of its
   own: PreToolUse fires before the prompt, PostToolUse only when the tool ends).
+  A second `PreToolUse`/`PostToolUse` entry with `matcher: "Task"` fires the delegation bracket —
+  claude's matcher selects on tool name, so this is a discriminated subagent signal that needs no
+  stdin read. `SubagentStop` is deliberately NOT used as the closer: it is not 1:1 with a Task call
+  (a blocking Stop-hook continuation can re-fire it), which would unbalance the renderer's counter,
+  whereas `PostToolUse` pairs 1:1 and still fires when the subagent errored.
 - **codex** - keeps `-c notify=[...]` for final completion, and also receives invocation-local passive
   `UserPromptSubmit`, `PermissionRequest`, `PreToolUse`, and `PostToolUse` observer hooks. The observer
   lives at a content-versioned app-owned path, so unchanged code keeps the same `/hooks` trust definition
@@ -61,7 +76,11 @@ resurrect the spinner. `agent.waiting` details become the attention `reason` (`a
   `--dangerously-bypass-hook-trust`, writes no user config, emits no hook stdout, and never answers an
   approval. Codex merges these invocation hooks with matching user/project/plugin hooks. Turn-scoped
   subagent hooks report the parent session id, so their tool activity correctly keeps the root turn
-  running; explicit subagent event payloads are ignored defensively. Legacy notify remains the final
+  running. Explicitly subagent-tagged payloads never produce `agent.running`/`agent.waiting`; they are
+  narrowed to the delegation bracket (`PreToolUse`/`PostToolUse` only, everything else still dropped),
+  so a parent completion landing while a child tool call is open is not attributed to the root turn.
+  This brackets individual child tool calls, not a whole delegation — codex exposes no pairing
+  terminator for that. Legacy notify remains the final
   signal because it fires only after Stop-hook continuation
   is resolved. Its appended `thread-id`/`turn-id` JSON is preserved; the renderer defers until root
   discovery and rejects child-thread or stale-turn completion.
@@ -104,7 +123,13 @@ resurrect the spinner. `agent.waiting` details become the attention `reason` (`a
   `UserPromptSubmit`->`agent.running` (undetailed turn start), `PreToolUse`/`PostToolUse`->
   `agent.running tool`, `PermissionRequest`->`agent.waiting approval`, `Stop`->`agent.completed`,
   `StopFailure`->`agent.failed`. The env guard keeps them inert for `kimi` runs outside vibeTerminal
-  panes.
+  panes. The **delegation bracket is marker-selected**, and the difference is load-bearing rather than
+  cosmetic: kimi validates `[[hooks]]` entries against an enum of hook event names, and its config
+  salvage deletes the **entire** `hooks` section when any entry fails that validation — so writing an
+  event name a stock build may not know would silently disable *all* vibeTerminal kimi telemetry, not
+  just the new entry. Stock kimi therefore brackets with `PreToolUse`/`PostToolUse` and
+  `matcher = '^Agent$'` (kimi treats the matcher as a regex over the tool name), covering foreground
+  delegation; the block emitter emits the optional `matcher` line only for these entries.
 
 - **kimi-custom** - The vendored custom fork (ribbon label "Kimi + CC") rides the same
   config.toml hook channel as stock kimi, under its own marker
@@ -116,7 +141,10 @@ resurrect the spinner. `agent.waiting` details become the attention `reason` (`a
   fallback) and into `VIBE_TERMINAL_ORIGINAL_PATH` (so the shim runner resolves the
   real launcher), then `ensureKimiCustomHooks()` merges the identical claude-parity
   `[[hooks]]` set into the shared config.toml; `cleanupKimiCustomHooks` strips them on
-  shutdown. The launcher (`bin/kimi-custom.cmd` / `bin/kimi-custom`) runs platform-key
+  shutdown. Unlike stock kimi, the fork is verified to expose `SubagentStart`/`SubagentStop`
+  (fired on the *parent's* hooks), so it uses those for the delegation bracket — which
+  brackets the **detached** window too (`Agent(run_in_background=true)`), not just
+  foreground delegation. The launcher (`bin/kimi-custom.cmd` / `bin/kimi-custom`) runs platform-key
   mode (kimi-k3 on Moonshot's Anthropic-compatible endpoint, 1M context) only when a
   key is available — the gitignored `vendor/kimi-custom/api.txt` takes precedence over
   `KIMI_MODEL_API_KEY` — and otherwise leaves the providers configured in

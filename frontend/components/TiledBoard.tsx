@@ -77,7 +77,7 @@ const ARRANGE_SETTLE_MS = 180;
 function shouldIgnoreDragTarget(target: HTMLElement) {
   return Boolean(
     target.closest(
-      ".pane-actions, .pane-actions *, .terminal-surface, .terminal-command-strip, button, input, textarea, select, a"
+      ".pane-actions, .pane-actions *, .pane-split-divider, .terminal-surface, .terminal-command-strip, button, input, textarea, select, a"
     )
   );
 }
@@ -687,6 +687,7 @@ export default function TiledBoard({
               disabled && "pane-frame-disabled"
             )}
             data-session-id={item.id}
+      data-tile-id={item.id}
             style={layoutToStyle(layout)}
             onPointerDown={(event) => handleFramePointerDown(event, item)}
           >

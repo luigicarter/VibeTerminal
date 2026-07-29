@@ -25,6 +25,48 @@
   --scrollbar-thumb: #3a3d45;
   --scrollbar-thumb-hover: #4c505a;
   --scrollbar-thumb-active: var(--accent);
+
+  /* Semantic status colours. Every surface that reports agent state — the
+     sidebar dots, the project-card counts, the pane status pills — reads from
+     these, so "working" cannot mean one amber in the sidebar and a different
+     one in a pane header. */
+  --status-working: #f4cf5a;
+  --status-working-dim: rgba(244, 207, 90, 0.25);
+  --status-done: #6fcf97;
+  --status-blocked: #4da3ff;
+  --status-blocked-dim: rgba(77, 163, 255, 0.12);
+  --status-failed: #f08a7a;
+  --status-idle: #8b918a;
+
+  /* Spacing scale. Chrome spacing is picked from these steps rather than
+     ad-hoc pixel values, which is what gives the shell a consistent rhythm. */
+  --space-1: 3px;
+  --space-2: 6px;
+  --space-3: 9px;
+  --space-4: 12px;
+  --space-5: 16px;
+  --space-6: 22px;
+
+  --radius-sm: 7px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
+
+  /* Type scale. Tight, with real steps between levels so hierarchy comes from
+     size and weight rather than from colour alone. */
+  --text-2xs: 10px;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-lg: 15px;
+  --text-xl: 18px;
+  --tracking-wide: 0.14em;
+
+  /* Motion is reserved for state changes (selection, hover, status), never for
+     layout that the user is dragging. */
+  --motion-fast: 120ms;
+  --motion-base: 160ms;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 * {
@@ -59,18 +101,17 @@ button {
   grid-template-columns: 0 minmax(0, 1fr);
 }
 
+/* Calm, flat surface: the sidebar is a frame for live status, so the chrome
+   itself should not compete with the colour the cards carry. */
 .sidebar {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-4);
   overflow: hidden;
   border-right: 1px solid var(--border-hairline);
-  background:
-    radial-gradient(120% 32% at 50% 0%, color-mix(in srgb, var(--accent) 5%, transparent), transparent 70%),
-    linear-gradient(180deg, #131418 0%, #0d0e11 100%);
-  padding: 16px 12px 14px;
-  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.04);
+  background: var(--bg-sidebar);
+  padding: var(--space-5) var(--space-4) var(--space-4);
 }
 
 .sidebar-collapsed .sidebar {
@@ -115,48 +156,43 @@ button {
 .brand {
   display: flex;
   align-items: center;
-  gap: 11px;
-  min-height: 44px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-  padding: 2px 4px 13px;
+  gap: var(--space-3);
+  min-height: 40px;
+  border-bottom: 1px solid var(--border-hairline);
+  padding: 0 var(--space-1) var(--space-4);
 }
 
 .brand-mark {
   display: grid;
-  width: 38px;
-  height: 38px;
+  width: 32px;
+  height: 32px;
   flex: 0 0 auto;
   place-items: center;
-  border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
-  border-radius: 11px;
-  background:
-    radial-gradient(85% 85% at 50% 18%, color-mix(in srgb, var(--accent) 13%, transparent), transparent 72%),
-    var(--bg-panel);
-  box-shadow:
-    0 6px 16px rgba(0, 0, 0, 0.35),
-    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
 }
 
 .brand-mark img {
   display: block;
-  width: 34px;
-  height: 34px;
+  width: 26px;
+  height: 26px;
   object-fit: contain;
 }
 
 .brand h1 {
   margin: 0;
   color: var(--text-primary);
-  font-size: 15px;
-  font-weight: 650;
+  font-size: var(--text-base);
+  font-weight: 600;
   letter-spacing: 0.01em;
-  line-height: 1.15;
+  line-height: 1.2;
 }
 
 .brand span {
   color: var(--text-muted);
-  font-size: 11.5px;
-  letter-spacing: 0.03em;
+  font-size: var(--text-xs);
+  letter-spacing: 0.02em;
 }
 
 .open-folder-button,
@@ -166,17 +202,18 @@ button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: var(--space-2);
   border: 1px solid var(--border-hairline);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--bg-element) 88%, transparent);
+  border-radius: var(--radius-sm);
+  background: var(--bg-element);
   color: var(--text-primary);
   cursor: pointer;
+  /* State change only: no transform, so a hover never nudges layout the user
+     is aiming at. */
   transition:
-    border-color 140ms ease,
-    background 140ms ease,
-    box-shadow 140ms ease,
-    transform 140ms ease;
+    border-color var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
 }
 
 .open-folder-button:hover,
@@ -188,13 +225,8 @@ button {
 }
 
 .open-folder-button:hover {
-  border-color: color-mix(in srgb, var(--accent) 38%, transparent);
-  background: linear-gradient(180deg, #282a31 0%, #1f2127 100%);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.07),
-    0 0 0 1px color-mix(in srgb, var(--accent) 10%, transparent),
-    0 8px 20px rgba(0, 0, 0, 0.3);
-  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  background: var(--bg-element-hover);
 }
 
 .open-folder-button:focus-visible {
@@ -209,41 +241,41 @@ button {
 }
 
 .open-folder-button {
-  min-height: 40px;
+  min-height: 36px;
   border: 1px solid var(--border-strong);
-  background: linear-gradient(180deg, #23252b 0%, #1b1d22 100%);
+  background: var(--bg-element);
   color: var(--text-primary);
-  border-radius: 10px;
-  font-size: 13px;
+  border-radius: var(--radius-md);
+  font-size: var(--text-base);
   font-weight: 600;
   letter-spacing: 0.01em;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.06),
-    0 6px 16px rgba(0, 0, 0, 0.25);
 }
 
 .open-folder-button svg {
   color: var(--accent-icon);
 }
 
+/* Card, not row: the heading sits above a live tally of what the scope's panes
+   are doing, so the sidebar answers "where should I look?" without a click. */
 .multi-mode-card {
   display: flex;
   width: 100%;
-  align-items: center;
-  justify-content: space-between;
-  gap: 9px;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: var(--space-1);
   border: 1px solid transparent;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
-  padding: 8px 9px;
+  padding: var(--space-2) var(--space-3);
   text-align: left;
   transition:
-    border-color 140ms ease,
-    background 140ms ease,
-    color 140ms ease,
-    box-shadow 140ms ease;
+    border-color var(--motion-base) var(--ease-out),
+    background var(--motion-base) var(--ease-out),
+    color var(--motion-base) var(--ease-out),
+    box-shadow var(--motion-base) var(--ease-out);
 }
 
 .multi-mode-card:hover {
@@ -257,27 +289,21 @@ button {
 }
 
 .multi-mode-card.active {
-  border-color: color-mix(in srgb, var(--accent) 16%, transparent);
-  background: linear-gradient(
-    90deg,
-    color-mix(in srgb, var(--accent) 13%, transparent),
-    color-mix(in srgb, var(--accent) 4%, transparent) 70%
-  );
+  border-color: color-mix(in srgb, var(--accent) 20%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
   color: var(--text-primary);
-  box-shadow:
-    inset 3px 0 0 var(--accent),
-    0 10px 22px rgba(0, 0, 0, 0.18);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .multi-mode-card.has-attention,
 .workspace-button.has-attention {
-  border-color: rgba(77, 163, 255, 0.4);
-  background: rgba(77, 163, 255, 0.05);
+  border-color: color-mix(in srgb, var(--status-blocked) 40%, transparent);
+  background: color-mix(in srgb, var(--status-blocked) 5%, transparent);
 }
 
 .multi-mode-card.has-working,
 .workspace-button.has-working {
-  border-color: rgba(244, 207, 90, 0.3);
+  border-color: color-mix(in srgb, var(--status-working) 30%, transparent);
 }
 
 .multi-mode-heading {
@@ -288,6 +314,12 @@ button {
   gap: 9px;
   font-size: 13px;
   font-weight: 600;
+}
+
+/* The dot slot sits at the end of the heading row, so it must not be stretched
+   by the column layout above. */
+.multi-mode-heading > .attention-dot {
+  margin-left: auto;
 }
 
 .multi-mode-heading svg {
@@ -309,18 +341,12 @@ button {
 }
 
 .multi-mode-subtitle {
-  overflow: hidden;
-  flex: 0 1 auto;
   min-width: 0;
-  border: 1px solid var(--border-hairline);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.03);
+  flex: 0 0 auto;
   color: var(--text-muted);
-  padding: 2px 8px;
+  padding-left: 34px;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .multi-mode-card.active .multi-mode-subtitle {
@@ -360,7 +386,8 @@ button {
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
-  gap: 2px;
+  /* Cards, not rows: they need air between them to read as separate objects. */
+  gap: var(--space-1);
   overflow: auto;
 }
 
@@ -425,7 +452,7 @@ button {
   position: relative;
   grid-template-columns: minmax(0, 1fr);
   align-items: center;
-  border-radius: 9px;
+  border-radius: var(--radius-md);
 }
 
 .workspace-row.drop-before::before,
@@ -462,34 +489,73 @@ button {
   text-align: left;
 }
 
+/* Three rows: identity, path, live tally. Every child is placed explicitly so
+   the auto-placement stays stable as the card gains content. */
 .workspace-button {
   grid-template-columns: 9px 18px minmax(0, 1fr) 16px;
-  gap: 8px;
+  grid-template-rows: auto auto auto;
+  gap: var(--space-1) var(--space-2);
   min-height: 36px;
-  padding: 0 9px;
-  font-size: 13px;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-base);
   transition:
-    border-color 140ms ease,
-    background 140ms ease,
-    color 140ms ease,
-    box-shadow 140ms ease,
-    transform 140ms ease;
+    border-color var(--motion-base) var(--ease-out),
+    background var(--motion-base) var(--ease-out),
+    color var(--motion-base) var(--ease-out),
+    box-shadow var(--motion-base) var(--ease-out);
+}
+
+.workspace-button > .attention-dot {
+  grid-row: 1;
+  grid-column: 1;
 }
 
 .workspace-button > svg {
+  grid-row: 1;
   color: var(--text-muted);
   transition:
     color 140ms ease,
     opacity 140ms ease;
 }
 
-.workspace-button > svg:last-child {
+.workspace-button > svg:first-of-type {
+  grid-column: 2;
+}
+
+.workspace-name {
+  grid-row: 1;
+  grid-column: 3;
+  color: var(--text-primary);
+  font-weight: 550;
+}
+
+.workspace-button > svg:last-of-type {
+  grid-column: 4;
   opacity: 0.4;
 }
 
 /* The overlay remove button takes the chevron's slot on row hover. */
-.workspace-row:hover .workspace-button > svg:last-child {
+.workspace-row:hover .workspace-button > svg:last-of-type {
   opacity: 0;
+}
+
+/* Middle rows share the text column so they align under the folder name. */
+.workspace-path {
+  grid-row: 2;
+  grid-column: 2 / -1;
+  color: var(--text-muted);
+  font-size: 11px;
+  /* Truncate from the LEFT: the tail of a path identifies it, the root rarely
+     does. `direction: rtl` moves the ellipsis without reordering the text,
+     which the isolate keeps intact. */
+  direction: rtl;
+  text-align: left;
+  unicode-bidi: isolate;
+}
+
+.workspace-button > .session-counts {
+  grid-row: 3;
+  grid-column: 2 / -1;
 }
 
 .workspace-button[draggable="true"] {
@@ -507,14 +573,85 @@ button {
   white-space: nowrap;
 }
 
+/* Live per-scope tally. Zero buckets are not rendered at all (a quiet project
+   should read as quiet, not as a row of zeros), so the row is allowed to wrap
+   rather than ellipsize — losing a count would defeat the point of the card. */
+.session-counts {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.45;
+  white-space: nowrap;
+}
+
+.session-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.session-count-glyph {
+  display: inline-flex;
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  line-height: 1;
+}
+
+/* The working glyph is the same amber spinner ring as the sidebar dot, so
+   "working" reads identically wherever it appears. */
+.session-count-working {
+  color: var(--status-working);
+}
+
+.session-count-working .session-count-glyph {
+  box-sizing: border-box;
+  border: 2px solid var(--status-working-dim);
+  border-top-color: var(--status-working);
+  border-radius: var(--radius-pill);
+  animation: working-dot-spin 0.7s linear infinite;
+}
+
+.session-count-done {
+  color: var(--status-done);
+}
+
+.session-count-blocked {
+  color: var(--status-blocked);
+}
+
+.session-count-failed {
+  color: var(--status-failed);
+}
+
+.session-counts-quiet {
+  color: var(--text-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-count-working .session-count-glyph {
+    animation: none;
+    border-color: color-mix(in srgb, var(--status-working) 35%, transparent);
+    border-top-color: var(--status-working);
+  }
+}
+
 .attention-dot {
   display: inline-block;
   width: 7px;
   height: 7px;
   flex: 0 0 auto;
-  border-radius: 999px;
-  background: #4da3ff;
-  box-shadow: 0 0 0 3px rgba(77, 163, 255, 0.12);
+  border-radius: var(--radius-pill);
+  background: var(--status-blocked);
+  box-shadow: 0 0 0 3px var(--status-blocked-dim);
 }
 
 .attention-dot-empty {
@@ -529,8 +666,8 @@ button {
   width: 9px;
   height: 9px;
   background: transparent;
-  border: 2px solid rgba(244, 207, 90, 0.25);
-  border-top-color: #f4cf5a;
+  border: 2px solid var(--status-working-dim);
+  border-top-color: var(--status-working);
   box-shadow: none;
   animation: working-dot-spin 0.7s linear infinite;
 }
@@ -544,8 +681,8 @@ button {
 @media (prefers-reduced-motion: reduce) {
   .attention-dot-working {
     animation: none;
-    border-color: rgba(244, 207, 90, 0.35);
-    border-top-color: #f4cf5a;
+    border-color: color-mix(in srgb, var(--status-working) 35%, transparent);
+    border-top-color: var(--status-working);
   }
 }
 
@@ -566,24 +703,18 @@ button {
 }
 
 .workspace-button.active {
-  border-color: color-mix(in srgb, var(--accent) 16%, transparent);
-  background: linear-gradient(
-    90deg,
-    color-mix(in srgb, var(--accent) 13%, transparent),
-    color-mix(in srgb, var(--accent) 4%, transparent) 70%
-  );
-  color: #ffffff;
+  border-color: color-mix(in srgb, var(--accent) 20%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  color: var(--text-primary);
   transform: none;
-  box-shadow:
-    inset 3px 0 0 var(--accent),
-    0 9px 20px rgba(0, 0, 0, 0.18);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .workspace-button.active > svg {
   color: var(--accent-icon);
 }
 
-.workspace-button.active > svg:last-child {
+.workspace-button.active > svg:last-of-type {
   opacity: 0.8;
 }
 
@@ -711,11 +842,11 @@ button {
 .topbar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  min-height: 60px;
+  gap: var(--space-3);
+  min-height: 52px;
   border-bottom: 1px solid var(--border-hairline);
   background: var(--bg-panel);
-  padding: 10px 14px;
+  padding: var(--space-2) var(--space-4);
 }
 
 .icon-button,
@@ -723,15 +854,19 @@ button {
   display: inline-grid;
   place-items: center;
   border: 1px solid var(--border-hairline);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: var(--bg-element);
   color: var(--text-primary);
   cursor: pointer;
+  transition:
+    border-color var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
 }
 
 .icon-button {
-  width: 34px;
-  height: 34px;
+  width: 32px;
+  height: 32px;
 }
 
 .workspace-title {
@@ -753,15 +888,17 @@ button {
   max-width: 520px;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 15px;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .workspace-title-copy > span {
   display: block;
   overflow: hidden;
   max-width: 620px;
-  color: var(--text-secondary);
-  font-size: 12px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -770,6 +907,141 @@ button {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* Version switcher: a caret beside "Check for update" that opens the list of
+   published releases. Going backwards is a first-class choice here, so older
+   versions are ordinary rows, not a hidden affordance. */
+.version-picker {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+/* Scoped to .quick-actions so it beats that block's 142px-wide button sizing:
+   this is a caret, not another labelled action. */
+.quick-actions .version-picker-toggle {
+  display: inline-grid;
+  min-width: 0;
+  width: 34px;
+  height: 34px;
+  min-height: 34px;
+  place-items: center;
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-sm);
+  background: var(--bg-element);
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0;
+  transition:
+    border-color var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+
+.quick-actions .version-picker-toggle:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-element-hover);
+  color: var(--text-primary);
+}
+
+.version-picker-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 60;
+  width: 260px;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+}
+
+.version-picker-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  border-bottom: 1px solid var(--border-hairline);
+  padding: var(--space-3);
+  color: var(--text-primary);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.version-picker-title span {
+  color: var(--text-muted);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.version-picker-note {
+  padding: var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.version-picker-list {
+  display: flex;
+  max-height: 280px;
+  flex-direction: column;
+  overflow-y: auto;
+  padding: var(--space-1);
+}
+
+.version-picker-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+  font-size: var(--text-sm);
+  transition: background var(--motion-fast) var(--ease-out);
+}
+
+.version-picker-item:hover:not(:disabled) {
+  background: var(--bg-element-hover);
+  color: var(--text-primary);
+}
+
+.version-picker-item:disabled {
+  cursor: default;
+}
+
+.version-picker-item.is-current {
+  color: var(--text-primary);
+}
+
+.version-picker-version {
+  flex: 1 1 auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.version-picker-tag {
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-pill);
+  color: var(--text-muted);
+  padding: 0 6px;
+  font-size: var(--text-2xs);
+}
+
+.version-picker-state {
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+}
+
+.version-picker-footer {
+  border-top: 1px solid var(--border-hairline);
+  padding: var(--space-2) var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+  line-height: 1.35;
 }
 
 .app-version {
@@ -1016,28 +1288,35 @@ button {
 .agent-toolbar {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   overflow: hidden;
   border-bottom: 1px solid var(--border-hairline);
-  background: var(--bg-panel);
-  padding: 9px 14px;
+  background: var(--bg-app);
+  padding: var(--space-2) var(--space-4);
 }
 
 .agent-toolbar-actions {
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   overflow-x: auto;
 }
 
+/* The accent identifies the agent, so it stays on the icon and only tints the
+   border — a full row of saturated outlines reads as noise. */
 .agent-toolbar button {
   flex: 0 0 auto;
-  min-height: 30px;
-  border-color: color-mix(in srgb, var(--agent-accent) 36%, var(--border-hairline));
-  padding: 0 10px;
+  min-height: 28px;
+  border-color: color-mix(in srgb, var(--agent-accent) 22%, var(--border-hairline));
+  padding: 0 var(--space-3);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.agent-toolbar button:hover {
+  border-color: color-mix(in srgb, var(--agent-accent) 45%, var(--border-hairline));
   color: var(--text-primary);
-  font-size: 12px;
 }
 
 .agent-toolbar button svg {
@@ -1308,6 +1587,99 @@ button {
   top: 5px;
   left: 5px;
   border-width: 2px 0 0 2px;
+}
+
+/* A tile's interior partition. Nested flex, sized purely by each branch's
+   flex-grow, so a tile resized by a board drag, the window, maximize or a
+   workspace switch reflows for free — there is no percentage geometry to
+   recompute. */
+.pane-split-root,
+.pane-split-branch,
+.pane-split-slot {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 0;
+}
+
+.pane-split-root {
+  /* The board frame is absolutely positioned with an explicit size and is not
+     itself a flex container, so the root must claim that size outright — a
+     flex-basis would resolve against nothing and collapse the whole tile. */
+  width: 100%;
+  height: 100%;
+  /* The one hard guarantee: if the board is ever narrower than the partition's
+     own minimum, panes are CLIPPED rather than collapsed. A zero-sized pane
+     would leave xterm unable to measure itself, so it could never advertise a
+     real PTY size. */
+  overflow: hidden;
+}
+
+.pane-split-row {
+  flex-direction: row;
+}
+
+.pane-split-col {
+  flex-direction: column;
+}
+
+.pane-split-leaf {
+  display: flex;
+  min-width: 120px;
+  min-height: 96px;
+  flex: 1 1 0;
+  overflow: hidden;
+}
+
+.pane-split-leaf > * {
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.pane-split-divider {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 6px;
+  background: transparent;
+  touch-action: none;
+}
+
+.pane-split-row > .pane-split-divider {
+  cursor: col-resize;
+}
+
+.pane-split-col > .pane-split-divider {
+  cursor: row-resize;
+}
+
+/* Same hairline-on-hover treatment as the board's own resize edges. */
+.pane-split-divider::after {
+  position: absolute;
+  border-radius: 2px;
+  background: var(--pane-accent, var(--accent));
+  content: "";
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.pane-split-row > .pane-split-divider::after {
+  top: 8px;
+  bottom: 8px;
+  left: 2px;
+  width: 2px;
+}
+
+.pane-split-col > .pane-split-divider::after {
+  top: 2px;
+  right: 8px;
+  left: 8px;
+  height: 2px;
+}
+
+.pane-split-divider:hover::after,
+.pane-split-divider:focus-visible::after {
+  opacity: 0.8;
 }
 
 .terminal-pane {

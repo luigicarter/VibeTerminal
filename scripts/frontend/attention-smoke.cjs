@@ -68,7 +68,12 @@ const {
   statusAfterUserInput,
   statusFromAttentionState,
   statusFromTerminalEvent,
-  updateDetachedTaskIds
+  summarizeSessions,
+  updateDetachedTaskIds,
+  updateSubagentDepth,
+  clearSubagentDepth,
+  hasLiveSubagents,
+  shouldSuppressAgentCompletion
 } = testModule.exports;
 
 const completed = {
@@ -254,6 +259,142 @@ assert.strictEqual(isSessionWorking({ status: "waiting" }), false);
 assert.strictEqual(isSessionWorking({ status: "done" }), false);
 assert.strictEqual(isSessionWorking({ status: "idle" }), false);
 
+// A terminal pane with an open subagent delegation is working even though its
+// own turn has settled — the parent's Stop is unattributable while a child is
+// live (kimi fires the session-level Stop at the CHILD's turn end).
+assert.strictEqual(isSessionWorking({ status: "done", subagentDepth: 1 }), true);
+assert.strictEqual(isSessionWorking({ status: "waiting", subagentDepth: 2 }), true);
+assert.strictEqual(isSessionWorking({ status: "done", subagentDepth: 0 }), false);
+assert.strictEqual(isSessionWorking({ status: "done" }), false);
+
+// The bracket is a counter, not an id set: no provider hook matcher can carry a
+// task id. It floors at 0 so an unpaired stop is a no-op rather than a negative
+// count that would later mask a real delegation, and caps so a leaked start
+// costs a bounded amount.
+assert.strictEqual(updateSubagentDepth({}, "start").subagentDepth, 1);
+assert.strictEqual(
+  updateSubagentDepth({ subagentDepth: 1 }, "start").subagentDepth,
+  2
+);
+assert.strictEqual(
+  updateSubagentDepth({ subagentDepth: 1 }, "stop").subagentDepth,
+  undefined
+);
+const flooredSession = { subagentDepth: 0 };
+assert.strictEqual(updateSubagentDepth(flooredSession, "stop"), flooredSession);
+assert.strictEqual(updateSubagentDepth({}, "stop").subagentDepth, undefined);
+let cappedSession = {};
+for (let i = 0; i < 40; i += 1) {
+  cappedSession = updateSubagentDepth(cappedSession, "start");
+}
+assert.strictEqual(cappedSession.subagentDepth, 32);
+assert.strictEqual(clearSubagentDepth({ subagentDepth: 3 }).subagentDepth, undefined);
+const noDepth = { status: "done" };
+assert.strictEqual(clearSubagentDepth(noDepth), noDepth);
+assert.strictEqual(hasLiveSubagents({ subagentDepth: 1 }), true);
+assert.strictEqual(hasLiveSubagents({ subagentDepth: 0 }), false);
+assert.strictEqual(hasLiveSubagents({}), false);
+
+// A completion arriving inside the bracket cannot be attributed to the pane's
+// own turn, so it is DROPPED (it carries no id, so deferring and replaying it
+// would just reproduce the bug one event later). Two exemptions: a "waiting" is
+// a genuine user-facing wait from a child asking permission, and a process exit
+// ("shim") is real and final. The ambiguous signal is the provider-sourced one:
+// mapTelemetryToAttention gives agent.completed (the Stop hook) source
+// "provider", while a real agent.process.exited carries "shim".
+const providerCompleted = {
+  state: "completed",
+  reason: "done",
+  source: "provider",
+  updatedAt: 100
+};
+assert.strictEqual(
+  shouldSuppressAgentCompletion({ subagentDepth: 1 }, providerCompleted),
+  true
+);
+assert.strictEqual(
+  shouldSuppressAgentCompletion(
+    { subagentDepth: 1 },
+    { state: "failed", reason: "error", source: "provider", updatedAt: 1 }
+  ),
+  true
+);
+assert.strictEqual(shouldSuppressAgentCompletion({}, providerCompleted), false);
+assert.strictEqual(
+  shouldSuppressAgentCompletion({ subagentDepth: 0 }, providerCompleted),
+  false
+);
+assert.strictEqual(
+  shouldSuppressAgentCompletion(
+    { subagentDepth: 1 },
+    { state: "waiting", reason: "approval", source: "provider", updatedAt: 1 }
+  ),
+  false
+);
+assert.strictEqual(
+  shouldSuppressAgentCompletion(
+    { subagentDepth: 1 },
+    { state: "completed", reason: "done", source: "shim", updatedAt: 1 }
+  ),
+  false
+);
+
+// The sidebar card tally is built from the same predicates as the pill and the
+// dot, so a card can never disagree with the pane it counts. Buckets are
+// mutually exclusive and evaluated working -> blocked -> failed -> done:
+// working wins over everything (an open delegation outranks a settled turn), a
+// blocked pane is not "done" even though its turn stopped, and a failed run is
+// finished but not a success so it never lands in "done".
+const summary = summarizeSessions([
+  { status: "running" },
+  { status: "done", subagentDepth: 1 },
+  { status: "idle", detachedTaskIds: ["bg-1"] },
+  { status: "waiting", attention: { state: "waiting", reason: "approval" } },
+  { status: "waiting", attention: { state: "waiting", reason: "question" } },
+  { status: "done", attention: { state: "completed" } },
+  { status: "done" },
+  { status: "failed" },
+  { status: "idle" },
+  { status: "starting" }
+]);
+assert.deepStrictEqual(summary, {
+  working: 3,
+  done: 2,
+  blocked: 2,
+  failed: 1,
+  total: 10
+});
+assert.deepStrictEqual(summarizeSessions([]), {
+  working: 0,
+  done: 0,
+  blocked: 0,
+  failed: 0,
+  total: 0
+});
+// A pane still working is never counted as blocked, even while its own turn is
+// parked waiting on a child's approval prompt.
+assert.deepStrictEqual(
+  summarizeSessions([
+    {
+      status: "waiting",
+      subagentDepth: 1,
+      attention: { state: "waiting", reason: "approval" }
+    }
+  ]),
+  { working: 1, done: 0, blocked: 0, failed: 0, total: 1 }
+);
+
+// The render-time dot decision is deliberately UNCHANGED by the bracket: an
+// ambiguous completion never gets written in the first place, and a child's
+// approval wait must still raise the dot.
+assert.strictEqual(
+  shouldShowAttentionDot({
+    subagentDepth: 1,
+    attention: { state: "waiting", reason: "approval", unread: true }
+  }),
+  true
+);
+
 // Detached task lifecycle is idempotent by id so live events plus reattach
 // replay cannot double-count, and any settled variant releases only its id.
 const detachedBase = { status: "done" };
@@ -397,6 +538,28 @@ assert.strictEqual(
 assert.strictEqual(
   codexTurnAttentionDecision(undefined, false, undefined, ["done-turn"], "done-turn"),
   "reject"
+);
+// With no bound turn id, a completion is accepted only while the pane has not
+// already settled a turn. turnLive===false means we settled one, so this
+// completion belongs to something untracked (a spawned child, a stale POST);
+// undefined means we never observed a turn at all, which is the older/untrusted
+// codex compatibility path and still accepts.
+assert.strictEqual(
+  codexTurnAttentionDecision(undefined, false, undefined, [], "turn-x", false),
+  "reject"
+);
+assert.strictEqual(
+  codexTurnAttentionDecision(undefined, false, undefined, [], "turn-x", undefined),
+  "accept"
+);
+assert.strictEqual(
+  codexTurnAttentionDecision(undefined, false, undefined, [], "turn-x", true),
+  "accept"
+);
+// A live turn id still wins: turnLive must not override the id match either way.
+assert.strictEqual(
+  codexTurnAttentionDecision("turn-x", false, undefined, [], "turn-x", false),
+  "accept"
 );
 
 // Plain terminals use TerminalPane's mounted output-idle heuristic, so their
@@ -601,6 +764,74 @@ assert(
   appSource.includes("statusFromAttentionState(attentionEvent.state)") &&
     appSource.includes("reconcileStatus("),
   "agent attention should drive the pill status through reconcileStatus"
+);
+// The delegation bracket: the listener routes it, and the suppression guard
+// must sit BEFORE the accepted-attention writer (so neither status nor
+// attention is written) and AFTER codex's own turn gates (so codex bookkeeping
+// still runs for a completion codex itself accepted).
+assert(
+  appSource.includes('event.type === "agent-subagent"') &&
+    appSource.includes("applyAgentSubagent(event.id, event.phase, event.provider)"),
+  "the terminal listener should route the subagent delegation bracket"
+);
+const applyAgentAttentionIndex = appSource.indexOf("function applyAgentAttention");
+const applyAgentAttentionBody = appSource.slice(
+  applyAgentAttentionIndex,
+  appSource.indexOf("function applyTerminalAttention")
+);
+const suppressIndex = applyAgentAttentionBody.indexOf(
+  "shouldSuppressAgentCompletion(current"
+);
+const acceptedIndex = applyAgentAttentionBody.indexOf(
+  "applyAcceptedAgentAttention(sessionId, attentionEvent)"
+);
+const codexGateIndex = applyAgentAttentionBody.indexOf(
+  "codexTurnLiveRef.current.set(sessionId, false)"
+);
+assert(
+  applyAgentAttentionIndex > 0 &&
+    suppressIndex > 0 &&
+    acceptedIndex > suppressIndex &&
+    codexGateIndex > 0 &&
+    codexGateIndex < suppressIndex,
+  "the completion suppression guard must sit after the codex gates and before applyAcceptedAgentAttention"
+);
+// Ordering inside applyAgentSubagent is load-bearing: applyAgentRunning's
+// turn-start branch clears subagentDepth, so the increment has to land after it.
+const subagentFnIndex = appSource.indexOf("function applyAgentSubagent");
+const subagentBody = appSource.slice(subagentFnIndex, subagentFnIndex + 1600);
+assert(
+  subagentFnIndex > 0 &&
+    subagentBody.indexOf("applyAgentRunning(sessionId, true, provider)") <
+      subagentBody.indexOf("updateSubagentDepth(session, phase)"),
+  "applyAgentSubagent must increment the bracket after the turn-start reset"
+);
+assert(
+  appSource.includes("const subagentDepth = turnStart ? undefined : session.subagentDepth;"),
+  "only a genuine turn start may clear the delegation bracket in applyAgentRunning"
+);
+assert(
+  appSource.includes("updateAnySession(session.id, clearSubagentDepth)"),
+  "Esc release and the delegation watchdog should clear the bracket"
+);
+// The sidebar cards tally EVERY workspace, not just the active one — all
+// status/attention mutations go through updateAnySession, so a background
+// folder's counts stay live without new state or polling.
+assert(
+  appSource.includes("summarizeSessions(workspace.sessions)") &&
+    appSource.includes("summarizeSessions(multiSessions)") &&
+    appSource.includes("<SessionCounts summary={summary} />") &&
+    appSource.includes("<SessionCounts summary={multiModeSummary} />"),
+  "both the folder cards and the Multi card should render live session counts"
+);
+const stylesSourceForCounts = fs.readFileSync(stylesPath, "utf8");
+assert(
+  stylesSourceForCounts.includes(".session-count-working") &&
+    stylesSourceForCounts.includes(".session-count-done") &&
+    stylesSourceForCounts.includes(".session-count-blocked") &&
+    stylesSourceForCounts.includes(".session-count-failed") &&
+    stylesSourceForCounts.includes(".workspace-path"),
+  "styles.css should style the project card path line and every count bucket"
 );
 assert(
   appSource.includes("function sessionCreationKind") &&
@@ -838,6 +1069,19 @@ assert(
     terminalPaneSource.includes("function armTelemetrySettle()") &&
     terminalPaneSource.includes("sessionRef.current.status === armedFor"),
   "terminal pane should settle a stale telemetry 'running' after prolonged output silence"
+);
+// A delegating pane is EXPECTED to be quiet — the parent idles at a static
+// prompt while its subagent works — so the same watchdog switches to a much
+// longer window while the bracket is open, and that window doubles as the
+// bracket's absolute expiry (its close event can be lost: a denied Task, a
+// killed child). The delay is fixed at arm time, so the pane also re-arms
+// whenever the depth changes.
+assert(
+  terminalPaneSource.includes("TELEMETRY_DELEGATION_QUIET_MS") &&
+    terminalPaneSource.includes("hasLiveSubagents(sessionRef.current)") &&
+    terminalPaneSource.includes("onDelegationTimeoutRef.current?.()") &&
+    terminalPaneSource.includes("}, [session.subagentDepth]);"),
+  "terminal pane should hold a delegating turn open and expire a leaked bracket"
 );
 // A snapshot is a replay (remount/reattach): it must not mark the pane working
 // (markActiveFromOutput is called for live "data" only — 1 definition + 1 call

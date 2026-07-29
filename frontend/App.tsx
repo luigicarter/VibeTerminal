@@ -11,6 +11,7 @@ import {
   type PointerEvent as ReactPointerEvent
 } from "react";
 import {
+  ChevronDown,
   ChevronRight,
   Download,
   Folder,
@@ -36,6 +37,7 @@ import {
   EMPTY_ATTENTION,
   attentionFromEvent,
   attentionFromTerminalEvent,
+  clearSubagentDepth,
   clearUnreadAttention,
   codexTurnAttentionDecision,
   isSessionWorking,
@@ -46,10 +48,14 @@ import {
   shouldMarkCompletedTurnUnread,
   shouldMarkAttentionUnread,
   shouldShowAttentionDot,
+  shouldSuppressAgentCompletion,
   shouldUseTerminalEventAttention,
   statusFromAttentionState,
   statusFromTerminalEvent,
-  updateDetachedTaskIds
+  summarizeSessions,
+  updateDetachedTaskIds,
+  updateSubagentDepth,
+  type SessionSummary
 } from "./attention";
 import TerminalPane from "./components/TerminalPane";
 import FusionChatPane from "./components/FusionChatPane";
@@ -61,6 +67,20 @@ import OpenFusionChatPane, {
   type OpenFusionSettingsChange
 } from "./components/OpenFusionChatPane";
 import TiledBoard from "./components/TiledBoard";
+import PaneSplit, { SPLIT_DIVIDER_PX } from "./components/PaneSplit";
+import {
+  buildBoardTiles,
+  detachSessionFromTile,
+  effectiveTileId,
+  isTileAnchor,
+  leafIds,
+  normalizeSplitNode,
+  reconcileTiles,
+  setRatioAtPath,
+  splitLeaf,
+  subtreeMin,
+  type SplitPath
+} from "./components/splitTree";
 import {
   createThreadRef,
   isThreadedAgentKind
@@ -69,6 +89,7 @@ import { computeCwdConflicts } from "./cwdConflicts";
 import type {
   AgentAttentionEvent,
   AgentBackgroundActivity,
+  AppVersionList,
   AgentKind,
   AgentProfile,
   AgentSession,
@@ -81,6 +102,7 @@ import type {
   LayoutBox,
   OpenFusionChatEvent,
   ProjectWorkspace,
+  SplitNode,
   UpdateState
 } from "./types";
 
@@ -321,6 +343,68 @@ function normalizeWorkspacePath(path: string) {
 
 function formatCount(count: number, label: string) {
   return `${count} ${label}${count === 1 ? "" : "s"}`;
+}
+
+// The live per-project tally on a sidebar card. Every bucket comes from
+// summarizeSessions, which is built from the same predicates the pane's own
+// status pill and attention dot use, so a card can never disagree with the pane
+// it is counting. Buckets that are zero are not rendered — a quiet project
+// should read as quiet, not as a row of zeros — and a project with nothing
+// happening falls back to the plain terminal count.
+function SessionCounts({ summary }: { summary: SessionSummary }) {
+  const { working, done, blocked, failed, total } = summary;
+
+  if (!working && !done && !blocked && !failed) {
+    return (
+      <span className="session-counts session-counts-quiet">
+        {total ? formatCount(total, "terminal") : "No terminals"}
+      </span>
+    );
+  }
+
+  const label = [
+    working ? `${working} working` : null,
+    done ? `${done} done` : null,
+    blocked ? `${blocked} blocked` : null,
+    failed ? `${failed} failed` : null
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  return (
+    <span className="session-counts" title={label} aria-label={label}>
+      {working > 0 && (
+        <span className="session-count session-count-working">
+          <span className="session-count-glyph" aria-hidden="true" />
+          {working} working
+        </span>
+      )}
+      {done > 0 && (
+        <span className="session-count session-count-done">
+          <span className="session-count-glyph" aria-hidden="true">
+            ✓
+          </span>
+          {done} done
+        </span>
+      )}
+      {blocked > 0 && (
+        <span className="session-count session-count-blocked">
+          <span className="session-count-glyph" aria-hidden="true">
+            △
+          </span>
+          {blocked} blocked
+        </span>
+      )}
+      {failed > 0 && (
+        <span className="session-count session-count-failed">
+          <span className="session-count-glyph" aria-hidden="true">
+            ✕
+          </span>
+          {failed} failed
+        </span>
+      )}
+    </span>
+  );
 }
 
 function formatUpdatePercent(state: UpdateState) {
@@ -581,7 +665,12 @@ function migrateLayout(layout: LayoutBox | null | undefined): LayoutBox {
 }
 
 function findNextFluidLayout(sessions: AgentSession[]): LayoutBox {
-  const existingLayouts = sessions.map((session) => migrateLayout(session.layout));
+  // Only anchors occupy board space. A grouped non-anchor still carries the
+  // layout it had before it joined a tile (kept so popping it out has a box to
+  // restore), and counting that dead data would reserve space nothing renders.
+  const existingLayouts = sessions
+    .filter(isTileAnchor)
+    .map((session) => migrateLayout(session.layout));
   const rowStep = DEFAULT_PANE_HEIGHT + LEGACY_BOARD_GAP;
   const columns = [
     { x: 0, w: DEFAULT_PANE_WIDTH_PERCENT },
@@ -791,6 +880,12 @@ function restoreSession(session: AgentSession): AgentSession {
     attention: normalizeAttention(session.attention),
     backgroundActivity: undefined,
     detachedTaskIds: undefined,
+    subagentDepth: undefined,
+    // Shape validation only — a single session cannot know whether its siblings
+    // exist, so membership is repaired by reconcileTiles once the sessions are
+    // a set (see restoreStoredWorkspace / loadMultiSessions).
+    tileId: typeof session.tileId === "string" ? session.tileId : undefined,
+    splitTree: normalizeSplitNode(session.splitTree),
     layout: migrateLayout(session.layout)
   };
 }
@@ -818,9 +913,11 @@ function restoreStoredWorkspace(value: unknown): ProjectWorkspace | null {
   }
 
   const sessions = Array.isArray(value.sessions)
-    ? value.sessions
-        .map(restoreStoredSession)
-        .filter((session): session is AgentSession => Boolean(session))
+    ? reconcileTiles(
+        value.sessions
+          .map(restoreStoredSession)
+          .filter((session): session is AgentSession => Boolean(session))
+      )
     : [];
 
   return {
@@ -858,9 +955,11 @@ function loadMultiSessions(): AgentSession[] {
 
     const parsed = JSON.parse(raw) as AgentSession[];
     return Array.isArray(parsed)
-      ? parsed
-          .map(restoreStoredSession)
-          .filter((session): session is AgentSession => Boolean(session))
+      ? reconcileTiles(
+          parsed
+            .map(restoreStoredSession)
+            .filter((session): session is AgentSession => Boolean(session))
+        )
       : [];
   } catch {
     return [];
@@ -1015,6 +1114,65 @@ export default function App() {
       };
     }
 
+    // Visual QA for split tiles and the sidebar card counts: a 3-terminal tile
+    // (two side by side over one full-width) next to an ordinary solo pane.
+    if (screenshotFixture?.mode === "split") {
+      const workspace = starterWorkspace(screenshotFixture.cwd);
+      const cwd = screenshotFixture.cwd;
+      const anchor = createSession("terminal", cwd, [], "Split A");
+      const right = createSession("terminal", cwd, [anchor], "Split B");
+      const below = createSession("terminal", cwd, [anchor, right], "Split C");
+      const solo = createSession("terminal", cwd, [anchor, right, below], "Solo");
+      const tileLayout: LayoutBox = {
+        x: 0,
+        y: LEGACY_BOARD_PADDING,
+        w: 64,
+        h: 620,
+        unit: "fluid"
+      };
+      const splitTree: SplitNode = {
+        dir: "col",
+        ratio: 0.55,
+        a: { dir: "row", ratio: 0.5, a: { id: anchor.id }, b: { id: right.id } },
+        b: { id: below.id }
+      };
+
+      return {
+        workspaces: [
+          {
+            ...workspace,
+            sessions: [
+              {
+                ...anchor,
+                started: false,
+                tileId: anchor.id,
+                splitTree,
+                layout: tileLayout
+              },
+              { ...right, started: false, tileId: anchor.id },
+              { ...below, started: false, tileId: anchor.id },
+              {
+                ...solo,
+                started: false,
+                status: "running" as const,
+                layout: {
+                  x: 66,
+                  y: LEGACY_BOARD_PADDING,
+                  w: 34,
+                  h: 620,
+                  unit: "fluid" as const
+                }
+              }
+            ]
+          }
+        ],
+        activeWorkspaceId: workspace.id,
+        multiSessions: [],
+        activeView: "project" as AppView,
+        sidebarWidth: loadSidebarWidth()
+      };
+    }
+
     const initialWorkspaces = loadWorkspaces();
     return {
       workspaces: initialWorkspaces,
@@ -1067,6 +1225,9 @@ export default function App() {
   const fusionBridgeToolRef = useRef<Map<string, boolean>>(new Map());
   const [shellMessage, setShellMessage] = useState<string | null>(null);
   const [updateState, setUpdateState] = useState<UpdateState | null>(null);
+  const [versionPickerOpen, setVersionPickerOpen] = useState(false);
+  // null = not fetched yet (the menu shows a loading note).
+  const [versionList, setVersionList] = useState<AppVersionList | null>(null);
   const [workspaceChangeSummaries, setWorkspaceChangeSummaries] = useState<
     Record<string, CodeChangeSummary>
   >({});
@@ -1357,6 +1518,11 @@ export default function App() {
         );
       }
 
+      if (event.type === "agent-subagent") {
+        applyAgentSubagent(event.id, event.phase, event.provider);
+        return;
+      }
+
       if (event.type === "agent-background-activity") {
         applyAgentBackgroundActivity(event.id, event.backgroundActivity);
         return;
@@ -1609,10 +1775,16 @@ export default function App() {
         return session;
       }
 
+      // A dead agent has no live children by definition, so a real process
+      // exit/error always releases the delegation bracket.
+      const settled = status === "done" || status === "failed";
       const nextStatus = reconcileStatus(session.status, status);
-      return nextStatus === session.status
-        ? session
-        : { ...session, status: nextStatus };
+      if (nextStatus === session.status) {
+        return settled ? clearSubagentDepth(session) : session;
+      }
+
+      const next = { ...session, status: nextStatus };
+      return settled ? clearSubagentDepth(next) : next;
     });
   }
 
@@ -1665,7 +1837,19 @@ export default function App() {
         return session;
       }
 
-      if (session.status === "running" && !session.attention?.unread && !session.backgroundActivity) {
+      // A genuine turn start supersedes the previous turn outright, so no
+      // delegation opened by that turn can still be in flight. This is the
+      // primary expiry for the subagent bracket. Mid-turn tool activity must
+      // NOT clear it — that would drop a live delegation on the parent's very
+      // next tool call.
+      const subagentDepth = turnStart ? undefined : session.subagentDepth;
+
+      if (
+        session.status === "running" &&
+        !session.attention?.unread &&
+        !session.backgroundActivity &&
+        session.subagentDepth === subagentDepth
+      ) {
         return session;
       }
 
@@ -1673,6 +1857,7 @@ export default function App() {
         ...session,
         status: "running",
         backgroundActivity: undefined,
+        subagentDepth,
         attention: {
           state: "none",
           unread: false,
@@ -1681,6 +1866,38 @@ export default function App() {
         }
       };
     });
+  }
+
+  // A subagent delegation opened or closed. The OPEN half is the only signal
+  // besides a genuine turn start that may push a pane past the done/failed
+  // latch: it is emitted from a tool-call boundary the model itself created, so
+  // unlike raw PTY output it can never be a keystroke echo, a focus/mouse
+  // report, a TUI redraw or a replayed snapshot.
+  function applyAgentSubagent(
+    sessionId: string,
+    phase: "start" | "stop",
+    provider?: string
+  ) {
+    if (phase === "start") {
+      if (provider === "codex") {
+        // Codex's bracket is derived from CHILD tool hooks, which can
+        // legitimately land after the root turn settled — so it stays
+        // latch-respecting, exactly like codex tool activity already is.
+        updateAnySession(sessionId, (session) =>
+          reconcileStatus(session.status, "running") === "running"
+            ? { ...session, status: "running" }
+            : session
+        );
+      } else {
+        applyAgentRunning(sessionId, true, provider);
+      }
+    }
+
+    // Ordering is load-bearing: applyAgentRunning's turn-start branch clears
+    // subagentDepth, so the increment has to land after it.
+    updateAnySession(sessionId, (session) =>
+      updateSubagentDepth(session, phase)
+    );
   }
 
   function clearCodexRunningWatchdog(sessionId: string) {
@@ -1802,9 +2019,18 @@ export default function App() {
         ? reconcileStatus(session.status, attentionStatus)
         : session.status;
 
+      // An idle "your turn" prompt means the agent is blocked on the human,
+      // which is incompatible with a delegation still running. This is what
+      // closes the one bracket leak claude can produce: a DENIED Task fires
+      // PreToolUse but never PostToolUse. An "approval" wait must NOT reset —
+      // that is a child asking permission mid-delegation.
+      const releasesDelegation =
+        attentionEvent.state === "waiting" && attentionEvent.reason === "question";
+
       return {
         ...session,
         status: nextStatus,
+        subagentDepth: releasesDelegation ? undefined : session.subagentDepth,
         attention: attentionFromEvent(
           attentionEvent,
           shouldMarkAttentionUnread(
@@ -1851,7 +2077,8 @@ export default function App() {
           submitPending,
           codexSubmitPendingRef.current.get(sessionId),
           codexSettledTurnIdsRef.current.get(sessionId) ?? [],
-          providerTurnId
+          providerTurnId,
+          codexTurnLiveRef.current.get(sessionId)
         ) === "reject"
       ) {
         return;
@@ -1867,6 +2094,17 @@ export default function App() {
         codexActiveTurnIdsRef.current.delete(sessionId);
         codexTurnLiveRef.current.set(sessionId, false);
       }
+    }
+
+    // A completion that lands while a subagent delegation is open cannot be
+    // attributed to the pane's own turn (kimi/kimi-custom fire the
+    // session-level Stop at a CHILD's turn end), so drop it rather than latch
+    // a false "done". Placed after the codex gates above so codex's own turn
+    // bookkeeping still runs for a completion codex itself accepted, and before
+    // applyAcceptedAgentAttention so neither status nor attention is written.
+    const current = sessionsByIdRef.current.get(sessionId);
+    if (current && shouldSuppressAgentCompletion(current, attentionEvent)) {
+      return;
     }
 
     applyAcceptedAgentAttention(sessionId, attentionEvent);
@@ -1916,6 +2154,90 @@ export default function App() {
 
   function sessionCreationKind(session: AgentSession): AgentKind {
     return session.fusion ? "fusion" : session.openFusion ? "openfusion" : session.kind;
+  }
+
+  // Split a pane in two inside its own tile. The new terminal is created the
+  // same way "Add matching pane" creates one; the only difference is that it
+  // joins the source's tile instead of taking a board box of its own.
+  function splitSession(
+    scope: SessionScope,
+    session: AgentSession,
+    dir: "row" | "col"
+  ) {
+    let createdId: string | null = null;
+
+    updateScopeSessions(scope, (sessions) => {
+      const created = createSession(
+        sessionCreationKind(session),
+        session.cwd,
+        sessions
+      );
+      createdId = created.id;
+
+      const tileId = effectiveTileId(session);
+      const anchor = sessions.find((candidate) => candidate.id === tileId);
+      const tree = anchor?.splitTree ?? { id: session.id };
+      const nextTree = splitLeaf(tree, session.id, dir, created.id);
+      // A solo pane becomes the anchor of the tile it just created.
+      const anchorId = anchor?.splitTree ? tileId : session.id;
+
+      return [
+        ...sessions.map((candidate) => {
+          if (candidate.id === anchorId) {
+            return { ...candidate, tileId: anchorId, splitTree: nextTree };
+          }
+          return leafIds(nextTree).includes(candidate.id)
+            ? { ...candidate, tileId: anchorId, splitTree: undefined }
+            : candidate;
+        }),
+        { ...created, tileId: anchorId, splitTree: undefined }
+      ];
+    });
+
+    if (createdId) {
+      setSelectedSessionId(createdId);
+    }
+  }
+
+  // Give a grouped pane its own board tile again. It needs a fresh box: its
+  // stored layout is the one it had before joining, which for the anchor is the
+  // tile's own box and would land exactly on top of it.
+  function popOutSession(scope: SessionScope, session: AgentSession) {
+    updateScopeSessions(scope, (sessions) => {
+      const detached = detachSessionFromTile(sessions, session.id);
+      const others = detached.filter(
+        (candidate) => candidate.id !== session.id
+      );
+      return detached.map((candidate) =>
+        candidate.id === session.id
+          ? { ...candidate, layout: findNextFluidLayout(others) }
+          : candidate
+      );
+    });
+  }
+
+  function setTileRatio(
+    scope: SessionScope,
+    tileId: string,
+    path: SplitPath,
+    ratio: number
+  ) {
+    updateScopeSessions(scope, (sessions) => {
+      let changed = false;
+      const next = sessions.map((session) => {
+        if (session.id !== tileId || !session.splitTree) {
+          return session;
+        }
+        const splitTree = setRatioAtPath(session.splitTree, path, ratio);
+        if (splitTree === session.splitTree) {
+          return session;
+        }
+        changed = true;
+        return { ...session, splitTree };
+      });
+
+      return changed ? next : sessions;
+    });
   }
 
   async function addSession(kind: AgentKind) {
@@ -1992,7 +2314,11 @@ export default function App() {
     void stopSessionProcess(session);
     const sessionId = session.id;
     updateScopeSessions(scope, (sessions) =>
-      sessions.filter((session) => session.id !== sessionId)
+      // Detach first so the tile collapses into its surviving sibling (and
+      // re-anchors, keeping the tile's board box) before the session is gone.
+      detachSessionFromTile(sessions, sessionId).filter(
+        (candidate) => candidate.id !== sessionId
+      )
     );
 
     if (maximizedSessionId === sessionId) {
@@ -2101,7 +2427,8 @@ export default function App() {
             status: "idle",
             attention: EMPTY_ATTENTION,
             backgroundActivity: undefined,
-            detachedTaskIds: undefined
+            detachedTaskIds: undefined,
+            subagentDepth: undefined
           };
         })
       );
@@ -2607,7 +2934,8 @@ export default function App() {
             status: "idle",
             attention: EMPTY_ATTENTION,
             backgroundActivity: undefined,
-            detachedTaskIds: undefined
+            detachedTaskIds: undefined,
+            subagentDepth: undefined
           };
         })
       );
@@ -2646,7 +2974,8 @@ export default function App() {
             status: "idle",
             attention: EMPTY_ATTENTION,
             backgroundActivity: undefined,
-            detachedTaskIds: undefined
+            detachedTaskIds: undefined,
+            subagentDepth: undefined
           };
         })
       );
@@ -2758,7 +3087,8 @@ export default function App() {
                   threadLookupMessage: undefined,
                   status: "idle" as const,
                   attention: EMPTY_ATTENTION,
-                  detachedTaskIds: undefined
+                  detachedTaskIds: undefined,
+                  subagentDepth: undefined
                 }
               : {})
           };
@@ -2846,7 +3176,8 @@ export default function App() {
                   threadLookupMessage: undefined,
                   status: "idle" as const,
                   attention: EMPTY_ATTENTION,
-                  detachedTaskIds: undefined
+                  detachedTaskIds: undefined,
+                  subagentDepth: undefined
                 }
               : {})
           };
@@ -3074,6 +3405,12 @@ export default function App() {
     multiSessions.some(shouldShowAttentionDot);
 
   const multiModeHasWorking = multiSessions.some(isSessionWorking);
+
+  // Every workspace's sessions live in renderer state and keep receiving live
+  // status/attention updates while their folder is in the background (all
+  // mutations go through updateAnySession, and the event subscriptions are
+  // mounted once), so the cards tally without any new state, IPC, or polling.
+  const multiModeSummary = summarizeSessions(multiSessions);
 
   function handleSidebarResizePointerDown(
     event: ReactPointerEvent<HTMLDivElement>
@@ -3307,10 +3644,21 @@ export default function App() {
     setActiveView("project");
   }
 
-  const visibleSessions =
-    boardSessions.filter(
-      (session) => !maximizedSessionId || session.id === maximizedSessionId
-    );
+  // Maximize operates on the TILE, not the sub-pane. Maximizing one terminal of
+  // a split to fill its tile would hide its siblings, and a hidden pane has a
+  // zero-sized box that xterm cannot measure — exactly the state all-visible
+  // splits exist to avoid.
+  const maximizedTileId = maximizedSessionId
+    ? effectiveTileId(
+        boardSessions.find((session) => session.id === maximizedSessionId) ?? {
+          id: maximizedSessionId
+        }
+      )
+    : null;
+  const visibleSessions = boardSessions.filter(
+    (session) => !maximizedTileId || effectiveTileId(session) === maximizedTileId
+  );
+  const boardTiles = buildBoardTiles(visibleSessions);
   const updateNoticeKey = updateState
     ? [
         updateState.status,
@@ -3320,7 +3668,9 @@ export default function App() {
     : "";
   const shouldShowUpdateOverlay =
     updateState !== null &&
-    ["available", "downloading", "downloaded", "error"].includes(updateState.status) &&
+    ["available", "downloading", "downloaded", "switching", "error"].includes(
+      updateState.status
+    ) &&
     dismissedUpdateKey !== updateNoticeKey;
   const updateVersion = updateState?.info?.version
     ? `v${updateState.info.version}`
@@ -3340,10 +3690,78 @@ export default function App() {
             ? "Downloading..."
             : "Check for update";
   const updateCheckDisabled =
-    updateState?.status === "checking" || updateState?.status === "downloading";
+    updateState?.status === "checking" ||
+    updateState?.status === "downloading" ||
+    updateState?.status === "switching";
+
+  const appVersion = updateState?.currentVersion ?? "";
+
+  // Same dismissal rules as the folder context menu: Escape, or a press
+  // anywhere outside the picker.
+  useEffect(() => {
+    if (!versionPickerOpen) {
+      return;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setVersionPickerOpen(false);
+      }
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target as HTMLElement | null;
+      if (!target?.closest(".version-picker")) {
+        setVersionPickerOpen(false);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, [versionPickerOpen]);
 
   function dismissUpdateOverlay() {
     setDismissedUpdateKey(updateNoticeKey);
+  }
+
+  // Releases are fetched on open rather than at launch: this is a rare,
+  // deliberate action, and it keeps startup off the network.
+  async function toggleVersionPicker() {
+    if (versionPickerOpen) {
+      setVersionPickerOpen(false);
+      return;
+    }
+
+    setVersionPickerOpen(true);
+    setVersionList(null);
+
+    const result = await window.vibe?.updates.listVersions();
+    setVersionList(
+      result ?? {
+        ok: false,
+        message: "Version switching is unavailable in this window.",
+        versions: []
+      }
+    );
+  }
+
+  async function selectAppVersion(version: string) {
+    setVersionPickerOpen(false);
+    setDismissedUpdateKey(null);
+
+    const result = await window.vibe?.updates.installVersion(version);
+    if (!result) {
+      setShellMessage("Version switching is unavailable in this window.");
+      return;
+    }
+
+    if (!result.ok) {
+      setShellMessage(result.message || `Couldn't switch to v${version}.`);
+    }
   }
 
   async function checkForUpdates() {
@@ -3425,7 +3843,7 @@ export default function App() {
             ) : null}
           </div>
           <span className="multi-mode-subtitle">
-            {formatCount(multiSessions.length, "terminal")}
+            <SessionCounts summary={multiModeSummary} />
           </span>
         </button>
 
@@ -3450,6 +3868,7 @@ export default function App() {
             const hasUnreadAttention = workspaceHasUnreadAttention(workspace);
             const hasWorking =
               !hasUnreadAttention && workspaceHasWorking(workspace);
+            const summary = summarizeSessions(workspace.sessions);
             const isDropTarget =
               workspaceDropTarget?.workspaceId === workspace.id;
 
@@ -3508,8 +3927,12 @@ export default function App() {
                     aria-hidden="true"
                   />
                   <Folder size={16} />
-                  <span>{workspace.name}</span>
+                  <span className="workspace-name">{workspace.name}</span>
                   <ChevronRight size={15} />
+                  <span className="workspace-path" title={workspace.path}>
+                    {workspace.path}
+                  </span>
+                  <SessionCounts summary={summary} />
                 </button>
                 <button
                   type="button"
@@ -3611,6 +4034,82 @@ export default function App() {
               <RefreshCw size={16} />
               {updateCheckLabel}
             </button>
+            <div className="version-picker">
+              <button
+                className="version-picker-toggle"
+                title="Switch to another version"
+                aria-haspopup="listbox"
+                aria-expanded={versionPickerOpen}
+                onClick={toggleVersionPicker}
+              >
+                <ChevronDown size={15} />
+              </button>
+              {versionPickerOpen && (
+                <div className="version-picker-menu" role="listbox">
+                  <div className="version-picker-title">
+                    Switch version
+                    {currentAppVersionLabel && (
+                      <span>now {currentAppVersionLabel}</span>
+                    )}
+                  </div>
+                  {versionList === null ? (
+                    <div className="version-picker-note">Loading releases…</div>
+                  ) : !versionList.ok ? (
+                    <div className="version-picker-note">
+                      {versionList.message ?? "Couldn't read releases."}
+                    </div>
+                  ) : versionList.versions.length === 0 ? (
+                    <div className="version-picker-note">
+                      No published releases.
+                    </div>
+                  ) : (
+                    <div className="version-picker-list">
+                      {versionList.versions.map((entry) => {
+                        const isCurrent =
+                          entry.version === (versionList.currentVersion ?? appVersion);
+                        return (
+                          <button
+                            key={entry.version}
+                            role="option"
+                            aria-selected={isCurrent}
+                            className={clsx(
+                              "version-picker-item",
+                              isCurrent && "is-current"
+                            )}
+                            disabled={isCurrent || !entry.installable}
+                            title={
+                              !entry.installable
+                                ? "This release has no Windows installer."
+                                : isCurrent
+                                  ? "Already installed"
+                                  : `Install v${entry.version}`
+                            }
+                            onClick={() => selectAppVersion(entry.version)}
+                          >
+                            <span className="version-picker-version">
+                              v{entry.version}
+                            </span>
+                            {entry.prerelease && (
+                              <span className="version-picker-tag">pre</span>
+                            )}
+                            <span className="version-picker-state">
+                              {isCurrent
+                                ? "current"
+                                : !entry.installable
+                                  ? "no installer"
+                                  : ""}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  <div className="version-picker-footer">
+                    Picking a version downloads its installer and closes the app.
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </header>
 
@@ -3679,27 +4178,9 @@ export default function App() {
               disabled={Boolean(maximizedSessionId)}
               onArrangeChange={setIsArranging}
               onLayoutCommit={(layouts) => persistLayout(activeScope, layouts)}
-              items={visibleSessions.map((session) => ({
-                id: session.id,
-                minW:
-                  session.id === maximizedSessionId
-                    ? DEFAULT_MIN_PANE_WIDTH * 2
-                    : DEFAULT_MIN_PANE_WIDTH,
-                minH:
-                  session.id === maximizedSessionId
-                    ? DEFAULT_MIN_PANE_HEIGHT * 2
-                    : DEFAULT_MIN_PANE_HEIGHT,
-                layout:
-                  session.id === maximizedSessionId
-                    ? {
-                        x: 0,
-                        y: LEGACY_BOARD_PADDING,
-                        w: 100,
-                        h: MAXIMIZED_PANE_HEIGHT,
-                        unit: "fluid"
-                      }
-                    : session.layout,
-                content: session.fusion ? (
+              items={boardTiles.map((tile) => {
+                const renderSessionPane = (session: AgentSession) =>
+                  session.fusion ? (
                   <FusionChatPane
                     session={session}
                     profile={getProfile("fusion")}
@@ -3784,8 +4265,19 @@ export default function App() {
                     cwdConflict={cwdConflicts.get(session.id)}
                     isMaximized={session.id === maximizedSessionId}
                     isArranging={isArranging}
+                    isGrouped={Boolean(session.tileId)}
+                    // An ungrouped pane keeps the original behaviour: it takes
+                    // focus when it mounts, so a freshly launched terminal is
+                    // typeable without clicking into it first. Only a split
+                    // tile needs the selective gate, because several terminals
+                    // mount into one frame there and the last one would win.
+                    autoFocus={
+                      !session.tileId || session.id === selectedSessionId
+                    }
                     onClose={() => closeSession(activeScope, session)}
                     onDuplicate={() => duplicateSession(activeScope, session)}
+                    onSplit={(dir) => splitSession(activeScope, session, dir)}
+                    onPopOut={() => popOutSession(activeScope, session)}
                     onRestart={() => restartSession(activeScope, session)}
                     onResume={() => resumeSession(activeScope, session)}
                     onAdd={() =>
@@ -3819,10 +4311,19 @@ export default function App() {
                         codexActiveTurnIdsRef.current.delete(session.id);
                         codexTurnLiveRef.current.set(session.id, false);
                       }
+                      // Esc is the TUI interrupt and cancels the agent's
+                      // foreground children with it, so it is also the user's
+                      // one-key escape from a delegation bracket that leaked.
+                      if (status === "waiting") {
+                        updateAnySession(session.id, clearSubagentDepth);
+                      }
                       updateSessionStatus(activeScope, session.id, status, {
                         force: true
                       });
                     }}
+                    onDelegationTimeout={() =>
+                      updateAnySession(session.id, clearSubagentDepth)
+                    }
                     onCodexTurnStart={() =>
                       applyCodexTurnStart(session.id)
                     }
@@ -3830,8 +4331,62 @@ export default function App() {
                       recordCodexTerminalInput(session.id)
                     }
                   />
-                )
-              }))}
+                  );
+
+                const isMaximizedTile = tile.id === maximizedTileId;
+                // A split tile advertises what its partition actually needs, so
+                // sanitizeLayout/settleLayouts grow it and re-pack its
+                // neighbours with no new sizing code here.
+                const partitionMin = tile.tree
+                  ? subtreeMin(
+                      tile.tree,
+                      DEFAULT_MIN_PANE_WIDTH,
+                      DEFAULT_MIN_PANE_HEIGHT,
+                      SPLIT_DIVIDER_PX
+                    )
+                  : { minW: DEFAULT_MIN_PANE_WIDTH, minH: DEFAULT_MIN_PANE_HEIGHT };
+
+                return {
+                  id: tile.id,
+                  minW: isMaximizedTile
+                    ? Math.max(DEFAULT_MIN_PANE_WIDTH * 2, partitionMin.minW)
+                    : partitionMin.minW,
+                  minH: isMaximizedTile
+                    ? Math.max(DEFAULT_MIN_PANE_HEIGHT * 2, partitionMin.minH)
+                    : partitionMin.minH,
+                  layout: isMaximizedTile
+                    ? {
+                        x: 0,
+                        y: LEGACY_BOARD_PADDING,
+                        w: 100,
+                        h: MAXIMIZED_PANE_HEIGHT,
+                        unit: "fluid" as const
+                      }
+                    : tile.anchor.layout,
+                  content: tile.tree ? (
+                    <PaneSplit
+                      node={tile.tree}
+                      leafMinW={DEFAULT_MIN_PANE_WIDTH}
+                      leafMinH={DEFAULT_MIN_PANE_HEIGHT}
+                      // Same arranging flag TiledBoard uses, so every pane in
+                      // the tile defers its fit until the drag settles: one PTY
+                      // resize per pane per drag, not one per frame.
+                      onArrangeChange={setIsArranging}
+                      onRatioChange={(path, ratio) =>
+                        setTileRatio(activeScope, tile.id, path, ratio)
+                      }
+                      renderPane={(paneId) => {
+                        const member = tile.members.find(
+                          (candidate) => candidate.id === paneId
+                        );
+                        return member ? renderSessionPane(member) : null;
+                      }}
+                    />
+                  ) : (
+                    renderSessionPane(tile.anchor)
+                  )
+                };
+              })}
             />
           ) : (
             <div className="empty-state">
@@ -3875,20 +4430,33 @@ export default function App() {
             <strong>
               {updateState.status === "downloaded"
                 ? "Update ready"
-                : updateState.status === "error"
-                  ? "Update failed"
-                  : "Update available"}
+                : updateState.status === "switching"
+                  ? "Switching version"
+                  : updateState.status === "error"
+                    ? "Update failed"
+                    : "Update available"}
             </strong>
-            {updateState.status !== "downloading" && (
+            {updateState.status !== "downloading" &&
+              updateState.status !== "switching" && (
               <button
                 className="update-overlay-dismiss"
                 aria-label="Dismiss update notice"
                 onClick={dismissUpdateOverlay}
               >
-                <X size={13} />
-              </button>
-            )}
+                  <X size={13} />
+                </button>
+              )}
           </div>
+
+          {/* No Restart button here on purpose: nothing is staged with
+              electron-updater, so its quitAndInstall would have nothing to
+              install. The installer is already running and closes the app. */}
+          {updateState.status === "switching" && (
+            <p>
+              Installing vibeTerminal {updateVersion}. The app will close and
+              reopen on that version.
+            </p>
+          )}
 
           {updateState.status === "available" && (
             <>

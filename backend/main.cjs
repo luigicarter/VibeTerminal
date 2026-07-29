@@ -568,6 +568,234 @@ function setupAutoUpdater() {
   });
 }
 
+// Version switching is deliberately NOT built on electron-updater. Its GitHub
+// provider resolves "the latest release" — it has no notion of "give me 0.1.68"
+// — so going backwards would mean fighting it with allowDowngrade plus a
+// hand-built feed. Downloading the release's own installer and running it is
+// the simpler mechanic, and it behaves identically whether the chosen version
+// is newer or older than what is installed.
+const RELEASES_API_URL =
+  "https://api.github.com/repos/luigicarter/VibeTerminal/releases?per_page=50";
+const VERSION_INSTALLER_TIMEOUT_MS = 20_000;
+let versionInstallInFlight = false;
+
+function httpsGet(url, { json = false, redirects = 5 } = {}) {
+  return new Promise((resolve, reject) => {
+    const request = require("https").get(
+      url,
+      {
+        headers: {
+          // GitHub rejects API requests without a User-Agent.
+          "user-agent": "vibeTerminal",
+          accept: json ? "application/vnd.github+json" : "*/*"
+        },
+        timeout: VERSION_INSTALLER_TIMEOUT_MS
+      },
+      (response) => {
+        const status = response.statusCode ?? 0;
+        if (status >= 300 && status < 400 && response.headers.location) {
+          response.resume();
+          if (redirects <= 0) {
+            reject(new Error("Too many redirects."));
+            return;
+          }
+          resolve(
+            httpsGet(response.headers.location, { json, redirects: redirects - 1 })
+          );
+          return;
+        }
+        if (status !== 200) {
+          response.resume();
+          reject(new Error(`Request failed (HTTP ${status}).`));
+          return;
+        }
+        if (!json) {
+          resolve(response);
+          return;
+        }
+        let body = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          body += chunk;
+        });
+        response.on("end", () => {
+          try {
+            resolve(JSON.parse(body));
+          } catch (error) {
+            reject(new Error(`Unreadable response: ${error.message}`));
+          }
+        });
+      }
+    );
+
+    request.on("timeout", () => {
+      request.destroy(new Error("Request timed out."));
+    });
+    request.on("error", reject);
+  });
+}
+
+function normalizeReleaseVersion(tag) {
+  return typeof tag === "string" ? tag.replace(/^v/i, "").trim() : "";
+}
+
+// Only Windows installers are published today, so a release with no .exe asset
+// is listed as unavailable rather than hidden: a version the user can see but
+// not install is less confusing than one that silently does not exist.
+function findInstallerAsset(release) {
+  const assets = Array.isArray(release.assets) ? release.assets : [];
+  return (
+    assets.find(
+      (asset) =>
+        typeof asset.name === "string" &&
+        asset.name.toLowerCase().endsWith(".exe") &&
+        typeof asset.browser_download_url === "string"
+    ) ?? null
+  );
+}
+
+async function listAppVersions() {
+  try {
+    const releases = await httpsGet(RELEASES_API_URL, { json: true });
+    if (!Array.isArray(releases)) {
+      return { ok: false, message: "Unexpected response from GitHub.", versions: [] };
+    }
+
+    const versions = releases
+      .filter((release) => release && !release.draft)
+      .map((release) => {
+        const asset = findInstallerAsset(release);
+        return {
+          version: normalizeReleaseVersion(release.tag_name),
+          name: typeof release.name === "string" ? release.name : undefined,
+          publishedAt: release.published_at ?? undefined,
+          prerelease: Boolean(release.prerelease),
+          installable: Boolean(asset),
+          assetName: asset?.name,
+          downloadUrl: asset?.browser_download_url
+        };
+      })
+      .filter((entry) => entry.version);
+
+    return { ok: true, versions, currentVersion: app.getVersion() };
+  } catch (error) {
+    return {
+      ok: false,
+      message: `Couldn't read releases: ${error.message}`,
+      versions: []
+    };
+  }
+}
+
+async function installAppVersion(version) {
+  const target = normalizeReleaseVersion(version);
+  if (!target) {
+    return { ok: false, message: "No version selected." };
+  }
+
+  if (!app.isPackaged) {
+    return {
+      ok: false,
+      message: "Switching versions only works in the installed app."
+    };
+  }
+
+  if (versionInstallInFlight) {
+    return { ok: false, message: "A version switch is already running." };
+  }
+
+  versionInstallInFlight = true;
+  publishUpdateState({
+    status: "downloading",
+    info: { version: target },
+    progress: { percent: 0, transferred: 0, total: 0 },
+    errorMessage: undefined
+  });
+
+  try {
+    const listed = await listAppVersions();
+    if (!listed.ok) {
+      throw new Error(listed.message || "Couldn't read releases.");
+    }
+
+    const release = listed.versions.find((entry) => entry.version === target);
+    if (!release) {
+      throw new Error(`Version ${target} is not published.`);
+    }
+    if (!release.downloadUrl) {
+      throw new Error(`Version ${target} has no Windows installer.`);
+    }
+
+    const downloadDir = path.join(app.getPath("temp"), "vibeterminal-versions");
+    fs.mkdirSync(downloadDir, { recursive: true });
+    const installerPath = path.join(
+      downloadDir,
+      release.assetName || `vibeTerminal-Setup-${target}.exe`
+    );
+
+    const response = await httpsGet(release.downloadUrl);
+    const total = Number(response.headers["content-length"]) || 0;
+    let transferred = 0;
+
+    await new Promise((resolve, reject) => {
+      const file = fs.createWriteStream(installerPath);
+      response.on("data", (chunk) => {
+        transferred += chunk.length;
+        publishUpdateState({
+          status: "downloading",
+          info: { version: target },
+          progress: {
+            percent: total ? (transferred / total) * 100 : 0,
+            transferred,
+            total
+          }
+        });
+      });
+      response.on("error", reject);
+      file.on("error", reject);
+      file.on("finish", resolve);
+      response.pipe(file);
+    });
+
+    // The same two flags electron-updater's quitAndInstall(true, true) uses:
+    // `/S` is NSIS's silent flag and `--force-run` relaunches the app when the
+    // install finishes. Both are needed — `/S` alone would install silently and
+    // then leave the user with no window. This makes a version switch look like
+    // an ordinary update (progress, app closes, app returns) instead of
+    // dropping them into an installer wizard, and `/S` works on older
+    // installers too, which predate the build/installer.nsh silent-on-update
+    // hook. Detached because the installer replaces the very binary this
+    // process is running from, so we have to be gone first.
+    const child = spawn(installerPath, ["/S", "--force-run"], {
+      detached: true,
+      stdio: "ignore"
+    });
+    child.unref();
+
+    publishUpdateState({
+      status: "switching",
+      info: { version: target },
+      progress: undefined,
+      errorMessage: undefined
+    });
+
+    setTimeout(() => {
+      app.quit();
+    }, 1200);
+
+    return { ok: true, message: `Installing ${target}…` };
+  } catch (error) {
+    publishUpdateState({
+      status: "error",
+      errorMessage: error.message || "Version switch failed.",
+      progress: undefined
+    });
+    return { ok: false, message: error.message || "Version switch failed." };
+  } finally {
+    versionInstallInFlight = false;
+  }
+}
+
 async function checkForAppUpdates(options = {}) {
   const silent = Boolean(options.silent);
 
@@ -1585,10 +1813,23 @@ ipcMain.handle("app:get-screenshot-fixture", () => {
     };
   }
 
+  if (process.env.VIBE_SCREENSHOT_SEED_SPLIT === "1") {
+    return {
+      mode: "split",
+      cwd: getDefaultRuntimeCwd()
+    };
+  }
+
   return null;
 });
 
 ipcMain.handle("updates:get-state", () => updateState);
+
+ipcMain.handle("updates:list-versions", () => listAppVersions());
+
+ipcMain.handle("updates:install-version", (_event, payload) =>
+  installAppVersion(payload && payload.version)
+);
 
 ipcMain.handle("updates:check", () => checkForAppUpdates());
 

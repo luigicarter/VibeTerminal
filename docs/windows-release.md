@@ -4,10 +4,10 @@ vibeTerminal ships to Windows users as an Electron Builder NSIS installer hosted
 
 ## Current Public Release
 
-The current public Windows release is `v0.1.71`:
+The current public Windows release is `v0.1.72`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.71`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.71/vibeTerminal-Setup-0.1.71.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.72`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.72/vibeTerminal-Setup-0.1.72.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -194,6 +194,20 @@ Silent updates are enforced at two layers:
 2. The NSIS installer itself forces silent mode whenever it is run for an update. `build/installer.nsh` defines a `customInit` hook that calls `SetSilent silent` when `${isUpdated}` is true. electron-updater always launches the installer with `--updated` for an auto-update and never for a first-time install, so a fresh install still shows the normal wizard while updates apply invisibly.
 
 The second layer matters because the silent flag is decided by the *currently installed* build. A user updating away from a build released before the silent fix (v0.1.1 or earlier) would otherwise see the installer window once; the `customInit` hook makes the new installer silence itself regardless of how the old build launched it.
+
+## Version Switching (rollback)
+
+The caret beside `Check for update` opens a list of published releases so a user can move to **any** version, including an older one.
+
+This deliberately does not go through electron-updater. Its GitHub provider only resolves "the latest release" — there is no way to request a specific version — so downgrading would mean fighting it with `allowDowngrade` plus a hand-built feed. Instead:
+
+1. `updates:list-versions` reads `GET /repos/luigicarter/VibeTerminal/releases` (unauthenticated, `user-agent` required) and returns every non-draft release with its `.exe` asset. Releases without an installer are listed but disabled rather than hidden.
+2. `updates:install-version` re-reads the list, downloads that release's installer to `%TEMP%/vibeterminal-versions/`, reporting progress through the normal update state so the existing overlay shows it.
+3. The installer is spawned detached with `["/S", "--force-run"]` — the same pair `quitAndInstall(true, true)` uses — then the app quits. `/S` installs silently; `--force-run` brings the app back. `/S` is honoured by every installer version, including ones released before the `customInit` silent-on-update hook, so rolling back that far still applies invisibly.
+
+The state published during this is `switching`, **not** `downloaded`. `downloaded` means electron-updater has an update staged and makes the overlay offer a `Restart` button wired to its `quitAndInstall`; during a version switch nothing is staged, so that button would call it with nothing to install. `switching` renders a progress note with no action, and `restartAndInstallUpdate()` (which requires `downloaded`) correctly refuses to fire.
+
+Rolling back means an older build reads the current `userData`. Fields added by newer builds are optional and additive, so older builds ignore them — but a rollback across a storage-format change is only as safe as that build's own restore path.
 
 ## Signing Status
 

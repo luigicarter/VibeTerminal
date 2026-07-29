@@ -27,6 +27,8 @@ const screenshotFixture = args.has("--openfusion")
       ? "fusion-picker-codex"
       : args.has("--fusion-builds")
         ? "fusion-builds"
+        : args.has("--split")
+          ? "split"
       : "default";
 const screenshotPath = path.join(
   artifactDir,
@@ -38,6 +40,8 @@ const screenshotPath = path.join(
         ? "vibe-terminal-fusion-picker-codex.png"
         : screenshotFixture === "fusion-builds"
           ? "vibe-terminal-fusion-builds.png"
+          : screenshotFixture === "split"
+            ? "vibe-terminal-split-screenshot.png"
     : "vibe-terminal-screenshot.png"
 );
 const screenshotUserData = path.join(
@@ -356,6 +360,9 @@ async function main() {
       screenshotFixture === "fusion-picker-codex" ? "executor" : "planner";
   } else if (screenshotFixture === "fusion-builds") {
     electronEnv.VIBE_SCREENSHOT_SEED_FUSION_BUILDS = "1";
+    electronEnv.VIBE_SCREENSHOT_FIXTURE_CWD = rootDir;
+  } else if (screenshotFixture === "split") {
+    electronEnv.VIBE_SCREENSHOT_SEED_SPLIT = "1";
     electronEnv.VIBE_SCREENSHOT_FIXTURE_CWD = rootDir;
   }
 

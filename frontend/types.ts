@@ -212,6 +212,25 @@ export interface LayoutBox {
   unit?: "fluid";
 }
 
+// One terminal inside a split tile.
+export interface SplitLeaf {
+  id: string;
+}
+
+// A divider. "row" puts the children side by side (a vertical divider), "col"
+// stacks them (a horizontal divider). `ratio` is child `a`'s share of the
+// parent box along the split axis, and is the ONLY number a divider drag
+// changes — which is what makes the tile's interior a partition with no holes
+// or overlaps by construction, rather than a set of boxes to keep in sync.
+export interface SplitBranch {
+  dir: "row" | "col";
+  ratio: number;
+  a: SplitNode;
+  b: SplitNode;
+}
+
+export type SplitNode = SplitLeaf | SplitBranch;
+
 export interface AgentSession {
   id: string;
   name: string;
@@ -268,7 +287,22 @@ export interface AgentSession {
   // Detached Fusion/Open Fusion delegations outlive the planner turn that
   // launched them. Their ids keep sidebar working state accurate until each
   // task settles, including across a chat-pane replay/reattach.
+  // Split-tile grouping. Both are absent for an ordinary one-terminal tile, so
+  // "no fields" means exactly today's behaviour and needs no migration.
+  // `tileId` names the tile's ANCHOR session (a session with
+  // `tileId === id` is the anchor); `splitTree` lives only on the anchor and
+  // holds the tile's interior partition. The tile's board geometry is the
+  // anchor's `layout`; a non-anchor member keeps its own `layout` as dead data
+  // so popping it back out has a sane box to restore.
+  tileId?: string;
+  splitTree?: SplitNode;
   detachedTaskIds?: string[];
+  // Terminal-pane analogue of detachedTaskIds: the number of subagent
+  // delegations the pane's agent has opened and not yet closed. The providers'
+  // argv-only hooks cannot carry a task id, so this is a COUNT rather than an
+  // id set — which is why it has explicit expiry rules (turn start, Esc,
+  // process exit, relaunch, and the pane's delegation watchdog).
+  subagentDepth?: number;
   layout: LayoutBox;
 }
 
@@ -325,6 +359,11 @@ export type UpdateStatus =
   | "available"
   | "downloading"
   | "downloaded"
+  // A user-chosen version switch has finished downloading and its installer is
+  // running. Deliberately NOT "downloaded": that status means electron-updater
+  // has a staged update and offers a Restart button wired to its
+  // quitAndInstall — which would be called with nothing staged.
+  | "switching"
   | "error";
 
 export interface UpdateInfo {
@@ -351,6 +390,27 @@ export interface UpdateState {
 export interface UpdateActionResult {
   ok: boolean;
   message?: string;
+}
+
+// One published release the user can switch to. `installable` is false when a
+// release carries no Windows installer asset — those are still listed, because
+// a version you can see but not install is less confusing than one that
+// silently does not appear.
+export interface AppVersion {
+  version: string;
+  name?: string;
+  publishedAt?: string;
+  prerelease: boolean;
+  installable: boolean;
+  assetName?: string;
+  downloadUrl?: string;
+}
+
+export interface AppVersionList {
+  ok: boolean;
+  message?: string;
+  versions: AppVersion[];
+  currentVersion?: string;
 }
 
 export type TerminalEvent =
@@ -385,6 +445,16 @@ export type TerminalEvent =
       providerThreadId?: string;
       providerTurnId?: string;
       turnStart?: boolean;
+    }
+  // A subagent delegation opened ("start") or closed ("stop"). Emitted from a
+  // tool-call boundary the model itself created, so unlike raw output it can
+  // never be a keystroke echo or a redraw — which is why "start" is allowed to
+  // override a finished done/failed pill.
+  | {
+      id: string;
+      type: "agent-subagent";
+      provider?: string;
+      phase: "start" | "stop";
     }
   | {
       id: string;

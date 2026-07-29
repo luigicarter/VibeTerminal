@@ -73,6 +73,8 @@ jobs:
           npm run smoke:frontend:session-launch
           npm run smoke:frontend:fusion-settings
           npm run smoke:frontend:tiled-resize
+          npm run smoke:frontend:pane-split
+          npm run smoke:frontend:cwd-conflicts
 
       - name: Build installer for release tag
         if: startsWith(github.ref, 'refs/tags/v')

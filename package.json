@@ -1,6 +1,6 @@
 {
   "name": "vibe-terminal",
-  "version": "0.1.71",
+  "version": "0.1.72",
   "private": true,
   "description": "A tiled local workspace for running multiple coding agents side by side.",
   "author": "vibeTerminal contributors",
@@ -18,6 +18,7 @@
     "start": "npm run build && electron .",
     "screenshot": "node scripts/qa/screenshot.cjs",
     "screenshot:openfusion": "node scripts/qa/screenshot.cjs --openfusion",
+    "screenshot:split": "node scripts/qa/screenshot.cjs --split",
     "smoke:backend:agent-telemetry": "node scripts/backend/agent-telemetry-smoke.cjs",
     "smoke:backend:code-changes": "node scripts/backend/code-changes-smoke.cjs",
     "smoke:backend:build-supervisor": "node scripts/backend/build-supervisor-smoke.cjs",
@@ -45,6 +46,7 @@
     "smoke:frontend:fusion-interrupt-dedupe": "node scripts/frontend/fusion-interrupt-dedupe-repro.cjs",
     "smoke:frontend:cwd-conflicts": "node scripts/frontend/cwd-conflicts-smoke.cjs",
     "smoke:frontend:tiled-resize": "node scripts/frontend/tiled-board-resize-smoke.cjs",
+    "smoke:frontend:pane-split": "node scripts/frontend/pane-split-smoke.cjs",
     "smoke:codex-discovery": "npm run smoke:backend:codex-discovery",
     "typecheck": "tsc --noEmit",
     "gen:codex-bindings": "node scripts/dev/gen-codex-bindings.cjs",

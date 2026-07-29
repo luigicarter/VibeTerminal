@@ -36,7 +36,125 @@ export function shouldShowAttentionDot(session: AgentSession) {
 // (a booting agent that hasn't been given a turn yet) and "waiting" alone do not
 // count as working, so an idle pane never spins.
 export function isSessionWorking(session: AgentSession) {
-  return session.status === "running" || Boolean(session.detachedTaskIds?.length);
+  return (
+    session.status === "running" ||
+    Boolean(session.detachedTaskIds?.length) ||
+    hasLiveSubagents(session)
+  );
+}
+
+// A pane cannot plausibly have more nested/parallel delegations open than this.
+// The cap makes a leaked "start" cost bounded rather than unbounded.
+const MAX_SUBAGENT_DEPTH = 32;
+
+// The delegation bracket, counted rather than tracked by id: no provider hook
+// matcher can carry a task id, and the notify transport is argv-only by design.
+export function updateSubagentDepth(
+  session: AgentSession,
+  phase: "start" | "stop"
+): AgentSession {
+  const current = session.subagentDepth ?? 0;
+  const next =
+    phase === "start"
+      ? Math.min(current + 1, MAX_SUBAGENT_DEPTH)
+      : Math.max(current - 1, 0);
+
+  return next === current
+    ? session
+    : { ...session, subagentDepth: next || undefined };
+}
+
+export function clearSubagentDepth(session: AgentSession): AgentSession {
+  return session.subagentDepth === undefined
+    ? session
+    : { ...session, subagentDepth: undefined };
+}
+
+export function hasLiveSubagents(session: Pick<AgentSession, "subagentDepth">) {
+  return (session.subagentDepth ?? 0) > 0;
+}
+
+// While a delegation is open, a provider "turn ended" signal is UNATTRIBUTABLE.
+// kimi and kimi-custom fire the session-level Stop hook at the CHILD's turn end
+// (subagents share the session's hook engine), so the first Task subagent
+// finishing looks exactly like the pane's own turn finishing — and the
+// done/failed latch then makes that wrong result permanent until the user
+// types. Drop it: the parent fires its own Stop once the bracket closes.
+//
+// Suppress rather than defer, because the event carries no id and so can never
+// be re-attributed later; replaying it on bracket close just reproduces the bug
+// one event later. Two deliberate exemptions:
+// - "waiting" is never suppressed: a child asking for permission is a genuine
+//   user-facing wait, and waiting is not latched, so it self-heals.
+// - a process exit (source "shim") is never suppressed: that is real and final.
+export function shouldSuppressAgentCompletion(
+  session: Pick<AgentSession, "subagentDepth">,
+  attentionEvent: AgentAttentionEvent
+) {
+  return (
+    hasLiveSubagents(session) &&
+    attentionEvent.source !== "shim" &&
+    (attentionEvent.state === "completed" || attentionEvent.state === "failed")
+  );
+}
+
+// What a project's panes are collectively doing, for the sidebar cards. Built
+// from the same predicates the pill and the dot use, so the counts can never
+// drift from what the pane itself says.
+//
+// One honest limitation: panes only mount for the ACTIVE scope, so sessions
+// restored from localStorage in a workspace the user has not opened this launch
+// have no process yet (restoreSession forces them back to "idle"). They count
+// toward `total` only, until the folder is visited.
+export interface SessionSummary {
+  working: number;
+  done: number;
+  blocked: number;
+  failed: number;
+  total: number;
+}
+
+export function summarizeSessions(
+  sessions: readonly AgentSession[]
+): SessionSummary {
+  const summary: SessionSummary = {
+    working: 0,
+    done: 0,
+    blocked: 0,
+    failed: 0,
+    total: sessions.length
+  };
+
+  for (const session of sessions) {
+    if (isSessionWorking(session)) {
+      summary.working += 1;
+      continue;
+    }
+
+    const attentionState = session.attention?.state;
+
+    // Blocked = the agent stopped and cannot continue without you: a permission
+    // prompt or a question. Checked before "done" because an interrupted turn
+    // leaves status "waiting" with a real reason attached.
+    if (attentionState === "waiting") {
+      summary.blocked += 1;
+      continue;
+    }
+
+    // A failed run IS finished, but it is not a success — folding it into
+    // either of the other buckets would misreport it, so it gets its own count
+    // (rendered only when non-zero).
+    if (session.status === "failed" || attentionState === "failed") {
+      summary.failed += 1;
+      continue;
+    }
+
+    if (session.status === "done" || attentionState === "completed") {
+      summary.done += 1;
+    }
+  }
+
+  return summary;
 }
 
 export type ProviderAttentionDecision = "accept" | "defer" | "reject";
@@ -46,7 +164,13 @@ export function codexTurnAttentionDecision(
   submitPending: boolean,
   submitPendingPriorTurnId: string | null | undefined,
   settledTurnIds: readonly string[],
-  providerTurnId: string | undefined
+  providerTurnId: string | undefined,
+  // The pane's App-owned "a codex turn is live" flag. Explicitly false means we
+  // already settled this pane's turn, so a completion arriving now belongs to
+  // something we are not tracking (a spawned child, a stale POST) and must not
+  // re-settle the pane. Undefined means we never observed a turn at all — that
+  // is the older/untrusted-codex compatibility path below, which still accepts.
+  turnLive?: boolean
 ): "accept" | "reject" {
   if (!providerTurnId || settledTurnIds.includes(providerTurnId)) {
     return "reject";
@@ -58,6 +182,10 @@ export function codexTurnAttentionDecision(
   // even when UserPromptSubmit hooks are unavailable.
   if (submitPending) {
     return submitPendingPriorTurnId === providerTurnId ? "reject" : "accept";
+  }
+
+  if (!activeTurnId && turnLive === false) {
+    return "reject";
   }
 
   return activeTurnId && activeTurnId !== providerTurnId ? "reject" : "accept";

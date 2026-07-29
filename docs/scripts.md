@@ -34,6 +34,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `scripts/frontend/fusion-settings-smoke.cjs` - Locks the Fusion settings layer: per-engine and per-model effort support (including safe GPT-5.5/Luna fallbacks), planning-model validation before restart, menu-activation trap fixes (/claude submenu, empty fallback, Shift+Tab gate), curated GPT-5.6 catalogs, and transcript preservation across settings restarts.
 - `scripts/frontend/cwd-conflicts-smoke.cjs` - Validates the shared-working-folder helpers (normalization, boundary-safe nesting, terminal exclusion, active escalation) and grep-locks the chip wiring in App, the three panes, and the CSS.
 - `scripts/frontend/tiled-board-resize-smoke.cjs` - Validates tiled-board resize geometry for directional neighbor pushes, edge detaching, multi-neighbor clamping, and no-overlap release behavior.
+- `scripts/frontend/pane-split-smoke.cjs` - Transpiles and executes the real `frontend/components/splitTree.ts`: split/remove/collapse round-trips, `subtreeMin` arithmetic, the divider clamp holding at every tile size, `normalizeSplitNode` rejecting cycles/depth/duplicates/NaN, `detachSessionFromTile` re-anchoring and dissolving, and `reconcileTiles` repairing every corruption idempotently without ever dropping a session — plus grep-locks on the App/TerminalPane/TiledBoard/CSS wiring.
 
 ## QA Scripts
 
@@ -52,6 +53,8 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `npm run dist:win` - Prepares the embedded Codex binary, builds the renderer, and creates the Windows NSIS installer plus update metadata in `release/`.
 - `npm run screenshot` - Visual QA screenshot pass.
 - `npm run screenshot:openfusion` - Visual QA screenshot pass for the Open Fusion chat pane fixture.
+- `npm run screenshot:split` - Visual QA screenshot pass for split tiles: a 3-terminal tile (two side by side over one full width) beside a solo pane, plus the sidebar project card.
+- `npm run smoke:frontend:pane-split` - Frontend smoke test for split-tile trees, tile membership repair, and the split wiring.
 - `npm run smoke:backend:codex-discovery` - Backend smoke test for Codex thread discovery.
 - `npm run smoke:backend:claude-discovery` - Backend smoke test for Claude thread discovery.
 - `npm run smoke:backend:kimi-discovery` - Backend smoke test for kimi thread discovery.

@@ -550,9 +550,54 @@ function postTelemetry(callbackUrl, token, payload) {
       }),
       { env: { ...process.env, ...instrumentation.env } }
     );
+    const childEvents = events.slice(eventsBeforeChildHook);
     assert(
-      events.length === eventsBeforeChildHook,
-      "Codex lifecycle observer should defensively ignore explicit subagent payloads"
+      childEvents.length === 1 &&
+        childEvents[0].type === "agent-subagent" &&
+        childEvents[0].id === "pane-one" &&
+        childEvents[0].phase === "stop",
+      "Codex lifecycle observer should narrow explicit subagent payloads to the delegation bracket"
+    );
+    assert(
+      !childEvents.some(
+        (event) =>
+          event.type === "agent-running" || event.type === "agent-attention"
+      ),
+      "Codex subagent payloads must never report running or waiting for the pane"
+    );
+    const eventsBeforeChildStart = events.length;
+    await runWithStdin(
+      process.execPath,
+      [lifecycleHookPath],
+      JSON.stringify({
+        hook_event_name: "PreToolUse",
+        session_id: "root-thread",
+        turn_id: "child-turn",
+        subagent: true
+      }),
+      { env: { ...process.env, ...instrumentation.env } }
+    );
+    const childStartEvents = events.slice(eventsBeforeChildStart);
+    assert(
+      childStartEvents.length === 1 &&
+        childStartEvents[0].type === "agent-subagent" &&
+        childStartEvents[0].phase === "start",
+      "a subagent PreToolUse payload should open the delegation bracket"
+    );
+    const eventsBeforeChildOther = events.length;
+    await runWithStdin(
+      process.execPath,
+      [lifecycleHookPath],
+      JSON.stringify({
+        hook_event_name: "PermissionRequest",
+        session_id: "root-thread",
+        agent_id: "child"
+      }),
+      { env: { ...process.env, ...instrumentation.env } }
+    );
+    assert(
+      events.length === eventsBeforeChildOther,
+      "non-tool subagent payloads should still be dropped entirely"
     );
     assert(
       typeof instrumentation.env.VIBE_TERMINAL_LAUNCH_NONCE === "string" &&
@@ -1439,6 +1484,35 @@ function postTelemetry(callbackUrl, token, payload) {
       "a tool-detailed agent.running should be flagged turnStart:false"
     );
 
+    // The delegation bracket rides its own event TYPES (not details), which is
+    // exactly why the argv-only notify programs needed no change: they forward
+    // argv[2] verbatim. It is neither an attention signal nor a turn start.
+    const eventsBeforeBracket = events.length;
+    await runNotify("pane-delegate", ["agent.subagent.started"]);
+    const bracketStart = events.slice(eventsBeforeBracket);
+    assert(
+      bracketStart.length === 1 &&
+        bracketStart[0].type === "agent-subagent" &&
+        bracketStart[0].id === "pane-delegate" &&
+        bracketStart[0].phase === "start",
+      `agent.subagent.started should produce exactly one agent-subagent start; got ${JSON.stringify(bracketStart)}`
+    );
+    const eventsBeforeBracketStop = events.length;
+    await runNotify("pane-delegate", ["agent.subagent.stopped"]);
+    const bracketStop = events.slice(eventsBeforeBracketStop);
+    assert(
+      bracketStop.length === 1 &&
+        bracketStop[0].type === "agent-subagent" &&
+        bracketStop[0].phase === "stop",
+      `agent.subagent.stopped should produce exactly one agent-subagent stop; got ${JSON.stringify(bracketStop)}`
+    );
+    const eventsBeforeBogus = events.length;
+    await runNotify("pane-delegate", ["agent.subagent.bogus"]);
+    assert(
+      events.length === eventsBeforeBogus,
+      "an unknown agent.subagent.* type should be dropped silently"
+    );
+
     // The claude permission Notification hook tags its wait "approval" so the
     // renderer can flip waiting->running on the user's answer keystroke.
     await runNotify("pane-approval", ["agent.waiting", "approval"]);
@@ -1943,14 +2017,45 @@ function postTelemetry(callbackUrl, token, payload) {
       winToolCmd.includes("agent.running tool"),
       `windows claude tool hook should pass the tool detail; got ${winToolCmd}`
     );
+    // The delegation bracket. claude's matcher selects on tool name, so `Task`
+    // is a discriminated subagent signal that keeps the notify transport
+    // argv-only (the hook JSON on stdin is never read).
+    assert(
+      claudeHooks.PreToolUse.length === 2 &&
+        claudeHooks.PreToolUse[1].matcher === "Task" &&
+        claudeHooks.PreToolUse[1].hooks[0].command.includes(
+          "'agent.subagent.started'"
+        ) &&
+        claudeHooks.PostToolUse.length === 2 &&
+        claudeHooks.PostToolUse[1].matcher === "Task" &&
+        claudeHooks.PostToolUse[1].hooks[0].command.includes(
+          "'agent.subagent.stopped'"
+        ),
+      "claude should bracket Task delegations via the tool-name matcher"
+    );
+    // Deliberately NOT SubagentStop as the closer: it is not 1:1 with a Task
+    // call (a blocking Stop-hook continuation can re-fire it), which would
+    // unbalance the renderer's delegation counter.
+    assert(
+      !JSON.stringify(claudeHooks).includes("SubagentStop"),
+      "claude settings must not close the bracket on SubagentStop"
+    );
+    const winTaskCmd = JSON.parse(
+      buildClaudeSettingsJson("C:\\x\\notify.ps1", true)
+    ).hooks.PreToolUse[1].hooks[0].command;
+    assert(
+      winTaskCmd.includes("agent.subagent.started") &&
+        !/agent\.subagent\.started\s+\S/.test(winTaskCmd),
+      `windows claude Task hook should pass the bracket type with no detail; got ${winTaskCmd}`
+    );
     // The kimi hook blocks carry the claude event set as config.toml TOML
     // ([[hooks]] tables), marker-tagged so merge/strip only ever touches
     // vibeTerminal's own entries.
     const kimiWinBlocks = kimiHookTomlBlocks("C:\\x\\notify.ps1", true);
     assert(
-      (kimiWinBlocks.match(/# vibeterminal-kimi-notify/g) || []).length === 6 &&
-        (kimiWinBlocks.match(/\[\[hooks\]\]/g) || []).length === 6,
-      "kimi blocks should be six marker-tagged [[hooks]] tables"
+      (kimiWinBlocks.match(/# vibeterminal-kimi-notify/g) || []).length === 8 &&
+        (kimiWinBlocks.match(/\[\[hooks\]\]/g) || []).length === 8,
+      "kimi blocks should be eight marker-tagged [[hooks]] tables"
     );
     assert(
       kimiWinBlocks.includes(
@@ -2027,8 +2132,35 @@ function postTelemetry(callbackUrl, token, payload) {
     );
     assert(
       (kimiCustomBlocks.match(/# vibeterminal-kimi-custom-notify/g) || [])
-        .length === 6,
-      "kimi-custom blocks should be six marker-tagged [[hooks]] tables"
+        .length === 8,
+      "kimi-custom blocks should be eight marker-tagged [[hooks]] tables"
+    );
+    // The delegation bracket is marker-selected, and the difference is
+    // load-bearing: kimi deletes its ENTIRE hooks section when any entry fails
+    // its hook-event enum, so an event name a stock build may not know would
+    // silently disable all vibeTerminal kimi telemetry. The vendored fork is
+    // verified to expose SubagentStart/SubagentStop (and they bracket the
+    // detached window too); stock kimi gets the Agent tool matcher instead.
+    assert(
+      kimiCustomBlocks.includes("event = 'SubagentStart'") &&
+        kimiCustomBlocks.includes("event = 'SubagentStop'") &&
+        kimiCustomBlocks.includes("'agent.subagent.started'") &&
+        kimiCustomBlocks.includes("'agent.subagent.stopped'"),
+      "kimi-custom should bracket delegations with SubagentStart/SubagentStop"
+    );
+    assert(
+      !kimiPosixBlocks.includes("SubagentStart") &&
+        !kimiPosixBlocks.includes("SubagentStop"),
+      "stock kimi must not reference hook events its enum may not know"
+    );
+    assert(
+      kimiPosixBlocks.includes(
+        `event = 'PreToolUse'\nmatcher = '^Agent$'\ncommand = "'/x/notify.sh' 'agent.subagent.started'"`
+      ) &&
+        kimiPosixBlocks.includes(
+          `event = 'PostToolUse'\nmatcher = '^Agent$'\ncommand = "'/x/notify.sh' 'agent.subagent.stopped'"`
+        ),
+      `stock kimi should bracket delegations with the Agent tool matcher; got ${kimiPosixBlocks}`
     );
     const bothMarkers = mergeKimiHooks(
       mergedToml,

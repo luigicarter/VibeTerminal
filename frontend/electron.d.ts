@@ -1,4 +1,5 @@
 import type {
+  AppVersionList,
   AgentThreadListResult,
   AgentThreadLookupPayload,
   AgentThreadLookupResult,
@@ -31,6 +32,10 @@ type ScreenshotFixture =
   | {
       mode: "fusion-builds";
       cwd: string;
+    }
+  | {
+      mode: "split";
+      cwd: string;
     };
 
 export interface FilePathDescription {
@@ -60,6 +65,8 @@ declare global {
         check: () => Promise<UpdateActionResult>;
         download: () => Promise<UpdateActionResult>;
         restart: () => Promise<boolean>;
+        listVersions: () => Promise<AppVersionList>;
+        installVersion: (version: string) => Promise<UpdateActionResult>;
         onEvent: (callback: (state: UpdateState) => void) => () => void;
       };
       workspace: {

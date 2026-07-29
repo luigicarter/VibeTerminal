@@ -146,13 +146,32 @@ assert(
   "folder remove controls and confirmation dialog should be styled"
 );
 
+// The sidebar's visual language is token-driven: spacing, radius, motion and
+// the semantic status colours all come from :root, so a state reads the same
+// wherever it appears and a restyle is a token change rather than a sweep of
+// literals. The active card is marked by an inset accent bar.
 assert(
-  stylesSource.includes("linear-gradient(180deg, #131418 0%, #0d0e11 100%)") &&
-    stylesSource.includes("--accent: #2dd4bf") &&
+  stylesSource.includes("--accent: #2dd4bf") &&
     stylesSource.includes("--accent-icon: #5eead4") &&
-    stylesSource.includes("inset 3px 0 0 var(--accent)") &&
+    stylesSource.includes("--status-working:") &&
+    stylesSource.includes("--status-blocked:") &&
+    stylesSource.includes("--space-3:") &&
+    stylesSource.includes("--radius-md:") &&
+    stylesSource.includes("--motion-base:") &&
+    stylesSource.includes("inset 2px 0 0 var(--accent)") &&
     stylesSource.includes(".workspace-context-menu button:hover"),
-  "sidebar should use the refreshed visual language for rows, active states, and menus"
+  "sidebar should use the token-driven visual language for cards, active states, and menus"
+);
+
+// The project card is a card, not a row: name, folder path, and the live
+// working/done/blocked tally.
+assert(
+  appSource.includes('className="workspace-name"') &&
+    appSource.includes('className="workspace-path"') &&
+    appSource.includes("<SessionCounts summary={summary} />") &&
+    stylesSource.includes(".workspace-path") &&
+    stylesSource.includes(".session-counts"),
+  "each folder should render as a card with its path and a live session tally"
 );
 
 console.log("workspace smoke passed");

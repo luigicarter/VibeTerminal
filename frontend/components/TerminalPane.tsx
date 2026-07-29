@@ -18,10 +18,12 @@ import {
   RefreshCcw,
   RotateCcw,
   TerminalSquare,
+  Ungroup,
   X
 } from "lucide-react";
 import clsx from "clsx";
 import {
+  hasLiveSubagents,
   isCodexTurnSubmitInput,
   isTurnTelemetryKind,
   reconcileStatus,
@@ -68,6 +70,14 @@ const INPUT_GRACE_MS = 450;
 // is over — settle to "waiting". If a turn really is alive but silent, the
 // next telemetry event re-asserts "running".
 const TELEMETRY_RUNNING_QUIET_MS = 12_000;
+// The same watchdog while a subagent delegation is open. A delegating pane is
+// EXPECTED to be quiet — the parent sits idle at a static prompt while its
+// subagent works, and a detached subagent can outlive the parent turn entirely
+// — so 12s of silence there is normal rather than a lost hook. Silence still
+// cannot be trusted forever, because the bracket's close event can be lost (a
+// denied Task, a killed child), so this window doubles as the delegation
+// counter's absolute expiry.
+const TELEMETRY_DELEGATION_QUIET_MS = 120_000;
 // Generated-title harvest: providers whose session titles can be read back
 // from local metadata with a cheap bounded file read. opencode/cursor already
 // bind their discovery refs with titles, and opencode's confirm path spawns a
@@ -77,6 +87,54 @@ const TELEMETRY_RUNNING_QUIET_MS = 12_000;
 const TITLE_REFRESH_PROVIDERS = new Set<string>(["claude", "codex", "kimi", "kimi-custom"]);
 const TITLE_REFRESH_DELAY_MS = 4000;
 const TITLE_REFRESH_MAX_ATTEMPTS = 5;
+
+// A tile can hold several terminals, so several panes mount into ONE
+// .pane-frame and each wants the frame's CSS transition off while it measures.
+// Refcount it: the forced synchronous layout happens once per frame element per
+// commit instead of once per pane, and the frame's declared transition is
+// restored by whoever leaves last rather than by whoever finishes first.
+const frameTransitionSuppressions = new WeakMap<
+  HTMLElement,
+  { count: number; saved: string }
+>();
+
+function suppressFrameTransition(frame: HTMLElement) {
+  const entry = frameTransitionSuppressions.get(frame);
+  if (entry) {
+    entry.count += 1;
+    return;
+  }
+
+  frameTransitionSuppressions.set(frame, {
+    count: 1,
+    saved: frame.style.transition
+  });
+  frame.style.transition = "none";
+  void frame.offsetWidth;
+}
+
+function releaseFrameTransition(frame: HTMLElement) {
+  const entry = frameTransitionSuppressions.get(frame);
+  if (!entry) {
+    return;
+  }
+
+  entry.count -= 1;
+  if (entry.count > 0) {
+    return;
+  }
+
+  // Deferred so every pane in this commit measures while the transition is
+  // still off, collapsing N suppress/reflow/restore cycles into one.
+  queueMicrotask(() => {
+    const current = frameTransitionSuppressions.get(frame);
+    if (!current || current.count > 0) {
+      return;
+    }
+    frameTransitionSuppressions.delete(frame);
+    frame.style.transition = current.saved;
+  });
+}
 
 interface ThreadLookupPatch {
   threadLookupStartedAt?: number;
@@ -92,8 +150,17 @@ interface TerminalPaneProps {
   cwdConflict?: CwdConflict;
   isMaximized: boolean;
   isArranging: boolean;
+  // This pane shares its board tile with others, so it can be popped back out.
+  isGrouped: boolean;
+  // Whether this pane takes focus when it mounts. True for an ordinary
+  // ungrouped pane (a freshly launched terminal must be typeable without
+  // clicking into it); inside a split tile only the selected member, since
+  // several terminals mount into one frame and the last one would win.
+  autoFocus: boolean;
   onClose: () => void;
   onDuplicate: () => void;
+  onSplit: (dir: "row" | "col") => void;
+  onPopOut: () => void;
   onRestart: () => void;
   onResume: () => void;
   onAdd: () => void;
@@ -106,6 +173,11 @@ interface TerminalPaneProps {
   // Human keyboard input decided the status (statusAfterUserInput). Applied
   // WITHOUT reconcileStatus — releasing the done/failed latch is the point.
   onInputStatusRelease: (status: SessionStatus) => void;
+  // The delegation watchdog gave up on an open subagent bracket after
+  // TELEMETRY_DELEGATION_QUIET_MS of total silence. Reported explicitly rather
+  // than inferred from the status change so the reset is visible at the call
+  // site and assertable in the smoke test.
+  onDelegationTimeout?: () => void;
   // Bare Enter is Codex's compatibility turn-start signal until the passive
   // provider lifecycle observer is trusted/available. It is kept above the pane
   // lifecycle so running survives workspace switches and maximize unmounts.
@@ -140,9 +212,13 @@ export default function TerminalPane({
   cwdConflict,
   isMaximized,
   isArranging,
+  isGrouped,
+  autoFocus,
   onAdd,
   onClose,
   onDuplicate,
+  onSplit,
+  onPopOut,
   onMaximize,
   onRestart,
   onResume,
@@ -152,6 +228,7 @@ export default function TerminalPane({
   onThreadLookupChange,
   onStatusChange,
   onInputStatusRelease,
+  onDelegationTimeout,
   onCodexTurnStart,
   onCodexInput
 }: TerminalPaneProps) {
@@ -163,6 +240,8 @@ export default function TerminalPane({
   const lastLaunchTokenRef = useRef(0);
   const onStatusChangeRef = useRef(onStatusChange);
   const onInputStatusReleaseRef = useRef(onInputStatusRelease);
+  const onDelegationTimeoutRef = useRef(onDelegationTimeout);
+  const autoFocusRef = useRef(autoFocus);
   const onCodexTurnStartRef = useRef(onCodexTurnStart);
   const onCodexInputRef = useRef(onCodexInput);
   const onThreadRefChangeRef = useRef(onThreadRefChange);
@@ -214,6 +293,29 @@ export default function TerminalPane({
   useEffect(() => {
     onInputStatusReleaseRef.current = onInputStatusRelease;
   }, [onInputStatusRelease]);
+
+  useEffect(() => {
+    onDelegationTimeoutRef.current = onDelegationTimeout;
+  }, [onDelegationTimeout]);
+
+  useEffect(() => {
+    autoFocusRef.current = autoFocus;
+  }, [autoFocus]);
+
+  // armTelemetrySettle fixes its delay at arm time, so a delegation that opens
+  // during an already-quiet stretch would still be settled by the pending short
+  // timer. Re-arm whenever the bracket opens or closes — which also shortens
+  // the window straight back to 12s once the delegation ends, so an ordinary
+  // turn is never left holding the long one. Only ever RE-arms a timer that is
+  // already pending: with no timer running there is nothing to correct, and
+  // arming one here (e.g. on mount) would settle a booting pane that has not
+  // produced any output yet.
+  useEffect(() => {
+    if (idleTimerRef.current !== null) {
+      armTelemetrySettle();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.subagentDepth]);
 
   useEffect(() => {
     onCodexTurnStartRef.current = onCodexTurnStart;
@@ -321,6 +423,12 @@ export default function TerminalPane({
       if (armedFor !== "starting" && armedFor !== "running") {
         return;
       }
+      const delay =
+        armedFor === "starting"
+          ? IDLE_AFTER_MS
+          : hasLiveSubagents(sessionRef.current)
+            ? TELEMETRY_DELEGATION_QUIET_MS
+            : TELEMETRY_RUNNING_QUIET_MS;
       clearIdleTimer();
       idleTimerRef.current = window.setTimeout(() => {
         idleTimerRef.current = null;
@@ -328,9 +436,12 @@ export default function TerminalPane({
           !terminalExitedRef.current &&
           sessionRef.current.status === armedFor
         ) {
+          if (hasLiveSubagents(sessionRef.current)) {
+            onDelegationTimeoutRef.current?.();
+          }
           setStatus("waiting");
         }
-      }, armedFor === "starting" ? IDLE_AFTER_MS : TELEMETRY_RUNNING_QUIET_MS);
+      }, delay);
     }
   }
 
@@ -598,7 +709,12 @@ export default function TerminalPane({
       });
     });
 
-    terminal.focus();
+    // Ungrouped panes focus on mount as they always have; inside a split tile
+    // only the selected member does, since an unconditional focus() there hands
+    // it to whichever pane rendered last.
+    if (autoFocusRef.current) {
+      terminal.focus();
+    }
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== "keydown") {
         return true;
@@ -966,14 +1082,12 @@ export default function TerminalPane({
     const paneFrame = isArrangingRef.current
       ? null
       : containerRef.current?.closest<HTMLElement>(".pane-frame");
-    const paneFrameTransition = paneFrame?.style.transition;
     if (paneFrame) {
-      paneFrame.style.transition = "none";
-      void paneFrame.offsetWidth;
+      suppressFrameTransition(paneFrame);
     }
     fitAndResizeRef.current?.();
     if (paneFrame) {
-      paneFrame.style.transition = paneFrameTransition ?? "";
+      releaseFrameTransition(paneFrame);
     }
     if (fitMeasuredRef.current) {
       lastSentSizeRef.current = {
@@ -1330,6 +1444,10 @@ export default function TerminalPane({
           `terminal-pane-attention-${session.attention.state}`
       )}
       style={{ "--pane-accent": profile.accent } as React.CSSProperties}
+      // Deliberately NOT data-session-id: the board frame owns that attribute
+      // and tooling resolves a frame with closest('[data-session-id]'), which a
+      // second copy on a descendant would break.
+      data-pane-id={session.id}
       onPointerDown={handlePanePointerDown}
     >
       <header className="pane-header pane-drag-zone" title="Drag header to move pane">
@@ -1374,6 +1492,15 @@ export default function TerminalPane({
           <button title="Duplicate pane" onClick={onDuplicate}>
             <CopyPlus size={14} />
           </button>
+          {/* Split / pop-out are intentionally NOT in this row: three more
+              always-visible buttons crowded the header at the 280px minimum
+              pane width. The actions stay wired for a less cramped entry
+              point. */}
+          {isGrouped && (
+            <button title="Pop out of tile" onClick={onPopOut}>
+              <Ungroup size={14} />
+            </button>
+          )}
           <button
             title={session.started ? "Restart terminal" : "Start terminal"}
             onClick={onRestart}

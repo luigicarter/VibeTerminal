@@ -55,6 +55,12 @@ function screenshotFixtureFromEnv() {
       cwd: process.env.VIBE_SCREENSHOT_FIXTURE_CWD || process.cwd()
     };
   }
+  if (process.env.VIBE_SCREENSHOT_SEED_SPLIT === "1") {
+    return {
+      mode: "split",
+      cwd: process.env.VIBE_SCREENSHOT_FIXTURE_CWD || process.cwd()
+    };
+  }
   return null;
 }
 
@@ -83,6 +89,9 @@ contextBridge.exposeInMainWorld("vibe", {
     check: () => ipcRenderer.invoke("updates:check"),
     download: () => ipcRenderer.invoke("updates:download"),
     restart: () => ipcRenderer.invoke("updates:restart"),
+    listVersions: () => ipcRenderer.invoke("updates:list-versions"),
+    installVersion: (version) =>
+      ipcRenderer.invoke("updates:install-version", { version }),
     onEvent: (callback) => {
       const listener = (_event, payload) => callback(payload);
       ipcRenderer.on("updates:event", listener);

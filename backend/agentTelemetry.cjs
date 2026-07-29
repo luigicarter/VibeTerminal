@@ -1981,9 +1981,12 @@ const CODEX_LIFECYCLE_EVENTS = [
 // App-owned observer used by invocation-local Codex hooks. It consumes the hook
 // JSON from stdin and never writes stdout, so it cannot change a prompt, tool,
 // or approval decision. Turn-scoped subagent hooks intentionally carry the
-// parent session id and therefore still describe activity in the root turn;
-// explicit subagent event payloads are rejected defensively. Codex's normal
-// hook trust review still applies; vibeTerminal never bypasses it.
+// parent session id and therefore still describe activity in the root turn.
+// Explicitly subagent-tagged payloads never produce running/waiting; they are
+// narrowed to the delegation bracket (agent.subagent.*) so that a parent
+// completion landing while a child tool call is open is not attributed to the
+// root turn. Codex's normal hook trust review still applies; vibeTerminal never
+// bypasses it.
 function codexLifecycleHookSource() {
   return String.raw`const http = require("http");
 
@@ -2005,26 +2008,36 @@ process.stdin.on("end", () => {
   } catch {
     process.exit(0);
   }
-  if (!hook || hook.subagent || hook.agent_id || hook.agent_type) process.exit(0);
+  if (!hook) process.exit(0);
 
   let type = "";
   let detail = "";
-  switch (hook.hook_event_name) {
-    case "UserPromptSubmit":
-      type = "agent.running";
-      detail = "turn-start";
-      break;
-    case "PermissionRequest":
-      type = "agent.waiting";
-      detail = "approval";
-      break;
-    case "PreToolUse":
-    case "PostToolUse":
-      type = "agent.running";
-      detail = "tool";
-      break;
-    default:
-      process.exit(0);
+  const isSubagent = Boolean(hook.subagent || hook.agent_id || hook.agent_type);
+  if (isSubagent) {
+    // Subagent payloads still NEVER report running/waiting and never touch a
+    // Codex decision — they may only say that a child was live, so a parent
+    // completion landing in that window is not attributed to the root turn.
+    if (hook.hook_event_name === "PreToolUse") type = "agent.subagent.started";
+    else if (hook.hook_event_name === "PostToolUse") type = "agent.subagent.stopped";
+    else process.exit(0);
+  } else {
+    switch (hook.hook_event_name) {
+      case "UserPromptSubmit":
+        type = "agent.running";
+        detail = "turn-start";
+        break;
+      case "PermissionRequest":
+        type = "agent.waiting";
+        detail = "approval";
+        break;
+      case "PreToolUse":
+      case "PostToolUse":
+        type = "agent.running";
+        detail = "tool";
+        break;
+      default:
+        process.exit(0);
+    }
   }
 
   const body = JSON.stringify({
@@ -2844,8 +2857,21 @@ function buildClaudeSettingsJson(scriptPath, isWin) {
       // done/failed latch — the hooks POST from independent short-lived
       // processes with no ordering guarantee, so a tool hook that lands AFTER
       // the turn's Stop must not resurrect a completed pane's spinner.
-      PreToolUse: [{ matcher: "*", hooks: [hook("agent.running", "tool")] }],
-      PostToolUse: [{ matcher: "*", hooks: [hook("agent.running", "tool")] }],
+      // The second entry on each is the DELEGATION BRACKET: claude's matcher
+      // selects on tool name, so `Task` gives us a discriminated subagent
+      // signal without reading the hook JSON from stdin (the notify program is
+      // argv-only by design). Deliberately NOT SubagentStop as the closer: it
+      // is not 1:1 with a Task call (a blocking Stop-hook continuation can
+      // re-fire it), which would unbalance the counter. PostToolUse pairs 1:1
+      // with PreToolUse and still fires when the subagent errored.
+      PreToolUse: [
+        { matcher: "*", hooks: [hook("agent.running", "tool")] },
+        { matcher: "Task", hooks: [hook("agent.subagent.started")] }
+      ],
+      PostToolUse: [
+        { matcher: "*", hooks: [hook("agent.running", "tool")] },
+        { matcher: "Task", hooks: [hook("agent.subagent.stopped")] }
+      ],
       Stop: [{ matcher: "*", hooks: [hook("agent.completed")] }],
       // Split so the pill can tell an approval prompt from an idle "your turn":
       // answering an approval has no hook of its own (PreToolUse fires before
@@ -2909,20 +2935,55 @@ function kimiHookCommand(notifyProgramPath, isWin, type, detail) {
 // only event/matcher/command/timeout — a malformed edit fails the whole config
 // for kimi, so the merge below never touches anything outside our own blocks.
 function kimiHookTomlBlocks(notifyProgramPath, isWin, marker = KIMI_HOOK_MARKER) {
+  // The delegation bracket differs by target, and the difference is
+  // load-bearing rather than cosmetic. kimi validates `[[hooks]]` entries
+  // against an enum of hook event names, and its config salvage DELETES THE
+  // WHOLE hooks section when any entry fails that validation — so writing an
+  // event name a stock kimi build doesn't know would silently disable ALL
+  // vibeTerminal kimi telemetry, not just the new entry.
+  //
+  // - kimi-custom: the vendored fork is verified to expose SubagentStart /
+  //   SubagentStop, fired on the PARENT's hooks, which bracket the DETACHED
+  //   window too (Agent(run_in_background=true)).
+  // - stock kimi: use only events we already depend on. The matcher is a regex
+  //   over the tool name, so `^Agent$` brackets the Agent tool call itself.
+  //   That covers foreground delegation (the reported bug); detached
+  //   delegation falls back to the pane's delegation watchdog.
+  const subagentEntries =
+    marker === KIMI_CUSTOM_HOOK_MARKER
+      ? [
+          { event: "SubagentStart", type: "agent.subagent.started" },
+          { event: "SubagentStop", type: "agent.subagent.stopped" }
+        ]
+      : [
+          {
+            event: "PreToolUse",
+            matcher: "^Agent$",
+            type: "agent.subagent.started"
+          },
+          {
+            event: "PostToolUse",
+            matcher: "^Agent$",
+            type: "agent.subagent.stopped"
+          }
+        ];
+
   const entries = [
     { event: "UserPromptSubmit", type: "agent.running" },
     { event: "PreToolUse", type: "agent.running", detail: "tool" },
     { event: "PostToolUse", type: "agent.running", detail: "tool" },
     { event: "PermissionRequest", type: "agent.waiting", detail: "approval" },
     { event: "Stop", type: "agent.completed" },
-    { event: "StopFailure", type: "agent.failed" }
+    { event: "StopFailure", type: "agent.failed" },
+    ...subagentEntries
   ];
   return entries
-    .map(({ event, type, detail }) =>
+    .map(({ event, matcher, type, detail }) =>
       [
         `# ${marker}`,
         "[[hooks]]",
         `event = ${kimiTomlString(event)}`,
+        ...(matcher ? [`matcher = ${kimiTomlString(matcher)}`] : []),
         `command = ${kimiTomlString(
           kimiHookCommand(notifyProgramPath, isWin, type, detail)
         )}`,
@@ -3433,6 +3494,24 @@ function createAgentTelemetryManager(options = {}) {
                 type: "agent-background-activity",
                 provider: event.provider,
                 backgroundActivity: activity
+              });
+            } else if (
+              event.type === "agent.subagent.started" ||
+              event.type === "agent.subagent.stopped"
+            ) {
+              // Delegation bracket: the pane's agent handed work to a subagent
+              // (start) or that subagent finished (stop). Not an attention
+              // signal and not a turn start — it rides its own event so the
+              // renderer can hold "working" across a turn boundary and refuse
+              // to settle on a completion it cannot attribute. It deliberately
+              // carries no ids: no provider matcher can supply one, and the
+              // notify transport stays argv-only.
+              emit({
+                id: event.sessionId,
+                type: "agent-subagent",
+                provider: event.provider,
+                phase:
+                  event.type === "agent.subagent.started" ? "start" : "stop"
               });
             } else if (event.type === "agent.running") {
               // A turn started (provider UserPromptSubmit/busy/before-submit
