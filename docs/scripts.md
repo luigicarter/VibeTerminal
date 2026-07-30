@@ -15,6 +15,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `scripts/backend/agent-telemetry-smoke.cjs` - Creates temporary fake provider commands; validates per-pane shim PATH injection, callback token plus per-launch nonce rejection, passive Codex lifecycle config, Codex thread/turn payload parsing, lifecycle attention events, kimi/kimi-custom config.toml hook merge/strip, OpenCode plugin refresh, and stale owned shim cleanup.
 - `scripts/backend/code-changes-smoke.cjs` - Validates Git status parsing and non-repository workspace handling for code-change tracking.
 - `scripts/backend/launch-cwd-smoke.cjs` - Validates terminal/Fusion launch cwd resolution rejects missing or file paths without creating them.
+- `scripts/backend/cli-probe-smoke.cjs` - Validates the launch-time PATH scan: PATHEXT expansion finds a fixture binary, an absent command reports unavailable, an unreadable PATH entry is skipped instead of failing the scan, the probe stays inside its launch budget, and the never-probed kinds (terminal, kimi-custom, fusion, openfusion) stay out of the command map.
 - `scripts/backend/update-smoke.cjs` - Validates packaged update policy, silent Windows update apply behavior, and matching user-facing docs.
 - `scripts/backend/fusion-launch-smoke.cjs` - Validates Fusion per-pane prompt/MCP file generation and confirms the adapter receives the embedded Codex binary path.
 - `scripts/backend/fusion-adapter-smoke.cjs` - Validates the Fusion adapter MCP surface exposed to Claude.
@@ -62,6 +63,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `npm run smoke:backend:agent-telemetry` - Backend smoke test for vibeTerminal-owned agent telemetry shims.
 - `npm run smoke:backend:code-changes` - Backend smoke test for code-change tracking.
 - `npm run smoke:backend:launch-cwd` - Backend smoke test for terminal/Fusion launch cwd validation.
+- `npm run smoke:backend:cli-probe` - Backend smoke test for the launch-time installed-CLI PATH scan.
 - `npm run smoke:backend:updates` - Backend smoke test for update policy and silent Windows update apply behavior.
 - `npm run smoke:backend:fusion-launch` - Backend smoke test for Fusion prompt/MCP launch files.
 - `npm run smoke:backend:fusion-adapter` - Backend smoke test for the Fusion adapter MCP tools.

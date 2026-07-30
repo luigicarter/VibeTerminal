@@ -9,6 +9,7 @@ The `preload/` folder contains the context-isolated bridge between the renderer 
 ## Exposed API
 
 - `window.vibe.app.getCwd()` - Returns the app working directory.
+- `window.vibe.app.getInstalledClis(options?)` - Returns the launch-time PATH scan of which agent CLIs exist on this machine, keyed by agent kind. Probed once on `app.whenReady` and cached for the session; pass `{ refresh: true }` to re-scan after the user installs something.
 - `window.vibe.updates.getState()` - Returns the current packaged-build update state.
 - `window.vibe.updates.check()` - Manually checks for a newer packaged build.
 - `window.vibe.updates.download()` - Downloads an available update after user confirmation.

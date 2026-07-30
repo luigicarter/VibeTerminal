@@ -17,6 +17,7 @@ const { createBuildSupervisor } = require("./buildSupervisor.cjs");
 const { fetchClaudeModelCatalog } = require("./claudeModels.cjs");
 const { fetchCodexModelCatalog } = require("./codexModels.cjs");
 const { getCodeChangeSummary } = require("./codeChanges.cjs");
+const { probeInstalledClis } = require("./cliProbe.cjs");
 const { resolveLaunchCwd } = require("./launchCwd.cjs");
 
 const isScreenshotMode =
@@ -1732,11 +1733,30 @@ function createMainWindow() {
   scheduleScreenshotCapture();
 }
 
+// Which agent CLIs exist on this machine. Probed once at launch (a few ms) and
+// cached for the session; the renderer dims launchers for the missing ones.
+let installedClisPromise = null;
+
+function refreshInstalledClis() {
+  installedClisPromise = probeInstalledClis().catch((error) => ({
+    probedAt: Date.now(),
+    durationMs: 0,
+    timedOut: false,
+    directoriesScanned: 0,
+    error: String(error?.message || error),
+    clis: {}
+  }));
+  return installedClisPromise;
+}
+
 app.whenReady().then(() => {
   getAgentTelemetry();
   getBuildSupervisor();
   startPtyHost();
   startAgentThreadHost();
+  // Kicked off before the window so the result is usually already resolved by
+  // the time the renderer asks; it is a promise, so nothing here blocks paint.
+  refreshInstalledClis();
   createMainWindow();
   setTimeout(checkForUpdatesOnLaunch, 1500);
 
@@ -1784,6 +1804,11 @@ app.on("window-all-closed", () => {
 });
 
 ipcMain.handle("app:get-cwd", () => getDefaultRuntimeCwd());
+
+ipcMain.handle("app:installed-clis", (_event, payload = {}) => {
+  if (payload?.refresh) return refreshInstalledClis();
+  return installedClisPromise || refreshInstalledClis();
+});
 
 ipcMain.handle("app:get-screenshot-fixture", () => {
   if (!isScreenshotMode) {

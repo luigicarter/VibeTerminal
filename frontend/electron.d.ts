@@ -46,12 +46,26 @@ export interface FilePathDescription {
   error?: string;
 }
 
+// Result of the launch-time PATH scan. Keyed by AgentKind; kinds with no CLI of
+// their own (terminal, kimi-custom, fusion, openfusion) are absent, not false.
+export interface InstalledCliReport {
+  probedAt: number;
+  durationMs: number;
+  timedOut: boolean;
+  directoriesScanned: number;
+  error?: string;
+  clis: Record<string, { command: string; available: boolean; path: string | null }>;
+}
+
 declare global {
   interface Window {
     vibe?: {
       platform: string;
       app: {
         getCwd: () => Promise<string>;
+        getInstalledClis?: (options?: {
+          refresh?: boolean;
+        }) => Promise<InstalledCliReport>;
         screenshotFixture?: ScreenshotFixture | null;
         getScreenshotFixture?: () => Promise<ScreenshotFixture | null>;
       };

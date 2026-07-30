@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -86,6 +87,7 @@ import {
   isThreadedAgentKind
 } from "./sessionLaunch";
 import { computeCwdConflicts } from "./cwdConflicts";
+import type { InstalledCliReport } from "./electron";
 import type {
   AgentAttentionEvent,
   AgentBackgroundActivity,
@@ -297,9 +299,10 @@ const agentProfiles: AgentProfile[] = [
   }
 ];
 
-const launcherAgentProfiles = agentProfiles.filter(
-  (profile) => profile.kind !== "gemini" && profile.kind !== "aider"
-);
+// Every profile is offered. Gemini and Aider used to be filtered out here
+// unconditionally, which hid them from the users who do have them installed;
+// the launch-time CLI probe now dims what is missing instead of hiding it.
+const launcherAgentProfiles = agentProfiles;
 
 // Pane labels the app itself minted ("Claude 2", "Fusion 1 copy"). Older builds
 // copied them into threadRef.title and forced them onto Claude via --name, so
@@ -1224,6 +1227,12 @@ export default function App() {
   >(new Map());
   const fusionBridgeToolRef = useRef<Map<string, boolean>>(new Map());
   const [shellMessage, setShellMessage] = useState<string | null>(null);
+  // null = the PATH scan has not answered yet, so nothing is dimmed. Only a
+  // definite "not found" dims a launcher — never the pending state, which would
+  // flash every button grey for a frame on a slow probe.
+  const [installedClis, setInstalledClis] = useState<InstalledCliReport | null>(
+    null
+  );
   const [updateState, setUpdateState] = useState<UpdateState | null>(null);
   const [versionPickerOpen, setVersionPickerOpen] = useState(false);
   // null = not fetched yet (the menu shows a loading note).
@@ -1374,6 +1383,39 @@ export default function App() {
       cancelled = true;
     };
   }, [activeWorkspace, boardSessions.length, multiSessions.length]);
+
+  useEffect(() => {
+    let cancelled = false;
+    window.vibe?.app?.getInstalledClis?.().then(
+      (report) => {
+        if (!cancelled) setInstalledClis(report);
+      },
+      () => {
+        // A failed probe leaves every launcher enabled, which is the safe
+        // default: presence is a hint, not a gate.
+      }
+    );
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // A launcher is dimmed only when the probe positively reports its CLI
+  // missing. Kinds with no PATH command of their own (Terminal, the vendored
+  // Kimi + CC) are absent from the report and stay normal. Fusion and Open
+  // Fusion are not probed either: they launch claude/opencode sessions, so
+  // their entries follow those two.
+  const agentCliMissing = useCallback(
+    (kind: AgentKind) => {
+      if (!installedClis) return false;
+      const probeKind =
+        kind === "fusion" ? "claude" : kind === "openfusion" ? "opencode" : kind;
+      const entry = installedClis.clis?.[probeKind];
+      return Boolean(entry) && !entry.available;
+    },
+    [installedClis]
+  );
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(workspaces));
@@ -4122,20 +4164,31 @@ export default function App() {
 
         <section className="agent-toolbar" aria-label="Agent launchers">
           <div className="agent-toolbar-actions">
-            {launcherAgentProfiles.map((profile) => (
-              <button
-                key={profile.kind}
-                onClick={() => addSession(profile.kind)}
-                style={{ "--agent-accent": profile.accent } as React.CSSProperties}
-              >
-                {profile.openFusion ? (
-                  <img className="agent-launcher-logo" src={openFusionLogo} alt="" />
-                ) : (
-                  <Plus size={14} />
-                )}
-                {profile.label}
-              </button>
-            ))}
+            {launcherAgentProfiles.map((profile) => {
+              const missing = agentCliMissing(profile.kind);
+              return (
+                <button
+                  key={profile.kind}
+                  className={clsx(missing && "agent-launcher-missing")}
+                  // Still clickable: the pane runs through a login shell whose
+                  // PATH can be wider than this process's, so a miss is a hint.
+                  title={
+                    missing
+                      ? `${profile.label} was not found on your PATH — click to launch anyway`
+                      : undefined
+                  }
+                  onClick={() => addSession(profile.kind)}
+                  style={{ "--agent-accent": profile.accent } as React.CSSProperties}
+                >
+                  {profile.openFusion ? (
+                    <img className="agent-launcher-logo" src={openFusionLogo} alt="" />
+                  ) : (
+                    <Plus size={14} />
+                  )}
+                  {profile.label}
+                </button>
+              );
+            })}
           </div>
 
           {activeView === "project" && activeWorkspace && (
@@ -4399,19 +4452,28 @@ export default function App() {
               </p>
               {activeScope ? (
                 <div className="empty-actions">
-                  {launcherAgentProfiles.map((profile) => (
-                    <button
-                      key={profile.kind}
-                      onClick={() => addSession(profile.kind)}
-                    >
-                      {profile.openFusion ? (
-                        <img className="agent-launcher-logo" src={openFusionLogo} alt="" />
-                      ) : (
-                        <Plus size={16} />
-                      )}
-                      {profile.label}
-                    </button>
-                  ))}
+                  {launcherAgentProfiles.map((profile) => {
+                    const missing = agentCliMissing(profile.kind);
+                    return (
+                      <button
+                        key={profile.kind}
+                        className={clsx(missing && "agent-launcher-missing")}
+                        title={
+                          missing
+                            ? `${profile.label} was not found on your PATH — click to launch anyway`
+                            : undefined
+                        }
+                        onClick={() => addSession(profile.kind)}
+                      >
+                        {profile.openFusion ? (
+                          <img className="agent-launcher-logo" src={openFusionLogo} alt="" />
+                        ) : (
+                          <Plus size={16} />
+                        )}
+                        {profile.label}
+                      </button>
+                    );
+                  })}
                 </div>
               ) : (
                 <button onClick={openFolder}>

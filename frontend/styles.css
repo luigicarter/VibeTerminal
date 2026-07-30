@@ -1323,6 +1323,27 @@ button {
   color: var(--agent-accent);
 }
 
+/* CLI not found on PATH at launch. Dimmed, not removed and not disabled: the
+   pane's login shell can resolve commands this process cannot see, so the
+   button stays clickable and only reads as secondary. */
+.agent-launcher-missing {
+  opacity: 0.42;
+  border-color: var(--border-hairline);
+}
+
+.agent-launcher-missing:hover {
+  opacity: 0.75;
+}
+
+.agent-toolbar button.agent-launcher-missing svg,
+.empty-actions button.agent-launcher-missing svg {
+  color: var(--text-secondary);
+}
+
+.agent-launcher-missing .agent-launcher-logo {
+  filter: grayscale(1);
+}
+
 .agent-launcher-logo {
   display: block;
   width: 17px;

@@ -73,6 +73,10 @@ contextBridge.exposeInMainWorld("vibe", {
   platform: process.platform,
   app: {
     getCwd: () => ipcRenderer.invoke("app:get-cwd"),
+    // Presence-on-PATH for each agent CLI, probed once at launch. Pass
+    // { refresh: true } to re-scan after the user installs something.
+    getInstalledClis: (options) =>
+      ipcRenderer.invoke("app:installed-clis", options || {}),
     screenshotFixture,
     getScreenshotFixture: () =>
       screenshotFixture
