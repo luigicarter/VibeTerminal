@@ -844,6 +844,23 @@ function restoreSession(session: AgentSession): AgentSession {
     activeThreadRef?.id ? activeThreadRef : storedResumeRef
   );
 
+  // Attention describes a moment inside the OLD process, which restore always
+  // replaces with a fresh terminal (see the launch note above). A stale
+  // "waiting" is the damaging one: it claims an approval/question prompt is on
+  // screen for a pane that has not even started, so every project that ever
+  // parked a pane at its idle prompt reads as "blocked" on the next launch.
+  // Panes that stay paused on a finished process keep their completed/failed
+  // state, which still matches the status restored beside it — but never its
+  // `unread` dot: that badge means "you have not seen this yet", and across a
+  // relaunch every stored result is old news.
+  const restoredAttention = normalizeAttention(session.attention);
+  const attention =
+    shouldAutoStart || restoredAttention.state === "waiting"
+      ? EMPTY_ATTENTION
+      : restoredAttention.unread
+        ? { ...restoredAttention, unread: false }
+        : restoredAttention;
+
   return {
     ...session,
     name: session.name || profile.label,
@@ -880,7 +897,7 @@ function restoreSession(session: AgentSession): AgentSession {
     threadLookupStatus: "idle",
     threadLookupMessage: undefined,
     status: shouldAutoStart ? "idle" : previousStatus,
-    attention: normalizeAttention(session.attention),
+    attention,
     backgroundActivity: undefined,
     detachedTaskIds: undefined,
     subagentDepth: undefined,
@@ -2069,19 +2086,41 @@ export default function App() {
       const releasesDelegation =
         attentionEvent.state === "waiting" && attentionEvent.reason === "question";
 
+      // A SETTLED turn owns its attention. claude fires its idle Notification
+      // (idle_prompt -> waiting/question) about a minute after every turn ends,
+      // and it lands on a pane whose status is already a latched done/failed.
+      // reconcileStatus keeps the pill honest, but writing the attention anyway
+      // did two visible kinds of damage: the sidebar counted the finished pane
+      // as "blocked", and the unread flag re-raised an attention dot the user
+      // had already dismissed — for a pane that had done nothing. Keep the
+      // completion/failure that settled the turn instead.
+      //
+      // Scoped to "waiting" on purpose: a late completed/failed still writes
+      // (it describes the same settled turn), and while the pane is running,
+      // starting or idle the event applies normally — that is the ~60s liveness
+      // backstop for a turn whose Stop hook never landed. Mid-turn approval
+      // waits are unaffected: a permission prompt can only occur inside a turn,
+      // whose UserPromptSubmit already released the latch.
+      const settled = session.status === "done" || session.status === "failed";
+      const keepSettledAttention = settled && attentionEvent.state === "waiting";
+
       return {
         ...session,
         status: nextStatus,
+        // Still released even when the notification itself is dropped: the
+        // bracket expiry is a fact about the delegation, not a notification.
         subagentDepth: releasesDelegation ? undefined : session.subagentDepth,
-        attention: attentionFromEvent(
-          attentionEvent,
-          shouldMarkAttentionUnread(
-            sessionId,
-            selection.selectedSessionId,
-            selection.visibleSessionIds,
-            attentionEvent
-          )
-        )
+        attention: keepSettledAttention
+          ? session.attention
+          : attentionFromEvent(
+              attentionEvent,
+              shouldMarkAttentionUnread(
+                sessionId,
+                selection.selectedSessionId,
+                selection.visibleSessionIds,
+                attentionEvent
+              )
+            )
       };
     });
   }

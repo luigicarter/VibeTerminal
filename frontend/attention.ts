@@ -136,7 +136,18 @@ export function summarizeSessions(
     // Blocked = the agent stopped and cannot continue without you: a permission
     // prompt or a question. Checked before "done" because an interrupted turn
     // leaves status "waiting" with a real reason attached.
-    if (attentionState === "waiting") {
+    //
+    // It must NOT outrank a turn that already settled, though. claude fires its
+    // idle Notification ("idle_prompt" -> waiting/question) about a minute after
+    // ANY turn ends, which lands on a pane whose status is a latched "done" —
+    // the same attention shape an interrupt produces. Without this guard every
+    // finished pane quietly became "blocked" a minute later while its own pill
+    // still read done, so the card contradicted the pane it was counting. The
+    // done/failed latch (see reconcileStatus) is exactly the signal that tells
+    // the two apart: an interrupt leaves status "waiting", a finished turn
+    // leaves it "done"/"failed".
+    const settled = session.status === "done" || session.status === "failed";
+    if (attentionState === "waiting" && !settled) {
       summary.blocked += 1;
       continue;
     }

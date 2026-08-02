@@ -383,6 +383,29 @@ assert.deepStrictEqual(
   ]),
   { working: 1, done: 0, blocked: 0, failed: 0, total: 1 }
 );
+// ...and neither is a pane whose turn already SETTLED. claude fires its idle
+// Notification (idle_prompt -> waiting/question) about a minute after every turn
+// ends, producing the same attention shape as an interrupt on top of a latched
+// done/failed status. The latch is what tells them apart, so a settled pane
+// stays in its own bucket instead of silently flipping to blocked while its own
+// pill still reads done.
+assert.deepStrictEqual(
+  summarizeSessions([
+    { status: "done", attention: { state: "waiting", reason: "question" } },
+    { status: "failed", attention: { state: "waiting", reason: "question" } }
+  ]),
+  { working: 0, done: 1, blocked: 0, failed: 1, total: 2 }
+);
+// The interrupt case the blocked-before-done ordering exists for is untouched:
+// an interrupted turn leaves status "waiting", which is not settled.
+assert.deepStrictEqual(
+  summarizeSessions([
+    { status: "waiting", attention: { state: "waiting", reason: "question" } },
+    { status: "idle", attention: { state: "waiting", reason: "approval" } },
+    { status: "starting", attention: { state: "waiting", reason: "approval" } }
+  ]),
+  { working: 0, done: 0, blocked: 3, failed: 0, total: 3 }
+);
 
 // The render-time dot decision is deliberately UNCHANGED by the bracket: an
 // ambiguous completion never gets written in the first place, and a child's
@@ -823,6 +846,63 @@ assert(
     appSource.includes("<SessionCounts summary={summary} />") &&
     appSource.includes("<SessionCounts summary={multiModeSummary} />"),
   "both the folder cards and the Multi card should render live session counts"
+);
+// Relaunching the app must not resurrect a "blocked" card. restoreSession hands
+// every started pane a FRESH terminal, so a persisted "waiting" attention points
+// at an approval/question prompt that died with the old process — carrying it
+// through made every project that ever parked at an idle prompt read as blocked
+// on the next launch.
+const restoreFnIndex = appSource.indexOf("function restoreSession");
+const restoreBody = appSource.slice(
+  restoreFnIndex,
+  appSource.indexOf("function restoreStoredSession")
+);
+assert(restoreFnIndex >= 0, "restoreSession should exist");
+assert(
+  /shouldAutoStart \|\| restoredAttention\.state === "waiting"\s*\?\s*EMPTY_ATTENTION/.test(
+    restoreBody
+  ) && restoreBody.includes("attention,"),
+  "restoreSession should drop a stale waiting attention instead of restoring it"
+);
+assert(
+  !restoreBody.includes("attention: normalizeAttention(session.attention)"),
+  "restoreSession should not restore the persisted attention blob verbatim"
+);
+// A surviving completed/failed keeps its STATE (it matches the restored status)
+// but never its unread dot — after a relaunch there is no unseen notification.
+assert(
+  /restoredAttention\.unread\s*\?\s*\{\s*\.\.\.restoredAttention,\s*unread:\s*false\s*\}/.test(
+    restoreBody
+  ),
+  "restoreSession should clear unread on a surviving attention"
+);
+// The root-cause guard for the same idle notification: a SETTLED turn owns its
+// attention, so claude's ~60s idle_prompt (waiting/question) landing on a
+// done/failed pane must not overwrite the completion — that both mis-counted the
+// card as blocked and re-raised an already-dismissed dot. The delegation bracket
+// release is deliberately OUTSIDE that guard, and the drop is scoped to
+// "waiting" so a late completed/failed still writes.
+const acceptedFnIndex = appSource.indexOf("function applyAcceptedAgentAttention");
+const acceptedBody = appSource.slice(
+  acceptedFnIndex,
+  appSource.indexOf("function applyAgentAttention")
+);
+assert(acceptedFnIndex > 0, "applyAcceptedAgentAttention should exist");
+assert(
+  acceptedBody.includes(
+    'const settled = session.status === "done" || session.status === "failed";'
+  ) &&
+    acceptedBody.includes(
+      'const keepSettledAttention = settled && attentionEvent.state === "waiting";'
+    ) &&
+    /keepSettledAttention\s*\?\s*session\.attention/.test(acceptedBody),
+  "a settled turn should keep its own attention against an idle waiting notification"
+);
+assert(
+  acceptedBody.includes(
+    "subagentDepth: releasesDelegation ? undefined : session.subagentDepth"
+  ),
+  "the delegation bracket release must survive the settled-attention guard"
 );
 const stylesSourceForCounts = fs.readFileSync(stylesPath, "utf8");
 assert(
