@@ -37,6 +37,17 @@ import {
   isTerminalPasteShortcut
 } from "../terminalClipboard";
 import {
+  createSgrMouseTracker,
+  createSyncOutputCoalescer,
+  type SgrMouseTracker,
+  type SyncOutputCoalescer
+} from "../terminalOutput";
+import {
+  buildSgrWheelReports,
+  computeWheelLines,
+  type WheelAccumulator
+} from "../terminalWheel";
+import {
   cwdConflictChipLabel,
   cwdConflictTitle,
   type CwdConflict
@@ -259,6 +270,10 @@ export default function TerminalPane({
   // Whether this pane should keep showing the tail of its output. Only the
   // user's own scrolling flips it — see syncFollowTail().
   const followTailRef = useRef(true);
+  // Byte-stream helpers owned by the terminal-create effect; refs so the
+  // launch effect can reset them on a relaunch.
+  const syncOutputRef = useRef<SyncOutputCoalescer | null>(null);
+  const sgrMouseRef = useRef<SgrMouseTracker | null>(null);
   const terminalPointerRef = useRef(false);
   const threadLookupTimeoutRef = useRef<number | null>(null);
   const threadLookupAfterRef = useRef(
@@ -709,6 +724,76 @@ export default function TerminalPane({
       });
     });
 
+    // Frame coalescing for DEC 2026 "synchronized output" (qwen's virtual
+    // viewport wraps every repaint in it): xterm has no support for the mode
+    // and ConPTY re-chunks output, so an unheld frame paints partially and the
+    // pane flickers on every repaint tick. All PTY data reaches xterm through
+    // this coalescer; streams without the markers pass through untouched.
+    const syncOutput = createSyncOutputCoalescer((data) => terminal.write(data));
+    // Whether the foreground app enabled SGR mouse encoding — the only
+    // encoding the wheel handler below can speak.
+    const sgrMouse = createSgrMouseTracker();
+    syncOutputRef.current = syncOutput;
+    sgrMouseRef.current = sgrMouse;
+
+    // When a TUI tracks the mouse (qwen's virtual viewport does), xterm turns
+    // any wheel event into exactly ONE wheel report, however large its delta —
+    // and Chromium coalesces a fast flick into a few large-delta events, so
+    // the TUI sees a single small step and scrolling reads as stuck.
+    // Synthesize one SGR report per scrolled line instead, at the same rate
+    // xterm scrolls an untracked buffer. Anything unsupported (no tracking,
+    // x10 protocol, non-SGR encoding, shift-wheel) falls through to xterm's
+    // own handling unchanged.
+    const wheelAccumulator: WheelAccumulator = { partial: 0 };
+    terminal.attachCustomWheelEventHandler((event) => {
+      const trackingMode = terminal.modes.mouseTrackingMode;
+      if (trackingMode === "none" || trackingMode === "x10") {
+        return true;
+      }
+      if (!sgrMouse.active || event.shiftKey) {
+        return true;
+      }
+      const host = containerRef.current;
+      if (!host || terminalExitedRef.current || !createdRef.current) {
+        return true;
+      }
+      const rect = host.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) {
+        return true;
+      }
+
+      const rowHeight = rect.height / Math.max(1, terminal.rows);
+      const colWidth = rect.width / Math.max(1, terminal.cols);
+      const fastModifier = terminal.options.fastScrollModifier ?? "alt";
+      const fastHeld =
+        (fastModifier === "alt" && event.altKey) ||
+        (fastModifier === "ctrl" && event.ctrlKey);
+      const deltaY =
+        event.deltaY * (fastHeld ? terminal.options.fastScrollSensitivity ?? 5 : 1);
+      const lines = computeWheelLines(
+        wheelAccumulator,
+        { deltaY, deltaMode: event.deltaMode },
+        rowHeight,
+        terminal.rows
+      );
+      if (lines !== 0) {
+        const col = Math.min(
+          terminal.cols,
+          Math.max(1, Math.floor((event.clientX - rect.left) / colWidth) + 1)
+        );
+        const row = Math.min(
+          terminal.rows,
+          Math.max(1, Math.floor((event.clientY - rect.top) / rowHeight) + 1)
+        );
+        window.vibe?.terminal.input(
+          session.id,
+          buildSgrWheelReports(lines, col, row)
+        );
+      }
+      // Consumed: without this xterm would add its own single report on top.
+      return false;
+    });
+
     // Ungrouped panes focus on mount as they always have; inside a split tile
     // only the selected member does, since an unconditional focus() there hands
     // it to whichever pane rendered last.
@@ -871,6 +956,7 @@ export default function TerminalPane({
           return;
         }
 
+        syncOutput.flush();
         terminal.writeln("");
         terminal.writeln(`\x1b[31m${event.message}\x1b[0m`);
         clearIdleTimer();
@@ -883,13 +969,20 @@ export default function TerminalPane({
       }
 
       if (event.type === "data") {
-        terminal.write(event.data);
+        sgrMouse.push(event.data);
+        syncOutput.push(event.data);
         markActiveFromOutput();
       }
 
       if (event.type === "snapshot") {
+        // A held frame and the mouse-encoding state describe the screen this
+        // replay is about to replace; the replay itself is one atomic write,
+        // so it does not need the coalescer.
+        syncOutput.reset();
+        sgrMouse.reset();
         terminal.reset();
         if (event.data) {
+          sgrMouse.push(event.data);
           terminal.write(event.data, () => terminal.scrollToBottom());
         }
 
@@ -922,6 +1015,7 @@ export default function TerminalPane({
       }
 
       if (event.type === "error") {
+        syncOutput.flush();
         terminal.writeln("");
         terminal.writeln(`\x1b[31m${event.message}\x1b[0m`);
         clearIdleTimer();
@@ -930,6 +1024,7 @@ export default function TerminalPane({
 
       if (event.type === "exit") {
         terminalExitedRef.current = true;
+        syncOutput.flush();
         terminal.writeln("");
         terminal.writeln(
           "\x1b[33mProcess exited. Use restart to run it again.\x1b[0m"
@@ -978,6 +1073,11 @@ export default function TerminalPane({
       clearIdleTimer();
       removeListener?.();
       removeContextMenuPasteListener?.();
+      // Drop (not flush) any held frame: the terminal is being disposed, and a
+      // pending coalescer timer must not write into a disposed instance.
+      syncOutput.reset();
+      syncOutputRef.current = null;
+      sgrMouseRef.current = null;
       terminal.dispose();
       terminalRef.current = null;
       fitRef.current = null;
@@ -1064,6 +1164,11 @@ export default function TerminalPane({
     createdRef.current = true;
     terminalExitedRef.current = false;
     terminal.clear();
+    // A relaunch starts a fresh process: no frame can be open and the old
+    // process's mouse-encoding state no longer applies. (A remount dedups into
+    // a snapshot, whose replay re-derives the encoding state.)
+    syncOutputRef.current?.reset();
+    sgrMouseRef.current?.reset();
     clearIdleTimer();
     // Only a genuine (re)launch shows "starting": every launch path (create,
     // restart, resume, settings change) resets the status to "idle" first. A

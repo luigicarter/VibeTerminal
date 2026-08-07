@@ -37,6 +37,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `scripts/frontend/cwd-conflicts-smoke.cjs` - Validates the shared-working-folder helpers (normalization, boundary-safe nesting, terminal exclusion, active escalation) and grep-locks the chip wiring in App, the three panes, and the CSS.
 - `scripts/frontend/tiled-board-resize-smoke.cjs` - Validates tiled-board resize geometry for directional neighbor pushes, edge detaching, multi-neighbor clamping, and no-overlap release behavior.
 - `scripts/frontend/pane-split-smoke.cjs` - Transpiles and executes the real `frontend/components/splitTree.ts`: split/remove/collapse round-trips, `subtreeMin` arithmetic, the divider clamp holding at every tile size, `normalizeSplitNode` rejecting cycles/depth/duplicates/NaN, `detachSessionFromTile` re-anchoring and dissolving, and `reconcileTiles` repairing every corruption idempotently without ever dropping a session — plus grep-locks on the App/TerminalPane/TiledBoard/CSS wiring.
+- `scripts/frontend/terminal-output-smoke.cjs` - Transpiles and executes the real `frontend/terminalOutput.ts` + `frontend/terminalWheel.ts`: DEC 2026 synchronized-output frame coalescing (split frames land as one write, split markers reassemble, lookalike tails release, deadline/overflow fall back to passthrough, flush vs reset semantics), the SGR mouse-encoding tracker, wheel line accumulation across pixel/line/page delta modes with the report cap, SGR wheel report bytes — plus grep-locks on the TerminalPane wiring (coalesced data path, snapshot resets, exit flushes, custom wheel handler fall-throughs).
 
 ## QA Scripts
 
@@ -57,6 +58,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `npm run screenshot:openfusion` - Visual QA screenshot pass for the Open Fusion chat pane fixture.
 - `npm run screenshot:split` - Visual QA screenshot pass for split tiles: a 3-terminal tile (two side by side over one full width) beside a solo pane, plus the sidebar project card.
 - `npm run smoke:frontend:pane-split` - Frontend smoke test for split-tile trees, tile membership repair, and the split wiring.
+- `npm run smoke:frontend:terminal-output` - Frontend smoke test for the terminal byte-stream helpers (2026 frame coalescing, SGR mouse tracking, wheel report synthesis).
 - `npm run smoke:backend:codex-discovery` - Backend smoke test for Codex thread discovery.
 - `npm run smoke:backend:claude-discovery` - Backend smoke test for Claude thread discovery.
 - `npm run smoke:backend:kimi-discovery` - Backend smoke test for kimi thread discovery.
