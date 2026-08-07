@@ -197,6 +197,10 @@ assert.strictEqual(
   false
 );
 assert.strictEqual(
+  shouldUseTerminalEventAttention({ id: "qwen", kind: "qwen" }),
+  false
+);
+assert.strictEqual(
   shouldMarkAttentionUnread("one", "one", ["one"], completed),
   false
 );
@@ -499,6 +503,7 @@ assert.strictEqual(isTurnTelemetryKind("opencode"), true);
 assert.strictEqual(isTurnTelemetryKind("cursor"), true);
 assert.strictEqual(isTurnTelemetryKind("kimi"), true);
 assert.strictEqual(isTurnTelemetryKind("kimi-custom"), true);
+assert.strictEqual(isTurnTelemetryKind("qwen"), true);
 assert.strictEqual(isTurnTelemetryKind("codex"), false);
 assert.strictEqual(isTurnTelemetryKind("terminal"), false);
 
@@ -750,6 +755,23 @@ assert.strictEqual(
 );
 assert.strictEqual(
   statusAfterUserInput({ kind: "kimi-custom", status: "running" }, "\x1b"),
+  "waiting"
+);
+// qwen's settings.json hooks report the same events as kimi's config.toml
+// ones, so the same keystroke rules apply.
+assert.strictEqual(
+  statusAfterUserInput(
+    {
+      kind: "qwen",
+      status: "waiting",
+      attention: { ...waiting, reason: "approval", unread: false }
+    },
+    "y"
+  ),
+  "running"
+);
+assert.strictEqual(
+  statusAfterUserInput({ kind: "qwen", status: "running" }, "\x1b"),
   "waiting"
 );
 assert.strictEqual(

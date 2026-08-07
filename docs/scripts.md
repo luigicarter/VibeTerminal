@@ -12,7 +12,8 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `scripts/backend/claude-discovery-smoke.cjs` - Creates temporary fake Claude transcripts and validates `backend/agentThreadHost.cjs` Claude discovery for title extraction from array content, `excludeIds` filtering, foreign-cwd tolerance, and the `after` cutoff.
 - `scripts/backend/kimi-discovery-smoke.cjs` - Creates a temporary fake `$KIMI_CODE_HOME` and validates `backend/agentThreadHost.cjs` kimi discovery: index parsing, title/lastPrompt fallback, updatedAt recency, foreign-cwd exclusion, malformed-line tolerance, list, and confirm contracts.
 - `scripts/backend/kimi-custom-discovery-smoke.cjs` - Same fixture shape against the kimi-custom home (`VIBE_KIMI_CUSTOM_HOME`), validating the fork's discovery wrappers return `kimi-custom`-labeled refs.
-- `scripts/backend/agent-telemetry-smoke.cjs` - Creates temporary fake provider commands; validates per-pane shim PATH injection, callback token plus per-launch nonce rejection, passive Codex lifecycle config, Codex thread/turn payload parsing, lifecycle attention events, kimi/kimi-custom config.toml hook merge/strip, OpenCode plugin refresh, and stale owned shim cleanup.
+- `scripts/backend/qwen-discovery-smoke.cjs` - Creates a temporary fake `$QWEN_HOME` with per-project chats JSONL transcripts and validates `backend/agentThreadHost.cjs` qwen discovery: title from the first real user message (system records skipped), createdAt from the first record, mtime recency, foreign-cwd exclusion, corrupt-line tolerance, list, and confirm contracts.
+- `scripts/backend/agent-telemetry-smoke.cjs` - Creates temporary fake provider commands; validates per-pane shim PATH injection, callback token plus per-launch nonce rejection, passive Codex lifecycle config, Codex thread/turn payload parsing, lifecycle attention events, kimi/kimi-custom config.toml hook merge/strip, qwen settings.json hook merge/strip (malformed files untouched), OpenCode plugin refresh, and stale owned shim cleanup.
 - `scripts/backend/code-changes-smoke.cjs` - Validates Git status parsing and non-repository workspace handling for code-change tracking.
 - `scripts/backend/launch-cwd-smoke.cjs` - Validates terminal/Fusion launch cwd resolution rejects missing or file paths without creating them.
 - `scripts/backend/cli-probe-smoke.cjs` - Validates the launch-time PATH scan: PATHEXT expansion finds a fixture binary, an absent command reports unavailable, an unreadable PATH entry is skipped instead of failing the scan, the probe stays inside its launch budget, and the never-probed kinds (terminal, kimi-custom, fusion, openfusion) stay out of the command map.
@@ -60,6 +61,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `npm run smoke:backend:claude-discovery` - Backend smoke test for Claude thread discovery.
 - `npm run smoke:backend:kimi-discovery` - Backend smoke test for kimi thread discovery.
 - `npm run smoke:backend:kimi-custom-discovery` - Backend smoke test for kimi-custom thread discovery.
+- `npm run smoke:backend:qwen-discovery` - Backend smoke test for qwen thread discovery.
 - `npm run smoke:backend:agent-telemetry` - Backend smoke test for vibeTerminal-owned agent telemetry shims.
 - `npm run smoke:backend:code-changes` - Backend smoke test for code-change tracking.
 - `npm run smoke:backend:launch-cwd` - Backend smoke test for terminal/Fusion launch cwd validation.

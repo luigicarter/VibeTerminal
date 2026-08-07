@@ -39,7 +39,8 @@ const PROBED_AGENT_COMMANDS = Object.freeze({
   gemini: "gemini",
   opencode: "opencode",
   aider: "aider",
-  kimi: "kimi"
+  kimi: "kimi",
+  qwen: "qwen"
 });
 
 // A single unreachable network share on PATH can hang readdir for seconds, so

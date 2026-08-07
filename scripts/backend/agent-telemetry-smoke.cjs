@@ -17,11 +17,14 @@ const {
   mapTelemetryToAttention,
   mergeCursorHooks,
   mergeKimiHooks,
+  mergeQwenHooks,
   notifyHookSource,
   openFusionConfigContents,
   openCodePluginSource,
+  qwenHookGroups,
   stripCursorHooks,
-  stripKimiHooks
+  stripKimiHooks,
+  stripQwenHooks
 } = require("../../backend/agentTelemetry.cjs");
 
 const CURSOR_HOOK_MARKER = "vibeterminal-cursor-notify";
@@ -37,6 +40,7 @@ const cmdOnlyFakeBin = path.join(root, "fake-cmd-bin");
 const shimBase = path.join(root, "shims");
 const openFusionBase = path.join(root, "openfusion");
 const previousKimiCodeHome = process.env.KIMI_CODE_HOME;
+const previousQwenHome = process.env.QWEN_HOME;
 
 function assert(condition, message) {
   if (!condition) {
@@ -2182,6 +2186,102 @@ function postTelemetry(callbackUrl, token, payload) {
       "stripping the kimi-custom marker must leave stock kimi blocks intact"
     );
 
+    // The qwen hook groups carry the same event semantics as settings.json
+    // matcher-groups, every entry name-tagged so merge/strip only ever touches
+    // vibeTerminal's own hooks.
+    const qwenWinGroups = qwenHookGroups("C:\\x\\notify.ps1", true);
+    const qwenEvents = Object.keys(qwenWinGroups);
+    assert(
+      qwenEvents.length === 8 &&
+        qwenEvents.every((event) =>
+          qwenWinGroups[event].every((group) =>
+            group.hooks.every((hook) => hook.name === "vibeterminal-notify")
+          )
+        ),
+      "qwen groups should be eight events of name-tagged entries"
+    );
+    const qwenWinCommand = (event) => qwenWinGroups[event][0].hooks[0].command;
+    // Windows qwen hooks pin shell=powershell and use the call operator: the
+    // default hook shell mangles a nested `powershell -File ...` launch.
+    assert(
+      qwenEvents.every(
+        (event) => qwenWinGroups[event][0].hooks[0].shell === "powershell"
+      ) && qwenWinCommand("Stop") === "& 'C:/x/notify.ps1' agent.completed",
+      `windows qwen hooks should call the notify ps1 via the call operator; got ${qwenWinCommand("Stop")}`
+    );
+    const qwenTurnStart = qwenWinCommand("UserPromptSubmit");
+    assert(
+      qwenTurnStart.endsWith("agent.running") && !qwenTurnStart.includes("tool"),
+      `qwen UserPromptSubmit must be an undetailed turn start; got ${qwenTurnStart}`
+    );
+    for (const hookEvent of ["PreToolUse", "PostToolUse"]) {
+      assert(
+        qwenWinCommand(hookEvent).includes("agent.running tool"),
+        `qwen ${hookEvent} should fire agent.running with the tool detail`
+      );
+    }
+    assert(
+      qwenWinCommand("PermissionRequest").includes("agent.waiting approval"),
+      "qwen PermissionRequest should fire agent.waiting with the approval detail"
+    );
+    assert(
+      qwenWinCommand("StopFailure").includes("agent.failed"),
+      "qwen StopFailure should fire agent.failed"
+    );
+    // qwen exposes native SubagentStart/SubagentStop (verified accepted by
+    // 0.21.6, fired on the parent session) — the kimi-custom bracket shape.
+    assert(
+      qwenWinCommand("SubagentStart").includes("agent.subagent.started") &&
+        qwenWinCommand("SubagentStop").includes("agent.subagent.stopped"),
+      "qwen should bracket delegations with SubagentStart/SubagentStop"
+    );
+    const qwenPosixGroups = qwenHookGroups("/x/notify.sh", false);
+    assert(
+      qwenPosixGroups.Stop[0].hooks[0].command ===
+        "'/x/notify.sh' 'agent.completed'" &&
+        !("shell" in qwenPosixGroups.Stop[0].hooks[0]),
+      "posix qwen hooks should run the notify wrapper directly with no shell pin"
+    );
+
+    // The settings.json merge is conservative and idempotent: user content
+    // (including the user's own hooks on the same events) is preserved,
+    // repeated launches never duplicate entries, and a new run refreshes the
+    // (per-run) notify program path.
+    const qwenUserSettings = {
+      model: { name: "qwen3-coder" },
+      hooks: {
+        Stop: [{ hooks: [{ type: "command", name: "my-own", command: "echo hi" }] }]
+      }
+    };
+    const qwenMerged = mergeQwenHooks(qwenUserSettings, qwenPosixGroups);
+    assert(
+      JSON.stringify(mergeQwenHooks(qwenMerged, qwenPosixGroups)) ===
+        JSON.stringify(qwenMerged),
+      "qwen settings merge should be idempotent"
+    );
+    assert(
+      qwenMerged.model.name === "qwen3-coder" &&
+        qwenMerged.hooks.Stop[0].hooks[0].name === "my-own" &&
+        qwenMerged.hooks.Stop[1].hooks[0].name === "vibeterminal-notify",
+      "qwen merge should keep user hooks ahead of ours on shared events"
+    );
+    const qwenStripped = stripQwenHooks(qwenMerged);
+    assert(
+      JSON.stringify(qwenStripped.trimmed) ===
+        JSON.stringify(qwenUserSettings) && qwenStripped.hasOtherContent,
+      "qwen strip should restore the user's settings exactly"
+    );
+    assert(
+      !stripQwenHooks(mergeQwenHooks(null, qwenPosixGroups)).hasOtherContent,
+      "a hooks-only settings object should strip back to empty"
+    );
+    const qwenRefreshed = mergeQwenHooks(qwenMerged, qwenWinGroups);
+    assert(
+      JSON.stringify(qwenRefreshed).includes("notify.ps1") &&
+        !JSON.stringify(qwenRefreshed).includes("notify.sh"),
+      "a re-merge should refresh the qwen notify program path"
+    );
+
     const signaledAttention = mapTelemetryToAttention({
       type: "agent.process.exited",
       exitCode: null,
@@ -2257,6 +2357,59 @@ function postTelemetry(callbackUrl, token, payload) {
       "ensureKimiCustomHooks should be idempotent across launches"
     );
 
+    // ensureQwenHooks merges the groups into $QWEN_HOME/settings.json;
+    // manager.cleanup strips them back out (deleting a settings file it
+    // created, keeping one the user already had).
+    const qwenCreatedHome = path.join(root, "qwen-created-home");
+    const qwenUserHome = path.join(root, "qwen-user-home");
+    const qwenBrokenHome = path.join(root, "qwen-broken-home");
+    fs.mkdirSync(qwenUserHome, { recursive: true });
+    fs.writeFileSync(
+      path.join(qwenUserHome, "settings.json"),
+      `${JSON.stringify({ model: { name: "qwen3-coder" } }, null, 2)}\n`
+    );
+    fs.mkdirSync(qwenBrokenHome, { recursive: true });
+    fs.writeFileSync(path.join(qwenBrokenHome, "settings.json"), "{ not json");
+
+    process.env.QWEN_HOME = qwenCreatedHome;
+    await manager.ensureQwenHooks();
+    const qwenCreatedSettingsPath = path.join(qwenCreatedHome, "settings.json");
+    assert(
+      fs
+        .readFileSync(qwenCreatedSettingsPath, "utf8")
+        .includes("vibeterminal-notify"),
+      "ensureQwenHooks should create a hooks-only settings file when none exists"
+    );
+
+    process.env.QWEN_HOME = qwenUserHome;
+    await manager.ensureQwenHooks();
+    const qwenUserSettingsPath = path.join(qwenUserHome, "settings.json");
+    const qwenUserSettingsRaw = fs.readFileSync(qwenUserSettingsPath, "utf8");
+    assert(
+      qwenUserSettingsRaw.includes("qwen3-coder") &&
+        qwenUserSettingsRaw.includes("vibeterminal-notify"),
+      "ensureQwenHooks should merge into existing settings without clobbering them"
+    );
+    await manager.ensureQwenHooks();
+    assert(
+      fs.readFileSync(qwenUserSettingsPath, "utf8") === qwenUserSettingsRaw,
+      "ensureQwenHooks should be idempotent across launches"
+    );
+
+    // A malformed settings.json is never clobbered — the user may be mid-edit.
+    process.env.QWEN_HOME = qwenBrokenHome;
+    await manager.ensureQwenHooks();
+    assert(
+      fs.readFileSync(path.join(qwenBrokenHome, "settings.json"), "utf8") ===
+        "{ not json",
+      "ensureQwenHooks must leave a malformed settings.json untouched"
+    );
+    if (previousQwenHome === undefined) {
+      delete process.env.QWEN_HOME;
+    } else {
+      process.env.QWEN_HOME = previousQwenHome;
+    }
+
     const runDir = manager.runDir;
     manager.cleanup();
     manager = null;
@@ -2277,6 +2430,17 @@ function postTelemetry(callbackUrl, token, payload) {
       "cleanup should remove a kimi-custom config.toml it created"
     );
 
+    assert(
+      !fs.existsSync(qwenCreatedSettingsPath),
+      "cleanup should remove a qwen settings.json it created"
+    );
+    const strippedQwenSettings = fs.readFileSync(qwenUserSettingsPath, "utf8");
+    assert(
+      strippedQwenSettings.includes("qwen3-coder") &&
+        !strippedQwenSettings.includes("vibeterminal-notify"),
+      "cleanup should strip our qwen hooks but keep the user's settings"
+    );
+
     console.log("Agent telemetry smoke passed");
   } finally {
     if (manager) {
@@ -2287,6 +2451,11 @@ function postTelemetry(callbackUrl, token, payload) {
       delete process.env.KIMI_CODE_HOME;
     } else {
       process.env.KIMI_CODE_HOME = previousKimiCodeHome;
+    }
+    if (previousQwenHome === undefined) {
+      delete process.env.QWEN_HOME;
+    } else {
+      process.env.QWEN_HOME = previousQwenHome;
     }
     fs.rmSync(root, { recursive: true, force: true });
   }

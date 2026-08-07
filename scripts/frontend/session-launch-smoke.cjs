@@ -333,6 +333,32 @@ assert.strictEqual(
 );
 assert.strictEqual(
   buildLaunchCommand(
+    session({
+      kind: "qwen",
+      command: "qwen",
+      nextLaunchMode: "resume",
+      threadRef: { id: "7d5460c3-64ca-4132-9ef4-7caccee7f562" }
+    })
+  ),
+  "qwen --resume 7d5460c3-64ca-4132-9ef4-7caccee7f562",
+  "qwen resume with an id should build a resume command"
+);
+assert.strictEqual(
+  buildLaunchCommand(
+    session({ kind: "qwen", command: "qwen", nextLaunchMode: "resume" })
+  ),
+  "qwen",
+  "qwen resume without an id should fall back to a plain launch"
+);
+assert.strictEqual(
+  buildLaunchCommand(
+    session({ kind: "qwen", command: "", nextLaunchMode: "new" })
+  ),
+  "qwen",
+  "qwen new launch should fall back to the qwen binary"
+);
+assert.strictEqual(
+  buildLaunchCommand(
     session({ kind: "terminal", command: "ls -la", nextLaunchMode: "new" })
   ),
   "ls -la",
@@ -350,6 +376,8 @@ assert.strictEqual(defaultLaunchMode("cursor", 2, true), "resume");
 assert.strictEqual(defaultLaunchMode("cursor", 1, false), "new");
 assert.strictEqual(defaultLaunchMode("kimi", 2, true), "resume");
 assert.strictEqual(defaultLaunchMode("kimi", 1, false), "new");
+assert.strictEqual(defaultLaunchMode("qwen", 2, true), "resume");
+assert.strictEqual(defaultLaunchMode("qwen", 1, false), "new");
 assert.strictEqual(defaultLaunchMode("opencode", 3, false), "new");
 assert.strictEqual(defaultLaunchMode("terminal", 1, true), "new");
 assert.strictEqual(defaultLaunchMode("gemini", 5, true), "new");

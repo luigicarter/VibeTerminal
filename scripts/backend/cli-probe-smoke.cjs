@@ -87,7 +87,7 @@ function fakeBin(name) {
         `${kind} must not be probed`
       );
     }
-    for (const kind of ["codex", "claude", "cursor", "gemini", "opencode", "aider", "kimi"]) {
+    for (const kind of ["codex", "claude", "cursor", "gemini", "opencode", "aider", "kimi", "qwen"]) {
       assert(PROBED_AGENT_COMMANDS[kind], `${kind} must be probed`);
     }
     assert.strictEqual(

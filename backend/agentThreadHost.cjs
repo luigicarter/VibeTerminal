@@ -1087,6 +1087,194 @@ function confirmKimiCustomThread(cwd, id) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Qwen Code thread discovery
+//
+// Qwen stores chats per project under
+//   ($QWEN_HOME || ~/.qwen)/projects/<sanitized cwd>/chats/<sessionId>.jsonl
+// where the sanitized dir name is the launch cwd (lowercased on Windows) with
+// every non-alphanumeric character replaced by "-", dashes NOT collapsed —
+// verified against qwen-code 0.21.6 (core Storage sanitizeCwd), and keyed on
+// the RAW cwd, not the git root. Each JSONL line is a transcript record; the
+// first real user message doubles as the display title (matching the
+// prompt-derived titles of `qwen sessions list`). Resume launches
+// `qwen --resume <id>` from the same cwd (the store is project-scoped).
+// ---------------------------------------------------------------------------
+
+function qwenHome() {
+  return process.env.QWEN_HOME || path.join(os.homedir(), ".qwen");
+}
+
+function qwenChatsDir(cwd, home = qwenHome()) {
+  const resolved = path.resolve(String(cwd));
+  const normalized =
+    process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  const sanitized = normalized.replace(/[^a-zA-Z0-9]/g, "-");
+  return path.join(home, "projects", sanitized, "chats");
+}
+
+// Bounded head read: the title (first real user message) and createdAt (first
+// record's timestamp) both live at the top of the transcript, so 64KB is
+// plenty and a huge session file never costs a full read.
+const QWEN_TITLE_SCAN_BYTES = 64 * 1024;
+
+function readQwenSessionState(filePath) {
+  let stat;
+  try {
+    stat = fs.statSync(filePath);
+  } catch {
+    return null;
+  }
+
+  let head = "";
+  try {
+    const fd = fs.openSync(filePath, "r");
+    try {
+      const buffer = Buffer.alloc(QWEN_TITLE_SCAN_BYTES);
+      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
+      head = buffer.toString("utf8", 0, bytesRead);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+
+  let createdAt = 0;
+  let title = "";
+  for (const line of head.split(/\r?\n/)) {
+    if (!line.trim()) {
+      continue;
+    }
+    let record;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      // Torn tail of the bounded read, or a corrupt line — keep scanning.
+      continue;
+    }
+    if (!createdAt) {
+      const parsed = Date.parse(record?.timestamp);
+      if (Number.isFinite(parsed)) {
+        createdAt = parsed;
+      }
+    }
+    if (
+      !title &&
+      record?.type === "user" &&
+      (!record.provenance || record.provenance === "real_user")
+    ) {
+      const parts = Array.isArray(record?.message?.parts)
+        ? record.message.parts
+        : [];
+      const text = parts
+        .map((part) => (typeof part?.text === "string" ? part.text : ""))
+        .filter(Boolean)
+        .join(" ");
+      title = normalizeThreadTitle(text);
+    }
+    if (title && createdAt) {
+      break;
+    }
+  }
+
+  return { title, createdAt, updatedAt: stat.mtimeMs || createdAt };
+}
+
+function collectQwenThreads(cwd, after = 0, excludeIds = []) {
+  const excluded = toExcludedSet(excludeIds);
+  const dir = qwenChatsDir(cwd);
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    // No chats dir yet (no session for this folder) or unreadable — an empty
+    // history, not a failure.
+    return { threads: [], readable: false };
+  }
+
+  const threads = [];
+  for (const name of names) {
+    if (!name.endsWith(".jsonl")) {
+      continue;
+    }
+    const id = name.slice(0, -".jsonl".length);
+    if (!id || excluded.has(id)) {
+      continue;
+    }
+    const state = readQwenSessionState(path.join(dir, name));
+    if (!state || state.createdAt < after) {
+      continue;
+    }
+    threads.push({
+      provider: "qwen",
+      id,
+      title: state.title,
+      createdAt: state.createdAt,
+      updatedAt: state.updatedAt
+    });
+  }
+
+  threads.sort((a, b) => b.updatedAt - a.updatedAt);
+  return { threads, readable: true };
+}
+
+// The latest resumable Qwen session for a folder. File mtime is the recency
+// signal (a resumed older session's transcript keeps appending, so its file
+// jumps ahead). Resume launches `qwen --resume <id>`.
+function findLatestQwenThread(cwd, after = 0, excludeIds = []) {
+  const { threads } = collectQwenThreads(cwd, after, excludeIds);
+  return threads.length > 0 ? threads[0] : null;
+}
+
+// Every Qwen session for a folder, newest first — the resume picker's data
+// source. A missing chats dir is a real empty history, not a failure.
+function listQwenThreads(cwd, after = 0, excludeIds = []) {
+  const { threads } = collectQwenThreads(cwd, after, excludeIds);
+  return { status: "found", threads };
+}
+
+function placeholderQwenRef(id) {
+  return { provider: "qwen", id, title: "", createdAt: 0, updatedAt: 0 };
+}
+
+// confirmQwenThread answers "does this session still exist?" so the launcher
+// can self-heal to a fresh session instead of erroring in the live shell.
+// Mirrors the other providers' conservative contract: report "missing" only
+// when the chats dir is readable and the transcript is absent; an unreadable
+// dir stays "found" and lets resume try.
+function confirmQwenThread(cwd, id) {
+  const target = String(id || "");
+  if (!target) {
+    return { status: "missing" };
+  }
+
+  const dir = qwenChatsDir(cwd);
+  const state = readQwenSessionState(path.join(dir, `${target}.jsonl`));
+  if (state) {
+    return {
+      status: "found",
+      threadRef: {
+        provider: "qwen",
+        id: target,
+        title: state.title,
+        createdAt: state.createdAt,
+        updatedAt: state.updatedAt
+      }
+    };
+  }
+
+  let readable = true;
+  try {
+    fs.readdirSync(dir);
+  } catch {
+    readable = false;
+  }
+  return readable
+    ? { status: "missing" }
+    : { status: "found", threadRef: placeholderQwenRef(target) };
+}
+
 async function findLatestAgentThread(payload) {
   const cwd = payload?.cwd;
   const after = Number(payload?.after || 0);
@@ -1230,6 +1418,28 @@ async function findLatestAgentThread(payload) {
         };
   }
 
+  if (payload.provider === "qwen") {
+    // Confirm whether a specific session id is still resumable so the launcher
+    // can self-heal instead of running a doomed `qwen --resume <id>`.
+    if (payload.confirmId) {
+      return confirmQwenThread(cwd, payload.confirmId);
+    }
+
+    // History listing for the resume picker: every session for this folder,
+    // newest first.
+    if (payload.list) {
+      return listQwenThreads(cwd, after, payload.excludeIds);
+    }
+
+    const threadRef = findLatestQwenThread(cwd, after, payload.excludeIds);
+    return threadRef
+      ? { status: "found", threadRef }
+      : {
+          status: "pending",
+          message: "Waiting for Qwen to create its local session metadata."
+        };
+  }
+
   return {
     status: "failed",
     message: `Unsupported agent thread provider: ${payload.provider || "unknown"}`
@@ -1308,6 +1518,7 @@ module.exports = {
   confirmKimiCustomThread,
   confirmKimiThread,
   confirmOpenCodeThread,
+  confirmQwenThread,
   encodeCursorProjectDir,
   extractClaudeText,
   findLatestAgentThread,
@@ -1316,11 +1527,14 @@ module.exports = {
   findLatestKimiCustomThread,
   findLatestKimiThread,
   findLatestOpenCodeThread,
+  findLatestQwenThread,
   isSamePath,
   listClaudeThreads,
   listKimiCustomThreads,
   listKimiThreads,
   listOpenCodeThreads,
+  listQwenThreads,
+  qwenChatsDir,
   locateClaudeTranscriptFile,
   normalizePathForCompare,
   opencodeSpawnEnv,

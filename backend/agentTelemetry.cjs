@@ -11,7 +11,7 @@ const SHIM_BASE_DIR =
 const OWNER_MARKER = ".vibe-agent-shims.json";
 const MAX_EVENT_BYTES = 64 * 1024;
 const MAX_SESSION_ID_BYTES = 512;
-const PROVIDERS = ["codex", "claude", "opencode", "cursor-agent", "kimi", "kimi-custom"];
+const PROVIDERS = ["codex", "claude", "opencode", "cursor-agent", "kimi", "kimi-custom", "qwen"];
 const OPEN_FUSION_MODEL_ID_PATTERN = /^[A-Za-z0-9._:/@+-]+$/;
 // Open Fusion deliberately ships with NO default models: assuming a vendor pair
 // on pane open fails the moment the app-owned credential store is empty, and it
@@ -3049,6 +3049,127 @@ function mergeKimiHooks(existingToml, blocksText, marker = KIMI_HOOK_MARKER) {
   return `${head}${blocks}${eol}`;
 }
 
+// Qwen Code reads hooks ONLY from settings.json in its config home ($QWEN_HOME
+// or ~/.qwen) — there is no --settings-style CLI flag — so, like kimi, we merge
+// env-guarded entries into the user's settings when a qwen pane launches. Our
+// entries are recognised (and refreshed/stripped) by their `name` field; the
+// notify program exits 0 when the VIBE_TERMINAL_* env is absent, so the merged
+// hooks are inert for plain `qwen` runs outside vibeTerminal.
+const QWEN_HOOK_NAME = "vibeterminal-notify";
+
+function qwenHookCommand(notifyProgramPath, isWin, type, detail) {
+  const args = detail ? `${type} ${detail}` : type;
+  if (isWin) {
+    // Qwen's default Windows hook shell (ComSpec) mangles a nested
+    // `powershell -File ...` launch (verified: the banner leaks into the TUI
+    // and the program never runs), so each entry pins `shell: "powershell"`
+    // and invokes the notify program with the call operator instead. Forward
+    // slashes + doubled apostrophes keep the path literal inside the
+    // single-quoted PowerShell string.
+    const program = notifyProgramPath.replace(/\\/g, "/").replace(/'/g, "''");
+    return `& '${program}' ${args}`;
+  }
+  return `'${notifyProgramPath}' '${type}'${detail ? ` '${detail}'` : ""}`;
+}
+
+// The settings.json hook groups vibeTerminal installs: turn-start "running",
+// mid-turn tool activity, approval waiting, turn-end completed/failed, plus the
+// delegation bracket. Mirrors the claude settings events, but uses qwen's
+// native SubagentStart/SubagentStop (verified accepted by 0.21.6, fired on the
+// parent session) — the kimi-custom shape rather than claude's Task-matcher
+// bracket. Timeout is in milliseconds (unlike kimi's seconds).
+function qwenHookGroups(notifyProgramPath, isWin) {
+  const hook = (type, detail) => ({
+    type: "command",
+    name: QWEN_HOOK_NAME,
+    ...(isWin ? { shell: "powershell" } : {}),
+    command: qwenHookCommand(notifyProgramPath, isWin, type, detail),
+    timeout: 5000
+  });
+  const group = (type, detail) => [{ hooks: [hook(type, detail)] }];
+  return {
+    UserPromptSubmit: group("agent.running"),
+    PreToolUse: group("agent.running", "tool"),
+    PostToolUse: group("agent.running", "tool"),
+    PermissionRequest: group("agent.waiting", "approval"),
+    Stop: group("agent.completed"),
+    StopFailure: group("agent.failed"),
+    SubagentStart: group("agent.subagent.started"),
+    SubagentStop: group("agent.subagent.stopped")
+  };
+}
+
+// Strip every hook entry we own (name === QWEN_HOOK_NAME) from a parsed
+// settings object, dropping matcher-groups and event arrays that empty out.
+// Returns the trimmed object plus whether any user content remains, so the
+// caller can delete a settings file vibeTerminal created. User content outside
+// our entries is preserved untouched.
+function stripQwenHooks(settings) {
+  const source =
+    settings && typeof settings === "object" && !Array.isArray(settings)
+      ? settings
+      : {};
+  const trimmed = { ...source };
+  const hooks = trimmed.hooks;
+  if (hooks && typeof hooks === "object" && !Array.isArray(hooks)) {
+    const nextHooks = {};
+    for (const [event, groups] of Object.entries(hooks)) {
+      if (!Array.isArray(groups)) {
+        nextHooks[event] = groups;
+        continue;
+      }
+      const keptGroups = [];
+      for (const group of groups) {
+        if (!group || typeof group !== "object" || !Array.isArray(group.hooks)) {
+          keptGroups.push(group);
+          continue;
+        }
+        const keptHooks = group.hooks.filter(
+          (entry) =>
+            !(entry && typeof entry === "object" && entry.name === QWEN_HOOK_NAME)
+        );
+        if (keptHooks.length === group.hooks.length) {
+          keptGroups.push(group);
+        } else if (keptHooks.length > 0) {
+          keptGroups.push({ ...group, hooks: keptHooks });
+        }
+      }
+      if (keptGroups.length > 0) {
+        nextHooks[event] = keptGroups;
+      }
+    }
+    if (Object.keys(nextHooks).length > 0) {
+      trimmed.hooks = nextHooks;
+    } else {
+      delete trimmed.hooks;
+    }
+  }
+  return {
+    trimmed,
+    hasOtherContent: Object.keys(trimmed).length > 0
+  };
+}
+
+// Idempotent merge: strip whatever an earlier run wrote, then append the
+// current groups (a refreshed notify path always lands, and repeated launches
+// never accumulate duplicates). User groups keep their place ahead of ours in
+// each event's array.
+function mergeQwenHooks(settings, hookGroups) {
+  const { trimmed } = stripQwenHooks(settings);
+  const hooks = {
+    ...(trimmed.hooks &&
+    typeof trimmed.hooks === "object" &&
+    !Array.isArray(trimmed.hooks)
+      ? trimmed.hooks
+      : {})
+  };
+  for (const [event, groups] of Object.entries(hookGroups)) {
+    const existing = Array.isArray(hooks[event]) ? hooks[event] : [];
+    hooks[event] = existing.concat(groups);
+  }
+  return { ...trimmed, hooks };
+}
+
 // Bump on ANY plugin-source change: installOpenCodePlugin only rewrites an
 // installed copy when its version string differs.
 const OPENCODE_PLUGIN_VERSION = "vibeterminal-notify-5";
@@ -3299,6 +3420,9 @@ function createAgentTelemetryManager(options = {}) {
   // same created-by-us tracking as cursorHookFiles so cleanup can undo it.
   const kimiHookFiles = new Map();
   const kimiCustomHookFiles = new Map();
+  // Qwen settings.json files we have merged our hook groups into this run —
+  // same created-by-us tracking as the kimi/cursor maps so cleanup can undo it.
+  const qwenHookFiles = new Map();
   const sessions = new Map();
   const fusionAdapterControls = new Map();
   const fusionAdapterModes = new Map();
@@ -4302,6 +4426,72 @@ function createAgentTelemetryManager(options = {}) {
     kimiCustomHookFiles.clear();
   }
 
+  // Merge our hook groups into the user's qwen settings.json ($QWEN_HOME or
+  // ~/.qwen). Idempotent; a missing file is created hooks-only (qwen applies
+  // built-in defaults for everything else). Best-effort: never let a settings
+  // problem break a terminal launch.
+  async function ensureQwenHooks() {
+    try {
+      await ready;
+      const home = process.env.QWEN_HOME || path.join(os.homedir(), ".qwen");
+      const file = path.join(home, "settings.json");
+
+      let raw = null;
+      try {
+        raw = fs.readFileSync(file, "utf8");
+      } catch {
+        raw = null;
+      }
+
+      let existing = null;
+      if (raw !== null) {
+        try {
+          existing = JSON.parse(raw);
+        } catch {
+          // The file exists but is not valid JSON. Do not clobber it — the
+          // user may be mid-edit or using a format we do not understand.
+          return;
+        }
+      }
+
+      const merged = mergeQwenHooks(
+        existing,
+        qwenHookGroups(notifyProgramPath, isWin)
+      );
+      const next = `${JSON.stringify(merged, null, 2)}\n`;
+      if (raw !== null && next === raw) {
+        return;
+      }
+      fs.mkdirSync(home, { recursive: true });
+      fs.writeFileSync(file, next);
+      if (!qwenHookFiles.has(file)) {
+        qwenHookFiles.set(file, { createdByUs: raw === null });
+      }
+    } catch {
+      // Best-effort; never let qwen hook install break a terminal launch.
+    }
+  }
+
+  function cleanupQwenHooks() {
+    for (const [file, info] of qwenHookFiles) {
+      try {
+        const raw = fs.readFileSync(file, "utf8");
+        const parsed = JSON.parse(raw);
+        const { trimmed, hasOtherContent } = stripQwenHooks(parsed);
+        if (info.createdByUs && !hasOtherContent) {
+          // We created this settings file purely for our hooks; remove it (but
+          // never the ~/.qwen dir itself — it is qwen's whole config home).
+          fs.rmSync(file, { force: true });
+        } else {
+          fs.writeFileSync(file, `${JSON.stringify(trimmed, null, 2)}\n`);
+        }
+      } catch {
+        // File gone, unreadable, or malformed — nothing safe to do.
+      }
+    }
+    qwenHookFiles.clear();
+  }
+
   function cleanup() {
     for (const sessionId of Array.from(sessions.keys())) {
       releaseSession(sessionId);
@@ -4309,6 +4499,7 @@ function createAgentTelemetryManager(options = {}) {
     cleanupCursorHooks();
     cleanupKimiHooks();
     cleanupKimiCustomHooks();
+    cleanupQwenHooks();
     if (server) {
       server.close();
       server = null;
@@ -4324,6 +4515,7 @@ function createAgentTelemetryManager(options = {}) {
     ensureCursorProjectHooks,
     ensureKimiHooks,
     ensureKimiCustomHooks,
+    ensureQwenHooks,
     // Sync on purpose: thread-discovery lookups need the app-owned OpenCode
     // home paths without awaiting the telemetry bootstrap.
     getOpenFusionOpencodeHome: () => ensureOpenFusionOpencodeHome(openFusionBaseDir),
@@ -4380,9 +4572,12 @@ module.exports = {
   mapTelemetryToAttention,
   mergeCursorHooks,
   mergeKimiHooks,
+  mergeQwenHooks,
   notifyHookSource,
   openCodePluginSource,
+  qwenHookGroups,
   safeRemoveDir,
   stripCursorHooks,
-  stripKimiHooks
+  stripKimiHooks,
+  stripQwenHooks
 };

@@ -296,6 +296,12 @@ const agentProfiles: AgentProfile[] = [
     label: "Kimi + CC",
     command: "kimi-custom",
     accent: "#8e24aa"
+  },
+  {
+    kind: "qwen",
+    label: "Qwen",
+    command: "qwen",
+    accent: "#6d7cff"
   }
 ];
 

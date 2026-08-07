@@ -2017,14 +2017,15 @@ ipcMain.handle("agent-thread:latest", (_event, payload) => {
 });
 
 ipcMain.handle("agent-thread:list", (_event, payload) => {
-  // Saved-chat history for the Fusion resume picker: claude/codex/kimi/kimi-custom chats
-  // live in the user's own global stores (exactly where `--resume` reads
+  // Saved-chat history for the Fusion resume picker: claude/codex/kimi/kimi-custom/qwen
+  // chats live in the user's own global stores (exactly where `--resume` reads
   // from), so the lookup passes straight through.
   if (
     payload?.provider === "claude" ||
     payload?.provider === "codex" ||
     payload?.provider === "kimi" ||
-    payload?.provider === "kimi-custom"
+    payload?.provider === "kimi-custom" ||
+    payload?.provider === "qwen"
   ) {
     return findLatestAgentThread({ ...payload, list: true });
   }
@@ -2174,6 +2175,13 @@ ipcMain.handle("terminal:create", async (_event, payload) => {
   // whenever a kimi pane launches — no cwd gate needed.
   if (typeof payload.command === "string" && /\bkimi\b(?!-)/.test(payload.command)) {
     telemetry.ensureKimiHooks().catch(() => {});
+  }
+
+  // Qwen's hooks live in the user's settings.json ($QWEN_HOME or ~/.qwen)
+  // rather than per-project, so merge ours (idempotently) whenever a qwen pane
+  // launches — the kimi model, JSON instead of TOML.
+  if (typeof payload.command === "string" && /\bqwen\b/.test(payload.command)) {
+    telemetry.ensureQwenHooks().catch(() => {});
   }
 
   return sendToPtyHost({
