@@ -141,15 +141,19 @@ export function buildLaunchCommand(
 
   if (session.kind === "opencode") {
     const openFusionAgentArg = session.openFusion ? " --agent planner" : "";
+    // vibeTerminal always passes --auto so in-pane permission prompts
+    // auto-approve anything not explicitly denied instead of blocking the
+    // workspace flow.
+    const autoArg = " --auto";
     if (mode === "resume") {
       const ref = resumeArg(session);
       if (ref) {
-        return `opencode --session ${commandArg(ref, platform)}${openFusionAgentArg}`;
+        return `opencode --session ${commandArg(ref, platform)}${openFusionAgentArg}${autoArg}`;
       }
     }
 
     const command = session.command.trim() || "opencode";
-    return `${command}${openFusionAgentArg}`;
+    return `${command}${openFusionAgentArg}${autoArg}`;
   }
 
   if (session.kind === "cursor") {

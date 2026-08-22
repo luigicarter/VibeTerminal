@@ -198,14 +198,14 @@ assert.strictEqual(
       threadRef: { id: "sess9" }
     })
   ),
-  "opencode --session sess9",
+  "opencode --session sess9 --auto",
   "opencode resume with an id should build a resume command"
 );
 assert.strictEqual(
   buildLaunchCommand(
     session({ kind: "opencode", command: "opencode", nextLaunchMode: "resume" })
   ),
-  "opencode",
+  "opencode --auto",
   "opencode resume without an id should fall back to a plain launch"
 );
 assert.strictEqual(
@@ -217,7 +217,7 @@ assert.strictEqual(
       nextLaunchMode: "new"
     })
   ),
-  "opencode --agent planner",
+  "opencode --agent planner --auto",
   "Open Fusion should launch OpenCode directly into the planner agent"
 );
 assert.strictEqual(
@@ -230,7 +230,7 @@ assert.strictEqual(
       threadRef: { id: "ofs9" }
     })
   ),
-  "opencode --session ofs9 --agent planner",
+  "opencode --session ofs9 --agent planner --auto",
   "Open Fusion resume should keep the planner agent selected"
 );
 
