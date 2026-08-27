@@ -1,0 +1,64 @@
+name: Model drift watchdog
+
+# Daily check that the curated Fusion model lists (fusionSlashMenu.ts) and the
+# vendored CLI pins (codex-appserver version, kimi-custom fork) still match
+# upstream. On drift it opens (or comments on) a `model-drift` issue with the
+# report — a human makes the edits. Run locally with `npm run check:model-drift`.
+
+on:
+  schedule:
+    - cron: "41 13 * * *" # daily 13:41 UTC, kept off the :00/:30 herd marks
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  check:
+    name: Check model/version drift
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run drift check
+        env:
+          # Optional: enables the Claude model-label check in CI. Without it the
+          # Anthropic catalog section reports "skipped".
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: node scripts/dev/model-drift.cjs --json drift-report.json --md drift-report.md --no-fail
+
+      - name: Report drift as a GitHub issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ ! -f drift-report.json ]; then
+            echo "::warning::drift-report.json missing — the drift check step likely crashed; see its log"
+            exit 0
+          fi
+          if [ "$(node -p "require('./drift-report.json').drift")" != "true" ]; then
+            echo "No drift."
+            exit 0
+          fi
+          gh label create model-drift --force --description "Automated model/version drift report" >/dev/null
+          existing="$(gh issue list --label model-drift --state open --json number --jq '.[0].number')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file drift-report.md
+            echo "Appended report to existing issue #$existing"
+          else
+            gh issue create --title "Model drift detected" --label model-drift --body-file drift-report.md
+            echo "Opened a new model-drift issue"
+          fi

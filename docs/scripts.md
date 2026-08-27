@@ -43,6 +43,12 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 
 - `scripts/qa/screenshot.cjs` - Starts the Vite frontend and Electron in screenshot mode, captures the visible app window, verifies the PNG exists, and writes `artifacts/vibe-terminal-screenshot.png`. Pass `--openfusion` to seed a deterministic Open Fusion pane and write `artifacts/vibe-terminal-openfusion-screenshot.png`.
 
+## Dev Scripts
+
+- `scripts/dev/gen-codex-bindings.cjs` - Regenerates the version-pinned Codex app-server protocol bindings (TypeScript + JSON Schema) vendored under `vendor/codex-appserver/<version>/` on a Codex version bump.
+- `scripts/dev/prepare-codex-bin.cjs` - Copies the global `@openai/codex` native binary plus helpers into `vendor/codex-bin/<platform>-<arch>/` so electron-builder can embed it; version-gated against the vendored app-server schema.
+- `scripts/dev/model-drift.cjs` - Model/version drift watchdog: diffs the curated Fusion model lists and alias labels (`frontend/components/fusionSlashMenu.ts`), the Quick-preset Codex model, and the vendored codex/kimi versions against upstream (live `codex debug models` or the bundled openai/codex catalog, Anthropic `/v1/models` via local OAuth or `ANTHROPIC_API_KEY`, npm dist-tags). Prints a report, exits nonzero on drift (`--no-fail` to override), and can write `--json`/`--md` reports. The daily `model-drift.yml` workflow files drift as a `model-drift` GitHub issue.
+
 ## npm Commands
 
 - `npm run dev` - Full app development launcher.
@@ -52,6 +58,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `npm run build` - TypeScript check plus Vite production build.
 - `npm run prepare:codex-bin` - Optionally copies the global `@openai/codex` native binary into `vendor/codex-bin/<platform>-<arch>` for Fusion packaging.
 - `npm run prepare:codex-bin:required` - Required release variant; exits nonzero if the pinned native Codex binary is missing or version-incompatible.
+- `npm run check:model-drift` - Model/version drift watchdog report (curated Fusion lists, alias labels, vendored CLI versions vs upstream).
 - `npm run pack:win` - Prepares the embedded Codex binary, builds the renderer, and creates an unpacked Windows app in `release/win-unpacked`.
 - `npm run dist:win` - Prepares the embedded Codex binary, builds the renderer, and creates the Windows NSIS installer plus update metadata in `release/`.
 - `npm run screenshot` - Visual QA screenshot pass.

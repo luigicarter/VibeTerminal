@@ -71,7 +71,7 @@ const CONSERVATIVE_CODEX_EFFORT_VALUES: FusionCodexEffort[] = [
   "high",
   "xhigh"
 ];
-const CURATED_CODEX_MODEL_EFFORTS: Record<string, FusionCodexEffort[]> = {
+export const CURATED_CODEX_MODEL_EFFORTS: Record<string, FusionCodexEffort[]> = {
   "gpt-5.6-sol": ["auto", "low", "medium", "high", "xhigh", "max", "ultra"],
   "gpt-5.6-terra": ["auto", "low", "medium", "high", "xhigh", "max", "ultra"],
   "gpt-5.6-luna": ["auto", "low", "medium", "high", "xhigh", "max"],

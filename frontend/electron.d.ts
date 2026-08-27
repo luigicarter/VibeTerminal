@@ -4,6 +4,11 @@ import type {
   AgentThreadLookupPayload,
   AgentThreadLookupResult,
   AgentThreadRef,
+  BranchOverview,
+  ClaudeProviderListResult,
+  ClaudeProviderModelsResult,
+  ClaudeProviderProfile,
+  ClaudeProviderTestResult,
   CodeChangeSummary,
   FusionCodexEffort,
   FusionFamily,
@@ -74,6 +79,32 @@ declare global {
         writeText: (text: string) => void;
         readFilePaths?: () => string[];
       };
+      // Native application menu action broadcasts ("menu:event" from main).
+      menu?: {
+        onEvent: (
+          callback: (event: { type: string; action?: string }) => void
+        ) => () => void;
+      };
+      // Claude provider profiles (Settings dialog). Sanitized — no key material.
+      claudeProviders?: {
+        list: () => Promise<ClaudeProviderListResult>;
+        listModels: () => Promise<ClaudeProviderModelsResult>;
+        upsert: (profile: {
+          id?: string;
+          name: string;
+          baseUrl: string;
+          apiKey?: string;
+          model: string;
+          smallFastModel?: string;
+        }) => Promise<{ ok: boolean; profile?: ClaudeProviderProfile; message?: string }>;
+        remove: (id: string) => Promise<{ ok: boolean; message?: string }>;
+        setDefault: (id: string | null) => Promise<{ ok: boolean; message?: string }>;
+        test: (payload: {
+          id?: string;
+          baseUrl?: string;
+          apiKey?: string;
+        }) => Promise<ClaudeProviderTestResult>;
+      };
       updates: {
         getState: () => Promise<UpdateState>;
         check: () => Promise<UpdateActionResult>;
@@ -86,6 +117,7 @@ declare global {
       workspace: {
         selectFolder: () => Promise<string | null>;
         getCodeChanges: (cwd: string) => Promise<CodeChangeSummary>;
+        getBranches: (cwd: string) => Promise<BranchOverview>;
         openInExplorer: (path: string) => Promise<{ ok: boolean; error?: string }>;
         openTerminal: (path: string) => Promise<{ ok: boolean; error?: string }>;
       };
@@ -136,6 +168,10 @@ declare global {
           mode?: FusionRunMode | string;
           effort?: string;
           executorEffort?: string;
+          // Pins the pane's claude-family roles to a specific Claude provider
+          // profile (Settings → Claude providers); the default custom profile
+          // applies when omitted.
+          providerProfileId?: string;
           // Legacy field names (pre-family builds).
           codexModel?: string;
           codexEffort?: string;

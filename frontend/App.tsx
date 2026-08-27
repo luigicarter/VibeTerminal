@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -12,6 +13,7 @@ import {
   type PointerEvent as ReactPointerEvent
 } from "react";
 import {
+  Check,
   ChevronDown,
   ChevronRight,
   Download,
@@ -23,6 +25,8 @@ import {
   Plus,
   Play,
   RefreshCw,
+  Search,
+  Settings,
   TerminalSquare,
   X
 } from "lucide-react";
@@ -87,6 +91,7 @@ import {
   isThreadedAgentKind
 } from "./sessionLaunch";
 import { computeCwdConflicts } from "./cwdConflicts";
+import { SettingsDialog } from "./components/SettingsDialog";
 import type { InstalledCliReport } from "./electron";
 import type {
   AgentAttentionEvent,
@@ -97,6 +102,9 @@ import type {
   AgentSession,
   AgentThreadRef,
   AgentThreadLookupStatus,
+  BranchOverview,
+  BranchOverviewEntry,
+  ClaudeProviderProfile,
   CodeChangeSummary,
   FusionRunMode,
   FusionChatEvent,
@@ -248,6 +256,13 @@ const agentProfiles: AgentProfile[] = [
     accent: "#8fd694"
   },
   {
+    kind: "claude-custom",
+    label: "Open Claude Code",
+    command: "claude",
+    accent: "#d97757",
+    claudeCustom: true
+  },
+  {
     kind: "fusion",
     label: "Fusion",
     command: "claude",
@@ -309,6 +324,20 @@ const agentProfiles: AgentProfile[] = [
 // unconditionally, which hid them from the users who do have them installed;
 // the launch-time CLI probe now dims what is missing instead of hiding it.
 const launcherAgentProfiles = agentProfiles;
+
+// One row in the toolbar launcher dropdown: an agent profile, a saved Claude
+// provider, or one of the provider's endpoint models.
+type LauncherMenuEntry = {
+  key: string;
+  section: "agents" | "providers";
+  label: string;
+  sub?: string;
+  hint?: string;
+  profile?: AgentProfile;
+  missing?: boolean;
+  indent?: boolean;
+  run: () => void;
+};
 
 // Pane labels the app itself minted ("Claude 2", "Fusion 1 copy"). Older builds
 // copied them into threadRef.title and forced them onto Claude via --name, so
@@ -434,11 +463,45 @@ function formatCodeLineSummary(summary?: CodeChangeSummary) {
     return summary.message || "Git changes could not be inspected.";
   }
 
+  const onBranch = summary.branch ? `On branch ${summary.branch}: ` : "";
+
   if (summary.state === "clean") {
-    return "Nothing new since the last commit.";
+    return `${onBranch}nothing new since the last commit.`;
   }
 
-  return `${summary.insertions} lines written, ${summary.deletions} lines deleted.`;
+  return `${onBranch}${summary.insertions} lines written, ${summary.deletions} lines deleted.`;
+}
+
+// One branch-picker row's right-hand state. Real dirty numbers exist only
+// where the branch is checked out (its own or a linked worktree's folder);
+// anywhere else the most truthful branch-level state is upstream drift.
+function branchStateNode(branch: BranchOverviewEntry) {
+  const worktree = branch.worktree;
+  if (worktree?.state === "dirty") {
+    return (
+      <>
+        <span className="diff-insertions">+{worktree.insertions}</span>
+        <span className="diff-deletions">-{worktree.deletions}</span>
+      </>
+    );
+  }
+
+  if (worktree?.state === "clean") {
+    return <span className="diff-muted">clean</span>;
+  }
+
+  if (branch.ahead > 0 || branch.behind > 0) {
+    const parts: string[] = [];
+    if (branch.ahead > 0) {
+      parts.push(`${branch.ahead} ahead`);
+    }
+    if (branch.behind > 0) {
+      parts.push(`${branch.behind} behind`);
+    }
+    return <span className="diff-muted">{parts.join(" · ")}</span>;
+  }
+
+  return <span className="diff-muted">not checked out</span>;
 }
 
 function getProfile(kind: AgentKind) {
@@ -718,7 +781,8 @@ function createSession(
   kind: AgentKind,
   cwd: string,
   existingSessions: AgentSession[],
-  name?: string
+  name?: string,
+  options?: { providerProfileId?: string; providerModelOverride?: string }
 ): AgentSession {
   const profile = getProfile(kind);
   // "fusion" is a selection-only kind: persist a real claude session flagged
@@ -727,11 +791,15 @@ function createSession(
   const isFusion = profile.fusion === true;
   // "openfusion" follows the same pattern but persists as OpenCode.
   const isOpenFusion = profile.openFusion === true;
+  // "claude-custom" too: a real claude session pinned to a provider profile.
+  const isClaudeCustom = profile.claudeCustom === true;
   const effectiveKind: AgentKind = isFusion
     ? "claude"
     : isOpenFusion
       ? "opencode"
-      : kind;
+      : isClaudeCustom
+        ? "claude"
+        : kind;
   const sessionName = name ?? `${profile.label} ${existingSessions.length + 1}`;
   // New panes inherit the last-used model configuration for their mode (the
   // normalizers fall back to the stock defaults when nothing is stored yet).
@@ -761,6 +829,12 @@ function createSession(
     openFusionPlannerModel: openFusionSeed?.plannerModel,
     openFusionExecutorModel: openFusionSeed?.executorModel,
     openFusionRunMode: isOpenFusion ? DEFAULT_FUSION_RUN_MODE : undefined,
+    providerProfileId: isClaudeCustom
+      ? options?.providerProfileId || "default-custom"
+      : undefined,
+    providerModelOverride: isClaudeCustom
+      ? options?.providerModelOverride || undefined
+      : undefined,
     command: profile.command,
     cwd,
     createdAt: Date.now(),
@@ -1220,6 +1294,25 @@ export default function App() {
   const [activeView, setActiveView] = useState<AppView>(initialState.activeView);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(initialState.sidebarWidth);
+  // Settings dialog (File → Settings… / topbar gear). The hint is shown when
+  // the dialog was opened as a detour, e.g. "Open Claude Code" with no
+  // provider configured yet.
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsHint, setSettingsHint] = useState<string | null>(null);
+  // The toolbar launcher dropdown: one trigger opens a searchable list of
+  // every agent profile plus the saved Claude providers and, per provider,
+  // the model list its API key exposes (null while/after a failed fetch —
+  // the provider header item still launches with the profile model).
+  const [launcherMenuOpen, setLauncherMenuOpen] = useState(false);
+  const [launcherQuery, setLauncherQuery] = useState("");
+  const [launcherHighlight, setLauncherHighlight] = useState(0);
+  const launcherSearchRef = useRef<HTMLInputElement | null>(null);
+  const [providerList, setProviderList] = useState<ClaudeProviderProfile[] | null>(
+    null
+  );
+  const [providerModels, setProviderModels] = useState<
+    Record<string, { id: string; label: string }[] | null>
+  >({});
   const [maximizedSessionId, setMaximizedSessionId] = useState<string | null>(
     null
   );
@@ -1277,6 +1370,11 @@ export default function App() {
     useState<WorkspaceDropTarget | null>(null);
   const [workspaceContextMenu, setWorkspaceContextMenu] =
     useState<WorkspaceContextMenuState | null>(null);
+  const [branchPicker, setBranchPicker] = useState<{
+    open: boolean;
+    loading: boolean;
+    overview?: BranchOverview;
+  }>({ open: false, loading: false });
 
   const activeWorkspace =
     workspaces.find((workspace) => workspace.id === activeWorkspaceId) ??
@@ -1433,7 +1531,11 @@ export default function App() {
     (kind: AgentKind) => {
       if (!installedClis) return false;
       const probeKind =
-        kind === "fusion" ? "claude" : kind === "openfusion" ? "opencode" : kind;
+        kind === "fusion" || kind === "claude-custom"
+          ? "claude"
+          : kind === "openfusion"
+            ? "opencode"
+            : kind;
       const entry = installedClis.clis?.[probeKind];
       return Boolean(entry) && !entry.available;
     },
@@ -1671,6 +1773,38 @@ export default function App() {
     };
   }, []);
 
+  // Native application menu actions (File/Edit/View). The ref indirection keeps
+  // the single subscription while always running the latest addSession/scope
+  // closures.
+  const menuActionRef = useRef<(action: string) => void>(() => {});
+  useEffect(() => {
+    menuActionRef.current = (action: string) => {
+      if (action === "open-settings") {
+        setSettingsHint(null);
+        setSettingsOpen(true);
+      } else if (action === "toggle-sidebar") {
+        setSidebarOpen((open) => !open);
+      } else if (action === "new-terminal") {
+        void addSession("terminal");
+      } else if (action === "new-claude") {
+        void addSession("claude");
+      } else if (action === "open-claude-code") {
+        void addSession("claude-custom");
+      }
+    };
+  });
+  useEffect(() => {
+    if (!window.vibe?.menu?.onEvent) {
+      return;
+    }
+    const unsubscribe = window.vibe.menu.onEvent((event) => {
+      if (event?.type === "action" && typeof event.action === "string") {
+        menuActionRef.current(event.action);
+      }
+    });
+    return unsubscribe;
+  }, []);
+
   useEffect(() => {
     if (workspaces.length === 0 || !window.vibe?.workspace.getCodeChanges) {
       setWorkspaceChangeSummaries({});
@@ -1724,6 +1858,48 @@ export default function App() {
       window.clearInterval(interval);
     };
   }, [workspaceChangeFingerprint]);
+
+  // The picker shows one workspace's branches; it can't survive a workspace
+  // switch without showing stale rows.
+  useEffect(() => {
+    setBranchPicker({ open: false, loading: false });
+  }, [activeWorkspaceId]);
+
+  useEffect(() => {
+    if (!branchPicker.open) {
+      return;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setBranchPicker((current) => ({ ...current, open: false }));
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [branchPicker.open]);
+
+  async function toggleBranchPicker() {
+    if (branchPicker.open) {
+      setBranchPicker((current) => ({ ...current, open: false }));
+      return;
+    }
+    if (!activeWorkspace || !window.vibe?.workspace.getBranches) {
+      return;
+    }
+    setBranchPicker({ open: true, loading: true });
+    try {
+      const overview = await window.vibe.workspace.getBranches(
+        activeWorkspace.path
+      );
+      setBranchPicker((current) =>
+        current.open ? { open: true, loading: false, overview } : current
+      );
+    } catch {
+      setBranchPicker((current) =>
+        current.open ? { open: true, loading: false } : current
+      );
+    }
+  }
 
   function updateWorkspace(
     workspaceId: string,
@@ -2232,15 +2408,38 @@ export default function App() {
     clearSessionAttention(sessionId);
   }
 
-  function addSessionForCwd(scope: SessionScope, kind: AgentKind, cwd: string) {
+  function addSessionForCwd(
+    scope: SessionScope,
+    kind: AgentKind,
+    cwd: string,
+    options?: { providerProfileId?: string; providerModelOverride?: string }
+  ) {
     updateScopeSessions(scope, (sessions) => [
       ...sessions,
-      createSession(kind, cwd, sessions)
+      createSession(kind, cwd, sessions, undefined, options)
     ]);
   }
 
   function sessionCreationKind(session: AgentSession): AgentKind {
-    return session.fusion ? "fusion" : session.openFusion ? "openfusion" : session.kind;
+    return session.fusion
+      ? "fusion"
+      : session.openFusion
+        ? "openfusion"
+        : session.providerProfileId
+          ? "claude-custom"
+          : session.kind;
+  }
+
+  // Provider-pinned panes must keep their pin through split/duplicate/
+  // add-matching — otherwise the copy silently launches against the user's own
+  // Anthropic login instead of the source pane's custom endpoint.
+  function providerOptionsFor(session: AgentSession) {
+    return session.providerProfileId
+      ? {
+          providerProfileId: session.providerProfileId,
+          providerModelOverride: session.providerModelOverride
+        }
+      : undefined;
   }
 
   // Split a pane in two inside its own tile. The new terminal is created the
@@ -2257,7 +2456,9 @@ export default function App() {
       const created = createSession(
         sessionCreationKind(session),
         session.cwd,
-        sessions
+        sessions,
+        undefined,
+        providerOptionsFor(session)
       );
       createdId = created.id;
 
@@ -2327,21 +2528,46 @@ export default function App() {
     });
   }
 
-  async function addSession(kind: AgentKind) {
+  async function addSession(
+    kind: AgentKind,
+    options?: { providerProfileId?: string; providerModelOverride?: string }
+  ) {
     if (!activeScope) {
       return;
+    }
+
+    // "Open Claude Code" needs a provider profile (endpoint + key) to launch
+    // against; without one, route the click into Settings instead of spawning
+    // a pane that would fail closed.
+    if (kind === "claude-custom") {
+      let profileCount = 0;
+      try {
+        const list = await window.vibe?.claudeProviders?.list?.();
+        profileCount = list?.profiles?.length ?? 0;
+      } catch {
+        // A broken store/IPC must still surface: open Settings rather than
+        // swallowing the click.
+        profileCount = 0;
+      }
+      if (profileCount === 0) {
+        setSettingsHint(
+          "Add a Claude provider below, then launch Open Claude Code."
+        );
+        setSettingsOpen(true);
+        return;
+      }
     }
 
     if (activeScope.type === "multi") {
       const cwd = await window.vibe?.workspace.selectFolder();
       if (cwd) {
-        addSessionForCwd(activeScope, kind, cwd);
+        addSessionForCwd(activeScope, kind, cwd, options);
       }
       return;
     }
 
     if (activeWorkspace) {
-      addSessionForCwd(activeScope, kind, activeWorkspace.path);
+      addSessionForCwd(activeScope, kind, activeWorkspace.path, options);
     }
   }
 
@@ -2353,7 +2579,13 @@ export default function App() {
     updateScopeSessions(scope, (sessions) => [
       ...sessions,
       {
-        ...createSession(sessionCreationKind(session), session.cwd, sessions),
+        ...createSession(
+          sessionCreationKind(session),
+          session.cwd,
+          sessions,
+          undefined,
+          providerOptionsFor(session)
+        ),
         name: `${session.name} copy`,
         command: session.command,
         // The copy keeps the source's Fusion family/model/effort/mode settings
@@ -3811,6 +4043,211 @@ export default function App() {
     };
   }, [versionPickerOpen]);
 
+  // Same dismissal rules as the version picker: Escape, or a press anywhere
+  // outside the launcher menu.
+  useEffect(() => {
+    if (!launcherMenuOpen) {
+      return;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setLauncherMenuOpen(false);
+      }
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target as HTMLElement | null;
+      if (!target?.closest(".launcher-picker")) {
+        setLauncherMenuOpen(false);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, [launcherMenuOpen]);
+
+  // Every open starts a fresh search and lands focus in the search box.
+  useEffect(() => {
+    if (!launcherMenuOpen) {
+      return;
+    }
+    setLauncherQuery("");
+    setLauncherHighlight(0);
+    launcherSearchRef.current?.focus();
+  }, [launcherMenuOpen]);
+
+  // Providers and their model lists are fetched on open rather than at launch:
+  // same reasoning as the version picker — rare, deliberate, off the startup
+  // path.
+  async function toggleLauncherMenu() {
+    if (launcherMenuOpen) {
+      setLauncherMenuOpen(false);
+      return;
+    }
+    setLauncherMenuOpen(true);
+    const list = await window.vibe?.claudeProviders?.list?.();
+    setProviderList(list?.profiles ?? []);
+    if (list?.profiles?.length) {
+      void window.vibe?.claudeProviders
+        ?.listModels?.()
+        .then((result) => {
+          if (!result?.ok) {
+            return;
+          }
+          const next: Record<string, { id: string; label: string }[] | null> = {};
+          for (const entry of result.providers) {
+            next[entry.providerId] = entry.models;
+          }
+          setProviderModels(next);
+        })
+        .catch(() => {});
+    }
+  }
+
+  function launchClaudeCustom(providerProfileId?: string, modelId?: string) {
+    setLauncherMenuOpen(false);
+    void addSession("claude-custom", {
+      providerProfileId: providerProfileId || "default-custom",
+      providerModelOverride: modelId || undefined
+    });
+  }
+
+  // The launcher dropdown's flat item list: agent profiles first, then the
+  // saved Claude providers with their endpoint models. The search box filters
+  // all of them by label (provider/model rows also match on model id).
+  const launcherQueryText = launcherQuery.trim().toLowerCase();
+  const launcherEntries: LauncherMenuEntry[] = [];
+  for (const profile of launcherAgentProfiles) {
+    if (
+      launcherQueryText &&
+      !profile.label.toLowerCase().includes(launcherQueryText)
+    ) {
+      continue;
+    }
+    launcherEntries.push({
+      key: profile.kind,
+      section: "agents",
+      label: profile.label,
+      hint: agentCliMissing(profile.kind)
+        ? `${profile.label} was not found on your PATH — click to launch anyway`
+        : undefined,
+      profile,
+      missing: agentCliMissing(profile.kind),
+      run: () => {
+        setLauncherMenuOpen(false);
+        void addSession(profile.kind);
+      }
+    });
+  }
+  for (const provider of providerList ?? []) {
+    const providerMatches =
+      !launcherQueryText ||
+      provider.name.toLowerCase().includes(launcherQueryText) ||
+      provider.model.toLowerCase().includes(launcherQueryText);
+    const models = (providerModels[provider.id] ?? []).filter(
+      (model) =>
+        !launcherQueryText ||
+        providerMatches ||
+        model.label.toLowerCase().includes(launcherQueryText) ||
+        model.id.toLowerCase().includes(launcherQueryText)
+    );
+    if (!providerMatches && models.length === 0) {
+      continue;
+    }
+    launcherEntries.push({
+      key: `provider:${provider.id}`,
+      section: "providers",
+      label: provider.name,
+      sub: provider.model,
+      hint: `${provider.baseUrl} — ${provider.model}`,
+      run: () => launchClaudeCustom(provider.id)
+    });
+    for (const model of models) {
+      launcherEntries.push({
+        key: `provider:${provider.id}:${model.id}`,
+        section: "providers",
+        label: model.label,
+        sub: model.id,
+        hint: `${provider.name} — ${model.id}`,
+        indent: true,
+        run: () => launchClaudeCustom(provider.id, model.id)
+      });
+    }
+  }
+  // Arrow keys can leave the highlight past the end once a search narrows the
+  // list; clamp it to the rows that actually exist.
+  const launcherActiveIndex = Math.min(
+    launcherHighlight,
+    Math.max(launcherEntries.length - 1, 0)
+  );
+
+  function handleLauncherSearchKeyDown(
+    event: ReactKeyboardEvent<HTMLInputElement>
+  ) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setLauncherHighlight((current) =>
+        Math.min(current + 1, launcherEntries.length - 1)
+      );
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setLauncherHighlight((current) => Math.max(current - 1, 0));
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      launcherEntries[launcherActiveIndex]?.run();
+    } else if (event.key === "Escape") {
+      setLauncherMenuOpen(false);
+    }
+  }
+
+  function renderLauncherEntry(entry: LauncherMenuEntry, index: number) {
+    const highlighted = index === launcherActiveIndex;
+    return (
+      <button
+        key={entry.key}
+        role="option"
+        aria-selected={highlighted}
+        className={clsx(
+          "launcher-picker-item",
+          highlighted && "is-active",
+          entry.missing && "agent-launcher-missing",
+          entry.indent && "launcher-picker-model"
+        )}
+        style={
+          entry.profile
+            ? ({ "--agent-accent": entry.profile.accent } as React.CSSProperties)
+            : undefined
+        }
+        title={entry.hint}
+        ref={
+          highlighted
+            ? (node) => {
+                node?.scrollIntoView({ block: "nearest" });
+              }
+            : undefined
+        }
+        onMouseMove={() => setLauncherHighlight(index)}
+        onClick={entry.run}
+      >
+        {entry.profile &&
+          (entry.profile.openFusion ? (
+            <img className="agent-launcher-logo" src={openFusionLogo} alt="" />
+          ) : (
+            <Plus size={13} />
+          ))}
+        <span className="launcher-picker-item-label">{entry.label}</span>
+        {entry.sub && (
+          <span className="launcher-picker-item-sub">{entry.sub}</span>
+        )}
+      </button>
+    );
+  }
+
   function dismissUpdateOverlay() {
     setDismissedUpdateKey(updateNoticeKey);
   }
@@ -4112,6 +4549,16 @@ export default function App() {
           </div>
 
           <div className="quick-actions">
+            <button
+              className="icon-button"
+              title="Settings (Ctrl+,)"
+              onClick={() => {
+                setSettingsHint(null);
+                setSettingsOpen(true);
+              }}
+            >
+              <Settings size={17} />
+            </button>
             {currentAppVersionLabel && (
               <span className="app-version" title="Current app version">
                 {currentAppVersionLabel}
@@ -4209,31 +4656,109 @@ export default function App() {
 
         <section className="agent-toolbar" aria-label="Agent launchers">
           <div className="agent-toolbar-actions">
-            {launcherAgentProfiles.map((profile) => {
-              const missing = agentCliMissing(profile.kind);
-              return (
-                <button
-                  key={profile.kind}
-                  className={clsx(missing && "agent-launcher-missing")}
-                  // Still clickable: the pane runs through a login shell whose
-                  // PATH can be wider than this process's, so a miss is a hint.
-                  title={
-                    missing
-                      ? `${profile.label} was not found on your PATH — click to launch anyway`
-                      : undefined
-                  }
-                  onClick={() => addSession(profile.kind)}
-                  style={{ "--agent-accent": profile.accent } as React.CSSProperties}
+            <div className="launcher-picker">
+              <button
+                className="launcher-picker-toggle"
+                title="Launch a terminal or coding agent"
+                aria-haspopup="listbox"
+                aria-expanded={launcherMenuOpen}
+                onClick={() => void toggleLauncherMenu()}
+                style={{ "--agent-accent": "var(--accent)" } as React.CSSProperties}
+              >
+                <Plus size={14} />
+                New terminal
+                <ChevronDown size={13} />
+              </button>
+              {launcherMenuOpen && (
+                <div
+                  className="launcher-picker-menu"
+                  role="listbox"
+                  aria-label="Launch a terminal or coding agent"
                 >
-                  {profile.openFusion ? (
-                    <img className="agent-launcher-logo" src={openFusionLogo} alt="" />
-                  ) : (
-                    <Plus size={14} />
-                  )}
-                  {profile.label}
-                </button>
-              );
-            })}
+                  <div className="launcher-picker-search">
+                    <Search size={14} />
+                    <input
+                      ref={launcherSearchRef}
+                      type="text"
+                      placeholder="Search terminals and agents…"
+                      value={launcherQuery}
+                      onChange={(event) => {
+                        setLauncherQuery(event.target.value);
+                        setLauncherHighlight(0);
+                      }}
+                      onKeyDown={handleLauncherSearchKeyDown}
+                    />
+                  </div>
+                  <div className="launcher-picker-list">
+                    {launcherEntries.length === 0 ? (
+                      <div className="launcher-picker-note">
+                        No matches for “{launcherQuery.trim()}”.
+                      </div>
+                    ) : (
+                      launcherEntries.map((entry, index) => (
+                        <Fragment key={entry.key}>
+                          {(index === 0 ||
+                            launcherEntries[index - 1].section !==
+                              entry.section) && (
+                            <div className="launcher-picker-title">
+                              {entry.section === "agents"
+                                ? "Agents"
+                                : "Claude providers"}
+                            </div>
+                          )}
+                          {renderLauncherEntry(entry, index)}
+                        </Fragment>
+                      ))
+                    )}
+                    {!launcherQueryText && providerList === null && (
+                      <>
+                        <div className="launcher-picker-title">
+                          Claude providers
+                        </div>
+                        <div className="launcher-picker-note">Loading…</div>
+                      </>
+                    )}
+                    {!launcherQueryText && providerList?.length === 0 && (
+                      <>
+                        <div className="launcher-picker-title">
+                          Claude providers
+                        </div>
+                        <div className="launcher-picker-note">
+                          No providers yet — add an endpoint + API key to use
+                          Open Claude Code.
+                        </div>
+                        <button
+                          className="launcher-picker-item"
+                          onClick={() => {
+                            setLauncherMenuOpen(false);
+                            setSettingsHint(
+                              "Add a Claude provider below, then launch Open Claude Code."
+                            );
+                            setSettingsOpen(true);
+                          }}
+                        >
+                          Add a provider…
+                        </button>
+                      </>
+                    )}
+                    {!launcherQueryText &&
+                      providerList !== null &&
+                      providerList.length > 0 && (
+                        <button
+                          className="launcher-picker-item"
+                          onClick={() => {
+                            setLauncherMenuOpen(false);
+                            setSettingsHint(null);
+                            setSettingsOpen(true);
+                          }}
+                        >
+                          Manage providers…
+                        </button>
+                      )}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
 
           {activeView === "project" && activeWorkspace && (
@@ -4246,6 +4771,17 @@ export default function App() {
               title={formatCodeLineSummary(activeWorkspaceChangeSummary)}
               aria-label={formatCodeLineSummary(activeWorkspaceChangeSummary)}
             >
+              {activeWorkspaceChangeSummary?.branch && (
+                <button
+                  type="button"
+                  className="diff-branch diff-branch-button"
+                  title="Show all branches and their state"
+                  onClick={() => void toggleBranchPicker()}
+                >
+                  {activeWorkspaceChangeSummary.branch}
+                  <ChevronDown size={11} />
+                </button>
+              )}
               {activeWorkspaceChangeSummary?.state === "dirty" ? (
                 <>
                   <span className="diff-insertions">
@@ -4265,6 +4801,65 @@ export default function App() {
                         ? "Nothing new"
                         : "Scanning changes"}
                 </span>
+              )}
+              {branchPicker.open && (
+                <>
+                  <div
+                    className="branch-picker-backdrop"
+                    onClick={() =>
+                      setBranchPicker((current) => ({
+                        ...current,
+                        open: false
+                      }))
+                    }
+                  />
+                  <div
+                    className="branch-picker"
+                    role="menu"
+                    aria-label="Branch states"
+                  >
+                    <div className="branch-picker-title">Branches</div>
+                    {branchPicker.loading ? (
+                      <div className="branch-picker-empty">
+                        Loading branches…
+                      </div>
+                    ) : !branchPicker.overview ||
+                      branchPicker.overview.state !== "ok" ||
+                      branchPicker.overview.branches.length === 0 ? (
+                      <div className="branch-picker-empty">
+                        {branchPicker.overview?.message ||
+                          "No branches found."}
+                      </div>
+                    ) : (
+                      branchPicker.overview.branches.map((branch) => (
+                        <div
+                          key={branch.name}
+                          className={clsx(
+                            "branch-picker-row",
+                            branch.current && "is-current"
+                          )}
+                          title={
+                            branch.upstream
+                              ? `Tracks ${branch.upstream}`
+                              : undefined
+                          }
+                        >
+                          <span className="branch-picker-name">
+                            {branch.current && <Check size={12} />}
+                            {branch.name}
+                          </span>
+                          <span className="branch-picker-state">
+                            {branchStateNode(branch)}
+                          </span>
+                        </div>
+                      ))
+                    )}
+                    <div className="branch-picker-note">
+                      Uncommitted changes only exist where a branch is checked
+                      out.
+                    </div>
+                  </div>
+                </>
               )}
             </div>
           )}
@@ -4298,7 +4893,12 @@ export default function App() {
                       updateFusionSettings(activeScope, session, settings)
                     }
                     onAdd={() =>
-                      addSessionForCwd(activeScope, sessionCreationKind(session), session.cwd)
+                      addSessionForCwd(
+                        activeScope,
+                        sessionCreationKind(session),
+                        session.cwd,
+                        providerOptionsFor(session)
+                      )
                     }
                     onSelect={() => selectSession(session.id)}
                     onMaximize={() =>
@@ -4335,7 +4935,12 @@ export default function App() {
                       updateOpenFusionSettings(activeScope, session, settings)
                     }
                     onAdd={() =>
-                      addSessionForCwd(activeScope, sessionCreationKind(session), session.cwd)
+                      addSessionForCwd(
+                        activeScope,
+                        sessionCreationKind(session),
+                        session.cwd,
+                        providerOptionsFor(session)
+                      )
                     }
                     onSelect={() => selectSession(session.id)}
                     onMaximize={() =>
@@ -4379,7 +4984,12 @@ export default function App() {
                     onRestart={() => restartSession(activeScope, session)}
                     onResume={() => resumeSession(activeScope, session)}
                     onAdd={() =>
-                      addSessionForCwd(activeScope, sessionCreationKind(session), session.cwd)
+                      addSessionForCwd(
+                        activeScope,
+                        sessionCreationKind(session),
+                        session.cwd,
+                        providerOptionsFor(session)
+                      )
                     }
                     onSelect={() => selectSession(session.id)}
                     onMaximize={() =>
@@ -4656,6 +5266,16 @@ export default function App() {
             </div>
           </section>
         </div>
+      )}
+
+      {settingsOpen && (
+        <SettingsDialog
+          hint={settingsHint}
+          onClose={() => {
+            setSettingsOpen(false);
+            setSettingsHint(null);
+          }}
+        />
       )}
     </div>
   );

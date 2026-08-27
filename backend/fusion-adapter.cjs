@@ -1672,7 +1672,10 @@ function buildClaudeExecutorArgs(settings = {}) {
   const { buildClaudeArgs } = require("./fusionChatHost.cjs");
   return buildClaudeArgs({
     cwd: CWD,
-    model: settings.model || "sonnet",
+    // On a custom provider (ANTHROPIC_BASE_URL arrives via the MCP env block),
+    // Anthropic aliases like "sonnet" do not exist on the endpoint - leave
+    // --model off so ANTHROPIC_MODEL from the provider profile chooses.
+    model: settings.model || (process.env.ANTHROPIC_BASE_URL ? undefined : "sonnet"),
     effort: settings.effort || undefined,
     settingsFile: writeClaudeExecutorSettingsFile(settings.fast === true),
     // Full-autonomy parity with the codex executor's dangerFullAccess +
@@ -1711,7 +1714,7 @@ function applyClaudeExecutorFastSetting(fast) {
 }
 
 function ensureClaudeChild(settings = {}) {
-  const model = settings.model || "sonnet";
+  const model = settings.model || (process.env.ANTHROPIC_BASE_URL ? undefined : "sonnet");
   const effort = settings.effort || null;
   const fast = settings.fast === true;
   if (claudeChild && (claudeSpawnedModel !== model || claudeSpawnedEffort !== effort)) {
@@ -4070,7 +4073,7 @@ function startClaudeBackgroundWorker(kind, task, taskId, settings) {
   backgroundWorkers.set(worker.threadId, worker);
   const { windowsCmdArg, createStreamNormalizer } = require("./fusionChatHost.cjs");
   const args = buildClaudeExecutorArgs({
-    model: settings.model || "sonnet",
+    model: settings.model || (process.env.ANTHROPIC_BASE_URL ? undefined : "sonnet"),
     effort: settings.effort || null,
     fast: settings.fast === true
   });

@@ -17,6 +17,10 @@ export type AgentKind =
   // (telemetry, resume, working-state) applies unchanged. No session is ever
   // persisted with kind "fusion".
   | "fusion"
+  // Selection-only kind for the ribbon's "Open Claude Code" launcher: creates a
+  // real `kind: "claude"` session carrying `providerProfileId`, so the pane
+  // runs the native Claude Code TUI against a custom provider from Settings.
+  | "claude-custom"
   // Selection-only kind for the ribbon: an Open Fusion launch creates a real
   // `kind: "opencode"` session with `openFusion: true`, so OpenCode terminal
   // behavior and thread discovery stay unchanged while the app injects a
@@ -24,6 +28,41 @@ export type AgentKind =
   | "openfusion";
 
 export type AgentThreadProvider = "codex" | "claude" | "opencode" | "cursor" | "kimi" | "kimi-custom" | "qwen";
+
+// A saved Claude provider profile (Settings → Claude providers). Sanitized in
+// the main process: `hasKey` only, key material never reaches the renderer.
+export interface ClaudeProviderProfile {
+  id: string;
+  name: string;
+  baseUrl: string;
+  model: string;
+  smallFastModel: string;
+  hasKey: boolean;
+  encrypted: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ClaudeProviderListResult {
+  profiles: ClaudeProviderProfile[];
+  defaultProfileId: string | null;
+  hasCustomProfile: boolean;
+}
+
+export interface ClaudeProviderModelsResult {
+  ok: boolean;
+  providers: {
+    providerId: string;
+    name: string;
+    models: { id: string; label: string }[] | null;
+  }[];
+}
+
+export interface ClaudeProviderTestResult {
+  ok: boolean;
+  models?: { id: string; label: string }[];
+  error?: string;
+}
 
 export type AgentLaunchMode = "new" | "resume";
 
@@ -148,6 +187,9 @@ export interface AgentProfile {
   fusion?: boolean;
   // Marks the ribbon's Open Fusion launcher (OpenCode planner + executor).
   openFusion?: boolean;
+  // Marks the ribbon's "Open Claude Code" launcher (native claude TUI against
+  // a custom provider profile from Settings).
+  claudeCustom?: boolean;
 }
 
 export interface AgentThreadRef {
@@ -265,6 +307,15 @@ export interface AgentSession {
   openFusion?: boolean;
   openFusionPlannerModel?: OpenFusionModel;
   openFusionExecutorModel?: OpenFusionModel;
+  // "Open Claude Code" panes (selection kind "claude-custom", persisted as
+  // kind === "claude"): which Claude provider profile this pane launches with.
+  // "default-custom" = the current default custom profile; a specific profile
+  // id pins the pane to that provider. Undefined = the user's own Anthropic
+  // login (a regular Claude pane).
+  providerProfileId?: string;
+  // Optional model picked from the provider's model list at launch; overrides
+  // the profile's stored model as ANTHROPIC_MODEL for this pane only.
+  providerModelOverride?: string;
   // Plan/Auto for the Open Fusion pane. Unlike Fusion there is no host-side
   // mode state: the pane sends the mode with every turn and the host picks
   // the opencode agent per prompt.
@@ -336,6 +387,34 @@ export interface CodeChangeSummary {
   message?: string;
 }
 
+export interface BranchWorktreeState {
+  path: string;
+  state: CodeChangeState;
+  insertions: number;
+  deletions: number;
+}
+
+// One row of the footer branch picker. `worktree` is present only where the
+// branch is checked out somewhere on disk — the only place uncommitted
+// changes ("dirty" LOC numbers) can exist. Other branches report upstream
+// ahead/behind instead.
+export interface BranchOverviewEntry {
+  name: string;
+  current: boolean;
+  upstream?: string;
+  ahead: number;
+  behind: number;
+  worktree?: BranchWorktreeState;
+}
+
+export interface BranchOverview {
+  state: "ok" | "not-git" | "unavailable";
+  cwd?: string;
+  current?: string;
+  branches: BranchOverviewEntry[];
+  message?: string;
+}
+
 export interface TerminalLaunchPayload {
   id: string;
   cwd: string;
@@ -351,6 +430,12 @@ export interface TerminalLaunchPayload {
   openFusion?: boolean;
   openFusionPlannerModel?: OpenFusionModel | string;
   openFusionExecutorModel?: OpenFusionModel | string;
+  // "Open Claude Code" panes: reference to a Claude provider profile (or the
+  // "default-custom" sentinel). Main resolves it to ANTHROPIC_* env at spawn.
+  providerProfileId?: string;
+  // Per-pane model pick from the provider's model list; overrides the profile's
+  // stored model as ANTHROPIC_MODEL for this spawn only.
+  providerModelOverride?: string;
 }
 
 export type UpdateStatus =

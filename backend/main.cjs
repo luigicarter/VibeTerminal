@@ -13,12 +13,14 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const { createAgentTelemetryManager } = require("./agentTelemetry.cjs");
+const { installApplicationMenu } = require("./appMenu.cjs");
 const { createBuildSupervisor } = require("./buildSupervisor.cjs");
-const { fetchClaudeModelCatalog } = require("./claudeModels.cjs");
+const { fetchClaudeModelCatalog, testClaudeConnection } = require("./claudeModels.cjs");
 const { fetchCodexModelCatalog } = require("./codexModels.cjs");
-const { getCodeChangeSummary } = require("./codeChanges.cjs");
+const { getBranchOverview, getCodeChangeSummary } = require("./codeChanges.cjs");
 const { probeInstalledClis } = require("./cliProbe.cjs");
 const { resolveLaunchCwd } = require("./launchCwd.cjs");
+const providerProfiles = require("./providerProfiles.cjs");
 
 const isScreenshotMode =
   process.env.VIBE_SCREENSHOT_MODE === "1" || Boolean(process.env.VIBE_SCREENSHOT_PATH);
@@ -93,6 +95,22 @@ const MAX_DESCRIBE_PATHS = 32;
 const TEXT_SAMPLE_BYTES = 4096;
 const FUSION_MODEL_CATALOG_TTL_MS = 5 * 60 * 1000;
 const fusionModelCatalogCache = new Map();
+const providerModelsCache = new Map();
+
+// Profile edits change what an endpoint serves and how we reach it — drop
+// every cached model list derived from it.
+function invalidateProviderModelCaches(profileId) {
+  if (typeof profileId === "string" && profileId) {
+    providerModelsCache.delete(profileId);
+  } else {
+    providerModelsCache.clear();
+  }
+  for (const key of [...fusionModelCatalogCache.keys()]) {
+    if (key.startsWith("claude:custom:")) {
+      fusionModelCatalogCache.delete(key);
+    }
+  }
+}
 
 if (isScreenshotMode) {
   const screenshotUserData =
@@ -1354,6 +1372,16 @@ function normalizeFusionModel(value) {
   return model;
 }
 
+// Anthropic aliases and claude-* ids only exist on api.anthropic.com. When a
+// custom provider drives the pane, those must NOT reach claude's --model flag —
+// the profile's ANTHROPIC_MODEL env picks the model instead. A user-typed
+// custom id (e.g. kimi-k2-0905) still passes through.
+const ANTHROPIC_ONLY_MODEL_PATTERN = /^(opus|sonnet|fast|fable|claude-[a-z0-9.:-]+)$/i;
+function suppressAnthropicOnlyModel(model, providerEnv) {
+  if (!providerEnv || typeof model !== "string") return model;
+  return ANTHROPIC_ONLY_MODEL_PATTERN.test(model) ? undefined : model;
+}
+
 function normalizeFusionCatalogFamily(value) {
   const family = typeof value === "string" ? value.trim().toLowerCase() : "";
   return family === "claude" || family === "codex" ? family : family || "unknown";
@@ -1363,7 +1391,12 @@ async function listFusionModelCatalog(family) {
   if (family !== "claude" && family !== "codex") {
     return { ok: true, family, models: null };
   }
-  const cached = fusionModelCatalogCache.get(family);
+  // With a default custom provider, the Claude catalog comes from that
+  // endpoint instead of api.anthropic.com — and is cached per endpoint.
+  const connection =
+    family === "claude" ? providerProfiles.getProfileConnection("default-custom") : null;
+  const cacheKey = connection ? `${family}:custom:${connection.baseUrl}` : family;
+  const cached = fusionModelCatalogCache.get(cacheKey);
   if (cached && Date.now() - cached.fetchedAt < FUSION_MODEL_CATALOG_TTL_MS) {
     return { ok: true, family, models: cached.models };
   }
@@ -1377,10 +1410,10 @@ async function listFusionModelCatalog(family) {
     }
     models = codexBin ? await fetchCodexModelCatalog({ codexBin }) : null;
   } else {
-    models = await fetchClaudeModelCatalog();
+    models = await fetchClaudeModelCatalog(connection ? { connection } : {});
   }
   const catalog = Array.isArray(models) ? models : null;
-  fusionModelCatalogCache.set(family, { fetchedAt: Date.now(), models: catalog });
+  fusionModelCatalogCache.set(cacheKey, { fetchedAt: Date.now(), models: catalog });
   return { ok: true, family, models: catalog };
 }
 
@@ -1702,13 +1735,14 @@ function createMainWindow() {
     icon: getAppIconPath(),
     title: "vibeTerminal",
     show: isScreenshotMode,
-    autoHideMenuBar: true,
+    autoHideMenuBar: false,
     webPreferences: {
       preload: path.join(__dirname, "..", "preload", "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false
     }
   });
+  installApplicationMenu(mainWindow);
 
   mainWindow.once("ready-to-show", () => {
     if (isScreenshotMode) {
@@ -1877,6 +1911,10 @@ ipcMain.handle("workspace:select-folder", async () => {
 
 ipcMain.handle("workspace:code-changes", (_event, payload) =>
   getCodeChangeSummary(payload?.cwd)
+);
+
+ipcMain.handle("workspace:branches", (_event, payload) =>
+  getBranchOverview(payload?.cwd)
 );
 
 ipcMain.handle("workspace:open-in-explorer", async (_event, payload) => {
@@ -2114,6 +2152,47 @@ ipcMain.handle("terminal:create", async (_event, payload) => {
     };
   }
 
+  // "Open Claude Code" panes carry a provider profile reference; resolve it to
+  // ANTHROPIC_* env here (main process only — keys never reach the renderer).
+  if (payload?.providerProfileId) {
+    const providerEnv = providerProfiles.buildProfileEnv(payload.providerProfileId);
+    if (!providerEnv) {
+      if (payload?.id) {
+        broadcastTerminalEvent({
+          id: payload.id,
+          type: "error",
+          message:
+            payload.providerProfileId === "default-custom"
+              ? "No Claude provider is configured yet. Add one under File → Settings… first."
+              : "This pane's Claude provider was removed. Relaunch it from the Open Claude Code dropdown."
+        });
+      }
+      return false;
+    }
+    instrumentation = {
+      ...instrumentation,
+      env: {
+        ...(instrumentation?.env || {}),
+        ...providerEnv
+      }
+    };
+    // A model picked from the provider's list in the launcher dropdown wins
+    // over the profile's stored model for this pane only.
+    const modelOverride =
+      typeof payload?.providerModelOverride === "string"
+        ? payload.providerModelOverride.trim()
+        : "";
+    if (modelOverride && modelOverride.length <= 96 && FUSION_MODEL_ID_PATTERN.test(modelOverride)) {
+      instrumentation = {
+        ...instrumentation,
+        env: {
+          ...(instrumentation?.env || {}),
+          ANTHROPIC_MODEL: modelOverride
+        }
+      };
+    }
+  }
+
   // Cursor's stop hook lives in the project's .cursor/hooks.json, so install it
   // (idempotently) whenever a cursor-agent pane launches and the cwd is known.
   if (
@@ -2218,10 +2297,32 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
       codexBin = "codex";
     }
     startFusionChatHost();
+    // A configured custom Claude provider (Settings → Claude providers) routes
+    // every claude-family spawn in this pane at its endpoint: the planner via
+    // providerEnv in the host payload, the executor via the MCP adapter env
+    // block in prepareFusionFiles. The pane may pin a specific provider by
+    // picking one of its models; otherwise the default custom profile applies.
+    // All-codex panes never spawn claude, so no key material is resolved at all.
+    let providerEnv;
+    if (plannerFamily === "claude" || executorFamily === "claude") {
+      providerEnv =
+        providerProfiles.buildProfileEnv(payload.providerProfileId || "default-custom") ||
+        undefined;
+      // An explicitly pinned provider that no longer resolves must fail
+      // closed — silently falling back would burn the user's Anthropic quota
+      // under the wrong label. The implicit default-custom case legitimately
+      // resolves to nothing when no profiles exist.
+      if (!providerEnv && payload.providerProfileId) {
+        return {
+          ok: false,
+          error: "This pane's Claude provider was removed. Pick another in Settings."
+        };
+      }
+    }
     const fusionModel =
       plannerFamily === "codex"
         ? normalizeFusionCodexModel(payload.model)
-        : normalizeFusionModel(payload.model);
+        : suppressAnthropicOnlyModel(normalizeFusionModel(payload.model), providerEnv);
     const plannerEffort =
       plannerFamily === "codex"
         ? normalizeFusionCodexEffort(payload.effort)
@@ -2234,7 +2335,10 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
           : "";
     const fusionExecutorModel =
       executorFamily === "claude"
-        ? normalizeFusionClaudeExecutorModel(rawExecutorModel)
+        ? suppressAnthropicOnlyModel(
+            normalizeFusionClaudeExecutorModel(rawExecutorModel),
+            providerEnv
+          )
         : normalizeFusionCodexModel(
             rawExecutorModel &&
               rawExecutorModel.toLowerCase() !== "auto" &&
@@ -2264,7 +2368,8 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
       executorEffort: fusionExecutorEffort,
       executorFast,
       runMode: fusionRunMode,
-      buildSupervisorDir: getBuildSupervisorDir()
+      buildSupervisorDir: getBuildSupervisorDir(),
+      providerEnv
     });
     if (!files) {
       return { ok: false, error: "could not prepare Fusion files" };
@@ -2291,6 +2396,7 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
         allowedTools: fusionClaudeAllowedTools(),
         disallowedTools: fusionClaudeDisallowedTools(),
         strictMcpConfig: true,
+        providerEnv,
         resumeId: payload.resumeId || undefined
       }
     });
@@ -2317,6 +2423,92 @@ ipcMain.handle("fusion-model-catalog:list", async (_event, payload) => {
   }
 });
 
+// Claude provider profiles (Settings dialog). Keys are stored and decrypted
+// main-process-side only — list responses carry `hasKey`, never key material.
+ipcMain.handle("claude-providers:list", () => providerProfiles.listProfiles());
+
+ipcMain.handle("claude-providers:upsert", (_event, payload) => {
+  const result = providerProfiles.upsertProfile(payload);
+  if (result.ok) {
+    invalidateProviderModelCaches(
+      typeof payload?.id === "string" ? payload.id : result.profile?.id
+    );
+  }
+  return result;
+});
+
+ipcMain.handle("claude-providers:delete", (_event, payload) => {
+  const result = providerProfiles.deleteProfile(
+    typeof payload?.id === "string" ? payload.id : ""
+  );
+  if (result.ok) {
+    invalidateProviderModelCaches(typeof payload?.id === "string" ? payload.id : undefined);
+  }
+  return result;
+});
+
+ipcMain.handle("claude-providers:set-default", (_event, payload) =>
+  providerProfiles.setDefaultProfile(typeof payload?.id === "string" ? payload.id : null)
+);
+
+// "Test connection" runs against the form's values so users can verify before
+// saving; an empty key on an existing profile falls back to the stored key.
+ipcMain.handle("claude-providers:test", async (_event, payload) => {
+  let baseUrl = typeof payload?.baseUrl === "string" ? payload.baseUrl.trim() : "";
+  let apiKey = typeof payload?.apiKey === "string" ? payload.apiKey.trim() : "";
+  if (payload?.id && (!baseUrl || !apiKey)) {
+    const saved = providerProfiles.getProfileConnection(payload.id);
+    if (saved) {
+      baseUrl = baseUrl || saved.baseUrl;
+      apiKey = apiKey || saved.apiKey;
+    }
+  }
+  if (!baseUrl) {
+    const fallback = providerProfiles.getProfileConnection("default-custom");
+    if (fallback) {
+      baseUrl = fallback.baseUrl;
+      apiKey = apiKey || fallback.apiKey;
+    }
+  }
+  if (!baseUrl) {
+    return { ok: false, error: "Provide a base URL to test." };
+  }
+  try {
+    return await testClaudeConnection({ baseUrl, apiKey });
+  } catch (error) {
+    return { ok: false, error: error.message || "Could not reach the endpoint." };
+  }
+});
+
+// Every model exposed by every saved provider key, for the pane model pickers.
+// Per-provider failures fail soft (models: null) so one dead endpoint doesn't
+// empty the whole picker.
+ipcMain.handle("claude-providers:models", async () => {
+  const { profiles } = providerProfiles.listProfiles();
+  const providers = await Promise.all(
+    profiles.map(async (profile) => {
+      const cached = providerModelsCache.get(profile.id);
+      if (cached && Date.now() - cached.fetchedAt < FUSION_MODEL_CATALOG_TTL_MS) {
+        return { providerId: profile.id, name: profile.name, models: cached.models };
+      }
+      const connection = providerProfiles.getProfileConnection(profile.id);
+      const models = connection
+        ? await fetchClaudeModelCatalog({ connection })
+        : null;
+      providerModelsCache.set(profile.id, {
+        fetchedAt: Date.now(),
+        models: Array.isArray(models) ? models : null
+      });
+      return {
+        providerId: profile.id,
+        name: profile.name,
+        models: Array.isArray(models) ? models : null
+      };
+    })
+  );
+  return { ok: true, providers };
+});
+
 ipcMain.handle("fusion-chat:update-settings", async (_event, payload) => {
   if (!payload?.id) {
     return { ok: false, error: "missing session id" };
@@ -2330,7 +2522,10 @@ ipcMain.handle("fusion-chat:update-settings", async (_event, payload) => {
         : "";
   const fusionExecutorModel =
     executorFamily === "claude"
-      ? normalizeFusionClaudeExecutorModel(rawExecutorModel)
+      ? suppressAnthropicOnlyModel(
+          normalizeFusionClaudeExecutorModel(rawExecutorModel),
+          providerProfiles.buildProfileEnv(payload.providerProfileId || "default-custom")
+        )
       : normalizeFusionCodexModel(
           rawExecutorModel &&
             rawExecutorModel.toLowerCase() !== "auto" &&

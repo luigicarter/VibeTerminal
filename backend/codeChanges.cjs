@@ -247,6 +247,9 @@ function runGit(args, cwd, timeoutMs = GIT_STATUS_TIMEOUT_MS) {
     const child = spawn("git", args, {
       cwd,
       windowsHide: true,
+      // Every git call we make is read-only; this also stops status/diff from
+      // taking optional locks or refreshing the index stat cache.
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
       stdio: ["ignore", "pipe", "pipe"]
     });
     let stdout = "";
@@ -397,8 +400,161 @@ async function getCodeChangeSummary(cwd) {
   });
 }
 
+function parseTrackText(trackText) {
+  const aheadMatch = trackText.match(/ahead\s+(\d+)/);
+  const behindMatch = trackText.match(/behind\s+(\d+)/);
+  return {
+    ahead: aheadMatch ? Number(aheadMatch[1]) : 0,
+    behind: behindMatch ? Number(behindMatch[1]) : 0
+  };
+}
+
+function parseBranchRefs(stdout) {
+  const branches = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim()) {
+      continue;
+    }
+    const [name, upstream, trackText] = line.split("\t");
+    if (!name) {
+      continue;
+    }
+    const { ahead, behind } = parseTrackText(trackText || "");
+    branches.push({ name, upstream: upstream || undefined, ahead, behind });
+  }
+  return branches;
+}
+
+function parseWorktreeList(stdout) {
+  const worktrees = [];
+  let current;
+  for (const line of stdout.split(/\r?\n/)) {
+    if (line.startsWith("worktree ")) {
+      current = { path: line.slice("worktree ".length).trim() };
+      worktrees.push(current);
+    } else if (current && line.startsWith("branch ")) {
+      current.branch = line
+        .slice("branch ".length)
+        .trim()
+        .replace(/^refs\/heads\//, "");
+    }
+  }
+  return worktrees;
+}
+
+// Per-branch view for the footer branch picker. Uncommitted changes only exist
+// where a branch is checked out, so real dirty numbers can only come from the
+// repo's worktrees; every other branch reports upstream ahead/behind instead.
+async function getBranchOverview(cwd) {
+  if (typeof cwd !== "string" || cwd.trim().length === 0) {
+    return {
+      state: "unavailable",
+      branches: [],
+      message: "A workspace path is required."
+    };
+  }
+
+  const resolvedCwd = path.resolve(cwd);
+
+  try {
+    const stat = fs.statSync(resolvedCwd);
+    if (!stat.isDirectory()) {
+      return {
+        state: "unavailable",
+        cwd: resolvedCwd,
+        branches: [],
+        message: "Workspace path is not a folder."
+      };
+    }
+  } catch {
+    return {
+      state: "unavailable",
+      cwd: resolvedCwd,
+      branches: [],
+      message: "Workspace folder does not exist."
+    };
+  }
+
+  const currentResult = await runGit(["branch", "--show-current"], resolvedCwd);
+  if (!currentResult.ok) {
+    if (isNotGitRepository(currentResult)) {
+      return { state: "not-git", cwd: resolvedCwd, branches: [] };
+    }
+    return {
+      state: "unavailable",
+      cwd: resolvedCwd,
+      branches: [],
+      message:
+        currentResult.stderr.trim() || normalizeGitError(currentResult.error)
+    };
+  }
+
+  const currentBranch = currentResult.stdout.trim();
+
+  const refsResult = await runGit(
+    [
+      "for-each-ref",
+      "--format=%(refname:short)%09%(upstream:short)%09%(upstream:track)",
+      "refs/heads"
+    ],
+    resolvedCwd
+  );
+  const worktreeResult = await runGit(
+    ["worktree", "list", "--porcelain"],
+    resolvedCwd
+  );
+
+  const branches = refsResult.ok ? parseBranchRefs(refsResult.stdout) : [];
+  const worktrees = worktreeResult.ok
+    ? parseWorktreeList(worktreeResult.stdout)
+    : [];
+
+  // A repo with no commits yet has an unborn branch that for-each-ref can't see.
+  if (currentBranch && !branches.some((branch) => branch.name === currentBranch)) {
+    branches.unshift({ name: currentBranch, upstream: undefined, ahead: 0, behind: 0 });
+  }
+
+  const worktreePathByBranch = new Map();
+  for (const worktree of worktrees) {
+    if (worktree.branch && !worktreePathByBranch.has(worktree.branch)) {
+      worktreePathByBranch.set(worktree.branch, worktree.path);
+    }
+  }
+
+  const summaryByBranch = new Map();
+  await Promise.all(
+    [...worktreePathByBranch].map(async ([branch, worktreePath]) => {
+      const summary = await getCodeChangeSummary(worktreePath);
+      summaryByBranch.set(branch, {
+        path: worktreePath,
+        state: summary.state,
+        insertions: summary.insertions,
+        deletions: summary.deletions
+      });
+    })
+  );
+
+  const entries = branches.map((branch) => ({
+    ...branch,
+    current: branch.name === currentBranch,
+    worktree: summaryByBranch.get(branch.name)
+  }));
+
+  entries.sort(
+    (a, b) => Number(b.current) - Number(a.current) || a.name.localeCompare(b.name)
+  );
+
+  return {
+    state: "ok",
+    cwd: resolvedCwd,
+    current: currentBranch || undefined,
+    branches: entries
+  };
+}
+
 module.exports = {
   countTextFileLines,
+  getBranchOverview,
   getCodeChangeSummary,
   parseBranchLine,
   parseCodeChangeStatus,

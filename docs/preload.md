@@ -10,6 +10,13 @@ The `preload/` folder contains the context-isolated bridge between the renderer 
 
 - `window.vibe.app.getCwd()` - Returns the app working directory.
 - `window.vibe.app.getInstalledClis(options?)` - Returns the launch-time PATH scan of which agent CLIs exist on this machine, keyed by agent kind. Probed once on `app.whenReady` and cached for the session; pass `{ refresh: true }` to re-scan after the user installs something.
+- `window.vibe.menu.onEvent(callback)` - Subscribes to native application-menu action broadcasts (`{ type: "action", action }`; actions: `new-terminal`, `new-claude`, `open-claude-code`, `open-settings`, `toggle-sidebar`).
+- `window.vibe.claudeProviders.list()` - Lists saved Claude provider profiles (sanitized: `hasKey` flags, never key material) plus `defaultProfileId` / `hasCustomProfile`.
+- `window.vibe.claudeProviders.listModels()` - Fetches every saved provider's endpoint model list (`/v1/models` per profile, cached 5 min, per-provider fail-soft).
+- `window.vibe.claudeProviders.upsert(profile)` - Validates and saves a provider profile; empty `apiKey` on edit keeps the stored key.
+- `window.vibe.claudeProviders.remove(id)` - Deletes a profile (clears the default if it pointed at it).
+- `window.vibe.claudeProviders.setDefault(id)` - Picks the default custom provider used by "Open Claude Code" and Fusion spawns.
+- `window.vibe.claudeProviders.test(payload)` - Tests a would-be or saved profile's connection (`GET {baseUrl}/v1/models`); empty `apiKey` with an `id` falls back to the stored key. Returns `{ ok, models }` or `{ ok: false, error }`.
 - `window.vibe.updates.getState()` - Returns the current packaged-build update state.
 - `window.vibe.updates.check()` - Manually checks for a newer packaged build.
 - `window.vibe.updates.download()` - Downloads an available update after user confirmation.

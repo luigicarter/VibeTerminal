@@ -1235,6 +1235,8 @@ export default function TerminalPane({
         openFusion: session.openFusion,
         openFusionPlannerModel: session.openFusionPlannerModel,
         openFusionExecutorModel: session.openFusionExecutorModel,
+        providerProfileId: session.providerProfileId,
+        providerModelOverride: session.providerModelOverride,
         // Advertise a size only once a real fit has measured the pane.
         // Shipping xterm's 80x24 pre-fit default here resizes a LIVE PTY down
         // to it on the backend's remount dedup path — a full-screen TUI

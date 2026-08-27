@@ -392,7 +392,6 @@ button {
 }
 
 .workspace-list,
-.agent-toolbar-actions,
 .terminal-board,
 .terminal-surface .xterm-viewport {
   scrollbar-color: var(--scrollbar-thumb) transparent;
@@ -400,7 +399,6 @@ button {
 }
 
 .workspace-list::-webkit-scrollbar,
-.agent-toolbar-actions::-webkit-scrollbar,
 .terminal-board::-webkit-scrollbar,
 .terminal-surface .xterm-viewport::-webkit-scrollbar {
   width: 10px;
@@ -408,14 +406,12 @@ button {
 }
 
 .workspace-list::-webkit-scrollbar-track,
-.agent-toolbar-actions::-webkit-scrollbar-track,
 .terminal-board::-webkit-scrollbar-track,
 .terminal-surface .xterm-viewport::-webkit-scrollbar-track {
   background: transparent;
 }
 
 .workspace-list::-webkit-scrollbar-thumb,
-.agent-toolbar-actions::-webkit-scrollbar-thumb,
 .terminal-board::-webkit-scrollbar-thumb,
 .terminal-surface .xterm-viewport::-webkit-scrollbar-thumb {
   min-height: 28px;
@@ -426,7 +422,6 @@ button {
 }
 
 .workspace-list::-webkit-scrollbar-thumb:hover,
-.agent-toolbar-actions::-webkit-scrollbar-thumb:hover,
 .terminal-board::-webkit-scrollbar-thumb:hover,
 .terminal-surface .xterm-viewport::-webkit-scrollbar-thumb:hover {
   background: var(--scrollbar-thumb-hover);
@@ -434,7 +429,6 @@ button {
 }
 
 .workspace-list::-webkit-scrollbar-thumb:active,
-.agent-toolbar-actions::-webkit-scrollbar-thumb:active,
 .terminal-board::-webkit-scrollbar-thumb:active,
 .terminal-surface .xterm-viewport::-webkit-scrollbar-thumb:active {
   background: var(--scrollbar-thumb-active);
@@ -1289,7 +1283,6 @@ button {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  overflow: hidden;
   border-bottom: 1px solid var(--border-hairline);
   background: var(--bg-app);
   padding: var(--space-2) var(--space-4);
@@ -1300,7 +1293,6 @@ button {
   min-width: 0;
   align-items: center;
   gap: var(--space-2);
-  overflow-x: auto;
 }
 
 /* The accent identifies the agent, so it stays on the icon and only tints the
@@ -1354,6 +1346,7 @@ button {
 }
 
 .code-line-summary {
+  position: relative;
   display: inline-flex;
   min-width: 0;
   min-height: 30px;
@@ -1371,6 +1364,106 @@ button {
   font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
+}
+
+.diff-branch {
+  max-width: 160px;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-weight: 400;
+  text-overflow: ellipsis;
+}
+
+.diff-branch-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+}
+
+.diff-branch-button:hover {
+  color: var(--text-primary);
+}
+
+.branch-picker-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 65;
+}
+
+.branch-picker {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 66;
+  min-width: 240px;
+  max-width: 340px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--border-hairline);
+  border-radius: 10px;
+  background: var(--bg-element);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  font-weight: 400;
+  white-space: normal;
+}
+
+.branch-picker-title {
+  padding: 4px 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.branch-picker-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 8px;
+  border-radius: 6px;
+}
+
+.branch-picker-row.is-current {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.branch-picker-name {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  color: var(--text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.branch-picker-state {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.branch-picker-note {
+  margin-top: 4px;
+  padding: 6px 8px 4px;
+  border-top: 1px solid var(--border-hairline);
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: normal;
+}
+
+.branch-picker-empty {
+  padding: 8px;
+  color: var(--text-muted);
 }
 
 .diff-insertions {
@@ -3504,4 +3597,477 @@ button {
   letter-spacing: 0.05em;
   text-transform: uppercase;
   vertical-align: 1px;
+}
+
+/* ---------------------------------------------------------------------------
+   Settings dialog (Claude provider profiles).
+   --------------------------------------------------------------------------- */
+
+/* Reuses .confirmation-dialog's surface, border and shadow; the overrides
+   below widen it and switch the confirmation grid to a vertical stack. */
+.settings-dialog {
+  display: flex;
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 64px);
+  flex-direction: column;
+  gap: 0;
+  padding: 0;
+}
+
+.settings-header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  border-bottom: 1px solid var(--border-hairline);
+  padding: var(--space-4) var(--space-5);
+}
+
+.settings-header h2 {
+  margin: 0;
+  font-size: var(--text-xl);
+  line-height: 1.25;
+}
+
+.settings-close {
+  display: inline-grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-sm);
+  background: var(--bg-element);
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0;
+  transition:
+    border-color var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+
+.settings-close:hover,
+.settings-close:focus-visible {
+  border-color: var(--border-strong);
+  background: var(--bg-element-hover);
+  color: var(--text-primary);
+}
+
+/* Detour note (e.g. "Open Claude Code" with no provider configured): visible
+   until explicitly dismissed, but never blocking. */
+.settings-hint {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin: 0;
+  border-bottom: 1px solid var(--border-hairline);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-surface));
+  padding: var(--space-3) var(--space-5);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.settings-hint-dismiss {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+
+.settings-hint-dismiss:hover,
+.settings-hint-dismiss:focus-visible {
+  background: var(--bg-element-hover);
+  color: var(--text-primary);
+}
+
+.settings-body {
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-4) var(--space-5) var(--space-5);
+}
+
+.settings-section-title {
+  margin: 0 0 var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+}
+
+.settings-note {
+  margin: 0 0 var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.provider-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-3);
+  padding: 0;
+  list-style: none;
+}
+
+.provider-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-md);
+  background: var(--bg-element);
+  padding: var(--space-3);
+}
+
+.provider-row-main {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.provider-row-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.provider-name {
+  color: var(--text-primary);
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+
+.provider-default-badge {
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border-hairline));
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent-icon);
+  padding: 0 7px;
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  line-height: 16px;
+}
+
+.provider-url,
+.provider-model {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-model {
+  font-family: "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+}
+
+.provider-row-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.provider-row-actions button {
+  display: inline-flex;
+  min-height: 26px;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-sm);
+  background: var(--bg-element);
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0 var(--space-3);
+  font-size: var(--text-xs);
+  transition:
+    border-color var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+
+.provider-row-actions button:hover,
+.provider-row-actions button:focus-visible {
+  border-color: var(--border-strong);
+  background: var(--bg-element-hover);
+  color: var(--text-primary);
+}
+
+.provider-row-actions button.danger {
+  border-color: #7a4144;
+  background: #371f22;
+  color: #ffb7b9;
+}
+
+.provider-row-actions button.danger:hover,
+.provider-row-actions button.danger:focus-visible {
+  border-color: #a64f54;
+  background: #46252a;
+  color: #ffd1d3;
+}
+
+.provider-empty {
+  margin: 0 0 var(--space-3);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.provider-add {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  gap: var(--space-2);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-sm);
+  background: var(--bg-element);
+  color: var(--text-primary);
+  cursor: pointer;
+  padding: 0 var(--space-4);
+  font-size: var(--text-sm);
+  transition:
+    border-color var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out);
+}
+
+.provider-add:hover,
+.provider-add:focus-visible {
+  border-color: var(--border-strong);
+  background: var(--bg-element-hover);
+}
+
+.provider-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.provider-form-title {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+
+.form-row {
+  display: grid;
+  align-items: center;
+  gap: var(--space-3);
+  grid-template-columns: 120px minmax(0, 1fr);
+}
+
+.form-label {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.form-input {
+  width: 100%;
+  border: 1px solid var(--border-hairline);
+  border-radius: 8px;
+  background: var(--bg-element);
+  color: var(--text-primary);
+  padding: 7px 10px;
+  font-size: var(--text-base);
+}
+
+.form-input:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-strong));
+}
+
+.form-input::placeholder {
+  color: var(--text-muted);
+}
+
+.form-error {
+  margin: 0;
+  color: var(--status-failed);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+
+.form-success {
+  margin: 0;
+  color: var(--status-done);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+
+.form-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding-top: var(--space-1);
+}
+
+.form-actions button {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-hairline);
+  border-radius: 8px;
+  background: var(--bg-element);
+  color: var(--text-primary);
+  cursor: pointer;
+  padding: 0 13px;
+  font-size: var(--text-base);
+  transition:
+    border-color var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out);
+}
+
+.form-actions button:hover:not(:disabled),
+.form-actions button:focus-visible:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--bg-element-hover);
+}
+
+.form-actions button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+/* Launcher dropdown: one toolbar trigger opens a searchable list of every
+   terminal/agent profile plus the saved Claude providers and their endpoint
+   models. Mirrors the version picker's dropdown chrome so the two menus read
+   as the same component. */
+.launcher-picker {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.launcher-picker-toggle {
+  gap: var(--space-1);
+}
+
+.launcher-picker-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 60;
+  width: 280px;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+}
+
+/* Focus lands here on open, so the box reads as part of the menu chrome
+   rather than a bordered field inside it. */
+.launcher-picker-search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  border-bottom: 1px solid var(--border-hairline);
+  padding: var(--space-2) var(--space-3);
+  color: var(--text-muted);
+}
+
+.launcher-picker-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  outline: none;
+}
+
+.launcher-picker-search input::placeholder {
+  color: var(--text-muted);
+}
+
+.launcher-picker-list {
+  max-height: 320px;
+  overflow-y: auto;
+  padding: var(--space-1);
+}
+
+.launcher-picker-title {
+  padding: var(--space-2) var(--space-3) var(--space-1);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.launcher-picker-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+  font-size: var(--text-sm);
+  transition: background var(--motion-fast) var(--ease-out);
+}
+
+.launcher-picker-item svg {
+  color: var(--agent-accent);
+  flex: 0 0 auto;
+}
+
+/* The provider header row leads its models and carries the profile's model id
+   as a muted suffix; model rows stay indented. */
+.launcher-picker-item-label {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.launcher-picker-item-sub {
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.launcher-picker-model {
+  padding-left: var(--space-5);
+  font-size: var(--text-xs);
+}
+
+/* Both hover and the keyboard highlight read as the same active row. */
+.launcher-picker-item:hover,
+.launcher-picker-item.is-active {
+  background: var(--bg-element-hover);
+  color: var(--text-primary);
+}
+
+.launcher-picker-note {
+  padding: var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
 }

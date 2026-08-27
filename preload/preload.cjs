@@ -88,6 +88,14 @@ contextBridge.exposeInMainWorld("vibe", {
     writeText: (text) => clipboard.writeText(String(text ?? "")),
     readFilePaths: () => parseWindowsClipboardFilePaths()
   },
+  // Native application menu actions ("menu:event" broadcasts from main).
+  menu: {
+    onEvent: (callback) => {
+      const listener = (_event, payload) => callback(payload);
+      ipcRenderer.on("menu:event", listener);
+      return () => ipcRenderer.removeListener("menu:event", listener);
+    }
+  },
   updates: {
     getState: () => ipcRenderer.invoke("updates:get-state"),
     check: () => ipcRenderer.invoke("updates:check"),
@@ -106,6 +114,8 @@ contextBridge.exposeInMainWorld("vibe", {
     selectFolder: () => ipcRenderer.invoke("workspace:select-folder"),
     getCodeChanges: (cwd) =>
       ipcRenderer.invoke("workspace:code-changes", { cwd }),
+    getBranches: (cwd) =>
+      ipcRenderer.invoke("workspace:branches", { cwd }),
     openInExplorer: (path) =>
       ipcRenderer.invoke("workspace:open-in-explorer", { path }),
     openTerminal: (path) =>
@@ -163,6 +173,16 @@ contextBridge.exposeInMainWorld("vibe", {
   },
   fusionModelCatalog: {
     list: (payload) => ipcRenderer.invoke("fusion-model-catalog:list", payload)
+  },
+  // Claude provider profiles (Settings dialog). Profiles are sanitized
+  // main-process-side — `hasKey` flags only, never key material.
+  claudeProviders: {
+    list: () => ipcRenderer.invoke("claude-providers:list"),
+    listModels: () => ipcRenderer.invoke("claude-providers:models"),
+    upsert: (profile) => ipcRenderer.invoke("claude-providers:upsert", profile),
+    remove: (id) => ipcRenderer.invoke("claude-providers:delete", { id }),
+    setDefault: (id) => ipcRenderer.invoke("claude-providers:set-default", { id }),
+    test: (payload) => ipcRenderer.invoke("claude-providers:test", payload)
   },
   // Headless OpenCode chat for Open Fusion panes (no PTY, no TUI). `start`
   // spawns a per-pane `opencode serve`; `sendUserTurn` posts a planner prompt;

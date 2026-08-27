@@ -4083,13 +4083,29 @@ function createAgentTelemetryManager(options = {}) {
             VIBE_FUSION_CODEX_SETTINGS: settingsFile,
             // The claude-family executor engine spawns a headless `claude`
             // child; dev/test builds can point this at a specific binary.
-            VIBE_FUSION_CLAUDE_BIN: process.env.VIBE_CLAUDE_BIN || "claude"
+            VIBE_FUSION_CLAUDE_BIN: process.env.VIBE_CLAUDE_BIN || "claude",
+            // Custom Claude provider (Settings → Claude providers): the adapter
+            // spawns the executor, and MCP servers only see this explicit env
+            // block — so the ANTHROPIC_* vars must ride here to reach it.
+            ...(opts.providerEnv || {})
           }
         }
       }
     };
     const mcpConfig = path.join(sessionDir, "fusion-mcp.json");
-    fs.writeFileSync(mcpConfig, `${JSON.stringify(mcpConfigObj, null, 2)}\n`);
+    fs.writeFileSync(mcpConfig, `${JSON.stringify(mcpConfigObj, null, 2)}\n`, {
+      // The file carries the provider API key when a custom profile is active.
+      // mode only applies at creation; the chmod covers rewrites of a session
+      // dir that was first prepared without a provider.
+      mode: opts.providerEnv?.ANTHROPIC_AUTH_TOKEN ? 0o600 : undefined
+    });
+    if (opts.providerEnv?.ANTHROPIC_AUTH_TOKEN) {
+      try {
+        fs.chmodSync(mcpConfig, 0o600);
+      } catch {
+        // best effort (Windows ACLs don't map cleanly)
+      }
+    }
 
     return { systemPromptFile, mcpConfig, settingsFile };
   }

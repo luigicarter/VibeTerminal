@@ -1597,7 +1597,11 @@ function buildClaudeSpawn(payload = {}) {
   const env = {
     ...process.env,
     MCP_TOOL_TIMEOUT:
-      process.env.MCP_TOOL_TIMEOUT ?? String(FUSION_PLANNER_MCP_TOOL_TIMEOUT_MS)
+      process.env.MCP_TOOL_TIMEOUT ?? String(FUSION_PLANNER_MCP_TOOL_TIMEOUT_MS),
+    // Custom Claude provider (Settings → Claude providers): ANTHROPIC_BASE_URL /
+    // ANTHROPIC_AUTH_TOKEN / ANTHROPIC_MODEL ride in from the main-process start
+    // payload and override any inherited values.
+    ...(payload.providerEnv || {})
   };
   if (isWin) {
     return {

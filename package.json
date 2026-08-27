@@ -1,6 +1,6 @@
 {
   "name": "vibe-terminal",
-  "version": "0.1.77",
+  "version": "0.1.78",
   "private": true,
   "description": "A tiled local workspace for running multiple coding agents side by side.",
   "author": "vibeTerminal contributors",
@@ -38,6 +38,7 @@
     "smoke:backend:openfusion-background-status": "node scripts/backend/openfusion-background-status-smoke.cjs",
     "smoke:backend:openfusion-isolation": "node scripts/backend/openfusion-isolation-smoke.cjs",
     "smoke:backend:openfusion-custom-provider": "node scripts/backend/openfusion-custom-provider-smoke.cjs",
+    "smoke:backend:claude-providers": "node scripts/backend/claude-providers-smoke.cjs",
     "smoke:backend:fusion-adapter": "node scripts/backend/fusion-adapter-smoke.cjs",
     "smoke:backend:fusion-watch-build": "node scripts/backend/fusion-watch-build-smoke.cjs",
     "smoke:frontend:attention": "node scripts/frontend/attention-smoke.cjs",
@@ -53,6 +54,7 @@
     "smoke:codex-discovery": "npm run smoke:backend:codex-discovery",
     "typecheck": "tsc --noEmit",
     "gen:codex-bindings": "node scripts/dev/gen-codex-bindings.cjs",
+    "check:model-drift": "node scripts/dev/model-drift.cjs",
     "prepare:codex-bin": "node scripts/dev/prepare-codex-bin.cjs",
     "prepare:codex-bin:required": "node scripts/dev/prepare-codex-bin.cjs --required",
     "smoke:backend:fusion-appserver:embedded": "node scripts/backend/fusion-appserver-smoke.cjs --require-embedded",

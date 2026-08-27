@@ -395,6 +395,19 @@ work. What Fusion now avoids is unrequested Codex work: passive objective
 updates cannot start turns, and a worker cannot recursively create more Codex
 workers.
 
+### Model freshness (curated lists vs upstream)
+
+The per-family model lists in `frontend/components/fusionSlashMenu.ts` are a
+fallback: at runtime they merge under the live catalogs (`claude` → Anthropic
+`/v1/models`, `codex` → `codex debug models`; see `backend/main.cjs`
+`fusion-model-catalog:list`), so online users see current models even when the
+curated entries lag. `npm run check:model-drift`
+(`scripts/dev/model-drift.cjs`) diffs the curated lists, alias labels, the
+Quick-preset model, and the vendored codex/kimi versions against upstream and
+exits nonzero on drift; the daily `model-drift.yml` GitHub workflow runs it and
+files the report as a `model-drift` issue. Humans make the edits — the
+workflow only reports.
+
 ## Approval / review loop (route to Opus, escalate to human rarely)
 
 `app-server` sends approvals/questions as **server→client JSON-RPC requests**
