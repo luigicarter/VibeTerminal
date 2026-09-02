@@ -183,6 +183,83 @@ let firstId;
   assert.strictEqual(onDisk.profiles[0].encrypted, false, "this run uses the plaintext fallback");
 }
 
+// ---- claudeCustomHome: home resolution, seeding, env strip ----
+{
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "vibe-claude-custom-home-"));
+  process.env.VIBE_CLAUDE_CUSTOM_HOME = homeDir;
+  const claudeCustomHome = require("../../backend/claudeCustomHome.cjs");
+
+  assert.strictEqual(
+    claudeCustomHome.resolveCustomClaudeHome(),
+    homeDir,
+    "the env override must win over electron/tmp resolution"
+  );
+
+  // First seed writes the onboarding flag; re-seeds preserve existing keys and
+  // never pre-accept folder trust (that stays a user decision).
+  assert.strictEqual(claudeCustomHome.ensureCustomClaudeHome(), homeDir);
+  let state = JSON.parse(fs.readFileSync(path.join(homeDir, ".claude.json"), "utf8"));
+  assert.strictEqual(state.hasCompletedOnboarding, true, "onboarding flag seeded");
+
+  fs.writeFileSync(
+    path.join(homeDir, ".claude.json"),
+    JSON.stringify({ theme: "dark", projects: {} })
+  );
+  claudeCustomHome.ensureCustomClaudeHome();
+  state = JSON.parse(fs.readFileSync(path.join(homeDir, ".claude.json"), "utf8"));
+  assert.strictEqual(state.theme, "dark", "existing keys survive the seed");
+  assert.strictEqual(state.hasCompletedOnboarding, true);
+  assert.ok(
+    !Object.values(state.projects || {}).some((p) => p && p.hasTrustDialogAccepted),
+    "folder trust is never pre-accepted"
+  );
+
+  // A corrupt state file is moved aside, never silently clobbered.
+  fs.writeFileSync(path.join(homeDir, ".claude.json"), "not json{");
+  claudeCustomHome.ensureCustomClaudeHome();
+  state = JSON.parse(fs.readFileSync(path.join(homeDir, ".claude.json"), "utf8"));
+  assert.strictEqual(state.hasCompletedOnboarding, true, "re-seeded after a corrupt file");
+  assert.ok(
+    fs.readdirSync(homeDir).some((name) => name.startsWith(".claude.json.corrupt-")),
+    "the corrupt state file was moved aside"
+  );
+
+  // The strip list removes the auth/endpoint family, keeps preference vars, and
+  // never mutates its input.
+  const input = {
+    ANTHROPIC_API_KEY: "k",
+    ANTHROPIC_BASE_URL: "u",
+    CLAUDE_CODE_USE_BEDROCK: "1",
+    CLAUDE_CONFIG_DIR: "/somewhere",
+    PATH: "p",
+    DISABLE_TELEMETRY: "1"
+  };
+  if (process.platform === "win32") {
+    input.anthropic_auth_token = "t"; // case-insensitive variant
+  }
+  const stripped = claudeCustomHome.stripClaudeProviderEnv(input);
+  for (const key of [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CONFIG_DIR"
+  ]) {
+    assert.ok(!(key in stripped), key + " must be stripped");
+  }
+  if (process.platform === "win32") {
+    assert.ok(!("anthropic_auth_token" in stripped), "win32 strip is case-insensitive");
+  }
+  assert.strictEqual(stripped.PATH, "p");
+  assert.strictEqual(stripped.DISABLE_TELEMETRY, "1", "preference vars survive");
+  assert.strictEqual(input.ANTHROPIC_API_KEY, "k", "the input is never mutated");
+  assert.ok(
+    claudeCustomHome.CLAUDE_PROVIDER_ENV_STRIP.includes("ANTHROPIC_SMALL_FAST_MODEL"),
+    "the strip list covers the model slots"
+  );
+
+  delete process.env.VIBE_CLAUDE_CUSTOM_HOME;
+}
+
 // ---- wiring contracts: preload surface, main IPC, menu, spawn injection ----
 {
   const preload = fs.readFileSync(path.join(rootDir, "preload", "preload.cjs"), "utf8");
@@ -210,8 +287,53 @@ let firstId;
     assert.ok(main.includes(channel), `main must register ${channel}`);
   }
   assert.ok(
-    main.includes("providerProfiles.buildProfileEnv(payload.providerProfileId)"),
-    "terminal:create must resolve providerProfileId into spawn env"
+    main.includes("resolveProviderEnv(payload.providerProfileId)"),
+    "terminal:create must resolve providerProfileId into the isolating spawn env"
+  );
+  assert.ok(
+    main.includes("stripEnv: claudeCustomHome.CLAUDE_PROVIDER_ENV_STRIP"),
+    "custom panes must pass the inherited-env strip list to ptyHost"
+  );
+  assert.ok(
+    main.includes("VIBE_CLAUDE_CUSTOM_HOME"),
+    "helper hosts must receive the app-owned Claude home path"
+  );
+  assert.ok(
+    main.includes("CLAUDE_CONFIG_DIR: claudeCustomHome.ensureCustomClaudeHome()"),
+    "the provider env must pin the app-owned Claude home"
+  );
+
+  const ptyHostSrc = fs.readFileSync(path.join(rootDir, "backend", "ptyHost.cjs"), "utf8");
+  assert.ok(
+    ptyHostSrc.includes("terminalEnvironment(instrumentationEnv, instrumentationStripEnv)"),
+    "ptyHost must apply the strip list to the spawned pane env"
+  );
+
+  const fusionHostSrc = fs.readFileSync(
+    path.join(rootDir, "backend", "fusionChatHost.cjs"),
+    "utf8"
+  );
+  assert.ok(
+    fusionHostSrc.includes("stripClaudeProviderEnv(process.env)"),
+    "the Fusion planner spawn must scrub inherited provider env on a custom profile"
+  );
+
+  const threadHostSrc = fs.readFileSync(
+    path.join(rootDir, "backend", "agentThreadHost.cjs"),
+    "utf8"
+  );
+  assert.ok(
+    threadHostSrc.includes('payload.claudeHome === "custom"'),
+    "thread discovery must honor the custom-home selector"
+  );
+
+  const terminalPaneSrc = fs.readFileSync(
+    path.join(rootDir, "frontend", "components", "TerminalPane.tsx"),
+    "utf8"
+  );
+  assert.ok(
+    terminalPaneSrc.includes('claudeHome: currentSession.providerProfileId ? "custom" : undefined'),
+    "provider panes must ask discovery for the custom home"
   );
   assert.ok(
     main.includes("ANTHROPIC_MODEL: modelOverride"),
@@ -234,6 +356,10 @@ let firstId;
     (adapter.match(/process\.env\.ANTHROPIC_BASE_URL \? undefined : "sonnet"/g) || []).length,
     3,
     "all three claude-executor model fallbacks must defer to ANTHROPIC_MODEL on a custom provider"
+  );
+  assert.ok(
+    (adapter.match(/env: CLAUDE_EXEC_ENV/g) || []).length >= 2,
+    "both claude executor spawn sites must use the scrubbed env on a custom profile"
   );
 
   const telemetry = fs.readFileSync(path.join(rootDir, "backend", "agentTelemetry.cjs"), "utf8");

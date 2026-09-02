@@ -58,15 +58,33 @@ function shellForPlatform() {
   };
 }
 
-function terminalEnvironment(instrumentationEnv = {}) {
+function terminalEnvironment(instrumentationEnv = {}, stripEnv = []) {
   const inheritedTerm = process.env.TERM;
   const term =
     !inheritedTerm || inheritedTerm.toLowerCase() === "dumb"
       ? "xterm-256color"
       : inheritedTerm;
 
+  const base = { ...process.env };
+  // Custom-provider panes ask us to drop inherited vars (ANTHROPIC_* and friends)
+  // so the pane's explicit env is the only auth/endpoint in play. Env keys are
+  // case-insensitive on Windows, so match lowercase there.
+  if (Array.isArray(stripEnv) && stripEnv.length > 0) {
+    const caseInsensitive = process.platform === "win32";
+    const strip = new Set(
+      stripEnv
+        .filter((key) => typeof key === "string" && key)
+        .map((key) => (caseInsensitive ? key.toLowerCase() : key))
+    );
+    for (const key of Object.keys(base)) {
+      if (strip.has(caseInsensitive ? key.toLowerCase() : key)) {
+        delete base[key];
+      }
+    }
+  }
+
   return {
-    ...process.env,
+    ...base,
     TERM: term,
     COLORTERM: process.env.COLORTERM || "truecolor",
     TERM_PROGRAM: "vibeTerminal",
@@ -160,6 +178,12 @@ function createSession(payload) {
     payload.instrumentation && typeof payload.instrumentation === "object"
       ? payload.instrumentation.env || {}
       : {};
+  const instrumentationStripEnv =
+    payload.instrumentation &&
+    typeof payload.instrumentation === "object" &&
+    Array.isArray(payload.instrumentation.stripEnv)
+      ? payload.instrumentation.stripEnv
+      : [];
   const session = {
     terminal: null,
     buffer: "",
@@ -176,7 +200,7 @@ function createSession(payload) {
       cols,
       rows,
       cwd,
-      env: terminalEnvironment(instrumentationEnv)
+      env: terminalEnvironment(instrumentationEnv, instrumentationStripEnv)
     });
 
     session.terminal = terminal;

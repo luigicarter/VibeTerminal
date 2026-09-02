@@ -218,6 +218,9 @@ export interface AgentThreadLookupPayload {
   // created (its headless claude planner records entrypoint "sdk-cli", unlike
   // interactive pane chats).
   fusion?: boolean;
+  // Claude-only: scan the app-owned custom home (provider-isolated panes write
+  // their transcripts there) instead of the user's global ~/.claude.
+  claudeHome?: "custom";
 }
 
 // Saved-chat history for the chat panes' resume pickers: every saved chat for

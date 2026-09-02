@@ -1118,7 +1118,8 @@ export default function TerminalPane({
         const result = await window.vibe.agentThreads.findLatest({
           provider: currentSession.kind,
           cwd: currentSession.cwd,
-          confirmId: currentSession.threadRef.id
+          confirmId: currentSession.threadRef.id,
+          claudeHome: currentSession.providerProfileId ? "custom" : undefined
         });
 
         if (result?.status === "missing") {
@@ -1344,7 +1345,8 @@ export default function TerminalPane({
         provider,
         cwd,
         after: lookupStartedAt,
-        excludeIds: claimedThreadIdsRef.current
+        excludeIds: claimedThreadIdsRef.current,
+        claudeHome: sessionRef.current.providerProfileId ? "custom" : undefined
       });
 
       const latestSession = sessionRef.current;
@@ -1500,7 +1502,8 @@ export default function TerminalPane({
       const result = await window.vibe?.agentThreads.findLatest({
         provider,
         cwd: currentSession.cwd,
-        confirmId: threadId
+        confirmId: threadId,
+        claudeHome: currentSession.providerProfileId ? "custom" : undefined
       });
 
       // The pane may have relaunched or rebound its thread while we read.

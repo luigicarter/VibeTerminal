@@ -2552,20 +2552,33 @@ export default function FusionChatPane({
       return;
     }
     const currentId = claudeSessionIdRef.current || session.threadRef?.id || "";
-    list({
-      provider: plannerFamily,
-      cwd: session.cwd,
-      fusion: true,
-      excludeIds: currentId ? [currentId] : undefined
-    })
-      .then((result) => {
-        if (result?.status === "found") {
-          applyResult(result.threads ?? []);
-        } else {
-          applyResult([], result?.message || "Could not read the saved chats.");
-        }
+    // A claude planner runs against the default custom provider whenever one is
+    // saved (main resolves "default-custom" at spawn), so its chats live in the
+    // app-owned Claude home — list that home, not the global one.
+    const claudeProvidersList = window.vibe?.claudeProviders?.list;
+    const customHome =
+      plannerFamily === "claude" && claudeProvidersList
+        ? claudeProvidersList()
+            .then((providers) => Boolean(providers?.hasCustomProfile))
+            .catch(() => false)
+        : Promise.resolve(false);
+    void customHome.then((hasCustomProfile) => {
+      list({
+        provider: plannerFamily,
+        cwd: session.cwd,
+        fusion: true,
+        claudeHome: hasCustomProfile ? "custom" : undefined,
+        excludeIds: currentId ? [currentId] : undefined
       })
-      .catch(() => applyResult([], "Could not read the saved chats."));
+        .then((result) => {
+          if (result?.status === "found") {
+            applyResult(result.threads ?? []);
+          } else {
+            applyResult([], result?.message || "Could not read the saved chats.");
+          }
+        })
+        .catch(() => applyResult([], "Could not read the saved chats."));
+    });
   }
 
   // Speed presets are EFFORT presets and preserve the user's model picks.

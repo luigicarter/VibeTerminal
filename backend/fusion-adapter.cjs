@@ -25,6 +25,7 @@ const path = require("path");
 const { spawn } = require("child_process");
 const { tailFile } = require("./buildSupervisor.cjs");
 const { modelCatalogEntry, resolveCodexEffortForModel } = require("./codexModels.cjs");
+const { stripClaudeProviderEnv } = require("./claudeCustomHome.cjs");
 
 const isWin = process.platform === "win32";
 
@@ -1563,6 +1564,18 @@ function failAll(error) {
 // awaitTurn/resolveTurn, verdict extraction), so the north side and result
 // shapes are identical for both engines.
 const CLAUDE_EXEC_BIN = process.env.VIBE_FUSION_CLAUDE_BIN || "claude";
+// On a custom provider (ANTHROPIC_BASE_URL arrives via the MCP env block) the executor
+// child must not inherit the user's global ANTHROPIC_* / CLAUDE_CONFIG_DIR — scrub the
+// family, then re-add the block's CLAUDE_CONFIG_DIR: that one is the app-owned home.
+// undefined = inherit unchanged (subscription path).
+const CLAUDE_EXEC_ENV = process.env.ANTHROPIC_BASE_URL
+  ? {
+      ...stripClaudeProviderEnv(process.env),
+      ...(process.env.CLAUDE_CONFIG_DIR
+        ? { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR }
+        : {})
+    }
+  : undefined;
 const CLAUDE_FILE_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
 let activeExecutorFamily = null;
 let claudeChild = null;
@@ -1739,13 +1752,19 @@ function ensureClaudeChild(settings = {}) {
     child = spawn(
       shell,
       ["/d", "/s", "/c", [CLAUDE_EXEC_BIN, ...args].map(windowsCmdArg).join(" ")],
-      { cwd: CWD, stdio: ["pipe", "pipe", "pipe"], windowsHide: true }
+      {
+        cwd: CWD,
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+        env: CLAUDE_EXEC_ENV
+      }
     );
   } else {
     child = spawn(CLAUDE_EXEC_BIN, args, {
       cwd: CWD,
       stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true
+      windowsHide: true,
+      env: CLAUDE_EXEC_ENV
     });
   }
   claudeChild = child;
@@ -4084,13 +4103,19 @@ function startClaudeBackgroundWorker(kind, task, taskId, settings) {
       child = spawn(
         shell,
         ["/d", "/s", "/c", [CLAUDE_EXEC_BIN, ...args].map(windowsCmdArg).join(" ")],
-        { cwd: CWD, stdio: ["pipe", "pipe", "pipe"], windowsHide: true }
+        {
+          cwd: CWD,
+          stdio: ["pipe", "pipe", "pipe"],
+          windowsHide: true,
+          env: CLAUDE_EXEC_ENV
+        }
       );
     } else {
       child = spawn(CLAUDE_EXEC_BIN, args, {
         cwd: CWD,
         stdio: ["pipe", "pipe", "pipe"],
-        windowsHide: true
+        windowsHide: true,
+        env: CLAUDE_EXEC_ENV
       });
     }
   } catch (error) {

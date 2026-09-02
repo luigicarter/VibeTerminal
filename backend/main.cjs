@@ -21,6 +21,7 @@ const { getBranchOverview, getCodeChangeSummary } = require("./codeChanges.cjs")
 const { probeInstalledClis } = require("./cliProbe.cjs");
 const { resolveLaunchCwd } = require("./launchCwd.cjs");
 const providerProfiles = require("./providerProfiles.cjs");
+const claudeCustomHome = require("./claudeCustomHome.cjs");
 
 const isScreenshotMode =
   process.env.VIBE_SCREENSHOT_MODE === "1" || Boolean(process.env.VIBE_SCREENSHOT_PATH);
@@ -110,6 +111,18 @@ function invalidateProviderModelCaches(profileId) {
       fusionModelCatalogCache.delete(key);
     }
   }
+}
+
+// The provider env every custom-provider claude spawn gets: the profile values plus
+// an app-owned CLAUDE_CONFIG_DIR (seeded on first use), so those spawns never see the
+// user's global ~/.claude (OAuth login, global settings) — the profile is the only
+// auth/endpoint in play. Subscription panes and provider-less Fusion never call this.
+function resolveProviderEnv(profileId) {
+  const env = providerProfiles.buildProfileEnv(profileId);
+  if (!env) {
+    return null;
+  }
+  return { ...env, CLAUDE_CONFIG_DIR: claudeCustomHome.ensureCustomClaudeHome() };
 }
 
 if (isScreenshotMode) {
@@ -434,13 +447,19 @@ function getNodeHostCommand() {
 }
 
 function getNodeHostEnv() {
+  // Helper hosts (thread discovery, fusion) resolve the app-owned Claude home from
+  // this var; claudeCustomHome falls back to electron/tmp when it is absent.
+  const customClaudeHome = {
+    VIBE_CLAUDE_CUSTOM_HOME: claudeCustomHome.resolveCustomClaudeHome()
+  };
   if (!app.isPackaged) {
-    return process.env;
+    return { ...process.env, ...customClaudeHome };
   }
 
   return {
     ...process.env,
-    ELECTRON_RUN_AS_NODE: "1"
+    ELECTRON_RUN_AS_NODE: "1",
+    ...customClaudeHome
   };
 }
 
@@ -2155,7 +2174,7 @@ ipcMain.handle("terminal:create", async (_event, payload) => {
   // "Open Claude Code" panes carry a provider profile reference; resolve it to
   // ANTHROPIC_* env here (main process only — keys never reach the renderer).
   if (payload?.providerProfileId) {
-    const providerEnv = providerProfiles.buildProfileEnv(payload.providerProfileId);
+    const providerEnv = resolveProviderEnv(payload.providerProfileId);
     if (!providerEnv) {
       if (payload?.id) {
         broadcastTerminalEvent({
@@ -2171,6 +2190,9 @@ ipcMain.handle("terminal:create", async (_event, payload) => {
     }
     instrumentation = {
       ...instrumentation,
+      // ptyHost drops these inherited vars (ANTHROPIC_* / CLAUDE_CONFIG_DIR) from
+      // the pane environment so the profile is the only auth/endpoint in play.
+      stripEnv: claudeCustomHome.CLAUDE_PROVIDER_ENV_STRIP,
       env: {
         ...(instrumentation?.env || {}),
         ...providerEnv
@@ -2306,7 +2328,7 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
     let providerEnv;
     if (plannerFamily === "claude" || executorFamily === "claude") {
       providerEnv =
-        providerProfiles.buildProfileEnv(payload.providerProfileId || "default-custom") ||
+        resolveProviderEnv(payload.providerProfileId || "default-custom") ||
         undefined;
       // An explicitly pinned provider that no longer resolves must fail
       // closed — silently falling back would burn the user's Anthropic quota
@@ -2524,7 +2546,7 @@ ipcMain.handle("fusion-chat:update-settings", async (_event, payload) => {
     executorFamily === "claude"
       ? suppressAnthropicOnlyModel(
           normalizeFusionClaudeExecutorModel(rawExecutorModel),
-          providerProfiles.buildProfileEnv(payload.providerProfileId || "default-custom")
+          resolveProviderEnv(payload.providerProfileId || "default-custom")
         )
       : normalizeFusionCodexModel(
           rawExecutorModel &&

@@ -25,6 +25,7 @@ const { spawn, execFileSync } = require("child_process");
 const { createCodexBrainSession } = require("./fusionCodexBrain.cjs");
 const { createFusionGateTracker } = require("./completionGate.cjs");
 const { locateClaudeTranscriptFile } = require("./agentThreadHost.cjs");
+const { stripClaudeProviderEnv } = require("./claudeCustomHome.cjs");
 const { codexHome, locateCodexRollout } = require("./agentThreads.cjs");
 
 const isWin = process.platform === "win32";
@@ -1162,7 +1163,9 @@ function runHost() {
     if (payload.resumeId && !options.preserveHistory) {
       let located = null;
       try {
-        located = locateClaudeTranscriptFile(String(payload.resumeId));
+        // Rehydration only READS the transcript: scan both homes (a resumed
+        // chat may predate the provider isolation or come from either config).
+        located = locateClaudeTranscriptFile(String(payload.resumeId), "any");
       } catch {
         located = null;
       }
@@ -1594,13 +1597,14 @@ function buildClaudeSpawn(payload = {}) {
   const args = buildClaudeArgs(payload);
   // Claude Code 2.1.205 exposes MCP_TOOL_TIMEOUT in milliseconds. Preserve an
   // explicit user value; otherwise keep planner bridge calls alive for 4h.
+  // Custom Claude provider (Settings → Claude providers): the start payload carries
+  // ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_MODEL / CLAUDE_CONFIG_DIR,
+  // and the inherited env is scrubbed of the same family first, so the planner's only
+  // auth/endpoint is the profile — never the user's global Claude setup.
   const env = {
-    ...process.env,
+    ...(payload.providerEnv ? stripClaudeProviderEnv(process.env) : process.env),
     MCP_TOOL_TIMEOUT:
       process.env.MCP_TOOL_TIMEOUT ?? String(FUSION_PLANNER_MCP_TOOL_TIMEOUT_MS),
-    // Custom Claude provider (Settings → Claude providers): ANTHROPIC_BASE_URL /
-    // ANTHROPIC_AUTH_TOKEN / ANTHROPIC_MODEL ride in from the main-process start
-    // payload and override any inherited values.
     ...(payload.providerEnv || {})
   };
   if (isWin) {

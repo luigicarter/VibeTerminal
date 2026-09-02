@@ -151,10 +151,26 @@ function extractClaudeText(value) {
   return "";
 }
 
-function claudeProjectsDir() {
+// `home` selects which Claude config home to scan: the user's global one
+// (default) or the app-owned custom home used by provider-isolated spawns. The
+// custom path arrives as VIBE_CLAUDE_CUSTOM_HOME (main sets it for this host);
+// without it we degrade to the global home, matching pre-isolation behavior.
+function claudeProjectsDir(home) {
   const claudeHome =
-    process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
+    home === "custom" && process.env.VIBE_CLAUDE_CUSTOM_HOME
+      ? process.env.VIBE_CLAUDE_CUSTOM_HOME
+      : process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
   return path.join(claudeHome, "projects");
+}
+
+// Roots to walk for a transcript: the selected home, or both for read-only
+// rehydration ("any" — ids are uuids, so a cross-home hit is not a collision).
+function claudeProjectsRoots(home) {
+  const roots =
+    home === "any"
+      ? [claudeProjectsDir("global"), claudeProjectsDir("custom")]
+      : [claudeProjectsDir(home)];
+  return [...new Set(roots)];
 }
 
 // Titles this app itself once forced onto sessions via `claude --name`
@@ -289,9 +305,9 @@ function publishClaudeThreadRef(ref) {
   return threadRef;
 }
 
-function findLatestClaudeThread(cwd, after = 0, excludeIds = []) {
+function findLatestClaudeThread(cwd, after = 0, excludeIds = [], home) {
   const excluded = toExcludedSet(excludeIds);
-  const matches = collectJsonlFiles(claudeProjectsDir())
+  const matches = collectJsonlFiles(claudeProjectsDir(home))
     .map((filePath) => parseClaudeTranscript(filePath, cwd))
     .filter(
       (ref) =>
@@ -314,7 +330,7 @@ function findLatestClaudeThread(cwd, after = 0, excludeIds = []) {
 function listClaudeThreads(cwd, after = 0, excludeIds = [], options = {}) {
   const excluded = toExcludedSet(excludeIds);
   const seen = new Set();
-  const threads = collectJsonlFiles(claudeProjectsDir())
+  const threads = collectJsonlFiles(claudeProjectsDir(options.claudeHome))
     .map((filePath) => parseClaudeTranscript(filePath, cwd))
     .filter(
       (ref) =>
@@ -354,46 +370,48 @@ function placeholderClaudeRef(id) {
 // directory could not be read (so the target may live in an unreadable subtree)
 // or a pathological-tree backstop tripped — meaning absence could NOT be proven,
 // and callers must treat that as "unknown" rather than "missing".
-function locateClaudeTranscriptFile(id) {
+function locateClaudeTranscriptFile(id, home) {
   const target = `${id}.jsonl`;
-  const root = claudeProjectsDir();
-  if (!fs.existsSync(root)) {
-    return { path: null, complete: true };
-  }
-
-  const stack = [root];
-  const visitCap = 200000;
-  let visited = 0;
   let complete = true;
 
-  while (stack.length > 0) {
-    if (visited >= visitCap) {
-      complete = false;
-      break;
-    }
-    visited += 1;
-
-    const current = stack.pop();
-    let entries = [];
-    try {
-      entries = fs.readdirSync(current, { withFileTypes: true });
-    } catch {
-      // The unreadable directory might be the one holding the transcript, so we
-      // can no longer prove the id is absent.
-      complete = false;
+  for (const root of claudeProjectsRoots(home)) {
+    if (!fs.existsSync(root)) {
       continue;
     }
 
-    for (const entry of entries) {
-      const entryPath = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        // Claude's `<id>/subagents/agent-*.jsonl` tree only duplicates the
-        // parent id; skip it (matches collectJsonlFiles).
-        if (entry.name !== "subagents") {
-          stack.push(entryPath);
+    const stack = [root];
+    const visitCap = 200000;
+    let visited = 0;
+
+    while (stack.length > 0) {
+      if (visited >= visitCap) {
+        complete = false;
+        break;
+      }
+      visited += 1;
+
+      const current = stack.pop();
+      let entries = [];
+      try {
+        entries = fs.readdirSync(current, { withFileTypes: true });
+      } catch {
+        // The unreadable directory might be the one holding the transcript, so we
+        // can no longer prove the id is absent.
+        complete = false;
+        continue;
+      }
+
+      for (const entry of entries) {
+        const entryPath = path.join(current, entry.name);
+        if (entry.isDirectory()) {
+          // Claude's `<id>/subagents/agent-*.jsonl` tree only duplicates the
+          // parent id; skip it (matches collectJsonlFiles).
+          if (entry.name !== "subagents") {
+            stack.push(entryPath);
+          }
+        } else if (entry.isFile() && entry.name === target) {
+          return { path: entryPath, complete: true };
         }
-      } else if (entry.isFile() && entry.name === target) {
-        return { path: entryPath, complete: true };
       }
     }
   }
@@ -413,13 +431,15 @@ function locateClaudeTranscriptFile(id) {
 // would collide), even across a cwd change. We report "missing" only when we can
 // prove no such file exists; if the directory walk was incomplete we stay
 // conservative and resume.
-function confirmClaudeThread(cwd, id) {
+function confirmClaudeThread(cwd, id, home) {
   const target = String(id || "");
   if (!target) {
     return { status: "missing" };
   }
 
-  const located = locateClaudeTranscriptFile(target);
+  // Home-scoped on purpose: confirming an id that only exists in the OTHER home
+  // would green-light a `claude --resume` the pane's config home cannot fulfil.
+  const located = locateClaudeTranscriptFile(target, home);
 
   if (located.path) {
     const threadRef = publishClaudeThreadRef(
@@ -1302,22 +1322,28 @@ async function findLatestAgentThread(payload) {
   }
 
   if (payload.provider === "claude") {
+    // Provider-isolated panes pass claudeHome "custom" so discovery scans the
+    // same app-owned home their claude writes transcripts to; everything else
+    // stays on the user's global home.
+    const claudeHome = payload.claudeHome === "custom" ? "custom" : "global";
+
     // A confirm request asks whether a specific pre-assigned id is safe to
     // resume, so the launcher can self-heal instead of running a doomed
     // `claude --resume <id>`.
     if (payload.confirmId) {
-      return confirmClaudeThread(cwd, payload.confirmId);
+      return confirmClaudeThread(cwd, payload.confirmId, claudeHome);
     }
 
     // History listing for the Fusion resume picker: every chat for this
     // folder, newest first. `fusion` keeps it to harness-created chats.
     if (payload.list) {
       return listClaudeThreads(cwd, after, payload.excludeIds, {
-        fusionOnly: Boolean(payload.fusion)
+        fusionOnly: Boolean(payload.fusion),
+        claudeHome
       });
     }
 
-    const threadRef = findLatestClaudeThread(cwd, after, payload.excludeIds);
+    const threadRef = findLatestClaudeThread(cwd, after, payload.excludeIds, claudeHome);
     return threadRef
       ? { status: "found", threadRef }
       : {
