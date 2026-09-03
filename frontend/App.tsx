@@ -26,7 +26,6 @@ import {
   Play,
   RefreshCw,
   Search,
-  Settings,
   TerminalSquare,
   X
 } from "lucide-react";
@@ -1294,7 +1293,7 @@ export default function App() {
   const [activeView, setActiveView] = useState<AppView>(initialState.activeView);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(initialState.sidebarWidth);
-  // Settings dialog (File → Settings… / topbar gear). The hint is shown when
+  // Settings dialog (File → Settings…, Ctrl+,). The hint is shown when
   // the dialog was opened as a detour, e.g. "Open Claude Code" with no
   // provider configured yet.
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -4549,16 +4548,6 @@ export default function App() {
           </div>
 
           <div className="quick-actions">
-            <button
-              className="icon-button"
-              title="Settings (Ctrl+,)"
-              onClick={() => {
-                setSettingsHint(null);
-                setSettingsOpen(true);
-              }}
-            >
-              <Settings size={17} />
-            </button>
             {currentAppVersionLabel && (
               <span className="app-version" title="Current app version">
                 {currentAppVersionLabel}
