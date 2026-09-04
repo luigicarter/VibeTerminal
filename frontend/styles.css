@@ -4054,11 +4054,6 @@ button {
   white-space: nowrap;
 }
 
-.launcher-picker-model {
-  padding-left: var(--space-5);
-  font-size: var(--text-xs);
-}
-
 /* Both hover and the keyboard highlight read as the same active row. */
 .launcher-picker-item:hover,
 .launcher-picker-item.is-active {

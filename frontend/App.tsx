@@ -324,8 +324,8 @@ const agentProfiles: AgentProfile[] = [
 // the launch-time CLI probe now dims what is missing instead of hiding it.
 const launcherAgentProfiles = agentProfiles;
 
-// One row in the toolbar launcher dropdown: an agent profile, a saved Claude
-// provider, or one of the provider's endpoint models.
+// One row in the toolbar launcher dropdown: an agent profile or a saved
+// Claude provider.
 type LauncherMenuEntry = {
   key: string;
   section: "agents" | "providers";
@@ -334,7 +334,6 @@ type LauncherMenuEntry = {
   hint?: string;
   profile?: AgentProfile;
   missing?: boolean;
-  indent?: boolean;
   run: () => void;
 };
 
@@ -1299,9 +1298,8 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsHint, setSettingsHint] = useState<string | null>(null);
   // The toolbar launcher dropdown: one trigger opens a searchable list of
-  // every agent profile plus the saved Claude providers and, per provider,
-  // the model list its API key exposes (null while/after a failed fetch —
-  // the provider header item still launches with the profile model).
+  // every agent profile plus the saved Claude providers (each launches with
+  // the model configured on its profile).
   const [launcherMenuOpen, setLauncherMenuOpen] = useState(false);
   const [launcherQuery, setLauncherQuery] = useState("");
   const [launcherHighlight, setLauncherHighlight] = useState(0);
@@ -1309,9 +1307,6 @@ export default function App() {
   const [providerList, setProviderList] = useState<ClaudeProviderProfile[] | null>(
     null
   );
-  const [providerModels, setProviderModels] = useState<
-    Record<string, { id: string; label: string }[] | null>
-  >({});
   const [maximizedSessionId, setMaximizedSessionId] = useState<string | null>(
     null
   );
@@ -4091,34 +4086,18 @@ export default function App() {
     setLauncherMenuOpen(true);
     const list = await window.vibe?.claudeProviders?.list?.();
     setProviderList(list?.profiles ?? []);
-    if (list?.profiles?.length) {
-      void window.vibe?.claudeProviders
-        ?.listModels?.()
-        .then((result) => {
-          if (!result?.ok) {
-            return;
-          }
-          const next: Record<string, { id: string; label: string }[] | null> = {};
-          for (const entry of result.providers) {
-            next[entry.providerId] = entry.models;
-          }
-          setProviderModels(next);
-        })
-        .catch(() => {});
-    }
   }
 
-  function launchClaudeCustom(providerProfileId?: string, modelId?: string) {
+  function launchClaudeCustom(providerProfileId?: string) {
     setLauncherMenuOpen(false);
     void addSession("claude-custom", {
-      providerProfileId: providerProfileId || "default-custom",
-      providerModelOverride: modelId || undefined
+      providerProfileId: providerProfileId || "default-custom"
     });
   }
 
   // The launcher dropdown's flat item list: agent profiles first, then the
-  // saved Claude providers with their endpoint models. The search box filters
-  // all of them by label (provider/model rows also match on model id).
+  // saved Claude providers. The search box filters all of them by label
+  // (provider rows also match on the profile's model id).
   const launcherQueryText = launcherQuery.trim().toLowerCase();
   const launcherEntries: LauncherMenuEntry[] = [];
   for (const profile of launcherAgentProfiles) {
@@ -4144,18 +4123,11 @@ export default function App() {
     });
   }
   for (const provider of providerList ?? []) {
-    const providerMatches =
-      !launcherQueryText ||
-      provider.name.toLowerCase().includes(launcherQueryText) ||
-      provider.model.toLowerCase().includes(launcherQueryText);
-    const models = (providerModels[provider.id] ?? []).filter(
-      (model) =>
-        !launcherQueryText ||
-        providerMatches ||
-        model.label.toLowerCase().includes(launcherQueryText) ||
-        model.id.toLowerCase().includes(launcherQueryText)
-    );
-    if (!providerMatches && models.length === 0) {
+    if (
+      launcherQueryText &&
+      !provider.name.toLowerCase().includes(launcherQueryText) &&
+      !provider.model.toLowerCase().includes(launcherQueryText)
+    ) {
       continue;
     }
     launcherEntries.push({
@@ -4166,17 +4138,6 @@ export default function App() {
       hint: `${provider.baseUrl} — ${provider.model}`,
       run: () => launchClaudeCustom(provider.id)
     });
-    for (const model of models) {
-      launcherEntries.push({
-        key: `provider:${provider.id}:${model.id}`,
-        section: "providers",
-        label: model.label,
-        sub: model.id,
-        hint: `${provider.name} — ${model.id}`,
-        indent: true,
-        run: () => launchClaudeCustom(provider.id, model.id)
-      });
-    }
   }
   // Arrow keys can leave the highlight past the end once a search narrows the
   // list; clamp it to the rows that actually exist.
@@ -4214,8 +4175,7 @@ export default function App() {
         className={clsx(
           "launcher-picker-item",
           highlighted && "is-active",
-          entry.missing && "agent-launcher-missing",
-          entry.indent && "launcher-picker-model"
+          entry.missing && "agent-launcher-missing"
         )}
         style={
           entry.profile
