@@ -52,17 +52,19 @@ prose. Live terminal samples are not a complete native conversation archive.
 
 ## Error feedback without cloud speech
 
-Current runtime errors use a short, nonverbal local chime. The old Microsoft Zira
-recordings remain as legacy assets but are no longer the default runtime alerts.
+Runtime errors and missed speech use bundled fixed spoken recordings, including
+a retry prompt for empty transcription and recordings with no detected speech.
 The mic and Settings identify whether transcription, the assistant request, or
 speech failed. A spoken-reply failure does not imply that an action was rejected.
 HTTP status and safe classified details remain available; raw provider bodies and
-keys are never spoken. Mute, cancellation, cooldown, and deferred error handling
-remain in effect, without a recursive cloud request to announce an error.
+keys are never spoken. Mute, cancellation and deferred background errors remain
+in effect. Background alerts retain cooldown; every explicit voice attempt gets
+feedback, without a recursive cloud request to announce an error.
 
 Speech uses the supported Kokoro English voices through OpenRouter. The app
-validates WAV framing, sample rate, channels, duration and response size before
-playback. Preview works while the mic and orchestrator are off and waits for
+requests PCM and validates response rate/channel metadata, frame alignment,
+duration and response size before playback. Framed WAV responses remain compatible.
+Preview works while the mic and orchestrator are off and waits for
 actual renderer playback completion. It does not enable capture. Missing or
 failed playback acknowledgments are reported as failures.
 

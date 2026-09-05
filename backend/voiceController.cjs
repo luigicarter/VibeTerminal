@@ -1,6 +1,7 @@
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
-const { RATE, wavFromSamples, createRecording, decodeSpeechWav, errorChime, shouldSpeak } = require('./voiceAudio.cjs');
+const { RATE, wavFromSamples, createRecording, decodeSpeechAudio, shouldSpeak } = require('./voiceAudio.cjs');
+const { createLocalErrorAudio, ERROR_AUDIO_TEXT } = require('./localErrorAudio.cjs');
 const { createWakeProcess } = require('./voiceWakeProcess.cjs');
 const { matchAnswer, questionSpeech } = require('./voiceAnswers.cjs');
 const { OpenRouterError, readOpenRouterResponse, classifyTransportError, upstreamErrorInfo } = require('./openRouterErrors.cjs');
@@ -23,7 +24,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
   let state = { phase: 'off', muted: true, ready: false, wakeReady: false, listening: false, transcript: '', reply: '', error: null, microphoneId: '' };
   let epoch = 0, wake = null, wakeStartup = null, recording = null, requestAbort = null, disposed = false, playbackTimer = null, playbackResolve = null, activeReply = null, activeInteraction = null;
   let speechQueue = Promise.resolve(), answerContext = null, announcementPending = null, wakeHistory = [], deferredTimer = null; const resolvedInteractions = new Set(), legacyResolvedIds = new Set(), announcedInteractions = new Set(), deferredInteractions = new Map();
-  const alerts = errorAudio || { load: errorChime };
+  const alerts = errorAudio || createLocalErrorAudio({ directory: path.join(modelPath, 'alerts') });
   const lastErrorAudio = new Map();
   let deferredError = null;
   const snapshot = () => ({ ...state });
@@ -42,6 +43,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
   const enabled = () => !disposed && orchestrator?.getState?.().enabled !== false;
   const checkSpending = () => { const limit = getSettings().spendingLimit; const usage = orchestrator?.getState?.().usage || {}; if (limit != null && Object.values(usage).reduce((total, cost) => total + (Number(cost) || 0), 0) >= limit) throw Error('Session spending limit reached.'); };
   const idlePhase = () => state.listening ? (state.wakeReady ? 'listening' : 'wake-error') : 'off';
+  const failureCategory = (error, operation) => error === 'Session spending limit reached.' ? 'spending-limit' : error === 'A relay request is already running.' ? 'busy' : operation;
   function resetRecording() { recording = null; }
   function cancelSpeech() {
     deferredError = null;
@@ -67,34 +69,37 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     const operation = ['transcription', 'speech', 'orchestration'].includes(info.operation) ? info.operation : 'orchestration';
     const stage = operation === 'speech' ? 'The answer is ready, but speech playback failed.' : operation === 'transcription' ? 'I could not transcribe that.' : 'I could not complete that request.';
     // Reconstruct the bounded classifier message so provider bodies and keys cannot enter UI state.
-    const safeDetail = new OpenRouterError(info.category, info.status).message;
-    const message = `${stage} ${info.message === safeDetail ? info.message : safeDetail}`.slice(0, 400);
+    const local = ['not-understood', 'transcription', 'orchestration', 'speech', 'busy', 'spending-limit', 'answer'].includes(info.category);
+    const safeDetail = local ? ERROR_AUDIO_TEXT[info.category] : new OpenRouterError(info.category, info.status).message;
+    const message = (local ? safeDetail : `${stage} ${safeDetail}`).slice(0, 400);
     update({ error: message, errorOperation: operation });
     if (info.origin === 'monitor' && ['recording', 'awaiting-answer', 'transcribing', 'thinking', 'speaking', 'starting'].includes(state.phase)) {
       deferredError = info; return { ok: true, status: 'queued' };
     }
-    if (lastErrorAudio.has(info.category) && now() - lastErrorAudio.get(info.category) < 60000) {
+    // Every explicit voice attempt gets feedback, including repeated missed speech.
+    if (info.origin !== 'voice' && lastErrorAudio.has(info.category) && now() - lastErrorAudio.get(info.category) < 60000) {
       if (state.phase === 'error' && !activeReply) update({ phase: idlePhase() });
       return { ok: true, status: 'duplicate' };
     }
     let clip;
     try { clip = alerts.load(info.category); }
-    catch { return { ok: false, status: 'audio-unavailable' }; }
+    catch { wake?.reset(); update({ phase: idlePhase() }); return { ok: false, status: 'audio-unavailable', error: message }; }
     cancelSpeech();
     lastErrorAudio.set(info.category, now());
     const current = epoch, replyId = activeReply = randomUUID();
-    update({ phase: 'speaking', replyId, error: message, errorOperation: operation });
-    const finished = new Promise(resolve => { playbackResolve = resolve; playbackTimer = setTimeout(resolve, clip.durationMs + 5000); });
+    update({ phase: 'speaking', reply: clip.text || '', replyId, error: message, errorOperation: operation });
+    const finished = new Promise(resolve => { playbackResolve = resolve; playbackTimer = setTimeout(() => resolve({ error: 'Speech playback did not finish. Check your audio output.' }), clip.durationMs + 5000); });
     let sequence = 0;
     for (let start = 0; start < clip.pcm.length; start += 16384) {
       if (current !== epoch || !enabled() || !state.listening) return { ok: false, status: 'cancelled' };
-      onAudio({ replyId, sequence: sequence++, data: Array.from(clip.pcm.subarray(start, start + 16384)), sampleRate: 24000, channels: 1, format: 's16le', local: true });
+      onAudio({ replyId, sequence: sequence++, data: Array.from(clip.pcm.subarray(start, start + 16384)), sampleRate: clip.sampleRate || 24000, channels: clip.channels || 1, format: 's16le', local: true });
     }
     onAudio({ replyId, sequence, data: [], sampleRate: 24000, channels: 1, format: 's16le', done: true, local: true });
-    await finished;
+    const playback = await finished;
     if (current !== epoch) return { ok: false, status: 'cancelled' };
     clearTimeout(playbackTimer); playbackTimer = null; playbackResolve = null; activeReply = null;
-    wake?.reset(); update({ phase: idlePhase(), replyId: undefined });
+    wake?.reset(); update({ phase: idlePhase(), replyId: undefined, ...(playback?.error && { error: `${message} ${playback.error}` }) });
+    if (playback?.error) return { ok: false, status: 'playback-failed', error: state.error };
     return { ok: true, status: 'announced', category: info.category };
   }
   function beginRecording(preRoll = []) {
@@ -155,15 +160,34 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       const data = await audioJson(response, abort);
       if (current !== epoch || !enabled()) return { ok: false, status: 'cancelled' };
       orchestrator.recordSpeechUsage?.('transcription', data.usage?.cost);
-      const text = String(data.text || '').split(key).join('[REDACTED]').replace(/^\s*hey[ ,.!]*vibe[ ,.!:]*/i, '').trim();
-      if (!text) { update({ phase: idlePhase(), transcript: '' }); return { ok: true, status: 'empty' }; }
+      if (typeof data.text !== 'string') throw new OpenRouterError('upstream', response.status);
+      const text = data.text.split(key).join('[REDACTED]').replace(/^\s*hey[ ,.!]*vibe\b[ ,.!:]*/i, '').trim();
+      if (!/[\p{L}\p{N}]/u.test(text)) {
+        update({ transcript: '' });
+        if (answerContext && currentInteraction(answerContext)) {
+          answerContext.answering = true;
+          return { ok: true, status: 'empty', speech: await askQuestion(answerContext, "I didn't catch that. ") };
+        }
+        return { ok: true, status: 'empty', speech: await announceError({ category: 'not-understood', origin: 'voice', operation }) };
+      }
       operation = 'orchestration';
       update({ phase: 'thinking', transcript: text });
       if (answerContext) return await submitAnswer(text, current);
       const result = await orchestrator.send({ text, origin: 'voice' });
+      if (current === epoch && result?.ok === false && result.status !== 'cancelled' && !result.text) {
+        await announceError({ ...(result.upstreamError || { category: failureCategory(result.error, operation) }), origin: 'voice', operation });
+      }
       if (current === epoch && state.phase === 'thinking') update({ phase: idlePhase(), ...(result?.ok === false ? { error: result.error || 'Orchestrator could not respond.' } : {}) });
       return result;
-    } catch (e) { if (current !== epoch || abort.signal.aborted) return { ok: false, status: 'cancelled' }; const error = String(e.message || 'Voice request failed.'); update({ phase: 'error', errorOperation: operation, error: key ? error.split(key).join('[REDACTED]') : error }); const upstreamError = upstreamErrorInfo(e); if (upstreamError) await announceError({ ...upstreamError, origin: 'voice', operation }); else { wake?.reset(); update({ phase: idlePhase() }); } return { ok: false, operation, error: state.error, ...(upstreamError && { upstreamError }) }; }
+    } catch (e) {
+      if (current !== epoch || abort.signal.aborted) return { ok: false, status: 'cancelled' };
+      const error = String(e.message || 'Voice request failed.');
+      const safeError = key ? error.split(key).join('[REDACTED]') : error;
+      update({ phase: 'error', errorOperation: operation, error: safeError });
+      const upstreamError = upstreamErrorInfo(e);
+      await announceError({ ...(upstreamError || { category: failureCategory(error, operation) }), origin: 'voice', operation });
+      return { ok: false, operation, error: safeError, ...(upstreamError && { upstreamError }) };
+    }
     finally { if (requestAbort === abort) requestAbort = null; }
   }
   function frames({ samples, sampleRate } = {}) {
@@ -171,7 +195,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     if (sampleRate !== RATE || !Array.isArray(samples) || !samples.length || samples.length > 8192 || samples.some(n => !Number.isFinite(n) || Math.abs(n) > 1.01)) return { ok: false, error: 'Invalid microphone frames.' };
     if (recording) {
       const progress = recording.push(samples);
-      if (progress === 'silence') { resetRecording(); answerContext = null; update({ phase: idlePhase(), transcript: '' }); }
+      if (progress === 'silence') { resetRecording(); answerContext = null; update({ transcript: '' }); void announceError({ category: 'not-understood', origin: 'voice', operation: 'transcription' }); }
       else if (progress === 'complete') { const data = recording.finish(); resetRecording(); void sendAudio({ audioBase64: wavFromSamples(data).toString('base64'), format: 'wav' }); }
     } else if (state.phase === 'listening') {
       wakeHistory.push(Float32Array.from(samples));
@@ -196,7 +220,12 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       let key;
       try { key = await getKey(); } catch { /* Report key-store failure without exposing details. */ }
       if (queuedEpoch !== epoch) return { ok: false, status: 'cancelled' };
-      if (!key) { wake?.reset(); update({ phase: idlePhase(), error: 'Save an OpenRouter key before checking the voice.', errorOperation: 'speech' }); return { ok: false, operation: 'speech', error: state.error }; }
+      if (!key) {
+        const error = 'Save an OpenRouter key before checking the voice.';
+        wake?.reset(); update({ phase: idlePhase(), error, errorOperation: 'speech' });
+        if (state.listening) await announceError({ category: 'auth', origin: 'voice', operation: 'speech' });
+        return { ok: false, operation: 'speech', error };
+      }
       text = text.split(key).join('[REDACTED]');
       const abort = requestAbort = new AbortController();
       const replyId = activeReply = randomUUID(); activeInteraction = message.kind === 'interaction' ? identity : null;
@@ -206,12 +235,12 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
         checkSpending();
         if (settings.ttsModel && settings.ttsModel !== TTS_MODEL) throw Error(`Voice playback currently supports ${TTS_MODEL}. Select this speech model in Orchestrator settings.`);
         if (settings.voice && !TTS_VOICES.includes(settings.voice)) throw Error('Select a supported Kokoro voice in Orchestrator settings.');
-        const response = await requestAudio('https://openrouter.ai/api/v1/audio/speech', { method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, signal: AbortSignal.any([abort.signal, AbortSignal.timeout(120000)]), body: JSON.stringify({ model: settings.ttsModel || TTS_MODEL, input: text, voice: settings.voice || TTS_VOICE, response_format: 'wav' }) }, abort);
+        const response = await requestAudio('https://openrouter.ai/api/v1/audio/speech', { method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, signal: AbortSignal.any([abort.signal, AbortSignal.timeout(120000)]), body: JSON.stringify({ model: settings.ttsModel || TTS_MODEL, input: text, voice: settings.voice || TTS_VOICE, response_format: 'pcm' }) }, abort);
         if (!response.ok) await audioJson(response, abort);
         if (!response.body) throw new OpenRouterError('upstream', response.status);
         const contentType = response.headers?.get?.('content-type') || '';
         if (/json/.test(contentType)) { await audioJson(response, abort); throw new OpenRouterError('upstream', response.status); }
-        if (contentType && !/audio\/(wav|wave|x-wav)|octet-stream/i.test(contentType)) throw new OpenRouterError('upstream', response.status);
+        if (contentType && !/^(?:audio\/(?:pcm|wav|wave|x-wav)|application\/octet-stream)(?:\s*;|\s*$)/i.test(contentType)) throw new OpenRouterError('upstream', response.status);
         const chunks = [];
         for await (const raw of audioChunks(response.body, abort)) {
           if (queuedEpoch !== epoch || abort.signal.aborted) return { ok: false, status: 'cancelled' };
@@ -221,7 +250,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
         }
         if (queuedEpoch !== epoch) return { ok: false, status: 'cancelled' };
         if (!bytes) throw new OpenRouterError('upstream', response.status);
-        const { pcm, sampleRate, channels, durationMs } = decodeSpeechWav(Buffer.concat(chunks));
+        const { pcm, sampleRate, channels, durationMs } = decodeSpeechAudio(Buffer.concat(chunks), contentType);
         const finished = new Promise(resolve => { playbackResolve = resolve; playbackTimer = setTimeout(() => resolve({ error: 'Speech playback did not finish. Check your audio output.' }), durationMs + 5000); });
         // One second per buffer bounds a three-minute reply to 180 playback nodes.
         const chunkBytes = sampleRate * channels * 2;
@@ -240,7 +269,12 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
         if (queuedEpoch !== epoch || abort.signal.aborted) return { ok: false, status: 'cancelled' };
         clearTimeout(playbackTimer); playbackTimer = null; playbackResolve = null;
         onAudio({ replyId, sequence, data: [], sampleRate: 24000, channels: 1, format: 's16le', done: true, cancelled: true });
-        activeReply = null; activeInteraction = null; update({ phase: 'error', errorOperation: 'speech', error: String(e.message || 'Speech failed.').split(key).join('[REDACTED]') }); const upstreamError = upstreamErrorInfo(e); if (upstreamError && state.listening) await announceError({ ...upstreamError, origin: 'voice', operation: 'speech' }); else { wake?.reset(); update({ phase: idlePhase() }); } return { ok: false, operation: 'speech', error: state.error, ...(upstreamError && { upstreamError }) };
+        const error = String(e.message || 'Speech failed.').split(key).join('[REDACTED]');
+        activeReply = null; activeInteraction = null; update({ phase: 'error', errorOperation: 'speech', error });
+        const upstreamError = upstreamErrorInfo(e);
+        if (state.listening) await announceError({ ...(upstreamError || { category: failureCategory(error, 'speech') }), origin: 'voice', operation: 'speech' });
+        else { wake?.reset(); update({ phase: idlePhase() }); }
+        return { ok: false, operation: 'speech', error, ...(upstreamError && { upstreamError }) };
       } finally { if (requestAbort === abort) requestAbort = null; }
     };
     const result = speechQueue.then(run, run); speechQueue = result.catch(() => {}); return result;
@@ -284,6 +318,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     if (current !== epoch || !currentInteraction(context)) return { ok: false, status: 'cancelled' };
     answerContext = null;
     const result = await orchestrator.dispatch({ kind: interaction.kind === 'permission' ? 'permission' : 'answer_question', targetId: interaction.sessionId, requestId: interaction.id, generation: interaction.generation, revision: interaction.revision, ...(interaction.kind === 'permission' ? { decision: answer.value } : { answers: context.answers }) });
+    if (current === epoch && result.ok === false) await announceError({ category: 'answer', origin: 'voice', operation: 'orchestration' });
     if (current === epoch) { update({ phase: idlePhase(), ...(result.ok ? { request: undefined } : { error: result.error || 'Answer was not accepted. Please review it in the workspace.' }) }); }
     return result;
   }

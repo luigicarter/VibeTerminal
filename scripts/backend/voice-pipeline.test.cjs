@@ -52,7 +52,7 @@ test('PCM boundaries preserve signed samples and text requests remain silent', a
   assert.equal(shouldSpeak({ origin: 'text' }), false); assert.equal(shouldSpeak({ kind: 'interaction' }), true);
   const f = fixture(); await f.controller.setListening(true); await f.controller.speak({ text: 'text answer', origin: 'text' }); assert.equal(f.calls.length, 0);
   await f.controller.speak({ text: 'voice answer', origin: 'voice' }); assert.equal(f.calls.length, 1);
-  assert.equal(JSON.parse(f.calls[0].options.body).response_format, 'wav'); assert.deepEqual(f.audio.map(c => c.sequence), [0, 1]);
+  assert.equal(JSON.parse(f.calls[0].options.body).response_format, 'pcm'); assert.deepEqual(f.audio.map(c => c.sequence), [0, 1]);
   assert.deepEqual(f.audio.flatMap(c => c.data), [0, 128, 255, 127, 0, 0]); assert.equal(f.controller.getState().phase, 'listening'); f.controller.dispose();
 });
 test('cancellation discards late transcription and late stream audio', async () => {
@@ -83,17 +83,54 @@ test('multi-question voice answers dispatch original keyed choices, not a brain 
   assert.equal(f.sent.length, 0); assert.deepEqual(f.dispatched[0], { kind: 'answer_question', targetId: 'pane', requestId: 'req', generation: 3, revision: 2, answers: { q1: 'Blue', q2: 'Small' } });
   f.controller.dispose();
 });
+
+test('an empty answer asks the pending question again and preserves answer routing', async () => {
+  let transcript = '';
+  const f = fixture({ fetch: async url => url.endsWith('/transcriptions') ? { ok: true, json: async () => ({ text: transcript }) } : pcmResponse() });
+  const interaction = { id: 'req', sessionId: 'pane', generation: 1, revision: 1, kind: 'question', state: 'pending', questions: [{ id: 'color', question: 'Which color?', options: [{ label: 'Red' }] }] };
+  await f.controller.setListening(true); f.relayState.requests = [interaction]; await f.controller.announceInteraction(interaction);
+  const audioBase64 = wavFromSamples(Array(1600).fill(.1)).toString('base64');
+  assert.equal((await f.controller.sendAudio({ audioBase64 })).status, 'empty');
+  assert.equal(f.controller.getState().phase, 'awaiting-answer');
+  assert.match(f.controller.getState().reply, /didn't catch.*Which color/);
+  assert.equal(f.dispatched.length, 0); assert.equal(f.sent.length, 0);
+  transcript = 'one'; await f.controller.sendAudio({ audioBase64 });
+  assert.deepEqual(f.dispatched[0].answers, { color: 'Red' }); assert.equal(f.sent.length, 0);
+  f.controller.dispose();
+});
+
+test('a command already in the wake buffer is transcribed and wake-only input gets spoken feedback', async () => {
+  let frames = 0;
+  const f = fixture({ keywordFactory: () => ({ accept: () => ++frames === 4, reset() {}, dispose() {} }) });
+  await f.controller.setListening(true);
+  for (let i = 0; i < 4; i++) f.controller.frames({ samples: Array(1600).fill(.1), sampleRate: 16000 });
+  for (let i = 0; i < 9; i++) f.controller.frames({ samples: Array(1600).fill(0), sampleRate: 16000 });
+  await tick();
+  assert.equal(f.sent.length, 1); assert.equal(f.sent[0].text, 'show my agents');
+  const wav = Buffer.from(JSON.parse(f.calls[0].options.body).input_audio.data, 'base64');
+  assert.equal((wav.length - 44) / 2, 1600 * 13); assert(wav.readInt16LE(44) > 0); f.controller.dispose();
+
+  const g = fixture({ fetch: async () => ({ ok: true, json: async () => ({ text: 'Hey Vibe!' }) }) });
+  await g.controller.setListening(true);
+  g.controller.frames({ samples: Array(4800).fill(.1), sampleRate: 16000 });
+  for (let i = 0; i < 9; i++) g.controller.frames({ samples: Array(1600).fill(0), sampleRate: 16000 });
+  await tick(); await tick();
+  assert.equal(g.sent.length, 0); assert.match(g.controller.getState().reply, /didn't catch/);
+  assert(g.audio.some(chunk => chunk.local && chunk.data.length)); g.controller.dispose();
+});
 test('resolved announcement is discarded and does not reopen answer capture after cancellation', async () => {
   const f = fixture(); await f.controller.setListening(true);
   const interaction = { id: 'resolved', revision: 1, kind: 'question', questions: [{ question: 'Choose', options: [] }] };
   f.controller.resolveInteraction(interaction.id); assert.equal((await f.controller.announceInteraction(interaction)).status, 'resolved'); assert.equal(f.calls.length, 0); assert.equal(f.controller.getState().request, undefined); f.controller.dispose();
 });
-test('answer listening closes after fifteen seconds of silence without a transcription', async () => {
+test('answer listening speaks missed-speech feedback after fifteen seconds without a transcription', async () => {
   const f = fixture(); await f.controller.setListening(true);
   await f.controller.announceInteraction({ id: 'waiting', revision: 1, kind: 'question', questions: [{ question: 'Which option?', options: [{ label: 'One' }] }] });
   assert.equal(f.controller.getState().phase, 'awaiting-answer');
   for (let i = 0; i < 149; i++) f.controller.frames({ samples: Array(1600).fill(0), sampleRate: 16000 });
   assert.equal(f.controller.getState().phase, 'awaiting-answer'); f.controller.frames({ samples: Array(1600).fill(0), sampleRate: 16000 });
+  await tick();
+  assert.match(f.controller.getState().reply, /didn't catch/);
   assert.equal(f.controller.getState().phase, 'listening'); assert.equal(f.calls.filter(c => c.url.endsWith('/transcriptions')).length, 0); f.controller.dispose();
 });
 test('same native request ID in two panes and after restart has independent voice identity', async () => {

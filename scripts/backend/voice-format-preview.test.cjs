@@ -30,7 +30,7 @@ test('preview plays selected supported voice at WAV rate without enabling relay 
     onAudio: chunk => { chunks.push(chunk); if (chunk.done) queueMicrotask(() => controller.configure({ playbackDone: chunk.replyId })); } });
   t.after(() => controller.dispose());
   assert.equal((await controller.configure({ preview: true })).ok, true);
-  assert.equal(calls.length, 1); assert.equal(calls[0].model, TTS_MODEL); assert.equal(calls[0].voice, 'af_bella'); assert.equal(calls[0].response_format, 'wav');
+  assert.equal(calls.length, 1); assert.equal(calls[0].model, TTS_MODEL); assert.equal(calls[0].voice, 'af_bella'); assert.equal(calls[0].response_format, 'pcm');
   assert.equal(chunks[0].sampleRate, 44100); assert.equal(wakeStarts, 0); assert(events.every(e => !e.listening && e.muted)); assert.equal(controller.getState().phase, 'off');
 });
 
@@ -41,7 +41,7 @@ test('preview reports missing key and speech failure while remaining muted', asy
   assert.equal((await other.configure({ preview: true })).ok, false); assert.equal(other.getState().phase, 'off'); assert.equal(other.getState().errorOperation, 'speech');
 });
 
-test('default error sound is a short nonverbal chime and default voice is Heart', () => {
+test('legacy nonverbal chime remains available and default voice is Heart', () => {
   const clip = errorChime(); assert.equal(clip.text, ''); assert(clip.durationMs < 500); assert(clip.pcm.some(n => n !== 0)); assert.equal(TTS_VOICE, 'af_heart');
 });
 

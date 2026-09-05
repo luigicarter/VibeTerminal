@@ -209,10 +209,15 @@ prevents activation and reports the error instead of claiming to be listening.
 Activated audio is held in memory and sent to OpenRouter's transcription
 endpoint. The default is `openai/whisper-large-v3-turbo`. The user-selected
 Orchestrator handles the recognized text. Spoken replies use
-`hexgrad/kokoro-82m` with the Heart English voice by default. WAV responses are
-validated before playback using their actual sample rate and channel count.
+`hexgrad/kokoro-82m` with the Heart English voice by default. PCM responses are
+validated before playback using the response's sample rate and channel metadata;
+correctly framed WAV responses remain compatible.
 Only supported voice choices are offered. Speech failures are separate from
-successful text/actions; errors use a brief local chime and stage-specific text.
+successful text/actions. Errors and missed speech use fixed bundled spoken
+feedback and stage-specific text without another cloud request. Speech already
+in the wake buffer counts toward endpointing, preserving short commands. Empty
+transcriptions ask the user to try again; empty answers to pending questions
+repeat the question without dispatching a guessed answer.
 
 There is no MP3/file-save workflow. Audio chunks are ordered, bounded, and
 cancelled by playback identity. Wake detection pauses during playback. Voice is

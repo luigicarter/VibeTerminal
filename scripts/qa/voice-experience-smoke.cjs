@@ -4,6 +4,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), net = require('node:net');
 const { spawn, spawnSync } = require('node:child_process');
+const { wavFromSamples } = require('../../backend/voiceAudio.cjs');
 const root = path.resolve(__dirname, '../..');
 const output = path.join(root, '.tmp', 'voice-experience-smoke', `${Date.now()}-${process.pid}`);
 fs.mkdirSync(output, { recursive: true });
@@ -18,6 +19,8 @@ class Cdp {
   close() { this.ws.close(); }
 }
 const traceFile = path.join(output, 'events.jsonl'), stateFile = path.join(output, 'windows.json'), commandFile = path.join(output, 'command.json'), failureFile = path.join(output, 'speech-failure'), consentResponseFile = path.join(output, 'consent-response.json');
+const transcriptionFile = path.join(output, 'transcription.json');
+fs.writeFileSync(transcriptionFile, JSON.stringify({ text: 'Hey Vibe, hello' }));
 const events = () => fs.existsSync(traceFile) ? fs.readFileSync(traceFile, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
 const windows = () => JSON.parse(fs.readFileSync(stateFile, 'utf8'));
 const record = (name, value) => { result.checks.push({ name, value }); console.log(name, JSON.stringify(value)); };
@@ -44,10 +47,17 @@ globalThis.fetch=async(url,options={})=>{
  if(url==='https://openrouter.ai/api/v1/key')return reply({data:{is_free_tier:true}});
  if(String(url).startsWith('https://openrouter.ai/api/v1/models'))return reply({data:[{id:'fixture/relay',name:'Fixture relay',supported_parameters:['tools'],architecture:{input_modalities:['text'],output_modalities:['text']}},{id:'openai/whisper-large-v3-turbo',architecture:{output_modalities:['transcription']}},{id:'hexgrad/kokoro-82m',architecture:{output_modalities:['speech']}}]});
  if(url==='https://openrouter.ai/api/v1/chat/completions')return reply({choices:[{message:{content:'Fixture text answer.'}}],usage:{cost:0}});
+ if(url==='https://openrouter.ai/api/v1/audio/transcriptions'){
+  const body=JSON.parse(options.body);const audio=Buffer.from(body.input_audio?.data||'','base64');
+  if(body.input_audio?.format!=='wav'||audio.toString('ascii',0,4)!=='RIFF'||audio.toString('ascii',8,12)!=='WAVE')throw Error('Fixture expected WAV transcription input');
+  const transcript=JSON.parse(fs.readFileSync(${JSON.stringify(transcriptionFile)},'utf8'));log({transcription:transcript.text});return reply({...transcript,usage:{cost:0}});
+ }
  if(url==='https://openrouter.ai/api/v1/audio/speech'){
+  const body=JSON.parse(options.body);log({speechRequest:{response_format:body.response_format,input:body.input}});
+  if(body.response_format!=='pcm')throw Error('Fixture expected PCM speech request');
   if(fs.existsSync(${JSON.stringify(failureFile)}))return new Response(JSON.stringify({error:{message:'Fixture speech outage',code:503}}),{status:503,headers:{'content-type':'application/json'}});
   const pcm=Buffer.alloc(4800);for(let i=0;i<2400;i++)pcm.writeInt16LE(Math.round(1000*Math.sin(i*2*Math.PI*440/24000)),i*2);
-  const wav=Buffer.alloc(44+pcm.length);wav.write('RIFF');wav.writeUInt32LE(36+pcm.length,4);wav.write('WAVEfmt ',8);wav.writeUInt32LE(16,16);wav.writeUInt16LE(1,20);wav.writeUInt16LE(1,22);wav.writeUInt32LE(24000,24);wav.writeUInt32LE(48000,28);wav.writeUInt16LE(2,32);wav.writeUInt16LE(16,34);wav.write('data',36);wav.writeUInt32LE(pcm.length,40);pcm.copy(wav,44);return new Response(wav,{headers:{'content-type':'audio/wav'}});
+  return new Response(pcm,{headers:{'content-type':'audio/pcm;rate=24000;channels=1'}});
  }
  throw Error('Fixture blocked network: '+url);
 };
@@ -95,6 +105,7 @@ async function screenshot(client, name) { const r = await client.send('Page.capt
   voice = new Cdp(vp.webSocketDebuggerUrl); await voice.open();
   // Preserve actual AudioContext scheduling/end ACK, silence only the physical output.
   await voice.eval(`(()=>{const connect=AudioNode.prototype.connect;AudioNode.prototype.connect=function(destination,...args){if(destination instanceof AudioDestinationNode){const gain=this.context.createGain();gain.gain.value=0;connect.call(gain,destination);return connect.call(this,gain,...args);}return connect.call(this,destination,...args);};window.__qaSilentPlayback=true;window.__qaStoppedTracks=[];const stop=MediaStreamTrack.prototype.stop;MediaStreamTrack.prototype.stop=function(){const before=this.readyState;stop.call(this);window.__qaStoppedTracks.push({kind:this.kind,before,after:this.readyState});};})()`);
+  await voice.eval(`(()=>{window.__qaVoiceAudio=[];window.__qaVoiceStates=[];window.vibe.voice.onAudio(({data,...chunk})=>window.__qaVoiceAudio.push({...chunk,bytes:data.length}));window.vibe.voice.onState(state=>window.__qaVoiceStates.push({phase:state.phase,reply:state.reply,replyId:state.replyId,transcript:state.transcript}));})()`);
   const native = await until(() => windows().find(w => w.url.includes('surface=voice') && !w.visible), 'hidden native audio renderer');
   assert.equal(native.bounds.width, 112); assert.equal(native.bounds.height, 112);
   const opts = events().find(e => e.nativeOptions).nativeOptions; assert.equal(opts.frame, false); assert.equal(opts.transparent, true); assert.equal(opts.backgroundThrottling, false); assert.equal(opts.alwaysOnTop,false); assert.equal(opts.focusable,false);
@@ -111,6 +122,28 @@ async function screenshot(client, name) { const r = await client.send('Page.capt
   assert(windows().some(w=>w.id===native.id&&!w.visible&&w.webContentsId===native.webContentsId));
   fs.writeFileSync(commandFile, JSON.stringify({ closeVoice: true }));
   await until(() => !fs.existsSync(commandFile)&&windows().find(w => w.id === native.id && !w.visible), 'native audio close remains hidden'); assert.equal((await cdp.eval('window.vibe.voice.getState()')).listening, true); record('in-app-hide-show-native-close-preserves-listening', { id: native.id, webContentsId: native.webContentsId });
+  const recording = wavFromSamples(Float32Array.from({ length: 8000 }, (_, i) => 0.1 * Math.sin(i * 2 * Math.PI * 440 / 16000))).toString('base64');
+  const normal = await cdp.eval(`window.vibe.voice.sendAudio(${JSON.stringify({ audioBase64: recording, format: 'wav' })})`);
+  assert.equal(normal.ok, true, JSON.stringify(normal));
+  const normalReply = await until(() => voice.eval(`window.__qaVoiceStates.find(s=>s.phase==='speaking'&&s.reply==='Fixture text answer.')`), 'voice relay spoken reply');
+  await until(() => events().some(e => e.payload?.playbackDone === normalReply.replyId && e.value?.ok), 'normal voice reply renderer ACK');
+  const normalAudio = await voice.eval(`window.__qaVoiceAudio.filter(c=>c.replyId===${JSON.stringify(normalReply.replyId)})`);
+  assert(normalAudio.some(c => c.bytes > 0 && c.sampleRate === 24000 && c.channels === 1 && c.format === 's16le' && !c.local));
+  assert(normalAudio.some(c => c.done && !c.cancelled));
+  assert.equal((await cdp.eval('window.vibe.voice.getState()')).transcript, 'hello');
+  assert(events().some(e => e.speechRequest?.response_format === 'pcm' && e.speechRequest.input === 'Fixture text answer.'));
+  record('wav-transcription-relay-pcm-reply-renderer-ack', { normal, normalReply, normalAudio });
+  fs.writeFileSync(transcriptionFile, JSON.stringify({ text: '' }));
+  const cloudBeforeEmpty = events().filter(e => /\/audio\/speech$|\/chat\/completions$/.test(e.request || '')).length;
+  const empty = await cdp.eval(`window.vibe.voice.sendAudio(${JSON.stringify({ audioBase64: recording, format: 'wav' })})`);
+  assert.equal(empty.ok, true, JSON.stringify(empty)); assert.equal(empty.status, 'empty'); assert.equal(empty.speech?.ok, true, JSON.stringify(empty));
+  const emptyReply = await until(() => voice.eval(`window.__qaVoiceStates.find(s=>s.phase==='speaking'&&s.reply?.startsWith("I didn't catch that."))`), 'empty transcription spoken retry prompt');
+  await until(() => events().some(e => e.payload?.playbackDone === emptyReply.replyId && e.value?.ok), 'local retry prompt renderer ACK');
+  const emptyAudio = await voice.eval(`window.__qaVoiceAudio.filter(c=>c.replyId===${JSON.stringify(emptyReply.replyId)})`);
+  assert(emptyAudio.some(c => c.local && c.bytes > 0 && c.format === 's16le'));
+  assert(emptyAudio.some(c => c.local && c.done && !c.cancelled));
+  assert.equal(events().filter(e => /\/audio\/speech$|\/chat\/completions$/.test(e.request || '')).length, cloudBeforeEmpty);
+  record('empty-transcription-local-spoken-retry-renderer-ack-no-cloud-speech', { empty, emptyReply, chunks: emptyAudio.length });
   assert.equal((await cdp.eval('window.vibe.orchestrator.setEnabled(false)')).ok, true);
   await until(() => events().some(e => e.helper === 'exit'), 'helper shutdown');
   const stoppedTracks = await until(() => voice.eval('window.__qaStoppedTracks.some(t=>t.kind==="audio"&&t.before==="live"&&t.after==="ended")&&window.__qaStoppedTracks'), 'actual audio capture track stopped');

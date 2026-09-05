@@ -12,7 +12,7 @@ const invalid = error => error instanceof LocalErrorAudioError && error.code ===
 test('every bundled error clip matches its manifest and contains short audible PCM', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'manifest.json'), 'utf8'));
   const loader = createLocalErrorAudio({ directory });
-  assert.equal(Object.keys(manifest.clips).length, 7);
+  assert.deepEqual(Object.keys(manifest.clips).sort(), Object.keys(ERROR_AUDIO_TEXT).sort());
   for (const [category, text] of Object.entries(ERROR_AUDIO_TEXT)) {
     const wav = fs.readFileSync(path.join(directory, `${category}.wav`));
     assert.equal(wav.toString('ascii', 0, 4), 'RIFF');

@@ -64,6 +64,69 @@
       "channels": 1,
       "format": "s16le",
       "sha256": "3d3d353964c4c806cf8a4a95ef6969d0a32659bb7e4e9c317fe0b894e9f3bce1"
+    },
+    "not-understood": {
+      "file": "not-understood.wav",
+      "text": "I didn't catch that. Say Hey Vibe and try again.",
+      "voice": "Microsoft Zira Desktop",
+      "sampleRate": 24000,
+      "channels": 1,
+      "format": "s16le",
+      "sha256": "a6acb2af54e1d5c8d8835c600c14984be5a946b1ef80be2c2d471dddaf8fadca"
+    },
+    "transcription": {
+      "file": "transcription.wav",
+      "text": "I couldn't turn that recording into text. Please check Orchestrator settings and try again.",
+      "voice": "Microsoft Zira Desktop",
+      "sampleRate": 24000,
+      "channels": 1,
+      "format": "s16le",
+      "sha256": "c59b3b285198630cb004c55c33197f96ac60609ba6377abf81694fd88ba5812e"
+    },
+    "orchestration": {
+      "file": "orchestration.wav",
+      "text": "I couldn't complete that request. Please check the error in the workspace before trying again.",
+      "voice": "Microsoft Zira Desktop",
+      "sampleRate": 24000,
+      "channels": 1,
+      "format": "s16le",
+      "sha256": "2c02f5f3db819723244d42c762845524e1daac5c79383a20b9616b54d8337afc"
+    },
+    "speech": {
+      "file": "speech.wav",
+      "text": "I couldn't play the spoken reply. Please read the response or error in the workspace.",
+      "voice": "Microsoft Zira Desktop",
+      "sampleRate": 24000,
+      "channels": 1,
+      "format": "s16le",
+      "sha256": "c71c5685c21ba6d3dc082cfc4428d2b49162c60cbc65c6371452fca6eb02ec33"
+    },
+    "busy": {
+      "file": "busy.wav",
+      "text": "I'm still working on your previous request. Please wait for my reply, or cancel it first.",
+      "voice": "Microsoft Zira Desktop",
+      "sampleRate": 24000,
+      "channels": 1,
+      "format": "s16le",
+      "sha256": "7412f1a37c6baa102e662a776ab94ea0e823524af3c30d702a0b6b4335d85a57"
+    },
+    "spending-limit": {
+      "file": "spending-limit.wav",
+      "text": "The session spending limit has been reached. Please check Orchestrator settings.",
+      "voice": "Microsoft Zira Desktop",
+      "sampleRate": 24000,
+      "channels": 1,
+      "format": "s16le",
+      "sha256": "11e67e48272dd9f07eb81e0446218abee5500c479dfb89e6f0c2a71fe1d11c6f"
+    },
+    "answer": {
+      "file": "answer.wav",
+      "text": "Your answer was not accepted. Please review the question in the workspace.",
+      "voice": "Microsoft Zira Desktop",
+      "sampleRate": 24000,
+      "channels": 1,
+      "format": "s16le",
+      "sha256": "4796fb9cad1ca049e902fe832befebc5daed8b6ea46a441437c7e9e7eba65097"
     }
   }
 }

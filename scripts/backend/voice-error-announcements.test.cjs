@@ -66,9 +66,20 @@ test('background error announcements never discard a user recording', async t =>
   f.controller.configure({ manual: true });
   assert.equal((await f.controller.announceError({ category: 'upstream', origin: 'monitor' })).status, 'queued');
   assert.equal(f.controller.getState().phase, 'recording'); assert.equal(f.audio.length, 0);
-  for (let i = 0; i < 60; i++) f.controller.frames({ samples: Array(1600).fill(0), sampleRate: 16000 });
+  for (let i = 0; i < 59; i++) f.controller.frames({ samples: Array(1600).fill(0), sampleRate: 16000 });
+  assert.equal(f.controller.getState().phase, 'recording');
   f.controller.cancelSpeech();
   await new Promise(setImmediate); assert.equal(f.audio.length, 0);
+});
+
+test('local spoken feedback reports renderer failure without retrying playback or cloud speech', async t => {
+  const f = fixture(t, () => { throw Error('No network allowed'); }, false); await f.controller.setListening(true);
+  const pending = f.controller.announceError({ category: 'not-understood', origin: 'voice', operation: 'transcription' });
+  f.controller.configure({ playbackError: 'Output unavailable' });
+  const result = await pending;
+  assert.equal(result.ok, false); assert.equal(result.status, 'playback-failed');
+  assert.match(result.error, /audio output/); assert.equal(f.controller.getState().phase, 'listening');
+  assert.equal(new Set(f.audio.map(chunk => chunk.replyId)).size, 1); assert.equal(f.calls.length, 0);
 });
 test('empty successful speech responses also use the local fallback', async t => {
   const f = fixture(t, () => ({ ok: true, status: 200, headers: new Headers({ 'content-type': 'audio/wav' }), body: (async function* () {})() }));

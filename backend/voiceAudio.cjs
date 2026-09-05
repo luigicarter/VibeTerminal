@@ -8,7 +8,19 @@ function wavFromSamples(samples, sampleRate = RATE) {
   return b;
 }
 function createRecording({ silenceMs = 900, initialSilenceMs = 6000, maxMs = 60000, threshold = 0.012, preRoll = [] } = {}) {
-  let chunks = preRoll.map(c => Float32Array.from(c)), total = 0, voiced = 0, silence = 0;
+  let chunks = [], total = 0, voiced = 0, silence = 0;
+  const accountVoice = samples => {
+    const duration = samples.length / RATE * 1000;
+    const rms = Math.sqrt(samples.reduce((sum, n) => sum + n * n, 0) / samples.length);
+    if (rms >= threshold) { voiced += duration; silence = 0; } else silence += duration;
+  };
+  let remainingPreRoll = Math.max(0, Math.floor(maxMs / 1000 * RATE));
+  for (const chunk of preRoll) {
+    const samples = Float32Array.from(chunk.slice(0, remainingPreRoll));
+    if (!samples.length) continue;
+    chunks.push(samples); remainingPreRoll -= samples.length; accountVoice(samples);
+    if (!remainingPreRoll) break;
+  }
   const preRollMs = chunks.reduce((n, chunk) => n + chunk.length, 0) / RATE * 1000;
   return {
     push(samples) {
@@ -16,9 +28,8 @@ function createRecording({ silenceMs = 900, initialSilenceMs = 6000, maxMs = 600
       if (samples.length > remaining) samples = samples.slice(0, remaining);
       if (!samples.length) return 'complete';
       const duration = samples.length / RATE * 1000;
-      const rms = Math.sqrt(samples.reduce((sum, n) => sum + n * n, 0) / samples.length);
       chunks.push(Float32Array.from(samples)); total += duration;
-      if (rms >= threshold) { voiced += duration; silence = 0; } else silence += duration;
+      accountVoice(samples);
       return total + preRollMs >= maxMs || (voiced >= 250 && silence >= silenceMs) ? 'complete' : (voiced < 250 && total >= initialSilenceMs ? 'silence' : 'recording');
     },
     finish() { const result = new Float32Array(chunks.reduce((n, c) => n + c.length, 0)); let at = 0; for (const c of chunks) { result.set(c, at); at += c.length; } chunks = []; return result; },
@@ -31,6 +42,34 @@ function createPcmFramer() {
   return { push(chunk) { const b = Buffer.concat([carry, Buffer.from(chunk)]); const end = b.length - b.length % 2; carry = Buffer.from(b.subarray(end)); return b.subarray(0, end); }, finish() { if (carry.length) throw Error('Speech stream ended with an incomplete PCM sample'); } };
 }
 function shouldSpeak({ origin, kind } = {}) { return origin === 'voice' || kind === 'interaction'; }
+function decodedPcm(pcm, sampleRate, channels, invalid) {
+  if (!pcm.length || !Number.isInteger(sampleRate) || sampleRate < 8000 || sampleRate > 48000 || ![1, 2].includes(channels) || pcm.length % (channels * 2)) invalid();
+  const durationMs = pcm.length / (sampleRate * channels * 2) * 1000;
+  if (durationMs > 180000) throw Error('Speech exceeded the three-minute playback limit.');
+  return { pcm, sampleRate, channels, durationMs };
+}
+function decodeSpeechAudio(input, contentType = '') {
+  const invalid = () => { throw Error('Speech returned invalid or unsupported audio or PCM metadata.'); };
+  if (contentType == null) contentType = '';
+  if (typeof contentType !== 'string' || contentType.length > 1024) invalid();
+  const [mime, ...parameters] = contentType.toLowerCase().split(';').map(part => part.trim());
+  // Bound the complete recording before copying, allowing space for WAV headers.
+  const length = input?.byteLength ?? input?.length;
+  if (!Number.isSafeInteger(length) || length <= 0) invalid();
+  if (length > 36 * 1024 * 1024) throw Error('Speech exceeded the audio size limit.');
+  if (mime === 'audio/pcm') {
+    const values = new Map();
+    for (const parameter of parameters) {
+      const match = /^(rate|channels)\s*=\s*(?:([0-9]+)|"([0-9]+)")$/.exec(parameter);
+      if (!match || values.has(match[1])) invalid();
+      values.set(match[1], Number(match[2] ?? match[3]));
+    }
+    // OpenRouter PCM is signed 16-bit little-endian; rate and channels are required.
+    return decodedPcm(Buffer.from(input), values.get('rate'), values.get('channels'), invalid);
+  }
+  if (['', 'application/octet-stream', 'audio/wav', 'audio/x-wav', 'audio/wave', 'audio/vnd.wave'].includes(mime)) return decodeSpeechWav(input);
+  invalid();
+}
 function decodeSpeechWav(input) {
   const b = Buffer.from(input);
   const invalid = () => { throw Error('Speech returned an invalid or unsupported WAV recording.'); };
@@ -50,12 +89,10 @@ function decodeSpeechWav(input) {
     at = end + (size % 2);
   }
   if (!format || !pcm?.length || format.encoding !== 1 || format.bits !== 16 || ![1, 2].includes(format.channels) || format.sampleRate < 8000 || format.sampleRate > 48000 || format.align !== format.channels * 2 || format.byteRate !== format.sampleRate * format.align || pcm.length % format.align) invalid();
-  const durationMs = pcm.length / format.byteRate * 1000;
-  if (durationMs > 180000) throw Error('Speech exceeded the three-minute playback limit.');
-  return { pcm, sampleRate: format.sampleRate, channels: format.channels, durationMs };
+  return decodedPcm(pcm, format.sampleRate, format.channels, invalid);
 }
 function errorChime() {
   const samples = Array.from({ length: 5760 }, (_, i) => 0.12 * Math.sin(2 * Math.PI * 660 * i / 24000) * Math.sin(Math.PI * i / 5760) ** 2);
   return { pcm: wavFromSamples(samples, 24000).subarray(44), durationMs: 240, text: '' };
 }
-module.exports = { RATE, wavFromSamples, createRecording, createPcmFramer, shouldSpeak, decodeSpeechWav, errorChime };
+module.exports = { RATE, wavFromSamples, createRecording, createPcmFramer, shouldSpeak, decodeSpeechWav, decodeSpeechAudio, errorChime };

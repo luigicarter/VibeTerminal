@@ -33,10 +33,11 @@ connection work; changing a spending limit does not cancel a command.
 
 The unavailable legacy speech selection is migrated to `hexgrad/kokoro-82m`,
 Heart (`af_heart`). Supported presets are explicit. Speech comes from OpenRouter;
-there is no local speech-generation model to install. WAV headers determine the
-sample rate/channels, with bounded size/duration and acknowledged playback.
-Errors use a brief local chime and stage-specific text, replacing robotic error
-recordings. Text/action success and speech failure remain separate results.
+there is no local speech-generation model to install. Speech requests use PCM;
+response metadata determines the sample rate/channels, with bounded size/duration
+and acknowledged playback. WAV responses remain supported when correctly framed.
+Missed speech and failures use bundled spoken explanations and stage-specific
+text. Text/action success and speech failure remain separate results.
 
 Automatic activity reports are off by default. Explicitly enabled reporting
 ignores paused/unavailable output, excludes reports from conversational context,
@@ -140,3 +141,35 @@ Electron's `askForMediaAccess` native OS prompt is macOS-only. Windows desktop
 microphone access remains subject to its privacy settings. See
 [Electron system preferences](https://www.electronjs.org/docs/latest/api/system-preferences)
 and [Microsoft desktop app permissions](https://support.microsoft.com/en-us/windows/windows-desktop-apps-and-privacy-8b3b13bc-d8ff-5460-8423-7d5d5c1f6665).
+
+## Spoken response repair (September 5, 2026)
+
+The prior speech request sent `response_format: wav`, while the current
+[OpenRouter speech API](https://openrouter.ai/docs/guides/overview/multimodal/tts)
+documents PCM or MP3. Requests now use PCM and decode signed 16-bit samples using
+the response's rate/channel metadata. Missing or invalid metadata fails with
+spoken local feedback, without guessing playback parameters.
+
+Wake capture now counts speech already present in its pre-roll buffer. Short
+commands spoken before detection completes therefore reach transcription instead
+of being discarded as silence. Empty, wake-only and punctuation-only transcripts,
+and recordings with no detected speech, play “I didn't catch that. Say Hey Vibe
+and try again.” Every explicit attempt gets feedback. Empty answers to pending
+agent questions repeat the question and retain answer routing. Silence still
+closes the bounded answer window.
+
+Bundled fixed recordings cover network/provider failures, local request failures,
+busy requests, spending limits, rejected answers and speech failures. They need
+no cloud speech request and follow mute/cancel rules. Background alerts retain
+their cooldown and defer during active voice turns. A failed playback
+acknowledgment is reported as a failure, without recursive fallback attempts.
+
+Verification: 289 backend tests, frontend voice smoke, asset validation and the
+production build passed. Parent reviewed the diffs and isolated Electron evidence
+at `.tmp/voice-experience-smoke/1788650479349-38068/`: WAV transcription to relay to
+PCM response, plus empty transcription to local spoken retry, each with renderer
+acknowledgment. No cloud speech was requested for the retry. Provider responses
+and microphone input were scripted; output was zero-gain. Physical microphone,
+audible playback and authenticated provider behavior remain unverified. These
+fixes are included in the v0.1.88 release. Installed applications receive them
+through the normal Check for update, Update and Restart flow.

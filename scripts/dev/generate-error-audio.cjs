@@ -7,9 +7,22 @@ const { ERROR_AUDIO_TEXT, createLocalErrorAudio } = require('../../backend/local
 
 if (process.platform !== 'win32') throw new Error('Generation requires Windows System.Speech; playback does not.');
 const directory = path.resolve(__dirname, '../../vendor/voice/alerts');
+const requestedCategories = process.argv.slice(2);
+for (const category of requestedCategories) {
+  if (!Object.hasOwn(ERROR_AUDIO_TEXT, category)) throw new Error(`Unknown error audio category: ${category}`);
+}
+const categories = new Set(requestedCategories.length ? requestedCategories : Object.keys(ERROR_AUDIO_TEXT));
+const manifestPath = path.join(directory, 'manifest.json');
+const previous = requestedCategories.length && fs.existsSync(manifestPath) ? JSON.parse(fs.readFileSync(manifestPath, 'utf8')) : null;
+if (requestedCategories.length) {
+  const existingLoader = createLocalErrorAudio({ directory });
+  for (const category of Object.keys(ERROR_AUDIO_TEXT)) {
+    if (!categories.has(category)) existingLoader.load(category);
+  }
+}
 fs.mkdirSync(directory, { recursive: true });
 const quote = value => `'${value.replaceAll("'", "''")}'`;
-const speechCommands = Object.entries(ERROR_AUDIO_TEXT).map(([category, text]) => `$synth.SetOutputToWaveFile(${quote(path.join(directory, `${category}.wav`))}, $format)\n$synth.Speak(${quote(text)})\n$synth.SetOutputToNull()`).join('\n');
+const speechCommands = Object.entries(ERROR_AUDIO_TEXT).filter(([category]) => categories.has(category)).map(([category, text]) => `$synth.SetOutputToWaveFile(${quote(path.join(directory, `${category}.wav`))}, $format)\n$synth.Speak(${quote(text)})\n$synth.SetOutputToNull()`).join('\n');
 const script = `
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Speech
@@ -28,10 +41,10 @@ try {
 } finally { $synth.Dispose() }
 `;
 const voice = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 120000, encoding: 'utf8' }).trim();
-const clips = Object.fromEntries(Object.entries(ERROR_AUDIO_TEXT).map(([category, text]) => [category, {
+const clips = Object.fromEntries(Object.entries(ERROR_AUDIO_TEXT).map(([category, text]) => [category, categories.has(category) ? {
   file: `${category}.wav`, text, voice, sampleRate: 24000, channels: 1, format: 's16le',
   sha256: crypto.createHash('sha256').update(fs.readFileSync(path.join(directory, `${category}.wav`))).digest('hex'),
-}]));
-fs.writeFileSync(path.join(directory, 'manifest.json'), `${JSON.stringify({ version: 1, generator: 'Windows System.Speech.Synthesis.SpeechSynthesizer (offline)', clips }, null, 2)}\n`);
+} : previous.clips[category]]));
+fs.writeFileSync(manifestPath, `${JSON.stringify({ version: 1, generator: 'Windows System.Speech.Synthesis.SpeechSynthesizer (offline)', clips }, null, 2)}\n`);
 const loader = createLocalErrorAudio({ directory });
-for (const category of Object.keys(clips)) console.log(`${category}: ${loader.load(category).durationMs} ms (${voice})`);
+for (const category of Object.keys(clips)) console.log(`${category}: ${loader.load(category).durationMs} ms (${clips[category].voice})`);
