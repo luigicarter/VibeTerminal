@@ -391,7 +391,8 @@ const appSource = fs.readFileSync(appPath, "utf8");
 const findNextIndex = appSource.indexOf("function findNextFluidLayout");
 assert(
   findNextIndex > 0 &&
-    appSource.slice(findNextIndex, findNextIndex + 700).includes(".filter(isTileAnchor)"),
+    appSource.slice(findNextIndex, findNextIndex + 900).includes("buildBoardTiles(sessions).map((tile) =>") &&
+    appSource.slice(findNextIndex, findNextIndex + 900).includes("tile.anchor.layout"),
   "findNextFluidLayout should only consider tile anchors"
 );
 // Membership is repaired wherever sessions become a set.
@@ -455,13 +456,12 @@ assert(
   terminalPaneSource.includes("if (autoFocusRef.current) {"),
   "focus on mount should be gated by the autoFocus prop"
 );
-// REGRESSION GUARD: gating focus on selection ALONE broke every ordinary pane —
-// selectedSessionId starts null and adding a pane does not select it, so no
-// terminal ever called focus() and a freshly launched one could not be typed
-// into until clicked. An ungrouped pane must always take focus on mount.
+// New panes now select themselves. Reattachment must not let every solo pane
+// steal focus; the first visible pane is the initial null-selection fallback.
 assert(
-  appSource.includes("!session.tileId || session.id === selectedSessionId"),
-  "an ungrouped pane must still focus on mount; only split members are gated on selection"
+  appSource.includes("session.id === selectedSessionId || (!selectedSessionId && session.id === visibleSessionIds[0])") &&
+    appSource.includes("setSelectedSessionId(created.id)"),
+  "new panes select themselves and remount focus follows selection"
 );
 assert(
   terminalPaneSource.includes("suppressFrameTransition(paneFrame)") &&
@@ -469,13 +469,13 @@ assert(
     terminalPaneSource.includes("frameTransitionSuppressions"),
   "several panes sharing one frame should refcount the transition suppression"
 );
-// Split/pop-out actions stay wired, but split is deliberately kept OUT of the
-// always-visible action row: three more buttons crowded the header at the
-// 280px minimum pane width. Pop-out only renders for a pane that is grouped.
+// The redesigned header puts split/pop-out in its accessible action menu;
+// pop-out remains conditional on membership in a split tile.
 assert(
   terminalPaneSource.includes("onSplit: (dir: \"row\" | \"col\") => void;") &&
-    terminalPaneSource.includes("isGrouped && (") &&
-    terminalPaneSource.includes("onClick={onPopOut}"),
+    terminalPaneSource.includes("isGrouped ?") &&
+    terminalPaneSource.includes("run:onPopOut") &&
+    terminalPaneSource.includes('onSplit("row")') && terminalPaneSource.includes('onSplit("col")'),
   "split/pop-out should stay wired, with pop-out shown only when grouped"
 );
 

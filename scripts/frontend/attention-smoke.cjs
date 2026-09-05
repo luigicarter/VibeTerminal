@@ -841,15 +841,14 @@ assert(
     codexGateIndex < suppressIndex,
   "the completion suppression guard must sit after the codex gates and before applyAcceptedAgentAttention"
 );
-// Ordering inside applyAgentSubagent is load-bearing: applyAgentRunning's
-// turn-start branch clears subagentDepth, so the increment has to land after it.
+// A child start must preserve prior siblings rather than start a new parent turn.
 const subagentFnIndex = appSource.indexOf("function applyAgentSubagent");
 const subagentBody = appSource.slice(subagentFnIndex, subagentFnIndex + 1600);
 assert(
   subagentFnIndex > 0 &&
-    subagentBody.indexOf("applyAgentRunning(sessionId, true, provider)") <
-      subagentBody.indexOf("updateSubagentDepth(session, phase)"),
-  "applyAgentSubagent must increment the bracket after the turn-start reset"
+    !subagentBody.includes("applyAgentRunning(sessionId, true, provider)") &&
+    subagentBody.includes("updateSubagentDepth(session, phase)"),
+  "applyAgentSubagent must retain already-open children"
 );
 assert(
   appSource.includes("const subagentDepth = turnStart ? undefined : session.subagentDepth;"),
@@ -863,8 +862,8 @@ assert(
 // status/attention mutations go through updateAnySession, so a background
 // folder's counts stay live without new state or polling.
 assert(
-  appSource.includes("summarizeSessions(workspace.sessions)") &&
-    appSource.includes("summarizeSessions(multiSessions)") &&
+  appSource.includes("summarizeSessions(workspace.sessions.map(withRuntime))") &&
+    appSource.includes("summarizeSessions(multiSessions.map(withRuntime))") &&
     appSource.includes("<SessionCounts summary={summary} />") &&
     appSource.includes("<SessionCounts summary={multiModeSummary} />"),
   "both the folder cards and the Multi card should render live session counts"
@@ -966,8 +965,8 @@ assert(
   appSource.includes("function stopSessionProcess(session") &&
     appSource.includes("window.vibe?.fusionChat?.stop(session.id)") &&
     appSource.includes("window.vibe?.openFusionChat?.stop(session.id)") &&
-    appSource.includes("window.vibe?.terminal.kill(session.id)") &&
-    appSource.includes("void stopSessionProcess(session)") &&
+    appSource.includes("window.vibe?.terminal.kill(session.id, {") &&
+    appSource.includes('void stopSessionProcess(session, "close")') &&
     appSource.includes("stopSessionProcess(session).then("),
   "Fusion/Open Fusion should stop only through explicit close/restart/resume actions"
 );

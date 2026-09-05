@@ -1,3 +1,4 @@
+import { useSessionDraft, readSessionDraft, writeSessionDraft } from "../sessionDrafts";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Ban,
@@ -264,10 +265,12 @@ interface ToolMeta {
   isGoalTool: boolean;
 }
 
+interface FusionQuestion { id: string; header?: string; question: string; options: { label: string; description?: string }[]; multiple?: boolean; custom?: boolean }
 interface PendingFusionDecision {
   pendingId: string;
   kind: string;
   detail: string;
+  questions?: FusionQuestion[];
 }
 
 const FUSION_SPEAKER_LABEL = "Fusion";
@@ -660,7 +663,8 @@ function pendingFusionDecisionFromResult(
   return {
     pendingId,
     kind: typeof parsed.kind === "string" && parsed.kind ? parsed.kind : "decision",
-    detail: typeof parsed.detail === "string" && parsed.detail ? parsed.detail : "Fusion needs a decision."
+    detail: typeof parsed.detail === "string" && parsed.detail ? parsed.detail : "Fusion needs a decision.",
+    questions: Array.isArray(parsed.questions) ? parsed.questions as FusionQuestion[] : undefined
   };
 }
 
@@ -728,11 +732,18 @@ export default function FusionChatPane({
   onAttention
 }: FusionChatPaneProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [input, setInput] = useState("");
+  const [input, setInput] = useSessionDraft(session.id);
   const [busy, setBusy] = useState(false);
   const [waiting, setWaiting] = useState(false);
   const [failed, setFailed] = useState(false);
   const [pendingDecision, setPendingDecision] = useState<PendingFusionDecision | null>(null);
+  const [fusionQuestionAnswers, setFusionQuestionAnswers] = useState<Record<string, string[]>>({});
+  const fusionQuestionSubmitting = useRef<string | null>(null);
+  const resolvedDecisionIds = useRef(new Set<string>());
+  const pendingDecisionRef = useRef(pendingDecision);
+  pendingDecisionRef.current = pendingDecision;
+  const [fusionQuestionPicks, setFusionQuestionPicks] = useState<string[]>([]);
+  const currentFusionQuestion = pendingDecision?.questions?.find(q => !fusionQuestionAnswers[q.id]);
   const [interrupting, setInterrupting] = useState(false);
   // Messages sent mid-turn (steering). Claude already has them on stdin; they
   // stay pinned above the composer — the same QUEUED mechanic as the Open
@@ -946,7 +957,6 @@ export default function FusionChatPane({
     if (!initialPicker || initialPickerAppliedRef.current) return;
     initialPickerAppliedRef.current = true;
     setPicker(initialPicker);
-    setInput("");
     setSlashMenuDismissed(false);
     window.setTimeout(() => composerRef.current?.focus(), 0);
   }, [initialPicker]);
@@ -1204,7 +1214,7 @@ export default function FusionChatPane({
     waitingForDecisionRef.current = next;
     setWaiting(next);
   };
-  const clearPendingDecision = () => setPendingDecision(null);
+  const clearPendingDecision = () => { setPendingDecision(null); setFusionQuestionAnswers({}); setFusionQuestionPicks([]); };
   const setInterruptingState = (next: boolean) => {
     interruptingRef.current = next;
     setInterrupting(next);
@@ -1560,6 +1570,12 @@ export default function FusionChatPane({
       if (event.type !== "assistant-text" && event.type !== "thinking") {
         flushDeltas();
       }
+      if (["question-resolved", "permission-resolved"].includes((event as { type: string }).type)) {
+        const requestId = (event as unknown as { requestId: string }).requestId;
+        resolvedDecisionIds.current.add(requestId);
+        if (pendingDecisionRef.current?.pendingId === requestId) clearPendingDecision();
+        return;
+      }
       switch (event.type) {
         case "session":
           claudeSessionIdRef.current = event.sessionId;
@@ -1816,6 +1832,7 @@ export default function FusionChatPane({
           );
           if (needsDecision) {
             const pending = pendingFusionDecisionFromResult(parsed);
+            if (pending && resolvedDecisionIds.current.has(pending.pendingId)) break;
             if (pending) {
               setPendingDecision(pending);
             } else {
@@ -3146,9 +3163,11 @@ export default function FusionChatPane({
     // Sending implies following the conversation again.
     pinnedToBottomRef.current = true;
     if (pendingDecisionIsQuestion && pendingDecision) {
-      submitPendingDecision("accept", text);
+      if (currentFusionQuestion?.custom === false) return;
+      void submitFusionQuestion([text]);
       return;
     }
+    if (pendingDecision) return;
     if (!window.vibe?.fusionChat?.sendUserTurn) {
       const message = "Fusion unavailable: fusion chat bridge is not available.";
       push({ role: "opus", kind: "error", text: message });
@@ -3202,6 +3221,32 @@ export default function FusionChatPane({
     setBusyState(true);
     onStatusChangeRef.current("running");
     setImplementingPlan(false);
+  }
+
+  async function submitFusionQuestion(labels: string[]) {
+    const pending = pendingDecision;
+    if (!pending || !labels.length || fusionQuestionSubmitting.current) return;
+    const questions = pending.questions || [{ id: "0", question: pending.detail, options: [] }];
+    const current = currentFusionQuestion || questions[0];
+    const answers = { ...fusionQuestionAnswers, [current.id]: labels };
+    if (questions.some(q => !answers[q.id])) {
+      setFusionQuestionAnswers(answers); setFusionQuestionPicks([]); setInput(""); return;
+    }
+    const bridge = window.vibe?.fusionChat as unknown as { answerQuestion?: (id: string, requestId: string, answers: Record<string, string[]>) => Promise<{ok: boolean; error?: string}> } | undefined;
+    if (!bridge?.answerQuestion) {
+      push({ role: "opus", kind: "error", text: "Question answer bridge is unavailable. Restart the app to continue." });
+      return;
+    }
+    const draft = readSessionDraft(session.id);
+    fusionQuestionSubmitting.current = pending.pendingId;
+    try {
+      const result = await bridge.answerQuestion(session.id, pending.pendingId, answers);
+      if (!result.ok) throw new Error(result.error || "Answer was not accepted");
+      if (pendingDecisionRef.current?.pendingId === pending.pendingId) clearPendingDecision();
+      if (readSessionDraft(session.id).revision === draft.revision) writeSessionDraft(session.id, "");
+      setWaitingState(false); setBusyState(true);
+    } catch (error) { push({ role: "opus", kind: "error", text: String(error) }); }
+    finally { fusionQuestionSubmitting.current = null; }
   }
 
   function submitPendingDecision(
@@ -3443,16 +3488,24 @@ export default function FusionChatPane({
                 <span className="fusion-decision-detail">{pendingDecision.detail}</span>
               </div>
               {pendingDecisionIsQuestion ? (
+                <div className="fusion-decision-actions">
+                {currentFusionQuestion && <div>{currentFusionQuestion.header && <strong>{currentFusionQuestion.header}: </strong>}{currentFusionQuestion.question}</div>}
+                {currentFusionQuestion?.options.map(option => <button key={option.label} type="button" className="fusion-decision-button" title={option.description}
+                  onClick={() => currentFusionQuestion.multiple ? setFusionQuestionPicks(previous => previous.includes(option.label) ? previous.filter(x => x !== option.label) : [...previous, option.label]) : void submitFusionQuestion([option.label])}>
+                  {fusionQuestionPicks.includes(option.label) ? "✓ " : ""}{option.label}
+                </button>)}
+                {currentFusionQuestion?.multiple && <button type="button" className="fusion-decision-button" disabled={!fusionQuestionPicks.length} onClick={() => void submitFusionQuestion(fusionQuestionPicks)}>Send selections</button>}
                 <button
                   className="fusion-decision-button is-primary"
                   type="button"
                   title="Send this answer to Fusion"
-                  disabled={!input.trim()}
-                  onClick={() => submitPendingDecision("accept", input.trim())}
+                  disabled={!input.trim() || currentFusionQuestion?.custom === false}
+                  onClick={() => void submitFusionQuestion([input.trim()])}
                 >
                   <Check size={14} />
                   <span>Send answer</span>
                 </button>
+                </div>
               ) : (
                 <div className="fusion-decision-actions">
                   <button

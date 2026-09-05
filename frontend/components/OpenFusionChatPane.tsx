@@ -1,3 +1,4 @@
+import { useSessionDraft, readSessionDraft, writeSessionDraft } from "../sessionDrafts";
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -129,6 +130,8 @@ interface PendingQuestion {
   requestId: string;
   role: OpenFusionChatRole;
   questions: OpenFusionQuestion[];
+  revision: number;
+  partialAnswers: string[][];
 }
 
 // One model the user is adding to a custom provider: the id the endpoint
@@ -366,7 +369,7 @@ export default function OpenFusionChatPane({
   onAttention
 }: OpenFusionChatPaneProps) {
   const [messages, setMessages] = useState<OpenFusionChatMessage[]>([]);
-  const [input, setInput] = useState("");
+  const [input, setInput] = useSessionDraft(session.id);
   const [busy, setBusy] = useState(false);
   const [waiting, setWaiting] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -378,10 +381,10 @@ export default function OpenFusionChatPane({
   // Question-service requests, FIFO. Only the head renders (and only when no
   // permission is pending — permission > question for key ownership).
   const [pendingQuestions, setPendingQuestions] = useState<PendingQuestion[]>([]);
-  // Progress through the HEAD request's questions: answered-so-far arrays and
-  // the multi-select picks for the current question.
+  const interactionSubmitting = useRef(new Set<string>());
+  // The host retains completed answers; the pane mirrors its current index.
+  // Unsubmitted multi-select picks belong to the current question only.
   const [questionIndex, setQuestionIndex] = useState(0);
-  const [questionAnswers, setQuestionAnswers] = useState<string[][]>([]);
   const [questionMultiPick, setQuestionMultiPick] = useState<Set<string>>(() => new Set());
   // Messages sent mid-turn (steering). The server has them queued; they stay
   // pinned above the composer — opencode's QUEUED badge mechanic — until the
@@ -544,7 +547,6 @@ export default function OpenFusionChatPane({
     pendingQuestionsRef.current = [];
     setPendingQuestions([]);
     setQuestionIndex(0);
-    setQuestionAnswers([]);
     setQuestionMultiPick(new Set());
   }
 
@@ -1065,6 +1067,11 @@ export default function OpenFusionChatPane({
       if (event.type !== "assistant-text" && event.type !== "thinking") {
         flushDeltas();
       }
+      if ((event as { type: string }).type === "question-progress") {
+        const progress = event as unknown as { requestId: string; partialAnswers: string[][]; revision: number };
+        applyQuestionProgress(progress.requestId, progress.partialAnswers, progress.revision);
+        return;
+      }
       switch (event.type) {
         case "session":
           threadIdRef.current = event.sessionId;
@@ -1457,7 +1464,9 @@ export default function OpenFusionChatPane({
           const pending: PendingQuestion = {
             requestId: event.requestId,
             role: event.role,
-            questions: event.questions
+            questions: event.questions,
+            revision: 1,
+            partialAnswers: []
           };
           pendingQuestionsRef.current = [...pendingQuestionsRef.current, pending];
           setPendingQuestions(pendingQuestionsRef.current);
@@ -1478,15 +1487,17 @@ export default function OpenFusionChatPane({
         case "question-resolved": {
           // Resolution can come from our own reply OR an external one (e.g.
           // the request timed out server-side) — drop it wherever it sits.
+          const removedHead = pendingQuestionsRef.current[0]?.requestId === event.requestId;
           const next = pendingQuestionsRef.current.filter(
             (q) => q.requestId !== event.requestId
           );
           if (next.length !== pendingQuestionsRef.current.length) {
             pendingQuestionsRef.current = next;
             setPendingQuestions(next);
-            setQuestionIndex(0);
-            setQuestionAnswers([]);
-            setQuestionMultiPick(new Set());
+            if (removedHead) {
+              setQuestionIndex(next[0]?.partialAnswers.length || 0);
+              setQuestionMultiPick(new Set());
+            }
           }
           if (!next.length) {
             setWaitingState(false);
@@ -1856,43 +1867,41 @@ export default function OpenFusionChatPane({
     onStatusChangeRef.current("running");
   }
 
-  function answerPermission(reply: "once" | "always" | "reject") {
+  async function answerPermission(reply: "once" | "always" | "reject") {
     const pending = pendingPermission;
-    if (!pending) return;
-    setPendingPermission(null);
-    // A queued question becomes the active panel next — stay in waiting.
-    if (!pendingQuestionsRef.current.length) {
-      setWaitingState(false);
-      if (busyRef.current) {
-        onStatusChangeRef.current("running");
-      }
+    if (!pending || interactionSubmitting.current.has(pending.requestId)) return;
+    interactionSubmitting.current.add(pending.requestId);
+    try {
+      const result = await window.vibe?.openFusionChat?.permission(session.id, pending.requestId, reply);
+      if (!result?.ok) throw new Error(result?.error || "Permission response was not accepted");
+      setPendingPermission(current => current?.requestId === pending.requestId ? null : current);
+      if (!pendingQuestionsRef.current.length) setWaitingState(false);
+      push({ role: "user", kind: "text", text: `${reply === "reject" ? "Rejected" : "Allowed"}: ${permissionDetail(pending)}` });
+    } catch (error) { push({ role: "brain", kind: "error", text: String(error) }); }
+    finally { interactionSubmitting.current.delete(pending.requestId); }
+  }
+
+  function applyQuestionProgress(requestId: string, answers: string[][], revision: number) {
+    const current = pendingQuestionsRef.current.find(question => question.requestId === requestId);
+    if (!current || revision <= current.revision || !Array.isArray(answers)) return;
+    const next = pendingQuestionsRef.current.map(question => question.requestId === requestId ? { ...question, partialAnswers: answers, revision } : question);
+    pendingQuestionsRef.current = next;
+    setPendingQuestions(next);
+    if (next[0]?.requestId === requestId) {
+      setQuestionIndex(answers.length);
+      setQuestionMultiPick(new Set());
     }
-    push({
-      role: "user",
-      kind: "text",
-      text:
-        reply === "reject"
-          ? `Rejected: ${permissionDetail(pending)}`
-          : `${reply === "always" ? "Allowed for the session" : "Allowed"}: ${permissionDetail(pending)}`
-    });
-    void window.vibe?.openFusionChat
-      ?.permission(session.id, pending.requestId, reply)
-      .then((result) => {
-        if (result && result.ok === false && result.error) {
-          push({ role: "brain", kind: "error", text: result.error });
-        }
-      });
   }
 
   // Removes the head question request from the queue and restores flow state.
   function retireActiveQuestion(active: PendingQuestion) {
+    if (pendingQuestionsRef.current[0]?.requestId !== active.requestId) return;
     const next = pendingQuestionsRef.current.filter(
       (q) => q.requestId !== active.requestId
     );
     pendingQuestionsRef.current = next;
     setPendingQuestions(next);
-    setQuestionIndex(0);
-    setQuestionAnswers([]);
+    setQuestionIndex(next[0]?.partialAnswers.length || 0);
     setQuestionMultiPick(new Set());
     if (!next.length) {
       setWaitingState(false);
@@ -1905,29 +1914,31 @@ export default function OpenFusionChatPane({
   // Record the current question's answer (labels or typed text). Advances to
   // the next question in the request, or POSTs the whole answer set — one
   // label array PER question, in order, as the reply endpoint requires.
-  function submitQuestionAnswer(labels: string[]) {
+  async function submitQuestionAnswer(labels: string[]) {
     const active = activeQuestion;
-    if (!active || !labels.length) return;
-    const nextAnswers = [...questionAnswers.slice(0, questionIndex), labels];
-    if (questionIndex + 1 < active.questions.length) {
-      setQuestionAnswers(nextAnswers);
-      setQuestionIndex(questionIndex + 1);
-      setQuestionMultiPick(new Set());
-      return;
-    }
-    retireActiveQuestion(active);
-    push({
-      role: "user",
-      kind: "text",
-      text: `Answered: ${nextAnswers.map((entry) => entry.join(", ")).join(" · ")}`
-    });
-    void window.vibe?.openFusionChat
-      ?.answerQuestion(session.id, active.requestId, nextAnswers)
-      .then((result) => {
-        if (result && result.ok === false && result.error) {
-          push({ role: "brain", kind: "error", text: result.error });
-        }
-      });
+    if (!active || !labels.length || interactionSubmitting.current.has(active.requestId)) return;
+    const nextAnswers = [...active.partialAnswers, labels];
+    const draft = readSessionDraft(session.id);
+    const bridge = window.vibe?.openFusionChat as unknown as {
+      questionProgress?: (id: string, requestId: string, answers: string[][], revision?: number) => Promise<{ ok: boolean; error?: string; revision?: number; partialAnswers?: string[][] }>;
+      answerQuestion?: (id: string, requestId: string, answers: string[][], revision?: number) => Promise<{ ok: boolean; error?: string }>;
+    } | undefined;
+    interactionSubmitting.current.add(active.requestId);
+    try {
+      if (nextAnswers.length < active.questions.length) {
+        const progress = await bridge?.questionProgress?.(session.id, active.requestId, nextAnswers, active.revision);
+        if (!progress?.ok || progress.revision === undefined) throw new Error(progress?.error || "Question progress was not accepted");
+        applyQuestionProgress(active.requestId, progress.partialAnswers || nextAnswers, progress.revision);
+        if (readSessionDraft(session.id).revision === draft.revision) writeSessionDraft(session.id, "");
+        return;
+      }
+      const result = await bridge?.answerQuestion?.(session.id, active.requestId, nextAnswers, active.revision);
+      if (!result?.ok) throw new Error(result?.error || "Answer was not accepted");
+      retireActiveQuestion(active);
+      if (readSessionDraft(session.id).revision === draft.revision) writeSessionDraft(session.id, "");
+      push({ role: "user", kind: "text", text: `Answered: ${nextAnswers.map(entry => entry.join(", ")).join(" · ")}` });
+    } catch (error) { push({ role: "brain", kind: "error", text: String(error) }); }
+    finally { interactionSubmitting.current.delete(active.requestId); }
   }
 
   function toggleQuestionPick(label: string) {
@@ -1939,18 +1950,18 @@ export default function OpenFusionChatPane({
     });
   }
 
-  function rejectActiveQuestion() {
+  async function rejectActiveQuestion() {
     const active = activeQuestion;
-    if (!active) return;
-    retireActiveQuestion(active);
-    push({ role: "user", kind: "text", text: "Dismissed the question." });
-    void window.vibe?.openFusionChat
-      ?.rejectQuestion(session.id, active.requestId)
-      .then((result) => {
-        if (result && result.ok === false && result.error) {
-          push({ role: "brain", kind: "error", text: result.error });
-        }
-      });
+    if (!active || interactionSubmitting.current.has(active.requestId)) return;
+    interactionSubmitting.current.add(active.requestId);
+    try {
+      const reject = window.vibe?.openFusionChat?.rejectQuestion as ((id: string, requestId: string, revision?: number) => Promise<{ ok: boolean; error?: string }>) | undefined;
+      const result = await reject?.(session.id, active.requestId, active.revision);
+      if (!result?.ok) throw new Error(result?.error || "Question dismissal was not accepted");
+      retireActiveQuestion(active);
+      push({ role: "user", kind: "text", text: "Dismissed the question." });
+    } catch (error) { push({ role: "brain", kind: "error", text: String(error) }); }
+    finally { interactionSubmitting.current.delete(active.requestId); }
   }
 
   function saveModels(change: OpenFusionSettingsChange, note: string) {
@@ -2590,11 +2601,12 @@ export default function OpenFusionChatPane({
     }
     // An active question that allows free-text answers owns the composer:
     // typed text is the answer for the CURRENT question, not a new turn.
+    if (pendingPermission) return;
     if (activeQuestion && activeQuestionInfo?.custom) {
-      setInput("");
-      submitQuestionAnswer([text]);
+      void submitQuestionAnswer([text]);
       return;
     }
+    if (activeQuestion) return;
     // First-run gate: no turn leaves the pane until both roles have an
     // explicitly picked model (slash commands above stay usable — they ARE the
     // setup path).

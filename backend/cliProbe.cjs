@@ -32,16 +32,11 @@ const path = require("path");
 // excludes: "terminal" (no CLI), "kimi-custom" (vendored binary shipped with
 // the app, always present), and "fusion"/"openfusion" (selection-only kinds
 // that launch real claude/opencode sessions, so they are covered by those two).
-const PROBED_AGENT_COMMANDS = Object.freeze({
-  codex: "codex",
-  claude: "claude",
-  cursor: "cursor-agent",
-  gemini: "gemini",
-  opencode: "opencode",
-  aider: "aider",
-  kimi: "kimi",
-  qwen: "qwen"
-});
+const PROBED_AGENT_COMMANDS = Object.freeze(Object.fromEntries(
+  Object.entries(require("../shared/providerCapabilities.json"))
+    .filter(([provider, capabilities]) => capabilities.command && provider !== "kimi-custom")
+    .map(([provider, capabilities]) => [provider, capabilities.command])
+));
 
 // A single unreachable network share on PATH can hang readdir for seconds, so
 // every directory read races a timer and a slow one is simply skipped.

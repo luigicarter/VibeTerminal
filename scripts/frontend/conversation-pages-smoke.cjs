@@ -1,0 +1,35 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const Module = require('node:module');
+const ts = require('typescript');
+const filename = path.resolve(__dirname, '../../frontend/conversationPages.ts');
+const loaded = new Module(filename, module);
+loaded.filename = filename;
+loaded.paths = Module._nodeModulePaths(path.dirname(filename));
+loaded._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, filename);
+const { mergeConversationFragments: merge } = loaded.exports;
+const piece = (messageId, source, start, end, role = 'user') => ({ messageId, role, text: source.slice(start, end), start, end });
+const long = 'First 🧠\n' + '内容😀\r\n'.repeat(14000) + ' THE END';
+let pages = [];
+for (let end = long.length; end > 0;) {
+  let start = Math.max(0, end - 16000);
+  if (start > 0 && /[\uDC00-\uDFFF]/.test(long[start])) start++;
+  pages = merge([piece('long', long, start, end)], pages);
+  end = start;
+}
+assert.equal(pages.length, 1);
+assert.equal(pages[0].text, long);
+assert.equal(pages[0].start, 0);
+assert.equal(pages[0].end, long.length);
+const prior = piece('prior', 'same', 0, 4);
+const later = piece('later', 'same', 0, 4, 'assistant');
+assert.deepEqual(merge([prior], [...pages, later]).map(p => p.messageId), ['prior', 'long', 'later']);
+const old = piece('m', 'abcdef', 0, 4);
+const recent = piece('m', 'abcdef', 2, 6);
+assert.equal(merge([old], [recent])[0].text, 'abcdef');
+assert.equal(old.text, 'abcd', 'merge must not mutate previous React state');
+assert.deepEqual(merge([old], [old]), [old], 'repeated fragment is deduplicated');
+assert.equal(merge([piece('m', 'abcdef', 0, 2)], [piece('m', 'abcdef', 4, 6)]).length, 2, 'gaps are retained as separate fragments');
+assert.equal(merge([prior], [{ ...prior, messageId: 'other' }]).length, 2, 'identical messages keep separate identities');
+console.log('conversation pages smoke passed');

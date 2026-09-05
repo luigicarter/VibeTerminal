@@ -1,3 +1,4 @@
+import { OrchestratorSettings } from "./OrchestratorSettings";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { Check, Pencil, Plus, Trash2, X } from "lucide-react";
 
@@ -74,6 +75,8 @@ type TestState =
   | { status: "error"; message: string };
 
 export function SettingsDialog({ hint, onClose }: SettingsDialogProps): JSX.Element {
+  const [panel, setPanel] = useState(hint ? "providers" : "orchestrator");
+  const [density, setDensity] = useState(() => window.localStorage.getItem("vibe-terminal:chrome-density:v1") || "comfortable");
   const [loading, setLoading] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
   const [profiles, setProfiles] = useState<ClaudeProviderProfile[]>([]);
@@ -344,7 +347,10 @@ export function SettingsDialog({ hint, onClose }: SettingsDialogProps): JSX.Elem
         )}
 
         <div className="settings-body">
-          <section className="settings-section" aria-labelledby="settings-claude-providers-title">
+          <nav className="settings-navigation" aria-label="Settings sections">{[{id:"orchestrator",label:"Orchestrator & voice"},{id:"providers",label:"Agent providers"},{id:"appearance",label:"Appearance"}].map(item=><button key={item.id} aria-current={panel===item.id?"page":undefined} onClick={()=>setPanel(item.id)}>{item.label}</button>)}</nav>
+          <div hidden={panel!=="orchestrator"}><OrchestratorSettings /></div>
+          {panel==="appearance" && <section className="settings-section"><h3>Workspace appearance</h3><p className="settings-description">Choose the density of navigation and controls. Terminal text keeps its own sizing.</p><div role="radiogroup" aria-label="Interface density" className="density-options">{["comfortable","compact"].map(value=><button role="radio" aria-checked={density===value} key={value} onClick={()=>{setDensity(value);window.localStorage.setItem("vibe-terminal:chrome-density:v1",value);document.documentElement.dataset.density=value;}}>{value=== "comfortable"?"Comfortable":"Compact"}</button>)}</div></section>}
+          <section hidden={panel!=="providers"} className="settings-section" aria-labelledby="settings-claude-providers-title">
             <h3 className="settings-section-title" id="settings-claude-providers-title">
               Claude providers
             </h3>

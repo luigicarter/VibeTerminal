@@ -40,6 +40,7 @@
 
 const { spawn, execFileSync } = require("child_process");
 const crypto = require("crypto");
+const { observeInteractionEvent, claimInteraction, chatEventEnvelope, isCurrentChatState } = require("./fusionChatHost.cjs");
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
@@ -1124,6 +1125,35 @@ function writeBackgroundStatusSnapshotFile(statusFile, snapshot) {
 }
 
 // ---- the host (only runs when executed as a process, not when required) ----
+function validateQuestionPrefix(interaction, answers, complete = false) {
+  if (!Array.isArray(answers) || (complete ? answers.length !== interaction.questions.length : answers.length >= interaction.questions.length)) throw new Error("Invalid completed question prefix");
+  for (let index = 0; index < answers.length; index++) {
+    const values = answers[index];
+    const question = interaction.questions[index];
+    if (!Array.isArray(values) || !values.length || values.some(v => typeof v !== "string" || !v.trim())) throw new Error("Each completed question requires answer labels or text");
+    if (!question.multiple && values.length > 1) throw new Error("This question allows one answer");
+    if (question.custom === false && values.some(v => !question.options.some(o => o.label === v))) throw new Error("This question requires a listed option");
+  }
+  const existing = interaction.partialAnswers || [];
+  if (answers.length < existing.length || existing.some((values, index) => JSON.stringify(values) !== JSON.stringify(answers[index]))) throw new Error("Question progress changed; refresh before answering");
+}
+
+function updateQuestionProgress(state, payload) {
+  if (!state?.child || state.child.killed) throw new Error("Session is not running");
+  if (payload.generation === undefined || payload.generation !== state.generation) throw new Error("Stale session generation");
+  const interaction = state.interactions?.get(String(payload.requestId || ""));
+  if (!interaction || interaction.kind !== "question") throw new Error("Question is no longer pending");
+  if (interaction.submitting) throw new Error("Question already has an answer in flight");
+  if (payload.revision !== undefined && payload.revision !== interaction.revision) throw new Error("Stale question revision");
+  validateQuestionPrefix(interaction, payload.answers);
+  const changed = (interaction.partialAnswers?.length || 0) !== payload.answers.length;
+  if (changed) {
+    interaction.partialAnswers = payload.answers.map(values => [...values]);
+    interaction.revision += 1;
+  }
+  return { interaction, changed };
+}
+
 function runHost() {
   const sessions = new Map(); // paneId -> state
 
@@ -1157,23 +1187,35 @@ function runHost() {
   }
 
   function emitSessionEvent(id, state, event) {
+    if (!isCurrentChatState(sessions, id, state)) return;
+    observeInteractionEvent(id, state, event, emit);
     state.history.push(cloneEvent(event));
     if (state.history.length > MAX_HISTORY_EVENTS) {
       state.history.splice(0, state.history.length - MAX_HISTORY_EVENTS);
     }
-    emit({ type: "event", id, event });
+    emit(chatEventEnvelope(id, state, event));
   }
 
-  function emitDirectSessionEvent(id, event) {
-    if (id) emit({ type: "event", id, event });
+  function emitDirectSessionEvent(id, event, state) {
+    if (state && sessions.has(id) && !isCurrentChatState(sessions, id, state)) return;
+    if (id) emit(chatEventEnvelope(id, state, event));
   }
 
   function replaySession(id, state) {
+    if (!isCurrentChatState(sessions, id, state)) return;
+    for (const interaction of state.interactions?.values() || []) emit({ type: "interaction-request", id, generation: interaction.generation, requestId: interaction.id, interaction });
     // Reattach replay is a transcript restore, not fresh activity: the flag
     // lets the renderer rebuild the pane without re-latching status or
     // re-marking the attention dot for turns the user already acknowledged.
     for (const event of state.history) {
-      emit({ type: "event", id, event: { ...event, replay: true } });
+      emit({ ...chatEventEnvelope(id, state, event), event: { ...event, replay: true } });
+    }
+    for (const interaction of state.interactions?.values() || []) {
+      if (interaction.kind === "question") {
+        // A very long turn can age the original request out of transcript history.
+        emit(chatEventEnvelope(id, state, { type: "question", requestId: interaction.id, role: "brain", questions: interaction.questions, replay: true }));
+        emit(chatEventEnvelope(id, state, { type: "question-progress", requestId: interaction.id, partialAnswers: interaction.partialAnswers || [], revision: interaction.revision, replay: true }));
+      }
     }
   }
 
@@ -1750,7 +1792,7 @@ function runHost() {
       activityKind,
       text: detail,
       updates: task.updates
-    });
+    }, state);
   }
 
   function backgroundRequest(payload) {
@@ -1918,9 +1960,9 @@ function runHost() {
   }
 
   function postRootPlannerInput(id, state, text, mode, model, queued) {
-    ensureSession(id, state, text)
+    return ensureSession(id, state, text)
       .then(() => {
-        if (sessions.get(id) !== state || !state.sessionId) return;
+        if (sessions.get(id) !== state || !state.sessionId) throw new Error("Session changed while sending");
         // One-shot completion-gate nudge: only a fresh non-plan turn consumes
         // it (short-circuit order is load-bearing — a plan or queued send must
         // not burn the flag; it stays armed for the next qualifying turn).
@@ -1938,12 +1980,14 @@ function runHost() {
           body
         );
       })
+      .then(() => ({ ok: true }))
       .catch((error) => {
-        if (sessions.get(id) !== state) return;
+        if (sessions.get(id) !== state) return { ok: false, error: error.message };
         emitSessionEvent(id, state, {
           type: "error",
           message: `Could not send the turn: ${error.message}`
         });
+        return { ok: false, error: error.message };
       });
   }
 
@@ -2155,13 +2199,14 @@ function runHost() {
     try {
       child = spawn(launch.command, launch.args, launch.options);
     } catch (error) {
-      emitDirectSessionEvent(id, { type: "error", message: `Could not launch OpenCode: ${error.message}` });
-      emitDirectSessionEvent(id, { type: "closed", code: -1 });
+      emitDirectSessionEvent(id, { type: "error", message: `Could not launch OpenCode: ${error.message}` }, { generation: payload.generation });
+      emitDirectSessionEvent(id, { type: "closed", code: -1 }, { generation: payload.generation });
       return;
     }
 
     const state = {
       child,
+      generation: payload.generation,
       password,
       port: 0,
       cwd: String(cwd || ""),
@@ -2256,6 +2301,40 @@ function runHost() {
     });
   }
 
+  async function dispatchCheckedAction(kind, payload) {
+    const state = sessions.get(payload?.id);
+    const ack = (ok, error) => emit({ type: "action-result", id: payload?.id, generation: state?.generation ?? payload?.generation, actionId: payload?.actionId, ok, status: ok ? "submitted" : "failed", ...(error ? { error } : {}) });
+    try {
+      if (!state?.child || state.child.killed || !state.port) throw new Error("Open Fusion is not ready");
+      if (payload.generation === undefined || payload.generation !== state.generation) throw new Error("Stale session generation");
+      if (kind === "interrupt") {
+        if (!state.sessionId) throw new Error("No active Open Fusion session");
+        await request(state, "POST", `/session/${encodeURIComponent(state.sessionId)}/abort`);
+        const event = { type: "interrupted" };
+        emitSessionEvent(payload.id, state, state.gate ? state.gate.observe(event) : event);
+      } else {
+        if (state.interactions?.size) throw new Error("Answer the pending request before sending another task");
+        const text = String(payload.text || "");
+        if (!text.trim()) throw new Error("Input text is empty");
+        const model = splitModelId(state.plannerModel);
+        if (!model) throw new Error("Choose a Brain model before sending");
+        const mode = payload.mode === "plan" ? "plan" : "auto";
+        if (mode === "plan" && !state.planAgent) throw new Error("Restart this pane to load the Plan agent");
+        const queued = Boolean(state.turnBusy);
+        let handled = false;
+        if (queued) handled = await routeSteerToPlanner(payload.id, state, text);
+        if (!handled) {
+          const result = await postRootPlannerInput(payload.id, state, text, mode, model, queued);
+          if (!result?.ok) throw new Error(result?.error || "Input was not accepted");
+        }
+        emitSessionEvent(payload.id, state, { type: "user", text, queued, mode });
+        if (handled) emitSessionEvent(payload.id, state, { type: "steer-absorbed" });
+      }
+      if (sessions.get(payload.id) !== state) throw new Error("Session changed while sending");
+      ack(true);
+    } catch (error) { ack(false, error.message); }
+  }
+
   function input(payload) {
     const id = payload?.id;
     const text = String(payload?.text ?? "");
@@ -2264,7 +2343,7 @@ function runHost() {
       emitDirectSessionEvent(id, {
         type: "error",
         message: "Open Fusion session is not running. Restart the pane to continue."
-      });
+      }, state || { generation: payload?.generation });
       return;
     }
     // Ready = the serve reported its port. The session itself is created
@@ -2335,21 +2414,57 @@ function runHost() {
     postRootPlannerInput(id, state, text, mode, model, queued);
   }
 
-  function permission(payload) {
+  function questionProgress(payload) {
     const id = payload?.id;
     const state = sessions.get(id);
-    if (!state || !state.child) return;
-    const requestId = String(payload?.requestId || "");
-    const reply = ["once", "always", "reject"].includes(payload?.reply) ? payload.reply : "reject";
-    if (!requestId) return;
-    request(state, "POST", `/permission/${encodeURIComponent(requestId)}/reply`, { reply }).catch((error) => {
-      if (sessions.get(id) !== state) return;
-      emitSessionEvent(id, state, {
-        type: "error",
-        message: `Could not answer the permission request: ${error.message}`
-      });
-    });
+    const ack = result => {
+      if (payload?.actionId) emit({ type: "action-result", id, generation: state?.generation ?? payload?.generation, actionId: payload.actionId, requestId: payload.requestId, ...result });
+    };
+    try {
+      const { interaction, changed } = updateQuestionProgress(state, payload);
+      if (changed) {
+        emit({ type: "interaction-request", id, generation: state.generation, requestId: interaction.id, interaction });
+        emitSessionEvent(id, state, { type: "question-progress", requestId: interaction.id, partialAnswers: interaction.partialAnswers, revision: interaction.revision });
+      }
+      ack({ ok: true, status: "updated", revision: interaction.revision, partialAnswers: interaction.partialAnswers || [] });
+    } catch (error) { ack({ ok: false, status: "failed", error: error.message }); }
   }
+
+  async function answerInteraction(payload, kind) {
+    const id = payload?.id;
+    const state = sessions.get(id);
+    const ack = (ok, status, error) => {
+      if (payload?.actionId) emit({ type: "action-result", id, generation: state?.generation ?? payload?.generation, actionId: payload.actionId, requestId: payload.requestId, ok, status, ...(error ? { error } : {}) });
+    };
+    let interaction;
+    try {
+      interaction = claimInteraction(state, payload, kind);
+      if (payload.revision !== undefined && payload.revision !== interaction.revision) throw new Error("Stale question revision");
+      const requestId = String(payload.requestId);
+      let path, body;
+      if (kind === "permission") {
+        if (!["once", "always", "reject"].includes(payload.reply)) throw new Error("Invalid permission response");
+        path = `/permission/${encodeURIComponent(requestId)}/reply`;
+        body = { reply: payload.reply };
+      } else {
+        const reject = payload.reject === true;
+        const answers = payload.answers;
+        if (!reject) validateQuestionPrefix(interaction, answers, true);
+        path = `/question/${encodeURIComponent(requestId)}/${reject ? "reject" : "reply"}`;
+        body = reject ? undefined : { answers };
+      }
+      await request(state, "POST", path, body);
+      if (sessions.get(id) !== state) throw new Error("Session changed while answering");
+      emitSessionEvent(id, state, { type: `${kind}-resolved`, requestId });
+      ack(true, "submitted");
+    } catch (error) {
+      if (interaction) interaction.submitting = false;
+      ack(false, "failed", error.message);
+      if (state && sessions.get(id) === state) emitSessionEvent(id, state, { type: "error", message: `Could not answer the ${kind}: ${error.message}` });
+    }
+  }
+
+  function permission(payload) { void answerInteraction(payload, "permission"); }
 
   function compact(payload) {
     const id = payload?.id;
@@ -2381,29 +2496,7 @@ function runHost() {
     });
   }
 
-  function question(payload) {
-    const id = payload?.id;
-    const state = sessions.get(id);
-    if (!state || !state.child) return;
-    const requestId = String(payload?.requestId || "");
-    if (!requestId) return;
-    const reject = payload?.reject === true;
-    // Reply body: option LABELS (or typed free-text), one inner array PER
-    // question in request order — indexes or a flat array 400 server-side.
-    const answers = Array.isArray(payload?.answers)
-      ? payload.answers.map((entry) =>
-          Array.isArray(entry) ? entry.map(String) : [String(entry)]
-        )
-      : [];
-    const path = `/question/${encodeURIComponent(requestId)}/${reject ? "reject" : "reply"}`;
-    request(state, "POST", path, reject ? undefined : { answers }).catch((error) => {
-      if (sessions.get(id) !== state) return;
-      emitSessionEvent(id, state, {
-        type: "error",
-        message: `Could not answer the question: ${error.message}`
-      });
-    });
-  }
+  function question(payload) { void answerInteraction(payload, "question"); }
 
   function plannerModel(payload) {
     const id = payload?.id;
@@ -2420,7 +2513,7 @@ function runHost() {
         type: "providers",
         ok: false,
         message: "Open Fusion engine is not ready yet."
-      });
+      }, state || { generation: payload?.generation });
       return;
     }
     // The full catalog and auth-method map are progressive enhancements: their
@@ -2470,7 +2563,7 @@ function runHost() {
           available,
           catalogOk,
           authMethods: normalizeAuthMethods(authMethodsRaw)
-        });
+        }, state || { generation: payload?.generation });
       })
       .catch((error) => {
         if (sessions.get(id) !== state) return;
@@ -2478,7 +2571,7 @@ function runHost() {
           type: "providers",
           ok: false,
           message: `Could not load the provider catalog: ${error.message}`
-        });
+        }, state || { generation: payload?.generation });
       });
   }
 
@@ -2547,7 +2640,7 @@ function runHost() {
         action: "connect",
         nonce,
         message: "Open Fusion engine is not ready yet."
-      });
+      }, state || { generation: payload?.generation });
       return;
     }
     if (!/^[A-Za-z0-9._-]+$/.test(providerId) || !key || key.length > 512 || /[\r\n]/.test(key)) {
@@ -2613,7 +2706,7 @@ function runHost() {
         providerId,
         nonce,
         message: "Open Fusion engine is not ready yet."
-      });
+      }, state || { generation: payload?.generation });
       return;
     }
     const inputs = cleanAuthInputs(payload?.inputs);
@@ -2674,7 +2767,7 @@ function runHost() {
         action: "connect",
         nonce,
         message: "Open Fusion engine is not ready yet."
-      });
+      }, state || { generation: payload?.generation });
       return;
     }
     request(
@@ -2723,7 +2816,7 @@ function runHost() {
         providerId,
         action: "disconnect",
         message: "Open Fusion engine is not ready yet."
-      });
+      }, state || { generation: payload?.generation });
       return;
     }
     request(state, "DELETE", `/auth/${encodeURIComponent(providerId)}`)
@@ -2768,7 +2861,7 @@ function runHost() {
         action: "connect",
         nonce,
         message: "Open Fusion engine is not ready yet."
-      });
+      }, state || { generation: payload?.generation });
       return;
     }
     const key = typeof payload?.key === "string" ? payload.key.trim() : "";
@@ -2831,7 +2924,7 @@ function runHost() {
         providerId,
         action: "disconnect",
         message: "Open Fusion engine is not ready yet."
-      });
+      }, state || { generation: payload?.generation });
       return;
     }
     request(state, "DELETE", `/auth/${encodeURIComponent(providerId)}`)
@@ -2883,6 +2976,7 @@ function runHost() {
   function stop(payload) {
     const state = sessions.get(payload?.id);
     if (state) {
+      observeInteractionEvent(payload.id, state, { type: "closed" }, emit);
       state.stopping = true;
       settleAllBackgroundTasks(
         payload.id,
@@ -2936,9 +3030,11 @@ function runHost() {
         continue;
       }
       if (msg.type === "start") start(msg.payload);
+      else if (["input", "steer", "interrupt"].includes(msg.type) && msg.payload?.actionId) void dispatchCheckedAction(msg.type, msg.payload);
       else if (msg.type === "input") input(msg.payload);
       else if (msg.type === "permission") permission(msg.payload);
       else if (msg.type === "question") question(msg.payload);
+      else if (msg.type === "question-progress") questionProgress(msg.payload);
       else if (msg.type === "compact") compact(msg.payload);
       else if (msg.type === "planner-model") plannerModel(msg.payload);
       else if (msg.type === "providers") providers(msg.payload);
@@ -2962,6 +3058,8 @@ function runHost() {
 }
 
 module.exports = {
+  validateQuestionPrefix,
+  updateQuestionProgress,
   createOpenCodeEventNormalizer,
   rehydrateMessages,
   buildCustomProviderPatch,

@@ -12,7 +12,7 @@ to which task.
 
 | Platform | Download | Notes |
 | --- | --- | --- |
-| Windows x64 | [vibeTerminal-Setup-0.1.81.exe](https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.81/vibeTerminal-Setup-0.1.81.exe) | Standard Windows installer. |
+| Windows x64 | [vibeTerminal-Setup-0.1.82.exe](https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.82/vibeTerminal-Setup-0.1.82.exe) | Standard Windows installer. |
 | All releases | [GitHub Releases](https://github.com/luigicarter/VibeTerminal/releases) | Older versions and release assets. |
 
 Install the app, then launch `vibeTerminal` from the Start Menu or desktop
@@ -20,12 +20,20 @@ shortcut. No separate developer setup is required to use the installed app.
 
 ## What You Can Do
 
+The app includes the redesigned dark agent board and optional
+[voice/text Orchestrator](docs/orchestrator.md): bring your own OpenRouter key,
+choose the relay model, inspect session activity, create projects, stage/send
+instructions, use saved setups, and relay structured agent questions. These
+features are included in the release download linked above.
+
 - Run multiple local terminal panes in one desktop window.
 - Open project folders and keep each folder's sessions grouped together.
 - Use Multi mode for a free board of terminals and agents from different
   folders.
-- Launch panes for Terminal, Codex, Claude, and OpenCode.
+- Launch panes for Terminal, Codex, Claude/Open Claude Code, OpenCode, Cursor, Gemini, Kimi/Kimi + CC, and Qwen.
 - Drag, resize, maximize, duplicate, restart, and close panes.
+- Fit panes into available board space; hold Shift while dropping onto another tile to swap.
+- Follow conversation names and inspect observed tools/child activity from the status chip.
 - See status pills for running, waiting, done, and failed sessions.
 - Use sidebar attention dots when an agent finishes, waits for input, or fails.
 - Track Git line changes for opened project folders.
@@ -35,9 +43,9 @@ shortcut. No separate developer setup is required to use the installed app.
 ## Quick Start
 
 1. Install and open vibeTerminal.
-2. Click `Open Folder` and choose a project folder.
-3. Click `Terminal` to open a regular shell in that folder.
-4. Click an agent button, such as `Codex` or `Claude`, to start that agent in
+2. Click `Add project` and choose a project folder, or use `New project`.
+3. Choose `Terminal` on the start screen to open a regular shell in that folder.
+4. Use `New session` or a launcher card, such as `Codex` or `Claude`, to start that agent in
    the same folder.
 5. Drag pane headers to move panes around the board.
 6. Drag pane edges or corners to resize panes.
@@ -70,6 +78,12 @@ command works in PowerShell:
 - `codex`
 - `claude`
 - `opencode`
+- `cursor-agent`
+- `gemini`
+- `kimi`
+- `qwen`
+
+Kimi + CC uses the vendored launcher. Activity detail depends on the provider's native telemetry; unavailable or provisional observations are shown explicitly. See [terminal runtime and board behavior](docs/terminal-runtime.md).
 
 If a tool is not installed or is not on your PATH, the pane will open but the
 shell will report that the command was not found.

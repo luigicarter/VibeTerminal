@@ -31,6 +31,7 @@ const source = fs.readFileSync(sessionLaunchPath, "utf8");
 const compiled = ts.transpileModule(source, {
   compilerOptions: {
     module: ts.ModuleKind.CommonJS,
+    esModuleInterop: true,
     target: ts.ScriptTarget.ES2022
   },
   fileName: sessionLaunchPath
@@ -380,7 +381,9 @@ assert.strictEqual(defaultLaunchMode("qwen", 2, true), "resume");
 assert.strictEqual(defaultLaunchMode("qwen", 1, false), "new");
 assert.strictEqual(defaultLaunchMode("opencode", 3, false), "new");
 assert.strictEqual(defaultLaunchMode("terminal", 1, true), "new");
-assert.strictEqual(defaultLaunchMode("gemini", 5, true), "new");
+assert.strictEqual(defaultLaunchMode("gemini", 5, true), "resume");
+assert.strictEqual(defaultLaunchMode("gemini", 5, false), "new");
+assert.strictEqual(buildLaunchCommand({ kind: "gemini", command: "gemini", nextLaunchMode: "resume", threadRef: { id: "12345678-1234-1234-1234-123456789abc" } }), "gemini --resume 12345678-1234-1234-1234-123456789abc");
 
 // Regression tripwire: the xterm-lifecycle effect (the one that disposes the
 // terminal) must depend ONLY on session.id. If launchCommand leaks into its

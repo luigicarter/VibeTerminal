@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "generator": "Windows System.Speech.Synthesis.SpeechSynthesizer (offline)",
+  "clips": {
+    "credits": {
+      "file": "credits.wav",
+      "text": "OpenRouter reports insufficient credits. Please check your balance or API key spending limit.",
+      "voice": "Microsoft Zira Desktop",
+      "sampleRate": 24000,
+      "channels": 1,
+      "format": "s16le",
+      "sha256": "7ff984ead428e1d0bfc2630513d5f67a950c9947d01cb8f7d120e2203eb7e584"
+    },
+    "auth": {
+      "file": "auth.wav",
+      "text": "OpenRouter authentication failed. Please check your API key in settings.",
+      "voice": "Microsoft Zira Desktop",
+      "sampleRate": 24000,
+      "channels": 1,
+      "format": "s16le",
+      "sha256": "8a5b9436c6b8c059375af7d7c61fa3fcc2f7500614f470b93e25970ff460b585"
+    },
+    "rate-limit": {
+      "file": "rate-limit.wav",
+      "text": "OpenRouter is rate limiting requests. Please try again shortly.",
+      "voice": "Microsoft Zira Desktop",
+      "sampleRate": 24000,
+      "channels": 1,
+      "format": "s16le",
+      "sha256": "f1b59be18049c16c4c0a1beaab25d3f156b1dbe800887513579336b4b2b30bcd"
+    },
+    "upstream": {
+      "file": "upstream.wav",
+      "text": "OpenRouter or the selected provider could not complete the request. Please try again later.",
+      "voice": "Microsoft Zira Desktop",
+      "sampleRate": 24000,
+      "channels": 1,
+      "format": "s16le",
+      "sha256": "0b6784ce79d9432fd298da6c224b3842d2b3465284ae531e56ab981dcc4cf9bf"
+    },
+    "network": {
+      "file": "network.wav",
+      "text": "OpenRouter could not be reached. Please check your connection and try again.",
+      "voice": "Microsoft Zira Desktop",
+      "sampleRate": 24000,
+      "channels": 1,
+      "format": "s16le",
+      "sha256": "7085c15e9a4a0cbd2de66a3aac61d52e6cc16a47ec54ba5bd4d38fbbef530bcd"
+    },
+    "timeout": {
+      "file": "timeout.wav",
+      "text": "The OpenRouter request timed out. Please try again.",
+      "voice": "Microsoft Zira Desktop",
+      "sampleRate": 24000,
+      "channels": 1,
+      "format": "s16le",
+      "sha256": "68a923b770b961f73bd36ac084d965902d640218e6160882c21fa23366252b82"
+    },
+    "request": {
+      "file": "request.wav",
+      "text": "OpenRouter rejected the request. Please check your model and settings.",
+      "voice": "Microsoft Zira Desktop",
+      "sampleRate": 24000,
+      "channels": 1,
+      "format": "s16le",
+      "sha256": "3d3d353964c4c806cf8a4a95ef6969d0a32659bb7e4e9c317fe0b894e9f3bce1"
+    }
+  }
+}

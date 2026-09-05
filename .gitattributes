@@ -5,3 +5,6 @@ vendor/kimi-custom/dist/** -text
 vendor/kimi-custom/native/** -text
 vendor/kimi-custom/bin/kimi-custom text eol=lf
 vendor/kimi-custom/bin/kimi-custom.cmd text eol=crlf
+
+# These files are checksummed runtime assets; preserve their original bytes.
+vendor/voice/** -text

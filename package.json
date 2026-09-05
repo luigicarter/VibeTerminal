@@ -1,6 +1,6 @@
 {
   "name": "vibe-terminal",
-  "version": "0.1.81",
+  "version": "0.1.82",
   "private": true,
   "description": "A tiled local workspace for running multiple coding agents side by side.",
   "author": "vibeTerminal contributors",
@@ -20,6 +20,9 @@
     "screenshot:openfusion": "node scripts/qa/screenshot.cjs --openfusion",
     "screenshot:split": "node scripts/qa/screenshot.cjs --split",
     "smoke:backend:agent-telemetry": "node scripts/backend/agent-telemetry-smoke.cjs",
+    "smoke:backend:terminal-runtime": "node scripts/backend/terminal-runtime-smoke.cjs",
+    "smoke:backend:agent-generation": "node scripts/backend/agent-generation-telemetry-smoke.cjs",
+    "smoke:backend:metadata": "node scripts/backend/metadata-discovery-smoke.cjs",
     "smoke:backend:code-changes": "node scripts/backend/code-changes-smoke.cjs",
     "smoke:backend:build-supervisor": "node scripts/backend/build-supervisor-smoke.cjs",
     "smoke:backend:launch-cwd": "node scripts/backend/launch-cwd-smoke.cjs",
@@ -42,6 +45,10 @@
     "smoke:backend:fusion-adapter": "node scripts/backend/fusion-adapter-smoke.cjs",
     "smoke:backend:fusion-watch-build": "node scripts/backend/fusion-watch-build-smoke.cjs",
     "smoke:frontend:attention": "node scripts/frontend/attention-smoke.cjs",
+    "smoke:frontend:terminal-runtime": "node scripts/frontend/terminal-runtime-smoke.cjs",
+    "smoke:frontend:app-runtime": "node scripts/frontend/app-runtime-smoke.cjs",
+    "smoke:frontend:session-persistence": "node scripts/frontend/session-persistence-smoke.cjs",
+    "smoke:electron:terminal-board": "node scripts/qa/terminal-board-smoke.cjs",
     "smoke:frontend:workspace": "node scripts/frontend/workspace-smoke.cjs",
     "smoke:frontend:session-launch": "node scripts/frontend/session-launch-smoke.cjs",
     "smoke:frontend:fusion-settings": "node scripts/frontend/fusion-settings-smoke.cjs",
@@ -58,13 +65,24 @@
     "prepare:codex-bin": "node scripts/dev/prepare-codex-bin.cjs",
     "prepare:codex-bin:required": "node scripts/dev/prepare-codex-bin.cjs --required",
     "smoke:backend:fusion-appserver:embedded": "node scripts/backend/fusion-appserver-smoke.cjs --require-embedded",
-    "pack:win": "npm run prepare:codex-bin:required && npm run build && electron-builder --win --dir",
-    "dist:win": "npm run prepare:codex-bin:required && npm run build && electron-builder --win nsis"
+    "pack:win": "npm run prepare:codex-bin:required && npm run prepare:voice && npm run build && electron-builder --win --dir",
+    "dist:win": "npm run prepare:codex-bin:required && npm run prepare:voice && npm run build && electron-builder --win nsis",
+    "prepare:voice": "node scripts/dev/prepare-voice-model.cjs && node scripts/dev/verify-error-audio.cjs",
+    "test:orchestrator": "node --test scripts/backend/orchestrator-*.test.cjs scripts/backend/terminal-observation*.test.cjs scripts/backend/voice*.test.cjs scripts/backend/workspace-changes.test.cjs",
+    "smoke:frontend:workspace-setups": "node scripts/frontend/workspace-setups-smoke.cjs",
+    "smoke:electron:orchestrator": "node scripts/qa/orchestrator-smoke.cjs",
+    "smoke:electron:orchestrator-command": "node scripts/qa/orchestrator-command-smoke.cjs",
+    "smoke:frontend:orchestrator-history": "node scripts/frontend/orchestrator-history-smoke.cjs",
+    "smoke:frontend:workspace-dock": "node scripts/frontend/workspace-dock-smoke.cjs",
+    "smoke:electron:workspace-controls": "node scripts/qa/workspace-controls-smoke.cjs",
+    "smoke:electron:audio-context": "node scripts/qa/audio-context-smoke.cjs",
+    "smoke:frontend:conversation-pages": "node scripts/frontend/conversation-pages-smoke.cjs"
   },
   "dependencies": {
     "@xterm/addon-canvas": "^0.7.0",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-web-links": "^0.11.0",
+    "@xterm/headless": "5.5.0",
     "@xterm/xterm": "^5.5.0",
     "clsx": "^2.1.1",
     "electron-updater": "^6.8.9",
@@ -73,7 +91,8 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "sherpa-onnx-node": "1.13.7"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
@@ -95,7 +114,9 @@
     "asar": true,
     "asarUnpack": [
       "backend/**/*.cjs",
-      "node_modules/node-pty/**"
+      "node_modules/node-pty/**",
+      "node_modules/sherpa-onnx-node/**",
+      "node_modules/sherpa-onnx-win-x64/**"
     ],
     "npmRebuild": false,
     "extraResources": [
@@ -106,10 +127,15 @@
       {
         "from": "vendor/kimi-custom",
         "to": "kimi-custom"
+      },
+      {
+        "from": "vendor/voice",
+        "to": "voice"
       }
     ],
     "files": [
       "backend/**",
+      "shared/**",
       "dist/**",
       "frontend/assets/**",
       "node_modules/**",

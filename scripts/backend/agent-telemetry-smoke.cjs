@@ -1772,9 +1772,9 @@ function postTelemetry(callbackUrl, token, payload) {
     assert(
       cursorTypeFromStatus("completed") === "agent.completed" &&
         cursorTypeFromStatus("aborted") === "agent.waiting" &&
-        cursorTypeFromStatus(undefined) === "agent.completed" &&
+        cursorTypeFromStatus(undefined) === "agent.response" &&
         cursorTypeFromStatus("error") === "agent.failed",
-      "cursorTypeFromStatus should map error->failed, aborted->waiting, else completed"
+      "cursorTypeFromStatus should require explicit completed status; unknown stays provisional"
     );
 
     // ensureCursorProjectHooks merges our env-guarded running + stop hooks into
@@ -1933,10 +1933,10 @@ function postTelemetry(callbackUrl, token, payload) {
     // while the latch is still up. Version must bump with any source change or
     // installed copies never update.
     assert(
-      pluginSource.includes("vibeterminal-notify-5") &&
+      pluginSource.includes("vibeterminal-notify-6") &&
         !pluginSource.includes("vibeterminal-notify-3") &&
         !pluginSource.includes("vibeterminal-notify-2") &&
-        pluginSource.includes("busy = false;") &&
+        pluginSource.includes("busy.delete(") &&
         !pluginSource.includes(
           'if (event.type === "session.idle" || event.type === "session.error") {'
         ),
@@ -2146,11 +2146,11 @@ function postTelemetry(callbackUrl, token, payload) {
     // verified to expose SubagentStart/SubagentStop (and they bracket the
     // detached window too); stock kimi gets the Agent tool matcher instead.
     assert(
-      kimiCustomBlocks.includes("event = 'SubagentStart'") &&
-        kimiCustomBlocks.includes("event = 'SubagentStop'") &&
+      !kimiCustomBlocks.includes("event = 'SubagentStart'") &&
+        !kimiCustomBlocks.includes("event = 'SubagentStop'") &&
         kimiCustomBlocks.includes("'agent.subagent.started'") &&
         kimiCustomBlocks.includes("'agent.subagent.stopped'"),
-      "kimi-custom should bracket delegations with SubagentStart/SubagentStop"
+      "kimi-custom must use the stock-compatible Agent tool bracket in the shared home"
     );
     assert(
       !kimiPosixBlocks.includes("SubagentStart") &&
@@ -2347,9 +2347,10 @@ function postTelemetry(callbackUrl, token, payload) {
     const kimiCustomConfigPath = path.join(kimiCustomCreatedHome, "config.toml");
     const kimiCustomConfig = fs.readFileSync(kimiCustomConfigPath, "utf8");
     assert(
-      kimiCustomConfig.includes("# vibeterminal-kimi-custom-notify") &&
-        !kimiCustomConfig.includes("# vibeterminal-kimi-notify"),
-      "ensureKimiCustomHooks should create a hooks-only config under its own marker"
+      kimiCustomConfig.includes("# vibeterminal-kimi-notify") &&
+        !kimiCustomConfig.includes("# vibeterminal-kimi-custom-notify") &&
+        !kimiCustomConfig.includes("SubagentStart"),
+      "ensureKimiCustomHooks should share one stock-compatible hook marker"
     );
     await manager.ensureKimiCustomHooks(kimiCustomCreatedHome);
     assert(

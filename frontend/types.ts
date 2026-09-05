@@ -5,7 +5,6 @@ export type AgentKind =
   | "cursor"
   | "gemini"
   | "opencode"
-  | "aider"
   | "kimi"
   // The vendored custom Kimi Code fork (claude-code profile set): launches the
   // vendored `kimi-custom` binary with its own app-owned home, not PATH kimi.
@@ -27,7 +26,7 @@ export type AgentKind =
   // pane-scoped OpenCode config.
   | "openfusion";
 
-export type AgentThreadProvider = "codex" | "claude" | "opencode" | "cursor" | "kimi" | "kimi-custom" | "qwen";
+export type AgentThreadProvider = "codex" | "claude" | "opencode" | "cursor" | "gemini" | "kimi" | "kimi-custom" | "qwen";
 
 // A saved Claude provider profile (Settings → Claude providers). Sanitized in
 // the main process: `hasKey` only, key material never reaches the renderer.
@@ -196,6 +195,7 @@ export interface AgentThreadRef {
   provider: AgentThreadProvider;
   id?: string;
   title?: string;
+  titleSource?: "named" | "generated" | "preview";
   createdAt: number;
   updatedAt: number;
 }
@@ -419,6 +419,9 @@ export interface BranchOverview {
 }
 
 export interface TerminalLaunchPayload {
+  provider?: AgentKind;
+  threadRef?: AgentThreadRef;
+  generation?: string;
   id: string;
   cwd: string;
   command?: string;
@@ -503,8 +506,10 @@ export interface AppVersionList {
   currentVersion?: string;
 }
 
-export type TerminalEvent =
+export type TerminalEvent = (
   | { type: "ready" }
+  | { id: string; type: "created" }
+  | { id: string; type: "title"; title: string }
   | { type: "host-error"; id?: string; message: string }
   | { type: "host-exit"; message: string }
   | {
@@ -561,7 +566,9 @@ export type TerminalEvent =
       ts?: number;
     }
   | { id: string; type: "error"; message: string }
-  | { id: string; type: "exit"; exitCode?: number; signal?: number };
+  | { id: string; type: "agent-process" | "agent-session" | "agent-activity" | "agent-response"; [key: string]: unknown }
+  | { id: string; type: "exit"; exitCode?: number; signal?: number }
+) & { generation?: string; launchToken?: number };
 
 // One read-only entry in a Fusion pane's role-tagged activity log (Opus
 // delegations + Codex's streamed work). Ephemeral per launch; never persisted.

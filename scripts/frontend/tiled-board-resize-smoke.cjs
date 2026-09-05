@@ -363,10 +363,9 @@ function simulateResize(items, itemId, axis, dx, dy) {
   );
 }
 
-// --- 8. Lock the current max-bottom behavior for a staggered A/B/C chain. ---
+// --- 8. Collision repair preserves unrelated, valid manual positions. ---
 {
-  // A pushes B down. C overlaps B horizontally but not A, so the current
-  // max-bottom skyline still places C below B even though a higher hole exists.
+  // A pushes B down; C's existing position remains valid and must not move.
   const normalized = normalizeLayouts([
     { id: "A", layout: LP(0, 10, 400, 300), minW: 280, minH: 170, index: 0 },
     { id: "B", layout: LP(300, 10, 400, 170), minW: 280, minH: 170, index: 1 },
@@ -376,7 +375,14 @@ function simulateResize(items, itemId, axis, dx, dy) {
   const c = rectOf(normalized.C);
 
   assert.ok(Math.abs(b.top - 314) < 0.001, "B should land below A");
-  assert.ok(Math.abs(c.top - (rectBottom(b) + BOARD_GAP)) < 0.001, "C should retain current max-bottom placement below B");
+  assert.ok(Math.abs(c.top - 500) < 0.001, "C should retain its valid manually positioned location");
+
+  const colliding = normalizeLayouts([
+    { id: "A", layout: LP(0, 10, 400, 300), minW: 280, minH: 170, index: 0 },
+    { id: "B", layout: LP(300, 10, 400, 170), minW: 280, minH: 170, index: 1 },
+    { id: "C", layout: LP(600, 330, 400, 170), minW: 280, minH: 170, index: 2 }
+  ], IW);
+  assert.ok(Math.abs(rectOf(colliding.C).top - BOARD_PADDING) < 0.001, "a colliding C should use the higher free hole");
 }
 
 // --- 9. A colliding drop with no visible fit grows below the lowest pane. ---
@@ -599,3 +605,60 @@ function simulateResize(items, itemId, axis, dx, dy) {
 }
 
 console.log("tiled board resize smoke passed (executed real tiledBoardGeometry.ts module)");
+
+
+// Empty-region behavior used by both the live pointer preview and release.
+{
+  const {resolveMoveLayouts,findAvailablePlacement,snapCoordinate,boardPointerDelta}=geometryModule.exports;
+  const width=1000;
+  const R=(left,top,w,h)=>rectToLayout({left,top,width:w,height:h},width);
+  const rect=layout=>layoutToRect(layout,width);
+  const options=new Map();
+  const make=(layouts)=>({itemId:"A",startLayout:layouts.A,startRect:rect(layouts.A),layoutsAtStart:layouts});
+  const layouts={A:R(0,800,500,400),B:R(0,10,650,400)};
+  const desired={left:600,top:10,width:500,height:400};
+  const normal=resolveMoveLayouts(make(layouts),desired,width,{top:0,bottom:600},options);
+  assert(normal);
+  assert.deepStrictEqual(normal.B,layouts.B,"ordinary drop leaves the occupied pane untouched");
+  assert.equal(rect(normal.A).left,654,"ordinary drop targets the right empty region instead of swapping");
+  assert.ok(Math.abs(rect(normal.A).width-346)<0.001);
+  const swapped=resolveMoveLayouts(make(layouts),{...desired,left:300},width,{top:0,bottom:600},options,true);
+  assert(swapped);
+  assert.deepStrictEqual(swapped.A,layouts.B,"Shift preview uses the final swapped target geometry");
+  assert.deepStrictEqual(swapped.B,layouts.A);
+  assert.deepStrictEqual(resolveMoveLayouts(make(layouts),desired,width,{top:0,bottom:600},options),normal,"same resolver gives identical preview and release");
+
+  const heightOnly={A:R(0,604,500,220),B:R(0,214,1000,386)};
+  const fitted=resolveMoveLayouts(make(heightOnly),{left:0,top:10,width:500,height:220},width,{top:0,bottom:600},options);
+  assert(fitted);
+  assert.equal(rect(fitted.A).left,0,"height fitting must not shift a valid x=0 anchor sideways to x=220");
+  assert.equal(rect(fitted.A).height,200);
+  assert.deepStrictEqual(fitted.B,heightOnly.B);
+
+  const full={A:R(0,800,500,260),B:R(0,10,1000,590)};
+  assert.equal(resolveMoveLayouts(make(full),{left:0,top:10,width:500,height:260},width,{top:0,bottom:600},options),null,"impossible visible drop rejects instead of appending or moving neighbors");
+  const hole=[{id:"B",layout:R(0,10,1000,196)},{id:"C",layout:R(0,480,1000,324)}];
+  assert.equal(rect(findAvailablePlacement(hole,width,{top:0,bottom:900})).top,210,"new pane uses y=210 gap instead of y=808 append");
+  const scrolled=findAvailablePlacement(hole,width,{top:810,bottom:1400});
+  assert.equal(rect(scrolled).top,810,"visible scrolled space ranks ahead of an offscreen hole");
+  const offscreen=findAvailablePlacement(hole,width,{top:500,bottom:700});
+  assert.equal(rect(offscreen).top,210,"offscreen usable hole ranks ahead of append when viewport is full");
+  assert.deepStrictEqual(boardPointerDelta({x:20,y:50},{x:20,y:50},{left:10,top:0},{left:10,top:-200}),{dx:0,dy:200},"board scroll contributes to drag coordinates even with a stationary pointer");
+  assert.equal(snapCoordinate(111,[100]),100);
+  assert.equal(snapCoordinate(117,[100],100),100,"snap holds through the 18px release radius");
+  assert.equal(snapCoordinate(119,[100],100),119);
+  const compact=resolveMoveLayouts(make({A:R(0,800,280,170)}),{left:0,top:10,width:280,height:170},width,{top:0,bottom:700},options);
+  assert.ok(Math.abs(rect(compact.A).width-560)<0.001);
+  assert.equal(rect(compact.A).height,320);
+  const splitOptions=new Map([["A",{minW:700,minH:400}]]);
+  const split=resolveMoveLayouts(make({A:R(0,800,700,400)}),{left:0,top:10,width:700,height:400},width,{top:0,bottom:700},splitOptions);
+  assert.equal(rect(split.A).width,700,"split minimum overrides compact width cap");
+  assert.equal(rect(split.A).height,400);
+}
+console.log("empty-region placement, explicit swap, scroll, snap and compact sizing regressions passed");
+
+{
+  const { boardInnerWidth } = geometryModule.exports;
+  assert.equal(boardInnerWidth(1198,[{minW:280}])+2*BOARD_PADDING,1198,"vertical scrollbar must not create horizontal overflow");
+  assert.equal(boardInnerWidth(1198,[{minW:1300}])+2*BOARD_PADDING,1320,"a real split minimum may expand the scrollable board");
+}

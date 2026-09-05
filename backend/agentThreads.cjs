@@ -1,6 +1,63 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { StringDecoder } = require("string_decoder");
+
+// Stream the whole metadata log with bounded memory: renames can be appended
+// long after the opening messages. Oversized individual records are skipped.
+function* readJsonlRecords(filePath) {
+  const fd = fs.openSync(filePath, "r");
+  const decoder = new StringDecoder("utf8");
+  const buffer = Buffer.alloc(64 * 1024);
+  let pending = "";
+  let skipping = false;
+  try {
+    let count;
+    while ((count = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) {
+      pending += decoder.write(buffer.subarray(0, count));
+      let end;
+      while ((end = pending.indexOf("\n")) !== -1) {
+        const line = pending.slice(0, end);
+        pending = pending.slice(end + 1);
+        if (!skipping) {
+          try { yield JSON.parse(line); } catch { /* torn/corrupt record */ }
+        }
+        skipping = false;
+      }
+      if (pending.length > 4 * 1024 * 1024) {
+        pending = "";
+        skipping = true;
+      }
+    }
+    pending += decoder.end();
+    if (!skipping && pending.trim()) {
+      try { yield JSON.parse(pending); } catch { /* incomplete append */ }
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function readCodexSavedTitles(home) {
+  const titles = new Map();
+  try {
+    for (const record of readJsonlRecords(path.join(home, "session_index.jsonl"))) {
+      const id = record?.id || record?.session_id;
+      if (id && typeof record.thread_name === "string") {
+        titles.set(String(id), normalizeThreadTitle(record.thread_name));
+      }
+    }
+  } catch { /* index is optional; prompt previews remain available */ }
+  return titles;
+}
+
+function isCodexSubagent(payload) {
+  return Boolean(payload.parent_thread_id || payload.parent_session_id ||
+    payload.parentThreadId || payload.parentSessionId || payload.parent_id || payload.parentId ||
+    (typeof payload.source === "string" && /subagent/i.test(payload.source)) ||
+    (payload.source && typeof payload.source === "object" &&
+      (payload.source.subagent || payload.source.sub_agent)));
+}
 
 const MAX_TRANSCRIPT_HEAD_BYTES = 256 * 1024;
 const DEFAULT_TRANSCRIPT_LIMIT = 5000;
@@ -137,8 +194,7 @@ function codexHome(options = {}) {
   );
 }
 
-// Codex generates no session title: its own `codex resume` picker previews the
-// first user message from the rollout. Harvest the same text (bounded to the
+// If Codex has no saved title, preview the first user message (bounded to the
 // head read) so panes can show it. Instruction/environment envelopes start
 // with "<" and are skipped. Returns "" when the rollout has no prompt yet.
 const MAX_TITLE_SCAN_LINES = 200;
@@ -195,7 +251,8 @@ function withRolloutTitle(thread) {
 
   return {
     ...thread,
-    title: parseCodexRolloutTitle(thread.rolloutPath) || undefined
+    title: parseCodexRolloutTitle(thread.rolloutPath) || undefined,
+    titleSource: "preview"
   };
 }
 
@@ -208,6 +265,7 @@ function parseCodexSessionMeta(filePath) {
     }
 
     const payload = event.payload || {};
+    if (isCodexSubagent(payload)) return null;
     const createdAt = Date.parse(payload.timestamp || event.timestamp || "");
     const id = payload.session_id || payload.id;
     if (!id || !Number.isFinite(createdAt)) {
@@ -219,6 +277,7 @@ function parseCodexSessionMeta(filePath) {
       provider: "codex",
       id,
       title: payload.name,
+      titleSource: payload.name ? "named" : "preview",
       createdAt,
       updatedAt: stat.mtimeMs,
       cwd: payload.cwd,
@@ -253,8 +312,12 @@ function collectCodexCandidates(payload = {}, options = {}) {
       : []
   );
   const sessionsDir = path.join(codexHome(options), "sessions");
+  const savedTitles = readCodexSavedTitles(codexHome(options));
   return collectJsonlFiles(sessionsDir)
     .map(parseCodexSessionMeta)
+    .map((thread) => thread && savedTitles.get(String(thread.id))
+      ? { ...thread, title: savedTitles.get(String(thread.id)), titleSource: "named" }
+      : thread)
     .filter((thread) => {
       if (!thread) {
         return false;
@@ -383,7 +446,7 @@ function locateCodexRollout(sessionsDir, id) {
 function confirmCodexThread(cwd, id, options = {}) {
   const target = String(id || "");
   if (!target) {
-    return { status: "missing" };
+    return { status: "missing", rootVerified: false };
   }
 
   const sessionsDir = path.join(codexHome(options), "sessions");
@@ -391,14 +454,23 @@ function confirmCodexThread(cwd, id, options = {}) {
 
   if (located.path) {
     const meta = parseCodexSessionMeta(located.path);
+    if (!meta) {
+      try {
+        if (isCodexSubagent(JSON.parse(readFirstLine(located.path)).payload || {})) {
+          return { status: "missing", rootVerified: false };
+        }
+      } catch { /* an unreadable existing rollout does not prove absence */ }
+    }
+    const savedTitle = readCodexSavedTitles(codexHome(options)).get(target);
+    const namedTitle = savedTitle || meta?.title;
     return {
       status: "found",
+      rootVerified: Boolean(meta && String(meta.id) === target && isSamePath(meta.cwd, cwd) && meta.originator !== "Codex Desktop"),
       threadRef: {
         provider: "codex",
         id: target,
-        // session_meta virtually never carries a name, so fall back to the
-        // first user prompt — the same text Codex's own resume picker shows.
-        title: meta?.title || parseCodexRolloutTitle(located.path) || undefined,
+        title: namedTitle || parseCodexRolloutTitle(located.path) || undefined,
+        titleSource: namedTitle ? "named" : "preview",
         createdAt: meta?.createdAt ?? 0,
         updatedAt: meta?.updatedAt ?? 0
       }
@@ -408,14 +480,18 @@ function confirmCodexThread(cwd, id, options = {}) {
   if (!located.complete) {
     return {
       status: "found",
+      rootVerified: false,
       threadRef: { provider: "codex", id: target, title: undefined, createdAt: 0, updatedAt: 0 }
     };
   }
 
-  return { status: "missing" };
+  return { status: "missing", rootVerified: false };
 }
 
 module.exports = {
+  readJsonlRecords,
+  readCodexSavedTitles,
+  isCodexSubagent,
   codexHome,
   collectJsonlFiles,
   listCodexThreads,

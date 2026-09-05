@@ -27,7 +27,9 @@ The `preload/` folder contains the context-isolated bridge between the renderer 
 - `window.vibe.agentThreads.findLatest(payload)` - Asks the backend to discover a matching local agent thread.
 - `window.vibe.agentThreads.list(payload)` - Lists every saved Open Fusion chat for a folder (newest first) from the app-owned OpenCode store, for the resume picker. Open Fusion payloads only; fails closed otherwise.
 - `window.vibe.terminal.create(payload)` - Creates or restores a PTY-backed session.
+- `window.vibe.terminal.getRuntimeSnapshots()` / `onRuntime(callback)` - Retained standalone identity, title, process/turn/progress, and attention snapshots. Subscribe first and merge by launch generation/revision. See [terminal runtime](terminal-runtime.md).
 - `window.vibe.terminal.input(id, data)` - Sends user terminal input to the PTY host.
 - `window.vibe.terminal.resize(id, cols, rows)` - Resizes the PTY session.
 - `window.vibe.terminal.kill(id)` - Stops and removes a PTY session.
+- Terminal input, resize, and kill accept optional `{ generation, launchToken }` scope; kill also accepts the close/restart reason. Scope prevents delayed commands from affecting replacement sessions.
 - `window.vibe.terminal.onEvent(callback)` - Subscribes to PTY host, terminal, snapshot, error, and exit events.

@@ -75,7 +75,8 @@ assert(
 
 assert(
   appSource.includes("function removeWorkspace(workspaceId: string)") &&
-    appSource.includes("window.vibe?.terminal.kill(session.id)") &&
+    appSource.includes("window.vibe?.terminal.kill(session.id, {") &&
+    appSource.includes('stopSessionProcess(session, "close")') &&
     appSource.includes("setWorkspaces(nextWorkspaces)") &&
     appSource.includes("setActiveWorkspaceId(nextActiveWorkspace?.id ?? null)"),
   "folder removal should clear state and kill its terminal sessions"
@@ -99,6 +100,16 @@ assert(
     stylesSource.includes(".workspace-row.drop-after::after") &&
     stylesSource.includes('.workspace-button[draggable="true"]'),
   "folder rows should support drag reordering with visible drop targets"
+);
+
+assert(
+  appSource.includes('className="workspace-reorder-grip"') &&
+    appSource.includes('aria-label={`Reorder ${workspace.name}`}') &&
+    appSource.includes("handleWorkspaceReorderKey(event, workspace.id)") &&
+    appSource.includes('aria-live="polite"') &&
+    appSource.includes("const draggedWorkspaceId = workspaceDragRef.current;") &&
+    appSource.includes("Date.now() < workspaceDragClickUntil.current"),
+  "reordering should have a keyboard-accessible grip and preserve project selection after dragging"
 );
 
 assert(
@@ -151,8 +162,8 @@ assert(
 // wherever it appears and a restyle is a token change rather than a sweep of
 // literals. The active card is marked by an inset accent bar.
 assert(
-  stylesSource.includes("--accent: #2dd4bf") &&
-    stylesSource.includes("--accent-icon: #5eead4") &&
+  stylesSource.includes("--accent:") &&
+    stylesSource.includes("--accent-icon:") &&
     stylesSource.includes("--status-working:") &&
     stylesSource.includes("--status-blocked:") &&
     stylesSource.includes("--space-3:") &&

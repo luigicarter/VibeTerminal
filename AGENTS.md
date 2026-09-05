@@ -4,9 +4,16 @@ vibeTerminal is an Electron + React desktop workspace for running local terminal
 
 ## Docs Index
 
+- `docs/orchestrator-context-and-audio.md` - Progressive output/history access, model-only context budgets, and bundled OpenRouter error announcements.
+
+- `docs/orchestrator-harness-review.md` - Single relay conversation, title-based discovery, tool authority, identity/cancellation edge cases, and verification boundaries.
+
+- `docs/orchestrator.md` - User-command relay, OpenRouter setup, voice overlay, observation/action contracts, saved setups, handoffs, and verification limits.
+
 - `docs/frontend.md` - React renderer files, UI state, terminal panes, layout board, and styling.
 - `docs/backend.md` - Electron main process, PTY host, and agent thread discovery files.
 - `docs/preload.md` - Context bridge and IPC surface exposed to the renderer.
+- `docs/terminal-runtime.md` - Standalone terminal identity, titles, progress, generation-scoped lifecycle, Gemini adapter, and board placement/sizing behavior.
 - `docs/scripts.md` - Development, smoke test, and screenshot helper scripts.
 - `docs/windows-release.md` - Windows installer, GitHub Releases deployment, update behavior, and signing status.
 - `docs/fusion-terminal.md` - Shipped two-model Fusion architecture (Opus orchestrator + embedded per-pane Codex executor, the adapter, approval/verifier loop).

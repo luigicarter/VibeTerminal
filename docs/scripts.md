@@ -8,6 +8,10 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 
 ## Backend Scripts
 
+- `scripts/backend/terminal-runtime-smoke.cjs` - Runtime generation, cancellation, root proof, ownership, progress/attention, OSC titles, UTF-8 framing, and actual main/PTY handler regressions.
+- `scripts/backend/agent-generation-telemetry-smoke.cjs` - Authenticated generation, paired invocation start/exit, passive native JSON metadata, Gemini overlays, and isolated actual PowerShell/Node hook transports.
+- `scripts/backend/metadata-discovery-smoke.cjs` - Saved/renamed titles, explicit root proof, child exclusion, and Gemini JSON/JSONL ownership.
+
 - `scripts/backend/codex-discovery-smoke.cjs` - Creates temporary fake Codex session metadata and validates `backend/agentThreads.cjs` behavior for pending, found, excluded, different-cwd, ambiguous, and remaining-candidate cases.
 - `scripts/backend/claude-discovery-smoke.cjs` - Creates temporary fake Claude transcripts and validates `backend/agentThreadHost.cjs` Claude discovery for title extraction from array content, `excludeIds` filtering, foreign-cwd tolerance, and the `after` cutoff.
 - `scripts/backend/kimi-discovery-smoke.cjs` - Creates a temporary fake `$KIMI_CODE_HOME` and validates `backend/agentThreadHost.cjs` kimi discovery: index parsing, title/lastPrompt fallback, updatedAt recency, foreign-cwd exclusion, malformed-line tolerance, list, and confirm contracts.
@@ -30,6 +34,10 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 
 ## Frontend Scripts
 
+- `scripts/frontend/terminal-runtime-smoke.cjs` - Shared runtime labels, process/turn separation, title precedence, and frozen elapsed time.
+- `scripts/frontend/app-runtime-smoke.cjs` - Actual App projections for attention, child work, generations, exits, alias preservation, and chat isolation.
+- `scripts/frontend/session-persistence-smoke.cjs` - Aider migration retaining tiles/folders and stripping transient runtime observations from stored sessions.
+
 - `scripts/frontend/attention-smoke.cjs` - Validates shared terminal attention helpers, Codex root-thread acceptance/defer/rejection, App-owned submit/watchdog/background-remount behavior, interrupt handling, sidebar dots, and unread clearing.
 - `scripts/frontend/workspace-smoke.cjs` - Validates empty-install workspace startup, project folder removal wiring, and sidebar remove control styling.
 - `scripts/frontend/session-launch-smoke.cjs` - Validates launch/resume command construction and launch-mode gating, and guards that the terminal-creation effect stays decoupled from the command string so a resume id discovered mid-session cannot blank a live pane.
@@ -40,6 +48,8 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `scripts/frontend/terminal-output-smoke.cjs` - Transpiles and executes the real `frontend/terminalOutput.ts` + `frontend/terminalWheel.ts`: DEC 2026 synchronized-output frame coalescing (split frames land as one write, split markers reassemble, lookalike tails release, deadline/overflow fall back to passthrough, flush vs reset semantics), the SGR mouse-encoding tracker, wheel line accumulation across pixel/line/page delta modes with the report cap, SGR wheel report bytes — plus grep-locks on the TerminalPane wiring (coalesced data path, snapshot resets, exit flushes, custom wheel handler fall-throughs).
 
 ## QA Scripts
+
+- `scripts/qa/terminal-board-smoke.cjs` - Build first; then exercise isolated Electron DOM/CDP and real PTYs for gap placement, preview/drop equality, Shift-swapping, measured PTY size, hidden OSC titles, scroll coordinates, and horizontal overflow. Writes screenshots/results under `.tmp/terminal-board-smoke/`.
 
 - `scripts/qa/screenshot.cjs` - Starts the Vite frontend and Electron in screenshot mode, captures the visible app window, verifies the PNG exists, and writes `artifacts/vibe-terminal-screenshot.png`. Pass `--openfusion` to seed a deterministic Open Fusion pane and write `artifacts/vibe-terminal-openfusion-screenshot.png`.
 

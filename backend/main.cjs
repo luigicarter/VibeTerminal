@@ -5,6 +5,7 @@ const {
   clipboard,
   dialog,
   ipcMain,
+  safeStorage,
   screen,
   shell
 } = require("electron");
@@ -12,6 +13,9 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
+const { StringDecoder } = require("string_decoder");
+const { createTerminalRuntime } = require("./terminalRuntime.cjs");
+const providerCapabilities = require("../shared/providerCapabilities.json");
 const { createAgentTelemetryManager } = require("./agentTelemetry.cjs");
 const { installApplicationMenu } = require("./appMenu.cjs");
 const { createBuildSupervisor } = require("./buildSupervisor.cjs");
@@ -131,16 +135,23 @@ if (isScreenshotMode) {
     path.join(process.cwd(), ".tmp", `screenshot-user-data-${process.pid}`);
   fs.mkdirSync(screenshotUserData, { recursive: true });
   app.setPath("userData", screenshotUserData);
+  const fixtureDocuments = path.join(screenshotUserData, "Documents");
+  fs.mkdirSync(fixtureDocuments, { recursive: true });
+  app.setPath("documents", fixtureDocuments);
 }
 
 let mainWindow = null;
+let orchestratorIntegration = null;
 let ptyHost = null;
 let ptyHostBuffer = "";
+let ptyHostDecoder = new StringDecoder("utf8");
+let terminalRuntime = null;
 let ptyHostReady = false;
 const pendingResizeMessages = new Map();
 const resizeFlushTimers = new Map();
 let agentThreadHost = null;
 let agentThreadHostBuffer = "";
+let agentThreadHostDecoder = new StringDecoder("utf8");
 let agentThreadHostReady = false;
 let nextAgentThreadRequestId = 1;
 const pendingAgentThreadRequests = new Map();
@@ -148,8 +159,10 @@ let agentTelemetry = null;
 let buildSupervisor = null;
 let fusionChatHost = null;
 let fusionChatHostBuffer = "";
+let fusionChatHostDecoder = new StringDecoder("utf8");
 let openFusionChatHost = null;
 let openFusionChatHostBuffer = "";
+let openFusionChatHostDecoder = new StringDecoder("utf8");
 let autoUpdater = null;
 let autoUpdaterConfigured = false;
 let checkedForUpdatesOnLaunch = false;
@@ -484,12 +497,49 @@ function getBuildSupervisorDir() {
   );
 }
 
+function getTerminalRuntime() {
+  if (!terminalRuntime) {
+    terminalRuntime = createTerminalRuntime({
+      lookup: requestAgentThreadLookup,
+      capabilities: (provider) => providerCapabilities[provider] || {},
+      emit: (snapshot) => BrowserWindow.getAllWindows().forEach((window) => {
+        window.webContents.send("terminal:runtime", snapshot);
+      })
+    });
+    terminalRuntime.start();
+  }
+  return terminalRuntime;
+}
+
+function ingestTelemetryEvent(event) {
+  if (event?.type === "fusion.interaction-resolved" || event?.type === "fusion-interaction-resolved") {
+    const generation = orchestratorIntegration?.directory.get(event.id)?.generation;
+    sendToFusionChatHost({ type: "interaction-resolved", payload: { id: event.id, requestId: event.requestId, generation } });
+    orchestratorIntegration?.incoming("fusion", { ...event, type: "interaction-resolved", generation });
+  }
+  if (event?.type === "fusion.interaction-request" || event?.type === "fusion-interaction-request") {
+    const generation = orchestratorIntegration?.directory.get(event.id)?.generation;
+    orchestratorIntegration?.incoming("fusion", { ...event, type: "interaction-request", generation,
+      interaction: { ...event, id: event.requestId, sessionId: event.id, generation, revision: 1,
+        kind: event.kind === "question" ? "question" : "permission", state: "pending" } });
+  }
+  // Chat hosts retain their existing transport. Standalone observations carry
+  // the generation authenticated by the telemetry server, never inferred here.
+  if (event?.generation !== undefined) {
+    if (!terminalRuntime?.isCurrent(event.id, event.generation)) return;
+    terminalRuntime.ingest(event);
+    const record = terminalRuntime.getRecord(event.id);
+    if (record?.identityHints.size) void terminalRuntime.refreshRecord(record);
+  }
+  broadcastTerminalEvent(event);
+}
+
 function getAgentTelemetry() {
   if (!agentTelemetry) {
     agentTelemetry = createAgentTelemetryManager({
       baseDir: getAgentShimBaseDir(),
       openFusionBaseDir: getOpenFusionBaseDir(),
-      emit: broadcastTerminalEvent
+      emit: ingestTelemetryEvent
     });
     agentTelemetry.ready.catch((error) => {
       broadcastTerminalEvent({
@@ -984,6 +1034,7 @@ async function findLatestAgentThread(payload) {
 }
 
 function broadcastTerminalEvent(event) {
+  orchestratorIntegration?.incoming("terminal", event);
   if (
     event?.type === "fusion-activity" &&
     event.id &&
@@ -1095,8 +1146,13 @@ function sendToPtyHost(message) {
     return false;
   }
 
-  ptyHost.stdin.write(`${JSON.stringify(message)}\n`);
-  return true;
+  try {
+    ptyHost.stdin.write(`${JSON.stringify(message)}\n`);
+    return true;
+  } catch (error) {
+    broadcastTerminalEvent({ type: "host-error", id: message?.payload?.id, message: error.message });
+    return false;
+  }
 }
 
 function sendResizeToPtyHost(payload) {
@@ -1127,7 +1183,7 @@ function sendResizeToPtyHost(payload) {
 }
 
 function parsePtyHostOutput(chunk) {
-  ptyHostBuffer += chunk.toString("utf8");
+  ptyHostBuffer += ptyHostDecoder.write(chunk);
 
   let newlineIndex = ptyHostBuffer.indexOf("\n");
   while (newlineIndex !== -1) {
@@ -1140,8 +1196,15 @@ function parsePtyHostOutput(chunk) {
         if (event.type === "ready") {
           ptyHostReady = true;
         }
+        if (event.generation !== undefined) {
+          if (!terminalRuntime?.isCurrent(event.id, event.generation)) {
+            newlineIndex = ptyHostBuffer.indexOf("\n");
+            continue;
+          }
+          terminalRuntime.ingest(event);
+        }
         if (event.type === "exit" && event.id) {
-          releaseTerminalResources(event.id);
+          releaseTerminalResources(event.id, event.generation);
         }
         broadcastTerminalEvent(event);
       } catch (error) {
@@ -1156,14 +1219,14 @@ function parsePtyHostOutput(chunk) {
   }
 }
 
-function releaseTerminalResources(sessionId) {
+function releaseTerminalResources(sessionId, generation) {
   const timer = resizeFlushTimers.get(sessionId);
   if (timer) {
     clearTimeout(timer);
     resizeFlushTimers.delete(sessionId);
   }
   pendingResizeMessages.delete(sessionId);
-  agentTelemetry?.releaseSession(sessionId);
+  agentTelemetry?.releaseSession(sessionId, generation === undefined ? {} : { generation });
 }
 
 function startPtyHost() {
@@ -1172,16 +1235,17 @@ function startPtyHost() {
   }
 
   const nodeBinary = getNodeHostCommand();
-  ptyHost = spawn(nodeBinary, [getPtyHostPath()], {
+  const host = spawn(nodeBinary, [getPtyHostPath()], {
     cwd: getDefaultRuntimeCwd(),
     env: getNodeHostEnv(),
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true
   });
 
-  ptyHost.stdout.on("data", parsePtyHostOutput);
+  ptyHost = host;
+  host.stdout.on("data", (chunk) => { if (ptyHost === host) parsePtyHostOutput(chunk); });
 
-  ptyHost.stderr.on("data", (chunk) => {
+  host.stderr.on("data", (chunk) => {
     const message = chunk.toString("utf8");
     if (
       message.includes("conpty_console_list_agent.js") &&
@@ -1196,34 +1260,39 @@ function startPtyHost() {
     });
   });
 
-  ptyHost.on("error", (error) => {
-    broadcastTerminalEvent({
-      type: "host-error",
-      message: `Failed to start PTY host with "${nodeBinary}": ${error.message}`
-    });
-  });
-
-  ptyHost.on("exit", (code, signal) => {
+  function finishHost(code, signal, error) {
+    if (ptyHost !== host) return;
     const wasReady = ptyHostReady;
     ptyHost = null;
     ptyHostReady = false;
-    broadcastTerminalEvent({
-      type: "host-exit",
-      message: wasReady
-        ? `PTY host exited (${code ?? signal ?? "unknown"}).`
-        : `PTY host failed before it was ready (${code ?? signal ?? "unknown"}).`
-    });
+    ptyHostBuffer = "";
+    ptyHostDecoder = new StringDecoder("utf8");
+    const message = error ? `PTY host failed: ${error.message}` : wasReady
+      ? `PTY host exited (${code ?? signal ?? "unknown"}).`
+      : `PTY host failed before it was ready (${code ?? signal ?? "unknown"}).`;
+    terminalRuntime?.hostExited(message);
+    for (const snapshot of terminalRuntime?.listSnapshots() || []) {
+      releaseTerminalResources(snapshot.id, snapshot.generation);
+    }
+    broadcastTerminalEvent({ type: "host-exit", message });
+  }
+  host.on("error", (error) => finishHost(undefined, undefined, error));
+  host.stdin.on("error", (error) => {
+    finishHost(undefined, undefined, error);
+    host.kill();
   });
+  host.on("exit", (code, signal) => finishHost(code, signal));
 }
 
 function broadcastFusionChatEvent(event) {
+  if (orchestratorIntegration?.incoming("fusion", event) === false) return;
   BrowserWindow.getAllWindows().forEach((window) => {
     window.webContents.send("fusion-chat:event", event);
   });
 }
 
 function parseFusionChatHostOutput(chunk) {
-  fusionChatHostBuffer += chunk.toString("utf8");
+  fusionChatHostBuffer += fusionChatHostDecoder.write(chunk);
   let newlineIndex = fusionChatHostBuffer.indexOf("\n");
   while (newlineIndex !== -1) {
     const line = fusionChatHostBuffer.slice(0, newlineIndex).trim();
@@ -1232,7 +1301,7 @@ function parseFusionChatHostOutput(chunk) {
       try {
         const message = JSON.parse(line);
         if (message.type === "event") {
-          const fusionEvent = { id: message.id, ...message.event };
+          const fusionEvent = { id: message.id, ...message.event, generation: message.generation || message.event?.generation };
           broadcastFusionChatEvent(fusionEvent);
           // Replayed history must not re-assert a stale background chip
           // through the terminal channel; live tracking already settled it.
@@ -1244,8 +1313,10 @@ function parseFusionChatHostOutput(chunk) {
               backgroundActivity: message.event.backgroundActivity
             });
           }
+        } else if (["action-result", "interaction-request", "interaction-resolved"].includes(message.type)) {
+          orchestratorIntegration?.incoming("fusion", message);
         } else if (message.type === "closed") {
-          broadcastFusionChatEvent({ id: message.id, type: "closed", code: message.code });
+          broadcastFusionChatEvent({ id: message.id, type: "closed", code: message.code, generation: message.generation });
         }
       } catch {
         // Ignore non-JSON host noise.
@@ -1285,6 +1356,7 @@ function startFusionChatHost() {
   fusionChatHost.on("exit", (code, signal) => {
     fusionChatHost = null;
     fusionChatHostBuffer = "";
+    fusionChatHostDecoder = new StringDecoder("utf8");
     broadcastFusionChatEvent({
       type: "host-error",
       message: `Fusion chat host exited (${code ?? signal ?? "unknown"}).`
@@ -1296,18 +1368,20 @@ function sendToFusionChatHost(message) {
   if (!fusionChatHost || !fusionChatHost.stdin.writable) {
     return false;
   }
+  message = orchestratorIntegration?.outgoing("fusion", message) || message;
   fusionChatHost.stdin.write(`${JSON.stringify(message)}\n`);
   return true;
 }
 
 function broadcastOpenFusionChatEvent(event) {
+  if (orchestratorIntegration?.incoming("openfusion", event) === false) return;
   BrowserWindow.getAllWindows().forEach((window) => {
     window.webContents.send("openfusion-chat:event", event);
   });
 }
 
 function parseOpenFusionChatHostOutput(chunk) {
-  openFusionChatHostBuffer += chunk.toString("utf8");
+  openFusionChatHostBuffer += openFusionChatHostDecoder.write(chunk);
   let newlineIndex = openFusionChatHostBuffer.indexOf("\n");
   while (newlineIndex !== -1) {
     const line = openFusionChatHostBuffer.slice(0, newlineIndex).trim();
@@ -1316,7 +1390,9 @@ function parseOpenFusionChatHostOutput(chunk) {
       try {
         const message = JSON.parse(line);
         if (message.type === "event") {
-          broadcastOpenFusionChatEvent({ id: message.id, ...message.event });
+          broadcastOpenFusionChatEvent({ id: message.id, ...message.event, generation: message.generation || message.event?.generation });
+        } else if (["action-result", "interaction-request", "interaction-resolved"].includes(message.type)) {
+          orchestratorIntegration?.incoming("openfusion", message);
         }
       } catch {
         // Ignore non-JSON host noise.
@@ -1356,6 +1432,7 @@ function startOpenFusionChatHost() {
   openFusionChatHost.on("exit", (code, signal) => {
     openFusionChatHost = null;
     openFusionChatHostBuffer = "";
+    openFusionChatHostDecoder = new StringDecoder("utf8");
     broadcastOpenFusionChatEvent({
       type: "host-error",
       message: `Open Fusion chat host exited (${code ?? signal ?? "unknown"}).`
@@ -1367,6 +1444,7 @@ function sendToOpenFusionChatHost(message) {
   if (!openFusionChatHost || !openFusionChatHost.stdin.writable) {
     return false;
   }
+  message = orchestratorIntegration?.outgoing("openfusion", message) || message;
   openFusionChatHost.stdin.write(`${JSON.stringify(message)}\n`);
   return true;
 }
@@ -1534,7 +1612,7 @@ function failPendingAgentThreadRequests(message) {
 }
 
 function parseAgentThreadHostOutput(chunk) {
-  agentThreadHostBuffer += chunk.toString("utf8");
+  agentThreadHostBuffer += agentThreadHostDecoder.write(chunk);
 
   let newlineIndex = agentThreadHostBuffer.indexOf("\n");
   while (newlineIndex !== -1) {
@@ -1591,6 +1669,7 @@ function startAgentThreadHost() {
     agentThreadHost = null;
     agentThreadHostReady = false;
     agentThreadHostBuffer = "";
+    agentThreadHostDecoder = new StringDecoder("utf8");
     failPendingAgentThreadRequests(
       wasReady
         ? `Agent thread discovery host exited (${code ?? signal ?? "unknown"}).`
@@ -1750,7 +1829,7 @@ function createMainWindow() {
     height: isScreenshotMode ? screenshotBounds.height : 960,
     minWidth: 960,
     minHeight: 640,
-    backgroundColor: "#111312",
+    backgroundColor: "#111111",
     icon: getAppIconPath(),
     title: "vibeTerminal",
     show: isScreenshotMode,
@@ -1758,7 +1837,8 @@ function createMainWindow() {
     webPreferences: {
       preload: path.join(__dirname, "..", "preload", "preload.cjs"),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      backgroundThrottling: false
     }
   });
   installApplicationMenu(mainWindow);
@@ -1811,6 +1891,17 @@ app.whenReady().then(() => {
   // the time the renderer asks; it is a promise, so nothing here blocks paint.
   refreshInstalledClis();
   createMainWindow();
+  const { installOrchestrator } = require("./orchestratorIntegration.cjs");
+  orchestratorIntegration = installOrchestrator({ app, BrowserWindow, ipcMain, screen, shell, safeStorage,
+    getMainWindow: () => mainWindow, getRuntime: getTerminalRuntime,
+    sendPty: sendToPtyHost, sendFusion: sendToFusionChatHost, sendOpenFusion: sendToOpenFusionChatHost,
+    getTelemetry: getAgentTelemetry, getChanges: getCodeChangeSummary,
+    getHistoryConfig: () => {
+      let openFusion = null;
+      try { const telemetry = getAgentTelemetry(), home = telemetry.getOpenFusionOpencodeHome(); openFusion = { env: { XDG_DATA_HOME: home.dataDir, XDG_CONFIG_HOME: home.configDir }, after: telemetry.getOpenFusionThreadCutoffMs() }; } catch {}
+      return { homes: { claudeCustom: claudeCustomHome.resolveCustomClaudeHome() }, openFusion };
+    } });
+  mainWindow.on("close", () => orchestratorIntegration?.dispose());
   setTimeout(checkForUpdatesOnLaunch, 1500);
 
   app.on("activate", () => {
@@ -1821,6 +1912,9 @@ app.whenReady().then(() => {
 });
 
 app.on("window-all-closed", () => {
+  orchestratorIntegration?.dispose();
+  terminalRuntime?.dispose();
+  terminalRuntime = null;
   if (agentTelemetry) {
     agentTelemetry.cleanup();
     agentTelemetry = null;
@@ -2122,21 +2216,57 @@ ipcMain.handle("agent-thread:list", (_event, payload) => {
 
 ipcMain.handle("terminal:create", async (_event, payload) => {
   const launchCwd = resolveLaunchCwd(payload?.cwd, getDefaultRuntimeCwd());
-  if (!launchCwd.ok) {
-    if (payload?.id) {
-      broadcastTerminalEvent({
-        id: payload.id,
-        type: "error",
-        message: launchCwd.message
-      });
-    }
-    return false;
+  const standalone = payload?.id && !payload.fusion && !payload.openFusion;
+  const runtime = standalone ? getTerminalRuntime() : null;
+  // Admission is synchronous even for an invalid launch, so the renderer gets
+  // a generation-scoped failure and stale/closed creates cannot change state.
+  const admission = runtime?.beginLaunch({ ...payload, cwd: launchCwd.cwd });
+  if (admission?.disposition === "stale") {
+    return { ok: false, cancelled: true, generation: admission.generation };
   }
-
+  if (admission?.disposition === "conflict" || !launchCwd.ok) {
+    const error = admission?.disposition === "conflict"
+      ? admission.error || admission.record.snapshot.binding.message
+      : launchCwd.message;
+    if (admission?.previousGeneration) {
+      releaseTerminalResources(payload.id, admission.previousGeneration);
+      if (ptyHost) sendToPtyHost({ type: "kill", payload: { id: payload.id, generation: admission.previousGeneration } });
+    }
+    if (admission?.disposition === "new" && runtime.isCurrent(payload.id, admission.generation)) {
+      runtime.ingest({ id: payload.id, generation: admission.generation, type: "error", message: error });
+    }
+    if (payload?.id) broadcastTerminalEvent({ id: payload.id, type: "error", generation: admission?.generation, message: error });
+    return admission ? { ok: false, generation: admission.generation, launchToken: payload.launchToken, error } : false;
+  }
+  if (admission?.disposition === "attach") {
+    if (admission.record.createPromise) await admission.record.createPromise;
+    if (!runtime.isCurrent(payload.id, admission.generation)) {
+      return { ok: false, cancelled: true, generation: admission.generation };
+    }
+    if (admission.record.snapshot.processState === "failed") {
+      return { ok: false, generation: admission.generation, error: "Restart this pane to retry the failed launch." };
+    }
+    const sent = sendToPtyHost({ type: "create", payload: {
+      ...payload, generation: admission.generation, cwd: launchCwd.cwd
+    } });
+    return { ok: sent, generation: admission.generation, launchToken: payload.launchToken };
+  }
+  if (admission?.previousGeneration) {
+    releaseTerminalResources(payload.id, admission.previousGeneration);
+  }
+  const creating = (async () => {
   startPtyHost();
   const telemetry = getAgentTelemetry();
   // Fusion panes do NOT use the PTY path — they run headless via fusion-chat:start.
-  let instrumentation = await telemetry.prepareSession(payload?.id);
+  let instrumentation = await telemetry.prepareSession(payload?.id,
+    admission ? { generation: admission.generation, provider: payload.provider } : {});
+  if (admission && !runtime.isCurrent(payload.id, admission.generation)) {
+    telemetry.releaseSession(payload.id, { generation: admission.generation });
+    return { ok: false, cancelled: true, generation: admission.generation };
+  }
+  if (admission && instrumentation?.capabilities) {
+    admission.record.snapshot.capabilities = { ...admission.record.snapshot.capabilities, ...instrumentation.capabilities };
+  }
 
   if (payload?.openFusion) {
     const openFusionFiles = await telemetry.prepareOpenFusionFiles(payload.id, {
@@ -2285,15 +2415,44 @@ ipcMain.handle("terminal:create", async (_event, payload) => {
     telemetry.ensureQwenHooks().catch(() => {});
   }
 
-  return sendToPtyHost({
+  if (admission && !runtime.isCurrent(payload.id, admission.generation)) {
+    telemetry.releaseSession(payload.id, { generation: admission.generation });
+    return { ok: false, cancelled: true, generation: admission.generation };
+  }
+  const sent = sendToPtyHost({
     type: "create",
     payload: {
       ...payload,
+      ...(admission ? { generation: admission.generation } : {}),
       cwd: launchCwd.cwd,
       instrumentation
     }
   });
+  if (!sent && admission) runtime.ingest({ id: payload.id, generation: admission.generation,
+    type: "error", message: "PTY host is not running." });
+  return admission ? { ok: sent, generation: admission.generation, launchToken: payload.launchToken } : sent;
+  })().catch((error) => {
+    if (admission && runtime.isCurrent(payload.id, admission.generation)) {
+      runtime.ingest({ id: payload.id, generation: admission.generation, type: "error", message: error.message });
+      releaseTerminalResources(payload.id, admission.generation);
+    }
+    broadcastTerminalEvent({ id: payload.id, type: "error", generation: admission?.generation, message: error.message });
+    return { ok: false, generation: admission?.generation, error: error.message };
+  });
+  if (admission) admission.record.createPromise = creating;
+  const result = await creating;
+  if (admission) {
+    admission.record.createPromise = null;
+    if ((result === false || result?.ok === false) && runtime.isCurrent(payload.id, admission.generation)) {
+      runtime.ingest({ id: payload.id, generation: admission.generation, type: "error", message: result?.error || "Terminal preparation failed." });
+      releaseTerminalResources(payload.id, admission.generation);
+    }
+    if (runtime.isCurrent(payload.id, admission.generation)) void runtime.refreshRecord(admission.record);
+  }
+  return result;
 });
+
+ipcMain.handle("terminal:get-runtime-snapshots", () => getTerminalRuntime().listSnapshots());
 
 ipcMain.handle("fusion-chat:start", async (_event, payload) => {
   const id = payload?.id;
@@ -2610,6 +2769,10 @@ ipcMain.handle("fusion-chat:interrupt", (_event, payload) => {
     sendToFusionChatHost({ type: "interrupt", payload: { id: payload.id } });
   }
   return true;
+});
+
+ipcMain.handle("fusion-chat:answer-question", (_event, payload) => {
+  return orchestratorIntegration?.answerExisting("fusion", payload) || { ok: false, error: "Answer bridge unavailable." };
 });
 
 ipcMain.handle("fusion-chat:background-cancel", async (_event, payload) => {
@@ -2948,6 +3111,7 @@ ipcMain.handle("openfusion-chat:custom-provider-remove", (_event, payload) => {
 });
 
 ipcMain.handle("openfusion-chat:permission", (_event, payload) => {
+  if (orchestratorIntegration) return orchestratorIntegration.answerExisting("openfusion", { ...payload, kind: "permission" });
   if (!payload?.id || !payload?.requestId) {
     return { ok: false, error: "missing permission request id" };
   }
@@ -2974,6 +3138,7 @@ ipcMain.handle("openfusion-chat:compact", (_event, payload) => {
 });
 
 ipcMain.handle("openfusion-chat:question", (_event, payload) => {
+  if (orchestratorIntegration) return orchestratorIntegration.answerExisting("openfusion", payload);
   if (!payload?.id || !payload?.requestId) {
     return { ok: false, error: "missing question request id" };
   }
@@ -2989,6 +3154,10 @@ ipcMain.handle("openfusion-chat:question", (_event, payload) => {
   return sent
     ? { ok: true }
     : { ok: false, error: "Open Fusion chat host is not running." };
+});
+
+ipcMain.handle("openfusion-chat:question-progress", (_event, payload) => {
+  return orchestratorIntegration?.answerExisting("openfusion", { ...payload, kind: "progress" }) || { ok: false, error: "Question progress bridge unavailable." };
 });
 
 ipcMain.handle("openfusion-chat:interrupt", (_event, payload) => {
@@ -3073,38 +3242,47 @@ ipcMain.handle("terminal:show-context-menu", (event, payload = {}) => {
   return true;
 });
 
+function scopedTerminalPayload(payload) {
+  const snapshot = terminalRuntime?.getSnapshot(payload?.id);
+  if (!snapshot) return terminalRuntime?.getRecord(payload?.id) ? null : payload;
+  if (!terminalRuntime.matches(payload)) return null;
+  return { ...payload, generation: snapshot.generation, launchToken: snapshot.launchToken };
+}
+
 ipcMain.handle("terminal:input", (_event, payload) => {
-  sendToPtyHost({
-    type: "input",
-    payload
-  });
+  const scoped = scopedTerminalPayload(payload);
+  if (!scoped) return false;
+  terminalRuntime?.recordInput(scoped);
+  sendToPtyHost({ type: "input", payload: scoped });
   return true;
 });
 
 ipcMain.on("terminal:input", (_event, payload) => {
-  sendToPtyHost({
-    type: "input",
-    payload
-  });
+  const scoped = scopedTerminalPayload(payload);
+  if (!scoped) return false;
+  terminalRuntime?.recordInput(scoped);
+  sendToPtyHost({ type: "input", payload: scoped });
 });
 
 ipcMain.handle("terminal:resize", (_event, payload) => {
-  sendResizeToPtyHost(payload);
+  const scoped = scopedTerminalPayload(payload);
+  if (scoped) sendResizeToPtyHost(scoped);
   return true;
 });
 
 ipcMain.on("terminal:resize", (_event, payload) => {
-  sendResizeToPtyHost(payload);
+  const scoped = scopedTerminalPayload(payload);
+  if (scoped) sendResizeToPtyHost(scoped);
 });
 
 ipcMain.handle("terminal:kill", (_event, payload) => {
-  if (payload?.id) {
-    releaseTerminalResources(payload.id);
+  const scoped = scopedTerminalPayload(payload);
+  if (!scoped) return false;
+  orchestratorIntegration?.forgetTerminal(scoped.id, scoped.generation);
+  if (scoped?.id) {
+    terminalRuntime?.stop(scoped);
+    releaseTerminalResources(scoped.id, scoped.generation);
   }
-
-  sendToPtyHost({
-    type: "kill",
-    payload
-  });
+  sendToPtyHost({ type: "kill", payload: scoped });
   return true;
 });

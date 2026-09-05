@@ -37,7 +37,9 @@ jobs:
           }
           $version = $versions[0].Name
           npm install -g "@openai/codex@$version"
+          if ($LASTEXITCODE -ne 0) { throw "Codex installation failed." }
           npm run prepare:codex-bin:required
+          if ($LASTEXITCODE -ne 0) { throw "Codex preparation failed." }
 
       - name: Typecheck
         run: npm run typecheck
@@ -52,29 +54,11 @@ jobs:
             throw "Release tag $env:GITHUB_REF_NAME does not match package version $packageVersion."
           }
 
-      - name: Run smoke tests
-        shell: pwsh
-        run: |
-          npm run smoke:backend:codex-discovery
-          npm run smoke:backend:claude-discovery
-          npm run smoke:backend:agent-telemetry
-          npm run smoke:backend:code-changes
-          npm run smoke:backend:updates
-          npm run smoke:backend:fusion-launch
-          npm run smoke:backend:fusion-adapter
-          npm run smoke:backend:fusion-chat-parse
-          npm run smoke:backend:completion-gate
-          npm run smoke:backend:openfusion-chat-parse
-          npm run smoke:backend:openfusion-background-status
-          npm run smoke:backend:openfusion-custom-provider
-          npm run smoke:backend:fusion-appserver:embedded
-          npm run smoke:frontend:attention
-          npm run smoke:frontend:workspace
-          npm run smoke:frontend:session-launch
-          npm run smoke:frontend:fusion-settings
-          npm run smoke:frontend:tiled-resize
-          npm run smoke:frontend:pane-split
-          npm run smoke:frontend:cwd-conflicts
+      - name: Prepare pinned voice assets
+        run: npm run prepare:voice
+
+      - name: Run release checks
+        run: node scripts/qa/release-checks.cjs
 
       - name: Build installer for release tag
         if: startsWith(github.ref, 'refs/tags/v')
@@ -100,6 +84,10 @@ jobs:
             }
           }
 
+      - name: Verify update feed and voice payload
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: node scripts/qa/verify-release-artifacts.cjs
+
       - name: Publish release assets
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
@@ -124,9 +112,16 @@ jobs:
 
           if (gh release view $tag --repo $repo *> $null) {
             gh release upload $tag @files --repo $repo --clobber
+            if ($LASTEXITCODE -ne 0) { throw "Release asset upload failed." }
           } else {
-            gh release create $tag @files --repo $repo --title $version --latest --generate-notes
+            $notes = "docs/releases/$version.md"
+            if (Test-Path -LiteralPath $notes) {
+              gh release create $tag @files --repo $repo --title $version --latest --notes-file $notes
+            } else {
+              gh release create $tag @files --repo $repo --title $version --latest --generate-notes
+            }
           }
+          if ($LASTEXITCODE -ne 0) { throw "Release publication failed." }
 
       - name: Build installer artifact
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
@@ -151,6 +146,10 @@ jobs:
               throw "Missing packaged embedded Codex payload file: $file"
             }
           }
+
+      - name: Verify artifact feed and voice payload
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: node scripts/qa/verify-release-artifacts.cjs
 
       - name: Upload installer artifact
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}

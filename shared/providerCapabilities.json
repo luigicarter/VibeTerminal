@@ -1,0 +1,74 @@
+{
+  "terminal": {
+    "command": "",
+    "lifecycle": "unsupported",
+    "finalCompletion": "unsupported",
+    "childTracking": "unsupported",
+    "titleSource": "unsupported",
+    "threaded": false
+  },
+  "codex": {
+    "command": "codex",
+    "lifecycle": "structured",
+    "finalCompletion": "authoritative",
+    "childTracking": "structured",
+    "titleSource": "named",
+    "threaded": true
+  },
+  "claude": {
+    "command": "claude",
+    "lifecycle": "structured",
+    "finalCompletion": "coarse",
+    "childTracking": "structured",
+    "titleSource": "named",
+    "threaded": true
+  },
+  "cursor": {
+    "command": "cursor-agent",
+    "lifecycle": "coarse",
+    "finalCompletion": "coarse",
+    "childTracking": "unsupported",
+    "titleSource": "preview",
+    "threaded": true
+  },
+  "gemini": {
+    "command": "gemini",
+    "lifecycle": "structured",
+    "finalCompletion": "coarse",
+    "childTracking": "unsupported",
+    "titleSource": "generated",
+    "threaded": true
+  },
+  "opencode": {
+    "command": "opencode",
+    "lifecycle": "coarse",
+    "finalCompletion": "coarse",
+    "childTracking": "unsupported",
+    "titleSource": "generated",
+    "threaded": true
+  },
+  "kimi": {
+    "command": "kimi",
+    "lifecycle": "coarse",
+    "finalCompletion": "coarse",
+    "childTracking": "unsupported",
+    "titleSource": "named",
+    "threaded": true
+  },
+  "kimi-custom": {
+    "command": "kimi-custom",
+    "lifecycle": "coarse",
+    "finalCompletion": "coarse",
+    "childTracking": "unsupported",
+    "titleSource": "named",
+    "threaded": true
+  },
+  "qwen": {
+    "command": "qwen",
+    "lifecycle": "coarse",
+    "finalCompletion": "coarse",
+    "childTracking": "unsupported",
+    "titleSource": "preview",
+    "threaded": true
+  }
+}

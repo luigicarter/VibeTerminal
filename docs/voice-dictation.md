@@ -1,9 +1,9 @@
 # Voice Dictation (Speech-to-Text)
 
-> **Status: proposed design sketch — not implemented.** Nothing in this document
-> exists in the codebase yet. It captures the research and architecture decided
-> in a sketch session so the work can be picked up later. When/if built, update
-> this file to describe what actually shipped.
+> **Historical design sketch.** The app now implements voice input/output through
+> the command relay described in [Orchestrator](orchestrator.md). The alternatives
+> and direct-dictation proposal below are historical context, not the current
+> implementation contract.
 
 Goal: let the user dictate into any pane — claude, cursor-agent, codex, opencode,
 or a bare shell — with a "super light, super efficient" speech-to-text path,

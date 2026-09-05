@@ -17,18 +17,18 @@ import {
   RESIZE_AXES,
   buildAdjacentResizeLayouts,
   buildMoveDropRect,
+  boardPointerDelta,
+  boardInnerWidth,
   buildMoveLayout,
   buildResizeLayout,
-  buildSwapCommitLayouts,
-  buildSwapPreviewLayouts,
+  resolveMoveLayouts,
+  type BoardGeometryMetrics,
+  type SnapState,
   changedLayoutEntries,
   committedLayoutsOverlap,
-  compactCommittedLayouts,
-  findSwapTargetId,
   isLayoutWithinBounds,
   layoutToRect,
   layoutsEqual,
-  resolveDropLayout,
   sanitizeLayout,
   settleLayouts,
   type PixelRect,
@@ -48,6 +48,8 @@ interface TiledBoardProps {
   disabled?: boolean;
   onArrangeChange?: (isArranging: boolean) => void;
   onLayoutCommit: (layouts: Record<string, LayoutBox>) => void;
+  onMetricsChange?: (metrics: BoardGeometryMetrics) => void;
+  revealItemId?: string;
 }
 
 interface BoardMetrics {
@@ -62,13 +64,15 @@ interface InteractionState {
   axis?: ResizeAxis;
   startClientX: number;
   startClientY: number;
+  startBoardLeft: number;
+  startBoardTop: number;
+  snap: SnapState;
   startLayout: LayoutBox;
   startRect: PixelRect;
   itemIdsAtStart: string[];
   layoutsAtStart: Record<string, LayoutBox>;
   lastValidLayout: LayoutBox;
   lastValidLayouts: Record<string, LayoutBox>;
-  swapTargetId?: string | null;
   capturedElement: HTMLElement;
 }
 
@@ -86,7 +90,9 @@ export default function TiledBoard({
   items,
   disabled = false,
   onArrangeChange,
-  onLayoutCommit
+  onLayoutCommit,
+  onMetricsChange,
+  revealItemId
 }: TiledBoardProps) {
   const boardRef = useRef<HTMLDivElement | null>(null);
   const interactionRef = useRef<InteractionState | null>(null);
@@ -96,6 +102,7 @@ export default function TiledBoard({
   const pendingPointerPositionRef = useRef<{
     clientX: number;
     clientY: number;
+    shiftKey: boolean;
   } | null>(null);
   const settleTimeoutRef = useRef<number | null>(null);
   const [metrics, setMetrics] = useState<BoardMetrics>({
@@ -112,6 +119,9 @@ export default function TiledBoard({
   // Keeps `.pane-frame` transitions suppressed across the synchronous commit ->
   // persist -> propLayouts round-trip so nothing eases from the drop spot.
   const [released, setReleased] = useState(false);
+  const metricsCallbackRef = useRef(onMetricsChange);
+  metricsCallbackRef.current = onMetricsChange;
+  const revealedRef = useRef<string | undefined>(undefined);
 
   // Keep geometry work stable when App only rebuilds pane JSX and handlers.
   const itemGeometrySignature = useMemo(
@@ -142,8 +152,8 @@ export default function TiledBoard({
   );
 
   const innerWidth = useMemo(
-    () => Math.max(1, metrics.width - BOARD_PADDING * 2),
-    [metrics.width]
+    () => boardInnerWidth(metrics.width, geometryItems),
+    [metrics.width, geometryItems]
   );
 
   const itemOptions = useMemo(
@@ -252,16 +262,21 @@ export default function TiledBoard({
 
     const measuredElement = boardRef.current.parentElement ?? boardRef.current;
     const measureBoard = () => {
-      const rect = measuredElement.getBoundingClientRect();
+      // The bounding rectangle includes scrollbars. Measuring the actual
+      // viewport avoids manufacturing horizontal overflow when a vertical
+      // scrollbar appears. ResizeObserver observes its content box as well.
+      const width = measuredElement.clientWidth;
+      const height = measuredElement.clientHeight;
 
+      metricsCallbackRef.current?.({innerWidth: boardInnerWidth(width, geometryItems), viewportTop: measuredElement.scrollTop, viewportBottom: measuredElement.scrollTop + height});
       setMetrics((current) => {
-        if (current.width === rect.width && current.height === rect.height) {
+        if (current.width === width && current.height === height) {
           return current;
         }
 
         return {
-          width: rect.width,
-          height: rect.height
+          width,
+          height
         };
       });
     };
@@ -270,25 +285,32 @@ export default function TiledBoard({
     measureBoard();
     resizeObserver.observe(measuredElement);
     window.addEventListener("resize", measureBoard);
+    measuredElement.addEventListener("scroll", measureBoard);
     return () => {
       resizeObserver.disconnect();
       window.removeEventListener("resize", measureBoard);
+      measuredElement.removeEventListener("scroll", measureBoard);
     };
-  }, []);
+  }, [geometryItems]);
 
   useEffect(() => {
     if (!activeInteraction) {
       return;
     }
 
-    const updateInteractionAtPosition = (clientX: number, clientY: number) => {
+    let lastPointer: {clientX:number;clientY:number;shiftKey:boolean} | undefined;
+    const updateInteractionAtPosition = (clientX: number, clientY: number, shiftKey = false) => {
       const interaction = interactionRef.current;
       if (!interaction) {
         return;
       }
 
-      const dx = clientX - interaction.startClientX;
-      const dy = clientY - interaction.startClientY;
+      lastPointer = {clientX,clientY,shiftKey};
+      const boardBounds = boardRef.current?.getBoundingClientRect();
+      const {dx,dy} = boardPointerDelta({x:clientX,y:clientY},{x:interaction.startClientX,y:interaction.startClientY},
+        {left:interaction.startBoardLeft,top:interaction.startBoardTop},
+        boardBounds ?? {left:interaction.startBoardLeft,top:interaction.startBoardTop});
+      if (Math.abs(dx) + Math.abs(dy) < 3 && interaction.lastValidLayouts === interaction.layoutsAtStart) return;
       const options = itemOptions.get(interaction.itemId) ?? {
         minW: DEFAULT_MIN_W,
         minH: DEFAULT_MIN_H
@@ -323,39 +345,20 @@ export default function TiledBoard({
         options.minW,
         options.minH
       );
-      const swapTargetId =
-        interaction.type === "move"
-          ? findSwapTargetId(
-              interaction.itemId,
-              nextLayout,
-              interaction.layoutsAtStart,
-              innerWidth
-            )
-          : null;
-      const nextLayouts =
-        interaction.type === "move" && swapTargetId
-          ? buildSwapPreviewLayouts(
-              interaction,
-              nextLayout,
-              swapTargetId,
-              innerWidth,
-              itemOptions
-            )
-          : interaction.type === "resize"
-            ? buildAdjacentResizeLayouts(
-                interaction,
-                nextLayout,
-                innerWidth,
-                itemOptions
-              )
-          : {
-              ...interaction.layoutsAtStart,
-              [interaction.itemId]: nextLayout
-            };
-
+      const scrollHost = boardRef.current?.parentElement;
+      const viewportTop = scrollHost?.scrollTop ?? 0;
+      const nextLayouts = interaction.type === "move"
+        ? resolveMoveLayouts(interaction, buildMoveDropRect(interaction.startRect, dx, dy), innerWidth,
+            {top:viewportTop, bottom:viewportTop + Math.max(scrollHost?.clientHeight ?? metrics.height, options.minH)}, itemOptions, shiftKey, interaction.snap)
+        : buildAdjacentResizeLayouts(interaction, nextLayout, innerWidth, itemOptions);
+      // A rejected pointer position keeps the last valid preview and commit.
+      if (!nextLayouts || committedLayoutsOverlap(nextLayouts,innerWidth)) return;
       interaction.lastValidLayouts = nextLayouts;
       interaction.lastValidLayout = nextLayouts[interaction.itemId] ?? nextLayout;
-      interaction.swapTargetId = swapTargetId;
+      const fitted = layoutToRect(interaction.lastValidLayout,innerWidth);
+      const desired = buildMoveDropRect(interaction.startRect,dx,dy);
+      interaction.snap = {x: (Math.abs(fitted.left-desired.left)>0.001 || interaction.snap.x === fitted.left) && Math.abs(fitted.left-desired.left)<=18 ? fitted.left : undefined,
+        y:(Math.abs(fitted.top-desired.top)>0.001 || interaction.snap.y === fitted.top) && Math.abs(fitted.top-desired.top)<=18 ? fitted.top : undefined};
       setLiveLayouts((current) =>
         layoutsEqual(current, nextLayouts) ? current : nextLayouts
       );
@@ -370,7 +373,8 @@ export default function TiledBoard({
       event.preventDefault();
       pendingPointerPositionRef.current = {
         clientX: event.clientX,
-        clientY: event.clientY
+        clientY: event.clientY,
+        shiftKey: event.shiftKey
       };
 
       if (pendingLayoutFrameRef.current !== null) {
@@ -383,7 +387,7 @@ export default function TiledBoard({
         pendingPointerPositionRef.current = null;
 
         if (position) {
-          updateInteractionAtPosition(position.clientX, position.clientY);
+          updateInteractionAtPosition(position.clientX, position.clientY, position.shiftKey);
         }
       });
     };
@@ -397,53 +401,10 @@ export default function TiledBoard({
       // The last raw move may still be waiting for rAF. Cancel it and compute
       // once at the release coordinates before reading the interaction result.
       cancelScheduledLayouts();
-      updateInteractionAtPosition(event.clientX, event.clientY);
+      updateInteractionAtPosition(event.clientX, event.clientY, event.shiftKey);
 
-      const swapCommitLayouts =
-        interaction.type === "move" && interaction.swapTargetId
-          ? buildSwapCommitLayouts(
-              interaction,
-              interaction.swapTargetId,
-              innerWidth,
-              itemOptions
-            )
-          : null;
-      const committedLayouts =
-        swapCommitLayouts ??
-        (interaction.type === "resize"
-          ? interaction.lastValidLayouts
-          : null) ??
-        (() => {
-          const desiredDropRect =
-            interaction.type === "move"
-              ? buildMoveDropRect(
-                  interaction.startRect,
-                  event.clientX - interaction.startClientX,
-                  event.clientY - interaction.startClientY
-                )
-              : undefined;
-          const committedLayout = resolveDropLayout(
-            interaction.itemId,
-            interaction.lastValidLayout,
-            interaction.layoutsAtStart,
-            innerWidth,
-            metrics.height,
-            itemOptions,
-            desiredDropRect
-          );
-
-          return {
-            ...interaction.layoutsAtStart,
-            [interaction.itemId]: committedLayout
-          };
-        })();
-
-      const compactedLayouts = committedLayoutsOverlap(
-        committedLayouts,
-        innerWidth
-      )
-        ? compactCommittedLayouts(committedLayouts, geometryItems, innerWidth)
-        : committedLayouts;
+      // Preview and release use the identical resolver; no release-only packing.
+      const compactedLayouts = interaction.lastValidLayouts;
       const changedLayouts = changedLayoutEntries(
         interaction.layoutsAtStart,
         compactedLayouts
@@ -476,7 +437,14 @@ export default function TiledBoard({
       abortInteraction();
     };
 
+    const handleScroll = () => {
+      if(lastPointer) updateInteractionAtPosition(lastPointer.clientX,lastPointer.clientY,lastPointer.shiftKey);
+    };
+    const handleShift = (event: KeyboardEvent) => {
+      if(event.key === "Shift" && lastPointer) updateInteractionAtPosition(lastPointer.clientX,lastPointer.clientY,event.shiftKey);
+    };
     const handleKeyDown = (event: KeyboardEvent) => {
+      handleShift(event);
       if (event.key !== "Escape" || !interactionRef.current) {
         return;
       }
@@ -498,6 +466,9 @@ export default function TiledBoard({
     window.addEventListener("pointercancel", cancelInteraction);
     window.addEventListener("keydown", handleKeyDown, true);
     window.addEventListener("blur", handleWindowBlur);
+    window.addEventListener("keyup",handleShift);
+    const scrollHost=boardRef.current?.parentElement;
+    scrollHost?.addEventListener("scroll",handleScroll);
 
     return () => {
       window.removeEventListener("pointermove", handlePointerMove);
@@ -505,6 +476,8 @@ export default function TiledBoard({
       window.removeEventListener("pointercancel", cancelInteraction);
       window.removeEventListener("keydown", handleKeyDown, true);
       window.removeEventListener("blur", handleWindowBlur);
+      window.removeEventListener("keyup",handleShift);
+      scrollHost?.removeEventListener("scroll",handleScroll);
       cancelScheduledLayouts();
     };
   }, [activeInteraction, geometryItems, innerWidth, itemOptions, metrics.height]);
@@ -524,6 +497,20 @@ export default function TiledBoard({
       abortInteraction();
     }
   }, [disabled, geometryItems]);
+
+  useEffect(() => {
+    if (!revealItemId || revealedRef.current === revealItemId || metrics.width === 0) return;
+    const layout = liveLayouts[revealItemId];
+    const host = boardRef.current?.parentElement;
+    if (!layout || !host) return;
+    revealedRef.current = revealItemId;
+    const rect = layoutToRect(layout,innerWidth);
+    const top = rect.height >= host.clientHeight || rect.top < host.scrollTop ? rect.top : (rect.top + rect.height) > host.scrollTop + host.clientHeight
+      ? Math.max(0,rect.top + rect.height - host.clientHeight) : host.scrollTop;
+    const left = rect.left < host.scrollLeft ? rect.left : rect.left + rect.width > host.scrollLeft + host.clientWidth
+      ? Math.max(0,rect.left + rect.width + BOARD_PADDING - host.clientWidth) : host.scrollLeft;
+    host.scrollTo({top,left,behavior:"instant"});
+  }, [revealItemId,liveLayouts,innerWidth,metrics.width]);
 
   function startInteraction(
     event: ReactPointerEvent<HTMLElement>,
@@ -577,13 +564,15 @@ export default function TiledBoard({
       axis,
       startClientX: event.clientX,
       startClientY: event.clientY,
+      startBoardLeft: boardRef.current?.getBoundingClientRect().left ?? 0,
+      startBoardTop: boardRef.current?.getBoundingClientRect().top ?? 0,
+      snap: {},
       startLayout,
       startRect: layoutToRect(startLayout, innerWidth),
       itemIdsAtStart: geometryItems.map((currentItem) => currentItem.id),
       layoutsAtStart: startingLayouts,
       lastValidLayout: startLayout,
       lastValidLayouts: startingLayouts,
-      swapTargetId: null,
       capturedElement
     };
 
@@ -669,7 +658,7 @@ export default function TiledBoard({
         released && "tiled-board-released",
         disabled && "tiled-board-disabled"
       )}
-      style={{ height: boardHeight }}
+      style={{ height: boardHeight, width: innerWidth + BOARD_PADDING * 2 }}
     >
       {items.map((item) => {
         const layout = liveLayouts[item.id] ?? propLayouts[item.id] ?? item.layout;

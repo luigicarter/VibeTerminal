@@ -1,0 +1,46 @@
+.orchestrator-dock { position:relative; }
+.orchestrator-dock > .dock-resize-handle {
+  height:12px;
+  display:flex;
+  justify-content:center;
+  align-items:center;
+  cursor:ns-resize;
+  touch-action:none;
+  user-select:none;
+  outline:none;
+  background:transparent;
+  transition:background 120ms ease;
+}
+.dock-resize-handle > span {
+  width:44px;
+  height:3px;
+  border-radius:3px;
+  background:var(--text-muted);
+  transition:background 120ms ease, width 120ms ease;
+}
+.orchestrator-dock > .dock-resize-handle:hover,
+.orchestrator-dock > .dock-resize-handle:focus-visible,
+.orchestrator-dock.resizing > .dock-resize-handle { background:var(--bg-element); }
+.dock-resize-handle:hover > span,
+.dock-resize-handle:focus-visible > span,
+.resizing > .dock-resize-handle > span { width:64px; background:var(--text-secondary); }
+.orchestrator-dock > .dock-resize-handle:focus-visible { box-shadow:inset 0 0 0 1px var(--border-focus); }
+.orchestrator-dock > .dock-content {
+  box-sizing:border-box;
+  height:var(--workspace-dock-height, 280px);
+  max-height:none;
+  min-height:0;
+  padding-block:min(15px, calc(var(--workspace-dock-height, 280px) / 2));
+}
+.orchestrator-dock > .dock-content[hidden] { display:none; }
+.orchestrator-dock .relay-view { min-height:0; }
+.orchestrator-dock .relay-thread {
+  min-height:0;
+  overflow-y:scroll;
+  scrollbar-gutter:stable;
+  scrollbar-width:thin;
+  scrollbar-color:var(--text-muted) transparent;
+}
+.orchestrator-dock .relay-composer,
+.orchestrator-dock .relay-enable { flex-shrink:0; }
+.orchestrator-dock .relay-staged-draft { flex-shrink:0; max-height:35%; overflow:auto; }

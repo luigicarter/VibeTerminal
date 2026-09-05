@@ -267,9 +267,10 @@ async function main() {
   // stores (where --resume/thread-resume read from) and bypass the
   // opencode-only gate — but never the other way around.
   assert(
-    mainSource.indexOf('payload?.provider === "claude" || payload?.provider === "codex"') <
-      mainSource.indexOf("Saved-chat listing is only available for chat panes.") &&
-      mainSource.indexOf('payload?.provider === "claude" || payload?.provider === "codex"') !== -1,
+    /payload\?\.provider === "claude"\s*\|\|\s*payload\?\.provider === "codex"/.test(
+      mainSource.slice(mainSource.indexOf('ipcMain.handle("agent-thread:list"'),
+        mainSource.indexOf("Saved-chat listing is only available for chat panes."))
+    ),
     "claude/codex listing must pass through above the opencode fail-closed gate"
   );
   const preloadSource = fs.readFileSync(

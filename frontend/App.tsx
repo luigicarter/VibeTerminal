@@ -14,22 +14,25 @@ import {
 } from "react";
 import {
   Check,
+  Mic,
   ChevronDown,
   ChevronRight,
   Download,
   Folder,
   FolderOpen,
+  GripVertical,
   LayoutGrid,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
-  Play,
   RefreshCw,
   Search,
   TerminalSquare,
   X
 } from "lucide-react";
 import clsx from "clsx";
+import "./components/projectReorder.css";
+import providerCapabilities from "../shared/providerCapabilities.json";
 import vibeTerminalLogo from "./assets/vibeterminal-logo.png";
 import openFusionLogo from "./assets/openfusion-logo.png";
 import {
@@ -62,6 +65,10 @@ import {
   type SessionSummary
 } from "./attention";
 import TerminalPane from "./components/TerminalPane";
+import { WorkspaceStart } from "./components/WorkspaceStart";
+import { runtimeDisplayTitle, runtimeSessionStatus, runtimeStatusLabel, type TerminalRuntimeSnapshot } from "./terminalRuntime";
+import { migrateRemovedAgent, serializeSession } from "./sessionPersistence";
+import { findAvailablePlacement, type GeometryItem } from "./components/tiledBoardGeometry";
 import FusionChatPane from "./components/FusionChatPane";
 import {
   normalizeFusionRoleSettings,
@@ -90,6 +97,15 @@ import {
   isThreadedAgentKind
 } from "./sessionLaunch";
 import { computeCwdConflicts } from "./cwdConflicts";
+import { readSessionDraft, writeSessionDraft, forgetSessionDraft } from "./sessionDrafts";
+import { useOrchestrator, relayApi, type RelaySession } from "./orchestratorUi";
+import { conversationKey, conversationLaunch, conversationNeedsResume, matchingConversation, normalizeSavedConversation, HISTORY_CONFIG_FIELDS, type SavedConversation } from "./orchestratorHistory";
+import { WorkspaceSetups, type WorkspaceSetupsProps } from "./components/WorkspaceSetups";
+import { HandoffPanel } from "./components/HandoffPanel";
+import { createWorkspaceSetup, instantiateWorkspaceSetup, SETUP_CONFIG_FIELDS, type WorkspaceSetup } from "./workspaceSetups";
+import { OrchestratorPanel } from "./components/OrchestratorPanel";
+import { NewProjectDialog } from "./components/NewProjectDialog";
+import { SessionNavigation, BoardHeading } from "./components/WorkspaceChrome";
 import { SettingsDialog } from "./components/SettingsDialog";
 import type { InstalledCliReport } from "./electron";
 import type {
@@ -239,87 +255,81 @@ const agentProfiles: AgentProfile[] = [
   {
     kind: "terminal",
     label: "Terminal",
-    command: "",
+    command: providerCapabilities["terminal"].command,
     accent: "#f4cf5a"
   },
   {
     kind: "codex",
     label: "Codex",
-    command: "codex",
+    command: providerCapabilities["codex"].command,
     accent: "#ff9f43"
   },
   {
     kind: "claude",
     label: "Claude",
-    command: "claude",
+    command: providerCapabilities["claude"].command,
     accent: "#8fd694"
   },
   {
     kind: "claude-custom",
     label: "Open Claude Code",
-    command: "claude",
+    command: providerCapabilities["claude"].command,
     accent: "#d97757",
     claudeCustom: true
   },
   {
     kind: "fusion",
     label: "Fusion",
-    command: "claude",
+    command: providerCapabilities["claude"].command,
     accent: "#b98bff",
     fusion: true
   },
   {
     kind: "openfusion",
     label: "Open Fusion",
-    command: "opencode",
+    command: providerCapabilities["opencode"].command,
     accent: "#2ee8be",
     openFusion: true
   },
   {
     kind: "cursor",
     label: "Cursor",
-    command: "cursor-agent",
+    command: providerCapabilities["cursor"].command,
     accent: "#46c2c9"
   },
   {
     kind: "gemini",
     label: "Gemini",
-    command: "gemini",
+    command: providerCapabilities["gemini"].command,
     accent: "#70a8ff"
   },
   {
     kind: "opencode",
     label: "OpenCode",
-    command: "opencode",
+    command: providerCapabilities["opencode"].command,
     accent: "#c78bff"
-  },
-  {
-    kind: "aider",
-    label: "Aider",
-    command: "aider",
-    accent: "#ff6b8a"
   },
   {
     kind: "kimi",
     label: "Kimi",
-    command: "kimi",
+    command: providerCapabilities["kimi"].command,
     accent: "#1e88e5"
   },
   {
     kind: "kimi-custom",
     label: "Kimi + CC",
-    command: "kimi-custom",
+    command: providerCapabilities["kimi-custom"].command,
     accent: "#8e24aa"
   },
   {
     kind: "qwen",
     label: "Qwen",
-    command: "qwen",
+    command: providerCapabilities["qwen"].command,
     accent: "#6d7cff"
   }
 ];
 
-// Every profile is offered. Gemini and Aider used to be filtered out here
+// Every retained profile is offered. Availability comes from the shared registry
 // unconditionally, which hid them from the users who do have them installed;
 // the launch-time CLI probe now dims what is missing instead of hiding it.
 const launcherAgentProfiles = agentProfiles;
@@ -734,45 +744,32 @@ function migrateLayout(layout: LayoutBox | null | undefined): LayoutBox {
   };
 }
 
-function findNextFluidLayout(sessions: AgentSession[]): LayoutBox {
-  // Only anchors occupy board space. A grouped non-anchor still carries the
-  // layout it had before it joined a tile (kept so popping it out has a box to
-  // restore), and counting that dead data would reserve space nothing renders.
-  const existingLayouts = sessions
-    .filter(isTileAnchor)
-    .map((session) => migrateLayout(session.layout));
-  const rowStep = DEFAULT_PANE_HEIGHT + LEGACY_BOARD_GAP;
-  const columns = [
-    { x: 0, w: DEFAULT_PANE_WIDTH_PERCENT },
-    { x: SECOND_COLUMN_X_PERCENT, w: DEFAULT_PANE_WIDTH_PERCENT }
-  ];
-  const maxBottom = existingLayouts.reduce(
-    (bottom, layout) => Math.max(bottom, layout.y + layout.h),
-    LEGACY_BOARD_PADDING
-  );
+function findNextFluidLayout(sessions: AgentSession[], metrics?: PlacementMetrics): LayoutBox {
+  return placeSession(sessions, metrics ?? { innerWidth: 1000, viewportTop: 0, viewportBottom: 600 });
+}
 
-  for (let y = LEGACY_BOARD_PADDING; y <= maxBottom + rowStep; y += rowStep) {
-    for (const column of columns) {
-      const candidate: LayoutBox = {
-        ...column,
-        y,
-        h: DEFAULT_PANE_HEIGHT,
-        unit: "fluid"
-      };
+type PlacementMetrics = { innerWidth: number; viewportTop: number; viewportBottom: number };
 
-      if (!existingLayouts.some((layout) => rectanglesOverlap(candidate, layout))) {
-        return candidate;
-      }
-    }
-  }
+function placeSession(sessions: AgentSession[], metrics: PlacementMetrics): LayoutBox {
+  const items: GeometryItem[] = buildBoardTiles(sessions).map((tile) => ({
+    id: tile.id,
+    layout: migrateLayout(tile.anchor.layout),
+    ...(tile.tree
+      ? subtreeMin(tile.tree, DEFAULT_MIN_PANE_WIDTH, DEFAULT_MIN_PANE_HEIGHT, SPLIT_DIVIDER_PX)
+      : { minW: DEFAULT_MIN_PANE_WIDTH, minH: DEFAULT_MIN_PANE_HEIGHT })
+  }));
+  return findAvailablePlacement(items, metrics.innerWidth, {
+    top: metrics.viewportTop,
+    bottom: metrics.viewportBottom
+  });
+}
 
-  return {
-    x: 0,
-    y: maxBottom + LEGACY_BOARD_GAP,
-    w: DEFAULT_PANE_WIDTH_PERCENT,
-    h: DEFAULT_PANE_HEIGHT,
-    unit: "fluid"
-  };
+function visibleRuntimeAttention(runtime: TerminalRuntimeSnapshot) {
+  if (runtime.pendingInput || runtime.processState !== "running" || runtime.agentProcessState === "exited" || runtime.agentProcessState === "failed" ||
+      runtime.observation !== "observed" || runtime.telemetryHealth !== "available") return false;
+  const state = runtime.attention?.state;
+  if (runtime.turnState === "completed") return state === "completed" && !runtime.childActivity && runtime.children.length === 0;
+  return (runtime.turnState === "waiting" && state === "waiting") || (runtime.turnState === "failed" && state === "failed");
 }
 
 function createSession(
@@ -780,7 +777,7 @@ function createSession(
   cwd: string,
   existingSessions: AgentSession[],
   name?: string,
-  options?: { providerProfileId?: string; providerModelOverride?: string }
+  options?: { providerProfileId?: string; providerModelOverride?: string; placement?: PlacementMetrics }
 ): AgentSession {
   const profile = getProfile(kind);
   // "fusion" is a selection-only kind: persist a real claude session flagged
@@ -843,7 +840,7 @@ function createSession(
     launchToken: 1,
     status: "idle",
     attention: EMPTY_ATTENTION,
-    layout: findNextFluidLayout(existingSessions)
+    layout: findNextFluidLayout(existingSessions, options?.placement)
   };
 }
 
@@ -989,6 +986,7 @@ function restoreSession(session: AgentSession): AgentSession {
 }
 
 function restoreStoredSession(value: unknown): AgentSession | null {
+  value = migrateRemovedAgent(value);
   if (!isStoredSession(value)) {
     return null;
   }
@@ -1159,6 +1157,8 @@ function moveWorkspace(
 }
 
 export default function App() {
+  const orchestratorState = useOrchestrator();
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [initialState] = useState(() => {
     const screenshotFixture = window.vibe?.app.screenshotFixture;
     if (
@@ -1332,6 +1332,13 @@ export default function App() {
   // can race one another in the same tick.
   const codexTurnLiveRef = useRef<Map<string, boolean>>(new Map());
   const sessionsByIdRef = useRef<Map<string, AgentSession>>(new Map());
+  const [runtimeSnapshots, setRuntimeSnapshots] = useState<Record<string, TerminalRuntimeSnapshot>>({});
+  const runtimeSnapshotsRef = useRef(runtimeSnapshots);
+  const [runtimeAcknowledgements, setRuntimeAcknowledgements] = useState<Record<string, string>>({});
+  const closedRuntimeIdsRef = useRef(new Set<string>());
+  const boardMetricsRef = useRef(new Map<string, PlacementMetrics>());
+  const activeScopeKeyRef = useRef<string | null>(null);
+  const [revealSessionId, setRevealSessionId] = useState<string | null>(null);
   const pendingCodexAttentionRef = useRef<
     Map<string, PendingCodexAttention[]>
   >(new Map());
@@ -1362,6 +1369,9 @@ export default function App() {
   );
   const [workspaceDropTarget, setWorkspaceDropTarget] =
     useState<WorkspaceDropTarget | null>(null);
+  const workspaceDragRef = useRef<string | null>(null);
+  const workspaceDragClickUntil = useRef(0);
+  const [workspaceOrderAnnouncement, setWorkspaceOrderAnnouncement] = useState("");
   const [workspaceContextMenu, setWorkspaceContextMenu] =
     useState<WorkspaceContextMenuState | null>(null);
   const [branchPicker, setBranchPicker] = useState<{
@@ -1369,6 +1379,60 @@ export default function App() {
     loading: boolean;
     overview?: BranchOverview;
   }>({ open: false, loading: false });
+
+  function withRuntime(session: AgentSession): AgentSession {
+    if (session.fusion || session.openFusion) return session;
+    const runtime = runtimeSnapshots[session.id];
+    if (!runtime || runtime.launchToken !== session.launchToken) {
+      return { ...session, status: session.started ? "starting" : "idle", attention: undefined, subagentDepth: undefined };
+    }
+    const attention = runtime.attention;
+    const reason = attention?.reason;
+    return {
+      ...session,
+      status: runtimeSessionStatus(runtime),
+      threadRef: runtime.conversation?.id ? runtime.conversation as AgentThreadRef : session.threadRef,
+      subagentDepth: runtimeSessionStatus(runtime) === "running"
+        ? runtime.children.length || (runtime.childActivity ? 1 : undefined)
+        : undefined,
+      attention: attention && visibleRuntimeAttention(runtime)
+        ? {
+            state: attention.state,
+            reason: reason === "approval" || reason === "question" || reason === "done" || reason === "exit" || reason === "error" ? reason : undefined,
+            source: "provider",
+            updatedAt: attention.updatedAt,
+            unread: runtimeAcknowledgements[session.id] !== attention.id
+          }
+        : undefined
+    };
+  }
+
+  function withRuntimeLabel(session: AgentSession): AgentSession {
+    const runtime = runtimeSnapshots[session.id];
+    return {
+      ...withRuntime(session),
+      name: runtimeDisplayTitle(runtime?.launchToken === session.launchToken ? runtime : undefined, session.name)
+    };
+  }
+
+  function scopeKey(scope: SessionScope) {
+    return scope.type === "multi" ? "multi" : scope.workspaceId;
+  }
+
+  function placementMetrics(scope: SessionScope): PlacementMetrics {
+    const board = scopeKey(scope) === activeScopeKeyRef.current ? document.querySelector<HTMLElement>(".terminal-board") : null;
+    const stored = boardMetricsRef.current.get(scopeKey(scope));
+    if (!board?.clientWidth) return stored ?? { innerWidth: 1000, viewportTop: 0, viewportBottom: 600 };
+    const sessions = scope.type === "multi" ? multiSessions : workspaces.find((workspace) => workspace.id === scope.workspaceId)?.sessions ?? [];
+    const minimumWidth = Math.max(DEFAULT_MIN_PANE_WIDTH, ...buildBoardTiles(sessions).map((tile) => tile.tree
+      ? subtreeMin(tile.tree, DEFAULT_MIN_PANE_WIDTH, DEFAULT_MIN_PANE_HEIGHT, SPLIT_DIVIDER_PX).minW
+      : DEFAULT_MIN_PANE_WIDTH));
+    return {
+      innerWidth: Math.max(board.clientWidth - 20, minimumWidth),
+      viewportTop: board.scrollTop,
+      viewportBottom: board.scrollTop + board.clientHeight
+    };
+  }
 
   const activeWorkspace =
     workspaces.find((workspace) => workspace.id === activeWorkspaceId) ??
@@ -1380,10 +1444,13 @@ export default function App() {
       : activeWorkspace
         ? { type: "workspace", workspaceId: activeWorkspace.id }
         : null;
-  const boardSessions =
+  useLayoutEffect(() => {
+    activeScopeKeyRef.current = activeScope ? scopeKey(activeScope) : null;
+  });
+  const boardSessions = (
     activeScope?.type === "multi"
       ? multiSessions
-      : activeWorkspace?.sessions ?? [];
+      : activeWorkspace?.sessions ?? []).map(withRuntime);
   const visibleSessionIds = boardSessions.map((session) => session.id);
   const boardTitle = activeView === "multi" ? "Multi mode" : activeWorkspace?.name ?? "No folder";
   const boardSubtitle =
@@ -1407,27 +1474,27 @@ export default function App() {
   const allSessions = [
     ...multiSessions,
     ...workspaces.flatMap((workspace) => workspace.sessions)
-  ];
+  ].map(withRuntime);
   useLayoutEffect(() => {
     sessionsByIdRef.current = new Map(
       allSessions.map((session) => [session.id, session])
     );
-  }, [multiSessions, workspaces]);
+  }, [multiSessions, workspaces, runtimeSnapshots, runtimeAcknowledgements]);
   const cwdConflicts = useMemo(
     () =>
       computeCwdConflicts([
         ...multiSessions.map((session) => ({
-          session,
+          session: withRuntimeLabel(session),
           scopeLabel: "Multi"
         })),
         ...workspaces.flatMap((workspace) =>
           workspace.sessions.map((session) => ({
-            session,
+            session: withRuntimeLabel(session),
             scopeLabel: workspace.name
           }))
         )
       ]),
-    [multiSessions, workspaces]
+    [multiSessions, workspaces, runtimeSnapshots, runtimeAcknowledgements]
   );
   const workspaceClosePending =
     workspaces.find((workspace) => workspace.id === workspaceClosePendingId) ??
@@ -1537,11 +1604,13 @@ export default function App() {
   );
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(workspaces));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(workspaces.map((workspace) => ({
+      ...workspace, sessions: workspace.sessions.map(serializeSession)
+    }))));
   }, [workspaces]);
 
   useEffect(() => {
-    localStorage.setItem(MULTI_SESSIONS_STORAGE_KEY, JSON.stringify(multiSessions));
+    localStorage.setItem(MULTI_SESSIONS_STORAGE_KEY, JSON.stringify(multiSessions.map(serializeSession)));
   }, [multiSessions]);
 
   useEffect(() => {
@@ -1659,6 +1728,12 @@ export default function App() {
         setShellMessage(event.message);
       }
 
+      // Standalone lifecycle belongs to the backend runtime, never screen replay.
+      if ("id" in event && event.id) {
+        const session = sessionsByIdRef.current.get(event.id);
+        if (session && !session.fusion && !session.openFusion) return;
+      }
+
       if (event.type === "agent-attention") {
         applyAgentAttention(
           event.id,
@@ -1708,6 +1783,41 @@ export default function App() {
         }
       }
     });
+  }, []);
+
+  useEffect(() => {
+    const terminal = window.vibe?.terminal;
+    if (!terminal?.onRuntime || !terminal.getRuntimeSnapshots) return;
+    let disposed = false;
+    const receive = (snapshot: TerminalRuntimeSnapshot, replay = false) => {
+      const session = sessionsByIdRef.current.get(snapshot.id);
+      if (disposed || !session || session.fusion || session.openFusion ||
+          closedRuntimeIdsRef.current.has(snapshot.id) || snapshot.launchToken !== session.launchToken) return;
+      const previous = runtimeSnapshotsRef.current[snapshot.id];
+      if (previous && previous.launchToken === snapshot.launchToken &&
+          (previous.generation !== snapshot.generation || previous.revision >= snapshot.revision)) return;
+      const next = { ...runtimeSnapshotsRef.current, [snapshot.id]: snapshot };
+      runtimeSnapshotsRef.current = next;
+      setRuntimeSnapshots(next);
+      if (snapshot.attention && visibleRuntimeAttention(snapshot) && (replay || attentionSelectionRef.current.selectedSessionId === snapshot.id)) {
+        const attentionId = snapshot.attention.id;
+        setRuntimeAcknowledgements((current) => current[snapshot.id] === attentionId ? current : { ...current, [snapshot.id]: attentionId });
+      }
+      const conversation = snapshot.conversation;
+      if (conversation?.id && conversation.provider === session.kind) {
+        updateAnySession(snapshot.id, (current) => {
+          if (current.launchToken !== snapshot.launchToken || current.fusion || current.openFusion) return current;
+          if (current.threadRef?.id === conversation.id && current.threadRef?.title === conversation.title &&
+              current.threadRef?.titleSource === conversation.titleSource) return current;
+          return { ...current, threadRef: conversation as AgentThreadRef };
+        });
+      }
+    };
+    const unsubscribe = terminal.onRuntime((snapshot) => receive(snapshot));
+    void terminal.getRuntimeSnapshots().then((snapshots) => {
+      snapshots.forEach((snapshot) => receive(snapshot, true));
+    }).catch(() => { if (!disposed) setShellMessage("Terminal observation could not be connected."); });
+    return () => { disposed = true; unsubscribe(); };
   }, []);
 
   useEffect(() => {
@@ -2124,12 +2234,15 @@ export default function App() {
             : session
         );
       } else {
-        applyAgentRunning(sessionId, true, provider);
+        updateAnySession(sessionId, (session) => ({
+          ...session,
+          status: "running",
+          attention: { state: "none", unread: false, updatedAt: Date.now(), source: "provider" }
+        }));
       }
     }
 
-    // Ordering is load-bearing: applyAgentRunning's turn-start branch clears
-    // subagentDepth, so the increment has to land after it.
+    // A child start is not a new parent turn: retain every already-open child.
     updateAnySession(sessionId, (session) =>
       updateSubagentDepth(session, phase)
     );
@@ -2394,6 +2507,9 @@ export default function App() {
   }
 
   function clearSessionAttention(sessionId: string) {
+    const runtime = runtimeSnapshotsRef.current[sessionId];
+    const attentionId = runtime && visibleRuntimeAttention(runtime) ? runtime.attention?.id : undefined;
+    if (attentionId) setRuntimeAcknowledgements((current) => ({ ...current, [sessionId]: attentionId }));
     updateAnySession(sessionId, clearUnreadAttention);
   }
 
@@ -2408,10 +2524,17 @@ export default function App() {
     cwd: string,
     options?: { providerProfileId?: string; providerModelOverride?: string }
   ) {
+    const created = createSession(kind, cwd, [], undefined, options);
+    const metrics = placementMetrics(scope);
     updateScopeSessions(scope, (sessions) => [
       ...sessions,
-      createSession(kind, cwd, sessions, undefined, options)
+      { ...created, name: `${getProfile(kind).label} ${sessions.length + 1}`, layout: findNextFluidLayout(sessions, metrics) }
     ]);
+    if (scopeKey(scope) === activeScopeKeyRef.current) {
+      setSelectedSessionId(created.id);
+      setRevealSessionId(created.id);
+    }
+    return created.id;
   }
 
   function sessionCreationKind(session: AgentSession): AgentKind {
@@ -2444,17 +2567,9 @@ export default function App() {
     session: AgentSession,
     dir: "row" | "col"
   ) {
-    let createdId: string | null = null;
+    const created = createSession(sessionCreationKind(session), session.cwd, [], undefined, providerOptionsFor(session));
 
     updateScopeSessions(scope, (sessions) => {
-      const created = createSession(
-        sessionCreationKind(session),
-        session.cwd,
-        sessions,
-        undefined,
-        providerOptionsFor(session)
-      );
-      createdId = created.id;
 
       const tileId = effectiveTileId(session);
       const anchor = sessions.find((candidate) => candidate.id === tileId);
@@ -2472,19 +2587,18 @@ export default function App() {
             ? { ...candidate, tileId: anchorId, splitTree: undefined }
             : candidate;
         }),
-        { ...created, tileId: anchorId, splitTree: undefined }
+        { ...created, name: `${getProfile(sessionCreationKind(session)).label} ${sessions.length + 1}`, tileId: anchorId, splitTree: undefined }
       ];
     });
 
-    if (createdId) {
-      setSelectedSessionId(createdId);
-    }
+    setSelectedSessionId(created.id);
   }
 
   // Give a grouped pane its own board tile again. It needs a fresh box: its
   // stored layout is the one it had before joining, which for the anchor is the
   // tile's own box and would land exactly on top of it.
   function popOutSession(scope: SessionScope, session: AgentSession) {
+    const metrics = placementMetrics(scope);
     updateScopeSessions(scope, (sessions) => {
       const detached = detachSessionFromTile(sessions, session.id);
       const others = detached.filter(
@@ -2492,10 +2606,12 @@ export default function App() {
       );
       return detached.map((candidate) =>
         candidate.id === session.id
-          ? { ...candidate, layout: findNextFluidLayout(others) }
+          ? { ...candidate, layout: findNextFluidLayout(others, metrics) }
           : candidate
       );
     });
+    setSelectedSessionId(session.id);
+    setRevealSessionId(session.id);
   }
 
   function setTileRatio(
@@ -2570,6 +2686,8 @@ export default function App() {
     // it inherits the source's conversation as `resumeRef` so the copy can offer
     // "Resume last chat" to continue where the original left off.
     const sourceThread = activeSessionThreadRef(session) ?? sessionResumeRef(session);
+    const createdId = createId("session");
+    const metrics = placementMetrics(scope);
     updateScopeSessions(scope, (sessions) => [
       ...sessions,
       {
@@ -2580,6 +2698,8 @@ export default function App() {
           undefined,
           providerOptionsFor(session)
         ),
+        id: createdId,
+        layout: findNextFluidLayout(sessions, metrics),
         name: `${session.name} copy`,
         command: session.command,
         // The copy keeps the source's Fusion family/model/effort/mode settings
@@ -2608,9 +2728,11 @@ export default function App() {
         resumeRef: sourceThread
       }
     ]);
+    setSelectedSessionId(createdId);
+    setRevealSessionId(createdId);
   }
 
-  function stopSessionProcess(session: AgentSession): Promise<boolean> {
+  function stopSessionProcess(session: AgentSession, reason: "close" | "restart" = "restart"): Promise<boolean> {
     if (session.fusion) {
       return window.vibe?.fusionChat?.stop(session.id) ?? Promise.resolve(false);
     }
@@ -2619,12 +2741,19 @@ export default function App() {
       return window.vibe?.openFusionChat?.stop(session.id) ?? Promise.resolve(false);
     }
 
-    return window.vibe?.terminal.kill(session.id) ?? Promise.resolve(false);
+    const runtime = runtimeSnapshotsRef.current[session.id];
+    return window.vibe?.terminal.kill(session.id, {
+      launchToken: session.launchToken,
+      generation: runtime?.launchToken === session.launchToken ? runtime.generation : undefined,
+      reason
+    }) ?? Promise.resolve(false);
   }
 
   function closeSession(scope: SessionScope, session: AgentSession) {
+    forgetSessionDraft(session.id);
+    closedRuntimeIdsRef.current.add(session.id);
     clearCodexTracking(session.id);
-    void stopSessionProcess(session);
+    void stopSessionProcess(session, "close");
     const sessionId = session.id;
     updateScopeSessions(scope, (sessions) =>
       // Detach first so the tile collapses into its surviving sibling (and
@@ -2670,8 +2799,10 @@ export default function App() {
       workspace.sessions.map((session) => session.id)
     );
     workspace.sessions.forEach((session) => {
+      forgetSessionDraft(session.id);
+      closedRuntimeIdsRef.current.add(session.id);
       clearCodexTracking(session.id);
-      void stopSessionProcess(session);
+      void stopSessionProcess(session, "close");
     });
 
     const nextWorkspaces = workspaces.filter(
@@ -3707,23 +3838,23 @@ export default function App() {
   }
 
   function workspaceHasUnreadAttention(workspace: ProjectWorkspace) {
-    return workspace.sessions.some(shouldShowAttentionDot);
+    return workspace.sessions.map(withRuntime).some(shouldShowAttentionDot);
   }
 
   function workspaceHasWorking(workspace: ProjectWorkspace) {
-    return workspace.sessions.some(isSessionWorking);
+    return workspace.sessions.map(withRuntime).some(isSessionWorking);
   }
 
   const multiModeHasUnreadAttention =
-    multiSessions.some(shouldShowAttentionDot);
+    multiSessions.map(withRuntime).some(shouldShowAttentionDot);
 
-  const multiModeHasWorking = multiSessions.some(isSessionWorking);
+  const multiModeHasWorking = multiSessions.map(withRuntime).some(isSessionWorking);
 
   // Every workspace's sessions live in renderer state and keep receiving live
   // status/attention updates while their folder is in the background (all
   // mutations go through updateAnySession, and the event subscriptions are
   // mounted once), so the cards tally without any new state, IPC, or polling.
-  const multiModeSummary = summarizeSessions(multiSessions);
+  const multiModeSummary = summarizeSessions(multiSessions.map(withRuntime));
 
   function handleSidebarResizePointerDown(
     event: ReactPointerEvent<HTMLDivElement>
@@ -3826,6 +3957,8 @@ export default function App() {
   ) {
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", workspaceId);
+    workspaceDragRef.current = workspaceId;
+    workspaceDragClickUntil.current = Infinity;
     setDraggingWorkspaceId(workspaceId);
     updateWorkspaceDropTarget(null);
   }
@@ -3834,7 +3967,7 @@ export default function App() {
     event: ReactDragEvent<HTMLDivElement>,
     targetWorkspaceId: string
   ) {
-    if (!draggingWorkspaceId || draggingWorkspaceId === targetWorkspaceId) {
+    if (!workspaceDragRef.current || workspaceDragRef.current === targetWorkspaceId) {
       updateWorkspaceDropTarget(null);
       return;
     }
@@ -3851,29 +3984,47 @@ export default function App() {
     event: ReactDragEvent<HTMLDivElement>,
     targetWorkspaceId: string
   ) {
-    const draggedWorkspaceId =
-      draggingWorkspaceId || event.dataTransfer.getData("text/plain");
-    const position =
-      workspaceDropTarget?.workspaceId === targetWorkspaceId
-        ? workspaceDropTarget.position
-        : getWorkspaceDropPosition(event.currentTarget, event.clientY);
-
+    const draggedWorkspaceId = workspaceDragRef.current;
+    const position = getWorkspaceDropPosition(event.currentTarget, event.clientY);
     event.preventDefault();
-    setDraggingWorkspaceId(null);
-    updateWorkspaceDropTarget(null);
-
-    if (!draggedWorkspaceId) {
-      return;
-    }
-
-    setWorkspaces((current) =>
-      moveWorkspace(current, draggedWorkspaceId, targetWorkspaceId, position)
-    );
+    handleWorkspaceDragEnd();
+    if (draggedWorkspaceId) commitWorkspaceMove(draggedWorkspaceId, targetWorkspaceId, position);
   }
 
   function handleWorkspaceDragEnd() {
+    workspaceDragRef.current = null;
+    workspaceDragClickUntil.current = Date.now() + 250;
     setDraggingWorkspaceId(null);
     updateWorkspaceDropTarget(null);
+  }
+
+  function commitWorkspaceMove(draggedWorkspaceId: string, targetWorkspaceId: string, position: WorkspaceDropPosition) {
+    const next = moveWorkspace(workspaces, draggedWorkspaceId, targetWorkspaceId, position);
+    if (next === workspaces) return;
+    setWorkspaces((current) => moveWorkspace(current, draggedWorkspaceId, targetWorkspaceId, position));
+    const index = next.findIndex(workspace => workspace.id === draggedWorkspaceId);
+    setWorkspaceOrderAnnouncement(`${next[index].name} moved to position ${index + 1} of ${next.length}.`);
+  }
+
+  function handleWorkspaceReorderKey(event: ReactKeyboardEvent<HTMLButtonElement>, workspaceId: string) {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    event.stopPropagation();
+    const button = event.currentTarget;
+    const index = workspaces.findIndex(workspace => workspace.id === workspaceId);
+    const target = workspaces[index + (event.key === "ArrowUp" ? -1 : 1)];
+    if (target) commitWorkspaceMove(workspaceId, target.id, event.key === "ArrowUp" ? "before" : "after");
+    requestAnimationFrame(() => button.scrollIntoView({ block: "nearest" }));
+  }
+
+  function handleWorkspaceListDragOver(event: ReactDragEvent<HTMLDivElement>) {
+    if (!workspaceDragRef.current) return;
+    event.preventDefault();
+    const list = event.currentTarget;
+    const rect = list.getBoundingClientRect();
+    // Native dragover repeats while held at the edge, including over the source row.
+    if (event.clientY < rect.top + 36) list.scrollTop -= 24;
+    else if (event.clientY > rect.bottom - 36) list.scrollTop += 24;
   }
 
   function handleWorkspaceListDragLeave(event: ReactDragEvent<HTMLDivElement>) {
@@ -4273,6 +4424,219 @@ export default function App() {
     }
   }
 
+  const setupsApi = (window.vibe as unknown as {
+      setups?: WorkspaceSetupsProps["api"];
+  })?.setups;
+  async function loadRelaySetup(recipe: WorkspaceSetup) {
+      const recipeProject = recipe.scope === "project"
+        ? workspaces.find(project=>normalizeWorkspacePath(project.path) === normalizeWorkspacePath(recipe.projectPath || "")) || (recipe.projectPath ? starterWorkspace(recipe.projectPath) : undefined)
+        : activeView === "project" ? activeWorkspace : undefined;
+      const targetScope: SessionScope | null = recipeProject ? {type:"workspace",workspaceId:recipeProject.id} : activeScope;
+      if (!targetScope) throw new Error("Open a project or choose Multi mode first.");
+      const instantiated = instantiateWorkspaceSetup(recipe, { projectPath: recipeProject?.path });
+      const providers = await window.vibe?.claudeProviders?.list();
+      for (const session of instantiated.sessions) {
+          if (session.providerProfileId && session.providerProfileId !== "default-custom" && !providers?.profiles.some(p => p.id === session.providerProfileId))
+              throw new Error(`Provider for ${session.name} is unavailable. Restore it in Settings first.`);
+          if (session.providerProfileId === "default-custom" && !providers?.profiles.length)
+              throw new Error("Configure a Claude provider before loading this setup.");
+      }
+      const metrics = placementMetrics(targetScope);
+      const fresh = instantiated.sessions.map((session,index) => ({
+        ...createSession(sessionCreationKind(session),session.cwd,[],session.name,providerOptionsFor(session)),
+        ...session,started:recipe.panes[index]?.migratedFrom !== "aider" && String(recipe.panes[index]?.config.kind) !== "aider",launchToken:1
+      }));
+      // Place whole tiles into visible holes, preserving split ownership and minima.
+      const occupied: GeometryItem[] = buildBoardTiles(recipeProject?.sessions || (targetScope.type === "multi" ? multiSessions : [])).map(tile=>({id:tile.id,layout:migrateLayout(tile.anchor.layout),...(tile.tree ? subtreeMin(tile.tree,DEFAULT_MIN_PANE_WIDTH,DEFAULT_MIN_PANE_HEIGHT,SPLIT_DIVIDER_PX) : {minW:DEFAULT_MIN_PANE_WIDTH,minH:DEFAULT_MIN_PANE_HEIGHT})}));
+      for (const tile of buildBoardTiles(fresh)) {
+        const minimum=tile.tree ? subtreeMin(tile.tree,DEFAULT_MIN_PANE_WIDTH,DEFAULT_MIN_PANE_HEIGHT,SPLIT_DIVIDER_PX) : {minW:DEFAULT_MIN_PANE_WIDTH,minH:DEFAULT_MIN_PANE_HEIGHT};
+        const saved=migrateLayout(tile.anchor.layout);
+        const layout=findAvailablePlacement(occupied,metrics.innerWidth,{top:metrics.viewportTop,bottom:metrics.viewportBottom},{width:saved.w/100*metrics.innerWidth,height:saved.h,...minimum});
+        const anchor=fresh.find(session=>session.id===tile.anchor.id)!;
+        anchor.layout=layout;
+        occupied.push({id:tile.id,layout,...minimum});
+      }
+      for (const [id, prompt] of Object.entries(instantiated.prompts))
+          writeSessionDraft(id, prompt);
+      if (recipeProject && !workspaces.some(project=>project.id===recipeProject.id)) {
+        setWorkspaces(current=>[{...recipeProject,sessions:fresh},...current]);
+      } else updateScopeSessions(targetScope, current => [...current, ...fresh]);
+      if(recipeProject){setActiveWorkspaceId(recipeProject.id);setActiveView("project");}else setActiveView("multi");
+      if (fresh[0]) {
+          setSelectedSessionId(fresh[0].id);
+          setRevealSessionId(fresh[0].id);
+      }
+  }
+  const relaySessions: RelaySession[] = allSessions.map(raw => {
+      const session = withRuntimeLabel(raw);
+      const project = workspaces.find(item => item.sessions.some(pane => pane.id === session.id));
+      const runtime = runtimeSnapshotsRef.current[session.id];
+      return { ...Object.fromEntries(HISTORY_CONFIG_FIELDS.map(field => [field, session[field]])), threadRef: session.threadRef, resumeRef: session.resumeRef, fusion: session.fusion, openFusion: session.openFusion, id: session.id, name: session.name, kind: sessionCreationKind(session), cwd: session.cwd, status: session.status, statusLabel: session.fusion || session.openFusion ? session.status : runtimeStatusLabel(runtime?.launchToken === session.launchToken ? runtime : undefined, session.started), observation: runtime?.observation, lastTool: runtime?.lastTool?.name, projectName: project?.name, started: session.started, launchToken: session.launchToken, generation: runtime?.generation, revision: runtime?.revision };
+  });
+  function focusRelaySession(id: string) {
+      const project = workspaces.find(item => item.sessions.some(session => session.id === id));
+      if (project) {
+          setActiveWorkspaceId(project.id);
+          setActiveView("project");
+      }
+      else if (multiSessions.some(session => session.id === id))
+          setActiveView("multi");
+      else
+          return false;
+      selectSession(id);
+      setRevealSessionId(null);
+      requestAnimationFrame(() => setRevealSessionId(id));
+      return true;
+  }
+  // Reserve synchronously: two IPC requests can arrive before React commits a new pane.
+  const pendingConversationOpens = useRef(new Map<string, { id: string; launchToken: number }>());
+  useEffect(() => {
+      for (const [key, pending] of pendingConversationOpens.current) {
+          if (allSessions.some(session => session.id === pending.id && session.launchToken >= pending.launchToken)) pendingConversationOpens.current.delete(key);
+      }
+  }, [allSessions]);
+  const relayActionHandler = useRef<(kind: string, payload: Record<string, unknown>) => Promise<Record<string, unknown>>>(async () => ({ ok: false }));
+  relayActionHandler.current = async (kind, payload) => {
+      if (kind === "resume_conversation") {
+          const identity = payload.conversation as SavedConversation;
+          if (!identity || typeof identity !== "object") return { ok: false, error: "Saved conversation is missing." };
+          const conversation = normalizeSavedConversation(identity);
+          const key = conversationKey(conversation);
+          const pending = pendingConversationOpens.current.get(key);
+          if (pending) return { ok: true, id: pending.id, launchToken: pending.launchToken, status: "resume_requested" };
+          const existing = matchingConversation(allSessions.map(withRuntimeLabel), conversation);
+          if (existing) {
+              setMaximizedSessionId(null);
+              focusRelaySession(existing.id);
+              if (!conversationNeedsResume(existing, runtimeSnapshotsRef.current[existing.id])) return { ok: true, id: existing.id, launchToken: existing.launchToken, status: "revealed" };
+              const project = workspaces.find(workspace => workspace.sessions.some(session => session.id === existing.id));
+              const scope: SessionScope = project ? { type: "workspace", workspaceId: project.id } : { type: "multi" };
+              const launchToken = existing.launchToken + 1;
+              pendingConversationOpens.current.set(key, { id: existing.id, launchToken });
+              try {
+                  if (existing.started && !["exited", "failed"].includes(runtimeSnapshotsRef.current[existing.id]?.processState || "") && !(await stopSessionProcess(existing))) throw new Error("Could not stop the exited conversation's terminal for resume.");
+                  const current = sessionsByIdRef.current.get(existing.id);
+                  if (!current || current.launchToken !== existing.launchToken) throw new Error("The pane changed while preparing resume. Select the conversation again.");
+                  clearCodexTracking(existing.id);
+                  updateScopeSessions(scope, sessions => sessions.map(session => session.id === existing.id ? {
+                      ...session, started: true, launchToken, nextLaunchMode: "resume",
+                      ...(session.fusion && (conversation.provider === "claude" || conversation.provider === "codex") ? { fusionPlannerFamily: conversation.provider } : {}),
+                      threadRef: { provider: existing.kind === "kimi-custom" || existing.kind === "kimi" ? existing.kind : conversation.provider, id: conversation.id, title: conversation.title, createdAt: conversation.createdAt || Date.now(), updatedAt: conversation.updatedAt || Date.now() },
+                      threadLookupStatus: "found", threadLookupStartedAt: undefined, threadLookupMessage: undefined,
+                      status: "idle", attention: EMPTY_ATTENTION, backgroundActivity: undefined, detachedTaskIds: undefined, subagentDepth: undefined
+                  } : session));
+                  return { ok: true, id: existing.id, launchToken, status: "resume_requested" };
+              } catch (error) {
+                  pendingConversationOpens.current.delete(key);
+                  return { ok: false, error: String(error) };
+              }
+          }
+          const launch = conversationLaunch(conversation);
+          const project = workspaces.find(workspace => normalizeWorkspacePath(workspace.path) === normalizeWorkspacePath(conversation.cwd));
+          const scope: SessionScope = project ? { type: "workspace", workspaceId: project.id } : { type: "multi" };
+          const created = { ...createSession(launch.kind, conversation.cwd, [], undefined, conversation), ...launch.patch };
+          pendingConversationOpens.current.set(key, { id: created.id, launchToken: created.launchToken });
+          const metrics = placementMetrics(scope);
+          updateScopeSessions(scope, sessions => [...sessions, { ...created, layout: findNextFluidLayout(sessions, metrics) }]);
+          if (project) { setActiveWorkspaceId(project.id); setActiveView("project"); } else setActiveView("multi");
+          setMaximizedSessionId(null);
+          setSelectedSessionId(created.id);
+          setRevealSessionId(created.id);
+          return { ok: true, id: created.id, launchToken: created.launchToken, status: "resume_requested" };
+      }
+      if (kind === "launch_setup") {
+          await loadRelaySetup(payload.recipe as WorkspaceSetup);
+          return { ok: true, status: "created" };
+      }
+      if (kind === "save_setup") {
+          if (!setupsApi)
+              return { ok: false, error: "Setup persistence is unavailable." };
+          const recipe = createWorkspaceSetup({ name: String(payload.name || boardTitle + " setup"), scope: activeView === "project" ? "project" : "global", projectPath: activeView === "project" ? activeWorkspace?.path : undefined, sessions: boardSessions });
+          const result=await setupsApi.save(recipe);
+          if(result && typeof result === "object" && "ok" in result && result.ok === false) return {ok:false,error:"error" in result ? String(result.error) : "Setup could not be saved."};
+          return { ok: true, recipe };
+      }
+      if (kind === "inventory")
+          return { ok: true, projectPaths: workspaces.map(workspace=>workspace.path), sessions: relaySessions.map(session => ({ ...session, projectId: workspaces.find(p => p.sessions.some(s => s.id === session.id))?.id })) };
+      if (kind === "focus_session")
+          return { ok: focusRelaySession(String(payload.id)) };
+      if (kind === "add_project") {
+          const path = String(payload.path || "").trim();
+          if (!path)
+              return { ok: false, error: "A project path is required." };
+          const existing = workspaces.find(w => normalizeWorkspacePath(w.path) === normalizeWorkspacePath(path));
+          const project = existing || starterWorkspace(path);
+          if (!existing)
+              setWorkspaces(current => [project, ...current]);
+          setActiveWorkspaceId(project.id);
+          setActiveView("project");
+          return { ok: true, projectId: project.id };
+      }
+      if (kind === "create_session") {
+          const cwd = String(payload.cwd || "");
+          const agentKind = String(payload.kind || "terminal") as AgentKind;
+          if (!cwd || !agentProfiles.some(profile => profile.kind === agentKind))
+              return { ok: false, error: "A valid folder and launcher are required." };
+          const project = workspaces.find(w => normalizeWorkspacePath(w.path) === normalizeWorkspacePath(cwd));
+          const scope: SessionScope = project ? { type: "workspace", workspaceId: project.id } : { type: "multi" };
+          if (agentKind === "claude-custom") {
+              const providers = await window.vibe?.claudeProviders?.list();
+              if (!providers?.profiles.length)
+                  return { ok: false, error: "Configure a Claude provider in Settings first." };
+          }
+          const id = addSessionForCwd(scope, agentKind, cwd, payload.settings as {
+              providerProfileId?: string;
+              providerModelOverride?: string;
+          } | undefined);
+          if (payload.settings && typeof payload.settings === "object") {
+              const settings = payload.settings as Record<string, unknown>;
+              const config = Object.fromEntries(SETUP_CONFIG_FIELDS.filter(key => !["kind", "fusion", "openFusion", "command"].includes(key) && (typeof settings[key] === "string" || typeof settings[key] === "boolean")).map(key => [key, settings[key]]));
+              updateScopeSessions(scope, sessions => sessions.map(session => session.id === id ? { ...session, ...config } : session));
+          }
+          if (typeof payload.prompt === "string")
+              writeSessionDraft(id, payload.prompt);
+          return { ok: true, id, launchToken: 1, status: "created", draftStaged: Boolean(payload.prompt) };
+      }
+      if (payload.generation && payload.id) {
+          const currentGeneration = runtimeSnapshotsRef.current[String(payload.id)]?.generation || orchestratorState?.sessions.find(session => session.id === payload.id)?.generation;
+          if (currentGeneration && currentGeneration !== payload.generation)
+              return { ok: false, error: "Session restarted; select its current generation." };
+      }
+      if (["stage_draft", "get_draft", "stage_handoff"].includes(kind)) {
+          const id = String(payload.id || payload.targetId || "");
+          if (!allSessions.some(session => session.id === id))
+              return { ok: false, error: "Session no longer exists." };
+          const previous = readSessionDraft(id);
+          if (kind === "get_draft")
+              return { ok: true, ...previous };
+          const text = String(payload.text || "");
+          const paths = kind === "stage_handoff" ? "" : Array.isArray(payload.paths) ? payload.paths.filter(p => typeof p === "string").join("\n") : "";
+          const incoming = [text, paths].filter(Boolean).join("\n");
+          const next = writeSessionDraft(id, payload.mode === "replace" ? incoming : [previous.text, incoming].filter(Boolean).join("\n"), typeof payload.expectedRevision === "number" ? payload.expectedRevision : undefined);
+          return { ok: true, status: "staged", ...next };
+      }
+      if (kind === "restart" || kind === "close") {
+          const id = String(payload.id || "");
+          const session = allSessions.find(s => s.id === id);
+          if (!session)
+              return { ok: false, error: "Session no longer exists." };
+          const project = workspaces.find(p => p.sessions.some(s => s.id === id));
+          const scope: SessionScope = project ? { type: "workspace", workspaceId: project.id } : { type: "multi" };
+          if (kind === "restart")
+              restartSession(scope, session);
+          else
+              closeSession(scope, session);
+          return { ok: true, status: kind === "restart" ? "restart_requested" : "close_requested" };
+      }
+      return { ok: false, error: `Unsupported workspace action: ${kind}` };
+  };
+  useEffect(() => {
+      const api = relayApi();
+      if (!api?.onUiAction)
+          return;
+      return api.onUiAction(action => { void relayActionHandler.current(action.kind, action.payload || {}).then(result => api.completeUiAction(action.id, result)).catch(error => api.completeUiAction(action.id, { ok: false, error: String(error) })); });
+  }, []);
+
   async function restartToUpdate() {
     await window.vibe?.updates.restart();
   }
@@ -4289,13 +4653,14 @@ export default function App() {
           </div>
           <div>
             <h1>vibeTerminal</h1>
-            <span>agent cockpit</span>
+            <span>WORKSPACE / AGENTS</span>
           </div>
         </div>
 
+        <button className="open-folder-button new-project-button" onClick={()=>setNewProjectOpen(true)}><Plus size={17}/><span>New project</span></button>
         <button className="open-folder-button" onClick={openFolder}>
           <FolderOpen size={17} />
-          Open Folder
+          Add project
         </button>
 
         <button
@@ -4331,13 +4696,14 @@ export default function App() {
         </button>
 
         <div className="sidebar-section-title">
-          Folders
+          Projects
           {workspaces.length > 0 && (
             <span className="sidebar-section-count">{workspaces.length}</span>
           )}
         </div>
         <div
           className="workspace-list"
+          onDragOver={handleWorkspaceListDragOver}
           onDragLeave={handleWorkspaceListDragLeave}
         >
           {workspaces.length === 0 && (
@@ -4351,7 +4717,7 @@ export default function App() {
             const hasUnreadAttention = workspaceHasUnreadAttention(workspace);
             const hasWorking =
               !hasUnreadAttention && workspaceHasWorking(workspace);
-            const summary = summarizeSessions(workspace.sessions);
+            const summary = summarizeSessions(workspace.sessions.map(withRuntime));
             const isDropTarget =
               workspaceDropTarget?.workspaceId === workspace.id;
 
@@ -4370,6 +4736,7 @@ export default function App() {
                     "drop-after"
                 )}
                 key={workspace.id}
+                data-workspace-id={workspace.id}
                 onDragOver={(event) =>
                   handleWorkspaceDragOver(event, workspace.id)
                 }
@@ -4378,6 +4745,20 @@ export default function App() {
                   openWorkspaceContextMenu(event, workspace)
                 }
               >
+                <button
+                  type="button"
+                  className="workspace-reorder-grip"
+                  aria-label={`Reorder ${workspace.name}`}
+                  aria-describedby="workspace-reorder-help"
+                  title="Drag to reorder · Arrow keys move up or down"
+                  disabled={workspaces.length < 2}
+                  draggable={workspaces.length > 1}
+                  onDragStart={(event) => handleWorkspaceDragStart(event, workspace.id)}
+                  onDragEnd={handleWorkspaceDragEnd}
+                  onKeyDown={(event) => handleWorkspaceReorderKey(event, workspace.id)}
+                >
+                  <GripVertical size={14} aria-hidden="true" />
+                </button>
                 <button
                   type="button"
                   className={clsx(
@@ -4394,6 +4775,7 @@ export default function App() {
                   }
                   onDragEnd={handleWorkspaceDragEnd}
                   onClick={() => {
+                    if (Date.now() < workspaceDragClickUntil.current) return;
                     setSelectedSessionId(null);
                     setActiveWorkspaceId(workspace.id);
                     setActiveView("project");
@@ -4430,7 +4812,9 @@ export default function App() {
             );
           })}
         </div>
-
+        <span id="workspace-reorder-help" className="workspace-reorder-sr-only">Drag to reorder projects, or use Up and Down arrow keys on a reorder button.</span>
+        <span className="workspace-reorder-sr-only" role="status" aria-live="polite">{workspaceOrderAnnouncement}</span>
+        <SessionNavigation sessions={boardSessions.map(session => ({...withRuntimeLabel(session),statusLabel:relaySessions.find(item=>item.id===session.id)?.statusLabel}))} selectedId={selectedSessionId} onFocus={focusRelaySession} onSettings={() => setSettingsOpen(true)} />
       </aside>
 
       {workspaceContextMenu && (
@@ -4513,6 +4897,7 @@ export default function App() {
                 {currentAppVersionLabel}
               </span>
             )}
+            <button className={clsx("orchestrator-mic", orchestratorState?.enabled && "enabled")} disabled={!orchestratorState?.ready && !orchestratorState?.enabled} aria-pressed={orchestratorState?.enabled ?? false} title={orchestratorState?.ready ? "Toggle Orchestrator" : "Configure OpenRouter and a model in Settings"} onClick={() => void relayApi()?.setEnabled(!orchestratorState?.enabled)}><Mic size={15} /><span>Orchestrator</span><i /></button>
             <button onClick={checkForUpdates} disabled={updateCheckDisabled}>
               <RefreshCw size={16} />
               {updateCheckLabel}
@@ -4608,14 +4993,15 @@ export default function App() {
             <div className="launcher-picker">
               <button
                 className="launcher-picker-toggle"
-                title="Launch a terminal or coding agent"
+                title={activeScope ? "Start a terminal or coding agent" : "Open a project or choose Multi mode first"}
+                disabled={!activeScope}
                 aria-haspopup="listbox"
                 aria-expanded={launcherMenuOpen}
                 onClick={() => void toggleLauncherMenu()}
                 style={{ "--agent-accent": "var(--accent)" } as React.CSSProperties}
               >
                 <Plus size={14} />
-                New terminal
+                New session
                 <ChevronDown size={13} />
               </button>
               {launcherMenuOpen && (
@@ -4814,9 +5200,12 @@ export default function App() {
           )}
         </section>
 
+        <BoardHeading count={boardSessions.length} title="Session board" />
         <section className="terminal-board">
           {activeScope && visibleSessions.length > 0 ? (
             <TiledBoard
+              onMetricsChange={(metrics) => boardMetricsRef.current.set(scopeKey(activeScope), metrics)}
+              revealItemId={revealSessionId ?? undefined}
               disabled={Boolean(maximizedSessionId)}
               onArrangeChange={setIsArranging}
               onLayoutCommit={(layouts) => persistLayout(activeScope, layouts)}
@@ -4910,6 +5299,8 @@ export default function App() {
                 ) : (
                   <TerminalPane
                     session={session}
+                    runtime={runtimeSnapshots[session.id]}
+                    runtimeUnread={Boolean(session.attention?.unread)}
                     profile={
                       session.fusion ? getProfile("fusion") : getProfile(session.kind)
                     }
@@ -4924,7 +5315,7 @@ export default function App() {
                     // tile needs the selective gate, because several terminals
                     // mount into one frame there and the last one would win.
                     autoFocus={
-                      !session.tileId || session.id === selectedSessionId
+                      session.id === selectedSessionId || (!selectedSessionId && session.id === visibleSessionIds[0])
                     }
                     onClose={() => closeSession(activeScope, session)}
                     onDuplicate={() => duplicateSession(activeScope, session)}
@@ -5046,49 +5437,17 @@ export default function App() {
               })}
             />
           ) : (
-            <div className="empty-state">
-              <Play size={42} />
-              <h2>Choose what to spin up.</h2>
-              <p>
-                {activeView === "multi"
-                  ? "Add terminals or coding agents from any repo onto this free board."
-                  : "Open a folder, then add only the terminal or coding agent panes you want for that folder."}
-              </p>
-              {activeScope ? (
-                <div className="empty-actions">
-                  {launcherAgentProfiles.map((profile) => {
-                    const missing = agentCliMissing(profile.kind);
-                    return (
-                      <button
-                        key={profile.kind}
-                        className={clsx(missing && "agent-launcher-missing")}
-                        title={
-                          missing
-                            ? `${profile.label} was not found on your PATH — click to launch anyway`
-                            : undefined
-                        }
-                        onClick={() => addSession(profile.kind)}
-                      >
-                        {profile.openFusion ? (
-                          <img className="agent-launcher-logo" src={openFusionLogo} alt="" />
-                        ) : (
-                          <Plus size={16} />
-                        )}
-                        {profile.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : (
-                <button onClick={openFolder}>
-                  <FolderOpen size={17} />
-                  Open Folder
-                </button>
-              )}
-            </div>
+            <WorkspaceStart profiles={launcherAgentProfiles} mode={activeView} projectName={activeWorkspace?.name} projectPath={activeWorkspace?.path}
+              canLaunch={Boolean(activeScope)} isMissing={agentCliMissing} onLaunch={kind => void addSession(kind)}
+              onNewProject={() => setNewProjectOpen(true)} onOpenProject={() => void openFolder()} onMultiMode={() => setActiveView("multi")}/>
           )}
         </section>
+        <OrchestratorPanel state={orchestratorState} sessions={relaySessions} selectedId={selectedSessionId} onFocus={focusRelaySession} onSettings={() => setSettingsOpen(true)} changes={activeWorkspaceChangeSummary} folders={workspaces}
+          setups={setupsApi ? <WorkspaceSetups sessions={boardSessions} projectPath={activeView === "project" ? activeWorkspace?.path : undefined} api={setupsApi} onLoad={loadRelaySetup} /> : <p className="dock-note">Setup storage is unavailable in this build.</p>}
+          handoff={<HandoffPanel sessions={(orchestratorState?.sessions || relaySessions).filter((session): session is RelaySession & {generation:string} => Boolean(session.generation)).map(session=>({id:session.id,generation:session.generation,name:session.name}))} onStage={async draft => {const api=relayApi();return api ? api.dispatch({kind:"stage_handoff",target:{id:draft.target.id,generation:draft.target.generation},sourceId:draft.source.id,sourceGeneration:draft.source.generation,text:draft.text,paths:draft.paths}) : {ok:false,error:"Orchestrator unavailable."};}} />}
+        />
       </main>
+      {newProjectOpen && <NewProjectDialog onClose={()=>setNewProjectOpen(false)}/>}
 
       {shouldShowUpdateOverlay && updateState && (
         <aside className="update-overlay" aria-live="polite">

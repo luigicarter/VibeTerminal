@@ -1,3 +1,4 @@
+import providerCapabilities from "../shared/providerCapabilities.json";
 import type {
   AgentKind,
   AgentLaunchMode,
@@ -6,15 +7,9 @@ import type {
   AgentThreadRef
 } from "./types";
 
-const THREADED_AGENT_KINDS: AgentThreadProvider[] = [
-  "codex",
-  "claude",
-  "opencode",
-  "cursor",
-  "kimi",
-  "kimi-custom",
-  "qwen"
-];
+const THREADED_AGENT_KINDS = Object.entries(providerCapabilities)
+  .filter(([, capabilities]) => capabilities.threaded)
+  .map(([provider]) => provider) as AgentThreadProvider[];
 
 export function isThreadedAgentKind(
   kind: AgentKind
@@ -165,6 +160,13 @@ export function buildLaunchCommand(
     }
 
     return session.command.trim() || "cursor-agent";
+  }
+
+  if (session.kind === "gemini") {
+    const ref = resumeArg(session);
+    return mode === "resume" && ref
+      ? `gemini --resume ${commandArg(ref, platform)}`
+      : session.command.trim() || "gemini";
   }
 
   if (session.kind === "kimi") {

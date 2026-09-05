@@ -35,7 +35,7 @@ function screenshotFixtureFromEnv() {
   if (process.env.VIBE_SCREENSHOT_SEED_OPEN_FUSION === "1") {
     return {
       mode: "openfusion",
-      cwd: process.env.VIBE_SCREENSHOT_FIXTURE_CWD || process.cwd(),
+      cwd: process.env.VIBE_SCREENSHOT_FIXTURE_CWD || "",
       openCodeCommand: process.env.VIBE_SCREENSHOT_OPENCODE_COMMAND || ""
     };
   }
@@ -44,7 +44,7 @@ function screenshotFixtureFromEnv() {
     const family = process.env.VIBE_SCREENSHOT_FUSION_PICKER_FAMILY === "codex" ? "codex" : "claude";
     return {
       mode: "fusion-picker",
-      cwd: process.env.VIBE_SCREENSHOT_FIXTURE_CWD || process.cwd(),
+      cwd: process.env.VIBE_SCREENSHOT_FIXTURE_CWD || "",
       role,
       family
     };
@@ -52,25 +52,64 @@ function screenshotFixtureFromEnv() {
   if (process.env.VIBE_SCREENSHOT_SEED_FUSION_BUILDS === "1") {
     return {
       mode: "fusion-builds",
-      cwd: process.env.VIBE_SCREENSHOT_FIXTURE_CWD || process.cwd()
+      cwd: process.env.VIBE_SCREENSHOT_FIXTURE_CWD || ""
     };
   }
   if (process.env.VIBE_SCREENSHOT_SEED_SPLIT === "1") {
     return {
       mode: "split",
-      cwd: process.env.VIBE_SCREENSHOT_FIXTURE_CWD || process.cwd()
+      cwd: process.env.VIBE_SCREENSHOT_FIXTURE_CWD || ""
     };
   }
   return null;
 }
 
 const screenshotFixture = screenshotFixtureFromEnv();
+const subscribe = (channel, callback) => {
+  const listener = (_event, payload) => callback(payload);
+  ipcRenderer.on(channel, listener);
+  return () => ipcRenderer.removeListener(channel, listener);
+};
 
 contextBridge.exposeInMainWorld("vibe", {
   // The launch command is typed into the platform shell (PowerShell on Windows,
   // the login shell on POSIX), so the renderer needs the platform to quote args
   // for the right shell.
   platform: process.platform,
+  orchestrator: {
+    getState: () => ipcRenderer.invoke("orchestrator:get-state"),
+    onState: callback => subscribe("orchestrator:state", callback),
+    configure: patch => ipcRenderer.invoke("orchestrator:configure", patch),
+    models: async kind => { const result = await ipcRenderer.invoke("orchestrator:models", { kind }); if (!Array.isArray(result)) throw new Error(result?.error || "Could not load models."); return result; },
+    testConnection: () => ipcRenderer.invoke("orchestrator:test"),
+    setEnabled: enabled => ipcRenderer.invoke("orchestrator:enabled", { enabled }),
+    send: payload => ipcRenderer.invoke("orchestrator:send", payload),
+    cancel: () => ipcRenderer.invoke("orchestrator:cancel"),
+    dispatch: payload => ipcRenderer.invoke("orchestrator:dispatch", payload),
+    preferences: payload => ipcRenderer.invoke("orchestrator:preferences", payload),
+    showOverlay: () => ipcRenderer.invoke("orchestrator:overlay"),
+    openMain: () => ipcRenderer.invoke("orchestrator:open-main"),
+    getChanges: payload => ipcRenderer.invoke("orchestrator:changes", payload),
+    listChanges: payload => ipcRenderer.invoke("orchestrator:changes-list", payload),
+    readChange: payload => ipcRenderer.invoke("orchestrator:change-read", payload),
+    onUiAction: callback => subscribe("orchestrator:ui-action", callback),
+    completeUiAction: (id, result) => ipcRenderer.send("orchestrator:ui-result", { id, result })
+  },
+  setups: {
+    list: payload => ipcRenderer.invoke("orchestrator:setups-list", payload),
+    save: recipe => ipcRenderer.invoke("orchestrator:setups-save", recipe),
+    remove: id => ipcRenderer.invoke("orchestrator:setups-remove", { id })
+  },
+  voice: {
+    getState: () => ipcRenderer.invoke("voice:get-state"),
+    onState: callback => subscribe("voice:state", callback),
+    configure: payload => ipcRenderer.invoke("voice:configure", payload),
+    setListening: enabled => ipcRenderer.invoke("voice:listening", { enabled }),
+    sendAudio: payload => ipcRenderer.invoke("voice:send-audio", payload),
+    cancelSpeech: () => ipcRenderer.invoke("voice:cancel-speech"),
+    frames: payload => ipcRenderer.send("voice:frames", payload),
+    onAudio: callback => subscribe("voice:audio", callback)
+  },
   app: {
     getCwd: () => ipcRenderer.invoke("app:get-cwd"),
     // Presence-on-PATH for each agent CLI, probed once at launch. Pass
@@ -131,10 +170,16 @@ contextBridge.exposeInMainWorld("vibe", {
   },
   terminal: {
     create: (payload) => ipcRenderer.invoke("terminal:create", payload),
-    input: (id, data) => ipcRenderer.send("terminal:input", { id, data }),
-    resize: (id, cols, rows) =>
-      ipcRenderer.send("terminal:resize", { id, cols, rows }),
-    kill: (id) => ipcRenderer.invoke("terminal:kill", { id }),
+    input: (id, data, scope = {}) => ipcRenderer.send("terminal:input", { ...scope, id, data }),
+    resize: (id, cols, rows, scope = {}) =>
+      ipcRenderer.send("terminal:resize", { ...scope, id, cols, rows }),
+    kill: (id, scope = {}) => ipcRenderer.invoke("terminal:kill", { ...scope, id }),
+    getRuntimeSnapshots: () => ipcRenderer.invoke("terminal:get-runtime-snapshots"),
+    onRuntime: (callback) => {
+      const listener = (_event, snapshot) => callback(snapshot);
+      ipcRenderer.on("terminal:runtime", listener);
+      return () => ipcRenderer.removeListener("terminal:runtime", listener);
+    },
     showContextMenu: (payload) =>
       ipcRenderer.invoke("terminal:show-context-menu", payload),
     onContextMenuPaste: (callback) => {
@@ -153,6 +198,7 @@ contextBridge.exposeInMainWorld("vibe", {
   // headless `claude`; `sendUserTurn` writes a user message to its stdin;
   // `onEvent` streams normalized chat events; `stop` ends it.
   fusionChat: {
+    answerQuestion: (id, requestId, answers) => ipcRenderer.invoke("fusion-chat:answer-question", { id, requestId, answers }),
     start: (payload) => ipcRenderer.invoke("fusion-chat:start", payload),
     updateSettings: (id, settings) =>
       ipcRenderer.invoke("fusion-chat:update-settings", { id, ...settings }),
@@ -237,10 +283,11 @@ contextBridge.exposeInMainWorld("vibe", {
       ipcRenderer.invoke("openfusion-chat:permission", { id, requestId, reply }),
     backgroundCancel: (id, taskId) =>
       ipcRenderer.invoke("openfusion-chat:background-cancel", { id, taskId }),
-    answerQuestion: (id, requestId, answers) =>
-      ipcRenderer.invoke("openfusion-chat:question", { id, requestId, answers }),
-    rejectQuestion: (id, requestId) =>
-      ipcRenderer.invoke("openfusion-chat:question", { id, requestId, reject: true }),
+    questionProgress: (id, requestId, answers, revision) => ipcRenderer.invoke("openfusion-chat:question-progress", { id, requestId, answers, revision }),
+    answerQuestion: (id, requestId, answers, revision) =>
+      ipcRenderer.invoke("openfusion-chat:question", { id, requestId, answers, revision }),
+    rejectQuestion: (id, requestId, revision) =>
+      ipcRenderer.invoke("openfusion-chat:question", { id, requestId, revision, reject: true }),
     compact: (id) => ipcRenderer.invoke("openfusion-chat:compact", { id }),
     interrupt: (id) => ipcRenderer.invoke("openfusion-chat:interrupt", { id }),
     stop: (id) => ipcRenderer.invoke("openfusion-chat:stop", { id }),

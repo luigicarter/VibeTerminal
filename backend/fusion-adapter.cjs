@@ -1340,6 +1340,7 @@ function resetCodexProcessState(options = {}) {
 
 function resetHarness(reason = "Fusion stopped.") {
   parked.clear();
+  externallyAnswered.clear();
   abortBackgroundWorkers(reason);
   failAll(new Error(reason));
   killCodex();
@@ -1356,7 +1357,7 @@ function startControlServer() {
   controlServer = http.createServer((request, response) => {
     if (
       request.method !== "POST" ||
-      !["/steer", "/interrupt", "/stop", "/mode", "/background-cancel"].includes(request.url)
+      !["/steer", "/interrupt", "/stop", "/mode", "/background-cancel", "/answer-question"].includes(request.url)
     ) {
       response.writeHead(404);
       response.end();
@@ -1384,7 +1385,20 @@ function startControlServer() {
           return;
         }
         let result;
-        if (request.url === "/interrupt") {
+        if (request.url === "/answer-question") {
+          const pendingId = String(parsed.requestId || "");
+          const item = parked.get(pendingId);
+          if (!item) throw new Error("Request is no longer pending");
+          const decision = approvalKind(item.method) === "question" ? "accept" : parsed.decision;
+          if (!["accept", "acceptForSession", "decline", "cancel"].includes(decision)) throw new Error("An explicit permission decision is required");
+          if (currentTurn || turnArming || fanoutActive || steerRoutingPending) throw new Error("Fusion is processing another decision");
+          buildDecisionResult(item.method, item.params, decision, "", parsed.answers);
+          const done = codexRespond(pendingId, decision, "", parsed.answers);
+          if (parked.has(pendingId)) { await done; throw new Error("Execution channel is not writable"); }
+          externallyAnswered.set(pendingId, done);
+          done.catch(() => {});
+          result = { ok: true, status: "submitted", requestId: pendingId };
+        } else if (request.url === "/interrupt") {
           result = await codexInterrupt();
         } else if (request.url === "/stop") {
           resetHarness("Fusion stopped.");
@@ -2110,7 +2124,8 @@ function pendingDecisionFor(pendingId, item) {
   return {
     pendingId,
     kind: approvalKind(item.method),
-    detail: approvalDetail(item.method, item.params)
+    detail: approvalDetail(item.method, item.params),
+    ...(approvalKind(item.method) === "question" ? { questions: normalizeQuestions(item.params) } : {})
   };
 }
 
@@ -2509,12 +2524,14 @@ function handleServerRequest(msg) {
   refreshTurnIdleTimer(method);
   parked.set(pendingId, { rpcId: msg.id, method, params });
   const detail = approvalDetail(method, params);
+  postTelemetry({ type: "fusion.interaction-request", requestId: pendingId, ...pendingDecisionFor(pendingId, parked.get(pendingId)) });
   relay({ role: "codex", kind: "approval", text: detail });
   resolveTurn({
     status: "needs_decision",
     pendingId,
     kind: approvalKind(method),
-    detail
+    detail,
+    ...(approvalKind(method) === "question" ? { questions: normalizeQuestions(params) } : {})
   });
 }
 
@@ -4853,11 +4870,28 @@ async function codexInvestigate(taskValue, tasksValue, backgroundValue) {
   return done;
 }
 
-function buildDecisionResult(method, params, decision, note) {
+function normalizeQuestions(params) {
+  return (Array.isArray(params?.questions) ? params.questions : []).map((q, index) => ({
+    id: String(q.id ?? index), header: String(q.header || ""), question: String(q.question || ""),
+    options: (Array.isArray(q.options) ? q.options : []).map(o => ({ label: String(o.label || ""), description: String(o.description || "") })),
+    multiple: q.multiple === true, custom: q.custom !== false
+  }));
+}
+
+function buildDecisionResult(method, params, decision, note, suppliedAnswers) {
   if (method.endsWith("requestUserInput")) {
+    const questions = normalizeQuestions(params);
     const answers = {};
-    for (const q of params.questions || []) {
-      answers[q.id] = { answers: [note || ""] };
+    for (const q of questions) {
+      const supplied = suppliedAnswers?.[q.id];
+      const values = Array.isArray(supplied) ? supplied : supplied?.answers;
+      const value = values ?? (questions.length === 1 && typeof note === "string" && note.trim() ? [note] : null);
+      if (!Array.isArray(value) || !value.length || value.some(v => typeof v !== "string" || !v.trim())) {
+        throw new Error(`A distinct answer is required for question ${q.id}`);
+      }
+      if (!q.multiple && value.length > 1) throw new Error(`Question ${q.id} accepts only one answer`);
+      if (!q.custom && value.some(v => !q.options.some(o => o.label === v))) throw new Error(`Question ${q.id} requires a listed option`);
+      Object.defineProperty(answers, q.id, { value: { answers: value }, enumerable: true });
     }
     return { answers };
   }
@@ -4883,7 +4917,13 @@ function buildDecisionResult(method, params, decision, note) {
   return { decision: allowed.includes(decision) ? decision : "decline" };
 }
 
-async function codexRespond(pendingId, decision, note) {
+const externallyAnswered = new Map();
+async function codexRespond(pendingId, decision, note, answers) {
+  if (externallyAnswered.has(pendingId)) {
+    const done = externallyAnswered.get(pendingId);
+    externallyAnswered.delete(pendingId);
+    return await done;
+  }
   if (steerRoutingPending) {
     return {
       status: "steer_routing",
@@ -4907,8 +4947,8 @@ async function codexRespond(pendingId, decision, note) {
       }) || { status: "error", error: `unknown pendingId: ${pendingId}` }
     );
   }
+  const result = buildDecisionResult(item.method, item.params, decision, note, answers);
   parked.delete(pendingId);
-  const result = buildDecisionResult(item.method, item.params, decision, note);
   relay({ role: "opus", kind: "decision", text: `${decision}` });
   const hasQueuedDecision = parked.size > 0;
   // Preserve the parked turn's kind: resolveTurn keeps activeTurnKind across a
@@ -4917,11 +4957,13 @@ async function codexRespond(pendingId, decision, note) {
   const done = hasQueuedDecision ? null : awaitTurn(activeTurnKind || "implement");
   if (done) refreshTurnHardTimer("approval resolved");
   if (!codexSend({ id: item.rpcId, result })) {
+    parked.set(pendingId, item);
     if (done) {
       resolveTurn({ status: "failed", error: "Fusion execution channel is not writable" });
     }
     return { status: "failed", error: "Fusion execution channel is not writable" };
   }
+  postTelemetry({ type: "fusion.interaction-resolved", requestId: pendingId });
   const nextDecision = pendingDecisionResult({
     warning: "Fusion has another pending decision queued."
   });
@@ -5097,7 +5139,7 @@ const TOOLS = [
   {
     name: "codex_respond",
     description:
-      "Answer a pending Codex approval or question returned by codex_implement, then continue the turn. For a command or patch approval, set decision to accept | acceptForSession | decline | cancel. For a clarifying question, set decision to 'accept' and put your answer in note. Returns the same result shapes as codex_implement.",
+      "Answer a pending Codex approval or question returned by codex_implement, then continue the turn. For a command or patch approval, set decision to accept | acceptForSession | decline | cancel. For clarifying questions, set decision to 'accept' and supply answers keyed by question ID, each value an array of selected labels or free text. Legacy note works only for a single question. Returns the same result shapes as codex_implement.",
     inputSchema: {
       type: "object",
       properties: {
@@ -5106,7 +5148,8 @@ const TOOLS = [
           type: "string",
           enum: ["accept", "acceptForSession", "decline", "cancel"]
         },
-        note: { type: "string" }
+        note: { type: "string" },
+        answers: { type: "object", additionalProperties: { type: "array", items: { type: "string" } } }
       },
       required: ["pendingId", "decision"]
     }
@@ -5189,7 +5232,8 @@ async function handleToolCall(id, params) {
       result = await codexRespond(
         String(args.pendingId || ""),
         String(args.decision || ""),
-        args.note != null ? String(args.note) : ""
+        args.note != null ? String(args.note) : "",
+        args.answers
       );
     } else if (name === "codex_steer_resolve") {
       result = await codexSteerResolve(
@@ -5302,6 +5346,9 @@ function startMcpServer() {
 }
 
 module.exports = {
+  normalizeQuestions,
+  pendingDecisionFor,
+  buildDecisionResult,
   FAST_SERVICE_TIER,
   FANOUT_MAX_TASKS,
   BACKGROUND_MAX_TASKS,

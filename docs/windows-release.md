@@ -4,10 +4,10 @@ vibeTerminal ships to Windows users as an Electron Builder NSIS installer hosted
 
 ## Current Public Release
 
-The current public Windows release is `v0.1.81`:
+The current public Windows release is `v0.1.82`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.81`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.81/vibeTerminal-Setup-0.1.81.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.82`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.82/vibeTerminal-Setup-0.1.82.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -30,6 +30,9 @@ The packaged app keeps only runtime files needed by Electron:
 
 - `backend/` - Electron main process, PTY host, telemetry shims, and agent thread discovery helpers.
 - `preload/` - Context bridge IPC surface.
+- `shared/` - Provider capability contracts.
+- `resources/voice/` - Pinned local wake model and offline error announcements.
+- unpacked `sherpa-onnx` runtime and Windows native libraries.
 - `dist/` - Compiled renderer UI produced by Vite.
 - `frontend/assets/` - Runtime app icons and logo assets.
 - `resources/codex-bin/win32-x64/` - Embedded private Codex CLI payload used
@@ -58,8 +61,10 @@ Use these commands before publishing a release:
 ```powershell
 npm ci
 $codexVersion = (Get-ChildItem vendor/codex-appserver -Directory | Where-Object Name -match '^\d+\.\d+\.\d+$').Name
-npm install -g "@openai/codex@$codexVersion"
+npm install --prefix .tmp/codex-release-cli --no-save "@openai/codex@$codexVersion"
+$env:VIBE_CODEX_BIN_SEARCH_ROOTS = (Resolve-Path .tmp/codex-release-cli/node_modules/@openai).Path
 npm run prepare:codex-bin:required
+npm run prepare:voice
 npm run typecheck
 npm run smoke:backend:codex-discovery
 npm run smoke:backend:claude-discovery
@@ -106,6 +111,8 @@ After `npm run dist:win -- --publish never`, verify:
 6. A packaged Fusion pane does not fall back to the user's global `codex` if the
    embedded binary is removed; it should fail start with a clear Fusion error.
 7. The packaged UI loads from `dist/index.html`, not a Vite dev server.
+8. Run `node scripts/qa/verify-release-artifacts.cjs` to verify version, filename,
+   installer size/SHA-512, blockmap, and packaged voice assets/libraries.
 
 ## GitHub Release Deployment
 
@@ -114,6 +121,10 @@ Production downloads and update metadata live in the public GitHub repository:
 `https://github.com/luigicarter/VibeTerminal/releases`
 
 The GitHub Actions workflow `.github/workflows/windows-release.yml` builds on `windows-latest`.
+It prepares the pinned voice assets, runs `scripts/qa/release-checks.cjs` with
+fail-fast handling, and verifies installer/feed hashes plus native voice payloads
+using `scripts/qa/verify-release-artifacts.cjs`. `vendor/voice` is committed with
+byte-preserving Git attributes because its model and announcement assets are checksummed.
 
 Treat the `main` branch as production. If this repository is ever referred to as
 `master`, the same rule applies: any change merged or pushed there that should

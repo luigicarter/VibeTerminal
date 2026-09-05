@@ -718,6 +718,56 @@ function createStreamNormalizer() {
   };
 }
 
+// Envelopes always carry the originating launch, never a later lookup by ID.
+function chatEventEnvelope(id, state, event) {
+  return { type: "event", id, generation: state?.generation ?? state?.launchPayload?.generation, event };
+}
+
+function isCurrentChatState(sessions, id, state) {
+  return Boolean(state) && sessions.get(id) === state;
+}
+
+// Retain pending requests independently of pane mounts and transcript limits.
+function observeInteractionEvent(id, state, event, emit) {
+  state.interactions ||= new Map();
+  state.resolvedInteractions ||= new Set();
+  const generation = state.generation ?? state.launchPayload?.generation;
+  const resolve = (requestId, status = "resolved") => {
+    state.resolvedInteractions.add(requestId);
+    if (!state.interactions.delete(requestId)) return;
+    emit({ type: "interaction-resolved", id, generation, requestId, status });
+  };
+  let requests = [];
+  if (event.type === "question" || event.type === "permission") requests = [event];
+  if (event.type === "tool-result") {
+    try {
+      const parsed = JSON.parse(event.text);
+      if (parsed?.status === "needs_decision") requests = (parsed.pendingDecisions || [parsed]).map(p => ({ ...p, requestId: p.pendingId, type: p.kind === "question" ? "question" : "permission" }));
+    } catch {}
+  }
+  for (const request of requests) {
+    const requestId = String(request.requestId || "");
+    if (!requestId || state.interactions.has(requestId) || state.resolvedInteractions.has(requestId)) continue;
+    const interaction = { id: requestId, sessionId: id, generation, revision: 1, kind: request.type,
+      questions: request.questions || [], detail: request.detail || request.title || request.permission || "", state: "pending" };
+    state.interactions.set(requestId, interaction);
+    emit({ type: "interaction-request", id, generation, requestId, interaction });
+  }
+  if (event.type === "question-resolved" || event.type === "permission-resolved") resolve(event.requestId);
+  if (event.type === "closed" || event.type === "interrupted") for (const requestId of state.interactions.keys()) resolve(requestId, "cancelled");
+}
+
+function claimInteraction(state, payload, kind) {
+  if (!state?.child) throw new Error("Session is not running");
+  const generation = state.generation ?? state.launchPayload?.generation;
+  if ((payload.actionId && payload.generation === undefined) || (payload.generation !== undefined && payload.generation !== generation)) throw new Error("Stale session generation");
+  const interaction = state.interactions?.get(String(payload.requestId || ""));
+  if (!interaction || interaction.kind !== kind) throw new Error("Request is no longer pending");
+  if (interaction.submitting) throw new Error("Request already has an answer in flight");
+  interaction.submitting = true;
+  return interaction;
+}
+
 // ---- the host (only runs when executed as a process, not when required) ----
 function runHost() {
   const sessions = new Map(); // id -> { child, normalizer, buffer, history }
@@ -789,6 +839,8 @@ function runHost() {
   }
 
   function emitSessionEvent(id, state, event) {
+    if (!isCurrentChatState(sessions, id, state)) return;
+    observeInteractionEvent(id, state, event, emit);
     const settle = applyPlannerTurnSettleState(state, event);
     event = settle.event;
     if (settle.clearBackstop) {
@@ -807,7 +859,7 @@ function runHost() {
     if (state.history.length > MAX_HISTORY_EVENTS) {
       state.history.splice(0, state.history.length - MAX_HISTORY_EVENTS);
     }
-    emit({ type: "event", id, event });
+    emit(chatEventEnvelope(id, state, event));
     // Host-side wake queueing for background delegations: a settled report
     // only opens a NEW planner turn when no turn is in flight — it is never
     // steered into a running one (that would hijack the live turn's topic).
@@ -973,7 +1025,7 @@ function runHost() {
         activityKind: String(payload.activityKind || "activity"),
         text: String(payload.text || ""),
         updates: Number(payload.updates) || 0
-      });
+      }, state || { generation: payload?.generation });
       return;
     }
     if (phase !== "settled") return;
@@ -1046,18 +1098,21 @@ function runHost() {
     maybeFlushBackgroundWakes(id, state);
   }
 
-  function emitDirectSessionEvent(id, event) {
+  function emitDirectSessionEvent(id, event, state) {
+    if (state && sessions.has(id) && !isCurrentChatState(sessions, id, state)) return;
     if (id) {
-      emit({ type: "event", id, event });
+      emit(chatEventEnvelope(id, state, event));
     }
   }
 
   function replaySession(id, state) {
+    if (!isCurrentChatState(sessions, id, state)) return;
+    for (const interaction of state.interactions?.values() || []) emit({ type: "interaction-request", id, generation: interaction.generation, requestId: interaction.id, interaction });
     // Reattach replay is a transcript restore, not fresh activity: the flag
     // lets the renderer rebuild the pane without re-latching status or
     // re-marking the attention dot for turns the user already acknowledged.
     for (const event of state.history) {
-      emit({ type: "event", id, event: { ...event, replay: true } });
+      emit({ ...chatEventEnvelope(id, state, event), event: { ...event, replay: true } });
     }
   }
 
@@ -1066,9 +1121,10 @@ function runHost() {
   // it). Deliberately NOT via emitSessionEvent — the completion-gate tracker
   // must never observe restored turns.
   function rehydrateResumedTranscript(id, state, events) {
+    if (!isCurrentChatState(sessions, id, state)) return;
     for (const event of events) {
       state.history.push(cloneEvent(event));
-      emit({ type: "event", id, event: { ...event, replay: true } });
+      emit({ ...chatEventEnvelope(id, state, event), event: { ...event, replay: true } });
     }
     if (state.history.length > MAX_HISTORY_EVENTS) {
       state.history.splice(0, state.history.length - MAX_HISTORY_EVENTS);
@@ -1113,7 +1169,8 @@ function runHost() {
         existingState.launchPayload = {
           ...clonePayload(existingState.launchPayload),
           ...clonePayload(payload),
-          mode: existingState.mode
+          mode: existingState.mode,
+          generation: existingState.launchPayload?.generation
         };
         replaySession(id, existingState);
         return existingState;
@@ -1296,6 +1353,64 @@ function runHost() {
     return state;
   }
 
+  async function dispatchCheckedAction(kind, payload) {
+    const state = sessions.get(payload?.id);
+    const generation = state?.launchPayload?.generation;
+    const ack = (ok, error) => emit({ type: "action-result", id: payload?.id, generation: generation ?? payload?.generation, actionId: payload?.actionId, ok, status: ok ? "submitted" : "failed", ...(error ? { error } : {}) });
+    try {
+      if (!state?.child || state.child.killed) throw new Error("Session is not running");
+      if (payload.generation === undefined || payload.generation !== generation) throw new Error("Stale session generation");
+      if (kind !== "interrupt" && state.interactions?.size) throw new Error("Answer the pending request before sending another task");
+      if (state.engine !== "codex" && !state.child.stdin?.writable) throw new Error("Planner input channel is closed");
+      if (kind !== "interrupt" && !String(payload.text || "").trim()) throw new Error("Input text is empty");
+      if (kind === "interrupt") {
+        if (state.engine === "codex") await state.brain.interrupt();
+        else await new Promise((resolve, reject) => state.child.stdin.write(JSON.stringify({ type: "control_request", request_id: `int_${payload.id}_${Date.now()}`, request: { subtype: "interrupt" } }) + "\n", error => error ? reject(error) : resolve()));
+        emitSessionEvent(payload.id, state, { type: "interrupted" });
+      } else {
+        const steer = kind === "steer" || payload.steer === true;
+        const runMode = normalizeFusionRunMode(state.mode);
+        const nudge = runMode !== "plan" && !steer && Boolean(state.gate && state.gate.consumeNudge());
+        const content = buildFusionInputContent(payload.text, runMode, steer, nudge);
+        if (!payload.routed) {
+          if (state.engine === "codex") await state.brain.sendInput(content, steer);
+          else await new Promise((resolve, reject) => state.child.stdin.write(JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n", error => error ? reject(error) : resolve()));
+        }
+        emitSessionEvent(payload.id, state, { type: "user", text: payload.text, steer });
+      }
+      if (sessions.get(payload.id) !== state) throw new Error("Session changed while sending");
+      ack(true);
+    } catch (error) { ack(false, error.message); }
+  }
+
+  async function answerQuestion(payload) {
+    const id = payload?.id;
+    const state = sessions.get(id);
+    const ack = (ok, status, error) => emit({ type: "action-result", id, generation: state?.launchPayload?.generation ?? payload?.generation, actionId: payload?.actionId, requestId: payload?.requestId, ok, status, ...(error ? { error } : {}) });
+    let interaction;
+    try {
+      const kind = state?.interactions?.get(String(payload.requestId || ""))?.kind;
+      interaction = claimInteraction(state, payload, kind);
+      const decision = kind === "question" ? "accept" : ({ once: "accept", always: "acceptForSession", reject: "decline" }[payload.reply] || payload.reply || payload.decision);
+      if (!["accept", "acceptForSession", "decline", "cancel"].includes(decision)) throw new Error("Explicit permission response required");
+      const url = new URL(payload.controlUrl);
+      if (url.protocol !== "http:" || url.hostname !== "127.0.0.1") throw new Error("Invalid adapter control endpoint");
+      const response = await fetch(new URL("/answer-question", url), {
+        method: "POST", headers: { "content-type": "application/json", "x-vibe-telemetry-token": payload.token },
+        body: JSON.stringify({ sessionId: id, requestId: payload.requestId, answers: payload.answers, decision }), signal: AbortSignal.timeout(10000)
+      });
+      const result = await response.json();
+      if (!response.ok || !result.ok) throw new Error(result.error || "Adapter rejected the answer");
+      if (sessions.get(id) !== state) throw new Error("Session changed while answering");
+      emitSessionEvent(id, state, { type: `${kind}-resolved`, requestId: payload.requestId });
+      input({ id, text: `The user answered request ${JSON.stringify(payload.requestId)} through the workspace. Call codex_respond with pendingId:${JSON.stringify(payload.requestId)}, decision:${JSON.stringify(decision)} to collect the resumed result, then continue the same task.`, steer: state.turnActive });
+      ack(true, "submitted");
+    } catch (error) {
+      if (interaction) interaction.submitting = false;
+      ack(false, "failed", error.message);
+    }
+  }
+
   function input(payload) {
     const id = payload?.id;
     const text = String(payload?.text ?? "");
@@ -1306,7 +1421,7 @@ function runHost() {
       emitDirectSessionEvent(id, {
         type: "error",
         message: "Fusion session is not running. Restart Fusion to continue."
-      });
+      }, state || { generation: payload?.generation });
       return;
     }
 
@@ -1470,6 +1585,7 @@ function runHost() {
   function stop(payload) {
     const state = sessions.get(payload.id);
     if (state) {
+      observeInteractionEvent(payload.id, state, { type: "closed" }, emit);
       clearPlannerResultBackstop(state);
       killChild(state.child);
       sessions.delete(payload.id);
@@ -1501,7 +1617,17 @@ function runHost() {
         continue;
       }
       if (msg.type === "start") start(msg.payload);
+      else if (["input", "steer", "interrupt"].includes(msg.type) && msg.payload?.actionId) void dispatchCheckedAction(msg.type, msg.payload);
       else if (msg.type === "input") input(msg.payload);
+      else if (msg.type === "steer") input({ ...msg.payload, steer: true });
+      else if (msg.type === "answer-question") void answerQuestion(msg.payload);
+      else if (msg.type === "interaction-resolved") {
+        const state = sessions.get(msg.payload?.id);
+        if (state && (msg.payload.generation === undefined || msg.payload.generation === state.launchPayload?.generation)) {
+          const kind = state.interactions?.get(msg.payload.requestId)?.kind || "question";
+          emitSessionEvent(msg.payload.id, state, { type: `${kind}-resolved`, requestId: msg.payload.requestId });
+        }
+      }
       else if (msg.type === "activity") activity(msg.payload);
       else if (msg.type === "background-task") backgroundTask(msg.payload);
       else if (msg.type === "build-task") buildTask(msg.payload);
@@ -1618,6 +1744,10 @@ function buildClaudeSpawn(payload = {}) {
 }
 
 module.exports = {
+  chatEventEnvelope,
+  isCurrentChatState,
+  observeInteractionEvent,
+  claimInteraction,
   buildClaudeArgs,
   buildClaudeSpawn,
   buildClaudeRehydrationEvents,

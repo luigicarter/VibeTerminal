@@ -4,6 +4,8 @@ const http = require("http");
 const os = require("os");
 const path = require("path");
 const url = require("url");
+const { prepareGeminiTelemetry } = require("./geminiTelemetry.cjs");
+const { hookMetadata, readHookInput, powershellReadHookInput, powershellHookMetadata } = require("./providerHookMetadata.cjs");
 
 const SHIM_BASE_DIR =
   process.env.VIBE_AGENT_SHIM_BASE_DIR ||
@@ -11,7 +13,7 @@ const SHIM_BASE_DIR =
 const OWNER_MARKER = ".vibe-agent-shims.json";
 const MAX_EVENT_BYTES = 64 * 1024;
 const MAX_SESSION_ID_BYTES = 512;
-const PROVIDERS = ["codex", "claude", "opencode", "cursor-agent", "kimi", "kimi-custom", "qwen"];
+const PROVIDERS = ["codex", "claude", "opencode", "cursor-agent", "kimi", "kimi-custom", "qwen", "gemini"];
 const OPEN_FUSION_MODEL_ID_PATTERN = /^[A-Za-z0-9._:/@+-]+$/;
 // Open Fusion deliberately ships with NO default models: assuming a vendor pair
 // on pane open fails the moment the app-owned credential store is empty, and it
@@ -1445,6 +1447,7 @@ function windowsPowerShellShimSource(provider) {
     "$ErrorActionPreference = 'Continue'",
     `$Provider = ${quotePowerShell(provider)}`,
     "$ProviderArgs = @($args)",
+    "$InvocationId = [Guid]::NewGuid().ToString('N')",
     "",
     "function Send-VibeEvent {",
     "  param([string]$Type, [hashtable]$Extra)",
@@ -1461,6 +1464,7 @@ function windowsPowerShellShimSource(provider) {
     "      argv = @($ProviderArgs)",
     "      cwd = (Get-Location).ProviderPath",
     "      pid = $PID",
+    "      processId = $InvocationId",
     "      timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()",
     "    }",
     "",
@@ -1559,6 +1563,7 @@ function windowsPowerShellShimSource(provider) {
     "  return 'powershell.exe'",
     "}",
     "",
+    "Send-VibeEvent 'agent.process.started' @{}",
     "$Command = Resolve-RealCommand $Provider",
     "if (-not $Command) {",
     "  $message = 'vibeTerminal: could not find real ' + $Provider + ' executable on the original PATH.'",
@@ -1669,6 +1674,7 @@ function shimRunnerSource() {
 const http = require("http");
 const path = require("path");
 const { spawn } = require("child_process");
+const invocationId = require("crypto").randomUUID();
 
 const provider = process.argv[2];
 let args = process.argv.slice(3);
@@ -1693,6 +1699,7 @@ function post(event) {
     argv: args,
     cwd: process.cwd(),
     pid: process.pid,
+    processId: invocationId,
     timestamp: Date.now()
   });
 
@@ -1785,6 +1792,9 @@ function powershellCommand() {
 (async () => {
   const env = { ...process.env };
   env[pathKey(env)] = originalPath;
+  // Claim the wrapper invocation before resolution/spawn, including failures.
+  // Await the bounded callback so a fast child cannot report exit before start.
+  await post({ type: "agent.process.started" });
 
   const command = resolveRealCommand(provider);
   if (!command) {
@@ -1888,6 +1898,8 @@ const NOTIFY_KNOWN_DETAILS = ["turn-start", "tool", "approval", "question"];
 // pipes hook JSON), and exits quietly when run outside vibeTerminal.
 function notifyHookSource() {
   return String.raw`const http = require("http");
+${hookMetadata.toString()}
+${readHookInput.toString()}
 
 const KNOWN_DETAILS = new Set(${JSON.stringify(NOTIFY_KNOWN_DETAILS)});
 const type = process.argv[2];
@@ -1929,7 +1941,10 @@ if (!type || !callbackUrl || !token || !sessionId || !launchNonce) {
   process.exit(0);
 }
 
-const event = { type, sessionId, launchNonce, timestamp: Date.now() };
+function deliver(raw = "") {
+let metadata = {};
+try { metadata = hookMetadata(JSON.parse(raw)); } catch {}
+const event = { type, sessionId, launchNonce, timestamp: Date.now(), ...metadata };
 if (detail) event.detail = detail;
 if (provider) event.provider = provider;
 if (providerThreadId) event.providerThreadId = providerThreadId;
@@ -1968,6 +1983,9 @@ request.on("timeout", () => {
   process.exit(0);
 });
 request.end(body);
+}
+if (provider === "codex") deliver();
+else readHookInput(deliver);
 `;
 }
 
@@ -2048,6 +2066,11 @@ process.stdin.on("end", () => {
     launchNonce,
     providerThreadId: typeof hook.session_id === "string" ? hook.session_id : undefined,
     providerTurnId: typeof hook.turn_id === "string" ? hook.turn_id : undefined,
+    phase: hook.hook_event_name === "PreToolUse" ? "start" : hook.hook_event_name === "PostToolUse" ? "stop" : undefined,
+    toolId: hook.tool_use_id || hook.tool_call_id || hook.tool_id,
+    toolName: typeof hook.tool_name === "string" ? hook.tool_name : undefined,
+    taskId: typeof hook.agent_id === "string" ? hook.agent_id : undefined,
+    taskLabel: typeof hook.agent_type === "string" ? hook.agent_type : undefined,
     timestamp: Date.now()
   });
   let url;
@@ -2133,6 +2156,7 @@ function windowsNotifyPs1Source() {
     "if ([string]::IsNullOrEmpty($Type) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_CALLBACK_URL) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_TELEMETRY_TOKEN) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_SESSION_ID) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_LAUNCH_NONCE)) {",
     "  exit 0",
     "}",
+    ...powershellReadHookInput(),
     "try {",
     "  $payload = [ordered]@{",
     "    type = $Type",
@@ -2146,6 +2170,7 @@ function windowsNotifyPs1Source() {
     "  if ($Provider) { $payload['provider'] = $Provider }",
     "  if ($ProviderThreadId) { $payload['providerThreadId'] = $ProviderThreadId }",
     "  if ($ProviderTurnId) { $payload['providerTurnId'] = $ProviderTurnId }",
+    ...powershellHookMetadata(),
     "  $body = $payload | ConvertTo-Json -Compress",
     "  $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)",
     "  $request = [System.Net.WebRequest]::Create($env:VIBE_TERMINAL_CALLBACK_URL)",
@@ -2195,6 +2220,7 @@ const CURSOR_RUNNING_TYPE = "agent.running";
 // argument or unparseable stdin therefore stays silent instead of POSTing junk.
 const CURSOR_KNOWN_TYPES = [
   "agent.running",
+  "agent.response",
   "agent.completed",
   "agent.waiting",
   "agent.failed"
@@ -2208,7 +2234,7 @@ function cursorTypeFromStatus(status) {
   if (normalized === "aborted") {
     return "agent.waiting";
   }
-  return "agent.completed";
+  return normalized === "completed" ? "agent.completed" : "agent.response";
 }
 
 // Windows notify program (PowerShell). Type comes from the first argument (turn
@@ -2223,14 +2249,13 @@ function windowsCursorNotifyPs1Source() {
     "if ([string]::IsNullOrEmpty($env:VIBE_TERMINAL_CALLBACK_URL) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_TELEMETRY_TOKEN) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_SESSION_ID) -or [string]::IsNullOrEmpty($env:VIBE_TERMINAL_LAUNCH_NONCE)) {",
     "  exit 0",
     "}",
-    "$raw = ''",
-    "try { $raw = [Console]::In.ReadToEnd() } catch { $raw = '' }",
+    ...powershellReadHookInput(),
     "if ($args.Count -ge 1 -and -not [string]::IsNullOrEmpty([string]$args[0])) {",
     "  $type = [string]$args[0]",
     "} else {",
     "  $status = ''",
     "  try { $status = [string]((($raw | ConvertFrom-Json)).status) } catch { $status = '' }",
-    "  $type = if ($status -eq 'error') { 'agent.failed' } elseif ($status -eq 'aborted') { 'agent.waiting' } else { 'agent.completed' }",
+    "  $type = if ($status -eq 'error') { 'agent.failed' } elseif ($status -eq 'aborted') { 'agent.waiting' } elseif ($status -eq 'completed') { 'agent.completed' } else { 'agent.response' }",
     "}",
     `if (${knownTypeGuard}) { exit 0 }`,
     "try {",
@@ -2241,6 +2266,7 @@ function windowsCursorNotifyPs1Source() {
     "    provider = 'cursor'",
     "    timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()",
     "  }",
+    ...powershellHookMetadata(),
     "  $body = $payload | ConvertTo-Json -Compress",
     "  $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)",
     "  $request = [System.Net.WebRequest]::Create($env:VIBE_TERMINAL_CALLBACK_URL)",
@@ -2266,6 +2292,7 @@ function windowsCursorNotifyPs1Source() {
 // hook can never hang the agent.
 function cursorNotifyHookSource() {
   return String.raw`const http = require("http");
+${hookMetadata.toString()}
 
 const KNOWN_TYPES = new Set(${JSON.stringify(CURSOR_KNOWN_TYPES)});
 const callbackUrl = process.env.VIBE_TERMINAL_CALLBACK_URL;
@@ -2298,14 +2325,16 @@ function finish() {
         ? "agent.failed"
         : status === "aborted"
           ? "agent.waiting"
-          : "agent.completed";
+          : status === "completed" ? "agent.completed" : "agent.response";
   }
   if (!KNOWN_TYPES.has(type)) {
     process.exit(0);
     return;
   }
 
-  const body = JSON.stringify({ type, sessionId, launchNonce, provider: "cursor", timestamp: Date.now() });
+  let metadata = {};
+  try { metadata = hookMetadata(JSON.parse(raw)); } catch {}
+  const body = JSON.stringify({ type, sessionId, launchNonce, provider: "cursor", timestamp: Date.now(), ...metadata });
 
   let url;
   try {
@@ -2343,6 +2372,7 @@ function finish() {
 }
 
 process.stdin.on("data", (chunk) => {
+  if (raw.length + chunk.length > 1024 * 1024) { raw = ""; finish(); return; }
   raw += chunk.toString("utf8");
 });
 process.stdin.on("error", finish);
@@ -2935,38 +2965,13 @@ function kimiHookCommand(notifyProgramPath, isWin, type, detail) {
 // only event/matcher/command/timeout — a malformed edit fails the whole config
 // for kimi, so the merge below never touches anything outside our own blocks.
 function kimiHookTomlBlocks(notifyProgramPath, isWin, marker = KIMI_HOOK_MARKER) {
-  // The delegation bracket differs by target, and the difference is
-  // load-bearing rather than cosmetic. kimi validates `[[hooks]]` entries
-  // against an enum of hook event names, and its config salvage DELETES THE
-  // WHOLE hooks section when any entry fails that validation — so writing an
-  // event name a stock kimi build doesn't know would silently disable ALL
-  // vibeTerminal kimi telemetry, not just the new entry.
-  //
-  // - kimi-custom: the vendored fork is verified to expose SubagentStart /
-  //   SubagentStop, fired on the PARENT's hooks, which bracket the DETACHED
-  //   window too (Agent(run_in_background=true)).
-  // - stock kimi: use only events we already depend on. The matcher is a regex
-  //   over the tool name, so `^Agent$` brackets the Agent tool call itself.
-  //   That covers foreground delegation (the reported bug); detached
-  //   delegation falls back to the pane's delegation watchdog.
-  const subagentEntries =
-    marker === KIMI_CUSTOM_HOOK_MARKER
-      ? [
-          { event: "SubagentStart", type: "agent.subagent.started" },
-          { event: "SubagentStop", type: "agent.subagent.stopped" }
-        ]
-      : [
-          {
-            event: "PreToolUse",
-            matcher: "^Agent$",
-            type: "agent.subagent.started"
-          },
-          {
-            event: "PostToolUse",
-            matcher: "^Agent$",
-            type: "agent.subagent.stopped"
-          }
-        ];
+  // Both launchers use one stock-compatible configuration. This brackets the
+  // foreground Agent tool call only; detached children require native identity
+  // metadata and must not be advertised as exact lifecycle coverage.
+  const subagentEntries = [
+    { event: "PreToolUse", matcher: "^Agent$", type: "agent.subagent.started" },
+    { event: "PostToolUse", matcher: "^Agent$", type: "agent.subagent.stopped" }
+  ];
 
   const entries = [
     { event: "UserPromptSubmit", type: "agent.running" },
@@ -3015,7 +3020,7 @@ function stripKimiHooks(existingToml, marker = KIMI_HOOK_MARKER) {
         while (
           i < lines.length &&
           !/^\s*\[/.test(lines[i]) &&
-          lines[i].trim() !== `# ${marker}`
+          ![marker, KIMI_HOOK_MARKER, KIMI_CUSTOM_HOOK_MARKER].some((entry) => lines[i].trim() === `# ${entry}`)
         ) {
           i += 1;
         }
@@ -3170,9 +3175,9 @@ function mergeQwenHooks(settings, hookGroups) {
   return { ...trimmed, hooks };
 }
 
-// Bump on ANY plugin-source change: installOpenCodePlugin only rewrites an
-// installed copy when its version string differs.
-const OPENCODE_PLUGIN_VERSION = "vibeterminal-notify-5";
+// Version identifies the hook protocol; installation compares the entire source
+// so an interrupted development update cannot retain an outdated observer.
+const OPENCODE_PLUGIN_VERSION = "vibeterminal-notify-6";
 
 // opencode cannot take a per-invocation hook, so we install one small plugin in
 // the user's opencode config. It is guarded: it only POSTs when the
@@ -3201,7 +3206,7 @@ function openCodePluginSource() {
     `// vibeterminal-notify (${OPENCODE_PLUGIN_VERSION}) - auto-generated by vibeTerminal.`,
     "// Safe no-op outside vibeTerminal: only POSTs when VIBE_TERMINAL_* env vars are set.",
     "export const VibeTerminalNotify = async () => {",
-    "  let busy = false;",
+    "  const busy = new Set();",
     "  const childSessions = new Set();",
     "  const eventSessionId = (event) => {",
     "    const props = event.properties;",
@@ -3219,16 +3224,17 @@ function openCodePluginSource() {
     '      if (!url || !token || !sessionId || !launchNonce || !event || typeof event.type !== "string") {',
     "        return;",
     "      }",
-    "      const send = async (type, detail) => {",
+    "      const send = async (type, detail, metadata = {}) => {",
     "        try {",
     "          await fetch(url, {",
     '            method: "POST",',
+    "            signal: AbortSignal.timeout(1000),",
     "            headers: {",
     '              "content-type": "application/json",',
     '              "x-vibe-telemetry-token": token',
     "            },",
     "            // JSON.stringify drops an undefined detail.",
-    '            body: JSON.stringify({ type, detail, sessionId, launchNonce, provider: "opencode", timestamp: Date.now() })',
+    '            body: JSON.stringify({ type, detail, sessionId, launchNonce, provider: "opencode", timestamp: Date.now(), providerThreadId: eventSessionId(event), ...metadata })',
     "          });",
     "        } catch (_error) {",
     "          // Telemetry is best-effort; ignore delivery failures.",
@@ -3240,11 +3246,17 @@ function openCodePluginSource() {
     '        if (info && typeof info.id === "string" && info.parentID) {',
     "          childSessions.add(info.id);",
     "        }",
+    '        if (info && typeof info.id === "string") {',
+    '          await send("agent.session", undefined, { phase: "update", providerThreadId: info.id, parentThreadId: info.parentID, rootVerified: !info.parentID, title: info.title, titleSource: "generated", cwd: info.directory });',
+    "        }",
     "        return;",
     "      }",
     '      if (event.type.startsWith("message.")) {',
-    "        if (!busy) {",
-    "          busy = true;",
+    "        const providerSession = eventSessionId(event);",
+    "        if (childSessions.has(providerSession)) return;",
+    '        const busyKey = providerSession || "unknown";',
+    "        if (!busy.has(busyKey)) {",
+    "          busy.add(busyKey);",
     '          await send("agent.running");',
     "        }",
     "        return;",
@@ -3272,7 +3284,7 @@ function openCodePluginSource() {
     "      // the turn, and a permission prompt pauses it with NO event of its own",
     "      // for the approval that resumes it - dropping the latch here lets the",
     "      // next message.* burst re-assert agent.running after the user approves.",
-    "      busy = false;",
+    '      busy.delete(eventSessionId(event) || "unknown");',
     '      await send(type, type === "agent.waiting" ? "approval" : undefined);',
     "    }",
     "  };",
@@ -3281,21 +3293,22 @@ function openCodePluginSource() {
   ].join("\n");
 }
 
-function installOpenCodePlugin(homeDir = os.homedir()) {
+function installOpenCodePlugin(homeDir, env = process.env) {
   try {
-    const base = path.join(homeDir, ".config", "opencode");
-    if (!fs.existsSync(base)) {
-      // User has no opencode config yet; install lazily on a later launch.
-      return;
-    }
+    // Explicit test/legacy home wins; real launches honor OpenCode's config
+    // overrides. Create a fresh config directory so first launch is observable.
+    const base = homeDir ? path.join(homeDir, ".config", "opencode")
+      : env.OPENCODE_CONFIG_DIR || path.join(env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "opencode");
 
     const source = openCodePluginSource();
+    let installed = 0;
     // opencode has used both "plugin" and "plugins" for its local-plugin dir
     // across versions; write to both so discovery does not depend on the spelling.
     for (const dirName of ["plugin", "plugins"]) {
       const file = path.join(base, dirName, "vibeterminal-notify.js");
       try {
-        if (fs.readFileSync(file, "utf8").includes(OPENCODE_PLUGIN_VERSION)) {
+        if (fs.readFileSync(file, "utf8") === source) {
+          installed += 1;
           continue;
         }
       } catch {
@@ -3304,12 +3317,15 @@ function installOpenCodePlugin(homeDir = os.homedir()) {
       try {
         fs.mkdirSync(path.dirname(file), { recursive: true });
         fs.writeFileSync(file, source);
+        installed += 1;
       } catch {
         // Best-effort; never let plugin install break telemetry startup.
       }
     }
+    return { available: installed > 0, configDir: base };
   } catch {
     // Never let opencode plugin install break the telemetry manager.
+    return { available: false };
   }
 }
 
@@ -3369,6 +3385,7 @@ function mapTelemetryToAttention(event) {
 
 function createAgentTelemetryManager(options = {}) {
   const baseDir = options.baseDir || SHIM_BASE_DIR;
+  const openCodeHome = options.openCodeHome;
   const openFusionBaseDir =
     options.openFusionBaseDir || path.join(path.dirname(baseDir), "openfusion");
   const emit = options.emit || (() => {});
@@ -3470,7 +3487,7 @@ function createAgentTelemetryManager(options = {}) {
         claudeSettingsPath,
         buildClaudeSettingsJson(notifyProgramPath, isWin)
       );
-      installOpenCodePlugin(options.openCodeHome);
+      installOpenCodePlugin(openCodeHome);
 
       server = http.createServer((request, response) => {
         if (request.method !== "POST" || request.url !== "/agent-event") {
@@ -3516,7 +3533,66 @@ function createAgentTelemetryManager(options = {}) {
               return;
             }
 
-            if (event.type === "fusion.adapterReady") {
+            // Generation is authenticated by the server-owned nonce. Never accept
+            // a generation claimed in a child payload, or resurrect a released run.
+            const eventMetadata = { generation: activeSession.generation };
+            const textMetadata = ["providerThreadId", "providerTurnId", "toolId", "toolName", "taskId", "taskLabel", "parentThreadId", "transcriptPath", "cwd"];
+            for (const key of textMetadata) {
+              if (activeSession.generation === undefined && event.provider !== "codex") continue;
+              if (typeof event[key] === "string" && event[key].length <= 4096) eventMetadata[key] = event[key];
+            }
+            if (event.rootVerified !== undefined) eventMetadata.rootVerified = event.rootVerified === true;
+            if (typeof event.transcriptKind === "string") eventMetadata.transcriptKind = event.transcriptKind;
+            const emitEvent = (value) => emit({
+              ...value,
+              provider: value.provider || event.provider || activeSession.provider,
+              ...eventMetadata
+            });
+
+            if (activeSession.generation !== undefined &&
+                (event.type === "agent.running" || event.type.startsWith("agent.subagent.")) &&
+                (event.phase === "start" || event.phase === "stop")) {
+              emitEvent({ id: normalizedEventSessionId, type: "agent-activity", phase: event.phase });
+            }
+
+            if (event.type === "agent.process.started" || event.type === "agent.process.exited") {
+              if (activeSession.generation !== undefined) emitEvent({
+                id: normalizedEventSessionId, type: "agent-process",
+                phase: event.type === "agent.process.started" ? "start" : "exit",
+                pid: Number(event.childPid || event.pid) || undefined,
+                processId: typeof event.processId === "string" && event.processId.length <= 256 ? event.processId : undefined,
+                exitCode: event.exitCode == null ? null : Number(event.exitCode),
+                signal: typeof event.signal === "string" ? event.signal : undefined,
+                error: typeof event.error === "string" ? event.error : undefined
+              });
+              // Headless Fusion callers predate process/turn separation; preserve
+              // their legacy event stream while standalone generations use process.
+              if (activeSession.generation === undefined) {
+                const attention = mapTelemetryToAttention(event);
+                if (attention) emitEvent({ id: normalizedEventSessionId, type: "agent-attention", attention });
+              }
+            } else if (event.type === "agent.activity") {
+              if (event.phase === "start" || event.phase === "stop") {
+                emitEvent({ id: normalizedEventSessionId, type: "agent-activity", phase: event.phase });
+              }
+            } else if (event.type === "agent.response") {
+              emitEvent({ id: normalizedEventSessionId, type: "agent-response", provisional: true, retry: event.retry === true });
+            } else if (event.type === "agent.session") {
+              if (["start", "end", "update"].includes(event.phase)) {
+                emitEvent({
+                  id: normalizedEventSessionId, type: "agent-session", phase: event.phase,
+                  source: typeof event.source === "string" ? event.source : undefined,
+                  reason: typeof event.reason === "string" ? event.reason : undefined,
+                  title: typeof event.title === "string" ? event.title.slice(0, 1024) : undefined,
+                  titleSource: typeof event.titleSource === "string" ? event.titleSource : undefined
+                });
+              }
+            } else
+            if (event.type === "fusion.interaction-request" || event.type === "fusion.interaction-resolved") {
+              emitEvent({ id: normalizedEventSessionId, type: event.type,
+                requestId: event.requestId, pendingId: event.pendingId,
+                kind: event.kind, detail: event.detail, questions: event.questions });
+            } else if (event.type === "fusion.adapterReady") {
               const normalizedSessionId = normalizeSessionId(event.sessionId);
               let controlUrl = null;
               try {
@@ -3545,7 +3621,7 @@ function createAgentTelemetryManager(options = {}) {
             } else if (event.type === "fusion.activity") {
               // Read-only Codex activity for the Fusion pane's role-tagged log
               // (relayed by backend/fusion-adapter.cjs). Not an attention signal.
-              emit({
+              emitEvent({
                 id: event.sessionId,
                 type: "fusion-activity",
                 role: event.role,
@@ -3558,7 +3634,7 @@ function createAgentTelemetryManager(options = {}) {
               // (started/progress/settled). main routes it into the fusion
               // chat host, which mirrors it to the pane and wakes the planner
               // with the settled report. Not an attention signal.
-              emit({
+              emitEvent({
                 id: event.sessionId,
                 type: "fusion-background-task",
                 phase: event.phase,
@@ -3577,7 +3653,7 @@ function createAgentTelemetryManager(options = {}) {
             } else if (event.type === "fusion.build-task") {
               // Detached build lifecycle from the adapter. main owns registry
               // mutation/cancellation and mirrors lifecycle events to the pane.
-              emit({
+              emitEvent({
                 id: event.sessionId,
                 type: "fusion-build-task",
                 phase: event.phase,
@@ -3594,7 +3670,7 @@ function createAgentTelemetryManager(options = {}) {
               // Brain-initiated background delegation request from the pane's
               // MCP bridge (start/cancel). main routes it to the Open Fusion
               // host, which owns the detached executor session and the wake.
-              emit({
+              emitEvent({
                 id: event.sessionId,
                 type: "openfusion-background-request",
                 action: event.action === "cancel" ? "cancel" : "start",
@@ -3613,7 +3689,7 @@ function createAgentTelemetryManager(options = {}) {
                     items: Array.isArray(event.items) ? event.items : [],
                     updatedAt: Number(event.updatedAt) || Date.now()
                   };
-              emit({
+              emitEvent({
                 id: event.sessionId,
                 type: "agent-background-activity",
                 provider: event.provider,
@@ -3630,7 +3706,7 @@ function createAgentTelemetryManager(options = {}) {
               // to settle on a completion it cannot attribute. It deliberately
               // carries no ids: no provider matcher can supply one, and the
               // notify transport stays argv-only.
-              emit({
+              emitEvent({
                 id: event.sessionId,
                 type: "agent-subagent",
                 provider: event.provider,
@@ -3645,7 +3721,7 @@ function createAgentTelemetryManager(options = {}) {
               // override a finished (done/failed) pill; mid-turn tool activity
               // (detail "tool") must respect it, so a tool hook that races past
               // the turn's Stop cannot resurrect the spinner.
-              emit({
+              emitEvent({
                 id: event.sessionId,
                 type: "agent-running",
                 provider: event.provider,
@@ -3665,7 +3741,7 @@ function createAgentTelemetryManager(options = {}) {
               const attention = mapTelemetryToAttention(event);
               if (attention) {
                 const codexProviderEvent = event.provider === "codex";
-                emit({
+                emitEvent({
                   id: event.sessionId,
                   type: "agent-attention",
                   provider: event.provider,
@@ -3709,16 +3785,22 @@ function createAgentTelemetryManager(options = {}) {
       return null;
     }
 
-    if (sessions.has(normalizedSessionId)) {
-      return sessions.get(normalizedSessionId).instrumentation;
+    const generation = typeof options.generation === "string" && options.generation
+      ? options.generation : Number.isSafeInteger(options.generation) ? options.generation : undefined;
+    const previous = sessions.get(normalizedSessionId);
+    if (previous && (generation === undefined || previous.generation === generation)) {
+      return previous.instrumentation;
     }
+    if (previous) releaseSession(normalizedSessionId, { generation: previous.generation });
 
-    const sessionDir = path.join(runDir, sessionDirName(normalizedSessionId));
+    const sessionDir = path.join(runDir, sessionDirName(normalizedSessionId),
+      ...(generation === undefined ? [] : ["generation-" + crypto.createHash("sha256").update(String(generation)).digest("hex").slice(0, 16)]));
     const shimDir = path.join(sessionDir, "bin");
     fs.mkdirSync(shimDir, { recursive: true });
     writeMarker(sessionDir, {
       runId,
       sessionId: normalizedSessionId,
+      generation,
       type: "session"
     });
     for (const provider of PROVIDERS) {
@@ -3731,6 +3813,7 @@ function createAgentTelemetryManager(options = {}) {
     const launchNonce = crypto.randomBytes(24).toString("base64url");
     const instrumentation = {
       shimDir,
+      generation,
       env: {
         [key]: nextPath,
         VIBE_TERMINAL_SESSION_ID: normalizedSessionId,
@@ -3745,9 +3828,24 @@ function createAgentTelemetryManager(options = {}) {
       }
     };
 
+    if (options.provider === "gemini") {
+      const gemini = prepareGeminiTelemetry({ sessionDir, nodePath, env: options.env || process.env });
+      Object.assign(instrumentation.env, gemini.env);
+      instrumentation.capabilities = gemini.capabilities;
+    } else if (options.provider === "opencode") {
+      const installation = installOpenCodePlugin(openCodeHome, options.env || process.env);
+      instrumentation.capabilities = {
+        nativeActivity: installation.available ? "pending" : "unavailable",
+        ...(installation.available ? {} : { lifecycle: "unsupported" }),
+        reason: installation.available ? "Waiting for an OpenCode provider event." : "OpenCode observer could not be installed."
+      };
+    }
+
     sessions.set(normalizedSessionId, {
       dir: sessionDir,
       launchNonce,
+      generation,
+      provider: options.provider,
       instrumentation
     });
     return instrumentation;
@@ -4110,19 +4208,21 @@ function createAgentTelemetryManager(options = {}) {
     return { systemPromptFile, mcpConfig, settingsFile };
   }
 
-  function releaseSession(sessionId) {
+  function releaseSession(sessionId, options = {}) {
     const normalizedSessionId = normalizeSessionId(sessionId);
     if (!normalizedSessionId) {
       return;
     }
 
+    const session = sessions.get(normalizedSessionId);
+    if (options.generation !== undefined && session?.generation !== options.generation) return false;
     fusionAdapterControls.delete(normalizedSessionId);
     fusionAdapterModes.delete(normalizedSessionId);
-    const session = sessions.get(normalizedSessionId);
     sessions.delete(normalizedSessionId);
     if (session) {
       safeRemoveDir(session.dir, runDir);
     }
+    return Boolean(session);
   }
 
   function postFusionAdapterControl(sessionId, pathName, payload = {}) {
@@ -4330,11 +4430,11 @@ function createAgentTelemetryManager(options = {}) {
   // ~/.kimi-code). Idempotent; a missing config is created hooks-only (kimi
   // applies built-in defaults for everything else). Best-effort: never let a
   // config problem break a terminal launch.
-  async function ensureKimiHooks() {
+  async function ensureKimiHooks(homeOverride) {
     try {
       await ready;
       const home =
-        process.env.KIMI_CODE_HOME || path.join(os.homedir(), ".kimi-code");
+        homeOverride || process.env.KIMI_CODE_HOME || path.join(os.homedir(), ".kimi-code");
       const file = path.join(home, "config.toml");
 
       let raw = null;
@@ -4344,8 +4444,9 @@ function createAgentTelemetryManager(options = {}) {
         raw = null;
       }
 
+      const migrated = stripKimiHooks(raw || "", KIMI_CUSTOM_HOOK_MARKER).trimmed;
       const merged = mergeKimiHooks(
-        raw || "",
+        migrated,
         kimiHookTomlBlocks(notifyProgramPath, isWin)
       );
       if (merged === raw) {
@@ -4381,42 +4482,10 @@ function createAgentTelemetryManager(options = {}) {
     kimiHookFiles.clear();
   }
 
-  // kimi-custom (the vendored custom fork) gets the identical hook set under
-  // its own marker, merged into the shared kimi-code home ($KIMI_CODE_HOME or
-  // ~/.kimi-code) — the same config.toml stock kimi uses, so the two markers
-  // coexist; homeOverride only exists so tests can repoint the home.
+  // Both launchers share the stock home. Install one stock-compatible hook set;
+  // never leave fork-only enum values or a second set of turn callbacks there.
   async function ensureKimiCustomHooks(homeOverride) {
-    try {
-      await ready;
-      const home =
-        homeOverride ||
-        process.env.KIMI_CODE_HOME ||
-        path.join(os.homedir(), ".kimi-code");
-      const file = path.join(home, "config.toml");
-
-      let raw = null;
-      try {
-        raw = fs.readFileSync(file, "utf8");
-      } catch {
-        raw = null;
-      }
-
-      const merged = mergeKimiHooks(
-        raw || "",
-        kimiHookTomlBlocks(notifyProgramPath, isWin, KIMI_CUSTOM_HOOK_MARKER),
-        KIMI_CUSTOM_HOOK_MARKER
-      );
-      if (merged === raw) {
-        return;
-      }
-      fs.mkdirSync(home, { recursive: true });
-      fs.writeFileSync(file, merged);
-      if (!kimiCustomHookFiles.has(file)) {
-        kimiCustomHookFiles.set(file, { createdByUs: raw === null });
-      }
-    } catch {
-      // Best-effort; never let hook install break a terminal launch.
-    }
+    return ensureKimiHooks(homeOverride);
   }
 
   function cleanupKimiCustomHooks() {
@@ -4553,6 +4622,8 @@ function createAgentTelemetryManager(options = {}) {
     cancelFusionBackgroundTask,
     setFusionSessionMode,
     stopFusionSession,
+    // Trusted main-process integration only. Never exposed through preload.
+    getFusionSessionControl: (sessionId) => ({ controlUrl: fusionAdapterControls.get(normalizeSessionId(sessionId)), token }),
     runDir,
     runId,
     token

@@ -1,3 +1,4 @@
+import type { TerminalRuntimeSnapshot } from "./terminalRuntime";
 import type {
   AppVersionList,
   AgentThreadListResult,
@@ -65,6 +66,12 @@ export interface InstalledCliReport {
 declare global {
   interface Window {
     vibe?: {
+      orchestrator: import("./orchestratorUi").RelayApi & {
+        openMain(): Promise<{ ok: boolean }>;
+        getChanges(payload: { id?: string; cwd?: string }): Promise<CodeChangeSummary>;
+      };
+      voice: import("./voice/types").VoiceApi;
+      setups: import("./components/WorkspaceSetups").WorkspaceSetupsProps["api"];
       platform: string;
       app: {
         getCwd: () => Promise<string>;
@@ -139,10 +146,12 @@ declare global {
         ) => Promise<AgentThreadListResult>;
       };
       terminal: {
-        create: (payload: TerminalLaunchPayload) => Promise<boolean>;
-        input: (id: string, data: string) => void;
-        resize: (id: string, cols: number, rows: number) => void;
-        kill: (id: string) => Promise<boolean>;
+        create: (payload: TerminalLaunchPayload) => Promise<boolean | { ok?: boolean; generation?: string; launchToken?: number; cancelled?: boolean; error?: string }>;
+        input: (id: string, data: string, scope?: { generation?: string; launchToken?: number }) => void;
+        resize: (id: string, cols: number, rows: number, scope?: { generation?: string; launchToken?: number }) => void;
+        kill: (id: string, scope?: { generation?: string; launchToken?: number; reason?: "close" | "restart" }) => Promise<boolean>;
+        getRuntimeSnapshots: () => Promise<TerminalRuntimeSnapshot[]>;
+        onRuntime: (callback: (snapshot: TerminalRuntimeSnapshot) => void) => () => void;
         showContextMenu: (payload: {
           id: string;
           selectionText?: string;
@@ -153,6 +162,7 @@ declare global {
         onEvent: (callback: (event: TerminalEvent) => void) => () => void;
       };
       fusionChat: {
+        answerQuestion(id: string, requestId: string, answers: Record<string, string[]>): Promise<{ ok: boolean; status?: string; error?: string }>;
         start: (payload: {
           id: string;
           cwd: string;
@@ -295,11 +305,14 @@ declare global {
         answerQuestion: (
           id: string,
           requestId: string,
-          answers: string[][]
+          answers: string[][],
+          revision?: number
         ) => Promise<{ ok: boolean; error?: string }>;
+        questionProgress: (id: string, requestId: string, answers: string[][], revision?: number) => Promise<{ ok: boolean; error?: string; revision?: number; partialAnswers?: string[][] }>;
         rejectQuestion: (
           id: string,
-          requestId: string
+          requestId: string,
+          revision?: number
         ) => Promise<{ ok: boolean; error?: string }>;
         compact: (id: string) => Promise<{ ok: boolean; error?: string }>;
         interrupt: (id: string) => Promise<boolean>;

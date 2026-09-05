@@ -11,15 +11,14 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import {
   CopyPlus,
   GripVertical,
-  Maximize2,
-  Minimize2,
   Plus,
+  Columns2,
+  Rows2,
   Play,
   RefreshCcw,
   RotateCcw,
   TerminalSquare,
-  Ungroup,
-  X
+  Ungroup
 } from "lucide-react";
 import clsx from "clsx";
 import {
@@ -31,6 +30,9 @@ import {
   shouldShowAttentionDot,
   statusAfterUserInput
 } from "../attention";
+import { runtimeDisplayTitle, runtimeTitleTooltip, type TerminalRuntimeSnapshot } from "../terminalRuntime";
+import { PaneActions } from "./PaneActions";
+import TerminalActivity from "./TerminalActivity";
 import { buildLaunchCommand, isThreadedAgentKind } from "../sessionLaunch";
 import {
   isTerminalCopyShortcut,
@@ -156,6 +158,8 @@ interface ThreadLookupPatch {
 interface TerminalPaneProps {
   session: AgentSession;
   profile: AgentProfile;
+  runtime?: TerminalRuntimeSnapshot;
+  runtimeUnread?: boolean;
   providerLogoSrc?: string;
   claimedThreadIds: string[];
   cwdConflict?: CwdConflict;
@@ -218,6 +222,8 @@ function statusLabel(status: SessionStatus) {
 export default function TerminalPane({
   session,
   profile,
+  runtime,
+  runtimeUnread,
   providerLogoSrc,
   claimedThreadIds,
   cwdConflict,
@@ -247,6 +253,20 @@ export default function TerminalPane({
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const sessionRef = useRef(session);
+  const runtimeRef = useRef(runtime);
+  runtimeRef.current = runtime?.launchToken === session.launchToken ? runtime : undefined;
+  const usesRuntime = !session.fusion && !session.openFusion;
+  // Native panes project backend observations; legacy Fusion owns its separate lifecycle.
+  function ownsRuntime() {
+    return !sessionRef.current.fusion && !sessionRef.current.openFusion;
+  }
+  function runtimeScope() {
+    const current = runtimeRef.current;
+    return {
+      launchToken: sessionRef.current.launchToken,
+      generation: current?.launchToken === sessionRef.current.launchToken ? current.generation : undefined
+    };
+  }
   const createdRef = useRef(false);
   const lastLaunchTokenRef = useRef(0);
   const onStatusChangeRef = useRef(onStatusChange);
@@ -392,6 +412,7 @@ export default function TerminalPane({
   }, [isArranging]);
 
   function setStatus(status: SessionStatus) {
+    if (ownsRuntime()) return;
     const nextStatus = reconcileStatus(sessionRef.current.status, status);
     if (nextStatus === sessionRef.current.status) {
       return;
@@ -433,6 +454,7 @@ export default function TerminalPane({
   // the timer fires — a starting->running transition mid-wait must not settle
   // a fresh turn after the shorter boot delay.
   function armTelemetrySettle() {
+    if (ownsRuntime()) return;
     if (isTurnTelemetryKind(sessionRef.current.kind)) {
       const armedFor = sessionRef.current.status;
       if (armedFor !== "starting" && armedFor !== "running") {
@@ -485,6 +507,7 @@ export default function TerminalPane({
 
   // Decide whether a chunk of PTY output should read as the agent "working".
   function markActiveFromOutput() {
+    if (ownsRuntime()) return;
     // Codex has provider lifecycle telemetry when its passive observer is
     // trusted, an Enter fallback otherwise, and provider-owned completion.
     // PTY silence during thinking/quiet tools is not the mounted idle heuristic.
@@ -787,7 +810,8 @@ export default function TerminalPane({
         );
         window.vibe?.terminal.input(
           session.id,
-          buildSgrWheelReports(lines, col, row)
+          buildSgrWheelReports(lines, col, row),
+          runtimeScope()
         );
       }
       // Consumed: without this xterm would add its own single report on top.
@@ -880,7 +904,7 @@ export default function TerminalPane({
         }
 
         lastSentSizeRef.current = size;
-        window.vibe?.terminal.resize(session.id, size.cols, size.rows);
+        window.vibe?.terminal.resize(session.id, size.cols, size.rows, runtimeScope());
       } catch {
         // Fit can throw while the pane is between layout states.
       }
@@ -909,7 +933,7 @@ export default function TerminalPane({
       // Applied directly — bypassing the latch is the point — and mirrored
       // into sessionRef so the heuristic reconciles against the released
       // status before the next re-render.
-      if (!terminalExitedRef.current) {
+      if (!ownsRuntime() && !terminalExitedRef.current) {
         if (sessionRef.current.kind === "codex") {
           onCodexInputRef.current();
         }
@@ -936,7 +960,7 @@ export default function TerminalPane({
         }
       }
 
-      window.vibe?.terminal.input(session.id, data);
+      window.vibe?.terminal.input(session.id, data, runtimeScope());
       // User interaction is not plain-terminal work. Record when it happened so
       // that pane's echo/redraw can be told apart from real output. Codex status
       // is submit/notify-driven and does not consume this grace timestamp.
@@ -951,6 +975,9 @@ export default function TerminalPane({
     });
 
     const removeListener = window.vibe?.terminal.onEvent((event) => {
+      if ("launchToken" in event && event.launchToken !== undefined && event.launchToken !== sessionRef.current.launchToken) return;
+      const scope = runtimeScope();
+      if ("generation" in event && event.generation && scope.generation && event.generation !== scope.generation) return;
       if (event.type === "host-error" || event.type === "host-exit") {
         if ("id" in event && event.id && event.id !== session.id) {
           return;
@@ -1044,7 +1071,7 @@ export default function TerminalPane({
 
     if (!session.started) {
       terminal.writeln(
-        "\x1b[90mSession is paused. Use the play button to start it.\x1b[0m"
+        "\x1b[90mSession is paused. Open pane actions to start it.\x1b[0m"
       );
     }
 
@@ -1083,6 +1110,7 @@ export default function TerminalPane({
       fitRef.current = null;
       fitAndResizeRef.current = null;
       lastSentSizeRef.current = null;
+      fitMeasuredRef.current = false;
     };
   }, [
     // Terminal lifecycle is pinned to the session identity. Every mutable
@@ -1108,6 +1136,7 @@ export default function TerminalPane({
     currentSession: AgentSession,
     defaultCommand: string
   ): Promise<string> {
+    if (ownsRuntime()) return defaultCommand;
     if (
       isThreadedAgentKind(currentSession.kind) &&
       currentSession.nextLaunchMode === "resume" &&
@@ -1202,8 +1231,8 @@ export default function TerminalPane({
       };
     }
     const lookupStartedAt = Date.now();
-    threadLookupAfterRef.current = lookupStartedAt;
-    if (isThreadedAgentKind(session.kind) && !session.threadRef?.id) {
+    if (!ownsRuntime()) threadLookupAfterRef.current = lookupStartedAt;
+    if (!ownsRuntime() && isThreadedAgentKind(session.kind) && !session.threadRef?.id) {
       onThreadLookupChangeRef.current({
         threadLookupStartedAt: lookupStartedAt,
         threadLookupStatus: "pending",
@@ -1230,6 +1259,8 @@ export default function TerminalPane({
       window.vibe?.terminal.create({
         id: session.id,
         cwd: session.cwd,
+        provider: session.kind,
+        threadRef: session.threadRef,
         command,
         launchToken,
         fusion: session.fusion,
@@ -1265,6 +1296,7 @@ export default function TerminalPane({
   ]);
 
   function scheduleThreadLookup(delayMs: number, finalAttempt = false) {
+    if (ownsRuntime()) return;
     const currentSession = sessionRef.current;
     const provider = currentSession.kind;
     const forceLookup =
@@ -1447,6 +1479,7 @@ export default function TerminalPane({
   // chain because a prompt was likely just submitted.
   function canRefreshTitle(currentSession: AgentSession) {
     return (
+      !ownsRuntime() &&
       TITLE_REFRESH_PROVIDERS.has(currentSession.kind) &&
       Boolean(currentSession.threadRef?.id) &&
       !currentSession.threadRef?.title &&
@@ -1540,7 +1573,9 @@ export default function TerminalPane({
   // Glow the pane border when this terminal has finished a turn but hasn't been
   // looked at yet (same unread rule as the sidebar folder dot). Selecting or
   // typing into the pane clears the unread flag, which drops the glow.
-  const showAttention = shouldShowAttentionDot(session);
+  const showAttention = usesRuntime ? Boolean(runtimeUnread) : shouldShowAttentionDot(session);
+  const currentRuntime = runtime?.launchToken === session.launchToken ? runtime : undefined;
+  const displayTitle = usesRuntime ? runtimeDisplayTitle(currentRuntime, session.name) : session.threadRef?.title || session.name;
 
   return (
     <article
@@ -1560,7 +1595,7 @@ export default function TerminalPane({
       data-pane-id={session.id}
       onPointerDown={handlePanePointerDown}
     >
-      <header className="pane-header pane-drag-zone" title="Drag header to move pane">
+      <header className="pane-header pane-drag-zone task-pane-header" title="Drag header to move pane">
         <div className="pane-title">
           <GripVertical className="drag-grip" size={15} />
           {providerLogoSrc ? (
@@ -1572,10 +1607,10 @@ export default function TerminalPane({
           ) : (
             <TerminalSquare size={15} />
           )}
-          <span title={session.threadRef?.title || session.name}>
-            {session.threadRef?.title || session.name}
+          <span title={usesRuntime ? runtimeTitleTooltip(currentRuntime, session.name) : displayTitle}>
+            {displayTitle}
           </span>
-          <small>{profile.label}</small>
+
           {cwdConflict && (
             <span
               className={clsx(
@@ -1589,55 +1624,21 @@ export default function TerminalPane({
           )}
         </div>
 
-        <div className="pane-status">
-          <span className={`status-pill status-${session.status}`}>
-            {statusLabel(session.status)}
-          </span>
-        </div>
-
-        <div className="pane-actions">
-          <button title="Add matching pane" onClick={onAdd}>
-            <Plus size={14} />
-          </button>
-          <button title="Duplicate pane" onClick={onDuplicate}>
-            <CopyPlus size={14} />
-          </button>
-          {/* Split / pop-out are intentionally NOT in this row: three more
-              always-visible buttons crowded the header at the 280px minimum
-              pane width. The actions stay wired for a less cramped entry
-              point. */}
-          {isGrouped && (
-            <button title="Pop out of tile" onClick={onPopOut}>
-              <Ungroup size={14} />
-            </button>
-          )}
-          <button
-            title={session.started ? "Restart terminal" : "Start terminal"}
-            onClick={onRestart}
-          >
-            {session.started ? <RefreshCcw size={14} /> : <Play size={14} />}
-          </button>
-          {session.resumeRef?.id && (
-            <button
-              title={`Resume last ${profile.label} chat`}
-              onClick={onResume}
-            >
-              <RotateCcw size={14} />
-            </button>
-          )}
-          <button title={isMaximized ? "Restore pane" : "Maximize pane"} onClick={onMaximize}>
-            {isMaximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-          </button>
-          <button className="danger" title="Close pane" onClick={onClose}>
-            <X size={15} />
-          </button>
-        </div>
+        <PaneActions maximized={isMaximized} onMaximize={onMaximize} onClose={onClose}
+          detail={`${profile.label} · ${launchCommand || "shell"}\n${session.cwd}`}
+          actions={[
+            {title:session.started ? "Restart terminal" : "Start terminal",icon:session.started ? <RefreshCcw size={14}/> : <Play size={14}/>,run:onRestart},
+            {title:"Add matching pane",icon:<Plus size={14}/>,run:onAdd},
+            {title:"Duplicate pane",icon:<CopyPlus size={14}/>,run:onDuplicate},
+            {title:"Split right",icon:<Columns2 size={14}/>,run:()=>onSplit("row")},
+            {title:"Split down",icon:<Rows2 size={14}/>,run:()=>onSplit("col")},
+            ...(isGrouped ? [{title:"Pop out of tile",icon:<Ungroup size={14}/>,run:onPopOut}] : []),
+            ...(session.resumeRef?.id ? [{title:`Resume last ${profile.label} chat`,icon:<RotateCcw size={14}/>,run:onResume}] : [])
+          ]}/>
+        <div className="task-pane-context"><span title={session.cwd}>{profile.label}<i/> {session.cwd.split(/[\\/]/).filter(Boolean).at(-1)}</span><div className="pane-status">
+          {usesRuntime ? <TerminalActivity runtime={currentRuntime} started={session.started} /> : <span className={`status-pill status-${session.status}`}>{statusLabel(session.status)}</span>}
+        </div></div>
       </header>
-
-      <div className="terminal-command-strip">
-        <span>{launchCommand || "shell"}</span>
-        <span>{session.cwd}</span>
-      </div>
 
       <div
         className="terminal-surface"

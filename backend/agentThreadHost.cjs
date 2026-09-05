@@ -3,11 +3,13 @@ const os = require("os");
 const path = require("path");
 const readline = require("readline");
 const { spawn } = require("child_process");
+const { lookupGeminiThread } = require("./geminiThreads.cjs");
 const {
   findCodexThread,
   listCodexThreads,
   confirmCodexThread,
-  normalizeThreadTitle
+  normalizeThreadTitle,
+  readJsonlRecords
 } = require("./agentThreads.cjs");
 
 const MAX_TRANSCRIPT_HEAD_BYTES = 256 * 1024;
@@ -197,7 +199,7 @@ function isClaudeMetaText(text) {
 // for this cwd. Shared by latest-thread discovery and the existence check.
 function parseClaudeTranscript(filePath, cwd) {
   try {
-    const lines = readHeadLines(filePath, 40);
+    const events = readJsonlRecords(filePath);
     let sessionId = "";
     let createdAt = 0;
     let title = "";
@@ -206,20 +208,9 @@ function parseClaudeTranscript(filePath, cwd) {
     let entrypoint = "";
     let sawMatchingCwd = false;
 
-    for (const line of lines) {
-      if (!line.trim()) {
-        continue;
-      }
-
-      let event;
-      try {
-        event = JSON.parse(line);
-      } catch {
-        // Tolerate the occasional malformed line instead of discarding the
-        // whole transcript.
-        continue;
-      }
-
+    for (const event of events) {
+      if (!event || typeof event !== "object") continue;
+      if (event.isSidechain || event.parentSessionId || event.parent_session_id || event.parent_thread_id) return null;
       if (event.cwd && isSamePath(event.cwd, cwd)) {
         sawMatchingCwd = true;
       }
@@ -239,17 +230,15 @@ function parseClaudeTranscript(filePath, cwd) {
       // first-prompt title — it is what Claude's own /resume picker shows.
       // Generic pane labels this app once forced are skipped instead.
       if (
-        !customTitle &&
         event.type === "custom-title" &&
-        typeof event.customTitle === "string" &&
-        !GENERIC_CUSTOM_TITLE.test(event.customTitle.trim())
+        typeof event.customTitle === "string"
       ) {
-        customTitle = normalizeThreadTitle(event.customTitle);
+        customTitle = GENERIC_CUSTOM_TITLE.test(event.customTitle.trim())
+          ? "" : normalizeThreadTitle(event.customTitle);
       }
       // Claude's generated session title (what its own picker shows) — better
       // than the raw first prompt when present.
       if (
-        !aiTitle &&
         event.type === "ai-title" &&
         typeof event.aiTitle === "string"
       ) {
@@ -286,6 +275,7 @@ function parseClaudeTranscript(filePath, cwd) {
       provider: "claude",
       id: sessionId,
       title: customTitle || aiTitle || title,
+      titleSource: customTitle ? "named" : aiTitle ? "generated" : "preview",
       createdAt: Number.isFinite(createdAt) ? createdAt : 0,
       updatedAt: stat.mtimeMs,
       entrypoint
@@ -434,7 +424,7 @@ function locateClaudeTranscriptFile(id, home) {
 function confirmClaudeThread(cwd, id, home) {
   const target = String(id || "");
   if (!target) {
-    return { status: "missing" };
+    return { status: "missing", rootVerified: false };
   }
 
   // Home-scoped on purpose: confirming an id that only exists in the OTHER home
@@ -442,19 +432,18 @@ function confirmClaudeThread(cwd, id, home) {
   const located = locateClaudeTranscriptFile(target, home);
 
   if (located.path) {
-    const threadRef = publishClaudeThreadRef(
-      parseClaudeTranscript(located.path, cwd) || placeholderClaudeRef(target)
-    );
-    return { status: "found", threadRef };
+    const parsed = parseClaudeTranscript(located.path, cwd);
+    const threadRef = publishClaudeThreadRef(parsed || placeholderClaudeRef(target));
+    return { status: "found", rootVerified: Boolean(parsed && String(parsed.id) === target), threadRef };
   }
 
   if (!located.complete) {
     // Could not prove the id is absent (unreadable dir or pathological tree);
     // resume rather than risk a duplicate-id collision on a fresh launch.
-    return { status: "found", threadRef: placeholderClaudeRef(target) };
+    return { status: "found", rootVerified: false, threadRef: placeholderClaudeRef(target) };
   }
 
-  return { status: "missing" };
+  return { status: "missing", rootVerified: false };
 }
 
 // Open Fusion panes pass envOverrides (XDG_DATA_HOME/XDG_CONFIG_HOME) so the
@@ -487,6 +476,7 @@ function selectOpenCodeThreadRefs(sessions, cwd, after = 0, excludeIds = []) {
     .filter(
       (session) =>
         session.id &&
+        !session.parentID && !session.parentId && !session.parent_id &&
         !excluded.has(String(session.id)) &&
         isSamePath(session.directory, cwd) &&
         Number(session.created || 0) >= after
@@ -496,6 +486,7 @@ function selectOpenCodeThreadRefs(sessions, cwd, after = 0, excludeIds = []) {
       provider: "opencode",
       id: session.id,
       title: session.title,
+      titleSource: "generated",
       createdAt: Number(session.created || 0),
       updatedAt: Number(session.updated || 0)
     }));
@@ -625,7 +616,7 @@ const OPENCODE_CONFIRM_LIST_MAX = 1000;
 function confirmOpenCodeThread(cwd, id, envOverrides) {
   const target = String(id || "");
   if (!target) {
-    return Promise.resolve({ status: "missing" });
+    return Promise.resolve({ status: "missing", rootVerified: false });
   }
 
   const result = spawnOpenCodeSessionList(
@@ -642,7 +633,7 @@ function confirmOpenCodeThread(cwd, id, envOverrides) {
     });
 
     result.on("error", () =>
-      resolve({ status: "found", threadRef: placeholderOpenCodeRef(target) })
+      resolve({ status: "found", rootVerified: false, threadRef: placeholderOpenCodeRef(target) })
     );
     result.on("exit", () => {
       try {
@@ -653,13 +644,19 @@ function confirmOpenCodeThread(cwd, id, envOverrides) {
             )
           : null;
 
+        if (match && (match.parentID || match.parentId || match.parent_id)) {
+          resolve({ status: "missing", rootVerified: false });
+          return;
+        }
         if (match) {
           resolve({
             status: "found",
+            rootVerified: isSamePath(match.directory, cwd),
             threadRef: {
               provider: "opencode",
               id: match.id,
               title: match.title,
+              titleSource: "generated",
               createdAt: Number(match.created || 0),
               updatedAt: Number(match.updated || 0)
             }
@@ -674,14 +671,14 @@ function confirmOpenCodeThread(cwd, id, envOverrides) {
           // A full page means the id may exist beyond the newest-N window; a
           // non-array response proves nothing. Resume rather than silently
           // replace the user's conversation with a fresh one.
-          resolve({ status: "found", threadRef: placeholderOpenCodeRef(target) });
+          resolve({ status: "found", rootVerified: false, threadRef: placeholderOpenCodeRef(target) });
           return;
         }
 
-        resolve({ status: "missing" });
+        resolve({ status: "missing", rootVerified: false });
       } catch {
         // Unparseable output — cannot prove the id is gone, so resume.
-        resolve({ status: "found", threadRef: placeholderOpenCodeRef(target) });
+        resolve({ status: "found", rootVerified: false, threadRef: placeholderOpenCodeRef(target) });
       }
     });
   });
@@ -797,10 +794,10 @@ function parseCursorTranscriptTitle(jsonlPath) {
 // ~/.cursor/projects/<encoded-cwd>/agent-transcripts/<chatId>/<chatId>.jsonl, so
 // the latest resumable chat for a cwd is the most recently modified transcript
 // dir. Mirrors findLatestClaudeThread; resume launches `cursor-agent --resume`.
-function findLatestCursorThread(cwd, after = 0, excludeIds = []) {
+function listCursorThreads(cwd, after = 0, excludeIds = []) {
   const projectDir = findCursorProjectDir(cwd);
   if (!projectDir) {
-    return null;
+    return { status: "found", threads: [] };
   }
 
   const transcriptsDir = path.join(projectDir, "agent-transcripts");
@@ -808,7 +805,7 @@ function findLatestCursorThread(cwd, after = 0, excludeIds = []) {
   try {
     entries = fs.readdirSync(transcriptsDir, { withFileTypes: true });
   } catch {
-    return null;
+    return { status: "found", threads: [] };
   }
 
   const excluded = toExcludedSet(excludeIds);
@@ -840,18 +837,19 @@ function findLatestCursorThread(cwd, after = 0, excludeIds = []) {
   }
 
   if (matches.length === 0) {
-    return null;
+    return { status: "found", threads: [] };
   }
 
   matches.sort((a, b) => b.updatedAt - a.updatedAt);
-  const latest = matches[0];
-  return {
-    provider: "cursor",
-    id: latest.id,
-    title: parseCursorTranscriptTitle(latest.jsonlPath),
-    createdAt: latest.createdAt,
-    updatedAt: latest.updatedAt
-  };
+  return { status: "found", threads: matches.map((entry) => ({
+    provider: "cursor", id: entry.id,
+    title: normalizeThreadTitle(parseCursorTranscriptTitle(entry.jsonlPath)),
+    titleSource: "preview", createdAt: entry.createdAt, updatedAt: entry.updatedAt
+  })) };
+}
+
+function findLatestCursorThread(cwd, after = 0, excludeIds = []) {
+  return listCursorThreads(cwd, after, excludeIds).threads[0] || null;
 }
 
 function placeholderCursorRef(id) {
@@ -865,15 +863,15 @@ function placeholderCursorRef(id) {
 // readable and the chat dir is absent; otherwise stay "found" and let resume try.
 function confirmCursorThread(cwd, id) {
   const target = String(id || "");
-  if (!target) {
-    return { status: "missing" };
+  if (!target || /[\\/]/.test(target)) {
+    return { status: "missing", rootVerified: false };
   }
 
   const projectDir = findCursorProjectDir(cwd);
   if (!projectDir) {
     // Cannot prove absence (the project dir may not have been scanned yet);
     // resume rather than discard a chat that may exist.
-    return { status: "found", threadRef: placeholderCursorRef(target) };
+    return { status: "found", rootVerified: false, threadRef: placeholderCursorRef(target) };
   }
 
   const chatDir = path.join(projectDir, "agent-transcripts", target);
@@ -890,17 +888,19 @@ function confirmCursorThread(cwd, id) {
     }
     return {
       status: "found",
+      rootVerified: Boolean(updatedAt && parseCursorTranscriptTitle(jsonlPath)),
       threadRef: {
         provider: "cursor",
         id: target,
-        title: updatedAt ? parseCursorTranscriptTitle(jsonlPath) : "",
+        title: updatedAt ? normalizeThreadTitle(parseCursorTranscriptTitle(jsonlPath)) : "",
+        titleSource: "preview",
         createdAt,
         updatedAt
       }
     };
   }
 
-  return { status: "missing" };
+  return { status: "missing", rootVerified: false };
 }
 
 // Kimi Code CLI stores every session under $KIMI_CODE_HOME/sessions and keeps
@@ -958,7 +958,12 @@ function parseKimiTimestampMs(value) {
 
 // state.json holds the display title (or, before one is generated, the opening
 // prompt) and the ISO timestamps the threadRef needs.
-function readKimiSessionState(sessionDir) {
+function isWithinStore(candidate, home) {
+  const relative = path.relative(path.resolve(home), path.resolve(candidate));
+  return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+function readKimiSessionState(sessionDir, cwd) {
   let state;
   try {
     state = JSON.parse(
@@ -968,7 +973,12 @@ function readKimiSessionState(sessionDir) {
     return null;
   }
   return {
+    rootVerified: Boolean(state && typeof state === "object" && !state.parentSessionId &&
+      !state.parent_session_id && !state.parentId && !state.parent_id && !state.parent_thread_id && state.kind !== "subagent" &&
+      (!state.workDir || isSamePath(state.workDir, cwd)) &&
+      (state.createdAt || state.updatedAt || state.title || state.lastPrompt)),
     title: normalizeThreadTitle(state?.title || state?.lastPrompt || ""),
+    titleSource: state?.title ? "named" : "preview",
     createdAt: parseKimiTimestampMs(state?.createdAt),
     updatedAt: parseKimiTimestampMs(state?.updatedAt)
   };
@@ -985,11 +995,11 @@ function findLatestKimiThread(cwd, after = 0, excludeIds = [], options = {}) {
   const matches = [];
 
   for (const entry of entries) {
-    if (excluded.has(entry.sessionId) || !isSamePath(entry.workDir, cwd)) {
+    if (excluded.has(entry.sessionId) || !isSamePath(entry.workDir, cwd) || !isWithinStore(entry.sessionDir, home)) {
       continue;
     }
-    const state = readKimiSessionState(entry.sessionDir);
-    if (!state) {
+    const state = readKimiSessionState(entry.sessionDir, cwd);
+    if (!state || !state.rootVerified) {
       // Index line without a readable session dir (deleted/moved) — skip it.
       continue;
     }
@@ -1009,6 +1019,7 @@ function findLatestKimiThread(cwd, after = 0, excludeIds = [], options = {}) {
     provider,
     id: latest.id,
     title: latest.title,
+    titleSource: latest.titleSource,
     createdAt: latest.createdAt,
     updatedAt: latest.updatedAt
   };
@@ -1024,17 +1035,18 @@ function listKimiThreads(cwd, after = 0, excludeIds = [], options = {}) {
   const threads = [];
 
   for (const entry of entries) {
-    if (excluded.has(entry.sessionId) || !isSamePath(entry.workDir, cwd)) {
+    if (excluded.has(entry.sessionId) || !isSamePath(entry.workDir, cwd) || !isWithinStore(entry.sessionDir, home)) {
       continue;
     }
-    const state = readKimiSessionState(entry.sessionDir);
-    if (!state || state.createdAt < after) {
+    const state = readKimiSessionState(entry.sessionDir, cwd);
+    if (!state || !state.rootVerified || state.createdAt < after) {
       continue;
     }
     threads.push({
       provider,
       id: entry.sessionId,
       title: state.title,
+      titleSource: state.titleSource,
       createdAt: state.createdAt,
       updatedAt: state.updatedAt
     });
@@ -1058,25 +1070,27 @@ function confirmKimiThread(cwd, id, options = {}) {
   const provider = options.provider || "kimi";
   const target = String(id || "");
   if (!target) {
-    return { status: "missing" };
+    return { status: "missing", rootVerified: false };
   }
 
   const { entries, readable } = parseKimiSessionIndex(home);
   const entry = entries.find((candidate) => candidate.sessionId === target);
   if (!entry) {
     return readable
-      ? { status: "missing" }
-      : { status: "found", threadRef: placeholderKimiRef(target, provider) };
+      ? { status: "missing", rootVerified: false }
+      : { status: "found", rootVerified: false, threadRef: placeholderKimiRef(target, provider) };
   }
 
-  const state = readKimiSessionState(entry.sessionDir);
+  const state = readKimiSessionState(entry.sessionDir, cwd);
   return {
     status: "found",
+    rootVerified: Boolean(state && state.rootVerified && isSamePath(entry.workDir, cwd) && isWithinStore(entry.sessionDir, home)),
     threadRef: state
       ? {
           provider,
           id: target,
           title: state.title,
+          titleSource: state.titleSource,
           createdAt: state.createdAt,
           updatedAt: state.updatedAt
         }
@@ -1138,7 +1152,7 @@ function qwenChatsDir(cwd, home = qwenHome()) {
 // plenty and a huge session file never costs a full read.
 const QWEN_TITLE_SCAN_BYTES = 64 * 1024;
 
-function readQwenSessionState(filePath) {
+function readQwenSessionState(filePath, cwd) {
   let stat;
   try {
     stat = fs.statSync(filePath);
@@ -1160,6 +1174,8 @@ function readQwenSessionState(filePath) {
     return null;
   }
 
+  let sessionId = "";
+  let rootVerified = true;
   let createdAt = 0;
   let title = "";
   for (const line of head.split(/\r?\n/)) {
@@ -1172,6 +1188,13 @@ function readQwenSessionState(filePath) {
     } catch {
       // Torn tail of the bounded read, or a corrupt line — keep scanning.
       continue;
+    }
+    if (!record || typeof record !== "object") continue;
+    if (record.parentSessionId || record.parent_session_id || record.parentId || record.parent_id || record.parent_thread_id || record.kind === "subagent" || record.isSidechain ||
+        (record.cwd && !isSamePath(record.cwd, cwd))) rootVerified = false;
+    if (record.sessionId) {
+      if (sessionId && sessionId !== record.sessionId) rootVerified = false;
+      sessionId = String(record.sessionId);
     }
     if (!createdAt) {
       const parsed = Date.parse(record?.timestamp);
@@ -1198,7 +1221,7 @@ function readQwenSessionState(filePath) {
     }
   }
 
-  return { title, createdAt, updatedAt: stat.mtimeMs || createdAt };
+  return { sessionId, rootVerified: Boolean(rootVerified && sessionId), title, titleSource: "preview", createdAt, updatedAt: stat.mtimeMs || createdAt };
 }
 
 function collectQwenThreads(cwd, after = 0, excludeIds = []) {
@@ -1222,14 +1245,15 @@ function collectQwenThreads(cwd, after = 0, excludeIds = []) {
     if (!id || excluded.has(id)) {
       continue;
     }
-    const state = readQwenSessionState(path.join(dir, name));
-    if (!state || state.createdAt < after) {
+    const state = readQwenSessionState(path.join(dir, name), cwd);
+    if (!state || !state.rootVerified || state.sessionId !== id || state.createdAt < after) {
       continue;
     }
     threads.push({
       provider: "qwen",
       id,
       title: state.title,
+      titleSource: state.titleSource,
       createdAt: state.createdAt,
       updatedAt: state.updatedAt
     });
@@ -1265,19 +1289,21 @@ function placeholderQwenRef(id) {
 // dir stays "found" and lets resume try.
 function confirmQwenThread(cwd, id) {
   const target = String(id || "");
-  if (!target) {
-    return { status: "missing" };
+  if (!target || /[\\/]/.test(target)) {
+    return { status: "missing", rootVerified: false };
   }
 
   const dir = qwenChatsDir(cwd);
-  const state = readQwenSessionState(path.join(dir, `${target}.jsonl`));
+  const state = readQwenSessionState(path.join(dir, `${target}.jsonl`), cwd);
   if (state) {
     return {
       status: "found",
+      rootVerified: Boolean(state.rootVerified && state.sessionId === target),
       threadRef: {
         provider: "qwen",
         id: target,
         title: state.title,
+        titleSource: state.titleSource,
         createdAt: state.createdAt,
         updatedAt: state.updatedAt
       }
@@ -1291,8 +1317,19 @@ function confirmQwenThread(cwd, id) {
     readable = false;
   }
   return readable
-    ? { status: "missing" }
-    : { status: "found", threadRef: placeholderQwenRef(target) };
+    ? { status: "missing", rootVerified: false }
+    : { status: "found", rootVerified: false, threadRef: placeholderQwenRef(target) };
+}
+
+function uniqueThreadResult(result, provider) {
+  if (result.status !== "found") return result;
+  const threads = result.threads || [];
+  if (threads.length > 1) return {
+    status: "ambiguous", candidates: threads,
+    message: `Multiple ${provider} sessions match; not guessing ownership.`
+  };
+  return threads.length ? { status: "found", threadRef: threads[0] }
+    : { status: "pending", message: `Waiting for ${provider} session metadata.` };
 }
 
 async function findLatestAgentThread(payload) {
@@ -1305,6 +1342,8 @@ async function findLatestAgentThread(payload) {
       message: "Cannot discover an agent thread without a working directory."
     };
   }
+
+  if (payload.provider === "gemini") return lookupGeminiThread(payload);
 
   if (payload.provider === "codex") {
     // Confirm whether a specific rollout id is still resumable so the launcher
@@ -1343,13 +1382,7 @@ async function findLatestAgentThread(payload) {
       });
     }
 
-    const threadRef = findLatestClaudeThread(cwd, after, payload.excludeIds, claudeHome);
-    return threadRef
-      ? { status: "found", threadRef }
-      : {
-          status: "pending",
-          message: "Waiting for Claude to create its local session metadata."
-        };
+    return uniqueThreadResult(listClaudeThreads(cwd, after, payload.excludeIds, { claudeHome }), "Claude");
   }
 
   if (payload.provider === "opencode") {
@@ -1370,34 +1403,18 @@ async function findLatestAgentThread(payload) {
       );
     }
 
-    const threadRef = await findLatestOpenCodeThread(
-      cwd,
-      after,
-      payload.excludeIds,
-      payload.opencodeEnv
-    );
-    return threadRef
-      ? { status: "found", threadRef }
-      : {
-          status: "pending",
-          message: "Waiting for OpenCode to create its local session metadata."
-        };
+    return uniqueThreadResult(await listOpenCodeThreads(cwd, after, payload.excludeIds, payload.opencodeEnv), "OpenCode");
   }
 
   if (payload.provider === "cursor") {
+    if (payload.list) return listCursorThreads(cwd, after, payload.excludeIds);
     // Confirm whether a specific chat id is still resumable so the launcher can
     // self-heal instead of running a doomed `cursor-agent --resume <id>`.
     if (payload.confirmId) {
       return confirmCursorThread(cwd, payload.confirmId);
     }
 
-    const threadRef = findLatestCursorThread(cwd, after, payload.excludeIds);
-    return threadRef
-      ? { status: "found", threadRef }
-      : {
-          status: "pending",
-          message: "Waiting for Cursor to create its local session metadata."
-        };
+    return uniqueThreadResult(listCursorThreads(cwd, after, payload.excludeIds), "Cursor");
   }
 
   if (payload.provider === "kimi-custom") {
@@ -1413,13 +1430,7 @@ async function findLatestAgentThread(payload) {
       return listKimiCustomThreads(cwd, after, payload.excludeIds);
     }
 
-    const threadRef = findLatestKimiCustomThread(cwd, after, payload.excludeIds);
-    return threadRef
-      ? { status: "found", threadRef }
-      : {
-          status: "pending",
-          message: "Waiting for Kimi Custom to create its local session metadata."
-        };
+    return uniqueThreadResult(listKimiCustomThreads(cwd, after, payload.excludeIds), "Kimi Custom");
   }
 
   if (payload.provider === "kimi") {
@@ -1435,13 +1446,7 @@ async function findLatestAgentThread(payload) {
       return listKimiThreads(cwd, after, payload.excludeIds);
     }
 
-    const threadRef = findLatestKimiThread(cwd, after, payload.excludeIds);
-    return threadRef
-      ? { status: "found", threadRef }
-      : {
-          status: "pending",
-          message: "Waiting for Kimi to create its local session metadata."
-        };
+    return uniqueThreadResult(listKimiThreads(cwd, after, payload.excludeIds), "Kimi");
   }
 
   if (payload.provider === "qwen") {
@@ -1457,13 +1462,7 @@ async function findLatestAgentThread(payload) {
       return listQwenThreads(cwd, after, payload.excludeIds);
     }
 
-    const threadRef = findLatestQwenThread(cwd, after, payload.excludeIds);
-    return threadRef
-      ? { status: "found", threadRef }
-      : {
-          status: "pending",
-          message: "Waiting for Qwen to create its local session metadata."
-        };
+    return uniqueThreadResult(listQwenThreads(cwd, after, payload.excludeIds), "Qwen");
   }
 
   return {
@@ -1556,6 +1555,7 @@ module.exports = {
   findLatestQwenThread,
   isSamePath,
   listClaudeThreads,
+  listCursorThreads,
   listKimiCustomThreads,
   listKimiThreads,
   listOpenCodeThreads,

@@ -1,0 +1,7 @@
+English keyword model by pkufool / Next-gen Kaldi contributors.
+Model: sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01
+Source: https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2
+Model card: https://www.modelscope.cn/pkufool/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01
+License: Apache License 2.0 (author declaration in README.md).
+Runtime sherpa-onnx: Copyright (c) 2022-2026 Xiaomi Corporation; Apache-2.0.
+hey-vibe.txt is a generated customization, not an upstream keyword file.

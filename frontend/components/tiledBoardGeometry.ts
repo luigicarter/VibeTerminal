@@ -147,17 +147,12 @@ export function normalizeLayouts(
   sanitizedItems.forEach((item) => {
     const rect = layoutToRect(item.layout, innerWidth);
 
-    // Gravity: pull each item up to the lowest hole-free top within its column.
-    // Items are placed in ascending-y order, so every horizontally-overlapping
-    // rect already placed sits at or above this one; a single skyline pass then
-    // yields the minimum non-colliding top (filling any vacated space above).
-    rect.top = placedRects.reduce((top, placed) => {
-      if (horizontalOverlap(rect, placed.rect)) {
-        return Math.max(top, placed.rect.top + placed.rect.height + BOARD_GAP);
-      }
-
-      return top;
-    }, BOARD_PADDING);
+    // Repair only a colliding item. Other manually positioned tiles keep their
+    // coordinates even when another item in the set needed collision recovery.
+    if (placedRects.some((placed) => rectsOverlap(rect, placed.rect))) {
+      const tops = [BOARD_PADDING, ...placedRects.map(({ rect }) => rectBottom(rect) + BOARD_GAP)].sort((a, b) => a - b);
+      rect.top = tops.find((top) => !placedRects.some((placed) => rectsOverlap({ ...rect, top }, placed.rect))) ?? rect.top;
+    }
 
     placedRects.push({ id: item.id, rect });
     normalizedLayouts[item.id] = rectToLayout(rect, innerWidth);
@@ -747,72 +742,14 @@ export function fitDropRectAtAnchor(
   minWidth: number,
   minHeight: number
 ) {
-  const minimumRect: PixelRect = {
-    left: anchor.left,
-    top: anchor.top,
-    width: minWidth,
-    height: minHeight
-  };
-
-  if (
-    minimumRect.left < 0 ||
-    minimumRect.top < BOARD_PADDING ||
-    rectRight(minimumRect) > innerWidth ||
-    rectBottom(minimumRect) > visibleBottom ||
-    fixedRects.some((rect) => rectsOverlap(minimumRect, rect))
-  ) {
-    return null;
-  }
-
-  let width = Math.min(desiredRect.width, innerWidth - anchor.left);
-  let height = Math.min(desiredRect.height, visibleBottom - anchor.top);
-
-  for (let guard = 0; guard < 4; guard += 1) {
-    const maxWidth = availableWidthForHeight(
-      anchor.left,
-      anchor.top,
-      height,
-      fixedRects,
-      innerWidth
-    );
-
-    if (maxWidth < minWidth) {
-      return null;
-    }
-
-    width = Math.min(Math.max(width, minWidth), maxWidth);
-
-    const maxHeight = availableHeightForWidth(
-      anchor.left,
-      anchor.top,
-      width,
-      fixedRects,
-      visibleBottom
-    );
-
-    if (maxHeight < minHeight) {
-      return null;
-    }
-
-    height = Math.min(Math.max(height, minHeight), maxHeight);
-  }
-
-  const fittedRect = {
-    left: anchor.left,
-    top: anchor.top,
-    width,
-    height
-  };
-
-  if (
-    rectRight(fittedRect) > innerWidth ||
-    rectBottom(fittedRect) > visibleBottom ||
-    fixedRects.some((rect) => rectsOverlap(fittedRect, rect))
-  ) {
-    return null;
-  }
-
-  return fittedRect;
+  const candidates = emptyBoardRegions(fixedRects, innerWidth, {top: anchor.top, bottom: visibleBottom}, minWidth, minHeight)
+    .filter(region => region.left <= anchor.left && rectRight(region) >= anchor.left + minWidth && region.top <= anchor.top)
+    .map(region => ({left:anchor.left,top:anchor.top,
+      width:Math.min(desiredRect.width,rectRight(region)-anchor.left),
+      height:Math.min(desiredRect.height,rectBottom(region)-anchor.top)}))
+    .filter(rect => rect.width >= minWidth && rect.height >= minHeight && !fixedRects.some(fixed => rectsOverlap(rect,fixed)))
+    .sort((a,b) => rectArea(b)-rectArea(a));
+  return candidates[0] ?? null;
 }
 
 export function findFittedDropRect(
@@ -1117,4 +1054,91 @@ export function buildResizeLayout(
     },
     innerWidth
   );
+}
+
+
+export interface BoardViewport { top: number; bottom: number }
+export interface BoardGeometryMetrics { innerWidth: number; viewportTop: number; viewportBottom: number }
+export interface SnapState { x?: number; y?: number }
+
+// Enumerate empty rectangles rather than committing to a width-first fit. A
+// horizontal span is bounded by board/obstacle edges; its vertical gaps are
+// then exact. Contained regions are harmless and allow precise local ranking.
+export function emptyBoardRegions(fixed: PixelRect[], innerWidth: number, viewport: BoardViewport, minW: number, minH: number): PixelRect[] {
+  const xs = dedupeNumberValues([0, innerWidth, ...fixed.flatMap(r => [clamp(r.left - BOARD_GAP, 0, innerWidth), clamp(rectRight(r) + BOARD_GAP, 0, innerWidth)])]).sort((a,b) => a-b);
+  const regions: PixelRect[] = [];
+  const floor = Math.max(BOARD_PADDING, viewport.top);
+  for (let i=0;i<xs.length;i++) for(let j=i+1;j<xs.length;j++) {
+    const left=xs[i], width=xs[j]-left;
+    if(width + OVERLAP_EPSILON < minW) continue;
+    const blockers=fixed.filter(r => horizontalOverlap({left,top:floor,width,height:1},r)).sort((a,b)=>a.top-b.top);
+    let top=floor;
+    for(const r of blockers) {
+      if(rectBottom(r)+BOARD_GAP <= top) continue;
+      const bottom=Math.min(viewport.bottom,r.top-BOARD_GAP);
+      if(bottom-top + OVERLAP_EPSILON >= minH) regions.push({left,top,width,height:bottom-top});
+      top=Math.max(top,rectBottom(r)+BOARD_GAP);
+      if(top>=viewport.bottom) break;
+    }
+    if(viewport.bottom-top + OVERLAP_EPSILON >= minH) regions.push({left,top,width,height:viewport.bottom-top});
+  }
+  return regions;
+}
+
+export function snapCoordinate(value: number, targets: number[], previous?: number): number {
+  if(previous !== undefined && Math.abs(value-previous)<=18) return previous;
+  const nearest=targets.filter(t=>Math.abs(t-value)<=12).sort((a,b)=>Math.abs(a-value)-Math.abs(b-value))[0];
+  return nearest ?? value;
+}
+
+export function fitInEmptyRegion(desired: PixelRect, regions: PixelRect[], minW: number, minH: number, snap: SnapState = {}): PixelRect | null {
+  const candidates=regions.map(region => {
+    const width=Math.min(region.width,Math.max(minW,560,desired.width));
+    const height=Math.min(region.height,Math.max(minH,320,desired.height));
+    const rawLeft=clamp(desired.left,region.left,rectRight(region)-width);
+    const rawTop=clamp(desired.top,region.top,rectBottom(region)-height);
+    return {left:clamp(snapCoordinate(rawLeft,[region.left,rectRight(region)-width],snap.x),region.left,rectRight(region)-width),top:clamp(snapCoordinate(rawTop,[region.top,rectBottom(region)-height],snap.y),region.top,rectBottom(region)-height),width,height};
+  });
+  candidates.sort((a,b)=>rectDistanceScore(a,desired)-rectDistanceScore(b,desired) || rectArea(b)-rectArea(a));
+  return candidates[0] ?? null;
+}
+
+export function resolveMoveLayouts(interaction: GeometryInteraction, desired: PixelRect, innerWidth: number, viewport: BoardViewport, options: Map<string,{minW:number;minH:number}>, explicitSwap=false, snap: SnapState={}): Record<string,LayoutBox> | null {
+  const size=itemSizing(options,interaction.itemId);
+  if(explicitSwap) {
+    const target=findSwapTargetId(interaction.itemId,rectToLayout(desired,innerWidth),interaction.layoutsAtStart,innerWidth);
+    if(target) {
+      const result=buildSwapCommitLayouts(interaction,target,innerWidth,options);
+      if(result && !committedLayoutsOverlap(result,innerWidth)) return result;
+      return null;
+    }
+  }
+  const fixed=Object.entries(interaction.layoutsAtStart).filter(([id])=>id!==interaction.itemId).map(([,layout])=>layoutToRect(layout,innerWidth));
+  const fitted=fitInEmptyRegion(desired,emptyBoardRegions(fixed,innerWidth,viewport,Math.min(size.minW,innerWidth),size.minH),Math.min(size.minW,innerWidth),size.minH,snap);
+  return fitted ? {...interaction.layoutsAtStart,[interaction.itemId]:rectToLayout(fitted,innerWidth)} : null;
+}
+
+export function findAvailablePlacement(items: GeometryItem[], innerWidth: number, viewport: BoardViewport, desiredSize?: {width:number;height:number;minW?:number;minH?:number}): LayoutBox {
+  const minW=Math.min(desiredSize?.minW ?? DEFAULT_MIN_W,innerWidth), minH=desiredSize?.minH ?? DEFAULT_MIN_H;
+  const width=Math.min(innerWidth,Math.max(minW,desiredSize?.width ?? Math.min(560,(innerWidth-BOARD_GAP)/2)));
+  const height=Math.max(minH,desiredSize?.height ?? 260);
+  const fixed=items.map(item=>layoutToRect(sanitizeLayout(item.layout,innerWidth,item.minW,item.minH),innerWidth));
+  const lowest=Math.max(BOARD_PADDING,...fixed.map(rectBottom));
+  const bands=[viewport,{top:BOARD_PADDING,bottom:Math.max(lowest,viewport.bottom)},{top:lowest+BOARD_GAP,bottom:lowest+BOARD_GAP+height}];
+  for(const band of bands) {
+    const regions=emptyBoardRegions(fixed,innerWidth,band,minW,minH).sort((a,b)=>a.top-b.top || a.left-b.left || rectArea(b)-rectArea(a));
+    if(regions.length) {
+      const region=regions[0];
+      return rectToLayout({left:region.left,top:region.top,width:Math.min(width,region.width),height:Math.min(height,region.height)},innerWidth);
+    }
+  }
+  return rectToLayout({left:0,top:lowest+BOARD_GAP,width,height},innerWidth);
+}
+
+export function boardPointerDelta(client: {x:number;y:number}, startClient: {x:number;y:number}, startBoard: {left:number;top:number}, currentBoard: {left:number;top:number}) {
+  return {dx:client.x-startClient.x+startBoard.left-currentBoard.left,dy:client.y-startClient.y+startBoard.top-currentBoard.top};
+}
+
+export function boardInnerWidth(clientWidth: number, items: Pick<GeometryItem, "minW">[]): number {
+  return Math.max(1, clientWidth - BOARD_PADDING * 2, ...items.map(item => item.minW ?? DEFAULT_MIN_W));
 }
