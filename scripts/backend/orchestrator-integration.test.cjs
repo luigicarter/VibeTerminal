@@ -58,7 +58,7 @@ test("real integration bridges UI and strict PTY acknowledgment without cloud or
   assert.equal((await invoke("orchestrator:dispatch",{kind:"open_file",path:outside})).ok,false);
   const doc=path.join(docs,"notes.txt");fs.writeFileSync(doc,"fixture");
   assert.equal((await invoke("orchestrator:dispatch",{kind:"open_file",path:doc})).ok,true);
-  assert.deepEqual(opened,[fs.realpathSync(doc)]);
+  assert.deepEqual(opened,[fs.realpathSync.native(doc)]);
   const stranger=await ipc.handlers.get("orchestrator:dispatch")({sender:{}},{kind:"close",targetId:"term"});assert.equal(stranger.ok,false);
   assert.equal((await invoke("voice:listening",{enabled:true})).ok,false);
 });
