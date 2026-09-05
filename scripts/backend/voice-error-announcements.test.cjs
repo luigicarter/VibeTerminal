@@ -18,7 +18,8 @@ test('transcription credit failure plays bundled PCM with no request to speech e
   const result = await f.controller.sendAudio({ audioBase64: wavFromSamples(Array(1600).fill(.1)).toString('base64') });
   assert.equal(result.upstreamError.category, 'credits'); assert.equal(f.calls.length, 1);
   assert(f.audio.some(c => c.local && c.data.length)); assert(f.audio.at(-1).done);
-  assert.match(f.controller.getState().reply, /insufficient credits/i);
+  assert.match(f.controller.getState().error, /could not transcribe/i); assert.equal(f.controller.getState().errorOperation, 'transcription');
+  assert.match(f.controller.getState().error, /billing and key limit/); assert.match(f.controller.getState().error, /HTTP 402/);
   assert(!JSON.stringify(f.audio).includes('secret-test-key'));
 });
 test('speech service failure uses local fallback rather than recursively requesting speech', async t => {
@@ -30,8 +31,16 @@ test('speech service failure uses local fallback rather than recursively request
 test('provider balance errors do not announce depleted OpenRouter account credits', async t => {
   const f = fixture(t, () => failure(402, { metadata: { provider_name: 'Provider', raw: 'secret-test-key insufficient balance' } })); await f.controller.setListening(true);
   await f.controller.speak({ text: 'Reply', origin: 'voice' });
-  assert.match(f.controller.getState().reply, /provider could not complete/i);
+  assert.match(f.controller.getState().error, /speech playback failed/i);
   assert(!f.controller.getState().reply.includes('insufficient credits'));
+});
+
+test('stage diagnostics retain HTTP remediation while excluding caller-supplied raw secrets', async t => {
+  const f = fixture(t, () => { throw Error('No network allowed'); }); await f.controller.setListening(true);
+  await f.controller.announceError({ category: 'request', status: 404, operation: 'speech', message: 'secret-test-key ' + 'provider raw '.repeat(1000) });
+  const state = f.controller.getState();
+  assert.match(state.error, /answer is ready/); assert.match(state.error, /selected model and settings/); assert.match(state.error, /HTTP 404/);
+  assert(!state.error.includes('secret-test-key')); assert(state.error.length <= 400); assert.equal(f.calls.length, 0);
 });
 test('announcements respect voice mute, cancellation and category cooldown', async t => {
   const f = fixture(t, () => { throw Error('No network allowed'); });
@@ -62,14 +71,14 @@ test('background error announcements never discard a user recording', async t =>
   await new Promise(setImmediate); assert.equal(f.audio.length, 0);
 });
 test('empty successful speech responses also use the local fallback', async t => {
-  const f = fixture(t, () => ({ ok: true, status: 200, headers: new Headers({ 'content-type': 'audio/pcm' }), body: (async function* () {})() }));
+  const f = fixture(t, () => ({ ok: true, status: 200, headers: new Headers({ 'content-type': 'audio/wav' }), body: (async function* () {})() }));
   await f.controller.setListening(true);
   const result = await f.controller.speak({ origin: 'voice', text: 'Reply' });
   assert.equal(result.upstreamError.category, 'upstream'); assert.equal(f.calls.length, 1);
   assert(f.audio.some(c => c.local && c.data.length));
 });
 test('a broken speech stream cancels partial playback and uses local audio', async t => {
-  const f = fixture(t, () => ({ ok: true, status: 200, headers: new Headers({ 'content-type': 'audio/pcm' }), body: (async function* () { yield Uint8Array.from([0, 0, 5, 0]); throw new TypeError('secret-test-key stream failed'); })() }));
+  const f = fixture(t, () => ({ ok: true, status: 200, headers: new Headers({ 'content-type': 'audio/wav' }), body: (async function* () { yield Uint8Array.from([0, 0, 5, 0]); throw new TypeError('secret-test-key stream failed'); })() }));
   await f.controller.setListening(true);
   const result = await f.controller.speak({ origin: 'voice', text: 'Reply' });
   assert.equal(result.upstreamError.category, 'network'); assert.equal(f.calls.length, 1);

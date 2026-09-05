@@ -113,7 +113,7 @@ function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
 }
 
 function installOrchestrator(options) {
-  const { app, BrowserWindow, ipcMain, screen, shell, safeStorage, getMainWindow,
+  const { app, BrowserWindow, Menu, ipcMain, screen, shell, safeStorage, dialog, systemPreferences, getMainWindow,
     getRuntime, sendPty, sendFusion, sendOpenFusion, getTelemetry, getChanges } = options;
   const { createOrchestrator } = require("./orchestrator.cjs");
   const { createTerminalObservation } = require("./terminalObservation.cjs");
@@ -121,6 +121,9 @@ function installOrchestrator(options) {
   const { createOrchestratorDelivery } = require("./orchestratorDelivery.cjs");
   const { createOrchestratorHistoryProcess } = require("./orchestratorHistoryProcess.cjs");
   const { createVoiceController } = require("./voiceController.cjs");
+  const { createVoiceOverlayWindow } = require("./voiceOverlayWindow.cjs");
+  const { createMicrophonePermission } = require("./microphonePermission.cjs");
+  const { TTS_MODEL, TTS_VOICES } = require("../shared/voiceConfig.cjs");
   const changes = require("./workspaceChanges.cjs");
   const directory = createSessionDirectory({ getRuntime });
   const observations = createTerminalObservation();
@@ -148,19 +151,30 @@ function installOrchestrator(options) {
     },
     onUpdate: result => relay.recordDelivery(result)
   });
-  let overlay = null, disposed = false, inventoryTimer = null, publicationTimer = null, voice;
-  const positionPath = path.join(app.getPath("userData"), "voice-overlay-position.json");
+  let disposed = false, inventoryTimer = null, publicationTimer = null, voice, activation = 0;
+  let permissionActivation = null;
+  const permissionLifetime = new AbortController();
+  const microphonePermission = options.microphonePermission || createMicrophonePermission({ userDataPath: app.getPath("userData"), getMainWindow, dialog, systemPreferences, shell });
+  let voiceReady = false, captureToken = 0, captureReady = false, indicatorVisible = false;
+  const captureWaiters = new Set();
+  const surface = createVoiceOverlayWindow({ BrowserWindow, screen, canCapture: () => microphonePermission.isGranted(),
+    onClosed: () => { void voice?.setListening(false); },
+    onFailure: error => { void microphoneFailure(error); },
+  });
   function broadcast(channel, value) {
-    for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send(channel, value);
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (w.isDestroyed() || (channel === "orchestrator:state" && surface.isSender(w.webContents))) continue;
+      w.webContents.send(channel, value);
+    }
   }
   function allowed(event, mainOnly = false) {
     const main = getMainWindow();
-    return event.sender === main?.webContents || (!mainOnly && event.sender === overlay?.webContents);
+    return event.sender === main?.webContents || (!mainOnly && surface.isSender(event.sender));
   }
   function guarded(channel, fn, mainOnly = false) {
     ipcMain.handle(channel, async (event, payload) => {
       if (!allowed(event, mainOnly)) return { ok: false, error: "Unsupported caller." };
-      try { return await fn(payload || {}); } catch (e) { return { ok: false, error: String(e?.message || e).slice(0, 1000) }; }
+      try { return await fn(payload || {}, event); } catch (e) { return { ok: false, error: String(e?.message || e).slice(0, 1000) }; }
     });
   }
   function requestUi(kind, payload = {}, signal) {
@@ -341,14 +355,14 @@ function installOrchestrator(options) {
     }
     throw new Error(`Unsupported action: ${kind}`);
   }
-  const relay = createOrchestrator({ userDataPath: app.getPath("userData"), secureStorage: safeStorage,
+  const relay = createOrchestrator({ userDataPath: app.getPath("userData"), secureStorage: safeStorage, fetch: options.fetch,
     getSessions: () => directory.list(),
     readSession: async target => ["fusion", "openfusion"].includes(directory.get(target.id)?.kind) ? directory.readChat(target) : observations.read(target),
     dispatchAction,
     getRoots: () => ({ documents: app.getPath("documents"), projects: [...new Set([...directory.projectPaths(), ...directory.list().map(s => s.cwd)].filter(Boolean))] }),
     onCancel: () => { delivery.cancel(); voice?.cancelSpeech(); },
     onUpstreamError: info => voice?.announceError(info),
-    onChange: state => broadcast("orchestrator:state", state),
+    onChange: state => broadcast("orchestrator:state", { ...state, ready: state.ready && voiceReady, voiceReady }),
     onSpeak: event => {
       if (event.origin === "interaction") {
         const request = relay.getState().requests.find(r => r.id === event.requestId && r.sessionId === event.sessionId && r.generation === event.generation && r.revision === event.revision && r.state === "pending");
@@ -358,60 +372,143 @@ function installOrchestrator(options) {
       return voice?.speak({ ...event, id: event.replyId });
     }
   });
-  voice = createVoiceController({ orchestrator: relay, getKey: () => relay.getKey(), getSettings: () => relay.getSettings(),
+  voice = (options.voiceFactory || createVoiceController)({ orchestrator: relay, getKey: () => relay.getKey(), getSettings: () => relay.getSettings(), fetch: options.fetch,
     modelPath: app.isPackaged ? path.join(process.resourcesPath, "voice") : path.join(__dirname, "..", "vendor", "voice"),
-    emit: state => broadcast("voice:state", state), onAudio: chunk => overlay?.webContents.send("voice:audio", chunk) });
+    emit: state => broadcast("voice:state", { ...state, captureToken, indicatorVisible }), onAudio: chunk => surface.send("voice:audio", chunk) });
 
-  function showOverlay() {
-    if (disposed) return { ok: false };
-    if (overlay && !overlay.isDestroyed()) { overlay.showInactive(); return { ok: true }; }
-    let saved;
-    try { saved = JSON.parse(fs.readFileSync(positionPath, "utf8")); } catch {}
-    const display = saved ? screen.getDisplayMatching(saved) : screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
-    const area = display.workArea, width = Math.min(420, area.width), height = Math.min(300, area.height);
-    const x = Math.max(area.x, Math.min(saved?.x ?? area.x + (area.width - width) / 2, area.x + area.width - width));
-    const y = Math.max(area.y, Math.min(saved?.y ?? area.y + area.height - height - 20, area.y + area.height - height));
-    overlay = new BrowserWindow({ width, height, x: Math.round(x), y: Math.round(y), frame: false,
-      alwaysOnTop: true, skipTaskbar: true, show: false, resizable: false, backgroundColor: "#111111",
-      title: "vibeTerminal Orchestrator", webPreferences: { preload: path.join(__dirname, "..", "preload", "voicePreload.cjs"),
-        nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false, autoplayPolicy: "no-user-gesture-required", partition: "voice-overlay" } });
-    overlay.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-    overlay.webContents.on("will-navigate", event => event.preventDefault());
-    overlay.webContents.session.setPermissionRequestHandler((contents, permission, callback, details) => {
-      callback(contents === overlay?.webContents && permission === "media" && !details.mediaTypes?.includes("video"));
-    });
-    overlay.on("moved", () => { if (!overlay) return; try { fs.mkdirSync(path.dirname(positionPath), { recursive: true }); fs.writeFileSync(positionPath, JSON.stringify(overlay.getBounds())); } catch {} });
-    overlay.on("closed", () => { overlay = null; void voice.setListening(false); });
-    overlay.once("ready-to-show", () => overlay?.showInactive());
-    const devUrl = process.env.VITE_DEV_SERVER_URL;
-    if (devUrl) void overlay.loadURL(`${devUrl}/?surface=voice`);
-    else void overlay.loadFile(path.join(__dirname, "..", "dist", "index.html"), { query: { surface: "voice" } });
-    return { ok: true };
+  const snapshot = () => { const state = relay.getState(); return { ...state, ready: state.ready && voiceReady, voiceReady }; };
+  const voiceSnapshot = () => ({ ...voice.getState(), captureToken, indicatorVisible });
+  function showIndicator() { indicatorVisible = true; broadcast("voice:state", voiceSnapshot()); return { ok: true }; }
+  function hideIndicator() { indicatorVisible = false; broadcast("voice:state", voiceSnapshot()); return { ok: true }; }
+  const publish = () => broadcast("orchestrator:state", snapshot());
+  function finishCapture(result) { for (const waiter of captureWaiters) waiter.finish(result); }
+  async function microphoneFailure(error) {
+    activation++; captureReady = false;
+    finishCapture({ ok: false, error });
+    voice?.configure({ microphoneError: error });
+    if (relay.getState().enabled) await relay.setEnabled(false);
   }
-  async function setEnabled(enabled) {
-    const result = await relay.setEnabled(Boolean(enabled));
-    if (result.ok && enabled) { showOverlay(); await refreshInventory(); }
-    if (!enabled) { voice.cancelSpeech(); await voice.setListening(false); overlay?.hide(); }
+  async function startListening(token) {
+    if (captureReady && voice.getState().listening && voice.getState().wakeReady) return { ok: true, wakeReady: true, listening: true };
+    captureReady = false; captureToken++;
+    const hardware = new Promise(resolve => {
+      const waiter = { finish: result => { clearTimeout(timer); captureWaiters.delete(waiter); resolve(result); } };
+      const timer = setTimeout(() => waiter.finish({ ok: false, error: 'Microphone access did not finish. Check the selected microphone and its permission.' }), options.captureReadyTimeoutMs ?? 15000);
+      captureWaiters.add(waiter);
+    });
+    const result = await voice.setListening(true);
+    if (!result.ok || !voice.getState().wakeReady || !voice.getState().listening) {
+      const failure = { ok: false, error: result.error || voice.getState().error || 'Hey Vibe could not start its local wake detector.' };
+      finishCapture(failure);
+      return failure;
+    }
+    const microphone = await hardware;
+    if (!microphone.ok) return microphone;
+    if (disposed || token !== activation) return { ok: false, status: 'cancelled', error: 'Voice activation was cancelled.' };
+    return { ok: true, wakeReady: true, listening: true };
+  }
+
+  const speechChoices = () => [{ id: TTS_MODEL, name: 'Kokoro · English', voices: TTS_VOICES.map(id => ({ id, name: id.slice(3).replace(/^./, letter => letter.toUpperCase()) + (id.startsWith('b') ? ' · British' : ' · American') })) }];
+  async function validateVoice() {
+    const settings = relay.getSettings();
+    if (settings.ttsModel !== TTS_MODEL || !TTS_VOICES.includes(settings.voice)) return { ok: false, voiceReady: false, error: 'Choose a supported voice in Settings.' };
+    try {
+      const [transcription, speech] = await Promise.all([relay.models('transcription'), relay.models('speech')]);
+      if (!transcription.some(model => model.id === settings.sttModel)) return { ok: false, voiceReady: false, error: 'The selected transcription model is unavailable. Choose another in Settings.' };
+      if (!speech.some(model => model.id === settings.ttsModel)) return { ok: false, voiceReady: false, error: 'The speech service is currently unavailable. Your text assistant is still available.' };
+      const current = relay.getSettings();
+      if (['sttModel', 'ttsModel', 'voice'].some(key => current[key] !== settings[key])) return { ok: false, voiceReady: false, error: 'Voice settings changed during validation. Try again.' };
+      return { ok: true, voiceReady: true };
+    } catch (error) { return { ok: false, voiceReady: false, error: String(error?.message || 'Could not validate voice.').slice(0, 1000) }; }
+  }
+  async function testConnection() {
+    const result = await relay.testConnection();
+    if (!result.ok || !result.ready) { voiceReady = false; publish(); return result; }
+    const audio = await validateVoice();
+    voiceReady = audio.ok; publish();
+    return { ...result, ...audio, ready: result.ready && audio.ok };
+  }
+  async function setEnabled(enabled, { interactive = true } = {}) {
+    const token = ++activation;
+    permissionActivation?.abort();
+    permissionActivation = null;
+    if (!enabled) { captureToken++; captureReady = false; finishCapture({ ok: false, status: "cancelled", error: "Voice activation was cancelled." }); voice.cancelSpeech(); await voice.setListening(false); hideIndicator(); return relay.setEnabled(false); }
+    const consent = permissionActivation = new AbortController();
+    const permission = await microphonePermission.ensure({ interactive, signal: AbortSignal.any([consent.signal, permissionLifetime.signal]) });
+    if (permissionActivation === consent) permissionActivation = null;
+    if (disposed || token !== activation) return { ok: false, status: 'cancelled' };
+    if (!permission.ok) { captureReady = false; await voice.setListening(false); await relay.setEnabled(false); hideIndicator(); return permission; }
+    const result = await relay.setEnabled(true);
+    if (!result.ok || disposed || token !== activation) return result.ok ? { ok: false, status: 'cancelled' } : result;
+    const audio = await validateVoice();
+    if (disposed || token !== activation) return { ok: false, status: 'cancelled' };
+    voiceReady = audio.ok; publish();
+    if (!audio.ok) { captureReady = false; await voice.setListening(false); await relay.setEnabled(false); return audio; }
+    try {
+      showIndicator(); await surface.ensureReady();
+      if (disposed || token !== activation) return { ok: false, status: 'cancelled' };
+      const listening = await startListening(token);
+      if (!listening.ok) { if (token === activation) { await voice.setListening(false); await relay.setEnabled(false); } return listening; }
+      await refreshInventory();
+      return { ok: true, voiceReady: true, wakeReady: true, listening: true };
+    } catch (error) {
+      if (token === activation) { finishCapture({ ok: false, error: String(error?.message || "Voice could not start.") }); captureReady = false; await voice.setListening(false); await relay.setEnabled(false); hideIndicator(); }
+      return { ok: false, error: String(error?.message || 'Voice could not start.') };
+    }
+  }
+  async function configure(patch) {
+    const before = relay.getSettings(), beforeKey = relay.getKey(), wasListening = voice.getState().listening;
+    const result = await relay.configure(patch);
+    if (!result.ok || disposed) return result;
+    const after = relay.getSettings();
+    const changesConnection = beforeKey !== relay.getKey() || before.model !== after.model;
+    const changesAudio = ['microphoneId', 'ttsModel', 'sttModel', 'voice', 'language'].some(key => before[key] !== after[key]);
+    if (!changesConnection && !changesAudio) return result;
+    const token = ++activation;
+    permissionActivation?.abort(); permissionActivation = null;
+    finishCapture({ ok: false, status: 'cancelled', error: 'Voice settings changed during activation.' });
+    captureReady = false; captureToken++;
+    await voice.setListening(false);
+    if (changesConnection) { voiceReady = false; hideIndicator(); publish(); }
+    else {
+      const audio = await validateVoice();
+      if (disposed || token !== activation) return { ok: false, status: 'cancelled' };
+      voiceReady = audio.ok; publish();
+      if (!audio.ok) { if (relay.getState().enabled) await relay.setEnabled(false); return { ...result, ...audio }; }
+      if (wasListening && relay.getState().enabled) {
+        const listening = await startListening(token);
+        if (!listening.ok) {
+          if (token === activation) {
+            captureReady = false; captureToken++;
+            finishCapture(listening);
+            await voice.setListening(false); await relay.setEnabled(false); hideIndicator();
+          }
+          return { ...result, ...listening };
+        }
+      }
+    }
     return result;
   }
-  function clampOverlay() {
-    if (!overlay || overlay.isDestroyed()) return;
-    const b = overlay.getBounds(), area = screen.getDisplayMatching(b).workArea;
-    const width = Math.min(b.width, area.width), height = Math.min(b.height, area.height);
-    overlay.setBounds({ width, height, x: Math.max(area.x, Math.min(b.x, area.x + area.width - width)), y: Math.max(area.y, Math.min(b.y, area.y + area.height - height)) });
+  function showMenu() {
+    if (!Menu) return { ok: false, error: 'Voice menu unavailable.' };
+    const items = [
+      { label: voice.getState().listening ? 'Turn off Hey Vibe' : 'Turn on Hey Vibe', click: () => { void setEnabled(!voice.getState().listening); } },
+      { label: 'Hide microphone · keep listening', click: () => hideIndicator() },
+      { type: 'separator' },
+      { label: 'Voice settings', click: () => { const window = getMainWindow(); if (window?.isMinimized()) window.restore(); window?.show(); void requestUi('open_settings'); } },
+    ];
+    Menu.buildFromTemplate(items).popup({ window: getMainWindow() }); return { ok: true };
   }
-  screen.on?.("display-removed", clampOverlay);
-  screen.on?.("display-metrics-changed", clampOverlay);
-  guarded("orchestrator:get-state", () => relay.getState());
-  guarded("orchestrator:configure", async p => { voice.cancelSpeech(); if (p.apiKey !== undefined || p.key !== undefined) await voice.setListening(false); return relay.configure(p); }, true);
-  guarded("orchestrator:models", p => relay.models(p.kind));
-  guarded("orchestrator:test", () => relay.testConnection(), true);
+  guarded("orchestrator:get-state", snapshot);
+  guarded("orchestrator:configure", configure, true);
+  guarded("orchestrator:models", p => p.kind === "speech" ? speechChoices() : relay.models(p.kind));
+  guarded("orchestrator:test", testConnection, true);
   guarded("orchestrator:enabled", p => setEnabled(p.enabled));
   guarded("orchestrator:send", async p => { await refreshInventory(); return relay.send(p); });
   guarded("orchestrator:cancel", () => { voice.cancelSpeech(); return relay.cancel(); });
   guarded("orchestrator:dispatch", async p => { await refreshInventory(); return relay.dispatch(p); });
   guarded("orchestrator:preferences", p => relay.preferences(p));
-  guarded("orchestrator:overlay", () => showOverlay());
+  guarded("orchestrator:overlay", showIndicator);
   guarded("orchestrator:open-main", async () => { const w = getMainWindow(); if (w?.isMinimized()) w.restore(); w?.show(); return { ok: true }; });
   guarded("orchestrator:changes", async p => { const target = directory.get(p.id); return getChanges(target?.cwd || p.cwd); });
   guarded("orchestrator:changes-list", async p => changes.listChanges(await allowedPath(p.cwd)));
@@ -419,21 +516,36 @@ function installOrchestrator(options) {
   guarded("orchestrator:setups-list", p => setups.list(p));
   guarded("orchestrator:setups-save", p => setups.save(p), true);
   guarded("orchestrator:setups-remove", p => setups.remove(p.id), true);
-  guarded("voice:get-state", () => voice.getState());
-  guarded("voice:configure", p => {
+  guarded("voice:get-state", voiceSnapshot);
+  guarded("voice:configure", async (p, event) => {
+    if (p.requestMicrophoneAccess || p.openMicrophoneSettings) {
+      if (event.sender !== getMainWindow()?.webContents || disposed) return { ok: false, error: "Unsupported caller." };
+      return p.openMicrophoneSettings ? microphonePermission.openSettings({ signal: permissionLifetime.signal }) : microphonePermission.ensure({ signal: permissionLifetime.signal });
+    }
+    if (p.rendererReady) return surface.markReady(event.sender);
+    if (p.microphoneReady || p.microphoneError) {
+      if (!surface.isSender(event.sender) || p.captureToken !== captureToken) return { ok: false, status: "stale" };
+      if (p.microphoneError) { await microphoneFailure(String(p.microphoneError).slice(0, 200)); return { ok: false, error: voice.getState().error }; }
+      if (!voice.getState().listening) return { ok: false, status: "stale" };
+      captureReady = true; finishCapture({ ok: true }); return { ok: true };
+    }
+    if (p.hideOverlay) return hideIndicator();
+    if (p.menu) return showMenu();
     if (p.openWorkspace) { const w = getMainWindow(); if (w?.isMinimized()) w.restore(); w?.show(); }
-    if (typeof p.collapsed === "boolean" && overlay) overlay.setSize(420, p.collapsed ? 86 : 420);
+    if (p.preview) { await surface.ensureReady(); return voice.configure({ preview: true }); }
     return voice.configure(p);
   });
-  guarded("voice:listening", p => relay.getState().enabled ? voice.setListening(p.enabled) : { ok: false, error: "Enable Orchestrator first." });
+  guarded("voice:listening", p => setEnabled(Boolean(p.enabled)));
   guarded("voice:send-audio", p => voice.sendAudio(p));
   guarded("voice:cancel-speech", () => voice.cancelSpeech());
-  ipcMain.on("voice:frames", (event, p) => { if (event.sender === overlay?.webContents && relay.getState().enabled) voice.frames(p); });
+  ipcMain.on("voice:frames", (event, p) => { if (surface.isSender(event.sender) && relay.getState().enabled) voice.frames(p); });
   ipcMain.on("orchestrator:ui-result", (event, p) => { if (allowed(event, true)) pendingUi.get(p.id)?.(p.result); });
-  inventoryTimer = setInterval(() => { void refreshInventory(); }, 4000); inventoryTimer.unref?.();
-  // Read-only validation of a previously configured account. No inference,
-  // microphone capture, or paid model request starts with the application.
-  if (relay.getKey() && relay.getSettings().model) void relay.testConnection();
+  inventoryTimer = setInterval(() => { if (relay.getState().enabled) void refreshInventory(); }, 4000); inventoryTimer.unref?.();
+  // Restore only the user's explicit startup preference. Wake detection is local CPU work.
+  if (relay.getKey() && relay.getSettings().model) {
+    if (relay.getSettings().enabledOnLaunch) void setEnabled(true, { interactive: false });
+    else void testConnection();
+  }
   function incoming(kind, event) {
     if (disposed) return;
     const current = event?.id ? directory.get(event.id) : undefined;
@@ -462,16 +574,16 @@ function installOrchestrator(options) {
     publishSoon();
   }
   function dispose() {
-    if (disposed) return; disposed = true; clearInterval(inventoryTimer); clearTimeout(publicationTimer);
+    if (disposed) return; disposed = true; activation++; clearInterval(inventoryTimer); clearTimeout(publicationTimer);
+    permissionLifetime.abort(); permissionActivation?.abort(); permissionActivation = null;
     delivery.dispose(); history.dispose(); voice.dispose(); relay.dispose(); observations.dispose(); directory.clear();
-    screen.removeListener?.("display-removed", clampOverlay);
-    screen.removeListener?.("display-metrics-changed", clampOverlay);
+    finishCapture({ ok: false, error: "Application closed." }); surface.dispose();
     for (const finish of pendingUi.values()) finish({ ok: false, status: "cancelled", error: "Application closed." });
     for (const pending of pendingHost.values()) pending.finish({ ok: false, status: "unknown", error: "Application closed before acknowledgment." });
-    if (overlay && !overlay.isDestroyed()) overlay.destroy(); overlay = null;
+
   }
   app.once("before-quit", dispose);
-  return { incoming, outgoing: directory.outgoing, refreshInventory, dispose, getState: relay.getState, directory, answerExisting, forgetTerminal };
+  return { incoming, outgoing: directory.outgoing, refreshInventory, dispose, getState: snapshot, directory, answerExisting, forgetTerminal };
 }
 
 module.exports = { createSessionDirectory, installOrchestrator };

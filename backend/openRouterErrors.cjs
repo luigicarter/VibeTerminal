@@ -24,7 +24,10 @@ function classifyOpenRouterError(status, body) {
   else if (effectiveStatus === 408) category = 'timeout';
   else if (effectiveStatus === 429) category = 'rate-limit';
   else if (effectiveStatus >= 400 && effectiveStatus < 500) category = 'request';
-  return new OpenRouterError(category, effectiveStatus);
+  const error = new OpenRouterError(category, effectiveStatus);
+  const reasons = { 400: 'invalid-request', 403: 'forbidden', 404: 'model-or-endpoint-unavailable', 422: 'invalid-parameters' };
+  if (reasons[effectiveStatus]) error.reason = reasons[effectiveStatus];
+  return error;
 }
 const isCancellation = error => error?.name === 'AbortError';
 function classifyTransportError(error, { signal, timeoutSignal } = {}) {
@@ -33,7 +36,7 @@ function classifyTransportError(error, { signal, timeoutSignal } = {}) {
   if (isCancellation(error) || error instanceof OpenRouterError) return error;
   return new OpenRouterError('network');
 }
-function upstreamErrorInfo(error) { return error instanceof OpenRouterError ? { category: error.category, status: error.status, message: error.message } : undefined; }
+function upstreamErrorInfo(error) { return error instanceof OpenRouterError ? { category: error.category, status: error.status, message: error.message, ...(error.reason && { reason: error.reason }) } : undefined; }
 async function readBoundedError(response) {
   const limit = 65536;
   if (response.body?.getReader) {

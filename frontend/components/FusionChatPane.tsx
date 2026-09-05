@@ -3386,6 +3386,7 @@ export default function FusionChatPane({
           `terminal-pane-attention-${session.attention.state}`
       )}
       style={{ "--pane-accent": profile.accent } as React.CSSProperties}
+      data-pane-id={session.id}
       onPointerDown={handlePanePointerDown}
     >
       <header className="pane-header pane-drag-zone" title="Drag header to move pane">

@@ -21,19 +21,26 @@ export class PcmPlayer {
     if (chunk.cancelled) { this.retire(chunk.replyId); if (chunk.replyId === this.active) this.stop(); return; }
     if (this.retired.has(chunk.replyId)) return;
     if (chunk.replyId !== this.active) { this.stop(); this.active = chunk.replyId; }
-    if (chunk.sampleRate !== 24000 || chunk.channels !== 1 || chunk.format !== 's16le' || chunk.sequence < this.expected) return;
+    if (!Number.isInteger(chunk.sampleRate) || chunk.sampleRate < 8000 || chunk.sampleRate > 48000 || ![1, 2].includes(chunk.channels) || chunk.format !== 's16le') { this.stop(); this.onError('Speech returned an unsupported audio format.'); return; }
+    if (chunk.sequence < this.expected) return;
     this.pending.set(chunk.sequence, chunk);
     if (this.pending.size > 256) { this.stop(); this.onError('Speech playback lost its audio order.'); return; }
     const epoch = this.epoch;
     this.chain = this.chain.then(async () => {
       if (epoch !== this.epoch) return;
-      this.context ??= new AudioContext({ sampleRate: 24000 }); await this.context.resume();
+      this.context ??= new AudioContext(); await this.context.resume();
       if (epoch !== this.epoch) return;
       while (this.pending.has(this.expected)) {
         const next = this.pending.get(this.expected)!; this.pending.delete(this.expected++);
         if (next.data.length) {
           const samples = decodePcm16(next.data);
-          const buffer = this.context.createBuffer(1, samples.length, 24000); buffer.copyToChannel(samples, 0);
+          if (samples.length % next.channels) throw new Error('Incomplete PCM frame');
+          const buffer = this.context.createBuffer(next.channels, samples.length / next.channels, next.sampleRate);
+          for (let channel = 0; channel < next.channels; channel++) {
+            const values = new Float32Array(buffer.length);
+            for (let i = 0; i < values.length; i++) values[i] = samples[i * next.channels + channel];
+            buffer.copyToChannel(values, channel);
+          }
           const source = this.context.createBufferSource(); source.buffer = buffer; source.connect(this.context.destination);
           const when = Math.max(this.context.currentTime + 0.035, this.endAt); this.endAt = when + buffer.duration;
           this.sources.add(source); source.onended = () => { this.sources.delete(source); source.disconnect(); }; source.start(when);

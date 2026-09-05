@@ -7,7 +7,8 @@ import { Activity, ArrowUp, Bot, ChevronDown, Files, GitBranch, Layers3, Setting
 import { useSessionDraft, readSessionDraft, writeSessionDraft } from "../sessionDrafts";
 import { relayApi, type RelayState, type RelaySession } from "../orchestratorUi";
 import type { CodeChangeSummary } from "../types";
-export function OrchestratorPanel({ state, sessions, selectedId, onFocus, onSettings, changes, folders, setups, handoff }: {
+export function OrchestratorPanel({ state, sessions, selectedId, onFocus, onSettings, changes, folders, setups, handoff, embedded = false }: {
+    embedded?: boolean;
     state: RelayState | null;
     sessions: RelaySession[];
     selectedId: string | null;
@@ -24,7 +25,7 @@ export function OrchestratorPanel({ state, sessions, selectedId, onFocus, onSett
 }) {
     const [tab, setTab] = useState("Orchestrator");
     const [expanded, setExpanded] = useState(() => {
-        try { return localStorage.getItem(DOCK_COLLAPSED_KEY) !== "true"; }
+        try { return embedded || localStorage.getItem(DOCK_COLLAPSED_KEY) !== "true"; }
         catch { return true; }
     });
     const dockRef = useRef<HTMLElement>(null);
@@ -43,14 +44,16 @@ export function OrchestratorPanel({ state, sessions, selectedId, onFocus, onSett
     const drag = useRef<{ pointerId: number; startY: number; startHeight: number; restoreHeight: number; wasExpanded: boolean; moved: boolean } | null>(null);
     const [resizing, setResizing] = useState(false);
     useEffect(() => {
+        if (embedded) return;
         try { localStorage.setItem(DOCK_HEIGHT_KEY, String(preferredHeight)); } catch { /* Preferences are optional. */ }
     }, [preferredHeight]);
     useEffect(() => {
+        if (embedded) return;
         try { localStorage.setItem(DOCK_COLLAPSED_KEY, String(!expanded)); } catch { /* Preferences are optional. */ }
     }, [expanded]);
     useLayoutEffect(() => {
         const dock = dockRef.current;
-        if (!dock) return;
+        if (!dock || embedded) return;
         const measure = () => {
             const board = dock.previousElementSibling;
             const available = dock.getBoundingClientRect().bottom - (board?.getBoundingClientRect().top ?? 100);
@@ -122,7 +125,7 @@ export function OrchestratorPanel({ state, sessions, selectedId, onFocus, onSett
         setError(String(e));
     } }
     return <section ref={dockRef} className={`orchestrator-dock ${expanded ? "expanded" : "collapsed"} ${resizing ? "resizing" : ""}`} style={{ "--workspace-dock-height": `${height}px` } as CSSProperties} aria-label="Workspace dock">
-    <div ref={gripRef} className="dock-resize-handle" role="separator" tabIndex={0} aria-label="Resize workspace dock" aria-orientation="horizontal" aria-valuemin={expanded ? bounds.min : 0} aria-valuemax={bounds.max} aria-valuenow={expanded ? height : 0} aria-valuetext={expanded ? `${height} pixels high` : "Collapsed"} title="Drag to resize · Arrow keys to adjust · Double-click to reset"
+    {!embedded && <div ref={gripRef} className="dock-resize-handle" role="separator" tabIndex={0} aria-label="Resize workspace dock" aria-orientation="horizontal" aria-valuemin={expanded ? bounds.min : 0} aria-valuemax={bounds.max} aria-valuenow={expanded ? height : 0} aria-valuetext={expanded ? `${height} pixels high` : "Collapsed"} title="Drag to resize · Arrow keys to adjust · Double-click to reset"
       onPointerDown={event => {
           if (event.button !== 0 || !event.isPrimary) return;
           event.preventDefault();
@@ -150,10 +153,10 @@ export function OrchestratorPanel({ state, sessions, selectedId, onFocus, onSett
           event.preventDefault();
           setExpanded(next > 0);
           if (next > 0) setPreferredHeight(next);
-      }}><span aria-hidden="true" /></div>
-    <header className="dock-tabs"><div role="tablist" aria-label="Workspace tools">{tabs.map(({ name, icon: Icon }) => <button key={name} role="tab" aria-selected={tab === name} className={tab === name ? "active" : ""} onClick={() => { setTab(name); setExpanded(true); }}><Icon size={14}/>{name}{name === "Activity" && !!state?.requests?.length && <b>{state.requests.length}</b>}</button>)}</div><span className="dock-phase"><i className={state?.enabled ? "enabled" : ""}/>{state?.enabled ? state.phase : "Off"}</span><button className="dock-collapse" aria-label={expanded ? "Collapse dock" : "Expand dock"} onClick={() => setExpanded(!expanded)}><ChevronDown size={15} style={{ transform: expanded ? undefined : "rotate(180deg)" }}/></button></header>
+      }}><span aria-hidden="true" /></div>}
+    <header className="dock-tabs"><div role="tablist" aria-label="Workspace tools">{tabs.map(({ name, icon: Icon }) => <button key={name} role="tab" aria-selected={tab === name} className={tab === name ? "active" : ""} onClick={() => { setTab(name); setExpanded(true); }}><Icon size={14}/>{name}{name === "Activity" && !!state?.requests?.length && <b>{state.requests.length}</b>}</button>)}</div><span className="dock-phase"><i className={state?.enabled ? "enabled" : ""}/>{state?.enabled ? state.phase : "Off"}</span>{!embedded && <button className="dock-collapse" aria-label={expanded ? "Collapse dock" : "Expand dock"} onClick={() => setExpanded(!expanded)}><ChevronDown size={15} style={{ transform: expanded ? undefined : "rotate(180deg)" }}/></button>}</header>
     <div className="dock-content" role="tabpanel" hidden={!expanded}>
-      {tab === "Orchestrator" && <div className="relay-view"><div className="relay-thread" ref={threadRef} onScroll={event => { const node = event.currentTarget; followThread.current = node.scrollHeight - node.scrollTop - node.clientHeight < 32; }}>{state?.requests?.filter(request=>!["resolved","cancelled"].includes(request.state)).map(request=><div className="relay-request" key={`${request.id}-${request.revision}`}><span>{sessions.find(session=>session.id===request.sessionId)?.name || "Session"} needs your {request.kind === "permission" ? "permission" : "answer"}</span>{request.questions?.map((question,index)=><p key={index}>{question.question}{question.options?.length ? <small>{question.options.map(option=>option.label).join(" · ")}</small> : null}</p>)}{request.detail && <p>{request.detail}</p>}<button onClick={()=>onFocus(request.sessionId)}>Review in session</button></div>)}{state?.messages?.length ? state.messages.map(message => <div className={`relay-message ${message.role}`} key={message.id}><span>{message.role === "user" ? "You" : "Orchestrator"}</span><p>{message.text}</p></div>) : <div className="relay-welcome"><Bot size={23}/><div><strong>{!state?.ready ? "Set up your orchestrator" : state.enabled ? "Ready for your command" : "Orchestrator is off"}</strong><p>{!state?.ready ? "Connect OpenRouter and choose a model for text and voice commands." : "Ask for a session update, find a saved conversation, or send an instruction."}</p></div>{!state?.ready && <button onClick={onSettings}><Settings2 size={14}/> Connect OpenRouter</button>}</div>}{(error || state?.error) && <p role="alert" className="relay-error">{error || state?.error}</p>}</div>
+      {tab === "Orchestrator" && <div className="relay-view"><div className="relay-thread" ref={threadRef} onScroll={event => { const node = event.currentTarget; followThread.current = node.scrollHeight - node.scrollTop - node.clientHeight < 32; }}>{state?.requests?.filter(request=>!["resolved","cancelled"].includes(request.state)).map(request=><div className="relay-request" key={`${request.id}-${request.revision}`}><span>{sessions.find(session=>session.id===request.sessionId)?.name || "Session"} needs your {request.kind === "permission" ? "permission" : "answer"}</span>{request.questions?.map((question,index)=><p key={index}>{question.question}{question.options?.length ? <small>{question.options.map(option=>option.label).join(" · ")}</small> : null}</p>)}{request.detail && <p>{request.detail}</p>}<button onClick={()=>onFocus(request.sessionId)}>Review in session</button></div>)}{state?.messages?.length ? state.messages.map(message => <div className={`relay-message ${message.role}`} key={message.id}><span>{message.role === "user" ? "You" : message.origin === "monitor" ? "Activity report" : "Orchestrator"}</span><p>{message.text}</p></div>) : <div className="relay-welcome"><Bot size={23}/><div><strong>{!state?.ready ? "Set up your orchestrator" : state.enabled ? "Ready for your command" : "Orchestrator is off"}</strong><p>{!state?.ready ? "Connect OpenRouter and choose a model for text and voice commands." : "Ask for a session update, find a saved conversation, or send an instruction."}</p></div>{!state?.ready && <button onClick={onSettings}><Settings2 size={14}/> Connect OpenRouter</button>}</div>}{(error || state?.error) && <p role="alert" className="relay-error">{error || state?.error}</p>}</div>
         {draft && draftTarget && <details className="relay-staged-draft"><summary>Staged draft · {sessions.find(session => session.id === draftTarget)?.name}</summary><textarea aria-label="Staged session draft" value={draft} onChange={event => setDraft(event.target.value)}/><button type="button" onClick={() => void sendDraft()}>Send to session</button><button type="button" onClick={() => onFocus(draftTarget)}>Open session</button></details>}
         <form className="relay-composer" onSubmit={event => { event.preventDefault(); void send(); }}><select aria-label="Command target" value={target} onChange={event => setTarget(event.target.value)}><option value="">Entire workspace</option>{sessions.map(session => <option value={session.id} key={session.id}>{session.name}</option>)}</select><textarea aria-label="Orchestrator instruction" placeholder={state?.ready ? "Tell Orchestrator what to do…" : "Connect a model in Settings to get started"} value={text} onChange={event => setText(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault();

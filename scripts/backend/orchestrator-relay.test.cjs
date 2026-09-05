@@ -22,6 +22,64 @@ test('secure per-user settings persist, transcripts and activation do not', asyn
   const disk = fs.readFileSync(path.join(f.dir, 'orchestrator-settings.json'), 'utf8'); assert.ok(!disk.includes(key)); assert.ok(!disk.includes('Hello')); assert.ok(!JSON.stringify(f.instance.getState()).includes(key));
   const second = createOrchestrator({ userDataPath: f.dir, secureStorage }); t.after(() => second.dispose()); assert.equal(second.getState().enabled, false); assert.equal(second.getState().messages.length, 0); assert.equal(second.getKey(), key);
 });
+
+test('monitoring requires opt-in and filters unavailable and blank observations', async t => {
+  const reads = [];
+  const f = fixture(t, { readSession: async ({ id }) => { reads.push(id); return id === 'a' ? { ok: false, status: 'unavailable', error: 'No live decoder for this generation.' } : { ok: true, text: '  ' }; } });
+  f.sessions.push({ id: 'paused', generation: 'paused:1', status: 'paused' }, { id: 'empty', generation: 1, status: 'idle' });
+  await f.ready(); await f.instance.refresh({ monitor: true }); assert.equal(reads.length, 0);
+  await f.instance.configure({ monitoringEnabled: true }); await f.instance.refresh({ monitor: true });
+  assert.deepEqual(reads, ['a', 'empty']); assert.equal(f.requests.filter(r => r.url.endsWith('/chat/completions')).length, 0);
+});
+
+test('monitor excludes clipped summaries and does not contaminate conversational context', async t => {
+  const f = fixture(t); await f.ready(); await f.instance.configure({ monitoringEnabled: true });
+  f.responses({ choices: [{ finish_reason: 'length', message: { content: 'Worker A has just' } }] });
+  await f.instance.refresh({ monitor: true }); assert.equal(f.instance.getState().messages.length, 0);
+  f.sessions[0].lastActivityAt++; f.responses(reply('Monitor-only update.')); await f.instance.refresh({ monitor: true });
+  f.responses(reply('Hello!')); await f.instance.send({ text: 'Hello', origin: 'text' });
+  const body = JSON.parse(f.requests.at(-1).options.body);
+  assert.ok(!JSON.parse(body.messages[1].content).recentConversation.some(m => m.text.includes('Monitor-only')));
+  assert.match(body.messages[0].content, /greetings and casual conversation/);
+});
+
+test('tool rejection records receipt and returns action failure alongside answer', async t => {
+  const f = fixture(t); await f.ready(); f.responses(tool({ kind: 'close', targetId: 'a' }), reply('I could not close it.'));
+  const result = await f.instance.send({ text: 'Hello', origin: 'text' });
+  assert.equal(result.ok, false); assert.equal(result.status, 'action-failed'); assert.equal(result.actions[0].status, 'rejected');
+  assert.equal(result.text, 'I could not close it.'); assert.equal(f.actions.length, 0); assert.equal(f.instance.getState().receipts[0].status, 'rejected');
+});
+
+test('model tools cannot open external applications but direct workspace actions remain available', async t => {
+  const f = fixture(t); await f.ready();
+  for (const kind of ['open_file', 'open_folder']) {
+    f.responses(tool({ kind, path: f.dir }), reply('Use Workspace tools to open that.'));
+    const result = await f.instance.send({ text: `Open ${f.dir}`, origin: 'voice' });
+    assert.equal(result.ok, false); assert.match(result.actions[0].error, /Workspace tools/);
+    assert.equal(f.actions.length, 0);
+    const kinds = JSON.parse(f.requests.at(-1).options.body).tools[0].function.parameters.properties.kind.enum;
+    assert.ok(!kinds.includes('open_file')); assert.ok(!kinds.includes('open_folder'));
+  }
+  assert.equal(f.instance.getState().receipts.filter(r => r.status === 'rejected').length, 2);
+  assert.equal((await f.instance.dispatch({ kind: 'open_folder', path: f.dir })).ok, true);
+  assert.equal(f.actions.length, 1); assert.equal(f.actions[0].kind, 'open_folder');
+});
+
+test('speech failure preserves successful text and delivered action without replay', async t => {
+  for (const throws of [false, true]) {
+    const f = fixture(t, { onSpeak: async () => { if (throws) throw new Error('Playback failed.'); return { ok: false, error: 'Playback failed.' }; } });
+    await f.ready(); f.responses(tool({ kind: 'send_prompt', targetId: 'a' }), reply('Delivered.'));
+    const result = await f.instance.send({ text: 'I want you to tell Worker A to fix the bug', origin: 'voice' });
+    assert.equal(result.ok, true); assert.equal(result.text, 'Delivered.'); assert.equal(result.speech.ok, false);
+    assert.equal(result.actions[0].status, 'delivered'); assert.equal(f.actions.length, 1); assert.equal(f.instance.getState().receipts.length, 1);
+  }
+});
+
+test('incomplete tool responses never dispatch and selected missing brain fails connection test', async t => {
+  const f = fixture(t); await f.ready(); const cut = tool({ kind: 'close', targetId: 'a' }); cut.choices[0].finish_reason = 'length';
+  f.responses(cut); assert.equal((await f.instance.send({ text: 'Close Worker A', origin: 'text' })).ok, false); assert.equal(f.actions.length, 0);
+  await f.instance.configure({ model: 'no-tools' }); assert.equal((await f.instance.testConnection()).ok, false); assert.equal(f.instance.getState().ready, false);
+});
 test('in-flight named command retains its original generation after runtime refresh', async t => {
   const f = fixture(t); await f.ready();
   let arrived, release;
@@ -34,7 +92,7 @@ test('in-flight named command retains its original generation after runtime refr
 });
 test('monitoring rotates batches so constantly noisy sessions cannot starve other panes',async t=>{
   const sessions=Array.from({length:17},(_,i)=>({id:String(i),generation:1,kind:'terminal',status:'running',lastActivityAt:1}));const reads=[];
-  const f=fixture(t,{getSessions:()=>sessions,readSession:async s=>{reads.push(s.id);return {text:'working'};}});await f.ready();
+  const f=fixture(t,{getSessions:()=>sessions,readSession:async s=>{reads.push(s.id);return {text:'working'};}});await f.ready();await f.instance.configure({ monitoringEnabled: true });
   f.responses(reply('NO_CHANGE'));await f.instance.refresh({monitor:true});sessions.forEach(s=>s.lastActivityAt++);
   f.responses(reply('NO_CHANGE'));await f.instance.refresh({monitor:true});assert.equal(new Set(reads).size,17);
 });
@@ -55,6 +113,31 @@ test('model cannot rewrite text, choose answers, act from status query or target
 test('cancelled model response cannot dispatch or speak', async t => {
   const f = fixture(t); await f.ready(); let release, started; const entered = new Promise(r => started = r); f.responses(() => { started(); return new Promise(r => release = () => r({ ok: true, json: async () => tool({ kind: 'close', targetId: 'a' }) })); }); const pending = f.instance.send({ text: 'Close Worker A', origin: 'voice' }); await entered; await f.instance.cancel(); release(); assert.equal((await pending).status, 'cancelled'); assert.equal(f.actions.length, 0); assert.equal(f.speech.length, 0);
 });
+
+test('non-brain settings preserve active relay and speech; key or brain changes cancel', async t => {
+  for (const [patch, cancels] of [[{ monitoringEnabled: true, spendingLimit: 12, enabledOnLaunch: true }, false], [{ voice: 'af_bella' }, false], [{ model: 'other' }, true], [{ apiKey: 'replacement-key' }, true]]) {
+    let cancellations = 0;
+    const f = fixture(t, { onCancel: () => { cancellations++; } }); await f.ready(); const before = cancellations;
+    let entered, release; const started = new Promise(resolve => { entered = resolve; });
+    f.responses(async () => { entered(); await new Promise(resolve => { release = resolve; }); return { ok: true, json: async () => reply('Hello!') }; });
+    const pending = f.instance.send({ text: 'Hello', origin: 'voice' }); await started;
+    assert.equal((await f.instance.configure(patch)).ok, true);
+    assert.equal(cancellations - before, cancels ? 1 : 0);
+    assert.equal(f.instance.getState().ready, !cancels); assert.equal(f.instance.getState().busy, !cancels);
+    release(); const result = await pending;
+    assert.equal(result.ok, !cancels); assert.equal(f.speech.length, cancels ? 0 : 1);
+    if (cancels) assert.equal(result.status, 'cancelled');
+  }
+});
+
+test('harmless settings do not cancel speech already playing', async t => {
+  let entered, release; const started = new Promise(resolve => { entered = resolve; }); let cancellations = 0;
+  const f = fixture(t, { onCancel: () => { cancellations++; }, onSpeak: async () => { entered(); await new Promise(resolve => { release = resolve; }); return { ok: true }; } });
+  await f.ready(); const before = cancellations; const pending = f.instance.send({ text: 'Hello', origin: 'voice' }); await started;
+  await f.instance.configure({ monitoringEnabled: true, spendingLimit: 10 });
+  assert.equal(cancellations, before); assert.equal(f.instance.getState().busy, true);
+  release(); const result = await pending; assert.equal(result.ok, true); assert.equal(result.speech.ok, true);
+});
 test('voice replies only and current native interaction announcement dedup', async t => {
   const f = fixture(t); await f.ready(); await f.instance.send({ text: 'Hello', origin: 'voice' }); assert.equal(f.speech[0].origin, 'voice'); const q = { id: 'q', sessionId: 'a', revision: 1, generation: 1, kind: 'question', questions: [{ question: 'Which option?' }] }; f.instance.ingestInteraction(q); f.instance.ingestInteraction(q); await Promise.resolve(); assert.equal(f.speech.length, 2); assert.equal((await f.instance.dispatch({ kind: 'send_prompt', targetId: 'a', text: 'new task' })).ok, false); assert.equal((await f.instance.dispatch({ kind: 'answer_question', targetId: 'a', requestId: 'q', revision: 0, answers: {} })).ok, false); f.instance.resolveInteraction(q); assert.equal((await f.instance.dispatch({ kind: 'send_prompt', targetId: 'a', text: 'new task' })).ok, true);
 });
@@ -62,7 +145,7 @@ test('direct actions reject stale generations and redact adapter errors', async 
   const f = fixture(t, { dispatchAction: async () => ({ ok: false, error: `Failure ${key}` }) }); await f.ready(); assert.equal((await f.instance.dispatch({ kind: 'close', target: { id: 'a', generation: 0 } })).ok, false); const result = await f.instance.dispatch({ kind: 'close', target: { id: 'a', generation: 1 } }); assert.equal(result.ok, false); assert.ok(!JSON.stringify(result).includes(key)); assert.ok(!JSON.stringify(f.instance.getState()).includes(key));
 });
 test('proactive monitoring is changed-only, bounded, observational and silent', async t => {
-  const f = fixture(t); await f.ready(); f.responses(reply('Worker A is running.')); await f.instance.refresh({ monitor: true }); await f.instance.refresh({ monitor: true }); assert.equal(f.requests.filter(r => r.url.endsWith('/chat/completions')).length, 1); assert.equal(f.actions.length, 0); assert.equal(f.speech.length, 0); const body = JSON.parse(f.requests.at(-1).options.body); assert.equal(body.tools, undefined); f.sessions[0].revision = 100; await f.instance.refresh({ monitor: true }); assert.equal(f.requests.filter(r => r.url.endsWith('/chat/completions')).length, 1); f.sessions[0].lastActivityAt = 2; f.responses(tool({ kind: 'close', targetId: 'a' })); await f.instance.refresh({ monitor: true }); assert.equal(f.actions.length, 0);
+  const f = fixture(t); await f.ready(); await f.instance.configure({ monitoringEnabled: true }); f.responses(reply('Worker A is running.')); await f.instance.refresh({ monitor: true }); await f.instance.refresh({ monitor: true }); assert.equal(f.requests.filter(r => r.url.endsWith('/chat/completions')).length, 1); assert.equal(f.actions.length, 0); assert.equal(f.speech.length, 0); const body = JSON.parse(f.requests.at(-1).options.body); assert.equal(body.tools, undefined); f.sessions[0].revision = 100; await f.instance.refresh({ monitor: true }); assert.equal(f.requests.filter(r => r.url.endsWith('/chat/completions')).length, 1); f.sessions[0].lastActivityAt = 2; f.responses(tool({ kind: 'close', targetId: 'a' })); await f.instance.refresh({ monitor: true }); assert.equal(f.actions.length, 0);
 });
 test('preferences require explicit API call and allow removal', async t => {
   const f = fixture(t); await f.ready(); await f.instance.send({ text: 'Remember my preferred language is French', origin: 'text' }); assert.equal(f.instance.getState().preferences.length, 0); const saved = await f.instance.preferences({ operation: 'remember', text: 'French' }); assert.equal(saved.preferences.length, 1); await f.instance.preferences({ operation: 'forget', id: saved.preferences[0].id }); assert.equal(f.instance.getState().preferences.length, 0);
@@ -77,11 +160,23 @@ test('bounded relay stops tool loops and honors configured usage threshold', asy
 test('connection test authenticates the key, not only public model discovery', async t => {
   const f = fixture(t, { fetch: async url => url.endsWith('/key') ? { ok: false, status: 401 } : { ok: true, json: async () => ({ data: [{ id: 'brain', supported_parameters: ['tools'] }] }) } }); await f.instance.configure({ apiKey: key, model: 'brain' }); assert.equal((await f.instance.models()).length, 1); const result = await f.instance.testConnection(); assert.equal(result.ok, false); assert.match(result.error, /401/);
 });
+
+test('first-run model browsing is public while connection and inference require a key', async t => {
+  const f = fixture(t);
+  assert.deepEqual((await f.instance.models()).map(m => m.id), ['brain']);
+  assert.equal(f.requests.length, 1); assert.equal(f.requests[0].options.headers.Authorization, undefined);
+  assert.equal(f.instance.getSettings().hasKey, false);
+  await f.instance.configure({ model: 'brain' });
+  assert.equal((await f.instance.testConnection()).ok, false);
+  assert.equal((await f.instance.setEnabled(true)).ok, false);
+  assert.equal((await f.instance.send({ text: 'Hello', origin: 'text' })).ok, false);
+  assert.equal(f.requests.length, 1);
+});
 test('restarted sessions do not inherit old question blockers', async t => {
   const f = fixture(t); await f.ready(); f.instance.ingestInteraction({ id: 'q', sessionId: 'a', generation: 1, revision: 1, kind: 'question', questions: [] }); f.sessions[0].generation = 2; await f.instance.refresh(); assert.equal((await f.instance.dispatch({ kind: 'send_prompt', targetId: 'a', text: 'new task' })).ok, true); assert.equal(f.instance.ingestInteraction({ id: 'q', sessionId: 'a', generation: 1, revision: 2, kind: 'question' }).ok, false);
 });
 test('dedicated audio catalog uses speech and transcription output categories', async t => {
-  const urls = []; const f = fixture(t, { fetch: async url => { urls.push(url); return { ok: true, json: async () => ({ data: [{ id: 'dedicated', architecture: { output_modalities: [url.includes('transcription') ? 'transcription' : 'speech'] } }, { id: 'chat-audio', architecture: { input_modalities: ['audio'], output_modalities: ['audio', 'text'] } }] }) }; } }); await f.instance.configure({ apiKey: key }); assert.equal(f.instance.getSettings().voice, 'alloy'); assert.deepEqual((await f.instance.models('transcription')).map(m => m.id), ['dedicated']); assert.deepEqual((await f.instance.models('speech')).map(m => m.id), ['dedicated']); assert.ok(urls[0].endsWith('output_modalities=transcription')); assert.ok(urls[1].endsWith('output_modalities=speech'));
+  const urls = []; const f = fixture(t, { fetch: async url => { urls.push(url); return { ok: true, json: async () => ({ data: [{ id: 'dedicated', architecture: { output_modalities: [url.includes('transcription') ? 'transcription' : 'speech'] } }, { id: 'chat-audio', architecture: { input_modalities: ['audio'], output_modalities: ['audio', 'text'] } }] }) }; } }); await f.instance.configure({ apiKey: key }); assert.equal(f.instance.getSettings().voice, 'af_heart'); assert.deepEqual((await f.instance.models('transcription')).map(m => m.id), ['dedicated']); assert.deepEqual((await f.instance.models('speech')).map(m => m.id), ['dedicated']); assert.ok(urls[0].endsWith('output_modalities=transcription')); assert.ok(urls[1].endsWith('output_modalities=speech'));
 });
 test('activation requires authenticated key and tool-capable selection, invalidated by changes', async t => {
   const f = fixture(t); assert.equal((await f.instance.setEnabled(true)).ok, false); assert.equal(f.instance.getState().enabled, false); await f.instance.configure({ apiKey: key, model: 'no-tools' }); assert.equal((await f.instance.setEnabled(true)).ok, false); assert.equal(f.instance.getState().ready, false); await f.ready(); assert.equal(f.instance.getState().ready, true); await f.instance.configure({ model: 'no-tools' }); assert.equal(f.instance.getState().ready, false); assert.equal(f.instance.getState().enabled, false);

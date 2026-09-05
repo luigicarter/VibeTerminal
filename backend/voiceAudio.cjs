@@ -31,4 +31,31 @@ function createPcmFramer() {
   return { push(chunk) { const b = Buffer.concat([carry, Buffer.from(chunk)]); const end = b.length - b.length % 2; carry = Buffer.from(b.subarray(end)); return b.subarray(0, end); }, finish() { if (carry.length) throw Error('Speech stream ended with an incomplete PCM sample'); } };
 }
 function shouldSpeak({ origin, kind } = {}) { return origin === 'voice' || kind === 'interaction'; }
-module.exports = { RATE, wavFromSamples, createRecording, createPcmFramer, shouldSpeak };
+function decodeSpeechWav(input) {
+  const b = Buffer.from(input);
+  const invalid = () => { throw Error('Speech returned an invalid or unsupported WAV recording.'); };
+  if (b.length < 44 || b.toString('ascii', 0, 4) !== 'RIFF' || b.toString('ascii', 8, 12) !== 'WAVE') invalid();
+  let format, pcm;
+  const declared = b.readUInt32LE(4);
+  if (declared !== 0xffffffff && declared + 8 !== b.length) invalid();
+  for (let at = 12; at + 8 <= b.length;) {
+    const id = b.toString('ascii', at, at + 4), size = b.readUInt32LE(at + 4), start = at + 8;
+    const end = size === 0xffffffff && id === 'data' ? b.length : start + size;
+    if (end > b.length) invalid();
+    if (id === 'fmt ') {
+      if (size < 16 || format) invalid();
+      format = { encoding: b.readUInt16LE(start), channels: b.readUInt16LE(start + 2), sampleRate: b.readUInt32LE(start + 4), byteRate: b.readUInt32LE(start + 8), align: b.readUInt16LE(start + 12), bits: b.readUInt16LE(start + 14) };
+    }
+    if (id === 'data') { if (pcm) invalid(); pcm = b.subarray(start, end); }
+    at = end + (size % 2);
+  }
+  if (!format || !pcm?.length || format.encoding !== 1 || format.bits !== 16 || ![1, 2].includes(format.channels) || format.sampleRate < 8000 || format.sampleRate > 48000 || format.align !== format.channels * 2 || format.byteRate !== format.sampleRate * format.align || pcm.length % format.align) invalid();
+  const durationMs = pcm.length / format.byteRate * 1000;
+  if (durationMs > 180000) throw Error('Speech exceeded the three-minute playback limit.');
+  return { pcm, sampleRate: format.sampleRate, channels: format.channels, durationMs };
+}
+function errorChime() {
+  const samples = Array.from({ length: 5760 }, (_, i) => 0.12 * Math.sin(2 * Math.PI * 660 * i / 24000) * Math.sin(Math.PI * i / 5760) ** 2);
+  return { pcm: wavFromSamples(samples, 24000).subarray(44), durationMs: 240, text: '' };
+}
+module.exports = { RATE, wavFromSamples, createRecording, createPcmFramer, shouldSpeak, decodeSpeechWav, errorChime };

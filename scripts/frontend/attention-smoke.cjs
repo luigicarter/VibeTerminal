@@ -1346,7 +1346,7 @@ assert(
     fusionChatPaneSource.includes('case "interrupted"') &&
     fusionChatPaneSource.includes('window.addEventListener("keydown", handleWindowKeyDown)') &&
     fusionChatPaneSource.includes("isSelected") &&
-    appSource.includes("isSelected={session.id === selectedSessionId}"),
+    appSource.includes("isSelected={!orchestratorViewOpen && session.id === selectedSessionId}"),
   "FusionChatPane should interrupt with Escape and submit prompt/steer with Enter, without a composer stop button"
 );
 assert(

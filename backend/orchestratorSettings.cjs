@@ -1,11 +1,18 @@
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
-const DEFAULTS = { model: '', sttModel: 'openai/whisper-large-v3-turbo', ttsModel: 'openai/gpt-4o-mini-tts-2025-12-15', voice: 'alloy', language: 'en', monitoringIntervalSeconds: 30 };
+const { STT_MODEL, TTS_MODEL, TTS_VOICE } = require('../shared/voiceConfig.cjs');
+const DEFAULTS = { model: '', sttModel: STT_MODEL, ttsModel: TTS_MODEL, voice: TTS_VOICE, language: 'en', monitoringEnabled: false, monitoringIntervalSeconds: 30, enabledOnLaunch: false };
 function createSettings({ userDataPath, secureStorage }) {
   const filename = path.join(userDataPath, 'orchestrator-settings.json');
   let data = { settings: { ...DEFAULTS }, preferences: [], encryptedKey: '' };
   try { const disk = JSON.parse(fs.readFileSync(filename, 'utf8')); data = { ...data, ...disk, settings: { ...DEFAULTS, ...disk.settings } }; } catch {}
+  // The old default never had a published OpenRouter speech route. Migrate that
+  // known configuration; other custom selections remain visible for correction.
+  if (['openai/gpt-4o-mini-tts-2025-12-15', 'openai/gpt-4o-mini-tts'].includes(data.settings.ttsModel)) {
+    data.settings.ttsModel = TTS_MODEL;
+    data.settings.voice = TTS_VOICE;
+  }
   let key = '';
   const secure = () => secureStorage?.isEncryptionAvailable?.() && secureStorage?.getSelectedStorageBackend?.() !== 'basic_text';
   try { if (data.encryptedKey && secure()) key = secureStorage.decryptString(Buffer.from(data.encryptedKey, 'base64')); } catch {}
@@ -28,6 +35,9 @@ function createSettings({ userDataPath, secureStorage }) {
           // This controls key storage only and never persists the key itself.
         } else if (['model', 'sttModel', 'ttsModel', 'voice', 'language', 'microphoneId'].includes(name)) {
           if (typeof value !== 'string' || value.length > 512) throw new Error(`Invalid ${name}.`);
+          next.settings[name] = value.trim();
+        } else if (['monitoringEnabled', 'enabledOnLaunch'].includes(name)) {
+          if (typeof value !== 'boolean') throw new Error(`Invalid ${name}.`);
           next.settings[name] = value;
         } else if (name === 'monitoringIntervalSeconds') {
           if (!Number.isFinite(value) || value < 5 || value > 300) throw new Error('Monitoring interval must be 5–300 seconds.');

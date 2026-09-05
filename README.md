@@ -12,7 +12,7 @@ to which task.
 
 | Platform | Download | Notes |
 | --- | --- | --- |
-| Windows x64 | [vibeTerminal-Setup-0.1.84.exe](https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.84/vibeTerminal-Setup-0.1.84.exe) | Standard Windows installer. |
+| Windows x64 | [vibeTerminal-Setup-0.1.87.exe](https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.87/vibeTerminal-Setup-0.1.87.exe) | Standard Windows installer. |
 | All releases | [GitHub Releases](https://github.com/luigicarter/VibeTerminal/releases) | Older versions and release assets. |
 
 Install the app, then launch `vibeTerminal` from the Start Menu or desktop
@@ -27,6 +27,7 @@ instructions, use saved setups, and relay structured agent questions. These
 features are included in the release download linked above.
 
 - Run multiple local terminal panes in one desktop window.
+- Open Orchestrator for a glass-bubble view of live sessions, status and Vibe's current targets.
 - Open project folders and keep each folder's sessions grouped together.
 - Use Multi mode for a free board of terminals and agents from different
   folders.

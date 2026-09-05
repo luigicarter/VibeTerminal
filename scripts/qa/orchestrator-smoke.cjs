@@ -18,16 +18,17 @@ const check=(label,value)=>{result.checks.push({label,value});console.log(label,
   const page=await until(async()=> (await pages()).find(p=>p.type==="page"&&p.url.startsWith("file:")&&!p.url.includes("surface=voice")),"main renderer");main=new Cdp(page.webSocketDebuggerUrl);await main.open();await main.send("Page.enable");await main.send("Emulation.setDeviceMetricsOverride",{width:1500,height:1000,deviceScaleFactor:1,mobile:false});
   await until(()=>main.eval("Boolean(window.vibe?.orchestrator && document.querySelector('.orchestrator-mic'))"),"orchestrator UI");
   const initial=await main.eval("window.vibe.orchestrator.getState()");assert.equal(initial.enabled,false);assert.equal(initial.ready,false);assert.equal(initial.settings.hasKey,false);check("fresh-user",{enabled:initial.enabled,ready:initial.ready,hasKey:initial.settings.hasKey});
-  assert(await main.eval("document.querySelector('.orchestrator-mic').disabled"));
-  await main.eval("document.querySelector('.workspace-settings-button').click()");
+  assert.equal(await main.eval("document.querySelector('.sidebar-footer .workspace-settings-button')?.textContent.trim()"),'Settings');
+  assert.equal(await main.eval("document.querySelector('.orchestrator-mic').disabled"),false);
+  await main.eval("document.querySelector('.orchestrator-mic').click()");
   await until(()=>main.eval("Boolean(document.querySelector('#settings-dialog-title'))"),"settings dialog");
-  await main.eval("Array.from(document.querySelectorAll('.orchestrator-settings button')).find(b=>b.textContent==='Load models').click()");
-  await until(()=>main.eval("document.querySelector('.settings-note[role=status]')?.textContent.includes('OpenRouter')"),"missing-key model error");
+  const basic=await main.eval("(()=>{const section=document.querySelector('.orchestrator-settings'),key=section.querySelector('input[type=password]'),model=section.querySelector('input[list=orchestrator-models]'),toggle=section.querySelector('.assistant-enable input'),advanced=section.querySelector('details');return {keyPlaceholder:key.placeholder,keyEditable:!key.disabled,model:!!model,toggleDisabled:toggle.disabled,advancedClosed:!advanced.open};})()");
+  assert.match(basic.keyPlaceholder,/sk-or/);assert.equal(basic.keyEditable,true);assert.equal(basic.model,true);assert.equal(basic.toggleDisabled,true);assert.equal(basic.advancedClosed,true);check("simple-first-run-settings",basic);
   const settingsShot=await main.send("Page.captureScreenshot",{format:"png"});fs.writeFileSync(path.join(output,"settings.png"),Buffer.from(settingsShot.data,"base64"));
   await main.eval("Array.from(document.querySelectorAll('.settings-navigation button')).find(b=>b.textContent==='Appearance').click()");
   await until(()=>main.eval("Boolean(document.querySelector('[role=radiogroup]'))"),"appearance settings");
   await main.eval("document.querySelector('[aria-label=\"Close settings\"]').click()");
-  check("settings-navigation",{missingKeyHandled:true,appearanceAvailable:true});
+  check("settings-navigation",{microphoneOpensSetup:true,appearanceAvailable:true});
   const project=await main.eval(`window.vibe.orchestrator.dispatch({kind:'create_project',parent:${JSON.stringify(docs)},name:'Budget Tracker'})`);assert.equal(project.ok,true,JSON.stringify(project));
   assert.equal(project.path,path.join(docs,"Budget Tracker"));await until(()=>main.eval("document.querySelector('.workspace-title').textContent.includes('Budget Tracker')"),"project selected");check("create-project",project.path);
   const created=await main.eval(`window.vibe.orchestrator.dispatch({kind:'create_session',kindOfSession:'terminal',cwd:${JSON.stringify(project.path)}})`);assert.equal(created.ok,true,JSON.stringify(created));
@@ -46,10 +47,10 @@ const check=(label,value)=>{result.checks.push({label,value});console.log(label,
   const preference=await main.eval("window.vibe.orchestrator.preferences({operation:'remember',text:'Use concise updates'})");assert.equal(preference.ok,true);assert(fs.readFileSync(path.join(userData,"orchestrator-settings.json"),"utf8").includes("Use concise updates"));
   assert(!fs.readFileSync(path.join(userData,"orchestrator-settings.json"),"utf8").includes("relay-smoke"));
   const shot=await main.send("Page.captureScreenshot",{format:"png"});fs.writeFileSync(path.join(output,"workspace.png"),Buffer.from(shot.data,"base64"));
-  await main.eval("window.vibe.orchestrator.showOverlay()");const voice=await until(async()=> (await pages()).find(p=>p.url.includes("surface=voice")),"voice overlay");overlay=new Cdp(voice.webSocketDebuggerUrl);await overlay.open();
-  await until(()=>overlay.eval("Boolean(document.querySelector('.voice-overlay'))"),"overlay loaded");assert.equal(await overlay.eval("typeof window.vibe.terminal"),"undefined");assert.equal(await overlay.eval("typeof window.vibe.orchestrator.configure"),"undefined");
-  const voiceState=await overlay.eval("window.vibe.voice.getState()");assert.equal(voiceState.listening,false);
-  const voiceShot=await overlay.send("Page.captureScreenshot",{format:"png"});fs.writeFileSync(path.join(output,"overlay.png"),Buffer.from(voiceShot.data,"base64"));check("overlay",{phase:voiceState.phase,narrowPreload:true});
+  await main.eval("window.vibe.orchestrator.showOverlay()");await until(()=>main.eval("Boolean(document.querySelector('.voice-indicator'))"),"in-app microphone");
+  assert.equal((await pages()).some(p=>p.url.includes("surface=voice")),false,"Showing the off indicator must not create native audio window");
+  const voiceState=await main.eval("window.vibe.voice.getState()");assert.equal(voiceState.listening,false);assert.equal(voiceState.indicatorVisible,true);
+  const voiceShot=await main.send("Page.captureScreenshot",{format:"png"});fs.writeFileSync(path.join(output,"overlay.png"),Buffer.from(voiceShot.data,"base64"));check("in-app-indicator",{phase:voiceState.phase,noNativeAudioWindow:true});
   result.pass=true;
 }catch(error){result.pass=false;result.error=error.stack;console.error(error.stack);process.exitCode=1;if(main){try{const shot=await main.send("Page.captureScreenshot",{format:"png"});fs.writeFileSync(path.join(output,"failure.png"),Buffer.from(shot.data,"base64"));}catch{}}}
 finally{fs.writeFileSync(path.join(output,"results.json"),JSON.stringify(result,null,2));main?.close();overlay?.close();if(child?.pid)spawnSync("taskkill",["/pid",String(child.pid),"/t","/f"],{windowsHide:true,stdio:"ignore"});console.log(`Artifacts: ${output}`);}})();

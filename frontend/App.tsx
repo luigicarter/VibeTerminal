@@ -15,6 +15,8 @@ import {
 import {
   Check,
   Mic,
+  Settings,
+  PanelsTopLeft,
   ChevronDown,
   ChevronRight,
   Download,
@@ -104,8 +106,12 @@ import { WorkspaceSetups, type WorkspaceSetupsProps } from "./components/Workspa
 import { HandoffPanel } from "./components/HandoffPanel";
 import { createWorkspaceSetup, instantiateWorkspaceSetup, SETUP_CONFIG_FIELDS, type WorkspaceSetup } from "./workspaceSetups";
 import { OrchestratorPanel } from "./components/OrchestratorPanel";
+import { WorkspaceToolsDialog } from "./components/WorkspaceToolsDialog";
+import { OrchestratorDashboard } from "./components/OrchestratorDashboard";
+import { RECENCY_STORAGE_KEY, loadSessionRecency, recordSessionRecency } from "./sessionRecency";
+import VoiceIndicator from "./VoiceIndicator";
 import { NewProjectDialog } from "./components/NewProjectDialog";
-import { SessionNavigation, BoardHeading } from "./components/WorkspaceChrome";
+import { BoardHeading } from "./components/WorkspaceChrome";
 import { SettingsDialog } from "./components/SettingsDialog";
 import type { InstalledCliReport } from "./electron";
 import type {
@@ -1296,6 +1302,13 @@ export default function App() {
   // the dialog was opened as a detour, e.g. "Open Claude Code" with no
   // provider configured yet.
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [workspaceToolsOpen, setWorkspaceToolsOpen] = useState(false);
+  const [orchestratorViewOpen, setOrchestratorViewOpen] = useState(false);
+  const [sessionRecency, setSessionRecency] = useState(() => loadSessionRecency(localStorage));
+  const sessionRecencyRef = useRef(sessionRecency);
+  const recentVibeTargets = useRef(new Set<string>());
+  const workspaceMainRef = useRef<HTMLElement | null>(null);
+  const [voiceToggleBusy, setVoiceToggleBusy] = useState(false);
   const [settingsHint, setSettingsHint] = useState<string | null>(null);
   // The toolbar launcher dropdown: one trigger opens a searchable list of
   // every agent profile plus the saved Claude providers (each launches with
@@ -1717,10 +1730,41 @@ export default function App() {
 
   useEffect(() => {
     attentionSelectionRef.current = {
-      selectedSessionId,
-      visibleSessionIds
+      selectedSessionId: orchestratorViewOpen ? null : selectedSessionId,
+      visibleSessionIds: orchestratorViewOpen ? [] : visibleSessionIds
     };
-  }, [selectedSessionId, visibleSessionIds]);
+  }, [selectedSessionId, visibleSessionIds, orchestratorViewOpen]);
+
+  useEffect(() => {
+    if (workspaceMainRef.current) workspaceMainRef.current.inert = orchestratorViewOpen;
+  }, [orchestratorViewOpen]);
+
+  useEffect(() => {
+    const current = new Set<string>();
+    for (const target of orchestratorState?.activeTargets || []) {
+      if (!target.operations?.some(operation => ["send_prompt", "stage_draft", "answer_question", "permission"].includes(operation))) continue;
+      const key = `${target.id}:${target.generation}`;
+      current.add(key);
+      if (!recentVibeTargets.current.has(key)) recordSessionUse(target.id, true);
+    }
+    recentVibeTargets.current = current;
+  }, [orchestratorState?.activeTargets]);
+
+  useEffect(() => {
+    if (!orchestratorViewOpen) return;
+    let live = true, pending = false;
+    const refresh = async () => {
+      if (!live || pending || document.hidden) return;
+      pending = true;
+      try { await relayApi()?.dispatch({ kind: "list_sessions" }); } catch { /* Runtime events continue to update the directory. */ }
+      finally { pending = false; }
+    };
+    void refresh();
+    const timer = orchestratorState?.enabled ? undefined : window.setInterval(() => void refresh(), 4000);
+    const onVisible = () => { if (!document.hidden) void refresh(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { live = false; clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
+  }, [orchestratorViewOpen, orchestratorState?.enabled]);
 
   useEffect(() => {
     return window.vibe?.terminal.onEvent((event) => {
@@ -2514,8 +2558,18 @@ export default function App() {
   }
 
   function selectSession(sessionId: string) {
+    recordSessionUse(sessionId, true);
     setSelectedSessionId(sessionId);
     clearSessionAttention(sessionId);
+  }
+
+  function recordSessionUse(sessionId: string, immediate = false) {
+    const now = Date.now();
+    if (!immediate && now - (sessionRecencyRef.current[sessionId] || 0) < 15000) return;
+    const next = recordSessionRecency(sessionRecencyRef.current, sessionId, now);
+    if (next === sessionRecencyRef.current) return;
+    sessionRecencyRef.current = next; setSessionRecency(next);
+    try { localStorage.setItem(RECENCY_STORAGE_KEY, JSON.stringify(next)); } catch { /* Optional local preference. */ }
   }
 
   function addSessionForCwd(
@@ -4097,12 +4151,14 @@ export default function App() {
     );
 
     if (existingWorkspace) {
+      setOrchestratorViewOpen(false);
       setActiveWorkspaceId(existingWorkspace.id);
       setActiveView("project");
       return;
     }
 
     const workspace = starterWorkspace(path);
+    setOrchestratorViewOpen(false);
     setWorkspaces((current) => [workspace, ...current]);
     setActiveWorkspaceId(workspace.id);
     setActiveView("project");
@@ -4483,6 +4539,7 @@ export default function App() {
           setActiveView("multi");
       else
           return false;
+      setOrchestratorViewOpen(false);
       selectSession(id);
       setRevealSessionId(null);
       requestAnimationFrame(() => setRevealSessionId(id));
@@ -4556,6 +4613,7 @@ export default function App() {
           if(result && typeof result === "object" && "ok" in result && result.ok === false) return {ok:false,error:"error" in result ? String(result.error) : "Setup could not be saved."};
           return { ok: true, recipe };
       }
+      if (kind === "open_settings") { setSettingsOpen(true); return { ok: true }; }
       if (kind === "inventory")
           return { ok: true, projectPaths: workspaces.map(workspace=>workspace.path), sessions: relaySessions.map(session => ({ ...session, projectId: workspaces.find(p => p.sessions.some(s => s.id === session.id))?.id })) };
       if (kind === "focus_session")
@@ -4663,10 +4721,11 @@ export default function App() {
           Add project
         </button>
 
+        <button className={clsx("orchestrator-nav-button", orchestratorViewOpen && "active")} aria-pressed={orchestratorViewOpen} onClick={() => { setOrchestratorViewOpen(true); setLauncherMenuOpen(false); }}><PanelsTopLeft size={17}/><span>Orchestrator</span></button>
         <button
           className={clsx(
             "multi-mode-card",
-            activeView === "multi" && "active",
+            !orchestratorViewOpen && activeView === "multi" && "active",
             multiModeHasUnreadAttention && "has-attention",
             !multiModeHasUnreadAttention &&
               multiModeHasWorking &&
@@ -4674,6 +4733,7 @@ export default function App() {
           )}
           aria-label="Multi mode"
           onClick={() => {
+            setOrchestratorViewOpen(false);
             setSelectedSessionId(null);
             setActiveView("multi");
           }}
@@ -4763,7 +4823,7 @@ export default function App() {
                   type="button"
                   className={clsx(
                     "workspace-button",
-                    activeView === "project" &&
+                    !orchestratorViewOpen && activeView === "project" &&
                       workspace.id === activeWorkspace?.id &&
                       "active",
                     hasUnreadAttention && "has-attention",
@@ -4778,6 +4838,7 @@ export default function App() {
                     if (Date.now() < workspaceDragClickUntil.current) return;
                     setSelectedSessionId(null);
                     setActiveWorkspaceId(workspace.id);
+                    setOrchestratorViewOpen(false);
                     setActiveView("project");
                   }}
                 >
@@ -4814,7 +4875,7 @@ export default function App() {
         </div>
         <span id="workspace-reorder-help" className="workspace-reorder-sr-only">Drag to reorder projects, or use Up and Down arrow keys on a reorder button.</span>
         <span className="workspace-reorder-sr-only" role="status" aria-live="polite">{workspaceOrderAnnouncement}</span>
-        <SessionNavigation sessions={boardSessions.map(session => ({...withRuntimeLabel(session),statusLabel:relaySessions.find(item=>item.id===session.id)?.statusLabel}))} selectedId={selectedSessionId} onFocus={focusRelaySession} onSettings={() => setSettingsOpen(true)} />
+        <footer className="sidebar-footer"><button className="workspace-settings-button" title="Workspace settings" aria-label="Workspace settings" onClick={() => setSettingsOpen(true)}><Settings size={17} aria-hidden="true"/><span>Settings</span></button></footer>
       </aside>
 
       {workspaceContextMenu && (
@@ -4873,7 +4934,11 @@ export default function App() {
         />
       )}
 
-      <main className="workspace">
+      <main ref={workspaceMainRef} className={clsx("workspace", orchestratorViewOpen && "workspace-covered")} aria-hidden={orchestratorViewOpen || undefined} onKeyDownCapture={event => {
+        if (orchestratorViewOpen || ["Shift", "Control", "Alt", "Meta"].includes(event.key)) return;
+        const id = (event.target as HTMLElement).closest<HTMLElement>("[data-pane-id]")?.dataset.paneId;
+        if (id) recordSessionUse(id);
+      }}>
         <header className="topbar">
           <button
             className="icon-button"
@@ -4897,7 +4962,13 @@ export default function App() {
                 {currentAppVersionLabel}
               </span>
             )}
-            <button className={clsx("orchestrator-mic", orchestratorState?.enabled && "enabled")} disabled={!orchestratorState?.ready && !orchestratorState?.enabled} aria-pressed={orchestratorState?.enabled ?? false} title={orchestratorState?.ready ? "Toggle Orchestrator" : "Configure OpenRouter and a model in Settings"} onClick={() => void relayApi()?.setEnabled(!orchestratorState?.enabled)}><Mic size={15} /><span>Orchestrator</span><i /></button>
+            <button className={clsx("orchestrator-mic", orchestratorState?.enabled && "enabled")} disabled={voiceToggleBusy} aria-pressed={orchestratorState?.enabled ?? false} title={orchestratorState?.ready ? "Turn Hey Vibe on or off" : "Set up Hey Vibe"} onClick={() => {
+              if (!orchestratorState?.ready && !orchestratorState?.enabled) { setSettingsOpen(true); return; }
+              setVoiceToggleBusy(true);
+              void relayApi()?.setEnabled(!orchestratorState?.enabled).then(result => { if (!result.ok) { setSettingsHint(result.error || "Voice could not start."); setSettingsOpen(true); } }).catch(() => { setSettingsHint("Voice could not start. Check your connection and microphone."); setSettingsOpen(true); }).finally(() => setVoiceToggleBusy(false));
+            }}><Mic size={15} /><span>Hey Vibe</span><i /></button>
+            {orchestratorState?.enabled && <button aria-label="Show microphone" title="Show microphone" onClick={() => void relayApi()?.showOverlay()}><Mic size={15}/></button>}
+            <button aria-label="Open workspace tools" title="History, files and workspace tools" onClick={() => setWorkspaceToolsOpen(true)}><PanelsTopLeft size={16}/></button>
             <button onClick={checkForUpdates} disabled={updateCheckDisabled}>
               <RefreshCw size={16} />
               {updateCheckLabel}
@@ -5219,7 +5290,7 @@ export default function App() {
                     claimedThreadIds={claimedThreadIds(session.id)}
                     cwdConflict={cwdConflicts.get(session.id)}
                     isMaximized={session.id === maximizedSessionId}
-                    isSelected={session.id === selectedSessionId}
+                    isSelected={!orchestratorViewOpen && session.id === selectedSessionId}
                     onClose={() => closeSession(activeScope, session)}
                     onDuplicate={() => duplicateSession(activeScope, session)}
                     onRestart={() => restartSession(activeScope, session)}
@@ -5261,7 +5332,7 @@ export default function App() {
                     claimedThreadIds={claimedThreadIds(session.id)}
                     cwdConflict={cwdConflicts.get(session.id)}
                     isMaximized={session.id === maximizedSessionId}
-                    isSelected={session.id === selectedSessionId}
+                    isSelected={!orchestratorViewOpen && session.id === selectedSessionId}
                     onClose={() => closeSession(activeScope, session)}
                     onDuplicate={() => duplicateSession(activeScope, session)}
                     onRestart={() => restartSession(activeScope, session)}
@@ -5442,11 +5513,21 @@ export default function App() {
               onNewProject={() => setNewProjectOpen(true)} onOpenProject={() => void openFolder()} onMultiMode={() => setActiveView("multi")}/>
           )}
         </section>
-        <OrchestratorPanel state={orchestratorState} sessions={relaySessions} selectedId={selectedSessionId} onFocus={focusRelaySession} onSettings={() => setSettingsOpen(true)} changes={activeWorkspaceChangeSummary} folders={workspaces}
+      </main>
+      {orchestratorViewOpen && <div className="orchestrator-view-host">
+        <OrchestratorDashboard sessions={(orchestratorState?.sessions || []).map(session => {
+          const metadata = relaySessions.find(item => item.id === session.id);
+          return { ...metadata, ...session, projectName: metadata?.projectName || session.projectName, lastUsedAt: sessionRecency[session.id],
+            statusLabel: session.statusLabel || (metadata?.generation === session.generation ? metadata?.statusLabel : undefined) };
+        })} activeTargets={orchestratorState?.activeTargets || []} busy={orchestratorState?.busy || false} enabled={orchestratorState?.enabled || false} visible onOpenSession={id => { focusRelaySession(id); }} />
+      </div>}
+      {workspaceToolsOpen && <WorkspaceToolsDialog onClose={() => setWorkspaceToolsOpen(false)}>
+        <OrchestratorPanel embedded state={orchestratorState} sessions={relaySessions} selectedId={selectedSessionId} onFocus={id => { focusRelaySession(id); setWorkspaceToolsOpen(false); }} onSettings={() => { setWorkspaceToolsOpen(false); setSettingsOpen(true); }} changes={activeWorkspaceChangeSummary} folders={workspaces}
           setups={setupsApi ? <WorkspaceSetups sessions={boardSessions} projectPath={activeView === "project" ? activeWorkspace?.path : undefined} api={setupsApi} onLoad={loadRelaySetup} /> : <p className="dock-note">Setup storage is unavailable in this build.</p>}
           handoff={<HandoffPanel sessions={(orchestratorState?.sessions || relaySessions).filter((session): session is RelaySession & {generation:string} => Boolean(session.generation)).map(session=>({id:session.id,generation:session.generation,name:session.name}))} onStage={async draft => {const api=relayApi();return api ? api.dispatch({kind:"stage_handoff",target:{id:draft.target.id,generation:draft.target.generation},sourceId:draft.source.id,sourceGeneration:draft.source.generation,text:draft.text,paths:draft.paths}) : {ok:false,error:"Orchestrator unavailable."};}} />}
         />
-      </main>
+      </WorkspaceToolsDialog>}
+      <VoiceIndicator />
       {newProjectOpen && <NewProjectDialog onClose={()=>setNewProjectOpen(false)}/>}
 
       {shouldShowUpdateOverlay && updateState && (

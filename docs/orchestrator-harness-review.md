@@ -77,7 +77,7 @@ retained so the user can see what already happened.
 | Saved conversations | `list_conversations`, `read_conversation`, `resume_conversation` | Search native titles/IDs; read bounded user/assistant prose; revalidate and open the exact selected identity. |
 | Send instructions | `stage_draft`, `send_prompt` | Stage text or deliver/queue the complete explicit user payload to one identified session. |
 | Session controls | `focus_session`, `create_session`, `interrupt`, `restart`, `close` | Perform only the named operation. Opening/revealing changes the app's selection; ordinary prompt delivery does not activate its window. |
-| Folders and files | `search_files`, `create_project`, `add_project`, `open_file`, `open_folder` | Work within Documents and known projects, using canonical paths. Project creation uses the OS Documents location. File/folder opening requires an explicitly identified path or a direct UI action. |
+| Folders and files | `search_files`, `create_project`, `add_project` | Work within Documents and known projects, using canonical paths. External file/folder opening is available only through explicit UI controls; model requests for `open_file`/`open_folder` are rejected. |
 | Saved setups | `list_setups`, `read_setup`, `save_setup`, `launch_setup` | Read or explicitly launch named configuration recipes; saved starting prompts are staged. |
 | Explicit memory | `list_preferences`, `remember_preference`, `forget_preference` | Store/remove only the preference the user explicitly supplies. |
 

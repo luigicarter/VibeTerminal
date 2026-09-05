@@ -50,37 +50,25 @@ record. Individual JSONL records, legacy JSON files and OpenCode exports have an
 claiming a complete read. Search coverage describes decoded human user/assistant
 prose. Live terminal samples are not a complete native conversation archive.
 
-## Error announcements without cloud speech
+## Error feedback without cloud speech
 
-Seven short English WAV recordings ship in `vendor/voice/alerts`: credits,
-authentication, rate limit, upstream/provider failure, connection failure,
-timeout and rejected request. They are generated offline during maintenance and
-played as 24 kHz mono signed-16-bit PCM through the existing audio player. Runtime
-does not invoke Windows speech synthesis or OpenRouter TTS for these alerts.
+Current runtime errors use a short, nonverbal local chime. The old Microsoft Zira
+recordings remain as legacy assets but are no longer the default runtime alerts.
+The mic and Settings identify whether transcription, the assistant request, or
+speech failed. A spoken-reply failure does not imply that an action was rejected.
+HTTP status and safe classified details remain available; raw provider bodies and
+keys are never spoken. Mute, cancellation, cooldown, and deferred error handling
+remain in effect, without a recursive cloud request to announce an error.
 
-The credit recording says: “OpenRouter reports insufficient credits. Please check
-your balance or API key spending limit.” This avoids claiming the balance is
-exactly zero. Provider/BYOK balance errors get the upstream recording rather than
-an incorrect statement about the user's OpenRouter account.
+Speech uses the supported Kokoro English voices through OpenRouter. The app
+validates WAV framing, sample rate, channels, duration and response size before
+playback. Preview works while the mic and orchestrator are off and waits for
+actual renderer playback completion. It does not enable capture. Missing or
+failed playback acknowledgments are reported as failures.
 
-Classification follows the documented HTTP/error-envelope distinctions:
-401 authentication, 402 payment/credits, 403 rejected/forbidden request, 408
-timeout, 429 rate limit and upstream 5xx failures. Responses that contain an error
-inside HTTP 200, broken/empty speech streams and transport failures are handled
-too. Raw provider error bodies and keys are never used as announcement text.
-See the [OpenRouter response error reference](https://openrouter.ai/docs/client-sdks/typescript/api-reference/responses).
-
-Alerts respect voice mute and cancellation. The same category is suppressed for
-60 seconds to avoid repetition. Background monitoring alerts wait until an active
-recording/reply finishes; cancelling also invalidates deferred announcements.
-Billing/authentication errors pause automatic model monitoring until a successful
-explicit retry/connection validation. A failed retry does not clear that pause.
-Other monitor failures have a retry delay. Individual user commands remain
-explicit retry opportunities.
-
-Asset hashes, format, size, duration and non-silent PCM are verified before
-packaging and by the runtime loader. Missing/corrupt assets leave the normal text
-error available; they never trigger another cloud request to speak the error.
+Background monitoring is opt-in. Credit/authentication failures pause automatic
+monitoring until successful explicit validation; other failures back off. Model
+configuration, speech, and microphone readiness are separate checks.
 
 ## Verification
 

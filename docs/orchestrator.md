@@ -13,20 +13,33 @@ For the reading/voice follow-up, see [progressive context and local error audio]
 ## Setup
 
 1. Open **Workspace settings → Orchestrator & voice**.
-2. Enter your own OpenRouter key. Keys are encrypted through the OS; the
-   optional session-only setting keeps a new key in memory instead.
-3. Load models, choose a tool-capable model, save, and test the connection.
-4. Enable **Orchestrator** beside the version in the top-right corner.
-5. Enable the microphone in the desktop overlay to use **Hey Vibe** or **Talk now**.
+2. Enter an OpenRouter API key and the assistant model name.
+3. Turn on **Enable Orchestrator**. This saves and validates the current entries,
+   starts the microphone and local wake detector, and shows a small glowing mic.
+   On first use, a native vibeTerminal dialog asks **Allow microphone / Not now**
+   before capture begins. Allow is remembered; Windows privacy controls still apply.
+4. Say **Hey Vibe**, then speak your request. The assistant returns to wake
+   listening after its reply. Use the Orchestrator switch to turn it off.
 
-The application starts with Orchestrator off. Previously saved connections are
-validated without running an inference. Missing microphone access does not
-prevent typed commands. Turning Orchestrator off cancels its pending requests and
-voice listening; existing terminal agents continue running.
+A saved key is greyed out with a **Change** button. No separate Save/Test sequence
+is required. Public model browsing works before a key is saved. Advanced settings
+contain microphone/voice selection, preview, optional launch-time enablement,
+spending limits, and opt-in activity reports. Keys use OS encryption; optional
+session-only storage is available in Advanced. The old unavailable speech default
+is migrated to the supported voice configuration without replacing credentials.
 
-Each user has their own credentials, model settings, preferences, saved setups,
-and overlay position. Documents is resolved through Electron's OS folder API,
-including redirected/OneDrive locations. No developer-specific path is required.
+The mic is drawn only inside vibeTerminal and never over other applications. Its
+audio renderer stays permanently hidden and non-focusable. The mic's X hides the indicator while capture continues. **Show microphone** in
+the main toolbar restores it. Its context menu offers disable and settings. The
+main application must remain running; closing the application stops listening.
+Startup listening is off unless the user explicitly enables that preference.
+Startup cannot display a first-use consent dialog over another app. If consent
+has not been granted, enable voice from the foreground vibeTerminal window.
+If Windows blocks microphone access, the app offers **Open Windows microphone
+settings**. It opens the system privacy page only after that explicit click.
+The same permission gate applies when refreshing the microphone device list.
+No GPU is needed: wake detection uses one CPU thread and a bundled int8 model.
+Transcription, the assistant model, and synthesized speech use OpenRouter.
 
 ## Examples
 
@@ -49,10 +62,15 @@ or command shapes are rejected or require clarification.
 
 ## Workspace UI
 
+The **Orchestrator** button above Multi mode opens the dedicated
+[session visualization](orchestrator-dashboard.md). Glass bubbles show live
+status, user recency, and Vibe's current request targets. Active targets expand
+with a violet halo; movement and scaling retain reserved, non-overlapping space.
+Switching this view keeps the terminal workspace mounted at its original size.
+
 The theme uses neutral black/charcoal surfaces and grayscale controls, including
-the mic overlay. Small semantic status indicators and code/terminal colors retain
-their meaning. The board remains central. The sidebar includes project creation/opening and
-session navigation. Task headers expose maximize, close, and an accessible menu
+the workspace chrome. The compact mic uses a subtle status glow. Small semantic status indicators and code/terminal colors retain
+their meaning. The board remains central. The sidebar includes project creation/opening and settings. Task headers expose maximize, close, and an accessible menu
 containing split, duplicate, resume, restart, and related controls. Existing
 placement, snapping, Shift-swap, split minimums, and PTY fitting remain in use.
 
@@ -62,21 +80,12 @@ can still try launching through their shell. New session in the toolbar opens th
 same launcher catalog. Without a folder, the start screen offers Open project,
 New project and Multi mode.
 
-The dock contains Orchestrator, History, Activity, Changes, Files, and Setups.
-Drag the centered grip above its tabs up/down to adjust its height, all the way
-down to its collapsed tab bar. Pull upward to reopen it continuously. The grip also
-supports Up/Down arrows (Shift for a larger step), Home/End bounds, Enter to
-collapse/expand, and double-click to reset. Height persists as a local UI
-preference and adapts to window size while reserving space for the session board.
-Collapsed state also persists. Sidebar projects can be reordered using their
-grips, or Up/Down arrows on a focused grip; project order persists without changing
-the active project or its running sessions.
-The conversation has a visible vertical scrollbar and shows all retained messages;
-incoming updates follow the bottom only when the user is already there. Changes
-provides staged/working-tree previews and an explicit review marker for the
-observed change-list snapshot. That marker is not a test result or proof of
-correctness. Refresh changes to inspect subsequent edits. Binary/large previews
-and incomplete observations are labeled.
+The primary workspace has no session-navigation list or bottom orchestrator dock.
+Session identity and routing remain internal. **Workspace tools** opens an optional
+modal containing the text conversation, history, activity, changes, files, and
+setups. Closing it returns the full board area. It has no resize slider or
+persistent bottom bar. Background reports are off by default; when explicitly
+enabled they are labeled separately and excluded from conversational context.
 
 Saved setups are versioned configuration recipes with fresh session identities.
 They exclude runtime observations, approval IDs, credentials, and conversation
@@ -104,7 +113,7 @@ the source selection cancels stale reads. Staging never sends bytes to a termina
 The standalone runtime remains the owner of identity, provider observations, and
 shell/agent/turn separation. Metadata refresh time is not actual activity time.
 The relay facade tracks meaningful output/activity separately. Its observational
-timer defaults to 30 seconds, skips unchanged work, and does not execute tools
+timer is opt-in, defaults to 30 seconds, skips paused/unavailable and unchanged work, and does not execute tools
 from model monitoring responses.
 
 An action records queued/submitted/written/resolved/rejected/unknown outcomes as
@@ -194,14 +203,16 @@ voice advances the same question request rather than repeating earlier answers.
 
 Wake detection is local, using the pinned English sherpa-onnx GigaSpeech keyword
 model in a hidden child process. The process validates model hashes and bounds
-its frame queue. Mute/disposal terminates it. If wake detection fails, manual
-capture remains available where microphone and cloud settings are usable.
+its frame queue. Mute/disposal terminates it. A failed wake detector or microphone
+prevents activation and reports the error instead of claiming to be listening.
 
 Activated audio is held in memory and sent to OpenRouter's transcription
 endpoint. The default is `openai/whisper-large-v3-turbo`. The user-selected
 Orchestrator handles the recognized text. Spoken replies use
-`openai/gpt-4o-mini-tts-2025-12-15`, with 24kHz signed 16-bit mono PCM playback.
-Other raw-PCM TTS models are refused until a compatible format adapter is added.
+`hexgrad/kokoro-82m` with the Heart English voice by default. WAV responses are
+validated before playback using their actual sample rate and channel count.
+Only supported voice choices are offered. Speech failures are separate from
+successful text/actions; errors use a brief local chime and stage-specific text.
 
 There is no MP3/file-save workflow. Audio chunks are ordered, bounded, and
 cancelled by playback identity. Wake detection pauses during playback. Voice is
@@ -210,10 +221,12 @@ turn-based; a stop-speaking control is available. An agent question opens a
 answers use the announced format. Permission answers use explicit `allow once`,
 `allow always`, or `reject`; `yes` never becomes an expanded permission.
 
-The overlay shows listening/transcribing/thinking/speaking/error states without
-automatically stealing focus. It shares one controller with the dock and has a
-narrow preload bridge. Monitor changes clamp its saved position to a work area.
-It remains available when minimized and closes with the application.
+The compact mic shows listening/transcribing/thinking/speaking/error states inside
+the app. It shares one controller with settings and optional tools. The hidden
+audio renderer has a narrow preload bridge and never takes foreground focus.
+Wake listening continues while minimized; full app disposal stops audio and the
+wake helper. Model tools cannot open external files/folders or inject global
+keyboard/clipboard input; ordinary delivery stays within its target pane.
 
 OpenRouter transcription, orchestration, and speech all use the user's key and
 are billed separately by OpenRouter. The optional spending limit stops further

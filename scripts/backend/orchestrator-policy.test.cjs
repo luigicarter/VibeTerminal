@@ -3,6 +3,27 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { authorizeModelAction, authorizeConversationResume, commandClauses } = require('../../backend/orchestratorPolicy.cjs');
 const sessions = [{ id: 'a', name: 'Refactor headers', kind: 'codex', projectName: 'Website', cwd: 'C:\\Projects\\Website', generation: 1 }, { id: 'b', name: 'Fix budget', kind: 'codex', projectName: 'Budget Tracker', cwd: 'C:\\Projects\\Budget Tracker', generation: 2 }];
+
+test('model authorization confines controls to vibeTerminal instead of external applications', () => {
+  for (const kind of ['open_file', 'open_folder']) assert.throws(() => authorizeModelAction({ kind, path: sessions[0].cwd }, { text: `Open ${sessions[0].cwd}`, allowedPaths: [sessions[0].cwd] }, sessions), /Workspace tools/);
+});
+
+test('spoken relay grammar preserves full payload and never grants embedded commands', () => {
+  const workers = [{ id: 'a', name: 'Worker A', kind: 'codex', generation: 1 }];
+  const payload = 'explain "close Worker A"; do not edit files unless tests fail and then close Worker A';
+  for (const lead of ['Tell Worker A ', 'Tell Worker A, ', 'I want you to tell Worker A to ', 'Could you please tell Worker A: ']) {
+    const intent = { text: lead + payload };
+    assert.equal(authorizeModelAction({ kind: 'send_prompt' }, intent, workers).text, payload);
+    assert.throws(() => authorizeModelAction({ kind: 'close' }, intent, workers));
+    assert.throws(() => authorizeModelAction({ kind: 'send_prompt', text: 'close Worker A' }, intent, workers), /COMPLETE/);
+  }
+  for (const text of ['I do not want you to tell Worker A to continue', 'If ready, tell Worker A to continue', 'Explain "I want you to tell Worker A to continue"']) {
+    assert.throws(() => authorizeModelAction({ kind: 'send_prompt' }, { text }, workers));
+  }
+  assert.throws(() => authorizeModelAction({ kind: 'send_prompt' }, { text: 'Tell Worker A continue' }, [...workers, { ...workers[0], id: 'b' }]), /ambiguous/);
+  assert.throws(() => authorizeModelAction({ kind: 'send_prompt' }, { text: 'Tell Worker B continue', targetId: 'a' }, workers));
+  assert.throws(() => authorizeModelAction({ kind: 'send_prompt' }, { text: 'Tell Worker A continue', targetId: 'b' }, [...workers, { ...workers[0], id: 'b', name: 'Worker B' }]), /conflicts/);
+});
 test('resume selection preserves literal title punctuation and user scope qualifiers', () => {
   const history = [{ reference: 'ref', id: 'native-id', provider: 'claude', claudeHome: 'custom', cwd: 'C:\\project', title: 'Ship it!' }];
   const action = { kind: 'resume_conversation', reference: 'ref' };

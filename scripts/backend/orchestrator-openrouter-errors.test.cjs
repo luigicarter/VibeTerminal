@@ -38,7 +38,7 @@ test('transport failures distinguish network, timeout and user cancellation', ()
 function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-upstream-errors-')); const events = [];
   let fail, chat;
-  const instance = createOrchestrator({ userDataPath: dir, onUpstreamError: e => events.push(e), getSessions: async () => [{ id: 's', generation: 1, status: 'running' }], fetch: async (url, options) => {
+  const instance = createOrchestrator({ userDataPath: dir, onUpstreamError: e => events.push(e), readSession: async () => ({ text: 'working' }), getSessions: async () => [{ id: 's', generation: 1, status: 'running' }], fetch: async (url, options) => {
     if (fail) return fail(url, options);
     if (url.endsWith('/key')) return response(200, { data: {} });
     if (url.includes('/models')) return response(200, { data: [{ id: 'brain', supported_parameters: ['tools'] }] });
@@ -57,13 +57,13 @@ test('voice and text failures preserve error string and emit exactly once', asyn
   assert.equal(f.events.length, 2); assert.ok(!JSON.stringify(f.events).includes('SECRET'));
 });
 test('monitor failure notifies once', async t => {
-  const f = fixture(t); await f.ready(); await f.instance.refresh({ monitor: true });
+  const f = fixture(t); await f.ready(); await f.instance.configure({ monitoringEnabled: true }); await f.instance.refresh({ monitor: true });
   assert.equal(f.events.length, 1); assert.equal(f.events[0].origin, 'monitor');
 });
 test('models and connection failures notify, missing key remains local', async t => {
   const f = fixture(t);
   assert.equal((await f.instance.testConnection()).ok, false);
-  await assert.rejects(f.instance.models()); assert.equal(f.events.length, 0);
+  assert.equal((await f.instance.models()).length, 1); assert.equal(f.events.length, 0);
   await f.ready(); f.fail(() => response(401, { error: { code: 401 } }));
   assert.equal((await f.instance.testConnection()).upstreamError.category, 'auth');
   await assert.rejects(f.instance.models('speech')); assert.equal(f.events.length, 2);

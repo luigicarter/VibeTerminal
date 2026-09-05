@@ -59,7 +59,7 @@ test('local context refusal never reports an upstream credit failure', async t =
   assert.equal(result.ok, false); assert.match(result.error, /Local context limit/); assert.equal(f.events.length, 0); assert.equal(f.bodies.length, 0);
 });
 test('billing monitor pause survives unsuccessful retry and resumes after manual success', async t => {
-  const f = fixture(t); await f.ready();
+  const f = fixture(t); await f.ready(); await f.instance.configure({ monitoringEnabled: true });
   f.handle(() => json({ error: { code: 402 } }, 402)); await f.instance.refresh({ monitor: true });
   assert.equal(f.instance.getState().monitoringPaused, true); f.advance(); await f.instance.refresh({ monitor: true }); assert.equal(f.bodies.length, 1);
   f.handle(() => json({ error: { code: 503 } }, 503)); await f.instance.send({ text: 'Retry', origin: 'text' });

@@ -41,3 +41,36 @@ test('mute cancels native helper startup and cannot reactivate voice later', asy
   const startup = voice.setListening(true); await wait(5); await voice.setListening(false); await startup;
   assert.equal(voice.getState().listening, false); assert.equal(voice.getState().phase, 'off'); voice.dispose();
 });
+
+test('microphone failure while native startup rejects is returned as failure', async t => {
+  let rejectStartup, startupDisposed = 0;
+  const pending = new Promise((_resolve, reject) => { rejectStartup = reject; });
+  pending.dispose = () => { startupDisposed++; rejectStartup(Error('cancelled')); };
+  const voice = createVoiceController({ orchestrator: { getState: () => ({ enabled: true }) }, getKey: () => 'fixture', keywordFactory: () => pending });
+  t.after(() => voice.dispose());
+  const startup = voice.setListening(true); await wait(0);
+  voice.configure({ microphoneError: 'Microphone permission denied' });
+  const result = await startup;
+  assert.equal(result.ok, false); assert.equal(result.status, 'microphone-error'); assert.equal(result.error, 'Microphone permission denied'); assert.equal(startupDisposed, 1); assert.equal(voice.getState().listening, false);
+});
+
+test('missing wake assets explicitly reports degraded manual-only availability', async t => {
+  const voice = createVoiceController({ orchestrator: { getState: () => ({ enabled: true }) }, getKey: () => 'fixture', keywordFactory: () => { throw Error('missing assets'); } });
+  t.after(() => voice.dispose());
+  const result = await voice.setListening(true);
+  assert.equal(result.ok, true); assert.equal(result.status, 'manual-only'); assert.equal(result.wakeReady, false); assert.match(result.error, /Hey Vibe is unavailable/);
+  assert.equal(voice.getState().listening, true); assert.equal(voice.configure({ manual: true }).ok, true);
+});
+
+test('repeated enables retire stale startup and reuse the ready wake helper', async t => {
+  let oldResolve, calls = 0, disposedOld = 0, disposedNew = 0;
+  const old = new Promise(resolve => { oldResolve = resolve; });
+  const voice = createVoiceController({ orchestrator: { getState: () => ({ enabled: true }) }, getKey: () => 'fixture', keywordFactory: () => ++calls === 1 ? old : { reset() {}, dispose() { disposedNew++; } } });
+  t.after(() => voice.dispose());
+  const first = voice.setListening(true); await wait(0);
+  assert.equal((await voice.setListening(true)).wakeReady, true);
+  oldResolve({ dispose() { disposedOld++; } }); assert.equal((await first).status, 'cancelled');
+  voice.configure({ manual: true }); assert.equal((await voice.setListening(true)).wakeReady, true);
+  assert.equal(voice.getState().phase, 'recording'); assert.equal(calls, 2); assert.equal(disposedOld, 1); assert.equal(disposedNew, 0);
+  await voice.setListening(false); assert.equal(disposedNew, 1);
+});

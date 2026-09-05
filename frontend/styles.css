@@ -827,11 +827,26 @@ button {
 }
 
 .workspace {
+  grid-column: 2;
+  grid-row: 1;
   display: flex;
   min-width: 0;
   min-height: 0;
   flex-direction: column;
 }
+
+.workspace.workspace-covered { visibility: hidden; pointer-events: none; }
+.orchestrator-view-host { grid-column: 2; grid-row: 1; position: relative; z-index: 2; min-width: 0; min-height: 0; }
+.orchestrator-view-host > .orchestrator-dashboard { position: absolute; inset: 0; }
+.orchestrator-nav-button {
+  display: flex; align-items: center; gap: 11px; width: 100%; min-height: 44px;
+  flex-shrink: 0; padding: 11px 14px; border: 1px solid var(--border-hairline);
+  border-radius: 8px; background: transparent; color: var(--text-secondary); text-align: left; cursor: pointer;
+}
+.orchestrator-nav-button:hover { background: var(--bg-element-hover); color: var(--text-primary); }
+.orchestrator-nav-button.active { background: #173735; border-color: #2c5752; color: #e4f5f2; }
+.orchestrator-nav-button svg { color: #77bfb3; flex-shrink: 0; }
+.orchestrator-nav-button:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 2px; }
 
 .topbar {
   display: flex;
@@ -4234,18 +4249,38 @@ button {
   background:#ec968e;
   color:#ec968e;
 }
+.sidebar-footer {
+  flex-shrink:0;
+  margin-top:auto;
+  border-top:1px solid var(--border-hairline);
+  padding-top:8px;
+}
 .workspace-settings-button {
   display:flex;
   align-items:center;
-  gap:9px;
-  border:1px solid var(--border-hairline);
+  justify-content:flex-start;
+  gap:10px;
+  width:100%;
+  min-height:40px;
+  border:1px solid transparent;
   border-radius:7px;
-  padding:10px;
-  background:var(--bg-panel);
+  padding:9px 12px;
+  background:transparent;
   color:var(--text-secondary);
+  font-family:inherit;
+  font-size:13px;
+  font-weight:500;
+  line-height:1.4;
+  text-align:left;
+  cursor:pointer;
 }
-.workspace-settings-button svg:last-child {
-  margin-left:auto;
+.workspace-settings-button svg {
+  flex-shrink:0;
+  color:var(--text-muted);
+}
+.workspace-settings-button:focus-visible {
+  outline:2px solid var(--border-focus);
+  outline-offset:-2px;
 }
 .nav-note {
   padding:4px 10px;

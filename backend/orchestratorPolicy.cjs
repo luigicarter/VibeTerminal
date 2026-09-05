@@ -13,7 +13,7 @@ const INTENT = {
   remember_preference: /^remember\b/i,
   forget_preference: /^forget\b/i,
 };
-const stripPlease = text => text.trim().replace(/^(?:(?:can|could|would) you\s+)?(?:please\s+)?/i, '');
+const stripPlease = text => text.trim().replace(/^(?:(?:(?:can|could|would) you|I want you to)\s+)?(?:please\s+)?/i, '');
 function commandClauses(text) {
   let quote = '', masked = '';
   for (let i = 0; i < text.length; i++) { const ch = text[i]; if (quote) { if (ch === quote && text[i - 1] !== '\\') quote = ''; masked += ' '; } else if ((ch === '"' || ch === "'") && !(ch === "'" && /\w/.test(text[i - 1] || '') && /\w/.test(text[i + 1] || ''))) { quote = ch; masked += ' '; } else masked += ch; }
@@ -36,7 +36,7 @@ function resolveTarget(clause, intent, sessions) {
     const bound = intent.conversationTarget;
     const session = sessions.find(s => s.id === (intent.targetId || bound?.id));
     if (!session || !bound || session.id !== bound.id || session.generation !== bound.generation) throw new Error('The prior target is unavailable or has restarted. Identify the session again.');
-    return { session, remainder: addressed.slice(pronoun[0].length) };
+    return { session, remainder: addressed.slice(pronoun[0].length), explicit: true };
   }
   const candidates = [];
   for (const session of sessions) {
@@ -45,8 +45,8 @@ function resolveTarget(clause, intent, sessions) {
     const length = Math.max(0, ...labels.map(label => prefixLength(addressed, label))); if (length) candidates.push({ session, length });
   }
   const longest = Math.max(0, ...candidates.map(c => c.length)); const matched = candidates.filter(c => c.length === longest);
-  if (intent.targetId) { const selected = sessions.find(s => s.id === intent.targetId); if (!selected) throw new Error('Unknown selected session.'); const explicit = matched.find(c => c.session.id === selected.id); return { session: selected, remainder: explicit ? addressed.slice(explicit.length) : addressed }; }
-  if (matched.length !== 1) throw new Error('The target is ambiguous or was not identified. Specify one session and project.'); return { session: matched[0].session, remainder: addressed.slice(longest) };
+  if (intent.targetId) { const selected = sessions.find(s => s.id === intent.targetId); if (!selected) throw new Error('Unknown selected session.'); if (matched.length && (matched.length !== 1 || matched[0].session.id !== selected.id)) throw new Error('The named target conflicts with the selected session or is ambiguous.'); const explicit = matched.find(c => c.session.id === selected.id); return { session: selected, remainder: explicit ? addressed.slice(explicit.length) : addressed, explicit: Boolean(explicit) }; }
+  if (matched.length !== 1) throw new Error('The target is ambiguous or was not identified. Specify one session and project.'); return { session: matched[0].session, remainder: addressed.slice(longest), explicit: true };
 }
 function identifyReadTarget(intent, sessions) {
   if (intent.targetId) { const selected = sessions.find(s => s.id === intent.targetId); return selected && (!intent.conversationTarget || selected.generation === intent.conversationTarget.generation) ? selected : null; }
@@ -62,14 +62,15 @@ function identifyReadTarget(intent, sessions) {
   if (selected.length || !/\b(it|that terminal|that session|that agent)\b/i.test(intent.text)) return null;
   const bound = intent.conversationTarget; return sessions.find(s => s.id === bound?.id && s.generation === bound.generation) || null;
 }
-function relayPayload(remainder) {
+function relayPayload(remainder, allowBare = false) {
   let value = remainder.trim();
-  if (value.startsWith(':')) value = value.slice(1).trim(); else if (/^to\s+/i.test(value)) value = value.replace(/^to\s+/i, '');
-  else if (!(value.startsWith('"') || value.startsWith("'"))) throw new Error('Use a colon, quoted payload, or target followed by “to” to identify the complete relay text.');
+  if (value.startsWith(':') || value.startsWith(',')) value = value.slice(1).trim(); else if (/^to\s+/i.test(value)) value = value.replace(/^to\s+/i, '');
+  if (!allowBare && !/^(?:[:,]|to\s+|[\"'])/i.test(remainder.trim())) throw new Error('Identify the target explicitly or use a colon or quoted payload for the selected session.');
   if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
   if (!value.trim()) throw new Error('A complete relay payload is required.'); return value;
 }
 function authorizeModelAction(action, intent, sessions) {
+  if (['open_file', 'open_folder'].includes(action.kind)) throw new Error('Use Workspace tools to open files or folders in an external application. Voice controls stay inside vibeTerminal.');
   const clauses = commandClauses(intent.text);
   const candidates = clauses.filter(c => INTENT[action.kind]?.test(c.syntax));
   if (!candidates.length) throw new Error('This action needs an explicit user instruction.');
@@ -94,7 +95,7 @@ function authorizeModelAction(action, intent, sessions) {
       if (['focus_session', 'stage_draft', 'send_prompt', 'interrupt', 'restart', 'close'].includes(action.kind)) {
         const resolved = resolveTarget(clause, intent, sessions); const session = resolved.session;
         if (action.targetId && action.targetId !== session.id) throw new Error('The model selected a different target than the user.'); result.targetId = session.id; result.target = { id: session.id, generation: session.generation };
-        if (['stage_draft', 'send_prompt'].includes(action.kind)) { payload = relayPayload(resolved.remainder); if (action.text !== undefined && action.text !== payload) throw new Error('Relay text must equal the COMPLETE user payload, including all qualifiers.'); result.text = payload; }
+        if (['stage_draft', 'send_prompt'].includes(action.kind)) { payload = relayPayload(resolved.remainder, resolved.explicit); if (action.text !== undefined && action.text !== payload) throw new Error('Relay text must equal the COMPLETE user payload, including all qualifiers.'); result.text = payload; }
       }
       // Negation inside the full relayed payload is preserved; negation in action clauses denies effects.
       const controlText = payload === undefined ? (action.kind === 'create_session' ? clause.syntax.split(/\b(?:with (?:the )?prompt|and (?:tell|ask) (?:it|them))\b/i)[0] : clause.syntax) : clause.text.slice(0, clause.text.indexOf(payload));

@@ -9,7 +9,7 @@ const { createVoiceController } = require('../../backend/voiceController.cjs');
 const { matchAnswer, questionSpeech } = require('../../backend/voiceAnswers.cjs');
 const { tokenizeBpe } = require('../dev/prepare-voice-model.cjs');
 const tick = () => new Promise(resolve => setImmediate(resolve));
-function pcmResponse(chunks = [[0, 128, 255], [127, 0, 0]]) { return { ok: true, headers: new Headers({ 'Content-Type': 'audio/pcm' }), body: (async function* () { for (const chunk of chunks) yield Uint8Array.from(chunk); })() }; }
+function pcmResponse(chunks = [[0, 128, 255], [127, 0, 0]]) { const pcm = Buffer.from(chunks.flat()); const wav = wavFromSamples(Array(pcm.length / 2).fill(0), 24000); pcm.copy(wav, 44); return { ok: true, headers: new Headers({ 'Content-Type': 'audio/wav' }), body: (async function* () { yield wav.subarray(0, 23); yield wav.subarray(23); })() }; }
 function fixture(overrides = {}) {
   const events = [], audio = [], calls = [], dispatched = [], sent = [], usage = [];
   const relayState = { enabled: true };
@@ -52,7 +52,7 @@ test('PCM boundaries preserve signed samples and text requests remain silent', a
   assert.equal(shouldSpeak({ origin: 'text' }), false); assert.equal(shouldSpeak({ kind: 'interaction' }), true);
   const f = fixture(); await f.controller.setListening(true); await f.controller.speak({ text: 'text answer', origin: 'text' }); assert.equal(f.calls.length, 0);
   await f.controller.speak({ text: 'voice answer', origin: 'voice' }); assert.equal(f.calls.length, 1);
-  assert.equal(JSON.parse(f.calls[0].options.body).response_format, 'pcm'); assert.deepEqual(f.audio.map(c => c.sequence), [0, 1, 2]);
+  assert.equal(JSON.parse(f.calls[0].options.body).response_format, 'wav'); assert.deepEqual(f.audio.map(c => c.sequence), [0, 1]);
   assert.deepEqual(f.audio.flatMap(c => c.data), [0, 128, 255, 127, 0, 0]); assert.equal(f.controller.getState().phase, 'listening'); f.controller.dispose();
 });
 test('cancellation discards late transcription and late stream audio', async () => {
@@ -159,7 +159,7 @@ test('spending cap blocks audio requests and upstream errors never expose the ke
   await limited.controller.speak({ text: 'Hello', origin: 'voice' }); assert.equal(limited.calls.length, 0); limited.controller.dispose();
   const f = fixture({ fetch: async () => { throw Error('test-key-never-sent refused'); } }); await f.controller.setListening(true);
   await f.controller.sendAudio({ audioBase64: wavFromSamples([1, 1, 1]).toString('base64') });
-  assert.equal(f.controller.getState().error, 'Could not reach OpenRouter. Check your connection and try again.');
+  assert.equal(f.controller.getState().errorOperation, 'transcription'); assert.equal(f.controller.getState().phase, 'listening');
   assert(!JSON.stringify(f.events).includes('test-key-never-sent')); f.controller.dispose();
 });
 test('unverified speech models cannot produce incorrectly sampled playback', async () => {
@@ -172,7 +172,7 @@ test('pinned BPE generation agrees with upstream keyword examples and custom Hey
 });
 test('renderer schedules out-of-order chunks correctly and rejects cancelled late chunks', async () => {
   const scheduled = [];
-  class Context { currentTime = 0; destination = {}; resume() { return Promise.resolve(); } close() { return Promise.resolve(); } createBuffer(_channels, length, rate) { return { duration: length / rate, copyToChannel(samples) { this.samples = [...samples]; } }; } createBufferSource() { const source = { connect() {}, disconnect() {}, stop() {}, start(at) { scheduled.push({ at, samples: source.buffer.samples }); } }; return source; } }
+  class Context { currentTime = 0; destination = {}; resume() { return Promise.resolve(); } close() { return Promise.resolve(); } createBuffer(_channels, length, rate) { return { length, duration: length / rate, copyToChannel(samples) { this.samples = [...samples]; } }; } createBufferSource() { const source = { connect() {}, disconnect() {}, stop() {}, start(at) { scheduled.push({ at, samples: source.buffer.samples }); } }; return source; } }
   const exports = {}; const source = ts.transpileModule(fs.readFileSync(path.resolve(__dirname, '../../frontend/voice/pcmPlayer.ts'), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   vm.runInNewContext(source, { exports, AudioContext: Context, setTimeout, clearTimeout, Float32Array, Map, Set });
   const player = new exports.PcmPlayer(() => {}, error => { throw Error(error); });

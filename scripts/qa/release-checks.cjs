@@ -14,7 +14,9 @@ const checks = [
   'smoke:frontend:cwd-conflicts', 'smoke:frontend:terminal-runtime', 'smoke:frontend:app-runtime',
   'smoke:frontend:session-persistence', 'smoke:frontend:terminal-output',
   'smoke:frontend:workspace-setups', 'smoke:frontend:orchestrator-history',
-  'smoke:frontend:workspace-dock', 'smoke:frontend:conversation-pages', 'test:orchestrator'
+  'smoke:frontend:workspace-dock', 'smoke:frontend:conversation-pages',
+  'smoke:frontend:voice-experience', 'smoke:frontend:orchestrator-dashboard',
+  'smoke:frontend:session-recency', 'test:orchestrator'
 ];
 if (require.main === module) {
   for (const script of checks) {

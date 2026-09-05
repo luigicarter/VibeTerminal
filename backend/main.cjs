@@ -6,6 +6,7 @@ const {
   dialog,
   ipcMain,
   safeStorage,
+  systemPreferences,
   screen,
   shell
 } = require("electron");
@@ -1892,7 +1893,7 @@ app.whenReady().then(() => {
   refreshInstalledClis();
   createMainWindow();
   const { installOrchestrator } = require("./orchestratorIntegration.cjs");
-  orchestratorIntegration = installOrchestrator({ app, BrowserWindow, ipcMain, screen, shell, safeStorage,
+  orchestratorIntegration = installOrchestrator({ app, BrowserWindow, Menu, ipcMain, screen, shell, safeStorage, dialog, systemPreferences,
     getMainWindow: () => mainWindow, getRuntime: getTerminalRuntime,
     sendPty: sendToPtyHost, sendFusion: sendToFusionChatHost, sendOpenFusion: sendToOpenFusionChatHost,
     getTelemetry: getAgentTelemetry, getChanges: getCodeChangeSummary,

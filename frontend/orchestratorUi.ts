@@ -9,6 +9,7 @@ export interface RelaySession extends Partial<Pick<AgentSession, typeof HISTORY_
     revision?: number;
     kind: string;
     name: string;
+    conversationTitle?: string;
     cwd: string;
     projectName?: string;
     status: string;
@@ -16,7 +17,12 @@ export interface RelaySession extends Partial<Pick<AgentSession, typeof HISTORY_
     observation?: string;
     lastTool?: string;
     model?: string;
+    processState?: string;
+    agentProcessState?: string;
+    lastActivityAt?: number;
+    lastUsedAt?: number;
 }
+export interface RelayActiveTarget { id: string; generation: string; operations?: string[] }
 export interface RelayResult {
     ok: boolean;
     error?: string;
@@ -27,6 +33,7 @@ export interface RelayState {
     enabled: boolean;
     ready: boolean;
     busy: boolean;
+    activeTargets?: RelayActiveTarget[];
     phase: string;
     error?: string;
     settings: {
@@ -37,6 +44,8 @@ export interface RelayState {
         voice?: string;
         language?: string;
         monitoringIntervalSeconds?: number;
+        monitoringEnabled?: boolean;
+        enabledOnLaunch?: boolean;
         spendingLimit?: number;
         microphoneId?: string;
     };
@@ -46,6 +55,7 @@ export interface RelayState {
         role: string;
         text: string;
         at: number;
+        origin?: string;
     }[];
     receipts: {
         id: string;
@@ -82,6 +92,7 @@ export interface RelayApi {
         id: string;
         name?: string;
         label?: string;
+        voices?: { id: string; name: string }[];
     }[]>;
     testConnection(): Promise<RelayResult>;
     setEnabled(enabled: boolean): Promise<RelayResult>;
