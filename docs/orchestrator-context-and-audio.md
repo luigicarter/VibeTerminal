@@ -19,6 +19,20 @@ terminal's existing user-facing output retention.
   **Jump to match** and **Latest**. Loaded messages and accumulated search
   matches remain available independently of the model's context window.
 
+The selected History chat checks local provider history about once a second
+while the view is open and the document is visible. At the bottom, new saved
+messages appear automatically. Scrolling up, loading earlier messages or jumping
+to a search result preserves that snapshot and position; **Conversation updated**
+offers a return to the latest messages. **Latest** resumes following new messages.
+This reflects messages as the provider saves them, rather than unsaved streaming
+tokens. No model or speech request is needed to refresh History.
+
+Refresh reads a fresh source revision and keeps existing content visible until
+the replacement is ready. It does not merge fragments from different revisions.
+Selection changes, explicit reads, visibility changes and closing the view
+invalidate late refresh results. Cursors and search matches tied to a previous
+revision are discarded when a new snapshot is displayed.
+
 Every brain/monitor request passes a serialized UTF-8 byte guard. The model's
 advertised context length reserves output and protocol space; an application
 ceiling of 48,000 input bytes applies. This is deliberately conservative, not an
@@ -73,6 +87,14 @@ monitoring until successful explicit validation; other failures back off. Model
 configuration, speech, and microphone readiness are separate checks.
 
 ## Verification
+
+The v0.1.89 live History follow-up passes all 37 release checks, including the
+289 backend tests and deterministic refresh/pagination/visibility race checks.
+Isolated Electron QA at `.tmp/history-live-smoke/1788651527561-52252/` appended
+and edited a real fixture rollout while History stayed open, reconstructed
+54,029 Unicode characters, preserved the browsing scroll position, and verified
+that closing the view stopped reads. No provider request or voice activation
+occurred. The parent inspected the code, assertions, artifacts and screenshot.
 
 The targeted suite passes 207 tests, including context budgets, progressive pages,
 source revisions, Unicode reconstruction, cursor rejection, error classification,

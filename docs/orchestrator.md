@@ -124,6 +124,10 @@ automatically repeated. New action targets require the captured generation.
 ### Saved conversations
 
 History searches existing provider-owned conversations in known workspace folders.
+An open History chat follows newly saved messages automatically while at the
+bottom. Reading older content preserves the view and shows an update button;
+Latest resumes following. Refresh pauses when the view is closed or hidden and
+does not require enabling Orchestrator or an API key.
 The UI supports provider/folder filters, title or ID search, pagination, transcript
 excerpts, and explicit opening. The relay uses the same service through
 `list_conversations`, `read_conversation`, and `resume_conversation`.
