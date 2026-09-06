@@ -1,5 +1,11 @@
 # Orchestrator voice deep dive (September 5, 2026)
 
+> **Superseded.** The “Hey Vibe” wake word described below was removed in favour of
+> Space push-to-talk: hold the space bar while no terminal or text field is focused,
+> release to send. The native keyword spotter, its model assets and its packaging
+> entries are gone with it. See [voice push-to-talk](voice-push-to-talk.md). The rest
+> of this file is kept as history of how the wake-word build behaved.
+
 Troubleshooting pass over the Hey Vibe voice feature after two repair releases (0.1.87 "repair voice lifecycle", 0.1.88 "repair spoken replies and missed-speech feedback") still left two complaints: turns kept failing, and "the voice is very robotic". This document records how the pipeline actually behaves on a real machine, which root causes were found with evidence, what was ruled out, what changed, and what remains unverified. `docs/orchestrator-voice-fixes.md` and `docs/orchestrator-context-and-audio.md` describe the feature as designed; this file describes what was measured.
 
 ## Method

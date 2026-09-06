@@ -91,7 +91,7 @@ const rows = file => fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim().
   await until(() => voice.eval("Boolean(document.querySelector('.voice-overlay'))"), 'voice DOM');
   await voice.eval(`(()=>{window.__packets=[];window.__audioStarts=0;window.__micRequests=0;Object.defineProperty(navigator.mediaDevices,'getUserMedia',{value:()=>{window.__micRequests++;return new Promise(()=>{})}});const original=AudioContext.prototype.createBufferSource;AudioContext.prototype.createBufferSource=function(){const source=original.call(this),connect=source.connect.bind(source),start=source.start.bind(source),gain=this.createGain();gain.gain.value=0;gain.connect(this.destination);source.connect=()=>connect(gain);source.start=(...args)=>{window.__audioStarts++;return start(...args)};return source};window.vibe.voice.onAudio(c=>window.__packets.push({local:c.local,sampleRate:c.sampleRate,dataLen:c.data.length,replyId:c.replyId,done:c.done,cancelled:c.cancelled}));})()`);
   assert.equal((await voice.eval('window.vibe.voice.setListening(true)')).ok, true);
-  await until(() => voice.eval("window.vibe.voice.getState().then(s=>s.listening&&['listening','wake-error'].includes(s.phase))"), 'voice enabled');
+  await until(() => voice.eval("window.vibe.voice.getState().then(s=>s.listening&&s.phase==='listening')"), 'voice enabled');
   const failed = await cdp.eval("window.vibe.orchestrator.send({text:'Please summarize the current workspace.',origin:'text'})");
   assert.equal(failed.ok, false);
   assert.equal(failed.upstreamError?.category, 'credits');

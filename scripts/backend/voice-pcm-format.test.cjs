@@ -102,11 +102,11 @@ test('benign content-type variations decode instead of failing the whole reply',
   }
 });
 
-test('a short command wholly in wake pre-roll is measured separately and retains all samples', () => {
+test('a short command wholly in the pre-roll ring is measured separately and retains all samples', () => {
   const speech = new Float32Array(RATE).fill(0.1);
   const trailingSilence = new Float32Array(RATE * 0.4);
   const recording = createRecording({ preRoll: [speech, trailingSilence] });
-  // Pre-roll is wake audio the speaker has already finished, so it cannot endpoint the
+  // Pre-roll is audio the speaker has already finished, so it cannot endpoint the
   // capture. Its voiced duration is still reported, because a second of it is a command
   // the caller must upload rather than discard.
   assert.equal(recording.preRollVoicedMs, 1000);
@@ -119,7 +119,7 @@ test('a short command wholly in wake pre-roll is measured separately and retains
   assert(result.subarray(speech.length).every(sample => sample === 0));
 });
 
-test('wake pre-roll is retained whole while only live audio endpoints the recording', () => {
+test('pre-roll is retained whole while only live audio endpoints the recording', () => {
   const speech = new Float32Array(RATE * 0.4).fill(0.1);
   const trailingSilence = new Float32Array(RATE * 0.4);
   const recording = createRecording({ preRoll: [speech, trailingSilence] });
@@ -136,13 +136,13 @@ test('wake pre-roll is retained whole while only live audio endpoints the record
   assert(result.subarray(speech.length, RATE * 1.3).every(sample => sample === 0));
 });
 
-test('a wake-only pre-roll waits for the speaker while a silent pre-roll still cancels', () => {
-  // Endpointing cannot distinguish a wake phrase from a command; transcription does.
-  // Because it cannot, the pause after the wake word must not end the capture.
-  const wake = createRecording({ preRoll: [new Float32Array(RATE * 0.3).fill(0.1)] });
-  assert.equal(wake.push(new Float32Array(RATE * 0.9)), 'recording');
-  assert.equal(wake.voicedMs, 0);
-  assert.equal(wake.finish().length, RATE * 1.2);
+test('a voiced pre-roll waits for the speaker while a silent pre-roll still cancels', () => {
+  // Endpointing cannot tell a stray word in the ring from a command; transcription does.
+  // Because it cannot, the pause after the ring must not end the capture.
+  const ring = createRecording({ preRoll: [new Float32Array(RATE * 0.3).fill(0.1)] });
+  assert.equal(ring.push(new Float32Array(RATE * 0.9)), 'recording');
+  assert.equal(ring.voicedMs, 0);
+  assert.equal(ring.finish().length, RATE * 1.2);
   const silent = createRecording({ preRoll: [new Float32Array(RATE)] });
   assert.equal(silent.push(new Float32Array(RATE * 6)), 'silence');
   assert.equal(silent.voicedMs, 0);

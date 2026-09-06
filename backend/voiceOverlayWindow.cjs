@@ -44,8 +44,8 @@ function createVoiceOverlayWindow({ BrowserWindow, screen, canCapture = () => fa
       window = null; ready = false; finish(new Error('Voice audio window closed.')); onClosed();
     });
     current.webContents.on('render-process-gone', () => {
-      ready = false; finish(new Error('Voice audio stopped. Turn Hey Vibe off and on to retry.'));
-      current.destroy(); onFailure('Voice audio stopped. Turn Hey Vibe on to retry.');
+      ready = false; finish(new Error('Voice audio stopped. Turn voice off and on to retry.'));
+      current.destroy(); onFailure('Voice audio stopped. Turn voice on to retry.');
     });
     const devUrl = process.env.VITE_DEV_SERVER_URL;
     const loaded = devUrl ? current.loadURL(`${devUrl}/?surface=voice`) : current.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), { query: { surface: 'voice' } });
@@ -66,7 +66,7 @@ function createVoiceOverlayWindow({ BrowserWindow, screen, canCapture = () => fa
         // A renderer that loaded but never reported ready is never reused: without
         // this, the advertised off/on retry waits again on the same dead window.
         if (!disposed && window === current && !current.isDestroyed()) current.destroy();
-        reject(new Error('Voice audio did not start. Turn Hey Vibe off and on to retry.'));
+        reject(new Error('Voice audio did not start. Turn voice off and on to retry.'));
       }, readyTimeoutMs);
       waiting.add(entry);
     });

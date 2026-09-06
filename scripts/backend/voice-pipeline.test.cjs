@@ -7,15 +7,15 @@ const ts = require('typescript');
 const { createRecording, wavFromSamples, createPcmFramer, shouldSpeak } = require('../../backend/voiceAudio.cjs');
 const { createVoiceController } = require('../../backend/voiceController.cjs');
 const { matchAnswer, questionSpeech } = require('../../backend/voiceAnswers.cjs');
-const { tokenizeBpe } = require('../dev/prepare-voice-model.cjs');
 const tick = () => new Promise(resolve => setImmediate(resolve));
+async function until(condition, description) { for (let i = 0; i < 200; i++) { if (condition()) return; await tick(); } assert.fail(`Did not reach ${description}`); }
 function pcmResponse(chunks = [[0, 128, 255], [127, 0, 0]]) { const pcm = Buffer.from(chunks.flat()); const wav = wavFromSamples(Array(pcm.length / 2).fill(0), 24000); pcm.copy(wav, 44); return { ok: true, headers: new Headers({ 'Content-Type': 'audio/wav' }), body: (async function* () { yield wav.subarray(0, 23); yield wav.subarray(23); })() }; }
 function fixture(overrides = {}) {
   const events = [], audio = [], calls = [], dispatched = [], sent = [], usage = [];
   const relayState = { enabled: true };
   let controller;
-  const orchestrator = { getState: () => relayState, send: async data => { sent.push(data); return { ok: true }; }, dispatch: async data => { dispatched.push(data); return { ok: true }; }, recordSpeechUsage: (...args) => usage.push(args) };
-  controller = createVoiceController({ orchestrator, getKey: () => 'test-key-never-sent', getSettings: () => ({}), keywordFactory: () => ({ accept: () => true, reset() {}, dispose() {} }), emit: state => { structuredClone(state); events.push(state); }, onAudio: chunk => { audio.push(chunk); if (chunk.done && !chunk.cancelled) setImmediate(() => controller.configure({ playbackDone: chunk.replyId })); }, fetch: async (url, options) => { calls.push({ url, options }); return url.endsWith('/transcriptions') ? { ok: true, json: async () => ({ text: 'Hey Vibe, show my agents', usage: { cost: 0.002 } }) } : pcmResponse(); }, ...overrides });
+  const orchestrator = { getState: () => relayState, send: async data => { sent.push(data); return overrides.send ? overrides.send(data) : { ok: true }; }, dispatch: async data => { dispatched.push(data); return { ok: true }; }, recordSpeechUsage: (...args) => usage.push(args) };
+  controller = createVoiceController({ orchestrator, getKey: () => 'test-key-never-sent', getSettings: () => ({}), emit: state => { structuredClone(state); events.push(state); }, onAudio: chunk => { audio.push(chunk); if (chunk.done && !chunk.cancelled) setImmediate(() => controller.configure({ playbackDone: chunk.replyId })); }, fetch: async (url, options) => { calls.push({ url, options }); return url.endsWith('/transcriptions') ? { ok: true, json: async () => ({ text: 'show my agents', usage: { cost: 0.002 } }) } : pcmResponse(); }, ...overrides });
   return { controller, events, audio, calls, dispatched, sent, usage, relayState };
 }
 test('endpointing cancels silence, preserves samples, and caps continuous recordings', () => {
@@ -29,22 +29,93 @@ test('endpointing cancels silence, preserves samples, and caps continuous record
   const capped = createRecording(); for (let i = 0; i < 600; i++) state = capped.push(new Float32Array(1600).fill(0.1)); assert.equal(state, 'complete');
   const wave = wavFromSamples([-1, 0, 1]); assert.equal(wave.toString('ascii', 0, 4), 'RIFF'); assert.equal(wave.readUInt32LE(24), 16000); assert.equal(wave.readInt16LE(44), -32768); assert.equal(wave.readInt16LE(48), 32767);
 });
-test('wake and manual capture upload one in-memory WAV only after voiced endpoint', async () => {
+test('push-to-talk uploads one in-memory WAV holding the pre-roll ring and the whole hold', async () => {
   const f = fixture(); await f.controller.setListening(true);
-  f.controller.frames({ samples: Array(1600).fill(0), sampleRate: 16000 }); assert.equal(f.controller.getState().phase, 'recording');
-  for (let i = 0; i < 60; i++) f.controller.frames({ samples: Array(1600).fill(0), sampleRate: 16000 }); assert.equal(f.calls.length, 0);
-  f.controller.configure({ manual: true });
+  // Idle frames only fill the pre-roll ring; nothing is captured or uploaded.
+  for (let i = 0; i < 10; i++) f.controller.frames({ samples: Array(1600).fill(0.1), sampleRate: 16000 });
+  assert.equal(f.controller.getState().phase, 'listening'); assert.equal(f.calls.length, 0);
+  assert.equal(f.controller.configure({ pushToTalk: 'start' }).status, 'recording');
+  assert.equal(f.controller.getState().phase, 'recording');
   for (let i = 0; i < 4; i++) f.controller.frames({ samples: Array(1600).fill(0.1), sampleRate: 16000 });
-  for (let i = 0; i < 9; i++) f.controller.frames({ samples: Array(1600).fill(0), sampleRate: 16000 });
-  await tick(); assert.equal(f.calls.length, 1); const payload = JSON.parse(f.calls[0].options.body);
-  assert.equal(payload.model, 'openai/whisper-large-v3-turbo'); assert.equal(Buffer.from(payload.input_audio.data, 'base64').readUInt32LE(24), 16000);
+  for (let i = 0; i < 12; i++) f.controller.frames({ samples: Array(1600).fill(0), sampleRate: 16000 });
+  assert.equal(f.controller.getState().phase, 'recording', 'a pause never ends a held recording');
+  assert.equal(f.controller.configure({ pushToTalk: 'stop' }).status, 'sent');
+  await until(() => f.sent.length, 'relay request');
+  assert.equal(f.calls.length, 1); const payload = JSON.parse(f.calls[0].options.body);
+  assert.equal(payload.model, 'openai/whisper-large-v3-turbo');
+  const wav = Buffer.from(payload.input_audio.data, 'base64');
+  assert.equal(wav.readUInt32LE(24), 16000);
+  assert.equal((wav.length - 44) / 2, 1600 * 26, 'the ring and every held frame are uploaded');
   assert.deepEqual(f.sent, [{ text: 'show my agents', origin: 'voice' }]); assert.deepEqual(f.usage, [['transcription', 0.002]]);
   f.controller.dispose();
 });
-test('missing wake model retains working manual capture; malformed frames are rejected', async () => {
-  const f = fixture({ keywordFactory: () => { throw Error('missing'); } }); await f.controller.setListening(true);
-  assert.equal(f.controller.getState().phase, 'wake-error'); assert.equal(f.controller.configure({ manual: true }).ok, true);
-  assert.equal(f.controller.frames({ samples: [NaN], sampleRate: 16000 }).ok, false); f.controller.dispose();
+test('a hold with no speech is discarded with spoken feedback and no upload; malformed frames are rejected', async () => {
+  const f = fixture(); await f.controller.setListening(true);
+  assert.equal(f.controller.frames({ samples: [NaN], sampleRate: 16000 }).ok, false);
+  assert.equal(f.controller.configure({ pushToTalk: 'start' }).ok, true);
+  for (let i = 0; i < 2; i++) f.controller.frames({ samples: Array(1600).fill(0), sampleRate: 16000 });
+  assert.equal(f.controller.configure({ pushToTalk: 'stop' }).status, 'empty');
+  assert.equal(f.calls.length, 0, 'silence is never uploaded');
+  assert.match(f.controller.getState().reply, /didn't catch/);
+  assert(f.audio.some(chunk => chunk.local && chunk.data.length));
+  f.controller.dispose();
+});
+test('a cancelled hold uploads nothing and says nothing', async () => {
+  const f = fixture(); await f.controller.setListening(true);
+  for (let i = 0; i < 5; i++) f.controller.frames({ samples: Array(1600).fill(0.1), sampleRate: 16000 });
+  f.controller.configure({ pushToTalk: 'start' });
+  for (let i = 0; i < 3; i++) f.controller.frames({ samples: Array(1600).fill(0.1), sampleRate: 16000 });
+  assert.equal(f.controller.configure({ pushToTalk: 'cancel' }).status, 'cancelled');
+  await tick(); await tick();
+  assert.equal(f.calls.length, 0); assert.equal(f.audio.length, 0);
+  assert.equal(f.controller.getState().phase, 'listening');
+  assert.doesNotMatch(f.controller.getState().reply || '', /didn't catch/);
+  f.controller.dispose();
+});
+test('talking over a reply interrupts playback and records instead', async () => {
+  let release;
+  const f = fixture({ fetch: async url => url.endsWith('/transcriptions') ? { ok: true, json: async () => ({ text: 'stop that' }) } : new Promise(resolve => { release = resolve; }) });
+  await f.controller.setListening(true);
+  const speech = f.controller.speak({ text: 'A long spoken reply', origin: 'voice' });
+  await until(() => f.controller.getState().phase === 'speaking', 'playback');
+  assert.equal(f.controller.configure({ pushToTalk: 'start' }).status, 'recording');
+  assert.equal(f.controller.getState().phase, 'recording');
+  assert(f.audio.some(chunk => chunk.cancelled), 'the reply in flight is cut off');
+  release(pcmResponse()); assert.equal((await speech).status, 'cancelled');
+  f.controller.dispose();
+});
+test('holding to talk while a request is in flight is refused as busy', async () => {
+  let release;
+  const f = fixture({ send: () => new Promise(resolve => { release = resolve; }) });
+  await f.controller.setListening(true);
+  const pending = f.controller.sendAudio({ audioBase64: wavFromSamples(Array(1600).fill(0.1)).toString('base64'), format: 'wav' });
+  await until(() => f.controller.getState().phase === 'thinking', 'relay request');
+  const refused = f.controller.configure({ pushToTalk: 'start' });
+  assert.equal(refused.ok, false); assert.equal(refused.status, 'busy');
+  assert.equal(f.controller.getState().phase, 'thinking');
+  release({ ok: true }); await pending; f.controller.dispose();
+});
+test('the maximum recording length ends a held turn and uploads it', async () => {
+  const f = fixture({ recordingOptions: { maxMs: 500 } }); await f.controller.setListening(true);
+  f.controller.configure({ pushToTalk: 'start' });
+  for (let i = 0; i < 5; i++) f.controller.frames({ samples: Array(1600).fill(0.1), sampleRate: 16000 });
+  assert.equal(f.controller.getState().phase, 'transcribing', 'the cap ends the turn even while the key is held');
+  await until(() => f.calls.length, 'transcription request');
+  assert.equal((Buffer.from(JSON.parse(f.calls[0].options.body).input_audio.data, 'base64').length - 44) / 2, 1600 * 5);
+  f.controller.dispose();
+});
+test('an answer given by holding to talk is matched and dispatched, not sent to the brain', async () => {
+  const f = fixture({ fetch: async url => url.endsWith('/transcriptions') ? { ok: true, json: async () => ({ text: 'one' }) } : pcmResponse() });
+  const interaction = { id: 'req', sessionId: 'pane', generation: 1, revision: 1, state: 'pending', kind: 'question', questions: [{ id: 'color', question: 'Which color?', options: [{ label: 'Red' }, { label: 'Blue' }] }] };
+  await f.controller.setListening(true); f.relayState.requests = [interaction];
+  await f.controller.announceInteraction(interaction);
+  assert.equal(f.controller.getState().phase, 'awaiting-answer');
+  assert.equal(f.controller.configure({ pushToTalk: 'start' }).status, 'recording');
+  for (let i = 0; i < 4; i++) f.controller.frames({ samples: Array(1600).fill(0.1), sampleRate: 16000 });
+  assert.equal(f.controller.configure({ pushToTalk: 'stop' }).status, 'sent');
+  await until(() => f.dispatched.length, 'answer dispatch');
+  assert.deepEqual(f.dispatched[0].answers, { color: 'Red' }); assert.equal(f.sent.length, 0);
+  f.controller.dispose();
 });
 test('PCM boundaries preserve signed samples and text requests remain silent', async () => {
   const framer = createPcmFramer(); const bytes = Buffer.concat([framer.push([0, 128, 255]), framer.push([127, 0, 0])]); framer.finish();
@@ -99,31 +170,22 @@ test('an empty answer asks the pending question again and preserves answer routi
   f.controller.dispose();
 });
 
-test('a command already in the wake buffer is transcribed and wake-only input gets spoken feedback', async () => {
-  let frames = 0;
-  const f = fixture({ keywordFactory: () => ({ accept: () => ++frames === 9, reset() {}, dispose() {} }) });
+test('a hold whose speech is only in the pre-roll ring is still uploaded', async () => {
+  const f = fixture();
   await f.controller.setListening(true);
+  // The user spoke, then pressed: the words live in the ring, and the live hold is quiet.
   for (let i = 0; i < 9; i++) f.controller.frames({ samples: Array(1600).fill(.1), sampleRate: 16000 });
-  // Said in one breath, the command is already in the wake buffer and no live speech is
-  // left to endpoint. After the initial-silence grace it is uploaded, not discarded:
-  // transcription decides whether it was a command or a bare wake phrase.
+  f.controller.configure({ pushToTalk: 'start' });
   for (let i = 0; i < 60; i++) f.controller.frames({ samples: Array(1600).fill(0), sampleRate: 16000 });
-  await tick();
+  assert.equal(f.controller.getState().phase, 'recording');
+  f.controller.configure({ pushToTalk: 'stop' });
+  await until(() => f.sent.length, 'relay request');
   assert.equal(f.calls.length, 1); assert.match(f.calls[0].url, /\/audio\/transcriptions$/);
-  assert.equal(f.sent.length, 1); assert.equal(f.sent[0].text, 'show my agents');
+  assert.equal(f.sent[0].text, 'show my agents');
   assert.equal(f.audio.some(chunk => chunk.local), false);
   assert.doesNotMatch(f.controller.getState().reply || '', /didn't catch/);
   const wav = Buffer.from(JSON.parse(f.calls[0].options.body).input_audio.data, 'base64');
   assert.equal((wav.length - 44) / 2, 1600 * 69); assert(wav.readInt16LE(44) > 0); f.controller.dispose();
-
-  const g = fixture({ fetch: async () => ({ ok: true, json: async () => ({ text: 'Hey Vibe!' }) }) });
-  await g.controller.setListening(true);
-  g.controller.frames({ samples: Array(4800).fill(.1), sampleRate: 16000 });
-  for (let i = 0; i < 3; i++) g.controller.frames({ samples: Array(1600).fill(.1), sampleRate: 16000 });
-  for (let i = 0; i < 9; i++) g.controller.frames({ samples: Array(1600).fill(0), sampleRate: 16000 });
-  await tick(); await tick();
-  assert.equal(g.sent.length, 0); assert.match(g.controller.getState().reply, /didn't catch/);
-  assert(g.audio.some(chunk => chunk.local && chunk.data.length)); g.controller.dispose();
 });
 test('resolved announcement is discarded and does not reopen answer capture after cancellation', async () => {
   const f = fixture(); await f.controller.setListening(true);
@@ -209,10 +271,6 @@ test('spending cap blocks audio requests and upstream errors never expose the ke
 test('unverified speech models cannot produce incorrectly sampled playback', async () => {
   const f = fixture({ getSettings: () => ({ ttsModel: 'unverified/tts' }) }); await f.controller.setListening(true);
   const result = await f.controller.speak({ text: 'Hello', origin: 'voice' }); assert.equal(result.ok, false); assert.match(result.error, /currently supports/); assert.equal(f.calls.length, 0); f.controller.dispose();
-});
-test('pinned BPE generation agrees with upstream keyword examples and custom Hey Vibe', () => {
-  const model = fs.readFileSync(path.resolve(__dirname, '../../vendor/voice/bpe.model'));
-  assert.equal(tokenizeBpe(model, 'HEY SIRI').join(' '), '▁HE Y ▁S I RI'); assert.equal(tokenizeBpe(model, 'HEY VIBE').join(' '), '▁HE Y ▁VI B E');
 });
 test('renderer schedules out-of-order chunks correctly and rejects cancelled late chunks', async () => {
   const scheduled = [];

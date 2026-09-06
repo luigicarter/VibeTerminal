@@ -15,11 +15,13 @@ For the reading/voice follow-up, see [progressive context and local error audio]
 1. Open **Workspace settings → Orchestrator & voice**.
 2. Enter an OpenRouter API key and the assistant model name.
 3. Turn on **Enable Orchestrator**. This saves and validates the current entries,
-   starts the microphone and local wake detector, and shows a small glowing mic.
+   opens the microphone, and shows a small glowing mic.
    On first use, a native vibeTerminal dialog asks **Allow microphone / Not now**
    before capture begins. Allow is remembered; Windows privacy controls still apply.
-4. Say **Hey Vibe**, then speak your request. The assistant returns to wake
-   listening after its reply. Use the Orchestrator switch to turn it off.
+4. **Hold the space bar** and speak your request, then release to send it. Space is
+   ignored while a terminal pane or a text field has focus. The assistant goes back
+   to waiting after its reply. Use the Orchestrator switch to turn it off.
+   See [voice push-to-talk](voice-push-to-talk.md) for the full gesture.
 
 A saved key is greyed out with a **Change** button. No separate Save/Test sequence
 is required. Public model browsing works before a key is saved. Advanced settings
@@ -38,8 +40,8 @@ has not been granted, enable voice from the foreground vibeTerminal window.
 If Windows blocks microphone access, the app offers **Open Windows microphone
 settings**. It opens the system privacy page only after that explicit click.
 The same permission gate applies when refreshing the microphone device list.
-No GPU is needed: wake detection uses one CPU thread and a bundled int8 model.
-Transcription, the assistant model, and synthesized speech use OpenRouter.
+Nothing is recognized on this machine: transcription, the assistant model, and
+synthesized speech all use OpenRouter.
 
 ## Examples
 
@@ -205,12 +207,13 @@ voice advances the same question request rather than repeating earlier answers.
 
 ## Voice
 
-Wake detection is local, using the pinned English sherpa-onnx GigaSpeech keyword
-model in a hidden child process. The process validates model hashes and bounds
-its frame queue. Mute/disposal terminates it. A failed wake detector or microphone
-prevents activation and reports the error instead of claiming to be listening.
+Recording is started by holding the space bar and ended by releasing it, with the
+last two seconds of microphone history prepended so the first word survives. Taps
+under 300 ms and holds carrying under 250 ms of voiced audio are discarded, the
+second with spoken feedback. A microphone that cannot start prevents activation
+and reports the error instead of claiming to be listening.
 
-Activated audio is held in memory and sent to OpenRouter's transcription
+Held audio is held in memory and sent to OpenRouter's transcription
 endpoint. The default is `openai/whisper-large-v3-turbo`. The user-selected
 Orchestrator handles the recognized text. Spoken replies use
 `hexgrad/kokoro-82m` with the Heart English voice by default. PCM responses are
@@ -218,23 +221,23 @@ validated before playback using the response's sample rate and channel metadata;
 correctly framed WAV responses remain compatible.
 Only supported voice choices are offered. Speech failures are separate from
 successful text/actions. Errors and missed speech use fixed bundled spoken
-feedback and stage-specific text without another cloud request. Speech already
-in the wake buffer counts toward endpointing, preserving short commands. Empty
-transcriptions ask the user to try again; empty answers to pending questions
-repeat the question without dispatching a guessed answer.
+feedback and stage-specific text without another cloud request. Speech captured
+before the key went down is uploaded with the rest of the hold, preserving short
+commands. Empty transcriptions ask the user to try again; empty answers to
+pending questions repeat the question without dispatching a guessed answer.
 
 There is no MP3/file-save workflow. Audio chunks are ordered, bounded, and
-cancelled by playback identity. Wake detection pauses during playback. Voice is
-turn-based; a stop-speaking control is available. An agent question opens a
-15-second answer window. Choices map literally from labels or numbers; custom
+cancelled by playback identity. Holding Space during a reply interrupts it and
+records instead. Voice is turn-based; a stop-speaking control is available. An
+agent question opens a 15-second answer window, answered with the same hold. Choices map literally from labels or numbers; custom
 answers use the announced format. Permission answers use explicit `allow once`,
 `allow always`, or `reject`; `yes` never becomes an expanded permission.
 
 The compact mic shows listening/transcribing/thinking/speaking/error states inside
 the app. It shares one controller with settings and optional tools. The hidden
 audio renderer has a narrow preload bridge and never takes foreground focus.
-Wake listening continues while minimized; full app disposal stops audio and the
-wake helper. Model tools cannot open external files/folders or inject global
+The microphone stays open while minimized; full app disposal stops audio and
+capture. Model tools cannot open external files/folders or inject global
 keyboard/clipboard input; ordinary delivery stays within its target pane.
 
 OpenRouter transcription, orchestration, and speech all use the user's key and
@@ -260,15 +263,14 @@ npm run smoke:electron:orchestrator
 npm run smoke:electron:orchestrator-command
 npm run smoke:electron:terminal-board
 npm run prepare:voice
-node scripts/backend/voice-packaged-smoke.cjs
 ```
 
-The tests include mocked cloud transport, real PTY fixtures, native keyword
-detection with synthetic speech, an isolated Electron workflow, and packaged
-wake-helper loading. Real microphones, varied acoustic environments, and live
-OpenRouter account/model behavior require separate acceptance checks.
+The tests include mocked cloud transport, real PTY fixtures, an isolated Electron
+workflow, and a push-to-talk checkpoint that drives real key events against a
+synthesized microphone stream. Real microphones, varied acoustic environments, and
+live OpenRouter account/model behavior require separate acceptance checks.
 
-Packaging includes `vendor/voice` and unpacks sherpa native modules. If the global
+Packaging includes `vendor/voice`, which now holds only the offline alert clips. If the global
 Codex version differs from the app's pinned schema, use
 `VIBE_CODEX_BIN_SEARCH_ROOTS` to point preparation at a matching local payload;
 do not replace the user's global CLI just to package the app.

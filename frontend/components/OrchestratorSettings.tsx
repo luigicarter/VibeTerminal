@@ -54,16 +54,16 @@ export function OrchestratorSettings() {
     if (enabled) await connect();
     const result = await api.setEnabled(enabled);
     if (!result.ok) throw new Error(result.error || 'Could not change Orchestrator listening.');
-    setNote(enabled ? 'Listening for “Hey Vibe”.' : 'Orchestrator disabled.');
+    setNote(enabled ? 'Microphone on. Hold Space to talk.' : 'Orchestrator disabled.');
   }
   if (!draft) return <section className="orchestrator-settings"><p>Loading assistant settings…</p></section>;
   const voices = speech.find(item => item.id === draft.ttsModel)?.voices || [];
   const unsaved = dirty || !!apiKey;
   const keyLocked = !!state?.settings.hasKey && !changingKey;
-  const error = voiceState?.error || voiceState?.wakeError || state?.error;
+  const error = voiceState?.error || state?.error;
   return <section className="orchestrator-settings vibe-assistant-settings">
     <div className="settings-section-heading"><h3>Orchestrator</h3><span>{state?.enabled ? 'On' : 'Off'}</span></div>
-    <p className="settings-description">Enter your key and model, then enable Orchestrator and say “Hey Vibe”. Wake listening runs locally on your CPU.</p>
+    <p className="settings-description">Enter your key and model, then enable Orchestrator and hold the space bar to talk. Release the key to send what you said.</p>
     <fieldset disabled={busy}>
       <div className="assistant-device-row"><label>OpenRouter API key<input type="password" autoComplete="off" disabled={keyLocked} value={apiKey} placeholder={keyLocked ? 'Saved securely' : 'sk-or-…'} onChange={event => { setKey(event.target.value); setNote(''); }}/></label>{keyLocked && <button type="button" onClick={() => setChangingKey(true)}>Change</button>}{changingKey && <button type="button" onClick={() => { setChangingKey(false); setKey(''); }}>Cancel</button>}</div>
       <label>Assistant model<input list="orchestrator-models" value={draft.model} onChange={event => edit('model', event.target.value)} placeholder="Choose or enter an OpenRouter model ID"/><datalist id="orchestrator-models">{models.map(item => <option key={item.id} value={item.id}>{item.name || item.label || item.id}</option>)}</datalist></label>
@@ -76,7 +76,7 @@ export function OrchestratorSettings() {
       <label>Voice<select value={`${draft.ttsModel}|${draft.voice}`} onChange={event => { const [ttsModel, voice] = event.target.value.split('|'); setDraft({ ...draft, ttsModel, voice }); setDirty(true); setNote(''); }}><option value="" disabled>Choose a supported voice</option>{!voices.some(item => item.id === draft.voice) && draft.voice && <option value={`${draft.ttsModel}|${draft.voice}`} disabled>Saved voice unavailable · choose a voice</option>}{speech.map(item => <optgroup key={item.id} label={item.name || item.id}>{item.voices?.map(voice => <option key={voice.id} value={`${item.id}|${voice.id}`}>{voice.name}</option>)}</optgroup>)}</select></label>
       <div className="settings-inline"><button type="button" disabled={!voiceApi || !state?.ready || unsaved} onClick={() => void action(async () => { const result = await voiceApi!.configure({ preview: true }); if (!result.ok) throw new Error(result.error || 'Voice preview failed.'); setNote('Voice preview requested. Check your speakers or headphones.'); })}>Preview voice</button><button type="button" disabled={!api} onClick={() => void action(async () => { setSpeech(await api!.models('speech')); setNote('Voice choices refreshed.'); })}>Refresh voices</button></div>
       {unsaved && <p className="settings-description">Enable Orchestrator or save changes below to preview these changes.</p>}
-        <label className="assistant-check"><input type="checkbox" checked={draft.enabledOnLaunch} onChange={event => edit('enabledOnLaunch', event.target.checked)}/> Enable “Hey Vibe” when the app launches</label>
+        <label className="assistant-check"><input type="checkbox" checked={draft.enabledOnLaunch} onChange={event => edit('enabledOnLaunch', event.target.checked)}/> Open the microphone when the app launches</label>
         <label>Transcription model<input list="orchestrator-transcription-models" value={draft.sttModel} onChange={event => edit('sttModel', event.target.value)}/><datalist id="orchestrator-transcription-models">{transcription.map(item => <option key={item.id} value={item.id}>{item.name || item.id}</option>)}</datalist></label>
         <button type="button" disabled={!api} onClick={() => void action(async () => { setTranscription(await api!.models('transcription')); setNote('Transcription models refreshed.'); })}>Browse transcription models</button>
         <label>Transcription language<input value={draft.language} placeholder="Auto-detect" onChange={event => edit('language', event.target.value)}/></label>

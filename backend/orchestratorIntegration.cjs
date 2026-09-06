@@ -389,7 +389,7 @@ function installOrchestrator(options) {
     if (relay.getState().enabled) await relay.setEnabled(false);
   }
   async function startListening(token) {
-    if (captureReady && voice.getState().listening && voice.getState().wakeReady) return { ok: true, wakeReady: true, listening: true };
+    if (captureReady && voice.getState().listening) return { ok: true, listening: true };
     captureReady = false; captureToken++;
     const hardware = new Promise(resolve => {
       const waiter = { finish: result => { clearTimeout(timer); captureWaiters.delete(waiter); resolve(result); } };
@@ -397,18 +397,15 @@ function installOrchestrator(options) {
       captureWaiters.add(waiter);
     });
     const result = await voice.setListening(true);
-    // Wake detection can fail while capture is healthy. That is a degraded success:
-    // Talk now still works, and the controller's wake-error text explains the loss.
-    const degraded = result.ok && result.status === 'manual-only' && voice.getState().listening;
-    if (!degraded && (!result.ok || !voice.getState().wakeReady || !voice.getState().listening)) {
-      const failure = { ok: false, error: result.error || voice.getState().error || 'Hey Vibe could not start its local wake detector.' };
+    if (!result.ok || !voice.getState().listening) {
+      const failure = { ok: false, error: result.error || voice.getState().error || 'Voice could not start listening.' };
       finishCapture(failure);
       return failure;
     }
     const microphone = await hardware;
     if (!microphone.ok) return microphone;
     if (disposed || token !== activation) return { ok: false, status: 'cancelled', error: 'Voice activation was cancelled.' };
-    return degraded ? { ok: true, status: 'manual-only', wakeReady: false, listening: true, error: result.error } : { ok: true, wakeReady: true, listening: true };
+    return { ok: true, listening: true };
   }
 
   const speechChoices = () => [{ id: TTS_MODEL, name: 'Kokoro · English', voices: TTS_VOICES.map(id => ({ id, name: id.slice(3).replace(/^./, letter => letter.toUpperCase()) + (id.startsWith('b') ? ' · British' : ' · American') })) }];
@@ -453,9 +450,7 @@ function installOrchestrator(options) {
       const listening = await startListening(token);
       if (!listening.ok) { if (token === activation) { await voice.setListening(false); await relay.setEnabled(false); } return listening; }
       await refreshInventory();
-      return listening.status === 'manual-only'
-        ? { ok: true, status: 'manual-only', voiceReady: true, wakeReady: false, listening: true, error: listening.error }
-        : { ok: true, voiceReady: true, wakeReady: true, listening: true };
+      return { ok: true, voiceReady: true, listening: true };
     } catch (error) {
       if (token === activation) { finishCapture({ ok: false, error: String(error?.message || "Voice could not start.") }); captureReady = false; await voice.setListening(false); await relay.setEnabled(false); hideIndicator(); }
       return { ok: false, error: String(error?.message || 'Voice could not start.') };
@@ -490,8 +485,6 @@ function installOrchestrator(options) {
           }
           return { ...result, ...listening };
         }
-        // A settings change that restarts capture degrades the same way activation does.
-        if (listening.status === 'manual-only') return { ...result, status: 'manual-only', wakeReady: false, listening: true, error: listening.error };
       }
     }
     return result;
@@ -499,7 +492,7 @@ function installOrchestrator(options) {
   function showMenu() {
     if (!Menu) return { ok: false, error: 'Voice menu unavailable.' };
     const items = [
-      { label: voice.getState().listening ? 'Turn off Hey Vibe' : 'Turn on Hey Vibe', click: () => { void setEnabled(!voice.getState().listening); } },
+      { label: voice.getState().listening ? 'Turn off voice' : 'Turn on voice (hold Space to talk)', click: () => { void setEnabled(!voice.getState().listening); } },
       { label: 'Hide microphone · keep listening', click: () => hideIndicator() },
       { type: 'separator' },
       { label: 'Voice settings', click: () => { const window = getMainWindow(); if (window?.isMinimized()) window.restore(); window?.show(); void requestUi('open_settings'); } },
@@ -548,7 +541,7 @@ function installOrchestrator(options) {
   ipcMain.on("voice:frames", (event, p) => { if (surface.isSender(event.sender) && relay.getState().enabled) voice.frames(p); });
   ipcMain.on("orchestrator:ui-result", (event, p) => { if (allowed(event, true)) pendingUi.get(p.id)?.(p.result); });
   inventoryTimer = setInterval(() => { if (relay.getState().enabled) void refreshInventory(); }, 4000); inventoryTimer.unref?.();
-  // Restore only the user's explicit startup preference. Wake detection is local CPU work.
+  // Restore only the user's explicit startup preference: open the microphone at launch.
   if (relay.getKey() && relay.getSettings().model) {
     if (relay.getSettings().enabledOnLaunch) void setEnabled(true, { interactive: false });
     else void testConnection();

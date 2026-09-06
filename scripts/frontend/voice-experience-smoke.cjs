@@ -11,12 +11,23 @@ function harness(file, mocks) {
     useMemo(factory, deps) { const index = cursor++; if (!cells[index] || deps.some((dep, i) => dep !== cells[index].deps[i])) cells[index] = { deps, value: factory() }; return cells[index].value; },
     useEffect(effect, deps) { const index = cursor++; if (!cells[index] || deps.some((dep, i) => dep !== cells[index].deps[i])) { cells[index]?.cleanup?.(); cells[index] = { deps }; effects.push(() => { cells[index].cleanup = effect(); }); } },
   };
-  const filename = path.resolve(__dirname, '../../frontend', file), loaded = new Module(filename, module);
-  loaded.filename = filename; loaded.paths = Module._nodeModulePaths(path.dirname(filename));
-  const original = loaded.require.bind(loaded);
-  loaded.require = name => name === 'react' ? react : name.endsWith('.css') ? {} : mocks[name] || original(name);
-  loaded._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText, filename);
-  return { render() { cursor = 0; const Component = loaded.exports.default || loaded.exports.OrchestratorSettings; const tree = Component(); while (effects.length) effects.shift()(); return tree; } };
+  // Un-mocked relative imports are real sibling sources, compiled the same way.
+  const load = filename => {
+    const loaded = new Module(filename, module);
+    loaded.filename = filename; loaded.paths = Module._nodeModulePaths(path.dirname(filename));
+    const original = loaded.require.bind(loaded);
+    loaded.require = name => {
+      if (name === 'react') return react;
+      if (name.endsWith('.css')) return {};
+      if (mocks[name]) return mocks[name];
+      const sibling = ['.ts', '.tsx'].map(extension => path.resolve(path.dirname(filename), name + extension)).find(candidate => fs.existsSync(candidate));
+      return sibling ? load(sibling) : original(name);
+    };
+    loaded._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText, filename);
+    return loaded.exports;
+  };
+  const exported = load(path.resolve(__dirname, '../../frontend', file));
+  return { render() { cursor = 0; const Component = exported.default || exported.OrchestratorSettings; const tree = Component(); while (effects.length) effects.shift()(); return tree; } };
 }
 function nodes(tree) { if (!tree || typeof tree !== 'object') return []; const children = tree.props?.children; return [tree, ...[children].flat(Infinity).flatMap(nodes)]; }
 function text(tree) { if (typeof tree === 'string') return tree; if (!tree || typeof tree !== 'object') return ''; return [tree?.props?.children].flat(Infinity).map(text).join(''); }
@@ -49,7 +60,7 @@ async function flush() { for (let i = 0; i < 12; i++) await Promise.resolve(); }
   api.testConnection = async () => ({ ok: true, ready: true, voiceReady: true });
   api.setEnabled = async value => { calls.push(['enabled', value]); state.enabled = value; return { ok: true }; };
   input(tree, 'Enable Orchestrator').props.onChange({ target: { checked: true } }); await flush(); tree = settings.render();
-  assert.deepEqual(calls.at(-1), ['enabled', true]); assert.match(text(tree), /Listening for/);
+  assert.deepEqual(calls.at(-1), ['enabled', true]); assert.match(text(tree), /Hold Space to talk/);
   state.ready = true; tree = settings.render(); assert.equal(button(tree, 'Preview voice').props.disabled, false);
   input(tree, 'Assistant model').props.onChange({ target: { value: '' } }); tree = settings.render();
   assert.equal(button(tree, 'Preview voice').props.disabled, true);
@@ -93,7 +104,7 @@ async function flush() { for (let i = 0; i < 12; i++) await Promise.resolve(); }
   assert.equal(indicator.render(), null, 'No indicator until main process asks to show it');
   stateListener({ phase: 'listening', listening: true, indicatorVisible: true }); resolveInitial({ phase: 'off', listening: false, indicatorVisible: false }); await flush(); tree = indicator.render();
   assert.match(tree.props.className, /voice-indicator/);
-  assert.match(nodes(tree).find(node => node.props?.className === 'voice-mic').props['aria-label'], /Hey Vibe/);
+  assert.match(nodes(tree).find(node => node.props?.className === 'voice-mic').props['aria-label'], /Hold to talk/);
   assert.deepEqual(events.slice(beforeIndicator), ['state-listener'], 'Main indicator must not own audio or issue rendererReady');
   assert.equal(captures, 1); assert.equal(players, 1);
   document.hidden = true; visibilityChanged(); tree = indicator.render(); assert.match(tree.props.className, /voice-hidden/);

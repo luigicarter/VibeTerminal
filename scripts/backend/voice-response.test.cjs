@@ -14,7 +14,7 @@ const json = (data, status = 200) => new Response(JSON.stringify(data), { status
 async function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-voice-response-'));
   const calls = [], audio = [], states = [];
-  let transcript = 'Hey Vibe, hello', failure, controller;
+  let transcript = 'hello', failure, controller;
   const request = async (url, options) => {
     const body = options?.body ? JSON.parse(options.body) : undefined;
     calls.push({ url, body });
@@ -32,7 +32,7 @@ async function fixture(t) {
   const relay = createOrchestrator({ userDataPath: root, fetch: request,
     onSpeak: message => controller.speak(message), onUpstreamError: info => controller.announceError(info), onCancel: () => controller?.cancelSpeech() });
   controller = createVoiceController({ orchestrator: relay, fetch: request, getKey: () => relay.getKey(), getSettings: () => relay.getSettings(),
-    keywordFactory: () => ({ reset() {}, dispose() {} }), emit: state => states.push(state),
+    emit: state => states.push(state),
     onAudio: chunk => { audio.push(chunk); if (chunk.done && !chunk.cancelled) queueMicrotask(() => controller.configure({ playbackDone: chunk.replyId })); } });
   t.after(() => {
     controller.dispose(); relay.dispose();
@@ -57,9 +57,9 @@ test('real voice-to-relay-to-speech composition responds with acknowledged PCM',
   assert.equal(f.audio.at(-1).done, true);
 });
 
-test('empty, wake-only and punctuation-only transcriptions each speak a retry prompt without cloud speech', async t => {
+test('empty and punctuation-only transcriptions each speak a retry prompt without cloud speech', async t => {
   const f = await fixture(t);
-  for (const transcript of ['', 'Hey Vibe!', '...']) {
+  for (const transcript of ['', '...', '  ']) {
     f.transcript(transcript);
     const before = f.audio.length;
     const result = await f.controller.sendAudio({ audioBase64 });
@@ -71,9 +71,10 @@ test('empty, wake-only and punctuation-only transcriptions each speak a retry pr
   assert.equal(f.calls.filter(call => /\/speech$|\/chat\/completions$/.test(call.url)).length, 0);
 });
 
-test('manual capture silence speaks once and returns to wake listening without transcription', async t => {
-  const f = await fixture(t); f.controller.configure({ manual: true });
+test('a silent hold speaks once and returns to listening without transcription', async t => {
+  const f = await fixture(t); f.controller.configure({ pushToTalk: 'start' });
   for (let i = 0; i < 60; i++) f.controller.frames({ samples: Array(1600).fill(0), sampleRate: 16000 });
+  assert.equal(f.controller.configure({ pushToTalk: 'stop' }).status, 'empty');
   await tick();
   assert.equal(f.controller.getState().reply, ERROR_AUDIO_TEXT['not-understood']);
   assert.equal(f.controller.getState().phase, 'listening');

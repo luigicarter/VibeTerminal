@@ -1,6 +1,6 @@
 export type VoiceState = {
-  indicatorVisible?: boolean; captureToken?: number; phase: string; muted: boolean; listening: boolean; ready: boolean; wakeReady: boolean;
-  error?: string | null; wakeError?: string | null; transcript?: string; reply?: string; replyId?: string; microphoneId?: string;
+  indicatorVisible?: boolean; captureToken?: number; phase: string; muted: boolean; listening: boolean; ready: boolean;
+  error?: string | null; transcript?: string; reply?: string; replyId?: string; microphoneId?: string;
   request?: { id: string; sessionId?: string; kind?: string; detail?: string; currentQuestion?: number; questions?: { id?: string; question: string; options?: { label: string }[] }[] };
 };
 export type VoiceAudio = { replyId: string; sequence: number; data: number[]; sampleRate: number; channels: 1 | 2; format: 's16le'; done?: boolean; cancelled?: boolean; local?: boolean };

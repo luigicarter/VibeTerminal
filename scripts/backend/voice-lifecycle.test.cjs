@@ -59,8 +59,7 @@ async function fixture(t, options = {}) {
     if (channel === 'orchestrator:ui-action') queueMicrotask(() => ipcMain.emit('orchestrator:ui-result', { sender: main.webContents }, { id: payload.id, result: { ok: true, sessions: [], projectPaths: [] } }));
   };
   const app = new EventEmitter(); app.getPath = () => root; app.isPackaged = false;
-  const calls = [], wake = { starts: 0, disposed: 0 }, previews = [];
-  const detector = () => ({ accept: () => false, reset() {}, dispose() { wake.disposed++; } });
+  const calls = [], previews = [];
   let controller;
   const integration = installOrchestrator({
     app, BrowserWindow, screen, ipcMain, getMainWindow: () => main,
@@ -78,7 +77,7 @@ async function fixture(t, options = {}) {
       throw Error(`Unexpected network request: ${endpoint}`);
     },
     voiceFactory: configuration => {
-      controller = createVoiceController({ ...configuration, keywordFactory: () => { wake.starts++; return options.startWake ? options.startWake(detector) : detector(); } });
+      controller = createVoiceController({ ...configuration, ...options.controllerOptions });
       const configure = controller.configure;
       controller.configure = patch => {
         if (patch.preview) { previews.push(controller.getState()); return { ok: true }; }
@@ -109,7 +108,7 @@ async function fixture(t, options = {}) {
     const pending = invoke('orchestrator:enabled', { enabled: true });
     await renderer(); await capture(); return pending;
   }
-  return { invoke, renderer, capture, enable, overlay, BrowserWindow, controller, calls, wake, previews, main };
+  return { invoke, renderer, capture, enable, overlay, BrowserWindow, controller, calls, previews, main };
 }
 
 test('audio renderer stays hidden and cannot take focus; native close preserves audio', async t => {
@@ -144,8 +143,8 @@ test('activation waits for renderer and physical microphone acknowledgment', asy
   const f = await fixture(t); let settled = false;
   const pending = f.invoke('orchestrator:enabled', { enabled: true }).then(result => { settled = true; return result; });
   await until(() => f.overlay(), 'indicator creation'); await tick();
-  assert.equal(f.wake.starts, 0); assert.equal(settled, false);
-  await f.renderer(); await until(() => f.controller.getState().wakeReady, 'wake readiness');
+  assert.equal(f.controller.getState().listening, false); assert.equal(settled, false);
+  await f.renderer(); await until(() => f.controller.getState().listening, 'microphone request');
   assert.equal(settled, false);
   await f.capture(); assert.equal((await pending).ok, true);
   assert.equal(f.overlay().visible, false);
@@ -156,17 +155,17 @@ test('activation waits for renderer and physical microphone acknowledgment', asy
   await f.invoke('orchestrator:overlay');
   assert.equal((await f.invoke('voice:get-state')).indicatorVisible, true);
   assert.equal(f.overlay().visible, false);
-  f.overlay().close(); assert.equal(f.controller.getState().listening, true); assert.equal(f.wake.disposed, 0);
+  f.overlay().close(); assert.equal(f.controller.getState().listening, true);
 });
 
-test('first-use consent resolves before any audio window or wake helper starts', async t => {
+test('first-use consent resolves before any audio window or capture starts', async t => {
   const response = deferred(); let requested = 0;
   const f = await fixture(t, { microphonePermission: { isGranted: () => false, ensure: () => { requested++; return response.promise; } } });
   const pending = f.invoke('orchestrator:enabled', { enabled: true });
   await tick(); assert.equal(requested, 1); assert.equal(f.overlay(), undefined);
-  assert.equal(f.wake.starts, 0); assert.equal(f.controller.getState().listening, false);
+  assert.equal(f.controller.getState().listening, false);
   response.resolve({ ok: false, status: 'permission-required', error: 'Not allowed' });
-  assert.equal((await pending).ok, false); assert.equal(f.wake.starts, 0);
+  assert.equal((await pending).ok, false); assert.equal(f.controller.getState().listening, false);
   assert.equal((await f.invoke('orchestrator:get-state')).enabled, false);
 });
 
@@ -176,14 +175,14 @@ test('turning off during consent prevents a late allow from starting capture', a
   const pending = f.invoke('orchestrator:enabled', { enabled: true }); await tick();
   await f.invoke('orchestrator:enabled', { enabled: false }); assert.equal(signal.aborted, true);
   response.resolve({ ok: true }); assert.equal((await pending).status, 'cancelled');
-  assert.equal(f.overlay(), undefined); assert.equal(f.wake.starts, 0);
+  assert.equal(f.overlay(), undefined); assert.equal(f.controller.getState().listening, false);
 });
 
 test('microphone consent and Windows settings controls accept only the main UI', async t => {
   let requests = 0, opens = 0;
   const f = await fixture(t, { microphonePermission: { isGranted: () => true, ensure: async () => { requests++; return { ok: true }; }, openSettings: async () => { opens++; return { ok: true }; } } });
   assert.equal((await f.invoke('voice:configure', { requestMicrophoneAccess: true })).ok, true);
-  assert.equal(requests, 1); assert.equal(f.wake.starts, 0); assert.equal(f.overlay(), undefined);
+  assert.equal(requests, 1); assert.equal(f.overlay(), undefined);
   assert.equal((await f.enable()).ok, true);
   assert.equal((await f.invoke('voice:configure', { openMicrophoneSettings: true }, f.overlay().webContents)).ok, false);
   assert.equal(opens, 0);
@@ -201,47 +200,36 @@ test('hidden audio surface refuses media access until app consent is granted', a
   assert.equal(allowed(window.webContents, ['video']), false); assert.equal(allowed({}, ['audio']), false);
 });
 
-test('missing wake model degrades to manual-only instead of disabling the relay', async t => {
-  const f = await fixture(t, { startWake: () => Promise.reject(Error('missing model')) });
-  const pending = f.invoke('orchestrator:enabled', { enabled: true }); await f.renderer(); await f.capture();
-  const result = await pending;
-  assert.equal(result.ok, true); assert.equal(result.status, 'manual-only'); assert.equal(result.wakeReady, false);
-  assert.match(result.error, /Hey Vibe is unavailable/);
-  assert.equal(f.controller.getState().listening, true); assert.equal(f.controller.getState().phase, 'wake-error');
-  assert.equal((await f.invoke('orchestrator:get-state')).enabled, true, 'wake detection is not the whole assistant');
-  assert.equal((await f.invoke('voice:configure', { manual: true })).ok, true, 'Talk now stays available');
+test('activation ends in listening with push-to-talk available through the IPC surface', async t => {
+  const f = await fixture(t);
+  const result = await f.enable();
+  assert.equal(result.ok, true); assert.equal(result.listening, true); assert.equal(result.voiceReady, true);
+  assert.equal(f.controller.getState().listening, true); assert.equal(f.controller.getState().phase, 'listening');
+  assert.equal((await f.invoke('voice:configure', { pushToTalk: 'start' })).ok, true);
+  assert.equal(f.controller.getState().phase, 'recording');
+  assert.equal((await f.invoke('voice:configure', { pushToTalk: 'cancel' })).status, 'cancelled');
+  assert.equal(f.controller.getState().phase, 'listening');
+  assert.equal((await f.invoke('voice:configure', { pushToTalk: 'sideways' })).ok, false);
 });
 
-test('physical capture failure during wake startup fails activation', async t => {
-  const startup = deferred(); startup.promise.dispose = () => startup.reject(Error('cancelled'));
-  const f = await fixture(t, { startWake: () => startup.promise });
+test('physical capture failure during activation fails activation', async t => {
+  const f = await fixture(t);
   const pending = f.invoke('orchestrator:enabled', { enabled: true }); await f.renderer();
   assert.equal((await f.capture({ microphoneError: 'Permission denied' })).ok, false);
   const result = await pending; assert.equal(result.ok, false); assert.match(result.error, /Permission denied/);
   assert.equal(f.controller.getState().listening, false); assert.equal((await f.invoke('orchestrator:get-state')).enabled, false);
 });
 
-test('wake startup failure after physical capture acknowledgment keeps capture and the relay', async t => {
-  const startup = deferred();
-  const f = await fixture(t, { startWake: () => startup.promise });
-  const pending = f.invoke('orchestrator:enabled', { enabled: true }); await f.renderer();
-  await f.capture(); startup.reject(Error('wake model initialization failed'));
-  const result = await pending; assert.equal(result.ok, true); assert.equal(result.status, 'manual-only');
-  assert.equal(f.controller.getState().listening, true); assert.equal(f.controller.getState().wakeReady, false);
-  assert.equal((await f.invoke('orchestrator:get-state')).enabled, true);
-});
-
 test('invalid audio configuration stops capture and clears connection readiness', async t => {
   const f = await fixture(t); assert.equal((await f.enable()).ok, true);
   const result = await f.invoke('orchestrator:configure', { sttModel: 'fixture/missing-stt' });
   assert.equal(result.ok, false); assert.match(result.error, /transcription/);
-  assert.equal(f.controller.getState().listening, false); assert.equal(f.wake.disposed, 1);
+  assert.equal(f.controller.getState().listening, false);
   const state = await f.invoke('orchestrator:get-state'); assert.equal(state.enabled, false); assert.equal(state.ready, false);
 });
 
-test('failed wake restart after valid voice settings keeps capture and degrades to manual-only', async t => {
-  let starts = 0;
-  const f = await fixture(t, { startWake: detector => { if (++starts > 1) throw Error('Wake restart failed'); return detector(); } });
+test('a valid voice settings change restarts capture and keeps the relay listening', async t => {
+  const f = await fixture(t);
   assert.equal((await f.enable()).ok, true);
   const previous = (await f.invoke('voice:get-state')).captureToken;
   const pending = f.invoke('orchestrator:configure', { language: 'fr' });
@@ -254,19 +242,19 @@ test('failed wake restart after valid voice settings keeps capture and degrades 
   assert.ok(restarted !== undefined, 'Did not reach the restarted capture request');
   assert.equal((await f.invoke('voice:configure', { microphoneReady: true, captureToken: restarted }, f.overlay().webContents)).ok, true);
   const result = await pending;
-  assert.equal(result.ok, true); assert.equal(result.status, 'manual-only'); assert.equal(result.wakeReady, false);
+  assert.equal(result.ok, true);
   assert.equal((await f.invoke('orchestrator:get-state')).enabled, true);
-  assert.equal(f.controller.getState().listening, true); assert.equal(f.controller.getState().phase, 'wake-error');
-  assert.equal(f.controller.getState().wakeReady, false); assert.equal(f.controller.getState().muted, false);
+  assert.equal(f.controller.getState().listening, true); assert.equal(f.controller.getState().phase, 'listening');
+  assert.equal(f.controller.getState().muted, false);
   assert.equal((await f.invoke('voice:configure', { microphoneReady: true, captureToken: previous }, f.overlay().webContents)).status, 'stale');
 });
 
-test('missing capture acknowledgment after device change stops microphone and wake helper', async t => {
+test('missing capture acknowledgment after a device change stops the microphone', async t => {
   const f = await fixture(t, { captureReadyTimeoutMs: 150 }); assert.equal((await f.enable()).ok, true);
   const result = await f.invoke('orchestrator:configure', { microphoneId: 'second-device' });
   assert.equal(result.ok, false); assert.match(result.error, /Microphone access did not finish/);
-  assert.equal(f.controller.getState().listening, false); assert.equal(f.controller.getState().wakeReady, false);
-  assert.equal((await f.invoke('orchestrator:get-state')).enabled, false); assert.equal(f.wake.disposed, 2);
+  assert.equal(f.controller.getState().listening, false); assert.equal(f.controller.getState().phase, 'off');
+  assert.equal((await f.invoke('orchestrator:get-state')).enabled, false);
 });
 
 test('unrelated settings patch preserves pending voice activation', async t => {
@@ -282,7 +270,7 @@ test('stale microphone ready and failure tokens cannot finish or stop a newer ac
   await f.invoke('orchestrator:enabled', { enabled: false });
   let settled = false;
   const pending = f.invoke('orchestrator:enabled', { enabled: true }).then(result => { settled = true; return result; });
-  await f.renderer(); await until(() => f.controller.getState().wakeReady, 'new wake readiness');
+  await f.renderer(); await until(() => f.controller.getState().listening, 'new microphone request');
   assert.equal((await f.capture({ microphoneReady: true }, previous)).status, 'stale');
   assert.equal((await f.capture({ microphoneError: 'Old device failed' }, previous)).status, 'stale');
   await tick(); assert.equal(settled, false); assert.equal(f.controller.getState().listening, true);
@@ -295,18 +283,17 @@ test('disable during connection validation prevents later reactivation', async t
   const pending = f.invoke('orchestrator:enabled', { enabled: true }); await until(() => reached, 'connection validation');
   assert.equal((await f.invoke('orchestrator:enabled', { enabled: false })).ok, true); gate.resolve();
   assert.equal((await pending).ok, false); assert.equal(f.controller.getState().listening, false);
-  assert.equal(f.wake.starts, 0); assert.equal((await f.invoke('orchestrator:get-state')).enabled, false);
+  assert.equal((await f.invoke('orchestrator:get-state')).enabled, false);
 });
 
-test('disable during wake startup disposes pending detector without reactivation', async t => {
-  const startup = deferred(); let disposed = 0;
-  startup.promise.dispose = () => { disposed++; startup.reject(Error('cancelled')); };
-  const f = await fixture(t, { startWake: () => startup.promise });
+test('disable while capture is pending leaves the microphone closed and inactive', async t => {
+  const f = await fixture(t);
   const pending = f.invoke('orchestrator:enabled', { enabled: true }); await f.renderer();
-  await until(() => f.wake.starts === 1, 'wake startup');
+  await until(() => f.controller.getState().listening, 'microphone request');
   assert.equal((await f.invoke('orchestrator:enabled', { enabled: false })).ok, true);
-  assert.equal((await pending).ok, false); assert.equal(disposed, 1);
+  assert.equal((await pending).ok, false);
   assert.equal(f.controller.getState().listening, false); assert.equal(f.overlay().visible, false);
+  assert.equal((await f.invoke('voice:configure', { pushToTalk: 'start' })).ok, false);
 });
 
 test('hidden preview waits for audio renderer without activating capture', async t => {
@@ -314,7 +301,7 @@ test('hidden preview waits for audio renderer without activating capture', async
   await until(() => f.overlay(), 'hidden preview window'); assert.equal(f.previews.length, 0);
   assert.equal(f.overlay().visible, false); await f.renderer(); assert.equal((await pending).ok, true);
   assert.equal(f.previews.length, 1); assert.equal(f.previews[0].listening, false);
-  assert.equal(f.wake.starts, 0); assert.equal(f.overlay().visible, false);
+  assert.equal(f.controller.getState().listening, false); assert.equal(f.overlay().visible, false);
 });
 
 test('an audio renderer that never reports ready is replaced by the next attempt', async t => {

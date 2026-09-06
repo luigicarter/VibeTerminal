@@ -67,12 +67,12 @@
     },
     "not-understood": {
       "file": "not-understood.wav",
-      "text": "I didn't catch that. Say Hey Vibe and try again.",
+      "text": "I didn't catch that. Hold Space and try again.",
       "voice": "Microsoft Zira Desktop",
       "sampleRate": 24000,
       "channels": 1,
       "format": "s16le",
-      "sha256": "a6acb2af54e1d5c8d8835c600c14984be5a946b1ef80be2c2d471dddaf8fadca"
+      "sha256": "bd2dd99770aeee805f5f153bef6fe2de73ac59e783e423aa2995251801ad5778"
     },
     "transcription": {
       "file": "transcription.wav",

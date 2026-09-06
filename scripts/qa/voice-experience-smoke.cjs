@@ -20,7 +20,7 @@ class Cdp {
 }
 const traceFile = path.join(output, 'events.jsonl'), stateFile = path.join(output, 'windows.json'), commandFile = path.join(output, 'command.json'), failureFile = path.join(output, 'speech-failure'), consentResponseFile = path.join(output, 'consent-response.json');
 const transcriptionFile = path.join(output, 'transcription.json');
-fs.writeFileSync(transcriptionFile, JSON.stringify({ text: 'Hey Vibe, hello' }));
+fs.writeFileSync(transcriptionFile, JSON.stringify({ text: 'hello' }));
 const events = () => fs.existsSync(traceFile) ? fs.readFileSync(traceFile, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
 const windows = () => JSON.parse(fs.readFileSync(stateFile, 'utf8'));
 const record = (name, value) => { result.checks.push({ name, value }); console.log(name, JSON.stringify(value)); };
@@ -38,8 +38,6 @@ permissionModule.createMicrophonePermission=options=>permissionFactory({...optio
 });
 const handle=electron.ipcMain.handle.bind(electron.ipcMain);
 electron.ipcMain.handle=(channel,listener)=>handle(channel,async(event,...args)=>{ const value=await listener(event,...args); if(channel==='voice:configure')log({channel,payload:args[0],value}); return value; });
-const childProcess=require('node:child_process'), fork=childProcess.fork;
-childProcess.fork=function(file,...args){const child=fork.call(this,file,...args); if(String(file).includes('voiceWakeHost')){log({helper:'spawn',pid:child.pid});child.on('message',m=>{if(m.type==='ready')log({helper:'ready',pid:child.pid});});child.on('exit',(code)=>log({helper:'exit',pid:child.pid,code}));}return child;};
 const surface=require(${JSON.stringify(path.join(root, 'backend/voiceOverlayWindow.cjs'))}); const original=surface.createVoiceOverlayWindow;
 surface.createVoiceOverlayWindow=options=>original({...options,BrowserWindow:class extends options.BrowserWindow{constructor(config){super(config);log({nativeOptions:{width:config.width,height:config.height,frame:config.frame,transparent:config.transparent,alwaysOnTop:config.alwaysOnTop,focusable:config.focusable,backgroundThrottling:config.webPreferences.backgroundThrottling}});this.on('show',()=>log({unexpectedNativeAudioShow:true}));}}});
 globalThis.fetch=async(url,options={})=>{
@@ -50,7 +48,8 @@ globalThis.fetch=async(url,options={})=>{
  if(url==='https://openrouter.ai/api/v1/audio/transcriptions'){
   const body=JSON.parse(options.body);const audio=Buffer.from(body.input_audio?.data||'','base64');
   if(body.input_audio?.format!=='wav'||audio.toString('ascii',0,4)!=='RIFF'||audio.toString('ascii',8,12)!=='WAVE')throw Error('Fixture expected WAV transcription input');
-  const transcript=JSON.parse(fs.readFileSync(${JSON.stringify(transcriptionFile)},'utf8'));log({transcription:transcript.text});return reply({...transcript,usage:{cost:0}});
+  let peak=0;for(let at=44;at+1<audio.length;at+=2){const value=Math.abs(audio.readInt16LE(at));if(value>peak)peak=value;}
+  const transcript=JSON.parse(fs.readFileSync(${JSON.stringify(transcriptionFile)},'utf8'));log({transcription:transcript.text,samples:(audio.length-44)/2,peak});return reply({...transcript,usage:{cost:0}});
  }
  if(url==='https://openrouter.ai/api/v1/audio/speech'){
   const body=JSON.parse(options.body);log({speechRequest:{response_format:body.response_format,input:body.input}});
@@ -69,10 +68,16 @@ async function click(selector, client = cdp) { await client.eval(`document.query
 async function screenshot(client, name) { const r = await client.send('Page.captureScreenshot', { format: 'png' }); fs.writeFileSync(path.join(output, name), Buffer.from(r.data, 'base64')); }
 (async () => { try {
   assert.equal(process.platform, 'win32');
+  const speechWav = path.join(output, 'fake-microphone.wav');
+  const sentence = 'Push to talk works. Show me the workspace. Push to talk works. Show me the workspace.';
+  const synthesis = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    `$ErrorActionPreference='Stop';Add-Type -AssemblyName System.Speech;$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;$f=New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo(16000,[System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen,[System.Speech.AudioFormat.AudioChannel]::Mono);$s.SetOutputToWaveFile('${speechWav}',$f);$s.Speak('${sentence}');$s.Dispose()`],
+    { windowsHide: true, encoding: 'utf8', timeout: 120000 });
+  if (synthesis.status !== 0 || !fs.existsSync(speechWav)) throw Error(`Could not synthesize the fake microphone recording: ${synthesis.stderr || synthesis.status}`);
   const port = await new Promise(resolve => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const port = s.address().port; s.close(() => resolve(port)); }); });
   const env = { ...process.env, VIBE_SCREENSHOT_MODE: '1', VIBE_INTERNAL_SCREENSHOT: '0', VIBE_SCREENSHOT_USER_DATA: path.join(output, 'userData'), VIBE_AGENT_SHIM_BASE_DIR: path.join(output, 'shims'), CODEX_HOME: path.join(output, 'codex'), CLAUDE_CONFIG_DIR: path.join(output, 'claude'), XDG_CONFIG_HOME: path.join(output, 'config'), XDG_DATA_HOME: path.join(output, 'data') };
   for (const key of Object.keys(env)) if (/API_KEY|AUTH_TOKEN/.test(key) || ['ELECTRON_RUN_AS_NODE', 'VITE_DEV_SERVER_URL'].includes(key)) delete env[key];
-  child = spawn(path.join(root, 'node_modules/electron/dist/electron.exe'), [entry, `--remote-debugging-port=${port}`, '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'], { cwd: root, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  child = spawn(path.join(root, 'node_modules/electron/dist/electron.exe'), [entry, `--remote-debugging-port=${port}`, '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${speechWav}`], { cwd: root, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   const log = fs.createWriteStream(path.join(output, 'electron.log')); child.stdout.pipe(log); child.stderr.pipe(log);
   const pages = async () => (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json());
   const page = await until(async () => (await pages()).find(p => p.type === 'page' && p.url.startsWith('file:') && !p.url.includes('surface=voice')), 'workspace');
@@ -90,13 +95,13 @@ async function screenshot(client, name) { const r = await client.send('Page.capt
   await click('.assistant-enable input');
   const consentDialog=await until(()=>events().find(e=>e.consentDialog)?.consentDialog,'first-use microphone consent dialog');
   assert.equal(consentDialog.title,'vibeTerminal');assert.match(consentDialog.message,/Allow vibeTerminal to use your microphone/);assert.deepEqual(consentDialog.buttons,['Allow microphone','Not now']);assert.equal(consentDialog.defaultId,1);assert.equal(consentDialog.cancelId,1);assert.equal(consentDialog.parentId,consentDialog.actualMainId);assert(consentDialog.parentId);
-  assert.match(consentDialog.detail,/OpenRouter/);assert.match(consentDialog.detail,/background/);assert.equal(events().some(e=>e.helper==='spawn'),false);assert.equal(events().some(e=>e.nativeOptions),false);assert.equal(events().some(e=>e.payload?.microphoneReady),false);assert.equal((await cdp.eval('window.vibe.voice.getState()')).listening,false);
-  record('first-use-consent-blocks-window-capture-helper',consentDialog);
+  assert.match(consentDialog.detail,/OpenRouter/);assert.match(consentDialog.detail,/background/);assert.equal(events().some(e=>e.nativeOptions),false);assert.equal(events().some(e=>e.payload?.microphoneReady),false);assert.equal((await cdp.eval('window.vibe.voice.getState()')).listening,false);
+  record('first-use-consent-blocks-window-and-capture',consentDialog);
   fs.writeFileSync(consentResponseFile,JSON.stringify({response:0}));
-  await until(async () => { const s = await cdp.eval('window.vibe.voice.getState()'); return s.listening && s.wakeReady && s; }, 'actual capture and native CPU wake readiness', 45000);
+  await until(async () => { const s = await cdp.eval('window.vibe.voice.getState()'); return s.listening && s.phase === 'listening' && s; }, 'actual capture readiness', 45000);
   const ready = await cdp.eval('window.vibe.voice.getState()');
-  assert(events().some(e => e.payload?.rendererReady && e.value?.ok)); assert(events().some(e => e.payload?.microphoneReady && e.payload.captureToken === ready.captureToken && e.value?.ok)); assert(events().some(e => e.helper === 'ready'));
-  record('renderer-capture-token-native-helper-ready', ready);
+  assert(events().some(e => e.payload?.rendererReady && e.value?.ok)); assert(events().some(e => e.payload?.microphoneReady && e.payload.captureToken === ready.captureToken && e.value?.ok));
+  record('renderer-capture-token-listening', ready);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(output,'userData','microphone-consent.json'),'utf8')),{version:1,granted:true});assert.equal(events().filter(e=>e.consentDialog).length,1);
   const saved = await cdp.eval('(()=>{const e=document.querySelector(".orchestrator-settings input[type=password]");return {disabled:e.disabled,value:e.value,placeholder:e.placeholder,color:getComputedStyle(e).color,background:getComputedStyle(e).backgroundColor};})()');
   assert.equal(saved.disabled, true); assert.equal(saved.value, ''); assert.equal(saved.placeholder, 'Saved securely'); record('saved-key-locked', saved);
@@ -144,13 +149,32 @@ async function screenshot(client, name) { const r = await client.send('Page.capt
   assert(emptyAudio.some(c => c.local && c.done && !c.cancelled));
   assert.equal(events().filter(e => /\/audio\/speech$|\/chat\/completions$/.test(e.request || '')).length, cloudBeforeEmpty);
   record('empty-transcription-local-spoken-retry-renderer-ack-no-cloud-speech', { empty, emptyReply, chunks: emptyAudio.length });
+  const space = type => cdp.send('Input.dispatchKeyEvent', { type, key: ' ', code: 'Space', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32, ...(type === 'keyDown' ? { text: ' ', unmodifiedText: ' ' } : {}) });
+  await cdp.eval(`(()=>{const host=document.createElement('div');host.dataset.paneId='qa-pane';host.innerHTML='<textarea class="xterm-helper-textarea"></textarea>';document.body.appendChild(host);host.querySelector('textarea').focus();})()`);
+  await space('keyDown'); await wait(500); await space('keyUp'); await wait(200);
+  const guarded = await cdp.eval('window.vibe.voice.getState()');
+  assert.equal(guarded.phase, 'listening', 'Space inside a terminal pane must never record');
+  await cdp.eval(`document.querySelector('[data-pane-id=qa-pane]').remove();document.activeElement?.blur?.()`);
+  record('space-inside-a-terminal-pane-never-records', guarded);
+  fs.writeFileSync(transcriptionFile, JSON.stringify({ text: 'push to talk works' }));
+  await cdp.eval(`(()=>{window.__qaPhases=[];window.vibe.voice.onState(state=>{if(window.__qaPhases.at(-1)!==state.phase)window.__qaPhases.push(state.phase);});})()`);
+  await space('keyDown');
+  await until(async () => (await cdp.eval('window.vibe.voice.getState()')).phase === 'recording', 'push-to-talk recording');
+  await wait(1500);
+  await space('keyUp');
+  const held = await until(() => events().find(e => e.transcription === 'push to talk works'), 'push-to-talk transcription');
+  assert(held.peak > 600, `The uploaded WAV must carry the fake microphone audio; peak was ${held.peak}`);
+  assert(held.samples > 16000, `A 1.5 s hold plus its pre-roll must reach the cloud; got ${held.samples} samples`);
+  const heldPhases = await cdp.eval('window.__qaPhases');
+  assert.deepEqual(heldPhases.slice(0, 3), ['listening', 'recording', 'transcribing'], JSON.stringify(heldPhases));
+  await until(() => voice.eval(`window.__qaVoiceStates.find(s=>s.transcript==='push to talk works')`), 'push-to-talk transcript in state');
+  record('space-hold-records-live-microphone-and-uploads-it', { ...held, phases: heldPhases });
   assert.equal((await cdp.eval('window.vibe.orchestrator.setEnabled(false)')).ok, true);
-  await until(() => events().some(e => e.helper === 'exit'), 'helper shutdown');
   const stoppedTracks = await until(() => voice.eval('window.__qaStoppedTracks.some(t=>t.kind==="audio"&&t.before==="live"&&t.after==="ended")&&window.__qaStoppedTracks'), 'actual audio capture track stopped');
-  const off = await cdp.eval('window.vibe.voice.getState()'); assert.equal(off.listening, false); assert.equal(off.wakeReady, false); record('off-tears-down-capture-and-native-wake', { off, stoppedTracks });
+  const off = await cdp.eval('window.vibe.voice.getState()'); assert.equal(off.listening, false); assert.equal(off.phase, 'off'); record('off-tears-down-capture', { off, stoppedTracks });
   assert.equal((await cdp.eval('window.vibe.orchestrator.setEnabled(true)')).ok,true);
-  assert.equal((await cdp.eval('window.vibe.voice.getState()')).wakeReady,true);assert.equal(events().filter(e=>e.consentDialog).length,1);
-  assert.equal((await cdp.eval('window.vibe.orchestrator.setEnabled(false)')).ok,true);await until(()=>events().filter(e=>e.helper==='exit').length===2,'second helper shutdown');
+  assert.equal((await cdp.eval('window.vibe.voice.getState()')).phase,'listening');assert.equal(events().filter(e=>e.consentDialog).length,1);
+  assert.equal((await cdp.eval('window.vibe.orchestrator.setEnabled(false)')).ok,true);
   record('saved-consent-reenable-does-not-prompt-again',{dialogCount:events().filter(e=>e.consentDialog).length});
   const beforeAck = events().filter(e => e.payload?.microphoneReady).length;
   const preview = await cdp.eval('window.vibe.voice.configure({preview:true})'); assert.equal(preview.ok, true, JSON.stringify(preview));

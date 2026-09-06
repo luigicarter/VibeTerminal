@@ -1,7 +1,5 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const vm = require('node:vm');
 const { decodeSpeechWav, wavFromSamples, errorChime } = require('../../backend/voiceAudio.cjs');
 const { createVoiceController } = require('../../backend/voiceController.cjs');
 const { TTS_MODEL, TTS_VOICE } = require('../../shared/voiceConfig.cjs');
@@ -23,15 +21,15 @@ test('WAV validates actual rate, framing, encoding and declared length', () => {
 });
 
 test('preview plays selected supported voice at WAV rate without enabling relay or capture', async t => {
-  let controller, wakeStarts = 0; const calls = [], chunks = [], events = [];
+  let controller; const calls = [], chunks = [], events = [];
   controller = createVoiceController({ orchestrator: { getState: () => ({ enabled: false }) }, getKey: () => 'fake-key', getSettings: () => ({ voice: 'af_bella' }),
-    keywordFactory: () => { wakeStarts++; throw Error('Must not start capture'); }, emit: state => events.push(state),
+    emit: state => events.push(state),
     fetch: async (_url, options) => { calls.push(JSON.parse(options.body)); return { ok: true, headers: new Headers({ 'content-type': 'audio/wav' }), body: (async function* () { const wav = wavFromSamples([0.1, -0.1], 44100); yield wav.subarray(0, 3); yield wav.subarray(3); })() }; },
     onAudio: chunk => { chunks.push(chunk); if (chunk.done) queueMicrotask(() => controller.configure({ playbackDone: chunk.replyId })); } });
   t.after(() => controller.dispose());
   assert.equal((await controller.configure({ preview: true })).ok, true);
   assert.equal(calls.length, 1); assert.equal(calls[0].model, TTS_MODEL); assert.equal(calls[0].voice, 'af_bella'); assert.equal(calls[0].response_format, 'pcm');
-  assert.equal(chunks[0].sampleRate, 44100); assert.equal(wakeStarts, 0); assert(events.every(e => !e.listening && e.muted)); assert.equal(controller.getState().phase, 'off');
+  assert.equal(chunks[0].sampleRate, 44100); assert(events.every(e => !e.listening && e.muted)); assert.equal(controller.getState().phase, 'off');
 });
 
 test('preview reports missing key and speech failure while remaining muted', async t => {
@@ -45,9 +43,9 @@ test('legacy nonverbal chime remains available and default voice is Heart', () =
   const clip = errorChime(); assert.equal(clip.text, ''); assert(clip.durationMs < 500); assert(clip.pcm.some(n => n !== 0)); assert.equal(TTS_VOICE, 'af_heart');
 });
 
-test('playback error fails preview without stopping wake listening', async t => {
+test('playback error fails preview without stopping the microphone', async t => {
   let controller;
-  controller = createVoiceController({ orchestrator: { getState: () => ({ enabled: true }) }, getKey: () => 'fake-key', keywordFactory: () => ({ reset() {}, dispose() {} }),
+  controller = createVoiceController({ orchestrator: { getState: () => ({ enabled: true }) }, getKey: () => 'fake-key',
     fetch: async () => ({ ok: true, headers: new Headers({ 'content-type': 'audio/wav' }), body: (async function* () { yield wavFromSamples([0, 0], 24000); })() }),
     onAudio: chunk => { if (chunk.done && !chunk.cancelled) queueMicrotask(() => controller.configure({ playbackError: 'Output unavailable' })); } });
   t.after(() => controller.dispose()); await controller.setListening(true);
@@ -65,11 +63,4 @@ test('full-duration WAV emits at most 180 audio buffers plus completion', async 
   t.after(() => controller.dispose());
   assert.equal((await controller.configure({ preview: true })).ok, true);
   assert.equal(chunks.length, 181); assert(chunks.slice(0, -1).every(chunk => chunk.length === chunk.rate * 2)); assert(chunks.at(-1).done);
-});
-
-test('native wake config explicitly uses CPU and one inference thread', () => {
-  let config;
-  const module = { exports: {} };
-  vm.runInNewContext(fs.readFileSync(require.resolve('../../backend/voiceWake.cjs'), 'utf8'), { module, require: id => id === 'node:fs' ? { readFileSync: () => '{"files":{}}' } : id === 'sherpa-onnx-node' ? { KeywordSpotter: class { constructor(value) { config = value; } createStream() { return {}; } } } : require(id) });
-  module.exports.createWakeDetector('test'); assert.equal(config.modelConfig.provider, 'cpu'); assert.equal(config.modelConfig.numThreads, 1);
 });

@@ -196,7 +196,7 @@ function toolsFrom(reply, expectedOk = true) { assert.equal(reply.ok, expectedOk
   overlayCdp = new Cdp(voicePage.webSocketDebuggerUrl); await overlayCdp.open();
   await until(() => cdp.eval("Boolean(document.querySelector('.voice-indicator'))"), "in-app microphone UI");
   assert.equal(await overlayCdp.eval("Boolean(document.querySelector('.voice-indicator,.voice-overlay'))"), false);
-  const voiceState = await overlayCdp.eval("window.vibe.voice.getState()"); assert.equal(voiceState.listening, true); assert.equal(voiceState.wakeReady, true);
+  const voiceState = await overlayCdp.eval("window.vibe.voice.getState()"); assert.equal(voiceState.listening, true); assert.equal(voiceState.phase, 'listening');
   const overlayScreenshot = await cdp.send("Page.captureScreenshot", { format: "png" }); fs.writeFileSync(path.join(output, "overlay.png"), Buffer.from(overlayScreenshot.data, "base64"));
   record("history-excerpt-and-overlay-ui", { historyExcerptRendered: true, listening: voiceState.listening, phase: voiceState.phase });
   result.pass = true;

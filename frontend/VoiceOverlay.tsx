@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { VoiceMicrophone } from './voice/microphone';
 import { PcmPlayer } from './voice/pcmPlayer';
 import type { VoiceApi, VoiceState } from './voice/types';
-const initial: VoiceState = { phase: 'off', muted: true, listening: false, ready: false, wakeReady: false };
+const initial: VoiceState = { phase: 'off', muted: true, listening: false, ready: false };
 export default function VoiceOverlay() {
   const api = (window.vibe as unknown as { voice: VoiceApi }).voice;
   const [state, setState] = useState<VoiceState>(initial);

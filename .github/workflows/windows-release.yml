@@ -54,7 +54,7 @@ jobs:
             throw "Release tag $env:GITHUB_REF_NAME does not match package version $packageVersion."
           }
 
-      - name: Prepare pinned voice assets
+      - name: Verify bundled voice alert audio
         run: npm run prepare:voice
 
       - name: Run release checks

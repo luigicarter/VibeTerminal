@@ -1,5 +1,11 @@
 # Orchestrator voice fixes
 
+> **Superseded.** The “Hey Vibe” wake word described below was removed in favour of
+> Space push-to-talk: hold the space bar while no terminal or text field is focused,
+> release to send. The native keyword spotter, its model assets and its packaging
+> entries are gone with it. See [voice push-to-talk](voice-push-to-talk.md). The rest
+> of this file is kept as history of how the wake-word build behaved.
+
 Local build: **0.1.86**. The Windows installer is prepared locally; this change
 does not publish a GitHub release or replace a running installed application.
 

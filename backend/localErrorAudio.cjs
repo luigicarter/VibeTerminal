@@ -10,7 +10,7 @@ const ERROR_AUDIO_TEXT = Object.freeze({
   network: 'OpenRouter could not be reached. Please check your connection and try again.',
   timeout: 'The OpenRouter request timed out. Please try again.',
   request: 'OpenRouter rejected the request. Please check your model and settings.',
-  'not-understood': "I didn't catch that. Say Hey Vibe and try again.",
+  'not-understood': "I didn't catch that. Hold Space and try again.",
   transcription: "I couldn't turn that recording into text. Please check Orchestrator settings and try again.",
   orchestration: "I couldn't complete that request. Please check the error in the workspace before trying again.",
   speech: "I couldn't play the spoken reply. Please read the response or error in the workspace.",

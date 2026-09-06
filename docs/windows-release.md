@@ -4,10 +4,10 @@ vibeTerminal ships to Windows users as an Electron Builder NSIS installer hosted
 
 ## Current Public Release
 
-The current public Windows release is `v0.1.90`:
+The current public Windows release is `v0.1.91`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.90`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.90/vibeTerminal-Setup-0.1.90.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.91`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.91/vibeTerminal-Setup-0.1.91.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -31,15 +31,14 @@ The packaged app keeps only runtime files needed by Electron:
 - `backend/` - Electron main process, PTY host, telemetry shims, and agent thread discovery helpers.
 - `preload/` - Context bridge IPC surface.
 - `shared/` - Provider capability contracts.
-- `resources/voice/` - Pinned local wake model and offline error announcements.
-- unpacked `sherpa-onnx` runtime and Windows native libraries.
+- `resources/voice/alerts/` - Offline spoken alert clips only, checksum-verified as they load.
 - `dist/` - Compiled renderer UI produced by Vite.
 - `frontend/assets/` - Runtime app icons and logo assets.
 - `resources/codex-bin/win32-x64/` - Embedded private Codex CLI payload used
   only by Fusion panes: `codex.exe`, its code-mode host, package metadata,
   bundled ripgrep, command runner, and Windows sandbox setup helper.
 - production `node_modules/` dependencies.
-- unpacked `node-pty` native files.
+- unpacked `node-pty` native files, the only native module outside the asar.
 
 The package excludes development and reference material:
 
@@ -112,7 +111,7 @@ After `npm run dist:win -- --publish never`, verify:
    embedded binary is removed; it should fail start with a clear Fusion error.
 7. The packaged UI loads from `dist/index.html`, not a Vite dev server.
 8. Run `node scripts/qa/verify-release-artifacts.cjs` to verify version, filename,
-   installer size/SHA-512, blockmap, and packaged voice assets/libraries.
+   installer size/SHA-512, blockmap, and packaged voice alert clips.
 
 ## GitHub Release Deployment
 
@@ -121,10 +120,10 @@ Production downloads and update metadata live in the public GitHub repository:
 `https://github.com/luigicarter/VibeTerminal/releases`
 
 The GitHub Actions workflow `.github/workflows/windows-release.yml` builds on `windows-latest`.
-It prepares the pinned voice assets, runs `scripts/qa/release-checks.cjs` with
-fail-fast handling, and verifies installer/feed hashes plus native voice payloads
-using `scripts/qa/verify-release-artifacts.cjs`. `vendor/voice` is committed with
-byte-preserving Git attributes because its model and announcement assets are checksummed.
+It verifies the bundled voice alert clips, runs `scripts/qa/release-checks.cjs` with
+fail-fast handling, and verifies installer/feed hashes plus the packaged alert clips
+using `scripts/qa/verify-release-artifacts.cjs`. `vendor/voice/alerts` is committed with
+byte-preserving Git attributes because the clips are checksummed on load.
 
 Treat the `main` branch as production. If this repository is ever referred to as
 `master`, the same rule applies: any change merged or pushed there that should

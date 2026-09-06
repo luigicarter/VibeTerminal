@@ -1,6 +1,6 @@
 {
   "name": "vibe-terminal",
-  "version": "0.1.90",
+  "version": "0.1.91",
   "private": true,
   "description": "A tiled local workspace for running multiple coding agents side by side.",
   "author": "vibeTerminal contributors",
@@ -67,7 +67,7 @@
     "smoke:backend:fusion-appserver:embedded": "node scripts/backend/fusion-appserver-smoke.cjs --require-embedded",
     "pack:win": "npm run prepare:codex-bin:required && npm run prepare:voice && npm run build && electron-builder --win --dir",
     "dist:win": "npm run prepare:codex-bin:required && npm run prepare:voice && npm run build && electron-builder --win nsis",
-    "prepare:voice": "node scripts/dev/prepare-voice-model.cjs && node scripts/dev/verify-error-audio.cjs",
+    "prepare:voice": "node scripts/dev/verify-error-audio.cjs",
     "test:orchestrator": "node --test scripts/backend/orchestrator-*.test.cjs scripts/backend/terminal-observation*.test.cjs scripts/backend/voice*.test.cjs scripts/backend/microphone-*.test.cjs scripts/backend/workspace-changes.test.cjs",
     "smoke:frontend:workspace-setups": "node scripts/frontend/workspace-setups-smoke.cjs",
     "smoke:electron:orchestrator": "node scripts/qa/orchestrator-smoke.cjs",
@@ -98,8 +98,7 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1",
-    "sherpa-onnx-node": "1.13.7"
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
@@ -121,9 +120,7 @@
     "asar": true,
     "asarUnpack": [
       "backend/**/*.cjs",
-      "node_modules/node-pty/**",
-      "node_modules/sherpa-onnx-node/**",
-      "node_modules/sherpa-onnx-win-x64/**"
+      "node_modules/node-pty/**"
     ],
     "npmRebuild": false,
     "extraResources": [

@@ -8,7 +8,7 @@ function wavFromSamples(samples, sampleRate = RATE) {
   for (let i = 0; i < samples.length; i++) { const s = Math.max(-1, Math.min(1, samples[i])); b.writeInt16LE(Math.round(s * (s < 0 ? 32768 : 32767)), 44 + i * 2); }
   return b;
 }
-function createRecording({ silenceMs = 900, initialSilenceMs = 6000, maxMs = 60000, threshold = 0.012, preRoll = [] } = {}) {
+function createRecording({ silenceMs = 900, initialSilenceMs = 6000, maxMs = 60000, threshold = 0.012, preRoll = [], endpointing = true } = {}) {
   let chunks = [], total = 0, voiced = 0, silence = 0, preRollVoiced = 0;
   const voicedMsOf = samples => Math.sqrt(samples.reduce((sum, n) => sum + n * n, 0) / samples.length) >= threshold ? samples.length / RATE * 1000 : 0;
   const accountVoice = samples => {
@@ -16,11 +16,10 @@ function createRecording({ silenceMs = 900, initialSilenceMs = 6000, maxMs = 600
     if (duration) { voiced += duration; silence = 0; } else silence += samples.length / RATE * 1000;
   };
   let remainingPreRoll = Math.max(0, Math.floor(maxMs / 1000 * RATE));
-  // Pre-roll is wake-word audio the speaker has already finished. It is kept for
+  // Pre-roll is microphone history from before the recording started. It is kept for
   // transcription but must not endpoint the recording: charging its trailing silence
   // to the budget below closed the capture before the speaker started their command.
-  // Its voiced duration is measured separately so a caller can tell a bare wake phrase
-  // from a wake phrase that already carried the whole command.
+  // Its voiced duration is measured separately so a caller can judge a whole turn.
   for (const chunk of preRoll) {
     const samples = Float32Array.from(chunk.slice(0, remainingPreRoll));
     if (!samples.length) continue;
@@ -36,7 +35,10 @@ function createRecording({ silenceMs = 900, initialSilenceMs = 6000, maxMs = 600
       const duration = samples.length / RATE * 1000;
       chunks.push(Float32Array.from(samples)); total += duration;
       accountVoice(samples);
-      return total + preRollMs >= maxMs || (voiced >= 250 && silence >= silenceMs) ? 'complete' : (voiced < 250 && total >= initialSilenceMs ? 'silence' : 'recording');
+      if (total + preRollMs >= maxMs) return 'complete';
+      // Push-to-talk turns are ended by the key, so only the maximum cap may close them.
+      if (!endpointing) return 'recording';
+      return voiced >= 250 && silence >= silenceMs ? 'complete' : (voiced < 250 && total >= initialSilenceMs ? 'silence' : 'recording');
     },
     finish() { const result = new Float32Array(chunks.reduce((n, c) => n + c.length, 0)); let at = 0; for (const c of chunks) { result.set(c, at); at += c.length; } chunks = []; return result; },
     get voicedMs() { return voiced; },

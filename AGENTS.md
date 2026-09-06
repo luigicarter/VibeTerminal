@@ -15,6 +15,7 @@ vibeTerminal is an Electron + React desktop workspace for running local terminal
 
 - `docs/orchestrator.md` - User-command relay, OpenRouter setup, voice overlay, observation/action contracts, saved setups, handoffs, and verification limits.
 
+- `docs/voice-push-to-talk.md` - Space push-to-talk: the hold gesture and its guards, the `pushToTalk` contract, what the wake word left behind, and verification.
 - `docs/frontend.md` - React renderer files, UI state, terminal panes, layout board, and styling.
 - `docs/backend.md` - Electron main process, PTY host, and agent thread discovery files.
 - `docs/preload.md` - Context bridge and IPC surface exposed to the renderer.

@@ -6,7 +6,7 @@ function fixture(t, fetcher, autoDone = true) {
   const calls = [], audio = []; let controller; let time = 1000;
   const state = { enabled: true };
   controller = createVoiceController({ orchestrator: { getState: () => state, send: async () => ({ ok: true }) },
-    getKey: () => 'secret-test-key', now: () => time, keywordFactory: () => ({ reset() {}, dispose() {} }),
+    getKey: () => 'secret-test-key', now: () => time,
     fetch: async (...args) => { calls.push(args); return fetcher(...args); },
     onAudio: chunk => { audio.push(chunk); if (chunk.done && !chunk.cancelled && autoDone) queueMicrotask(() => controller.configure({ playbackDone: chunk.replyId })); } });
   t.after(() => controller.dispose());
@@ -63,7 +63,7 @@ test('cancelled upstream requests produce no error announcement', async t => {
 });
 test('background error announcements never discard a user recording', async t => {
   const f = fixture(t, () => { throw Error('No network allowed'); }); await f.controller.setListening(true);
-  f.controller.configure({ manual: true });
+  f.controller.configure({ pushToTalk: 'start' });
   assert.equal((await f.controller.announceError({ category: 'upstream', origin: 'monitor' })).status, 'queued');
   assert.equal(f.controller.getState().phase, 'recording'); assert.equal(f.audio.length, 0);
   for (let i = 0; i < 59; i++) f.controller.frames({ samples: Array(1600).fill(0), sampleRate: 16000 });

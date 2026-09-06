@@ -110,6 +110,7 @@ import { WorkspaceToolsDialog } from "./components/WorkspaceToolsDialog";
 import { OrchestratorDashboard } from "./components/OrchestratorDashboard";
 import { RECENCY_STORAGE_KEY, loadSessionRecency, recordSessionRecency } from "./sessionRecency";
 import VoiceIndicator from "./VoiceIndicator";
+import VoicePushToTalk from "./VoicePushToTalk";
 import { NewProjectDialog } from "./components/NewProjectDialog";
 import { BoardHeading } from "./components/WorkspaceChrome";
 import { SettingsDialog } from "./components/SettingsDialog";
@@ -4962,11 +4963,11 @@ export default function App() {
                 {currentAppVersionLabel}
               </span>
             )}
-            <button className={clsx("orchestrator-mic", orchestratorState?.enabled && "enabled")} disabled={voiceToggleBusy} aria-pressed={orchestratorState?.enabled ?? false} title={orchestratorState?.ready ? "Turn Hey Vibe on or off" : "Set up Hey Vibe"} onClick={() => {
+            <button className={clsx("orchestrator-mic", orchestratorState?.enabled && "enabled")} disabled={voiceToggleBusy} aria-pressed={orchestratorState?.enabled ?? false} title={orchestratorState?.ready ? "Turn voice on or off" : "Set up voice"} onClick={() => {
               if (!orchestratorState?.ready && !orchestratorState?.enabled) { setSettingsOpen(true); return; }
               setVoiceToggleBusy(true);
               void relayApi()?.setEnabled(!orchestratorState?.enabled).then(result => { if (!result.ok) { setSettingsHint(result.error || "Voice could not start."); setSettingsOpen(true); } }).catch(() => { setSettingsHint("Voice could not start. Check your connection and microphone."); setSettingsOpen(true); }).finally(() => setVoiceToggleBusy(false));
-            }}><Mic size={15} /><span>Hey Vibe</span><i /></button>
+            }}><Mic size={15} /><span>Voice</span><i /></button>
             {orchestratorState?.enabled && <button aria-label="Show microphone" title="Show microphone" onClick={() => void relayApi()?.showOverlay()}><Mic size={15}/></button>}
             <button aria-label="Open workspace tools" title="History, files and workspace tools" onClick={() => setWorkspaceToolsOpen(true)}><PanelsTopLeft size={16}/></button>
             <button onClick={checkForUpdates} disabled={updateCheckDisabled}>
@@ -5528,6 +5529,7 @@ export default function App() {
         />
       </WorkspaceToolsDialog>}
       <VoiceIndicator />
+      <VoicePushToTalk />
       {newProjectOpen && <NewProjectDialog onClose={()=>setNewProjectOpen(false)}/>}
 
       {shouldShowUpdateOverlay && updateState && (
