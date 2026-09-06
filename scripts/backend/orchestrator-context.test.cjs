@@ -109,7 +109,12 @@ test("initial context carries only eight recent relay messages and no native tra
 test("session directory exposes bounded initial page and model query reaches a later native title alias", async t => {
   const f = await fixture(t); f.sessions = Array.from({ length: 67 }, (_, i) => ({ id: `pane-${i}`, generation: `g-${i}`, name: `Worker ${i}`, kind: "codex", provider: "codex", aliases: i === 63 ? ["Payment review"] : [], cwd: f.root }));
   await f.run("Find Payment review", { kind: "list_sessions", query: "Payment review", limit: 10 });
-  const initial = JSON.parse(f.requests[0].messages[1].content); assert.equal(initial.sessions.length, 40); assert.deepEqual(initial.sessionDirectory, { total: 67, truncated: true });
+  const initial = JSON.parse(f.requests[0].messages[1].content);
+  // The input budget may shorten the 40-item cap when TEMP paths are longer.
+  assert.ok(initial.sessions.length > 0 && initial.sessions.length <= 40);
+  assert.equal(initial.sessions[0].id, "pane-0");
+  assert.equal(initial.sessions.some(session => session.id === "pane-63"), false);
+  assert.deepEqual(initial.sessionDirectory, { total: 67, truncated: true });
   const listing = JSON.parse(f.requests[1].messages.at(-1).content); assert.equal(listing.sessions[0].id, "pane-63"); assert.equal(listing.total, 1);
   const next = listSessionSummaries(f.sessions, { offset: 40, limit: 10 }); assert.equal(next.sessions[0].id, "pane-40"); assert.equal(next.nextOffset, 50);
 });
