@@ -74,3 +74,23 @@ test('repeated enables retire stale startup and reuse the ready wake helper', as
   assert.equal(voice.getState().phase, 'recording'); assert.equal(calls, 2); assert.equal(disposedOld, 1); assert.equal(disposedNew, 0);
   await voice.setListening(false); assert.equal(disposedNew, 1);
 });
+
+test('native helper stderr reaches the reported startup failure instead of being discarded', async () => {
+  const { PassThrough } = require('node:stream');
+  const stderr = new PassThrough();
+  let child;
+  const startup = createWakeProcess({ modelPath: 'fixture', fork: (_file, _args, passed) => {
+    assert.deepEqual(passed.stdio, ['ignore', 'ignore', 'pipe', 'ipc']);
+    child = new EventEmitter(); child.connected = true; child.pid = 321; child.exitCode = null; child.stderr = stderr;
+    child.send = (_message, callback) => { callback?.(); }; child.kill = () => {};
+    return child;
+  } });
+  stderr.write('Error: The specified module could not be found.\onnxruntime.dll\n');
+  await wait(5);
+  child.exitCode = 1; child.emit('exit', 1); stderr.end();
+  await assert.rejects(startup, error => {
+    assert.match(error.message, /Talk now is still available/);
+    assert.match(error.detail, /onnxruntime\.dll/);
+    return true;
+  });
+});

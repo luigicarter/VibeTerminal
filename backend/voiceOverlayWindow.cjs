@@ -3,7 +3,7 @@ const path = require('node:path');
 
 // Audio runs in a permanently hidden renderer. The mic is drawn inside the main
 // app; this surface must never appear above a game or another application.
-function createVoiceOverlayWindow({ BrowserWindow, screen, canCapture = () => false, onClosed = () => {}, onFailure = () => {} }) {
+function createVoiceOverlayWindow({ BrowserWindow, screen, canCapture = () => false, onClosed = () => {}, onFailure = () => {}, readyTimeoutMs = 15000 }) {
   let window = null, ready = false, disposed = false;
   const waiting = new Set();
   function finish(error) {
@@ -58,10 +58,16 @@ function createVoiceOverlayWindow({ BrowserWindow, screen, canCapture = () => fa
   }
   function hide() { window?.hide(); return { ok: true }; }
   async function ensureReady() {
-    create(); if (ready) return;
+    const current = create(); if (ready) return;
     await new Promise((resolve, reject) => {
       const entry = { resolve, reject, timer: null };
-      entry.timer = setTimeout(() => { waiting.delete(entry); reject(new Error('Voice audio did not start. Turn Hey Vibe off and on to retry.')); }, 15000);
+      entry.timer = setTimeout(() => {
+        waiting.delete(entry);
+        // A renderer that loaded but never reported ready is never reused: without
+        // this, the advertised off/on retry waits again on the same dead window.
+        if (!disposed && window === current && !current.isDestroyed()) current.destroy();
+        reject(new Error('Voice audio did not start. Turn Hey Vibe off and on to retry.'));
+      }, readyTimeoutMs);
       waiting.add(entry);
     });
   }

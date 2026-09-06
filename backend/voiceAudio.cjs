@@ -1,3 +1,4 @@
+const { TTS_NATIVE_RATE, TTS_NATIVE_CHANNELS } = require('../shared/voiceConfig.cjs');
 const RATE = 16000;
 function wavFromSamples(samples, sampleRate = RATE) {
   const b = Buffer.alloc(44 + samples.length * 2);
@@ -8,17 +9,22 @@ function wavFromSamples(samples, sampleRate = RATE) {
   return b;
 }
 function createRecording({ silenceMs = 900, initialSilenceMs = 6000, maxMs = 60000, threshold = 0.012, preRoll = [] } = {}) {
-  let chunks = [], total = 0, voiced = 0, silence = 0;
+  let chunks = [], total = 0, voiced = 0, silence = 0, preRollVoiced = 0;
+  const voicedMsOf = samples => Math.sqrt(samples.reduce((sum, n) => sum + n * n, 0) / samples.length) >= threshold ? samples.length / RATE * 1000 : 0;
   const accountVoice = samples => {
-    const duration = samples.length / RATE * 1000;
-    const rms = Math.sqrt(samples.reduce((sum, n) => sum + n * n, 0) / samples.length);
-    if (rms >= threshold) { voiced += duration; silence = 0; } else silence += duration;
+    const duration = voicedMsOf(samples);
+    if (duration) { voiced += duration; silence = 0; } else silence += samples.length / RATE * 1000;
   };
   let remainingPreRoll = Math.max(0, Math.floor(maxMs / 1000 * RATE));
+  // Pre-roll is wake-word audio the speaker has already finished. It is kept for
+  // transcription but must not endpoint the recording: charging its trailing silence
+  // to the budget below closed the capture before the speaker started their command.
+  // Its voiced duration is measured separately so a caller can tell a bare wake phrase
+  // from a wake phrase that already carried the whole command.
   for (const chunk of preRoll) {
     const samples = Float32Array.from(chunk.slice(0, remainingPreRoll));
     if (!samples.length) continue;
-    chunks.push(samples); remainingPreRoll -= samples.length; accountVoice(samples);
+    chunks.push(samples); remainingPreRoll -= samples.length; preRollVoiced += voicedMsOf(samples);
     if (!remainingPreRoll) break;
   }
   const preRollMs = chunks.reduce((n, chunk) => n + chunk.length, 0) / RATE * 1000;
@@ -34,6 +40,7 @@ function createRecording({ silenceMs = 900, initialSilenceMs = 6000, maxMs = 600
     },
     finish() { const result = new Float32Array(chunks.reduce((n, c) => n + c.length, 0)); let at = 0; for (const c of chunks) { result.set(c, at); at += c.length; } chunks = []; return result; },
     get voicedMs() { return voiced; },
+    get preRollVoicedMs() { return preRollVoiced; },
   };
 }
 // Network boundaries can split a signed 16-bit sample between two chunks.
@@ -60,14 +67,31 @@ function decodeSpeechAudio(input, contentType = '') {
   if (mime === 'audio/pcm') {
     const values = new Map();
     for (const parameter of parameters) {
-      const match = /^(rate|channels)\s*=\s*(?:([0-9]+)|"([0-9]+)")$/.exec(parameter);
-      if (!match || values.has(match[1])) invalid();
-      values.set(match[1], Number(match[2] ?? match[3]));
+      const named = /^([^=]+?)\s*=\s*(.*)$/.exec(parameter);
+      if (!named) continue;
+      // A parameter that contradicts signed 16-bit little-endian cannot be ignored:
+      // decoding float or 32-bit data as s16le is noise, not a wrong-sounding voice.
+      if (['bits', 'bitspersample'].includes(named[1]) && named[2] !== '16') invalid();
+      if (['encoding', 'format'].includes(named[1]) && !['pcm', 'lpcm', 's16le', 'pcm_s16le', 'signed-integer'].includes(named[2])) invalid();
+      // Anything else descriptive (charset, codecs, ...) is not disqualifying; only a
+      // malformed value for a parameter we actually read is.
+      if (!['rate', 'channels'].includes(named[1])) continue;
+      const value = /^(?:([0-9]+)|"([0-9]+)")$/.exec(named[2]);
+      if (!value || values.has(named[1])) invalid();
+      values.set(named[1], Number(value[1] ?? value[2]));
     }
-    // OpenRouter PCM is signed 16-bit little-endian; rate and channels are required.
-    return decodedPcm(Buffer.from(input), values.get('rate'), values.get('channels'), invalid);
+    // OpenRouter PCM is signed 16-bit little-endian; an omitted rate or channel count
+    // falls back to the speech model's native output rather than failing the reply.
+    return decodedPcm(Buffer.from(input), values.get('rate') ?? TTS_NATIVE_RATE, values.get('channels') ?? TTS_NATIVE_CHANNELS, invalid);
   }
-  if (['', 'application/octet-stream', 'audio/wav', 'audio/x-wav', 'audio/wave', 'audio/vnd.wave'].includes(mime)) return decodeSpeechWav(input);
+  if (['audio/wav', 'audio/x-wav', 'audio/wave', 'audio/vnd.wave'].includes(mime)) return decodeSpeechWav(input);
+  if (['', 'application/octet-stream'].includes(mime)) {
+    // Unlabelled bodies are whatever they actually are: a WAV container, else raw PCM.
+    const body = Buffer.from(input);
+    return body.length >= 12 && body.toString('ascii', 0, 4) === 'RIFF' && body.toString('ascii', 8, 12) === 'WAVE'
+      ? decodeSpeechWav(body)
+      : decodedPcm(body, TTS_NATIVE_RATE, TTS_NATIVE_CHANNELS, invalid);
+  }
   invalid();
 }
 function decodeSpeechWav(input) {

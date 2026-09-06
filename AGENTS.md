@@ -7,6 +7,7 @@ vibeTerminal is an Electron + React desktop workspace for running local terminal
 - `docs/orchestrator-dashboard.md` - Clear-glass session visualization, truthful request activity, stable motion/recency, and verification.
 
 - `docs/orchestrator-voice-fixes.md` - Simple key/model/toggle setup, CPU wake listening, compact mic lifecycle, speech repair, and verification.
+- `docs/orchestrator-voice-deep-dive.md` - September 2026 troubleshooting deep dive: measured pipeline timings, root causes with evidence (pre-roll endpointing, SAPI fallback clips, Brain reasoning budget, malformed preferences, degraded wake mode), what was ruled out, changes landed, and the fake-microphone reproduction harness.
 
 - `docs/orchestrator-context-and-audio.md` - Progressive output/history access, model-only context budgets, and bundled OpenRouter error announcements.
 

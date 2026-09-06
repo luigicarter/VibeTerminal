@@ -201,11 +201,15 @@ test('hidden audio surface refuses media access until app consent is granted', a
   assert.equal(allowed(window.webContents, ['video']), false); assert.equal(allowed({}, ['audio']), false);
 });
 
-test('missing wake model fails activation and stops microphone', async t => {
+test('missing wake model degrades to manual-only instead of disabling the relay', async t => {
   const f = await fixture(t, { startWake: () => Promise.reject(Error('missing model')) });
-  const pending = f.invoke('orchestrator:enabled', { enabled: true }); await f.renderer();
-  const result = await pending; assert.equal(result.ok, false); assert.match(result.error, /wake|Hey Vibe/i);
-  assert.equal(f.controller.getState().listening, false); assert.equal((await f.invoke('orchestrator:get-state')).enabled, false);
+  const pending = f.invoke('orchestrator:enabled', { enabled: true }); await f.renderer(); await f.capture();
+  const result = await pending;
+  assert.equal(result.ok, true); assert.equal(result.status, 'manual-only'); assert.equal(result.wakeReady, false);
+  assert.match(result.error, /Hey Vibe is unavailable/);
+  assert.equal(f.controller.getState().listening, true); assert.equal(f.controller.getState().phase, 'wake-error');
+  assert.equal((await f.invoke('orchestrator:get-state')).enabled, true, 'wake detection is not the whole assistant');
+  assert.equal((await f.invoke('voice:configure', { manual: true })).ok, true, 'Talk now stays available');
 });
 
 test('physical capture failure during wake startup fails activation', async t => {
@@ -217,14 +221,14 @@ test('physical capture failure during wake startup fails activation', async t =>
   assert.equal(f.controller.getState().listening, false); assert.equal((await f.invoke('orchestrator:get-state')).enabled, false);
 });
 
-test('wake startup failure after physical capture acknowledgment still fails activation', async t => {
+test('wake startup failure after physical capture acknowledgment keeps capture and the relay', async t => {
   const startup = deferred();
   const f = await fixture(t, { startWake: () => startup.promise });
   const pending = f.invoke('orchestrator:enabled', { enabled: true }); await f.renderer();
   await f.capture(); startup.reject(Error('wake model initialization failed'));
-  const result = await pending; assert.equal(result.ok, false);
-  assert.equal(f.controller.getState().listening, false);
-  assert.equal((await f.invoke('orchestrator:get-state')).enabled, false);
+  const result = await pending; assert.equal(result.ok, true); assert.equal(result.status, 'manual-only');
+  assert.equal(f.controller.getState().listening, true); assert.equal(f.controller.getState().wakeReady, false);
+  assert.equal((await f.invoke('orchestrator:get-state')).enabled, true);
 });
 
 test('invalid audio configuration stops capture and clears connection readiness', async t => {
@@ -235,14 +239,25 @@ test('invalid audio configuration stops capture and clears connection readiness'
   const state = await f.invoke('orchestrator:get-state'); assert.equal(state.enabled, false); assert.equal(state.ready, false);
 });
 
-test('failed wake restart after valid voice settings stops capture and disables relay', async t => {
+test('failed wake restart after valid voice settings keeps capture and degrades to manual-only', async t => {
   let starts = 0;
   const f = await fixture(t, { startWake: detector => { if (++starts > 1) throw Error('Wake restart failed'); return detector(); } });
   assert.equal((await f.enable()).ok, true);
   const previous = (await f.invoke('voice:get-state')).captureToken;
-  const result = await f.invoke('orchestrator:configure', { language: 'fr' });
-  assert.equal(result.ok, false); assert.equal((await f.invoke('orchestrator:get-state')).enabled, false);
-  assert.equal(f.controller.getState().listening, false); assert.equal(f.controller.getState().muted, true);
+  const pending = f.invoke('orchestrator:configure', { language: 'fr' });
+  // The restart reissues the capture token; acknowledge the new one, not the retired one.
+  let restarted;
+  for (let i = 0; i < 200 && restarted === undefined; i++) {
+    const state = await f.invoke('voice:get-state');
+    if (state.listening && state.captureToken !== previous) restarted = state.captureToken; else await tick();
+  }
+  assert.ok(restarted !== undefined, 'Did not reach the restarted capture request');
+  assert.equal((await f.invoke('voice:configure', { microphoneReady: true, captureToken: restarted }, f.overlay().webContents)).ok, true);
+  const result = await pending;
+  assert.equal(result.ok, true); assert.equal(result.status, 'manual-only'); assert.equal(result.wakeReady, false);
+  assert.equal((await f.invoke('orchestrator:get-state')).enabled, true);
+  assert.equal(f.controller.getState().listening, true); assert.equal(f.controller.getState().phase, 'wake-error');
+  assert.equal(f.controller.getState().wakeReady, false); assert.equal(f.controller.getState().muted, false);
   assert.equal((await f.invoke('voice:configure', { microphoneReady: true, captureToken: previous }, f.overlay().webContents)).status, 'stale');
 });
 
@@ -300,4 +315,16 @@ test('hidden preview waits for audio renderer without activating capture', async
   assert.equal(f.overlay().visible, false); await f.renderer(); assert.equal((await pending).ok, true);
   assert.equal(f.previews.length, 1); assert.equal(f.previews[0].listening, false);
   assert.equal(f.wake.starts, 0); assert.equal(f.overlay().visible, false);
+});
+
+test('an audio renderer that never reports ready is replaced by the next attempt', async t => {
+  const { BrowserWindow, screen } = windows();
+  const surface = createVoiceOverlayWindow({ BrowserWindow, screen, readyTimeoutMs: 20 });
+  t.after(() => surface.dispose());
+  await assert.rejects(surface.ensureReady(), /Voice audio did not start/);
+  const stuck = BrowserWindow.instances.length;
+  assert.equal(BrowserWindow.getAllWindows().length, 0, 'a renderer that never signalled ready is not kept');
+  const retry = surface.ensureReady(); retry.catch(() => {});
+  assert.equal(BrowserWindow.instances.length, stuck + 1, 'the advertised off/on retry builds a fresh renderer');
+  surface.markReady(surface.getWindow().webContents); await retry;
 });

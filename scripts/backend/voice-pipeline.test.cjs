@@ -101,18 +101,25 @@ test('an empty answer asks the pending question again and preserves answer routi
 
 test('a command already in the wake buffer is transcribed and wake-only input gets spoken feedback', async () => {
   let frames = 0;
-  const f = fixture({ keywordFactory: () => ({ accept: () => ++frames === 4, reset() {}, dispose() {} }) });
+  const f = fixture({ keywordFactory: () => ({ accept: () => ++frames === 9, reset() {}, dispose() {} }) });
   await f.controller.setListening(true);
-  for (let i = 0; i < 4; i++) f.controller.frames({ samples: Array(1600).fill(.1), sampleRate: 16000 });
-  for (let i = 0; i < 9; i++) f.controller.frames({ samples: Array(1600).fill(0), sampleRate: 16000 });
+  for (let i = 0; i < 9; i++) f.controller.frames({ samples: Array(1600).fill(.1), sampleRate: 16000 });
+  // Said in one breath, the command is already in the wake buffer and no live speech is
+  // left to endpoint. After the initial-silence grace it is uploaded, not discarded:
+  // transcription decides whether it was a command or a bare wake phrase.
+  for (let i = 0; i < 60; i++) f.controller.frames({ samples: Array(1600).fill(0), sampleRate: 16000 });
   await tick();
+  assert.equal(f.calls.length, 1); assert.match(f.calls[0].url, /\/audio\/transcriptions$/);
   assert.equal(f.sent.length, 1); assert.equal(f.sent[0].text, 'show my agents');
+  assert.equal(f.audio.some(chunk => chunk.local), false);
+  assert.doesNotMatch(f.controller.getState().reply || '', /didn't catch/);
   const wav = Buffer.from(JSON.parse(f.calls[0].options.body).input_audio.data, 'base64');
-  assert.equal((wav.length - 44) / 2, 1600 * 13); assert(wav.readInt16LE(44) > 0); f.controller.dispose();
+  assert.equal((wav.length - 44) / 2, 1600 * 69); assert(wav.readInt16LE(44) > 0); f.controller.dispose();
 
   const g = fixture({ fetch: async () => ({ ok: true, json: async () => ({ text: 'Hey Vibe!' }) }) });
   await g.controller.setListening(true);
   g.controller.frames({ samples: Array(4800).fill(.1), sampleRate: 16000 });
+  for (let i = 0; i < 3; i++) g.controller.frames({ samples: Array(1600).fill(.1), sampleRate: 16000 });
   for (let i = 0; i < 9; i++) g.controller.frames({ samples: Array(1600).fill(0), sampleRate: 16000 });
   await tick(); await tick();
   assert.equal(g.sent.length, 0); assert.match(g.controller.getState().reply, /didn't catch/);

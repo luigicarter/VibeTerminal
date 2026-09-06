@@ -3,10 +3,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { STT_MODEL, TTS_MODEL, TTS_VOICE } = require('../shared/voiceConfig.cjs');
 const DEFAULTS = { model: '', sttModel: STT_MODEL, ttsModel: TTS_MODEL, voice: TTS_VOICE, language: 'en', monitoringEnabled: false, monitoringIntervalSeconds: 30, enabledOnLaunch: false };
+// A malformed saved file must never reach the list/map/push callers in the relay,
+// the policy check or the settings panel. Only well-formed entries survive.
+const normalizePreferences = list => (Array.isArray(list) ? list : []).filter(item => item && typeof item.id === 'string' && typeof item.text === 'string');
 function createSettings({ userDataPath, secureStorage }) {
   const filename = path.join(userDataPath, 'orchestrator-settings.json');
   let data = { settings: { ...DEFAULTS }, preferences: [], encryptedKey: '' };
   try { const disk = JSON.parse(fs.readFileSync(filename, 'utf8')); data = { ...data, ...disk, settings: { ...DEFAULTS, ...disk.settings } }; } catch {}
+  data.preferences = normalizePreferences(data.preferences);
   // The old default never had a published OpenRouter speech route. Migrate that
   // known configuration; other custom selections remain visible for correction.
   if (['openai/gpt-4o-mini-tts-2025-12-15', 'openai/gpt-4o-mini-tts'].includes(data.settings.ttsModel)) {
@@ -16,7 +20,7 @@ function createSettings({ userDataPath, secureStorage }) {
   let key = '';
   const secure = () => secureStorage?.isEncryptionAvailable?.() && secureStorage?.getSelectedStorageBackend?.() !== 'basic_text';
   try { if (data.encryptedKey && secure()) key = secureStorage.decryptString(Buffer.from(data.encryptedKey, 'base64')); } catch {}
-  function persist(next) { fs.mkdirSync(userDataPath, { recursive: true }); const tmp = `${filename}.tmp`; fs.writeFileSync(tmp, JSON.stringify(next, null, 2), { mode: 0o600 }); fs.renameSync(tmp, filename); data = next; }
+  function persist(next) { next.preferences = normalizePreferences(next.preferences); fs.mkdirSync(userDataPath, { recursive: true }); const tmp = `${filename}.tmp`; fs.writeFileSync(tmp, JSON.stringify(next, null, 2), { mode: 0o600 }); fs.renameSync(tmp, filename); data = next; }
   return {
     getKey: () => key,
     getSettings: () => ({ ...data.settings, hasKey: Boolean(key) }),

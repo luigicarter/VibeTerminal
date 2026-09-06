@@ -397,7 +397,10 @@ function installOrchestrator(options) {
       captureWaiters.add(waiter);
     });
     const result = await voice.setListening(true);
-    if (!result.ok || !voice.getState().wakeReady || !voice.getState().listening) {
+    // Wake detection can fail while capture is healthy. That is a degraded success:
+    // Talk now still works, and the controller's wake-error text explains the loss.
+    const degraded = result.ok && result.status === 'manual-only' && voice.getState().listening;
+    if (!degraded && (!result.ok || !voice.getState().wakeReady || !voice.getState().listening)) {
       const failure = { ok: false, error: result.error || voice.getState().error || 'Hey Vibe could not start its local wake detector.' };
       finishCapture(failure);
       return failure;
@@ -405,7 +408,7 @@ function installOrchestrator(options) {
     const microphone = await hardware;
     if (!microphone.ok) return microphone;
     if (disposed || token !== activation) return { ok: false, status: 'cancelled', error: 'Voice activation was cancelled.' };
-    return { ok: true, wakeReady: true, listening: true };
+    return degraded ? { ok: true, status: 'manual-only', wakeReady: false, listening: true, error: result.error } : { ok: true, wakeReady: true, listening: true };
   }
 
   const speechChoices = () => [{ id: TTS_MODEL, name: 'Kokoro · English', voices: TTS_VOICES.map(id => ({ id, name: id.slice(3).replace(/^./, letter => letter.toUpperCase()) + (id.startsWith('b') ? ' · British' : ' · American') })) }];
@@ -450,7 +453,9 @@ function installOrchestrator(options) {
       const listening = await startListening(token);
       if (!listening.ok) { if (token === activation) { await voice.setListening(false); await relay.setEnabled(false); } return listening; }
       await refreshInventory();
-      return { ok: true, voiceReady: true, wakeReady: true, listening: true };
+      return listening.status === 'manual-only'
+        ? { ok: true, status: 'manual-only', voiceReady: true, wakeReady: false, listening: true, error: listening.error }
+        : { ok: true, voiceReady: true, wakeReady: true, listening: true };
     } catch (error) {
       if (token === activation) { finishCapture({ ok: false, error: String(error?.message || "Voice could not start.") }); captureReady = false; await voice.setListening(false); await relay.setEnabled(false); hideIndicator(); }
       return { ok: false, error: String(error?.message || 'Voice could not start.') };
@@ -485,6 +490,8 @@ function installOrchestrator(options) {
           }
           return { ...result, ...listening };
         }
+        // A settings change that restarts capture degrades the same way activation does.
+        if (listening.status === 'manual-only') return { ...result, status: 'manual-only', wakeReady: false, listening: true, error: listening.error };
       }
     }
     return result;

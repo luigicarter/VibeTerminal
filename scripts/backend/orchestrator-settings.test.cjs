@@ -31,3 +31,18 @@ test('custom speech choices remain visible and invalid startup/reporting flags a
   assert.throws(() => store.configure({ monitoringEnabled: 1 }), /Invalid monitoringEnabled/);
   assert.equal(fs.readFileSync(filename, 'utf8'), before); assert.equal(store.getSettings().model, '');
 });
+test('a malformed saved preferences shape cannot reach list, map or push callers', t => {
+  const { store, filename } = fixture(t, { settings: {}, preferences: {}, encryptedKey: '' });
+  assert.deepEqual(store.getPreferences(), []);
+  const saved = store.preferences({ operation: 'remember', text: 'Concise replies' });
+  assert.equal(saved.length, 1); assert.equal(saved[0].text, 'Concise replies');
+  const disk = JSON.parse(fs.readFileSync(filename, 'utf8'));
+  assert.ok(Array.isArray(disk.preferences)); assert.equal(disk.preferences.length, 1);
+  assert.deepEqual(store.preferences({ operation: 'forget', id: saved[0].id }), []);
+});
+test('partly malformed preference entries are dropped instead of poisoning the list', t => {
+  const { store, filename } = fixture(t, { settings: {}, preferences: [{ id: 'a', text: 'Keep me' }, { bogus: 1 }, 's', null, { id: 2, text: 'numeric id' }], encryptedKey: '' });
+  assert.deepEqual(store.getPreferences(), [{ id: 'a', text: 'Keep me' }]);
+  store.configure({ language: 'en' });
+  assert.deepEqual(JSON.parse(fs.readFileSync(filename, 'utf8')).preferences, [{ id: 'a', text: 'Keep me' }]);
+});

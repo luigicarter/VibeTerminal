@@ -6,6 +6,8 @@ const { createWakeProcess } = require('./voiceWakeProcess.cjs');
 const { matchAnswer, questionSpeech } = require('./voiceAnswers.cjs');
 const { OpenRouterError, readOpenRouterResponse, classifyTransportError, upstreamErrorInfo } = require('./openRouterErrors.cjs');
 const { STT_MODEL, TTS_MODEL, TTS_VOICE, TTS_VOICES } = require('../shared/voiceConfig.cjs');
+// "Hey Vibe" alone runs about 600 ms; more voiced pre-roll than this carries a command.
+const PRE_ROLL_COMMAND_MS = 800;
 const interactionKey = item => JSON.stringify([item?.sessionId ?? '', item?.generation ?? null, item?.id ?? item?.requestId ?? '', item?.revision ?? null]);
 const sameInteraction = (a, b) => interactionKey(a) === interactionKey(b);
 const sameRequest = (a, b) => !!a && !!b && a.sessionId === b.sessionId && a.generation === b.generation && a.id === b.id;
@@ -123,18 +125,18 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       if (!wake) {
         const startup = keywordFactory ? Promise.resolve(keywordFactory(modelPath)) : createWakeProcess({ modelPath,
           onDetected: () => { if (state.listening && state.phase === 'listening') beginRecording(wakeHistory); },
-          onError: () => { wake = null; if (state.listening) update({ wakeReady: false, ...(['listening', 'starting'].includes(state.phase) ? { phase: 'wake-error' } : {}), wakeError: 'Wake detection stopped. Talk now is still available.' }); },
+          onError: (_message, detail) => { wake = null; if (state.listening) update({ wakeReady: false, ...(['listening', 'starting'].includes(state.phase) ? { phase: 'wake-error' } : {}), wakeError: 'Wake detection stopped. Talk now is still available.', wakeErrorDetail: String(detail || '').slice(0, 500) || null }); },
         });
         wakeStartup = startup;
         const detector = await startup; if (wakeStartup === startup) wakeStartup = null;
         if (disposed || !state.listening || epoch !== startEpoch) { detector.dispose?.(); return interrupted(); }
         wake = detector;
       }
-      update({ wakeReady: true, phase: 'listening', wakeError: null });
-    } catch {
+      update({ wakeReady: true, phase: 'listening', wakeError: null, wakeErrorDetail: null });
+    } catch (startupError) {
       if (disposed || !state.listening || epoch !== startEpoch) return interrupted();
       wakeStartup = null;
-      update({ wakeReady: false, phase: 'wake-error', wakeError: 'Hey Vibe is unavailable. Use Talk now, or repair the local wake model.' });
+      update({ wakeReady: false, phase: 'wake-error', wakeError: 'Hey Vibe is unavailable. Use Talk now, or repair the local wake model.', wakeErrorDetail: String(startupError?.detail || '').slice(0, 500) || null });
     }
     if (state.listening && epoch === startEpoch) {
       const pending = orchestrator.getState?.().requests;
@@ -195,8 +197,11 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     if (sampleRate !== RATE || !Array.isArray(samples) || !samples.length || samples.length > 8192 || samples.some(n => !Number.isFinite(n) || Math.abs(n) > 1.01)) return { ok: false, error: 'Invalid microphone frames.' };
     if (recording) {
       const progress = recording.push(samples);
-      if (progress === 'silence') { resetRecording(); answerContext = null; update({ transcript: '' }); void announceError({ category: 'not-understood', origin: 'voice', operation: 'transcription' }); }
-      else if (progress === 'complete') { const data = recording.finish(); resetRecording(); void sendAudio({ audioBase64: wavFromSamples(data).toString('base64'), format: 'wav' }); }
+      // A speaker who said the command in the same breath as the wake phrase leaves no
+      // live speech to endpoint; transcription, not endpointing, judges that audio.
+      const banked = progress === 'silence' && recording.preRollVoicedMs >= PRE_ROLL_COMMAND_MS;
+      if (progress === 'silence' && !banked) { resetRecording(); answerContext = null; update({ transcript: '' }); void announceError({ category: 'not-understood', origin: 'voice', operation: 'transcription' }); }
+      else if (progress === 'complete' || banked) { const data = recording.finish(); resetRecording(); void sendAudio({ audioBase64: wavFromSamples(data).toString('base64'), format: 'wav' }); }
     } else if (state.phase === 'listening') {
       wakeHistory.push(Float32Array.from(samples));
       while (wakeHistory.reduce((n, chunk) => n + chunk.length, 0) > RATE * 2) wakeHistory.shift();
@@ -240,7 +245,10 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
         if (!response.body) throw new OpenRouterError('upstream', response.status);
         const contentType = response.headers?.get?.('content-type') || '';
         if (/json/.test(contentType)) { await audioJson(response, abort); throw new OpenRouterError('upstream', response.status); }
-        if (contentType && !/^(?:audio\/(?:pcm|wav|wave|x-wav)|application\/octet-stream)(?:\s*;|\s*$)/i.test(contentType)) throw new OpenRouterError('upstream', response.status);
+        // Every type this gate admits must be one decodeSpeechAudio can decode, or the
+        // reply dies here instead of playing: audio/vnd.wave was decodable but unreachable.
+        // audio/L16 stays out: RFC 2586 makes it big-endian, which would play as noise.
+        if (contentType && !/^(?:audio\/(?:pcm|wav|wave|x-wav|vnd\.wave)|application\/octet-stream)(?:\s*;|\s*$)/i.test(contentType)) throw new OpenRouterError('upstream', response.status);
         const chunks = [];
         for await (const raw of audioChunks(response.body, abort)) {
           if (queuedEpoch !== epoch || abort.signal.aborted) return { ok: false, status: 'cancelled' };

@@ -2,7 +2,7 @@
 const path = require('node:path');
 const { fork } = require('node:child_process');
 function createWakeProcess({ modelPath, onDetected = () => {}, onError = () => {}, startupTimeoutMs = 15000, fork: spawn = fork } = {}) {
-  let child, ready = false, disposed = false, generation = 0, sequence = 0, inFlight = null, pendingReset = false, queue = [], killTimer;
+  let child, ready = false, disposed = false, generation = 0, sequence = 0, inFlight = null, pendingReset = false, queue = [], killTimer, diagnostics = '';
   let resolveReady, rejectReady;
   const started = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
   let startupTimer;
@@ -19,9 +19,20 @@ function createWakeProcess({ modelPath, onDetected = () => {}, onError = () => {
   }
   function fail() {
     if (disposed) return;
+    // A native loader failure only ever appears on the helper's stderr. Carry a
+    // bounded tail so the stage that failed is reportable instead of invisible.
+    const detail = diagnostics.trim().slice(-2048);
     const error = new Error('Local wake inference failed. Talk now is still available.');
-    if (!ready) rejectReady(error); else onError(error.message);
+    error.detail = detail;
+    if (!ready) rejectReady(error); else onError(error.message, detail);
     dispose();
+  }
+  // 'exit' can precede the last stderr chunk; wait briefly so the detail is not lost.
+  function failAfterDiagnostics() {
+    const stderr = child?.stderr;
+    if (disposed || !stderr || stderr.readableEnded || stderr.destroyed) return fail();
+    const grace = setTimeout(fail, 100); grace.unref?.();
+    stderr.once('close', () => { clearTimeout(grace); fail(); });
   }
   function reset() { generation++; queue = []; pendingReset = true; next(); }
   function dispose() {
@@ -30,6 +41,7 @@ function createWakeProcess({ modelPath, onDetected = () => {}, onError = () => {
     if (!ready) rejectReady(new Error('Wake startup cancelled.'));
     if (child?.connected) child.send({ type: 'dispose' }, () => {});
     disposed = true;
+    child?.stderr?.destroy?.();
     // A stuck native decode cannot keep the app or microphone alive.
     if (child && child.exitCode == null) { killTimer = setTimeout(() => child.kill(), 500); killTimer.unref?.(); }
   }
@@ -47,10 +59,13 @@ function createWakeProcess({ modelPath, onDetected = () => {}, onError = () => {
     const helperPath = path.join(__dirname, 'voiceWakeHost.cjs').replace(/([\\/])app\.asar([\\/])/, '$1app.asar.unpacked$2');
     child = spawn(helperPath, [], {
       execPath: process.execPath, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-      windowsHide: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'], serialization: 'advanced',
+      windowsHide: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'], serialization: 'advanced',
     });
+    child.stderr?.setEncoding?.('utf8');
+    child.stderr?.on('data', chunk => { diagnostics = (diagnostics + chunk).slice(-2048); });
+    child.stderr?.on('error', () => {});
     child.on('error', fail);
-    child.on('exit', () => { clearTimeout(killTimer); if (!disposed) fail(); });
+    child.on('exit', () => { clearTimeout(killTimer); if (!disposed) failAfterDiagnostics(); });
     child.on('message', message => {
       if (disposed) return;
       if (message?.type === 'ready') { ready = true; clearTimeout(startupTimer); resolveReady(api); next(); }
