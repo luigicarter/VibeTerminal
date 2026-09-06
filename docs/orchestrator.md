@@ -3,10 +3,12 @@
 See [the harness review](orchestrator-harness-review.md) for the tool map, title
 resolution, single-conversation context, edge cases and verified limitations.
 
-The app-wide Orchestrator is a user-command relay. It reads current activity,
-summarizes observations, routes the user's instructions, and brings structured
-agent questions back to the user. It does not decide answers, change priorities,
-invent assignments, or grant itself authority from terminal output.
+The app-wide Orchestrator interprets the user's goal and operates across their
+terminals: reading activity, navigating panes and views, composing and sending
+requested prompts, and submitting the answers the user supplies. The selected
+Brain interprets natural language; application code binds operations to current
+terminal identities and validates delivery. See [semantic commands and terminal
+controls](orchestrator-controls.md) for the current operating contract.
 
 For the reading/voice follow-up, see [progressive context and local error audio](orchestrator-context-and-audio.md).
 
@@ -59,11 +61,13 @@ synthesized speech all use OpenRouter.
 - `Launch setup Frontend work.`
 - `Remember that I prefer concise updates.`
 
-An explicitly identified session can become the target of a follow-up such as
-`Tell it to rerun the tests`. The binding includes the launch generation; a
-restart cannot silently redirect the old request. Relay payloads preserve the
-whole explicitly supplied instruction, including qualifiers. Ambiguous targets
-or command shapes are rejected or require clarification.
+An identified session can become the target of a follow-up such as `Tell it to
+rerun the tests`. The binding includes the launch generation. Requests such as
+`Have one of them review the latest changes` and `You choose` permit the app to
+choose one terminal in the identified group. `Have all six review it` grants one
+submission per target. The Brain can formulate a usable prompt from the user's
+goal while retaining constraints. Clarifications preserve unfinished commands;
+terminal restarts and completed submissions cannot silently replay old work.
 
 Native `navigate` actions open Settings, History, the Orchestrator dashboard,
 Multi mode, or an existing project. The renderer acknowledges the view change;
@@ -124,8 +128,13 @@ the source selection cancels stale reads. Staging never sends bytes to a termina
   the existing Fusion/Open Fusion hosts; it bridges app actions and acknowledgments.
 - `backend/terminalObservation.cjs` interprets live terminal output with headless
   xterm. History consists of bounded display samples, not a complete transcript.
-- `backend/orchestratorPolicy.cjs` binds action permission and complete payloads
-  to the current user command. Recent conversation and terminal output are data.
+- `backend/orchestratorIntent.cjs` defines the user-only semantic interpretation
+  contract, immutable operation grants, exact answer sources, and per-target claims.
+- `backend/orchestratorPolicy.cjs` retains directory/identity helpers and the exact
+  saved-history selection check. Its literal parser is not the general model
+  effect gate.
+- `backend/orchestratorTerminalInput.cjs` bridges fresh native terminal screen
+  observations to bounded, generation-checked text/key input.
 - `frontend/sessionDrafts.ts` keeps drafts and revisions in RAM independently of
   mounted pane components.
 
@@ -210,10 +219,19 @@ device reports do not set or clear that protection. A generation or live shell a
 that the foreground input is an agent composer. PTY `written` remains transport
 acceptance, not model consumption or successful task completion.
 
-Full spoken question/choice routing is implemented for structured Fusion and
-Open Fusion interactions. Arbitrary terminal TUIs may expose only activity or
-visible text; unsupported question menus require interaction in their terminal.
-The relay can still read and summarize their captured screen on request.
+Fusion and Open Fusion expose structured question/permission tools to the
+Orchestrator. Each submitted value comes from the user's answer and is checked
+against the current request, generation, revision and options. Multiple selected
+labels and allowed custom answers work without a special spoken prefix. Literal
+voice answers retain their quick path; other wording and directions to another
+terminal reach the semantic Orchestrator with the current question identity.
+
+Standalone terminals expose `terminal_interact` for literal user input and named
+keys after a fresh `read_session`. This includes Codex, Claude, Cursor, Gemini,
+Kimi, Qwen, OpenCode and plain shells. Waiting menus use a separate interaction
+transport rather than the idle-only new-prompt path. Manual drafts, stale screens
+and dead roots are protected. Navigation-only grants cannot submit an answer;
+Enter/submission requires the user's answer or explicit input instruction.
 
 Fusion preserves question IDs and option arrays and accepts distinct answers per
 question. Open Fusion retains its ordered answer arrays. Both use request
@@ -268,6 +286,28 @@ Settings, encrypted credentials, explicit preferences, saved setups, and selecte
 workspace configuration persist under the current user's app data. New relay
 messages, captured terminal history, handoff drafts, and microphone audio do not
 become a permanent archive. Existing engine-owned transcript storage is separate.
+
+Private error diagnostics persist in `<userData>/logs/orchestrator-errors.jsonl`
+(normally `%APPDATA%\vibe-terminal\logs\orchestrator-errors.jsonl` on Windows).
+They stay outside normal chat, speech, model context, and renderer state. Rejected
+tools, failed or unconfirmed delivery, connection/settings failures, inventory and
+monitor errors, and transcription/speech/playback/microphone failures record
+bounded error details and available model, action, terminal generation, request,
+tool-call and receipt IDs. A queued delivery failure retains its originating IDs.
+Provider failures retain their classified HTTP status/category; raw provider
+response bodies are excluded. Normal user cancellation is not an error log event.
+
+The logger redacts the configured key and common credential formats. It excludes
+prompt, conversation, terminal-output, request-body and audio fields; malformed
+tool JSON is logged without quoting its arguments. Writes run asynchronously and
+rotate at 1 MiB, retaining the current file and two backups. A bounded 100-record
+queue drops excess events during an error flood. Unwritable logs cannot stop the
+app; orderly shutdown waits up to one second for pending writes. These are local
+diagnostic files, not an uploaded error-reporting service.
+
+The diagnostic, diagnostic-integration and voice-diagnostic tests verify
+persistence, rotation, redaction, failed relay/delivery correlation, voice failure
+capture and isolation from visible replies. They run in `npm run test:orchestrator`.
 
 Useful commands:
 

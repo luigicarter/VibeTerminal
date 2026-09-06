@@ -4,6 +4,7 @@ const test = require("node:test"), assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
 const { installOrchestrator } = require("../../backend/orchestratorIntegration.cjs");
+const { interpretTestIntent } = require('./orchestrator-test-intent.cjs');
 
 function harness(t, provider, state = "idle") {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "vibe-provider-integration-"));
@@ -25,7 +26,7 @@ function harness(t, provider, state = "idle") {
     queueMicrotask(() => integration.incoming(engine, { id: message.payload.id, generation: message.payload.generation, type: "action-result", actionId: message.payload.actionId, ok: true, status: engine === "terminal" ? "written" : message.type === "steer" ? "steered" : "accepted" }));
     return true;
   };
-  integration = installOrchestrator({ app, BrowserWindow: { getAllWindows: () => [main] }, ipcMain: ipc, screen: {}, shell: {}, safeStorage: { isEncryptionAvailable: () => false }, getMainWindow: () => main,
+  integration = installOrchestrator({ interpretIntent: interpretTestIntent, app, BrowserWindow: { getAllWindows: () => [main] }, ipcMain: ipc, screen: {}, shell: {}, safeStorage: { isEncryptionAvailable: () => false }, getMainWindow: () => main,
     getRuntime: () => ({ listSnapshots: () => chat ? [] : [snapshot] }), sendPty: sender("terminal"), sendFusion: sender("fusion"), sendOpenFusion: sender("openfusion"),
     getTelemetry: () => ({ steerFusionSession: async (id, text) => { steers.push({ id, text }); return steerResult; } }), getChanges: () => ({}) });
   if (chat) {
@@ -35,9 +36,29 @@ function harness(t, provider, state = "idle") {
     integration.incoming("terminal", { id: "pane", generation: snapshot.generation, type: "agent-process", phase: "start", pid: 12345 });
   }
   const invoke = (name, p = {}) => ipc.handlers.get(`orchestrator:${name}`)({ sender: main.webContents }, p);
-  t.after(() => { integration.dispose(); const resolved = path.resolve(root); assert(resolved.startsWith(path.join(os.tmpdir(), "vibe-provider-integration-"))); fs.rmSync(resolved, { recursive: true, force: true }); });
+  t.after(async () => { await integration.dispose(); const resolved = path.resolve(root); assert(resolved.startsWith(path.join(os.tmpdir(), "vibe-provider-integration-"))); fs.rmSync(resolved, { recursive: true, force: true }); });
   return { integration, sent, steers, uiActions, snapshot, invoke, setSteer: value => { steerResult = value; },
     send: (text = "Exact payload; keep every qualifier") => invoke("dispatch", { kind: "send_prompt", target: { id: "pane", generation: snapshot.generation }, text }) };
+}
+
+for (const provider of ['claude', 'codex', 'cursor', 'gemini', 'kimi', 'kimi-custom', 'qwen', 'opencode', 'terminal']) {
+  test(`${provider}: a current waiting screen supports identity-bound terminal interaction through the real bridge`, async t => {
+    const h = harness(t, provider, 'waiting'), generation = h.snapshot.generation;
+    h.integration.incoming('terminal', { id: 'pane', generation, type: 'created', pid: 32123, cols: 80, rows: 24 });
+    h.integration.incoming('terminal', { id: 'pane', generation, type: 'data', data: 'Choose: 1 Small  2 Large', sequence: 1 });
+    const screen = await h.invoke('dispatch', { kind: 'read_session', target: { id: 'pane', generation } });
+    assert.equal(screen.observation.ok, true);
+    const action = { kind: 'terminal_interact', actionId: 'native-answer', target: { id: 'pane', generation }, observationSequence: screen.observation.sequence, keys: ['down', 'enter'] };
+    const result = await h.invoke('dispatch', action);
+    assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(result.status, 'written');
+    assert.equal(h.sent.length, 1); assert.equal(h.sent[0].type, 'action'); assert.equal(h.sent[0].payload.kind, 'interaction');
+    assert.deepEqual(h.sent[0].payload.keys, ['down', 'enter']);
+    assert.equal(h.sent[0].payload.expectedAgentPid, provider === 'terminal' ? 32123 : 12345);
+    assert.equal((await h.invoke('dispatch', action)).ok, true); assert.equal(h.sent.length, 1);
+    h.integration.incoming('terminal', { id: 'pane', generation, type: 'data', data: '\r\nNew prompt', sequence: 2 });
+    const stale = await h.invoke('dispatch', { ...action, actionId: 'stale-answer' });
+    assert.equal(stale.status, 'stale-observation'); assert.equal(h.sent.length, 1);
+  });
 }
 
 for (const provider of ["fusion", "openfusion"]) {

@@ -2,13 +2,14 @@
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const { createOrchestrator } = require('../../backend/orchestrator.cjs');
+const { interpretTestIntent } = require('./orchestrator-test-intent.cjs');
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 const reply = text => ({ choices: [{ message: { content: text } }] });
 const tools = (...actions) => ({ choices: [{ message: { tool_calls: actions.map((args, i) => ({ id: `call-${i}`, type: 'function', function: { name: 'workspace', arguments: JSON.stringify(args) } })) } }] });
 async function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-activity-'));
   const f = { sessions: ['a', 'b', 'idle'].map(id => ({ id, generation: `g-${id}`, name: `Worker ${id.toUpperCase()}`, kind: 'codex', cwd: root, status: 'busy' })), responses: [], changes: [] };
-  const relay = createOrchestrator({ userDataPath: root, secureStorage: { isEncryptionAvailable: () => false },
+  const relay = createOrchestrator({ interpretIntent: interpretTestIntent, userDataPath: root, secureStorage: { isEncryptionAvailable: () => false },
     getSessions: () => f.sessions, getRoots: () => ({ documents: root, projects: [{ name: "Fixture", path: root }] }),
     onChange: state => f.changes.push(state.activeTargets),
     onSpeak: value => f.speak?.(value),
@@ -19,7 +20,7 @@ async function fixture(t) {
       if (url.endsWith('/models')) return { data: [{ id: 'brain', supported_parameters: ['tools'] }] };
       const response = f.responses.shift(); return typeof response === 'function' ? response() : response || reply('Done.');
     } }) });
-  t.after(() => { relay.dispose(); assert(path.resolve(root).startsWith(path.join(os.tmpdir(), 'vibe-activity-'))); fs.rmSync(root, { recursive: true, force: true }); });
+  t.after(async () => { await relay.dispose(); assert(path.resolve(root).startsWith(path.join(os.tmpdir(), 'vibe-activity-'))); fs.rmSync(root, { recursive: true, force: true }); });
   await relay.configure({ apiKey: 'test-key', sessionOnly: true, model: 'brain' });
   assert.equal((await relay.setEnabled(true)).ok, true);
   f.relay = relay; f.active = () => relay.getState().activeTargets;

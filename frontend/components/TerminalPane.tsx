@@ -710,7 +710,9 @@ export default function TerminalPane({
       : undefined;
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
-    terminal.loadAddon(new WebLinksAddon());
+    terminal.loadAddon(new WebLinksAddon((_event, url) => {
+      void window.vibe?.openFusionChat.openExternal(url).catch(() => {});
+    }));
     terminal.open(containerRef.current);
 
     // Capture phase: these must record the user's intent before xterm's own

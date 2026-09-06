@@ -13,9 +13,10 @@ const checks = [
   'smoke:frontend:fusion-settings', 'smoke:frontend:tiled-resize', 'smoke:frontend:pane-split',
   'smoke:frontend:cwd-conflicts', 'smoke:frontend:terminal-runtime', 'smoke:frontend:app-runtime',
   'smoke:frontend:session-persistence', 'smoke:frontend:terminal-output',
+  'test:frontend:terminal-links',
   'smoke:frontend:workspace-setups', 'smoke:frontend:orchestrator-history', 'smoke:frontend:conversation-live',
   'smoke:frontend:workspace-dock', 'smoke:frontend:conversation-pages',
-  'smoke:frontend:voice-experience', 'smoke:frontend:orchestrator-dashboard',
+  'smoke:frontend:voice-experience', 'test:voice:capture', 'smoke:voice:native', 'smoke:voice:matrix', 'smoke:frontend:orchestrator-dashboard',
   'smoke:frontend:session-recency', 'test:orchestrator'
 ];
 if (require.main === module) {

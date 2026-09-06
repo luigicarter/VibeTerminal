@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { installOrchestrator } = require('../../backend/orchestratorIntegration.cjs');
+const { interpretTestIntent } = require('./orchestrator-test-intent.cjs');
 const { createVoiceOverlayWindow } = require('../../backend/voiceOverlayWindow.cjs');
 const { createVoiceController } = require('../../backend/voiceController.cjs');
 const { STT_MODEL, TTS_MODEL, TTS_VOICE } = require('../../shared/voiceConfig.cjs');
@@ -61,9 +62,10 @@ async function fixture(t, options = {}) {
   const app = new EventEmitter(); app.getPath = () => root; app.isPackaged = false;
   const calls = [], previews = [];
   let controller;
-  const integration = installOrchestrator({
+  const integration = installOrchestrator({ interpretIntent: interpretTestIntent,
     app, BrowserWindow, screen, ipcMain, getMainWindow: () => main,
     captureReadyTimeoutMs: options.captureReadyTimeoutMs,
+    captureFlushTimeoutMs: options.captureFlushTimeoutMs,
     shell: {}, safeStorage: { isEncryptionAvailable: () => false },
     microphonePermission: options.microphonePermission || { isGranted: () => true, ensure: async () => ({ ok: true }), openSettings: async () => ({ ok: true }) },
     getRuntime: () => ({ listSnapshots: () => [] }), sendPty: () => false, sendFusion: () => false, sendOpenFusion: () => false,
@@ -86,8 +88,8 @@ async function fixture(t, options = {}) {
       return controller;
     },
   });
-  t.after(() => {
-    integration.dispose();
+  t.after(async () => {
+    await integration.dispose();
     assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()));
     assert(path.basename(root).startsWith('vibe-voice-lifecycle-'));
     fs.rmSync(root, { recursive: true, force: true });
@@ -108,7 +110,7 @@ async function fixture(t, options = {}) {
     const pending = invoke('orchestrator:enabled', { enabled: true });
     await renderer(); await capture(); return pending;
   }
-  return { invoke, renderer, capture, enable, overlay, BrowserWindow, controller, calls, previews, main };
+  return { invoke, renderer, capture, enable, overlay, BrowserWindow, controller, calls, previews, main, ipcMain };
 }
 
 test('audio renderer stays hidden and cannot take focus; native close preserves audio', async t => {
@@ -124,6 +126,69 @@ test('audio renderer stays hidden and cannot take focus; native close preserves 
   window.close(); assert.equal(window.visible, false); assert.equal(window.destroyed, false); assert.equal(closed, 0);
   surface.send('voice:audio', { fixture: true }); assert.equal(window.sent.at(-1).channel, 'voice:audio');
   await surface.ensureReady(); assert.equal(surface.getWindow(), window); assert.equal(window.visible, false);
+});
+
+test('manual release waits for the audio worklet tail before submitting the WAV', async t => {
+  const uploads = [];
+  const f = await fixture(t, { controllerOptions: { fetch: async (_url, options) => {
+    uploads.push(JSON.parse(options.body)); return new Response(JSON.stringify({ text: '' }));
+  } } });
+  await f.enable();
+  const { captureToken } = await f.invoke('voice:get-state');
+  const sender = f.overlay().webContents;
+  const feed = (sampleStart, count) => f.ipcMain.emit('voice:frames', { sender }, { captureToken, sampleStart, sampleRate: 16000, samples: Array(count).fill(0.1) });
+  await f.invoke('voice:configure', { pushToTalk: 'start', holdId: 'tail-hold' });
+  feed(0, 1600); feed(1600, 1600); feed(3200, 1600);
+  let flush;
+  f.overlay().onSend = (channel, payload) => { if (channel === 'voice:flush') flush = payload; };
+  const released = f.invoke('voice:configure', { pushToTalk: 'stop', holdId: 'tail-hold' });
+  await until(() => flush, 'worklet flush request');
+  assert.equal(uploads.length, 0);
+  feed(4800, 17);
+  assert.equal((await f.invoke('voice:configure', { captureFlushed: true, flushId: flush.id, captureToken, sampleEnd: 4817 }, sender)).ok, true);
+  assert.equal((await released).status, 'sent');
+  await until(() => uploads.length, 'WAV upload');
+  assert.equal(Buffer.from(uploads[0].input_audio.data, 'base64').length, 44 + 4817 * 2);
+});
+
+test('audio positions and flush acknowledgments reject stale or unauthorized capture data', async t => {
+  const f = await fixture(t); await f.enable();
+  const { captureToken } = await f.invoke('voice:get-state');
+  const sender = f.overlay().webContents;
+  let accepted = 0;
+  const frames = f.controller.frames;
+  f.controller.frames = payload => { accepted++; return frames(payload); };
+  const packet = { captureToken, sampleStart: 0, sampleRate: 16000, samples: Array(320).fill(0.1) };
+  f.ipcMain.emit('voice:frames', { sender }, { ...packet, captureToken: captureToken - 1 });
+  f.ipcMain.emit('voice:frames', { sender: f.main.webContents }, packet);
+  f.ipcMain.emit('voice:frames', { sender }, { ...packet, sampleStart: -1 });
+  assert.equal(accepted, 0);
+  f.ipcMain.emit('voice:frames', { sender }, packet);
+  f.ipcMain.emit('voice:frames', { sender }, packet);
+  assert.equal(accepted, 1, 'duplicate samples are not delivered twice');
+  f.ipcMain.emit('voice:frames', { sender }, { ...packet, sampleStart: 640 });
+  assert.equal(accepted, 2, 'a forward gap reaches discontinuity handling instead of wedging capture');
+  await f.invoke('voice:configure', { pushToTalk: 'start', holdId: 'identity-hold' });
+  let flush;
+  f.overlay().onSend = (channel, payload) => { if (channel === 'voice:flush') flush = payload; };
+  const released = f.invoke('voice:configure', { pushToTalk: 'stop', holdId: 'identity-hold' });
+  await until(() => flush, 'flush request');
+  const ack = { captureFlushed: true, flushId: flush.id, captureToken, sampleEnd: 960 };
+  assert.equal((await f.invoke('voice:configure', ack)).status, 'stale');
+  assert.equal((await f.invoke('voice:configure', { ...ack, captureToken: captureToken - 1 }, sender)).status, 'stale');
+  await f.invoke('orchestrator:enabled', { enabled: false });
+  assert.equal((await released).status, 'cancelled');
+  assert.equal((await f.invoke('voice:configure', ack, sender)).status, 'stale');
+});
+
+test('flush deadline cancels the held attempt without uploading incomplete audio', async t => {
+  let uploaded = false;
+  const f = await fixture(t, { captureFlushTimeoutMs: 15, controllerOptions: { fetch: async () => { uploaded = true; throw Error('Unexpected upload'); } } });
+  await f.enable();
+  await f.invoke('voice:configure', { pushToTalk: 'start', holdId: 'missing-tail' });
+  const result = await f.invoke('voice:configure', { pushToTalk: 'stop', holdId: 'missing-tail' });
+  assert.equal(result.ok, false); assert.match(result.error, /audio did not finish/);
+  assert.equal(uploaded, false); assert.equal(f.controller.getState().phase, 'listening');
 });
 
 test('failed indicator load destroys the failed renderer and permits retry', async t => {

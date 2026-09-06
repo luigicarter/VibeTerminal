@@ -5,10 +5,11 @@ const fs = require("node:fs"), path = require("node:path"), net = require("node:
 const { spawn, spawnSync } = require("node:child_process");
 const root = path.resolve(__dirname, "../..");
 const observeExternal = process.argv.includes("--observe-external");
+const hidden = process.argv.includes("--hidden");
 const output = path.join(root, ".tmp", "orchestrator-command-smoke", `${Date.now()}-${process.pid}`);
 fs.mkdirSync(output, { recursive: true });
 const result = { output, mode: "scripted OpenRouter; real Electron and PTY; no live model", checks: [] };
-result.focusMode = observeExternal ? "observe-existing-external-foreground" : "strict-selected-text-sentinel";
+result.focusMode = hidden ? "hidden-fixture-no-foreground-sentinel" : observeExternal ? "observe-existing-external-foreground" : "strict-selected-text-sentinel";
 result.externalSelectionVerified = false;
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(fn, label, ms = 25000) { let last; const end = Date.now() + ms; while (Date.now() < end) { try { const value = await fn(); if (value) return value; } catch (error) { last = error; } await wait(120); } throw Error(`Timeout: ${label}; ${last || ""}`); }
@@ -36,9 +37,20 @@ for (const [index, id] of historyIds.entries()) {
 // A fixture-only entry point replaces fetch before loading the unchanged application.
 const entry = path.join(output, "main.cjs");
 fs.writeFileSync(entry, `const fs=require('node:fs');
+const {interpretTestIntent}=require(${JSON.stringify(path.join(root,'scripts/backend/orchestrator-test-intent.cjs'))});
+if(${hidden}){
+ const electron=require('electron'),NativeWindow=electron.BrowserWindow,Module=require('node:module'),load=Module._load;
+ // Fixture-only hidden runtime: do not create/activate a foreground QA window.
+ const hiddenElectron=Object.create(electron);
+ Object.defineProperty(hiddenElectron,'BrowserWindow',{value:class extends NativeWindow{
+  constructor(options){super({...options,show:false});}
+  show(){} showInactive(){} maximize(){} restore(){} focus(){}
+ }});
+ Module._load=function(name,...args){return name==='electron'?hiddenElectron:load.call(this,name,...args);};
+}
 const path=require('node:path');const permissionModule=require(${JSON.stringify(path.join(root,'backend/microphonePermission.cjs'))});const permissionFactory=permissionModule.createMicrophonePermission;
 // This transport harness starts with granted app consent and scripted OS access;
-// it does not replace BrowserWindow or weaken the real foreground sentinel.
+// Normal visible mode retains the real BrowserWindow and foreground sentinel.
 permissionModule.createMicrophonePermission=options=>{fs.mkdirSync(options.userDataPath,{recursive:true});fs.writeFileSync(path.join(options.userDataPath,'microphone-consent.json'),JSON.stringify({version:1,granted:true}));return permissionFactory({...options,systemPreferences:{getMediaAccessStatus:()=> 'granted'}});};
 globalThis.fetch=async(url,options={})=>{
  const reply=data=>({ok:true,json:async()=>data});
@@ -48,6 +60,10 @@ globalThis.fetch=async(url,options={})=>{
  const body=JSON.parse(options.body);fs.appendFileSync(${JSON.stringify(traceFile)},JSON.stringify(body)+'\\n');
  const answer=message=>reply({choices:[{message}],usage:{cost:0}});
  if(!body.tools)return answer({content:'NO_CHANGE'});
+ if(body.tools.some(tool=>tool.function?.name==='interpret_workspace')){
+  const context=JSON.parse(body.messages.find(message=>message.role==='user').content);
+  return answer({tool_calls:[{id:'fixture-intent',type:'function',function:{name:'interpret_workspace',arguments:JSON.stringify(interpretTestIntent(context))}}]});
+ }
  const plan=JSON.parse(fs.readFileSync(${JSON.stringify(planFile)},'utf8'));
  if(plan.hold){fs.writeFileSync(${JSON.stringify(path.join(output, "held"))},'held');await new Promise((resolve,reject)=>{if(options.signal.aborted)return reject(Error('Cancelled'));options.signal.addEventListener('abort',()=>reject(Error('Cancelled')),{once:true});});}
  const completed=body.messages.filter(m=>m.role==='tool').length;
@@ -127,20 +143,23 @@ function toolsFrom(reply, expectedOk = true) { assert.equal(reply.ok, expectedOk
   await until(() => cdp.eval(`window.vibe.terminal.getRuntimeSnapshots().then(s=>s.some(s=>s.id===${JSON.stringify(id)}&&s.processState==='running'))`), "running PTY transport");
   const selectedBefore = await cdp.eval("({project:localStorage.getItem('vibe-terminal:active-workspace:v1'),view:localStorage.getItem('vibe-terminal:active-view:v1'),panes:Array.from(document.querySelectorAll('[data-pane-id]'),e=>e.dataset.paneId)})");
   assert(selectedBefore.panes.includes(id), JSON.stringify(selectedBefore));
+  let foregroundBaseline;
+  if (!hidden) {
   sentinel = spawn(path.join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), ["-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File", sentinelScript], { env: { ...process.env, VIBE_QA_APP_PID: String(child.pid) }, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
   const sentinelLog = fs.createWriteStream(path.join(output, "sentinel.log")); sentinel.stdout.pipe(sentinelLog); sentinel.stderr.pipe(sentinelLog);
   sentinel.on("error", error => sentinelLog.write(`sentinel: process error ${error.stack}\n`));
   sentinel.on("exit", (code, signal) => sentinelLog.write(`sentinel: exit code=${code} signal=${signal}\n`));
-  const foregroundBaseline = await until(() => { if (sentinel.exitCode !== null) throw Error(`Sentinel exited ${sentinel.exitCode}; see sentinel.log`); const state = JSON.parse(fs.readFileSync(sentinelState, "utf8").replace(/^\uFEFF/, "")); const expected = observeExternal ? state.baselineForegroundPid : sentinel.pid; if (!expected || state.foregroundPid !== expected || (!observeExternal && state.selection !== "selected")) throw Error(`Sentinel ready but OS foreground=${state.foregroundPid}, expected=${expected}, selection=${JSON.stringify(state.selection)}; see sentinel.log`); return state; }, "OS foreground sentinel");
+  foregroundBaseline = await until(() => { if (sentinel.exitCode !== null) throw Error(`Sentinel exited ${sentinel.exitCode}; see sentinel.log`); const state = JSON.parse(fs.readFileSync(sentinelState, "utf8").replace(/^\uFEFF/, "")); const expected = observeExternal ? state.baselineForegroundPid : sentinel.pid; if (!expected || state.foregroundPid !== expected || (!observeExternal && state.selection !== "selected")) throw Error(`Sentinel ready but OS foreground=${state.foregroundPid}, expected=${expected}, selection=${JSON.stringify(state.selection)}; see sentinel.log`); return state; }, "OS foreground sentinel");
   record("foreground-probe-baseline", { mode: result.focusMode, ...foregroundBaseline });
   fs.writeFileSync(armFile, "armed");
+  } else record("foreground-sentinel-skipped", { reason: "Hidden fixture mode creates no foreground sentinel; external selection and clipboard preservation are not measured." });
   const payload = "Write-Output ('RELAY_' + 'OBSERVED_42')";
   plan([{ kind: "send_prompt", targetId: id, text: payload }, { kind: "read_session", targetId: id }]);
   const sent = toolsFrom(await command(`Send ${id}: ${payload}`)); assert.equal(sent[0].ok, true, JSON.stringify(sent)); assert.equal(sent[0].status, "written");
   const observed = await until(async () => { const read = await dispatch({ kind: "read_session", target: { id, generation: session.generation } }); return read.observation?.text.includes("RELAY_OBSERVED_42") && read; }, "evaluated PTY output, distinct from command echo");
   record("command-policy-generation-real-pty-output", { target: { id, generation: session.generation }, payload, receipt: sent[0], observation: observed });
   plan([{ kind: "send_prompt", targetId: id, text: "Write-Output POLICY_BYPASS" }]);
-  const refused = toolsFrom(await command(`Send ${id}: Write-Output legitimate`), false); assert.equal(refused[0].ok, false); assert.match(refused[0].error, /COMPLETE|payload/i);
+  const refused = toolsFrom(await command(`Send ${id}: Write-Output legitimate`), false); assert.equal(refused[0].ok, false); assert.match(refused[0].error, /COMPLETE|payload|authorized user task/i);
   const stale = await dispatch({ kind: "send_prompt", target: { id, generation: "stale-generation" }, text: "Write-Output STALE_BYPASS" }); assert.equal(stale.ok, false); assert.match(stale.error, /generation|changed/i);
   record("policy-and-stale-refusal", { refused, stale });
   fs.writeFileSync(planFile, JSON.stringify({ actions: [], hold: true }));
@@ -176,12 +195,15 @@ function toolsFrom(reply, expectedOk = true) { assert.equal(reply.ok, expectedOk
   assert.equal(followup.status,'not-running',JSON.stringify(followup));
   record('resumed-title-followup-bound-to-new-pane',followup);
   await wait(300);
+  if (!hidden) {
   const focus = JSON.parse(fs.readFileSync(sentinelState, "utf8").replace(/^\uFEFF/, "")); assert(focus.samples > 3); assert.equal(focus.violations, 0, JSON.stringify(focus)); assert.equal(focus.foregroundPid, foregroundBaseline.baselineForegroundPid); assert.equal(focus.clipboardSequence, focus.baseline);
   if (!observeExternal) { assert.equal(focus.selection, "selected"); result.externalSelectionVerified = true; }
   record(observeExternal ? "external-os-focus-clipboard-selection-unverified" : "external-os-focus-clipboard-selection", focus);
   fs.unlinkSync(armFile); // Foreground assertion interval ends before UI screenshot navigation.
+  }
   const finalRead = await dispatch({ kind: "read_session", target: { id, generation: session.generation } }); assert(!/POLICY_BYPASS|STALE_BYPASS|FOLLOWUP_MUST_TARGET_RESUMED_CHAT/.test(finalRead.observation.text));
-  const screenshot = await cdp.send("Page.captureScreenshot", { format: "png" }); fs.writeFileSync(path.join(output, "workspace.png"), Buffer.from(screenshot.data, "base64"));
+  if (!hidden) { const screenshot = await cdp.send("Page.captureScreenshot", { format: "png" }); fs.writeFileSync(path.join(output, "workspace.png"), Buffer.from(screenshot.data, "base64")); }
+  else record("screenshots-skipped", { reason: "Hidden Chromium windows have no capture frame; DOM behavior is checked without visual screenshots." });
   await cdp.eval("document.querySelector('[aria-label=\"Open workspace tools\"]').click()");
   await until(()=>cdp.eval("Boolean(document.querySelector('.workspace-tools-heading'))"),"workspace tools dialog");
   await cdp.eval("Array.from(document.querySelectorAll('[role=tab]')).find(e=>e.textContent==='History').click()");
@@ -191,14 +213,19 @@ function toolsFrom(reply, expectedOk = true) { assert.equal(reply.ok, expectedOk
   await until(() => cdp.eval("Array.from(document.querySelectorAll('.conversation-history-item')).some(e=>e.textContent.includes('Fixture history 1'))"), "native fixture in History UI");
   await cdp.eval("Array.from(document.querySelectorAll('.conversation-history-item')).find(e=>e.textContent.includes('Fixture history 1')).click()");
   await until(() => cdp.eval("document.querySelector('[aria-label=\"Saved conversation messages\"]')?.textContent.includes('Historical answer 1')"), "History excerpt UI");
-  const historyScreenshot = await cdp.send("Page.captureScreenshot", { format: "png" }); fs.writeFileSync(path.join(output, "history.png"), Buffer.from(historyScreenshot.data, "base64"));
+  if (!hidden) { const historyScreenshot = await cdp.send("Page.captureScreenshot", { format: "png" }); fs.writeFileSync(path.join(output, "history.png"), Buffer.from(historyScreenshot.data, "base64")); }
+  if (!hidden) {
   const voicePage = await until(async () => (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(p => p.url.includes("surface=voice")), "overlay renderer");
   overlayCdp = new Cdp(voicePage.webSocketDebuggerUrl); await overlayCdp.open();
   await until(() => cdp.eval("Boolean(document.querySelector('.voice-indicator'))"), "in-app microphone UI");
   assert.equal(await overlayCdp.eval("Boolean(document.querySelector('.voice-indicator,.voice-overlay'))"), false);
   const voiceState = await overlayCdp.eval("window.vibe.voice.getState()"); assert.equal(voiceState.listening, true); assert.equal(voiceState.phase, 'listening');
-  const overlayScreenshot = await cdp.send("Page.captureScreenshot", { format: "png" }); fs.writeFileSync(path.join(output, "overlay.png"), Buffer.from(overlayScreenshot.data, "base64"));
+  if (!hidden) { const overlayScreenshot = await cdp.send("Page.captureScreenshot", { format: "png" }); fs.writeFileSync(path.join(output, "overlay.png"), Buffer.from(overlayScreenshot.data, "base64")); }
   record("history-excerpt-and-overlay-ui", { historyExcerptRendered: true, listening: voiceState.listening, phase: voiceState.phase });
+  } else {
+    record("history-excerpt-ui", { historyExcerptRendered: true });
+    record("microphone-overlay-checks-skipped", { reason: "Hidden command-only mode does not activate or visually verify the microphone indicator and overlay; use the full voice smoke for that boundary." });
+  }
   result.pass = true;
 } catch (error) { result.pass = false; result.error = error.stack; console.error(error.stack); process.exitCode = 1; }
 finally { fs.writeFileSync(path.join(output, "results.json"), JSON.stringify(result, null, 2)); cdp?.close(); overlayCdp?.close(); for (const process of [sentinel, child]) if (process?.pid) spawnSync("taskkill", ["/pid", String(process.pid), "/t", "/f"], { windowsHide: true, stdio: "ignore" }); console.log(`Artifacts: ${output}`); } })();

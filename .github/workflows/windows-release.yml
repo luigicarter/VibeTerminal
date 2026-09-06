@@ -54,7 +54,7 @@ jobs:
             throw "Release tag $env:GITHUB_REF_NAME does not match package version $packageVersion."
           }
 
-      - name: Verify bundled voice alert audio
+      - name: Verify bundled voice audio and models
         run: npm run prepare:voice
 
       - name: Run release checks
@@ -87,6 +87,10 @@ jobs:
       - name: Verify update feed and voice payload
         if: startsWith(github.ref, 'refs/tags/v')
         run: node scripts/qa/verify-release-artifacts.cjs
+
+      - name: Exercise packaged voice inference before publication
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: node scripts/qa/voice-packaged-smoke.cjs
 
       - name: Publish release assets
         if: startsWith(github.ref, 'refs/tags/v')
@@ -150,6 +154,10 @@ jobs:
       - name: Verify artifact feed and voice payload
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         run: node scripts/qa/verify-release-artifacts.cjs
+
+      - name: Exercise packaged voice inference for artifact
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: node scripts/qa/voice-packaged-smoke.cjs
 
       - name: Upload installer artifact
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}

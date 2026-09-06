@@ -26,15 +26,17 @@ function answerContextFor(interaction) {
   }
   return context;
 }
-function createVoiceController({ orchestrator, getKey, getSettings = () => ({}), emit = () => {}, onAudio = () => {}, fetch: request = globalThis.fetch, modelPath = path.join(__dirname, '../vendor/voice'), recordingOptions, errorAudio, now = Date.now } = {}) {
-  let state = { phase: 'off', muted: true, ready: false, listening: false, transcript: '', reply: '', error: null, microphoneId: '' };
+function createVoiceController({ orchestrator, getKey, getSettings = () => ({}), emit = () => {}, onAudio = () => {}, fetch: request = globalThis.fetch, modelPath = path.join(__dirname, '../vendor/voice'), recordingOptions, errorAudio, now = Date.now, inferenceFactory = options => require('./voiceInferenceService.cjs').createVoiceInferenceService(options) } = {}) {
+  let state = { phase: 'off', muted: true, ready: false, listening: false, transcript: '', reply: '', error: null, microphoneId: '', handsFreeStatus: 'off', handsFreeError: null, recordingSource: undefined, finishHint: false };
   let epoch = 0, recording = null, requestAbort = null, disposed = false, playbackTimer = null, playbackResolve = null, activeReply = null, activeInteraction = null;
+  let turn = null, turnSequence = 0, inference = null, inferenceGeneration = 0, streamId = 0, detectionMode = null, captureToken, samplePosition = 0, startupPromise = null, activeAnalysis = null;
   let speechQueue = Promise.resolve(), answerContext = null, announcementPending = null, recentAudio = [], answerSilenceMs = 0, deferredTimer = null; const resolvedInteractions = new Set(), legacyResolvedIds = new Set(), announcedInteractions = new Set(), deferredInteractions = new Map();
   const alerts = errorAudio || createLocalErrorAudio({ directory: path.join(modelPath, 'alerts') });
   const lastErrorAudio = new Map();
   let deferredError = null;
   const snapshot = () => ({ ...state });
-  const update = patch => { state = { ...state, ...patch }; emit(snapshot());
+  const update = patch => { const previousPhase = state.phase; state = { ...state, ...patch }; emit(snapshot());
+    if (state.phase !== previousPhase) { if (previousPhase === 'speaking' || state.phase === 'speaking') recentAudio = []; syncDetectionMode(true); }
     if (deferredError && state.listening && state.phase === 'listening') {
       const pending = deferredError, scheduledEpoch = epoch; deferredError = null;
       queueMicrotask(() => { if (scheduledEpoch === epoch && enabled() && state.listening) void announceError(pending); });
@@ -50,13 +52,125 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
   const checkSpending = () => { const limit = getSettings().spendingLimit; const usage = orchestrator?.getState?.().usage || {}; if (limit != null && Object.values(usage).reduce((total, cost) => total + (Number(cost) || 0), 0) >= limit) throw Error('Session spending limit reached.'); };
   const idlePhase = () => state.listening ? 'listening' : 'off';
   const failureCategory = (error, operation) => error === 'Session spending limit reached.' ? 'spending-limit' : error === 'A relay request is already running.' ? 'busy' : operation;
-  function resetRecording() { recording = null; }
+  // Diagnostics are best-effort and never receive recorded or spoken content.
+  function diagnostic(stage, error, details = {}, key) {
+    try {
+      if (error?.name === 'AbortError' || ['Session spending limit reached.', 'A relay request is already running.'].includes(error?.message)) return;
+      const clean = value => typeof value === 'string' && key ? value.split(key).join('[REDACTED]') : value;
+      const settings = getSettings();
+      const result = orchestrator?.recordDiagnostic?.({ event: 'voice_error', origin: 'voice', stage, status: 'failed',
+        ...(stage === 'transcription' ? { model: settings.sttModel || STT_MODEL } : stage === 'speech' ? { model: settings.ttsModel || TTS_MODEL } : {}),
+        category: error?.category, httpStatus: error?.status, reason: error?.reason, ...details,
+        error: { name: clean(error?.name), message: clean(error?.message), code: clean(error?.code), stack: clean(error?.stack) } });
+      Promise.resolve(result).catch(() => {});
+    } catch { /* Logging must not affect the voice lifecycle. */ }
+  }
+  function resetRecording() { recording = null; turn = null; state.recordingSource = undefined; state.finishHint = false; }
+  function syncDetectionMode(force = false) {
+    const mode = state.listening && state.handsFreeStatus === 'ready' ? (recording ? turn?.manual ? null : 'vad' : state.phase === 'listening' ? 'wake' : state.phase === 'awaiting-answer' ? 'vad' : null) : null;
+    if (force || mode !== detectionMode) { streamId++; detectionMode = mode; }
+  }
+  function stopInference() {
+    inferenceGeneration++; const service = inference; inference = null; startupPromise = null; activeAnalysis = null;
+    try { Promise.resolve(service?.dispose ? service.dispose() : service?.stop?.()).catch(() => {}); } catch { /* Already stopped. */ }
+    detectionMode = null; streamId++;
+  }
+  function inferenceFailed(error, generation = inferenceGeneration) {
+    if (generation !== inferenceGeneration || disposed) return;
+    diagnostic('hands-free', error instanceof Error ? error : Error(String(error)));
+    stopInference();
+    if (turn && !turn.manual) { resetRecording(); answerContext = null; answerSilenceMs = 0; }
+    update({ handsFreeStatus: 'unavailable', handsFreeError: 'Hands-free detection is unavailable. Use Space to talk, or toggle hands-free to retry.', ...(state.phase === 'recording' && !recording ? { phase: idlePhase(), error: 'Automatic recording cancelled. Hold Space to try again.' } : {}) });
+  }
+  async function refreshHandsFree() {
+    if (!state.listening || !enabled() || !getSettings().handsFreeEnabled) {
+      stopInference();
+      if (turn && !turn.manual) { resetRecording(); update({ phase: answerContext ? 'awaiting-answer' : idlePhase() }); }
+      update({ handsFreeStatus: 'off', handsFreeError: null }); return { ok: true };
+    }
+    if (inference && state.handsFreeStatus === 'ready') return { ok: true };
+    if (startupPromise) return startupPromise;
+    const generation = ++inferenceGeneration;
+    update({ handsFreeStatus: 'loading', handsFreeError: null });
+    startupPromise = Promise.resolve().then(async () => {
+      try {
+        if (generation !== inferenceGeneration || disposed || !state.listening) return { ok: false, status: 'cancelled' };
+        const service = inferenceFactory({ modelPath, onFrame: event => { if (generation === inferenceGeneration) inferenceFrame(event); }, onError: error => inferenceFailed(error, generation), onDiagnostic: details => {
+          if (generation !== inferenceGeneration) return;
+          const bounded = {};
+          for (const field of ['processingMs', 'queuedSamples', 'totalMs', 'preprocessingMs', 'inferenceMs']) if (Number.isFinite(details?.[field])) bounded[field] = Math.max(0, Math.min(1e9, details[field]));
+          try { Promise.resolve(orchestrator?.recordDiagnostic?.({ event: 'voice_inference', origin: 'voice', stage: ['stream', 'completion', 'error'].includes(details?.type) ? details.type : 'inference', ...bounded })).catch(() => {}); } catch { /* Best effort. */ }
+        } });
+        inference = service; await service.start();
+        if (generation !== inferenceGeneration || disposed) return { ok: false, status: 'cancelled' };
+        update({ handsFreeStatus: 'ready', handsFreeError: null }); syncDetectionMode(true);
+        return { ok: true };
+      } catch (error) { inferenceFailed(error, generation); return { ok: false, status: 'unavailable' }; }
+      finally { if (generation === inferenceGeneration) startupPromise = null; }
+    });
+    return startupPromise;
+  }
+  function beginAutomatic(source, event) {
+    const preRoll = recentAudio; recentAudio = [];
+    recording = createRecording({ ...recordingOptions, maxMs: 60000, preRoll, endpointing: false });
+    turn = { id: ++turnSequence, source, manual: false, speechRevision: 0, voicedMs: 0, silenceMs: 0, elapsedMs: 0, commandSpeech: source === 'answer', lastFrameEnd: event?.sampleEnd ?? samplePosition, pending: false, analyzedRevision: null };
+    answerSilenceMs = 0;
+    update({ phase: 'recording', recordingSource: source, finishHint: false, transcript: '', error: null });
+  }
+  function cancelAutomatic(message) {
+    resetRecording(); answerContext = null; answerSilenceMs = 0;
+    update({ phase: idlePhase(), error: message, transcript: '' }); syncDetectionMode(true);
+  }
+  function inferenceFrame(event = {}) {
+    if (!inference || state.handsFreeStatus !== 'ready' || event.streamId !== streamId || event.captureToken !== captureToken || !Number.isFinite(event.sampleStart) || !Number.isFinite(event.sampleEnd) || event.sampleEnd <= event.sampleStart || event.sampleEnd > samplePosition) return;
+    if (!recording && state.phase === 'listening' && event.wake) { beginAutomatic('wake', event); return; }
+    if (!recording && state.phase === 'awaiting-answer' && event.speech && answerContext && currentInteraction(answerContext)) { beginAutomatic('answer', event); turn.voicedMs = (event.sampleEnd - event.sampleStart) / RATE * 1000; return; }
+    if (!recording && state.phase === 'awaiting-answer' && !event.speech) { accountAnswerSilence((event.sampleEnd - event.sampleStart) / RATE * 1000); return; }
+    if (!recording || !turn || turn.manual || event.sampleEnd <= turn.lastFrameEnd) return;
+    const duration = (event.sampleEnd - Math.max(event.sampleStart, turn.lastFrameEnd)) / RATE * 1000;
+    turn.lastFrameEnd = event.sampleEnd;
+    if (event.speech) {
+      turn.voicedMs += duration; turn.silenceMs = 0; turn.commandSpeech = true; turn.speechRevision++; turn.completionReady = false;
+      if (state.finishHint) update({ finishHint: false });
+    } else turn.silenceMs += duration;
+    if (finishAnalyzedTurn()) return;
+    if (turn.silenceMs >= 3000 && !state.finishHint) update({ finishHint: true });
+    // Wake history is retained for transcription, but never charged as live silence.
+    if (!turn.commandSpeech && turn.elapsedMs >= 6000 && turn.silenceMs >= 200 && turn.lastFrameEnd >= samplePosition) { finishRecording(); return; }
+    if (turn.silenceMs >= 200 && turn.commandSpeech) void analyzeTurn();
+  }
+  async function analyzeTurn() {
+    const currentTurn = turn, service = inference, generation = inferenceGeneration;
+    if (!currentTurn || currentTurn.manual || activeAnalysis || currentTurn.pending || currentTurn.completionReady || !recording || !service || currentTurn.analyzedRevision === currentTurn.speechRevision) return;
+    currentTurn.pending = true; currentTurn.analyzedRevision = currentTurn.speechRevision;
+    const identity = { captureToken, turnId: currentTurn.id, speechRevision: currentTurn.speechRevision };
+    activeAnalysis = identity;
+    try {
+      const result = await service.analyze({ samples: recording.tail(), ...identity });
+      if (generation !== inferenceGeneration || turn !== currentTurn || currentTurn.manual || currentTurn.speechRevision !== identity.speechRevision || captureToken !== identity.captureToken || result.captureToken !== identity.captureToken || result.turnId !== identity.turnId || result.speechRevision !== identity.speechRevision) return;
+      if (result.probability > 0.5 && result.complete !== false && currentTurn.silenceMs >= 200) { currentTurn.completionReady = true; finishAnalyzedTurn(); }
+    } catch (error) {
+      if (['BusyError', 'AbortError'].includes(error?.name)) { if (currentTurn.analyzedRevision === identity.speechRevision) currentTurn.analyzedRevision = null; }
+      else if (generation === inferenceGeneration) inferenceFailed(error, generation);
+    }
+    finally { currentTurn.pending = false; if (activeAnalysis === identity) activeAnalysis = null; }
+  }
+  function finishAnalyzedTurn() {
+    // Microphone delivery can outrun VAD. Drain all received speech classifications
+    // before accepting completion, so speech queued during inference can veto it.
+    if (!turn?.completionReady || turn.manual || turn.lastFrameEnd < samplePosition || turn.silenceMs < 200) return false;
+    finishRecording(); return true;
+  }
+  function accountAnswerSilence(duration) {
+    answerSilenceMs += duration;
+    if (answerSilenceMs >= ANSWER_SILENCE_MS) { answerSilenceMs = 0; answerContext = null; update({ transcript: '' }); void announceError({ category: 'not-understood', origin: 'voice', operation: 'transcription' }); }
+  }
   function cancelSpeech() {
     deferredError = null;
     epoch++; requestAbort?.abort(); requestAbort = null; clearTimeout(playbackTimer); playbackTimer = null; playbackResolve?.(); playbackResolve = null;
     if (activeReply) onAudio({ replyId: activeReply, sequence: 0, data: [], sampleRate: 24000, channels: 1, format: 's16le', cancelled: true, done: true });
     activeReply = null; activeInteraction = null; answerContext = null; answerSilenceMs = 0; recentAudio = []; resetRecording();
-    update({ phase: idlePhase(), replyId: undefined }); return { ok: true };
+    update({ phase: idlePhase(), replyId: undefined }); syncDetectionMode(true); return { ok: true };
   }
   async function requestAudio(url, options, abort) {
     try { return await request(url, options); }
@@ -89,7 +203,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     }
     let clip;
     try { clip = alerts.load(info.category); }
-    catch { update({ phase: idlePhase() }); return { ok: false, status: 'audio-unavailable', error: message }; }
+    catch (error) { diagnostic('alert-audio', error); update({ phase: idlePhase() }); return { ok: false, status: 'audio-unavailable', error: message }; }
     cancelSpeech();
     lastErrorAudio.set(info.category, now());
     const current = epoch, replyId = activeReply = randomUUID();
@@ -105,48 +219,62 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     if (current !== epoch) return { ok: false, status: 'cancelled' };
     clearTimeout(playbackTimer); playbackTimer = null; playbackResolve = null; activeReply = null;
     update({ phase: idlePhase(), replyId: undefined, ...(playback?.error && { error: `${message} ${playback.error}` }) });
-    if (playback?.error) return { ok: false, status: 'playback-failed', error: state.error };
+    if (playback?.error) { diagnostic('playback', playback.diagnosticError || Error(playback.error), { replyId }); return { ok: false, status: 'playback-failed', error: state.error }; }
     return { ok: true, status: 'announced', category: info.category };
   }
   // The key ends the turn, so a finished recording is judged on voiced audio alone:
   // pre-roll and live speech together must clear the tap threshold to be uploaded.
   function finishRecording() {
+    const finishedTurn = turn;
     const voiced = recording.voicedMs + recording.preRollVoicedMs, data = recording.finish();
     resetRecording();
-    if (voiced < MIN_VOICED_MS) {
+    if (!finishedTurn?.source && voiced < MIN_VOICED_MS) {
       answerContext = null; answerSilenceMs = 0; update({ transcript: '' });
       void announceError({ category: 'not-understood', origin: 'voice', operation: 'transcription' });
       return { ok: true, status: 'empty' };
     }
-    void sendAudio({ audioBase64: wavFromSamples(data).toString('base64'), format: 'wav' });
+    void sendAudio({ audioBase64: wavFromSamples(data).toString('base64'), format: 'wav', recordingSource: finishedTurn?.source });
     return { ok: true, status: 'sent' };
   }
-  function pushToTalk(action) {
+  function pushToTalk(action, holdId) {
     if (action !== 'start') {
       if (!recording) return { ok: true, status: 'idle' };
+      if (turn && !turn.manual) return { ok: true, status: 'recording', recordingSource: turn.source };
+      if (turn?.holdId !== undefined && holdId !== turn.holdId) return { ok: true, status: 'stale-hold', recordingSource: state.recordingSource };
       if (action === 'stop') return finishRecording();
+      if (turn?.adopted) {
+        turn.manual = false; turn.adopted = false; turn.holdId = undefined; turn.speechRevision++; turn.completionReady = false;
+        update({ recordingSource: turn.source }); syncDetectionMode(true);
+        return { ok: true, status: 'recording', recordingSource: turn.source };
+      }
       resetRecording(); answerSilenceMs = 0;
       update({ phase: answerContext ? 'awaiting-answer' : idlePhase(), transcript: '' });
       return { ok: true, status: 'cancelled' };
     }
     if (!state.listening || !enabled()) return { ok: false, error: 'Enable Orchestrator and the microphone first.' };
     if (['transcribing', 'thinking'].includes(state.phase)) return { ok: false, status: 'busy', error: 'Wait for the current reply before talking again.' };
-    if (recording) return { ok: true, status: 'recording' };
+    if (recording) {
+      if (turn && !turn.manual) { turn.manual = true; turn.adopted = true; turn.holdId = holdId; turn.speechRevision++; turn.completionReady = false; update({ recordingSource: 'ptt', finishHint: false }); syncDetectionMode(true); }
+      else if (turn) turn.holdId = holdId;
+      return { ok: true, status: 'recording', recordingSource: 'ptt' };
+    }
     const preRoll = recentAudio; recentAudio = []; answerSilenceMs = 0;
     // Talking over a reply interrupts it; talking over a question keeps the answer route.
     if (state.phase !== 'awaiting-answer') cancelSpeech();
     recording = createRecording({ ...recordingOptions, preRoll, endpointing: false });
-    update({ phase: 'recording', transcript: '', error: null });
-    return { ok: true, status: 'recording' };
+    turn = { id: ++turnSequence, manual: true, holdId };
+    update({ phase: 'recording', recordingSource: 'ptt', transcript: '', error: null });
+    return { ok: true, status: 'recording', recordingSource: 'ptt' };
   }
   async function setListening(value) {
-    if (!value) { update({ listening: false, muted: true }); cancelSpeech(); update({ phase: 'off' }); return { ok: true }; }
+    if (!value) { update({ listening: false, muted: true }); cancelSpeech(); stopInference(); update({ phase: 'off', handsFreeStatus: 'off', handsFreeError: null }); return { ok: true }; }
     if (state.listening && enabled()) return { ok: true };
     const activation = ++epoch;
     const key = await getKey?.();
     if (activation !== epoch || disposed) return state.phase === 'microphone-error' ? { ok: false, status: 'microphone-error', error: state.error } : { ok: false, status: 'cancelled' };
     if (!enabled() || !key) { update({ ready: false, error: 'Enable Orchestrator and save an OpenRouter key to use voice.' }); return { ok: false, error: state.error }; }
     cancelSpeech(); update({ listening: true, muted: false, ready: true, microphoneId: getSettings().microphoneId || '', phase: 'listening', error: null });
+    void refreshHandsFree();
     const startEpoch = epoch;
     const pending = orchestrator.getState?.().requests;
     for (const interaction of Array.isArray(pending) ? pending : [...deferredInteractions.values()]) {
@@ -154,7 +282,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     }
     return { ok: true };
   }
-  async function sendAudio({ audioBase64, format = 'wav' } = {}) {
+  async function sendAudio({ audioBase64, format = 'wav', recordingSource } = {}) {
     if (!enabled() || !state.listening) return { ok: false, error: 'Voice is off.' };
     if (typeof audioBase64 !== 'string' || audioBase64.length < 60 || audioBase64.length > 2600000 || format !== 'wav') return { ok: false, error: 'Expected a WAV recording of at most 60 seconds.' };
     resetRecording();
@@ -171,7 +299,12 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       if (current !== epoch || !enabled()) return { ok: false, status: 'cancelled' };
       orchestrator.recordSpeechUsage?.('transcription', data.usage?.cost);
       if (typeof data.text !== 'string') throw new OpenRouterError('upstream', response.status);
-      const text = data.text.split(key).join('[REDACTED]').trim();
+      const rawText = data.text.split(key).join('[REDACTED]').trim();
+      const text = recordingSource === 'wake' ? rawText.replace(/^\s*hey[\s,!.:;—-]+vibe\b[\s,!.:;—-]*/i, '').trim() : rawText;
+      if (recordingSource === 'wake' && !/[\p{L}\p{N}]/u.test(text)) {
+        update({ phase: idlePhase(), transcript: '', error: 'No command heard. Say Hey Vibe and your command, or hold Space.' });
+        return { ok: true, status: 'wake-only' };
+      }
       if (!/[\p{L}\p{N}]/u.test(text)) {
         update({ transcript: '' });
         if (answerContext && currentInteraction(answerContext)) {
@@ -191,6 +324,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       return result;
     } catch (e) {
       if (current !== epoch || abort.signal.aborted) return { ok: false, status: 'cancelled' };
+      if (operation === 'transcription') diagnostic(operation, e, {}, key);
       const error = String(e.message || 'Voice request failed.');
       const safeError = key ? error.split(key).join('[REDACTED]') : error;
       update({ phase: 'error', errorOperation: operation, error: safeError });
@@ -200,17 +334,33 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     }
     finally { if (requestAbort === abort) requestAbort = null; }
   }
-  function frames({ samples, sampleRate } = {}) {
+  function frames({ samples, sampleRate, captureToken: frameToken, sampleStart } = {}) {
     if (!state.listening || !enabled()) return { ok: false, status: 'off' };
-    if (sampleRate !== RATE || !Array.isArray(samples) || !samples.length || samples.length > 8192 || samples.some(n => !Number.isFinite(n) || Math.abs(n) > 1.01)) return { ok: false, error: 'Invalid microphone frames.' };
-    if (recording) { if (recording.push(samples) === 'complete') finishRecording(); return { ok: true }; }
+    if (sampleRate !== RATE || !(Array.isArray(samples) || samples instanceof Float32Array) || !samples.length || samples.length > 8192 || samples.some(n => !Number.isFinite(n) || Math.abs(n) > 1.01)) return { ok: false, error: 'Invalid microphone frames.' };
+    if (captureToken !== undefined && (frameToken !== captureToken || !Number.isSafeInteger(sampleStart) || sampleStart < samplePosition)) return { ok: false, status: 'stale-capture' };
+    const start = sampleStart ?? samplePosition;
+    if (start !== samplePosition) {
+      recentAudio = []; syncDetectionMode(true);
+      if (turn && !turn.manual) cancelAutomatic('Microphone audio was interrupted. Hold Space to try again.');
+    }
+    samplePosition = start + samples.length;
+    if (recording) {
+      const complete = recording.push(samples) === 'complete';
+      if (turn && !turn.manual) {
+        turn.elapsedMs += samples.length / RATE * 1000;
+        if (complete) { cancelAutomatic('Automatic recording reached 60 seconds. Please try a shorter command.'); return { ok: true }; }
+      } else if (complete) { finishRecording(); return { ok: true }; }
+    } else {
     // The ring is the pre-roll a press-to-talk turn starts from, so it is kept whenever
     // the microphone is open and nothing is being recorded.
     recentAudio.push(Float32Array.from(samples));
-    while (recentAudio.reduce((n, chunk) => n + chunk.length, 0) > RATE * RECENT_AUDIO_MS / 1000) recentAudio.shift();
-    if (state.phase === 'awaiting-answer') {
-      answerSilenceMs += samples.length / RATE * 1000;
-      if (answerSilenceMs >= ANSWER_SILENCE_MS) { answerSilenceMs = 0; answerContext = null; update({ transcript: '' }); void announceError({ category: 'not-understood', origin: 'voice', operation: 'transcription' }); }
+    let excess = recentAudio.reduce((n, chunk) => n + chunk.length, 0) - RATE * RECENT_AUDIO_MS / 1000;
+    while (excess > 0) { if (recentAudio[0].length <= excess) excess -= recentAudio.shift().length; else { recentAudio[0] = recentAudio[0].slice(excess); excess = 0; } }
+    if (state.phase === 'awaiting-answer' && state.handsFreeStatus !== 'ready') accountAnswerSilence(samples.length / RATE * 1000);
+    }
+    if (inference && detectionMode) {
+      try { inference.feed({ samples: Float32Array.from(samples), sampleStart: start, captureToken, streamId, mode: detectionMode }); }
+      catch (error) { inferenceFailed(error); }
     }
     return { ok: true };
   }
@@ -227,7 +377,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       }
       let text = String(message.text || '').trim().slice(0, 4000); if (!text) return { ok: true };
       let key;
-      try { key = await getKey(); } catch { /* Report key-store failure without exposing details. */ }
+      try { key = await getKey(); } catch (error) { if (queuedEpoch === epoch) diagnostic('speech', error, { requestId: identity.id }); }
       if (queuedEpoch !== epoch) return { ok: false, status: 'cancelled' };
       if (!key) {
         const error = 'Save an OpenRouter key before checking the voice.';
@@ -239,6 +389,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       const speechText = spokenText(text);
       if (!speechText) return { ok: true };
       const abort = requestAbort = new AbortController();
+      let speechStage = 'speech';
       const replyId = activeReply = randomUUID(); activeInteraction = message.kind === 'interaction' ? identity : null;
       update({ phase: 'speaking', reply: text, replyId, error: null, errorOperation: null }); let sequence = 0, bytes = 0;
       try {
@@ -265,6 +416,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
         if (queuedEpoch !== epoch) return { ok: false, status: 'cancelled' };
         if (!bytes) throw new OpenRouterError('upstream', response.status);
         const { pcm, sampleRate, channels, durationMs } = decodeSpeechAudio(Buffer.concat(chunks), contentType);
+        speechStage = 'playback';
         const finished = new Promise(resolve => { playbackResolve = resolve; playbackTimer = setTimeout(() => resolve({ error: 'Speech playback did not finish. Check your audio output.' }), durationMs + 5000); });
         // One second per buffer bounds a three-minute reply to 180 playback nodes.
         const chunkBytes = sampleRate * channels * 2;
@@ -276,11 +428,12 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
         const playback = await finished;
         clearTimeout(playbackTimer); playbackTimer = null; playbackResolve = null;
         if (queuedEpoch !== epoch) return { ok: false, status: 'cancelled' };
-        if (playback?.error) throw Error(playback.error);
+        if (playback?.error) throw Object.assign(Error(playback.error), { diagnosticError: playback.diagnosticError });
         if (queuedEpoch === epoch) { activeReply = null; activeInteraction = null; update({ phase: idlePhase(), replyId: undefined }); }
         return { ok: true };
       } catch (e) {
         if (queuedEpoch !== epoch || abort.signal.aborted) return { ok: false, status: 'cancelled' };
+        diagnostic(speechStage, e.diagnosticError || e, { replyId, requestId: identity.id, targetId: identity.sessionId, generation: identity.generation }, key);
         clearTimeout(playbackTimer); playbackTimer = null; playbackResolve = null;
         onAudio({ replyId, sequence, data: [], sampleRate: 24000, channels: 1, format: 's16le', done: true, cancelled: true });
         const error = String(e.message || 'Speech failed.').split(key).join('[REDACTED]');
@@ -294,15 +447,20 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     const result = speechQueue.then(run, run); speechQueue = result.catch(() => {}); return result;
   }
   function configure(patch = {}) {
-    if (patch.playbackError && activeReply) { clearTimeout(playbackTimer); playbackResolve?.({ error: 'Speech playback failed. Check your audio output.' }); return { ok: true }; }
+    if (Object.hasOwn(patch, 'captureToken') && patch.captureToken !== captureToken) {
+      captureToken = patch.captureToken; samplePosition = 0; recentAudio = []; syncDetectionMode(true);
+      if (recording) { resetRecording(); answerContext = null; update({ phase: idlePhase(), error: 'Microphone changed. Please start your recording again.' }); }
+    }
+    if (patch.refreshHandsFree) return refreshHandsFree();
+    if (patch.playbackError && activeReply) { clearTimeout(playbackTimer); playbackResolve?.({ error: 'Speech playback failed. Check your audio output.', diagnosticError: Error(String(patch.playbackError)) }); return { ok: true }; }
     if (patch.preview === true) {
       if (state.listening && !['listening', 'error'].includes(state.phase)) return { ok: false, error: 'Finish the current voice turn before checking the voice.' };
       cancelSpeech();
       return speak({ preview: true, text: 'Hi, I’m Vibe. Hold the space bar when you need me, and I’ll help you with your workspace.' });
     }
     if (patch.playbackDone && patch.playbackDone === activeReply) { clearTimeout(playbackTimer); playbackResolve?.(); }
-    if (patch.microphoneError) { update({ listening: false, muted: true }); cancelSpeech(); update({ phase: 'microphone-error', error: String(patch.microphoneError).slice(0, 200) }); }
-    if (patch.pushToTalk) return ['start', 'stop', 'cancel'].includes(patch.pushToTalk) ? pushToTalk(patch.pushToTalk) : { ok: false, error: 'Unknown push-to-talk action.' };
+    if (patch.microphoneError) { diagnostic('microphone', Error(String(patch.microphoneError))); update({ listening: false, muted: true }); cancelSpeech(); stopInference(); update({ phase: 'microphone-error', handsFreeStatus: 'off', error: String(patch.microphoneError).slice(0, 200) }); }
+    if (patch.pushToTalk) return ['start', 'stop', 'cancel'].includes(patch.pushToTalk) ? pushToTalk(patch.pushToTalk, patch.holdId) : { ok: false, error: 'Unknown push-to-talk action.' };
     if (patch.answerRequest && state.request) return announceInteraction(state.request, true);
     if (patch.cancelRecording) return cancelSpeech();
     return { ok: true };
@@ -325,6 +483,15 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     context.answering = true;
     const question = interaction.questions?.[context.index] || { id: '0', options: [] };
     const answer = matchAnswer(text, question, interaction.kind);
+    if (!answer.ok && orchestrator.routeUserAnswer) {
+      // Natural answers and directions to another terminal belong to the
+      // orchestrator; the literal quick path must not trap the conversation.
+      answerContext = null; answerSilenceMs = 0;
+      const result = await orchestrator.routeUserAnswer({ text, interaction: { id: interaction.id, sessionId: interaction.sessionId, generation: interaction.generation, revision: interaction.revision } });
+      if (current === epoch && state.phase === 'thinking') update({ phase: idlePhase() });
+      if (current === epoch && result?.ok === false && !result.text && result.status !== 'cancelled') await announceError({ category: 'answer', origin: 'voice', operation: 'orchestration' });
+      return result;
+    }
     if (!answer.ok) return askQuestion(context, 'I could not match that answer. ');
     context.answers[question.id || String(context.index)] = answer.value;
     context.index++;
@@ -372,7 +539,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     announcementPending = context;
     update({ request: interaction }); return askQuestion(context).finally(() => { if (announcementPending === context) announcementPending = null; });
   }
-  function dispose() { disposed = true; state.listening = false; clearTimeout(deferredTimer); deferredTimer = null; deferredInteractions.clear(); cancelSpeech(); }
+  function dispose() { disposed = true; state.listening = false; clearTimeout(deferredTimer); deferredTimer = null; deferredInteractions.clear(); stopInference(); cancelSpeech(); }
   return { getState: snapshot, configure, setListening, frames, sendAudio, cancelSpeech, speak, announceError, announceInteraction, resolveInteraction, dispose };
 }
 module.exports = { createVoiceController, STT_MODEL, TTS_MODEL };

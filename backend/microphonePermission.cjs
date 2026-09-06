@@ -64,7 +64,7 @@ function createMicrophonePermission({ userDataPath, getMainWindow, dialog, syste
     if (!window) return required();
     const result = await dialog.showMessageBox(window, {
       type: 'question', title: 'vibeTerminal', message: 'Allow vibeTerminal to use your microphone?',
-      detail: 'While voice is enabled, vibeTerminal keeps your microphone open, including in the background, so you can hold Space to talk. What you record is sent to OpenRouter for transcription. vibeTerminal does not save recordings.\n\nThis gives vibeTerminal your consent; your operating system also controls microphone access.',
+      detail: 'While voice is enabled, vibeTerminal keeps your microphone open, including in the background, so you can hold Space to talk or say Hey Vibe when hands-free is enabled. What you record is sent to OpenRouter for transcription. vibeTerminal does not save recordings.\n\nThis gives vibeTerminal your consent; your operating system also controls microphone access.',
       buttons: ['Allow microphone', 'Not now'], defaultId: 1, cancelId: 1, signal,
     });
     if (signal?.aborted) return aborted();

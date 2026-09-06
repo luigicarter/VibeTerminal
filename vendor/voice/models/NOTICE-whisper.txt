@@ -1,0 +1,11 @@
+Whisper feature extraction reference
+Copyright 2022 The HuggingFace Inc. team.
+Licensed under Apache License 2.0; see LICENSE-sherpa.txt for the full license.
+Reference sources:
+https://github.com/huggingface/transformers/blob/c93057d4835cd31752bb56f59989dd27696eb45b/src/transformers/models/whisper/feature_extraction_whisper.py
+https://github.com/huggingface/transformers/blob/c93057d4835cd31752bb56f59989dd27696eb45b/src/transformers/audio_utils.py
+
+vibeTerminal implements an independent JavaScript FFT and a port of the documented
+Whisper/Slaney frontend equations. NumPy float32 pairwise reduction behavior is
+reproduced for normalization parity. Reference fixtures were generated with the
+exact library versions recorded in voice-whisper-reference.json.

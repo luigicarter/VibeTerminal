@@ -155,6 +155,17 @@ test('multi-question voice answers dispatch original keyed choices, not a brain 
   f.controller.dispose();
 });
 
+test('natural directions while awaiting an answer reach the semantic orchestrator with question identity', async () => {
+  const interaction = { id: 'req', revision: 2, generation: 3, sessionId: 'pane', state: 'pending', kind: 'question', questions: [{ id: 'q', question: 'Pick a database', custom: true, options: [{ label: 'SQLite' }] }] };
+  const state = { enabled: true, requests: [] }, routed = [];
+  const f = fixture({ orchestrator: { getState: () => state, routeUserAnswer: async input => { routed.push(input); return { ok: true, text: 'Answer sent.' }; }, dispatch: async () => assert.fail('A natural direction must not become a guessed literal answer.') },
+    fetch: async url => url.endsWith('/transcriptions') ? { ok: true, json: async () => ({ text: 'Use PostgreSQL for that question.' }) } : pcmResponse() });
+  await f.controller.setListening(true); state.requests = [interaction]; await f.controller.announceInteraction(interaction);
+  const result = await f.controller.sendAudio({ audioBase64: wavFromSamples(Array(1600).fill(0.1)).toString('base64') });
+  assert.equal(result.text, 'Answer sent.'); assert.deepEqual(routed, [{ text: 'Use PostgreSQL for that question.', interaction: { id: 'req', sessionId: 'pane', generation: 3, revision: 2 } }]);
+  f.controller.dispose();
+});
+
 test('an empty answer asks the pending question again and preserves answer routing', async () => {
   let transcript = '';
   const f = fixture({ fetch: async url => url.endsWith('/transcriptions') ? { ok: true, json: async () => ({ text: transcript }) } : pcmResponse() });

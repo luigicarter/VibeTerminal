@@ -3,9 +3,9 @@ import { relayApi, useOrchestrator, type RelayState } from '../orchestratorUi';
 import type { VoiceApi, VoiceState } from '../voice/types';
 import './orchestratorSettings.css';
 type Model = { id: string; name?: string; label?: string; voices?: { id: string; name: string }[] };
-type Draft = { model: string; sttModel: string; ttsModel: string; voice: string; language: string; microphoneId: string; monitoringEnabled: boolean; enabledOnLaunch: boolean; monitoringIntervalSeconds: string; spendingLimit: string };
+type Draft = { model: string; sttModel: string; ttsModel: string; voice: string; language: string; microphoneId: string; handsFreeEnabled: boolean; monitoringEnabled: boolean; enabledOnLaunch: boolean; monitoringIntervalSeconds: string; spendingLimit: string };
 function draftFrom(settings: RelayState['settings']): Draft {
-  return { model: settings.model || '', sttModel: settings.sttModel || '', ttsModel: settings.ttsModel || '', voice: settings.voice || '', language: settings.language || '', microphoneId: settings.microphoneId || '', monitoringEnabled: !!settings.monitoringEnabled, enabledOnLaunch: !!settings.enabledOnLaunch, monitoringIntervalSeconds: String(settings.monitoringIntervalSeconds ?? 30), spendingLimit: settings.spendingLimit == null ? '' : String(settings.spendingLimit) };
+  return { model: settings.model || '', sttModel: settings.sttModel || '', ttsModel: settings.ttsModel || '', voice: settings.voice || '', language: settings.language || '', microphoneId: settings.microphoneId || '', handsFreeEnabled: !!settings.handsFreeEnabled, monitoringEnabled: !!settings.monitoringEnabled, enabledOnLaunch: !!settings.enabledOnLaunch, monitoringIntervalSeconds: String(settings.monitoringIntervalSeconds ?? 30), spendingLimit: settings.spendingLimit == null ? '' : String(settings.spendingLimit) };
 }
 export function OrchestratorSettings() {
   const state = useOrchestrator(), api = relayApi();
@@ -54,7 +54,7 @@ export function OrchestratorSettings() {
     if (enabled) await connect();
     const result = await api.setEnabled(enabled);
     if (!result.ok) throw new Error(result.error || 'Could not change Orchestrator listening.');
-    setNote(enabled ? 'Microphone on. Hold Space to talk.' : 'Orchestrator disabled.');
+    setNote(enabled ? draft?.handsFreeEnabled ? 'Microphone on. Say Hey Vibe or hold Space to talk.' : 'Microphone on. Hold Space to talk.' : 'Orchestrator disabled.');
   }
   if (!draft) return <section className="orchestrator-settings"><p>Loading assistant settings…</p></section>;
   const voices = speech.find(item => item.id === draft.ttsModel)?.voices || [];
@@ -63,12 +63,16 @@ export function OrchestratorSettings() {
   const error = voiceState?.error || state?.error;
   return <section className="orchestrator-settings vibe-assistant-settings">
     <div className="settings-section-heading"><h3>Orchestrator</h3><span>{state?.enabled ? 'On' : 'Off'}</span></div>
-    <p className="settings-description">Enter your key and model, then enable Orchestrator and hold the space bar to talk. Release the key to send what you said.</p>
+    <p className="settings-description">Enter your key and model, then enable Orchestrator and hold the space bar to talk. Release the key to send what you said. Enable hands-free voice to say "Hey Vibe" in English.</p>
     <fieldset disabled={busy}>
       <div className="assistant-device-row"><label>OpenRouter API key<input type="password" autoComplete="off" disabled={keyLocked} value={apiKey} placeholder={keyLocked ? 'Saved securely' : 'sk-or-…'} onChange={event => { setKey(event.target.value); setNote(''); }}/></label>{keyLocked && <button type="button" onClick={() => setChangingKey(true)}>Change</button>}{changingKey && <button type="button" onClick={() => { setChangingKey(false); setKey(''); }}>Cancel</button>}</div>
       <label>Assistant model<input list="orchestrator-models" value={draft.model} onChange={event => edit('model', event.target.value)} placeholder="Choose or enter an OpenRouter model ID"/><datalist id="orchestrator-models">{models.map(item => <option key={item.id} value={item.id}>{item.name || item.label || item.id}</option>)}</datalist></label>
       <button className="assistant-browse" type="button" disabled={!api} onClick={() => void action(async () => { setModels(await api!.models('brain')); setNote('Assistant models refreshed.'); })}>Browse models</button>
       <div className="assistant-enable"><label className="assistant-check"><input type="checkbox" checked={!!state?.enabled} disabled={busy || !api || (!state?.enabled && ((!state?.settings.hasKey && !apiKey.trim()) || !draft.model.trim()))} onChange={event => void action(() => toggle(event.target.checked))}/> Enable Orchestrator</label></div>
+      <label className="assistant-check"><input type="checkbox" checked={draft.handsFreeEnabled} onChange={event => edit('handsFreeEnabled', event.target.checked)}/> Hands-free voice - Hey Vibe (English)</label>
+      {voiceState?.handsFreeStatus === 'loading' && <p className="settings-description" role="status">Starting hands-free voice... Hold Space to talk.</p>}
+      {voiceState?.handsFreeStatus === 'ready' && <p className="settings-description" role="status">Say Hey Vibe or hold Space to talk.</p>}
+      {voiceState?.handsFreeStatus === 'unavailable' && <p className="settings-description" role="status">{voiceState.handsFreeError || 'Hands-free voice is unavailable.'} Hold Space to talk. Turn hands-free voice off and on to retry.</p>}
       <details className="voice-settings"><summary>Advanced</summary>
       <label className="assistant-check"><input type="checkbox" checked={sessionOnly} onChange={event => setSessionOnly(event.target.checked)}/> Use a new key for this app session only</label>
       <div className="assistant-device-row"><label>Microphone<select value={draft.microphoneId} onChange={event => edit('microphoneId', event.target.value)}><option value="">System default</option>{draft.microphoneId && !devices.some(item => item.deviceId === draft.microphoneId) && <option value={draft.microphoneId}>Saved microphone (not currently listed)</option>}{devices.map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Microphone ${index + 1}`}</option>)}</select></label><button type="button" onClick={() => void action(async () => { const permission = await voiceApi?.configure({ requestMicrophoneAccess: true }); if (!permission?.ok) throw new Error(permission?.error || 'Microphone access was not allowed.'); const stream = await navigator.mediaDevices.getUserMedia({ audio: true }); stream.getTracks().forEach(track => track.stop()); setDevices((await navigator.mediaDevices.enumerateDevices()).filter(item => item.kind === 'audioinput')); setNote('Microphones refreshed.'); })}>Refresh microphones</button></div>
@@ -84,9 +88,10 @@ export function OrchestratorSettings() {
         {draft.monitoringEnabled && <label>Report interval (seconds)<input type="number" min="5" value={draft.monitoringIntervalSeconds} onChange={event => edit('monitoringIntervalSeconds', event.target.value)}/></label>}
         <label>Spending limit (USD)<input type="number" min="0" step="0.1" value={draft.spendingLimit} placeholder="Optional" onChange={event => edit('spendingLimit', event.target.value)}/></label>
         <button type="button" disabled={!api || !state?.settings.hasKey} onClick={() => void action(async () => { const result = await api!.configure({ apiKey: '' }); if (!result.ok) throw new Error(result.error || 'Could not remove key.'); setKey(''); setChangingKey(false); setNote('OpenRouter key removed.'); })}>Remove saved key</button>
-      <button className="assistant-connect" type="button" disabled={!api || (!state?.settings.hasKey && !apiKey.trim()) || !draft.model.trim()} onClick={() => void action(connect)}>Save changes</button>
     <details className="voice-settings"><summary>Remembered preferences & usage</summary><p className="settings-description">Only preferences you explicitly save are remembered.</p>{(Array.isArray(state?.preferences) ? state.preferences : []).map(item => <p key={item.id}>{item.text} <button disabled={!api || busy} onClick={() => void action(async () => { const result = await api!.preferences({ operation: 'forget', id: item.id }); if (!result.ok) throw new Error(result.error); })}>Forget</button></p>)}<label>New preference<input value={preference} disabled={busy} onChange={event => setPreference(event.target.value)}/></label><button disabled={!api || busy || !preference.trim()} onClick={() => void action(async () => { const result = await api!.preferences({ operation: 'remember', text: preference }); if (!result.ok) throw new Error(result.error); setPreference(''); setNote('Preference saved.'); })}>Remember</button><p className="settings-description">Session usage: {Object.entries(state?.usage || {}).map(([kind, cost]) => `${kind} $${typeof cost === 'number' ? cost.toFixed(4) : '0.0000'}`).join(' · ') || '$0.0000'}</p></details>
       </details>
+      <button className="assistant-connect" type="button" disabled={!api || (!state?.settings.hasKey && !apiKey.trim()) || !draft.model.trim()} onClick={() => void action(connect)}>Save changes</button>
+      {unsaved && <p className="settings-description" role="status">Unsaved changes. Save changes to apply them.</p>}
     </fieldset>
     {note && <p role="status" className="settings-note">{note}</p>}{error && <p role="alert" className="assistant-error">{error}</p>}
   </section>;

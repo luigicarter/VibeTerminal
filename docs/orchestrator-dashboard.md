@@ -29,25 +29,45 @@ work simultaneously. Agent Working status alone never expands a bubble.
 
 ## Layout and motion
 
-The layout uses staggered hexagonal rows with bounded eight-pixel offsets,
-filling each row from its middle. It reserves space for every bubble at its
-maximum size, plus halo, drift, and offset margins. Highlight changes alter
-scale, not cell positions. Expansion and
+The initial layout uses staggered hexagonal rows with bounded eight-pixel offsets,
+filling each row from its middle. It chooses the column count that fits the
+largest bubbles within both available viewport dimensions, then scales the
+entire field down as needed. The page never scrolls. Once placed, bubbles roam
+through the full available field rather than remaining tied to their starting
+cells. Highlight changes alter scale without resetting positions. Expansion and
 retraction use a 320ms transform transition from the current interpolated size;
 rapid retargeting does not remount elements or reset the animation.
 
-Drift uses a separate wrapper with a stable per-session phase/duration and a
-three-pixel maximum translation. Offscreen and hidden-page animation pauses;
-reduced-motion disables drift/transitions. There is no physics engine or
-per-frame JavaScript loop. A single cached static glass texture supplies the
-reflections. The asset lives in `frontend/assets/orchestrator-glass-bubble.png`.
+Resting bubbles use stable per-session sizes of up to roughly 162–195px;
+addressed targets expand to up to 232px and other sessions settle smaller.
+`orchestratorBubbleMotion.ts` gives each session a stable initial velocity of
+18–30 logical pixels per second. A small circle simulation reflects movement
+at the field edges and deflects approaching bubbles. Collision radii follow the
+visible sphere size plus 2px, including the current CSS scale during target
+transitions; the walls leave another 18px for glow and deformation. Natural
+approaching contacts briefly squash the glass along the contact normal (up to
+6%) with a smaller perpendicular stretch, then settle. Labels stay undistorted.
+There are no scripted collisions or idle impact pulses, and expansion-only
+placement repairs do not create a false impact. The initial packing reserves
+space for all targets at maximum size. Narrower/shorter
+viewports and more sessions scale down bubbles, labels, and motion together.
+
+One requestAnimationFrame loop writes transforms at approximately 60Hz without
+per-frame React renders; collision passes stop early when clear. Status and target updates preserve positions and velocities;
+viewport/session-count changes seed a new fitting layout. Hovering or focusing
+a bubble holds it still while other bubbles avoid it; expanding frozen bubbles
+can still be repositioned to keep them within bounds and separated. Hidden views cancel the
+loop; reduced-motion uses static placement and disables transitions. Frame time
+is capped after pauses. A single cached static glass texture supplies reflections
+from `frontend/assets/orchestrator-glass-bubble.png`.
 
 Recent user interaction controls initial ordering and mild visual emphasis.
 The local bounded recency map records pane selection, throttled keyboard input,
 and explicit prompt/answer operations. Agent output and passive reads do not
 refresh it. Ordering is frozen for a visit; new sessions append and reopening
-can rerank by recency. Text remains unscaled and accessible. Many/narrow sessions
-scroll instead of becoming unreadably small.
+can rerank by recency. Text remains unscaled during target expansion; the overall
+field fit can scale it down. Full session names and status remain available through
+accessible labels and hover titles, including when many bubbles are small.
 
 The terminal workspace remains mounted and keeps its original dimensions under
 the dashboard. It is hidden and inert, and hidden panes do not count as visible
@@ -88,6 +108,17 @@ four-second inventory poll covers both enabled mode and the open dashboard while
 disabled. There was no evidence of a missing polling loop.
 
 ## Verification
+
+The free-roaming revision passed `npm run build`, the frontend dashboard smoke,
+and 32 isolated Electron check groups in
+`.tmp/orchestrator-dashboard-smoke/1788732240735-35468/`. Pure checks simulate
+1/6/31 bubbles for 60 seconds each, validate free travel and disk/wall bounds,
+and exercise contact impulses, decay, time caps, frozen bubbles, and expansion
+repairs. The renderer run captured a naturally occurring two-bubble contact with
+6% directional squash, verified hover/focus and reduced-motion behavior,
+preserved session/PTY state, and kept all 31 sessions on a narrow page without
+scrolling. The parent inspected collision, active-target, and many-session
+screenshots. These are local source/build checks, not a packaged release update.
 
 Pure checks exercise sampled widths from zero through 1600px, empty/single/many sessions,
 multiple active sets, generation mismatch, status/unknown handling, recency ordering,

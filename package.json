@@ -1,6 +1,6 @@
 {
   "name": "vibe-terminal",
-  "version": "0.1.92",
+  "version": "0.1.93",
   "private": true,
   "description": "A tiled local workspace for running multiple coding agents side by side.",
   "author": "vibeTerminal contributors",
@@ -32,7 +32,7 @@
     "smoke:backend:kimi-discovery": "node scripts/backend/kimi-discovery-smoke.cjs",
     "smoke:backend:kimi-custom-discovery": "node scripts/backend/kimi-custom-discovery-smoke.cjs",
     "smoke:backend:qwen-discovery": "node scripts/backend/qwen-discovery-smoke.cjs",
-    "smoke:backend:updates": "node scripts/backend/update-smoke.cjs",
+    "smoke:backend:updates": "node scripts/backend/update-smoke.cjs && node --test scripts/backend/main-navigation.test.cjs",
     "smoke:backend:fusion-appserver": "node scripts/backend/fusion-appserver-smoke.cjs",
     "smoke:backend:fusion-launch": "node scripts/backend/fusion-launch-smoke.cjs",
     "smoke:backend:fusion-chat-parse": "node scripts/backend/fusion-chat-parse-smoke.cjs",
@@ -58,6 +58,7 @@
     "smoke:frontend:tiled-resize": "node scripts/frontend/tiled-board-resize-smoke.cjs",
     "smoke:frontend:pane-split": "node scripts/frontend/pane-split-smoke.cjs",
     "smoke:frontend:terminal-output": "node scripts/frontend/terminal-output-smoke.cjs",
+    "test:frontend:terminal-links": "node scripts/frontend/terminal-links.test.cjs",
     "smoke:codex-discovery": "npm run smoke:backend:codex-discovery",
     "typecheck": "tsc --noEmit",
     "gen:codex-bindings": "node scripts/dev/gen-codex-bindings.cjs",
@@ -67,7 +68,7 @@
     "smoke:backend:fusion-appserver:embedded": "node scripts/backend/fusion-appserver-smoke.cjs --require-embedded",
     "pack:win": "npm run prepare:codex-bin:required && npm run prepare:voice && npm run build && electron-builder --win --dir",
     "dist:win": "npm run prepare:codex-bin:required && npm run prepare:voice && npm run build && electron-builder --win nsis",
-    "prepare:voice": "node scripts/dev/verify-error-audio.cjs",
+    "prepare:voice": "node scripts/dev/verify-error-audio.cjs && node scripts/dev/prepare-voice-models.cjs",
     "test:orchestrator": "node --test scripts/backend/orchestrator-*.test.cjs scripts/backend/terminal-observation*.test.cjs scripts/backend/voice*.test.cjs scripts/backend/microphone-*.test.cjs scripts/backend/workspace-changes.test.cjs",
     "smoke:frontend:workspace-setups": "node scripts/frontend/workspace-setups-smoke.cjs",
     "smoke:electron:orchestrator": "node scripts/qa/orchestrator-smoke.cjs",
@@ -80,6 +81,9 @@
     "smoke:electron:audio-context": "node scripts/qa/audio-context-smoke.cjs",
     "smoke:frontend:conversation-pages": "node scripts/frontend/conversation-pages-smoke.cjs",
     "smoke:frontend:voice-experience": "node scripts/frontend/voice-experience-smoke.cjs",
+    "test:voice:capture": "node scripts/frontend/voice-capture-hold.test.cjs",
+    "smoke:voice:native": "node scripts/qa/voice-native-smoke.cjs",
+    "smoke:voice:matrix": "node scripts/qa/voice-keyword-matrix.cjs",
     "smoke:electron:voice-experience": "node scripts/qa/voice-experience-smoke.cjs",
     "smoke:frontend:orchestrator-dashboard": "node scripts/frontend/orchestrator-dashboard-smoke.cjs",
     "smoke:frontend:session-recency": "node scripts/frontend/session-recency-smoke.cjs",
@@ -95,20 +99,25 @@
     "electron-updater": "^6.8.9",
     "lucide-react": "^0.468.0",
     "node-pty": "^1.1.0",
+    "onnxruntime-node": "1.29.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "sherpa-onnx-node": "1.13.7"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/react": "^18.3.17",
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
-    "electron": "^42.5.0",
+    "electron": "^42.11.2",
     "electron-builder": "^26.15.3",
     "typescript": "^5.7.2",
     "vite": "^6.0.5"
+  },
+  "overrides": {
+    "sherpa-onnx-win-x64": "1.13.7"
   },
   "build": {
     "appId": "com.vibeterminal.app",
@@ -120,7 +129,11 @@
     "asar": true,
     "asarUnpack": [
       "backend/**/*.cjs",
-      "node_modules/node-pty/**"
+      "node_modules/node-pty/**",
+      "node_modules/sherpa-onnx-node/**",
+      "node_modules/sherpa-onnx-win-x64/**",
+      "node_modules/onnxruntime-node/**",
+      "node_modules/onnxruntime-common/**"
     ],
     "npmRebuild": false,
     "extraResources": [

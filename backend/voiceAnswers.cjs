@@ -10,7 +10,10 @@ function matchAnswer(text, question, kind) {
   const exact = options.find(option => normalized(option.label) === input);
   if (exact) return { ok: true, value: question.multiple ? [exact.label] : exact.label };
   const parts = String(text).toLowerCase().replace(/[.!?]/g, '').trim().split(/\s+and\s+|\s*,\s*/).map(part => part.replace(/^(?:option|choice|number) /, '').trim());
-  const indices = parts.map(part => /^\d+$/.test(part) ? Number(part) - 1 : NUMBERS.get(part));
+  const indices = parts.map(part => {
+    const labelIndex = options.findIndex(option => normalized(option.label) === normalized(part));
+    return labelIndex >= 0 ? labelIndex : /^\d+$/.test(part) ? Number(part) - 1 : NUMBERS.get(part);
+  });
   if (indices.length && indices.every(index => Number.isInteger(index) && index >= 0 && index < options.length) && (question.multiple || indices.length === 1)) {
     const values = [...new Set(indices)].map(index => options[index].label);
     return { ok: true, value: question.multiple ? values : values[0] };

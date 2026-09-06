@@ -14,19 +14,22 @@ runtime._compile(ts.transpileModule(fs.readFileSync(runtimePath, "utf8"), { comp
 const originalRequire = helper.require.bind(helper);
 helper.require = id => id === "../terminalRuntime" ? runtime.exports : originalRequire(id);
 helper._compile(compiled, sourcePath);
-const { dashboardLayout, dashboardScale, dashboardSessionVisible, dashboardStatus, dashboardSessionMetadata, dashboardTargeted, dashboardSessionTitle, dashboardProvider, dashboardSessionOrder, dashboardRecency, dashboardDrift } = helper.exports;
+const { dashboardLayout, dashboardScale, dashboardSessionVisible, dashboardStatus, dashboardSessionMetadata, dashboardTargeted, dashboardSessionTitle, dashboardProvider, dashboardSessionOrder, dashboardRecency } = helper.exports;
 
-// All possible simultaneous enlargements must fit, even when the viewport needs scrolling.
+// All possible simultaneous enlargements and drift must fit on one page.
 for (const viewport of [0, 132, 180, 212, 260, 272, 320, 600, 1000, 1600]) {
-  for (const count of [0, 1, 2, 6, 20]) {
-    const layout = dashboardLayout(viewport, count);
-    assert.ok(layout.diameter <= 280 && layout.diameter >= 220);
+  for (const height of [0, 160, 600, 1000]) for (const count of [0, 1, 2, 6, 20, 31]) {
+    const layout = dashboardLayout(viewport, count, height);
+    assert.ok(layout.diameter <= 232 && layout.diameter >= 220);
     assert.ok(Number.isFinite(layout.width) && layout.columns >= 1);
+    assert.ok(Number.isFinite(layout.fitScale)&&layout.fitScale>=0&&layout.fitScale<=1);
+    assert.ok(layout.width*layout.fitScale<=viewport+.001&&layout.height*layout.fitScale<=height+.001, "The full field fits both dimensions without scrolling");
+    if(viewport&&height&&count) assert.ok(layout.fitScale>0, "Nonempty viewports retain visible bubbles");
     for (const activeIndices of [[], Array.from({ length: count }, (_, i) => i), [0], [1, 3, 5]]) {
       const circles = Array.from({ length: count }, (_, i) => ({
         x: layout.positions[i].x + layout.slot / 2,
         y: layout.positions[i].y + layout.slot / 2,
-        radius: layout.diameter * dashboardScale(activeIndices.includes(i), activeIndices.length > 0) / 2 + layout.halo
+        radius: layout.diameter * dashboardScale(activeIndices.includes(i), activeIndices.length > 0, `session-${i}`) / 2 + layout.halo
       }));
       for (const [i, circle] of circles.entries()) {
         assert.ok(circle.x - circle.radius >= 0 && circle.x + circle.radius <= layout.width);
@@ -34,9 +37,9 @@ for (const viewport of [0, 132, 180, 212, 260, 272, 320, 600, 1000, 1600]) {
         for (const other of circles.slice(i + 1)) assert.ok(Math.hypot(circle.x - other.x, circle.y - other.y) >= circle.radius + other.radius + 23.99, "No active set overlaps; reserved circles retain a 24px gap");
       }
     }
-    if (layout.width > viewport && count > 0) assert.equal(layout.columns, 1, "Only minimum readable cells require horizontal scrolling");
   }
 }
+for(const dimension of [NaN,Infinity,-100]) assert.equal(dashboardLayout(dimension,6,500).fitScale,0);
 const session = { id: "a", generation: "new", started: true, kind: "codex", name: "API", cwd: "C:\\Projects\\API", status: "running" };
 assert.equal(dashboardTargeted(session, [{ id: "a", generation: "old" }]), false);
 assert.equal(dashboardTargeted({ ...session, generation: undefined }, [{ id: "a", generation: "new" }]), false);
@@ -64,9 +67,12 @@ assert.equal(projectedStatus({ turnState: "unknown", provider: "terminal" }), "i
 assert.equal(projectedStatus({ pendingInput: "submit" }), "pending");
 assert.equal(projectedStatus({ turnState: "waiting" }), "needs-you");
 assert.equal(projectedStatus({ children: [{ id: "child" }] }), "working");
-const cloud = dashboardLayout(1600, 20);
+const cloud = dashboardLayout(1600, 20, 1000);
 assert.ok(new Set(cloud.positions.slice(0, cloud.columns).map(p => Math.round(p.y))).size > 1, "Bubbles do not form a rigid horizontal row");
-assert.deepEqual(dashboardLayout(1600, 21).positions.slice(0, 20), cloud.positions, "Appending within the same column count keeps centers stable");
+const appended = dashboardLayout(1600, 21, 1000);
+assert.equal(appended.columns,cloud.columns);
+assert.deepEqual(appended.positions.slice(0, 20), cloud.positions, "Appending within the same column count keeps logical centers stable");
+assert.ok(dashboardLayout(320,31,600).fitScale<dashboardLayout(320,6,600).fitScale, "Adding sessions scales the bubbles down");
 const longTitle = "Conversation title ".repeat(120);
 assert.equal(dashboardSessionTitle({ ...session, conversationTitle: longTitle }), longTitle.trim(), "Full accessible title is preserved; CSS ellipsis handles display");
 assert.equal(dashboardSessionTitle({ ...session, threadRef: { title: "Stale" } }), "API", "A stale thread title cannot replace the current name");
@@ -90,25 +96,54 @@ assert.equal(dashboardRecency({ id: "unknown", lastActivityAt: now }, now, false
 assert.equal(dashboardRecency({ id: "future", lastUsedAt: now + 1000 }, now, false).recent, false);
 assert.ok(dashboardRecency({ id: "old", lastUsedAt: 1 }, now, false).opacity >= .9);
 for (const id of ["a", "long-session-id", "b", "c", "recent", "unknown-b"]) {
-  const drift = dashboardDrift(id);
-  assert.deepEqual(drift, dashboardDrift(id));
-  assert.ok(drift.duration >= 8 && drift.duration <= 12 && drift.distance <= 3);
-  const layout = dashboardLayout(1600, 20);
-  assert.ok(Math.hypot(drift.distance, drift.distance) <= layout.motionMargin, "Worst diagonal movement fits reserved margin");
-  const maxRadius = layout.diameter / 2 + 12;
-  for (const dx of [-drift.distance, drift.distance]) {
-    assert.ok(layout.slot / 2 + dx - maxRadius >= 0);
-    assert.ok(layout.slot / 2 + dx + maxRadius <= layout.slot);
-    assert.ok(layout.slot + layout.gap - 2 * drift.distance - 2 * maxRadius >= 24, "Opposing drift preserves spacing even with both circles fully enlarged and focused");
-  }
+  const layout = dashboardLayout(1600, 20, 1000);
+  const resting = dashboardScale(false, false, id), subdued = dashboardScale(false, true, id);
+  assert.ok(layout.diameter*resting>=160&&layout.diameter*resting<=200);
+  assert.ok(subdued<resting&&subdued>=.64&&dashboardScale(true,true,id)===1);
 }
+const personalities=Array.from({length:30},(_,i)=>`session-${i}`);
+assert.ok(new Set(personalities.map(id=>dashboardScale(false,false,id))).size>10, "Sessions have varied stable resting sizes");
 const css = fs.readFileSync(path.resolve(path.dirname(sourcePath), "orchestratorDashboard.css"), "utf8");
 const component = fs.readFileSync(path.resolve(path.dirname(sourcePath), "OrchestratorDashboard.tsx"), "utf8");
-assert.match(css, /prefers-reduced-motion: reduce[\s\S]*?orchestrator-dashboard-drift\s*\{\s*animation: none/);
-assert.match(css, /data-motion="false"[^}]+animation-play-state: paused/);
-assert.match(css, /data-in-view="true"[^}]+animation-play-state: paused/);
+assert.match(css, /prefers-reduced-motion: reduce[\s\S]*?transition: none/);
 assert.match(css, /transition: transform 320ms cubic-bezier/);
 assert.match(component, /document\.addEventListener\("visibilitychange"/);
 assert.match(component, /document\.removeEventListener\("visibilitychange"/);
-assert.doesNotMatch(component, /requestAnimationFrame|setInterval|setTimeout/);
-console.log("Orchestrator dashboard smoke passed: geometry, identity, lifecycle, titles, frozen recency order, drift bounds and motion safeguards.");
+assert.match(component, /cancelAnimationFrame/);
+const motionPath=path.resolve(path.dirname(sourcePath),'orchestratorBubbleMotion.ts');
+const motionModule=new Module(motionPath,module);
+motionModule._compile(ts.transpileModule(fs.readFileSync(motionPath,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,motionPath);
+const {createBubbleMotion,stepBubbleMotion}=motionModule.exports;
+function motionBounds(bodies,width,height) {
+  for(const [i,a] of bodies.entries()) {
+    assert.ok(a.x>=a.radius+18-.01&&a.x<=width-a.radius-18+.01&&a.y>=a.radius+18-.01&&a.y<=height-a.radius-18+.01,'Floating bodies and glow remain inside walls');
+    for(const b of bodies.slice(i+1)) assert.ok(Math.hypot(a.x-b.x,a.y-b.y)>=a.radius+b.radius-.01,'Floating bodies meet without overlapping');
+  }
+}
+for(const count of [1,6,31]) {
+  const layout=dashboardLayout(400,count,800),width=400/layout.fitScale,height=800/layout.fitScale;
+  const bodies=layout.positions.map((p,i)=>createBubbleMotion(`fixture-${i}`,p.x+layout.slot/2+(width-layout.width)/2,p.y+layout.slot/2+(height-layout.height)/2,130));
+  const start=bodies.map(b=>({x:b.x,y:b.y}));let travel=0;
+  for(let frame=0;frame<3600;frame++) {
+    stepBubbleMotion(bodies,width,height,1/60);motionBounds(bodies,width,height);
+    travel=Math.max(travel,...bodies.map((b,i)=>Math.hypot(b.x-start[i].x,b.y-start[i].y)));
+  }
+  assert.ok(travel>200,'Bubbles can roam beyond their original cells');
+}
+const left={...createBubbleMotion('left',130,200,30),vx:20,vy:0},right={...createBubbleMotion('right',189,200,30),vx:-20,vy:0};
+stepBubbleMotion([left,right],500,500,.05);motionBounds([left,right],500,500);assert.ok(left.vx<0&&right.vx>0,'Approaching bubbles bounce apart');
+assert.ok(left.impact>0&&right.impact>0,'Actual approaching contact produces visible deformation');
+for(let i=0;i<120;i++)stepBubbleMotion([left,right],500,500,1/60);
+assert.ok(left.impact<.001&&right.impact<.001,'Collision deformation settles without repeated artificial pulses');
+const frozen={...createBubbleMotion('frozen',200,200,30),frozen:true};
+const incoming={...createBubbleMotion('incoming',141,200,30),vx:20,vy:0};const held={...frozen};
+stepBubbleMotion([incoming,frozen],500,500,.05);assert.deepEqual(frozen,held);assert.ok(incoming.vx<0);motionBounds([incoming,frozen],500,500);
+const wall={...createBubbleMotion('wall',49,100,30),vx:-25,vy:0};stepBubbleMotion([wall],300,300,5);assert.equal(wall.x,48);assert.ok(wall.vx>0&&wall.impact>0);
+const apart=[{...createBubbleMotion('apart-a',100,100,30),vx:-10,vy:0},{...createBubbleMotion('apart-b',159,100,30),vx:10,vy:0}];
+stepBubbleMotion(apart,500,500,.05);assert.ok(apart.every(b=>b.impact===0),'Geometric correction of separating bodies must not fake a collision');
+const capped={...createBubbleMotion('pause',500,500,30),vx:20,vy:0};stepBubbleMotion([capped],1000,1000,100);assert.equal(capped.x,501,'A paused frame cannot launch a bubble across the field');
+const growingWall={...createBubbleMotion('growing-wall',70,200,30),frozen:true,radius:70};stepBubbleMotion([growingWall],500,500,1/60);assert.equal(growingWall.x,88);assert.equal(growingWall.impact,0);
+const growingPair=[{...createBubbleMotion('grow-a',200,200,30),frozen:true,radius:60},{...createBubbleMotion('grow-b',270,200,30),frozen:true,radius:60}];
+stepBubbleMotion(growingPair,500,500,1/60);motionBounds(growingPair,500,500);assert.ok(growingPair.every(b=>b.impact===0),'Expansion repairs placement without pretending two stationary bubbles collided');
+assert.deepEqual(createBubbleMotion('stable',100,100,30),createBubbleMotion('stable',100,100,30));
+console.log("Orchestrator dashboard smoke passed: fitting, identity, lifecycle, titles, recency, free roaming, collisions, frozen bubbles and wall bounds.");

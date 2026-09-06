@@ -48,6 +48,7 @@ export interface RelayState {
         enabledOnLaunch?: boolean;
         spendingLimit?: number;
         microphoneId?: string;
+        handsFreeEnabled?: boolean;
     };
     sessions: RelaySession[];
     messages: {

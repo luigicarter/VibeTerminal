@@ -3,7 +3,7 @@ import { runtimeStatusLabel, type TerminalRuntimeSnapshot } from "../terminalRun
 
 export type DashboardStatus = "working" | "done" | "needs-you" | "idle" | "error" | "unknown" | "starting" | "pending" | "response";
 export interface DashboardTarget { id: string; generation: string; operations?: string[] }
-export const DASHBOARD_DRIFT_PX = 3;
+const DASHBOARD_PACKING_CLEARANCE_PX = 40;
 type UsedSession = { id: string; lastUsedAt?: number };
 const usedAt = (session: UsedSession) => Number.isFinite(session.lastUsedAt) && session.lastUsedAt! > 0 ? session.lastUsedAt! : 0;
 
@@ -21,11 +21,12 @@ export function dashboardRecency(session: UsedSession, now: number, active: bool
   return { recent, opacity: active || recent ? 1 : timestamp ? 0.90 : 0.96 };
 }
 
-export function dashboardDrift(id: string) {
+function dashboardSeed(id: string) {
   let hash = 2166136261;
   for (let i = 0; i < id.length; i++) hash = Math.imul(hash ^ id.charCodeAt(i), 16777619) >>> 0;
-  return { duration: 8 + hash % 4001 / 1000, delay: -(hash % 10000) / 1000, distance: DASHBOARD_DRIFT_PX };
+  return hash;
 }
+
 export const DASHBOARD_STATUS_LABELS: Record<DashboardStatus, string> = {
   working: "Working", done: "Done", "needs-you": "Needs you", idle: "Idle", error: "Error", unknown: "Unknown",
   starting: "Starting", pending: "Awaiting activity", response: "Response available"
@@ -79,19 +80,38 @@ export function dashboardProvider(session: RelaySession): string {
 }
 
 /** Reserve every cell for the largest circle and its halo, independent of status. */
-export function dashboardLayout(viewportWidth: number, count: number) {
+export function dashboardLayout(viewportWidth: number, count: number, viewportHeight: number) {
   const available = Math.max(0, Number.isFinite(viewportWidth) ? viewportWidth : 0);
-  const diameter = Math.min(280, Math.max(220, available - 56));
-  // A 12px visual halo plus the worst diagonal drift (sqrt(3²+3²) < 6px).
-  const motionMargin = 6;
-  const halo = 12 + motionMargin;
+  const availableHeight = Math.max(0, Number.isFinite(viewportHeight) ? viewportHeight : 0);
+  // Generous initial separation leaves room for bubbles to begin roaming.
+  const motionMargin = DASHBOARD_PACKING_CLEARANCE_PX;
+  const halo = 14 + motionMargin;
+  const diameter = 232;
   const gap = 24;
   const slot = diameter + halo * 2;
   // Hexagonal rows plus bounded offsets make a cloud without a physics loop.
   // Extra pitch reserves the full jitter even when every target expands.
   const jitter = 8;
   const pitch = slot + gap + 24;
-  const columns = Math.max(1, Math.min(Math.max(1, count), Math.floor((available + gap + 8) / pitch)));
+  // Choose the packing that leaves the largest spheres in the available field.
+  // Status and targeting never participate in this calculation.
+  let columns = 1;
+  let fitScale = 0;
+  let bestAspect = Infinity;
+  for (let candidate = 1; candidate <= Math.max(1, count); candidate++) {
+    const pairCapacity = candidate > 1 ? candidate * 2 - 1 : 2;
+    const remainder = count % pairCapacity;
+    const rows = Math.floor(count / pairCapacity) * 2 + (remainder > candidate ? 2 : remainder > 0 ? 1 : 0);
+    const candidateWidth = (candidate - 1) * pitch + slot + jitter * 2;
+    const candidateHeight = rows ? (rows - 1) * (candidate > 1 ? pitch * Math.sqrt(3) / 2 : pitch) + slot + jitter * 2 : 0;
+    const fit = !available || !availableHeight ? 0 : count ? Math.min(1, available / candidateWidth, availableHeight / candidateHeight) : 1;
+    const aspect = Math.abs(Math.log((candidateWidth / (candidateHeight || 1)) / (available / (availableHeight || 1) || 1)));
+    if (fit > fitScale || (fit === fitScale && aspect < bestAspect)) {
+      columns = candidate;
+      fitScale = fit;
+      bestAspect = aspect;
+    }
+  }
   const rowStep = columns > 1 ? pitch * Math.sqrt(3) / 2 : pitch;
   const positions: { x: number; y: number }[] = [];
   let row = 0;
@@ -110,10 +130,15 @@ export function dashboardLayout(viewportWidth: number, count: number) {
     }
     row++;
   }
-  return { diameter, halo, motionMargin, gap, slot, columns, rows: row, positions,
-    width: (columns - 1) * pitch + slot + jitter * 2, height: row ? (row - 1) * rowStep + slot + jitter * 2 : 0 };
+  return { diameter, halo, motionMargin, gap, slot, columns, rows: row, positions, fitScale,
+    width: count ? (columns - 1) * pitch + slot + jitter * 2 : 0, height: row ? (row - 1) * rowStep + slot + jitter * 2 : 0 };
 }
 
-export function dashboardScale(active: boolean, hasTargets: boolean): number {
-  return active ? 1 : hasTargets ? 0.65 : 0.82;
+export function dashboardScale(active: boolean, hasTargets: boolean, id = ""): number {
+  // Avalanche adjacent IDs before sizing so sequential sessions do not cluster.
+  let hash = dashboardSeed(id);
+  hash = Math.imul(hash ^ (hash >>> 16), 0x85ebca6b);
+  hash = Math.imul(hash ^ (hash >>> 13), 0xc2b2ae35);
+  const variation = ((hash ^ (hash >>> 16)) >>> 0) % 101 / 100;
+  return active ? 1 : hasTargets ? 0.64 + variation * 0.10 : 0.70 + variation * 0.14;
 }

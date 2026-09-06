@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "sampleRate": 16000,
+  "files": [
+    {
+      "path": "bpe.model",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2",
+      "sha256": "c8a2a0129c4ab8e463164c142f82d25649661b122c8cd0b7aab5c9e80b90ad24",
+      "bytes": 244837,
+      "archiveMember": "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/bpe.model",
+      "archiveSha256": "f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a"
+    },
+    {
+      "path": "decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2",
+      "sha256": "e40ff43297abe815e8898494c17e71bba2152d9d40fa3eb803f75d0f7533329a",
+      "bytes": 277985,
+      "archiveMember": "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+      "archiveSha256": "f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a"
+    },
+    {
+      "path": "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2",
+      "sha256": "1e721676515bcd42a186979733981213c66c80db680e1cc582dfedf3be76e678",
+      "bytes": 4807159,
+      "archiveMember": "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+      "archiveSha256": "f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a"
+    },
+    {
+      "path": "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2",
+      "sha256": "eae9da0c7e1e6c6a3f4cc42d167899c388f6c6701b94cb96320e4f55df79624c",
+      "bytes": 163380,
+      "archiveMember": "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+      "archiveSha256": "f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a"
+    },
+    {
+      "path": "tokens.txt",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2",
+      "sha256": "fd2ded4050a55d2b1578870ba8697d02371980217806b7558bd0a5cc60f3ba53",
+      "bytes": 5006,
+      "archiveMember": "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/tokens.txt",
+      "archiveSha256": "f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a"
+    },
+    {
+      "path": "keywords.txt",
+      "sha256": "6af0565f9fdd81a51ef2aac66f061b0449807ee3315df5eba332555766a7980a",
+      "bytes": 28,
+      "generatedFrom": "bpe.model",
+      "content": "\u2581HE Y \u2581VI B E @HEY_VIBE\n"
+    },
+    {
+      "path": "smart-turn-v3.2-cpu.onnx",
+      "url": "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/f766f81d3cfdf7737ac64aad813d91bbfd56bf93/smart-turn-v3.2-cpu.onnx",
+      "sha256": "2bb026316b14a660486a75b1733cd3fbab8c2fd0314dc9af7be49f8cca967e4f",
+      "bytes": 8679182
+    },
+    {
+      "path": "silero_vad.onnx",
+      "url": "https://raw.githubusercontent.com/snakers4/silero-vad/867c2aa692646a1f1de3e94a15c9dd9f614c0acb/src/silero_vad/data/silero_vad.onnx",
+      "sha256": "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3",
+      "bytes": 2327524
+    },
+    {
+      "path": "LICENSE-silero.txt",
+      "url": "https://raw.githubusercontent.com/snakers4/silero-vad/867c2aa692646a1f1de3e94a15c9dd9f614c0acb/LICENSE",
+      "sha256": "2e63e9a38b6e8fc0c7bc37ce174caca1862870856c6daf5697cfb785e925520b",
+      "bytes": 1075
+    },
+    {
+      "path": "LICENSE-smart-turn.txt",
+      "url": "https://raw.githubusercontent.com/pipecat-ai/smart-turn/4786657e242dfe77dd138699ac564ee074a2a543/LICENSE",
+      "sha256": "0d66364067f678c08586ebb60a16a2aed4fa081ec11057df35585759ce0e774f",
+      "bytes": 1301
+    },
+    {
+      "path": "LICENSE-sherpa.txt",
+      "url": "https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/v1.13.7/LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "bytes": 11358
+    },
+    {
+      "path": "NOTICE-whisper.txt",
+      "bytes": 761,
+      "sha256": "24121980b23b7632c5162955c7f56e5a2f3ec5262d6071f38369482d7c8102fb",
+      "content": "Whisper feature extraction reference\nCopyright 2022 The HuggingFace Inc. team.\nLicensed under Apache License 2.0; see LICENSE-sherpa.txt for the full license.\nReference sources:\nhttps://github.com/huggingface/transformers/blob/c93057d4835cd31752bb56f59989dd27696eb45b/src/transformers/models/whisper/feature_extraction_whisper.py\nhttps://github.com/huggingface/transformers/blob/c93057d4835cd31752bb56f59989dd27696eb45b/src/transformers/audio_utils.py\n\nvibeTerminal implements an independent JavaScript FFT and a port of the documented\nWhisper/Slaney frontend equations. NumPy float32 pairwise reduction behavior is\nreproduced for normalization parity. Reference fixtures were generated with the\nexact library versions recorded in voice-whisper-reference.json.\n"
+    }
+  ]
+}

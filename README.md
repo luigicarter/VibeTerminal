@@ -12,7 +12,7 @@ to which task.
 
 | Platform | Download | Notes |
 | --- | --- | --- |
-| Windows x64 | [vibeTerminal-Setup-0.1.92.exe](https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.92/vibeTerminal-Setup-0.1.92.exe) | Standard Windows installer. |
+| Windows x64 | [vibeTerminal-Setup-0.1.93.exe](https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.93/vibeTerminal-Setup-0.1.93.exe) | Standard Windows installer. |
 | All releases | [GitHub Releases](https://github.com/luigicarter/VibeTerminal/releases) | Older versions and release assets. |
 
 Install the app, then launch `vibeTerminal` from the Start Menu or desktop

@@ -37,6 +37,10 @@ permissionModule.createMicrophonePermission=options=>permissionFactory({...optio
  dialog:{showMessageBox:async(parent,config)=>{log({consentDialog:{parentId:parent.id,actualMainId:options.getMainWindow()?.id,title:config.title,message:config.message,detail:config.detail,buttons:config.buttons,defaultId:config.defaultId,cancelId:config.cancelId,source:'createMicrophonePermission dialog spy'}});while(!fs.existsSync(${JSON.stringify(consentResponseFile)})){if(config.signal?.aborted)throw Error('Consent cancelled');await new Promise(r=>setTimeout(r,25));}return JSON.parse(fs.readFileSync(${JSON.stringify(consentResponseFile)},'utf8'));}}
 });
 const handle=electron.ipcMain.handle.bind(electron.ipcMain);
+// Use the same deterministic interpretation stand-in as the backend integration
+// suite; recognition, recording, transport and playback remain real here.
+const orchestration=require(${JSON.stringify(path.join(root, 'backend/orchestrator.cjs'))});const createRelay=orchestration.createOrchestrator;
+orchestration.createOrchestrator=options=>createRelay({...options,interpretIntent:require(${JSON.stringify(path.join(root, 'scripts/backend/orchestrator-test-intent.cjs'))}).interpretTestIntent});
 electron.ipcMain.handle=(channel,listener)=>handle(channel,async(event,...args)=>{ const value=await listener(event,...args); if(channel==='voice:configure')log({channel,payload:args[0],value}); return value; });
 const surface=require(${JSON.stringify(path.join(root, 'backend/voiceOverlayWindow.cjs'))}); const original=surface.createVoiceOverlayWindow;
 surface.createVoiceOverlayWindow=options=>original({...options,BrowserWindow:class extends options.BrowserWindow{constructor(config){super(config);log({nativeOptions:{width:config.width,height:config.height,frame:config.frame,transparent:config.transparent,alwaysOnTop:config.alwaysOnTop,focusable:config.focusable,backgroundThrottling:config.webPreferences.backgroundThrottling}});this.on('show',()=>log({unexpectedNativeAudioShow:true}));}}});
@@ -44,7 +48,11 @@ globalThis.fetch=async(url,options={})=>{
  log({request:String(url)}); const reply=data=>new Response(JSON.stringify(data),{headers:{'content-type':'application/json'}});
  if(url==='https://openrouter.ai/api/v1/key')return reply({data:{is_free_tier:true}});
  if(String(url).startsWith('https://openrouter.ai/api/v1/models'))return reply({data:[{id:'fixture/relay',name:'Fixture relay',supported_parameters:['tools'],architecture:{input_modalities:['text'],output_modalities:['text']}},{id:'openai/whisper-large-v3-turbo',architecture:{output_modalities:['transcription']}},{id:'hexgrad/kokoro-82m',architecture:{output_modalities:['speech']}}]});
- if(url==='https://openrouter.ai/api/v1/chat/completions')return reply({choices:[{message:{content:'Fixture text answer.'}}],usage:{cost:0}});
+ if(url==='https://openrouter.ai/api/v1/chat/completions'){
+  const body=JSON.parse(options.body);
+  if(body.tools?.some(tool=>tool.function?.name==='interpret_workspace'))return reply({choices:[{message:{tool_calls:[{id:'fixture-intent',type:'function',function:{name:'interpret_workspace',arguments:JSON.stringify({goal:'Answer the fixture user without workspace effects.',actions:[]})}}]}}],usage:{cost:0}});
+  return reply({choices:[{message:{content:'Fixture text answer.'}}],usage:{cost:0}});
+ }
  if(url==='https://openrouter.ai/api/v1/audio/transcriptions'){
   const body=JSON.parse(options.body);const audio=Buffer.from(body.input_audio?.data||'','base64');
   if(body.input_audio?.format!=='wav'||audio.toString('ascii',0,4)!=='RIFF'||audio.toString('ascii',8,12)!=='WAVE')throw Error('Fixture expected WAV transcription input');
@@ -69,7 +77,7 @@ async function screenshot(client, name) { const r = await client.send('Page.capt
 (async () => { try {
   assert.equal(process.platform, 'win32');
   const speechWav = path.join(output, 'fake-microphone.wav');
-  const sentence = 'Push to talk works. Show me the workspace. Push to talk works. Show me the workspace.';
+  const sentence = 'Push to talk works. Show me the workspace. Hey Vibe. Open the project and run the tests.';
   const synthesis = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
     `$ErrorActionPreference='Stop';Add-Type -AssemblyName System.Speech;$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;$f=New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo(16000,[System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen,[System.Speech.AudioFormat.AudioChannel]::Mono);$s.SetOutputToWaveFile('${speechWav}',$f);$s.Speak('${sentence}');$s.Dispose()`],
     { windowsHide: true, encoding: 'utf8', timeout: 120000 });
@@ -98,7 +106,7 @@ async function screenshot(client, name) { const r = await client.send('Page.capt
   assert.match(consentDialog.detail,/OpenRouter/);assert.match(consentDialog.detail,/background/);assert.equal(events().some(e=>e.nativeOptions),false);assert.equal(events().some(e=>e.payload?.microphoneReady),false);assert.equal((await cdp.eval('window.vibe.voice.getState()')).listening,false);
   record('first-use-consent-blocks-window-and-capture',consentDialog);
   fs.writeFileSync(consentResponseFile,JSON.stringify({response:0}));
-  await until(async () => { const s = await cdp.eval('window.vibe.voice.getState()'); return s.listening && s.phase === 'listening' && s; }, 'actual capture readiness', 45000);
+  await until(async () => { const s = await cdp.eval('window.vibe.voice.getState()'); return s.listening && s.phase === 'listening' && events().some(e => e.payload?.microphoneReady && e.payload.captureToken === s.captureToken && e.value?.ok) && s; }, 'actual capture readiness', 45000);
   const ready = await cdp.eval('window.vibe.voice.getState()');
   assert(events().some(e => e.payload?.rendererReady && e.value?.ok)); assert(events().some(e => e.payload?.microphoneReady && e.payload.captureToken === ready.captureToken && e.value?.ok));
   record('renderer-capture-token-listening', ready);
@@ -110,7 +118,7 @@ async function screenshot(client, name) { const r = await client.send('Page.capt
   voice = new Cdp(vp.webSocketDebuggerUrl); await voice.open();
   // Preserve actual AudioContext scheduling/end ACK, silence only the physical output.
   await voice.eval(`(()=>{const connect=AudioNode.prototype.connect;AudioNode.prototype.connect=function(destination,...args){if(destination instanceof AudioDestinationNode){const gain=this.context.createGain();gain.gain.value=0;connect.call(gain,destination);return connect.call(this,gain,...args);}return connect.call(this,destination,...args);};window.__qaSilentPlayback=true;window.__qaStoppedTracks=[];const stop=MediaStreamTrack.prototype.stop;MediaStreamTrack.prototype.stop=function(){const before=this.readyState;stop.call(this);window.__qaStoppedTracks.push({kind:this.kind,before,after:this.readyState});};})()`);
-  await voice.eval(`(()=>{window.__qaVoiceAudio=[];window.__qaVoiceStates=[];window.vibe.voice.onAudio(({data,...chunk})=>window.__qaVoiceAudio.push({...chunk,bytes:data.length}));window.vibe.voice.onState(state=>window.__qaVoiceStates.push({phase:state.phase,reply:state.reply,replyId:state.replyId,transcript:state.transcript}));})()`);
+  await voice.eval(`(()=>{window.__qaVoiceAudio=[];window.__qaVoiceStates=[];window.vibe.voice.onAudio(({data,...chunk})=>window.__qaVoiceAudio.push({...chunk,bytes:data.length}));window.vibe.voice.onState(state=>window.__qaVoiceStates.push({phase:state.phase,reply:state.reply,replyId:state.replyId,transcript:state.transcript,recordingSource:state.recordingSource,handsFreeStatus:state.handsFreeStatus,finishHint:state.finishHint}));})()`);
   const native = await until(() => windows().find(w => w.url.includes('surface=voice') && !w.visible), 'hidden native audio renderer');
   assert.equal(native.bounds.width, 112); assert.equal(native.bounds.height, 112);
   const opts = events().find(e => e.nativeOptions).nativeOptions; assert.equal(opts.frame, false); assert.equal(opts.transparent, true); assert.equal(opts.backgroundThrottling, false); assert.equal(opts.alwaysOnTop,false); assert.equal(opts.focusable,false);
@@ -169,6 +177,17 @@ async function screenshot(client, name) { const r = await client.send('Page.capt
   assert.deepEqual(heldPhases.slice(0, 3), ['listening', 'recording', 'transcribing'], JSON.stringify(heldPhases));
   await until(() => voice.eval(`window.__qaVoiceStates.find(s=>s.transcript==='push to talk works')`), 'push-to-talk transcript in state');
   record('space-hold-records-live-microphone-and-uploads-it', { ...held, phases: heldPhases });
+  await until(async () => (await cdp.eval('window.vibe.voice.getState()')).phase === 'listening', 'manual reply finished');
+  fs.writeFileSync(transcriptionFile, JSON.stringify({ text: 'Hey Vibe open the project and run the tests' }));
+  assert.equal((await cdp.eval('window.vibe.orchestrator.configure({handsFreeEnabled:true})')).ok, true);
+  await until(async () => (await cdp.eval('window.vibe.voice.getState()')).handsFreeStatus === 'ready', 'native hands-free helpers ready', 20000);
+  const automatic = await until(() => voice.eval(`window.__qaVoiceStates.find(s=>s.recordingSource==='wake')`), 'native wake starts recording from fake microphone', 30000);
+  const automaticTranscript = await until(() => voice.eval(`window.__qaVoiceStates.find(s=>s.transcript==='open the project and run the tests')`), 'automatic completion and wake-prefix removal', 30000);
+  const automaticUpload = events().find(e => e.transcription === 'Hey Vibe open the project and run the tests');
+  assert(automaticUpload?.peak > 600, 'Wake recording must contain microphone audio');
+  record('native-wake-vad-completion-through-real-capture', { automatic, automaticTranscript, upload: automaticUpload });
+  assert.equal((await cdp.eval('window.vibe.orchestrator.configure({handsFreeEnabled:false})')).ok, true);
+  assert.equal((await cdp.eval('window.vibe.voice.getState()')).handsFreeStatus, 'off');
   assert.equal((await cdp.eval('window.vibe.orchestrator.setEnabled(false)')).ok, true);
   const stoppedTracks = await until(() => voice.eval('window.__qaStoppedTracks.some(t=>t.kind==="audio"&&t.before==="live"&&t.after==="ended")&&window.__qaStoppedTracks'), 'actual audio capture track stopped');
   const off = await cdp.eval('window.vibe.voice.getState()'); assert.equal(off.listening, false); assert.equal(off.phase, 'off'); record('off-tears-down-capture', { off, stoppedTracks });

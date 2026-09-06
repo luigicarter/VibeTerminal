@@ -61,4 +61,58 @@ assert(
   "electron-builder NSIS config should wire up the custom installer hook"
 );
 
-console.log("update smoke passed");
+async function verifyInstallerLaunch(fail) {
+  const vm = require("vm");
+  const { EventEmitter } = require("events");
+  const states = [];
+  const timers = [];
+  let unreferenced = false;
+  const child = new EventEmitter();
+  child.unref = () => { unreferenced = true; };
+  const context = {
+    normalizeReleaseVersion: (value) => value,
+    app: { isPackaged: true, getPath: () => "mock-temp", quit() {} },
+    versionInstallInFlight: false,
+    publishUpdateState: (state) => states.push(state),
+    listAppVersions: async () => ({ ok: true, versions: [{
+      version: "1.2.3", downloadUrl: "https://example.invalid/installer.exe",
+      assetName: "installer.exe"
+    }] }),
+    path,
+    fs: { mkdirSync() {}, createWriteStream: () => new EventEmitter() },
+    httpsGet: async () => ({
+      headers: {}, on() {}, pipe: (file) => file.emit("finish")
+    }),
+    spawn: (_file, args, options) => {
+      assert.deepStrictEqual(Array.from(args), ["/S", "--force-run"]);
+      assert.strictEqual(options.windowsHide, true);
+      process.nextTick(() => fail
+        ? child.emit("error", new Error("spawn EACCES"))
+        : child.emit("spawn"));
+      return child;
+    },
+    setTimeout: (callback, delay) => timers.push({ callback, delay })
+  };
+  vm.createContext(context);
+  const start = mainSource.indexOf("async function installAppVersion(");
+  const end = mainSource.indexOf("\nasync function checkForAppUpdates(", start);
+  assert(start >= 0 && end > start);
+  vm.runInContext(mainSource.slice(start, end), context);
+  const result = await context.installAppVersion("1.2.3");
+  assert.strictEqual(result.ok, !fail);
+  assert.strictEqual(unreferenced, !fail);
+  assert.strictEqual(timers.length, fail ? 0 : 1);
+  assert.strictEqual(states.at(-1).status, fail ? "error" : "switching");
+  if (fail) assert.match(result.message, /EACCES/);
+  else assert.strictEqual(timers[0].delay, 1200);
+  assert.strictEqual(context.versionInstallInFlight, false);
+}
+
+(async () => {
+  await verifyInstallerLaunch(true);
+  await verifyInstallerLaunch(false);
+  console.log("update smoke passed (installer launch failure and success)");
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

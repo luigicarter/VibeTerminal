@@ -129,6 +129,7 @@ function noteManualInput(session, data) {
   // xterm emits these replies through onData without a user editing anything.
   // Match whole packets only; navigation/paste and mixed packets stay dirty.
   if (/^\x1b\[(?:[IO]|\??\d+;\d+R|[?>][0-9]+(?:;[0-9]+)*c|[03]n)$/.test(data)) return;
+  session.interactionInputPending = false;
   session.manualInputPending = !["\r", "\n", "\r\n", "\x03"].includes(data);
 }
 
@@ -284,7 +285,10 @@ function createSession(payload) {
       appendSessionBuffer(session, data);
       const modeText = session.modeTail + data;
       const modes = /\x1b\[\?([0-9;]+)([hl])/g;
-      for (const match of modeText.matchAll(modes)) if (match[1].split(";").includes("2004")) session.bracketedPaste = match[2] === "h";
+      for (const match of modeText.matchAll(modes)) {
+        if (match[1].split(";").includes("2004")) session.bracketedPaste = match[2] === "h";
+        if (match[1].split(";").includes("1")) session.applicationCursorKeys = match[2] === "h";
+      }
       // Retain only a possible incomplete mode sequence across output chunks.
       session.modeTail = modeText.match(/\x1b(?:\[(?:\?[0-9;]{0,64})?)?$/)?.[0] || "";
       captureTerminalTitle(session, data, payload.id);
@@ -414,12 +418,33 @@ function handleAction(payload, strict) {
     emit(event);
   };
   if (!payload.actionId || !payload.id || (strict && (payload.generation === undefined || payload.generation === null))) return result(false, "invalid-action", "Action ID, session ID and generation are required.");
-  if (!["input", "interrupt", "kill"].includes(payload.kind)) return result(false, "invalid-action", "Unknown terminal action.");
+  if (!["input", "interaction", "interrupt", "kill"].includes(payload.kind)) return result(false, "invalid-action", "Unknown terminal action.");
   const session = sessions.get(payload.id);
   if (!matchesSession(session, payload)) return result(false, "stale-generation", "The terminal generation is no longer current.");
   if (!session.terminal) return result(false, "not-running", "The terminal has exited.");
   if (payload.kind === "input" && typeof payload.data !== "string") return result(false, "invalid-action", "Input must be a string.");
   try {
+    if (payload.kind === "interaction") {
+      const evidence = payload.interactionEvidence, pid = payload.expectedAgentPid;
+      const age = Date.now() - Number(evidence?.observedAt);
+      if (payload.generation == null || !Number.isSafeInteger(pid) || pid <= 0 || evidence?.id !== payload.id || evidence?.generation !== session.generation || evidence?.pid !== pid || !Number.isSafeInteger(evidence?.sequence) || evidence.sequence !== session.sequence || !Number.isFinite(age) || age < 0 || age > 5000 || (evidence.shell && pid !== session.terminal.pid)) return result(false, "stale-observation", "Fresh generation-bound terminal interaction evidence is required.");
+      try { process.kill(pid, 0); } catch { return result(false, "recipient-unavailable", "The expected input recipient is no longer alive."); }
+      if (session.manualInputPending) return result(false, "input-buffer-occupied", "This terminal may contain unsent user input.");
+      const prefix = session.applicationCursorKeys ? "\x1bO" : "\x1b[";
+      const keys = { up: prefix + "A", down: prefix + "B", right: prefix + "C", left: prefix + "D", home: prefix + "H", end: prefix + "F", tab: "\t", "shift-tab": "\x1b[Z", enter: "\r", escape: "\x1b", backspace: "\x7f", space: " " };
+      if ((payload.text !== undefined && (typeof payload.text !== "string" || require('node:buffer').Buffer.byteLength(payload.text) > 4096 || /[\x00-\x1f\x7f-\x9f]/.test(payload.text))) || (payload.keys !== undefined && (!Array.isArray(payload.keys) || payload.keys.length > 16 || payload.keys.some(key => !Object.prototype.hasOwnProperty.call(keys, key)))) || (payload.submit !== undefined && typeof payload.submit !== "boolean") || (!payload.text && !payload.keys?.length && !payload.submit)) return result(false, "invalid-action", "Use bounded literal text and named terminal keys.");
+      if (payload.keys?.includes("enter") && (payload.submit || payload.keys.filter(key => key === "enter").length !== 1 || payload.keys.at(-1) !== "enter")) return result(false, "invalid-action", "Use Enter once as the final key, or submit, never both.");
+      const text = payload.text || "";
+      const data = (text && session.bracketedPaste ? "\x1b[200~" + text + "\x1b[201~" : text) + (payload.keys || []).map(key => keys[key]).join("") + (payload.submit ? "\r" : "");
+      if (text) session.interactionInputPending = true;
+      session.terminal.write(data);
+      for (const key of payload.keys || []) {
+        if (key === "enter") session.interactionInputPending = false;
+        else if (["space", "backspace"].includes(key)) session.interactionInputPending = true;
+      }
+      if (payload.submit) session.interactionInputPending = false;
+      return result(true, "written"); // ConPTY acceptance, not foreground ownership or answer consumption.
+    }
     if (payload.expectedAgentPid !== undefined) {
       const pid = Number(payload.expectedAgentPid);
       if (!Number.isSafeInteger(pid) || pid <= 0) return result(false, "invalid-action", "Invalid expected agent PID.");
@@ -437,7 +462,7 @@ function handleAction(payload, strict) {
     let data = payload.data;
     if (payload.kind === "input" && payload.promptText !== undefined) {
       if (typeof payload.promptText !== "string" || !payload.promptText.trim() || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/.test(payload.promptText)) return result(false, "invalid-action", "Prompt contains unsupported control characters or is empty.");
-      if (session.manualInputPending) return result(false, "input-buffer-occupied", "This terminal may contain unsent user input. Prompt preserved as a draft without changing that input.");
+      if (session.manualInputPending || session.interactionInputPending) return result(false, "input-buffer-occupied", "This terminal may contain unsent user input. Prompt preserved as a draft without changing that input.");
       if (payload.expectedAgentPid !== undefined) {
         if (/[\r\n]/.test(payload.promptText) && !session.bracketedPaste) return result(false, "needs-staging", "This agent has not enabled bracketed paste; multiline prompt preserved for review.");
         data = session.bracketedPaste ? "\x1b[200~" + payload.promptText.replace(/\r\n?/g, "\n") + "\x1b[201~\r" : payload.promptText + "\r";
@@ -453,7 +478,7 @@ function handleAction(payload, strict) {
     session.terminal.write(payload.kind === "interrupt" ? "\x03" : data);
     return result(true, "written"); // Transport acceptance, never agent completion.
   } catch (error) {
-    return result(false, "write-failed", error.message);
+    return result(false, payload.kind === "interaction" ? "unknown" : "write-failed", error.message);
   }
 }
 

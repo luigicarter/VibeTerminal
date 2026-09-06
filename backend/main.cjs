@@ -857,7 +857,14 @@ async function installAppVersion(version) {
     // process is running from, so we have to be gone first.
     const child = spawn(installerPath, ["/S", "--force-run"], {
       detached: true,
-      stdio: "ignore"
+      stdio: "ignore",
+      windowsHide: true
+    });
+    // spawn failures arrive asynchronously and cannot be caught by the outer
+    // try/catch until we await them. Keep the app open if Windows refuses it.
+    await new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("spawn", resolve);
     });
     child.unref();
 
@@ -1841,6 +1848,23 @@ function createMainWindow() {
       nodeIntegration: false,
       backgroundThrottling: false
     }
+  });
+  // External links and provider login pages use the validated open-external
+  // IPC. Keep remote content out of windows carrying the workspace preload.
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    // Renderer reloads must remain possible (including saved workspace setup).
+    // Compare full documents, not origins: other file: pages are untrusted.
+    try {
+      const current = new URL(mainWindow.webContents.getURL());
+      const target = new URL(url);
+      current.hash = "";
+      target.hash = "";
+      if (current.href === target.href) return;
+    } catch {
+      // Malformed destinations are rejected below.
+    }
+    event.preventDefault();
   });
   installApplicationMenu(mainWindow);
 

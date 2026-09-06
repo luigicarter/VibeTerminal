@@ -40,6 +40,8 @@ function createRecording({ silenceMs = 900, initialSilenceMs = 6000, maxMs = 600
       if (!endpointing) return 'recording';
       return voiced >= 250 && silence >= silenceMs ? 'complete' : (voiced < 250 && total >= initialSilenceMs ? 'silence' : 'recording');
     },
+    // Completion inference reads a bounded tail without consuming the recording.
+    tail(maxSamples = RATE * 8) { const size = Math.min(maxSamples, chunks.reduce((n, c) => n + c.length, 0)); const result = new Float32Array(size); let at = size; for (let i = chunks.length - 1; i >= 0 && at; i--) { const c = chunks[i], take = Math.min(at, c.length); at -= take; result.set(c.subarray(c.length - take), at); } return result; },
     finish() { const result = new Float32Array(chunks.reduce((n, c) => n + c.length, 0)); let at = 0; for (const c of chunks) { result.set(c, at); at += c.length; } chunks = []; return result; },
     get voicedMs() { return voiced; },
     get preRollVoicedMs() { return preRollVoiced; },

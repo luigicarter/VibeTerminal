@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createOrchestrator } = require('../../backend/orchestrator.cjs');
+const { interpretTestIntent } = require('./orchestrator-test-intent.cjs');
 const { modelInputBudget } = require('../../backend/orchestratorBudget.cjs');
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status });
 const reply = text => json({ choices: [{ message: { content: text } }] });
@@ -14,14 +15,14 @@ function fixture(t, options = {}) {
   const bodies = [], events = [], source = { id: 's', sequence: 10, text: 'RECENT ' + 'x'.repeat(5000), history: ['OLD_PRIVATE_HISTORY'], raw: 'RAW_PRIVATE_SOURCE' };
   let clock = 1, handler = () => reply('Ready');
   const contextLength = options.contextLength || 16384;
-  const instance = createOrchestrator({ userDataPath: dir, now: () => clock, onUpstreamError: e => events.push(e), getSessions: async () => [{ id: 's', generation: 1, name: 'Worker', status: 'running' }], readSession: async () => structuredClone(source), dispatchAction: options.dispatchAction, fetch: async (url, request) => {
+  const instance = createOrchestrator({ interpretIntent: interpretTestIntent, userDataPath: dir, now: () => clock, onUpstreamError: e => events.push(e), getSessions: async () => [{ id: 's', generation: 1, name: 'Worker', status: 'running' }], readSession: async () => structuredClone(source), dispatchAction: options.dispatchAction, fetch: async (url, request) => {
     if (url.endsWith('/key')) return json({ data: {} });
     if (url.includes('/models')) return json({ data: [{ id: 'brain', context_length: contextLength, supported_parameters: ['tools'] }] });
     const body = JSON.parse(request.body); bodies.push(body);
     assert.ok(Buffer.byteLength(JSON.stringify({ messages: body.messages, tools: body.tools || [] })) <= modelInputBudget(contextLength, body.max_tokens));
     return handler(body);
   } });
-  t.after(() => { instance.dispose(); fs.rmSync(dir, { recursive: true, force: true }); });
+  t.after(async () => { await instance.dispose(); fs.rmSync(dir, { recursive: true, force: true }); });
   return { instance, bodies, events, source, handle(fn) { handler = fn; }, advance() { clock += 120000; }, async ready() { await instance.configure({ apiKey: 'test', sessionOnly: true, model: 'brain' }); assert.equal((await instance.setEnabled(true)).ok, true); } };
 }
 test('real model requests stay bounded, preserve instruction, strip history without changing source', async t => {

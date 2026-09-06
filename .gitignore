@@ -2,6 +2,7 @@ node_modules/
 dist/
 .tmp/
 artifacts/
+output/
 release/
 npm-debug.log*
 .cursor/

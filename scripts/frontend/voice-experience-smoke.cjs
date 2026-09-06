@@ -3,6 +3,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const Module = require('node:module');
 const ts = require('typescript');
+for (const file of ['VoiceIndicator.tsx', 'components/OrchestratorSettings.tsx']) {
+  const source = new TextDecoder('utf-8', { fatal: true }).decode(fs.readFileSync(path.resolve(__dirname, '../../frontend', file)));
+  assert.ok(!source.includes('\r\r\n'), `${file} contains doubled carriage returns`);
+  assert.ok(!source.includes('\uFFFD'), `${file} contains replacement characters`);
+}
 function harness(file, mocks) {
   const cells = [], effects = []; let cursor = 0;
   const react = {
@@ -38,21 +43,23 @@ async function flush() { for (let i = 0; i < 12; i++) await Promise.resolve(); }
   const calls = [];
   const state = { enabled: false, ready: false, settings: { hasKey: true, model: 'old/model', ttsModel: 'supported/speech', voice: 'warm', sttModel: 'stt', monitoringEnabled: false }, preferences: [], usage: {} };
   const api = { models: async () => [{ id: 'supported/speech', voices: [{ id: 'warm', name: 'Warm' }] }], configure: async patch => { calls.push(['configure', patch]); return { ok: true }; }, testConnection: async () => { calls.push(['test']); return { ok: true, ready: false }; } };
-  const voice = { onState: () => () => {}, getState: async () => ({ listening: false }), configure: async () => ({ ok: true }) };
+  const voice = { onFlush: () => () => {}, onState: () => () => {}, getState: async () => ({ listening: false }), configure: async () => ({ ok: true }) };
   global.window = { vibe: { voice } };
   const settings = harness('components/OrchestratorSettings.tsx', { '../orchestratorUi': { relayApi: () => api, useOrchestrator: () => state } });
   settings.render(); await flush(); let tree = settings.render();
+  assert.equal(input(tree, 'Hands-free voice').props.checked, false);
   assert.equal(input(tree, 'OpenRouter API key').props.disabled, true);
   assert.equal(input(tree, 'OpenRouter API key').props.value, '');
   button(tree, 'Change').props.onClick(); tree = settings.render();
   assert.equal(input(tree, 'OpenRouter API key').props.disabled, false);
+  input(tree, 'Hands-free voice').props.onChange({ target: { checked: true } });
   input(tree, 'Assistant model').props.onChange({ target: { value: 'new/model' } });
   input(tree, 'OpenRouter API key').props.onChange({ target: { value: 'candidate-key' } });
   tree = settings.render(); assert.equal(input(tree, 'Enable Orchestrator').props.disabled, false);
   input(tree, 'Enable Orchestrator').props.onChange({ target: { checked: true } }); await flush(); tree = settings.render();
   assert.equal(calls[0][0], 'configure'); assert.equal(calls[0][1].model, 'new/model'); assert.equal(calls[0][1].apiKey, 'candidate-key'); assert.deepEqual(calls[1], ['test']);
   assert.match(text(tree), /selected models are not ready/); assert.equal(calls.some(call => call[0] === 'enabled'), false);
-  assert.equal(calls[0][1].monitoringEnabled, false); assert.equal(input(tree, 'OpenRouter API key').props.value, '');
+  assert.equal(calls[0][1].handsFreeEnabled, true); assert.equal(calls[0][1].monitoringEnabled, false); assert.equal(input(tree, 'OpenRouter API key').props.value, '');
   assert.equal(input(tree, 'OpenRouter API key').props.disabled, true);
   api.testConnection = async () => ({ ok: true, ready: true, voiceReady: false });
   input(tree, 'Enable Orchestrator').props.onChange({ target: { checked: true } }); await flush(); tree = settings.render();
@@ -60,7 +67,7 @@ async function flush() { for (let i = 0; i < 12; i++) await Promise.resolve(); }
   api.testConnection = async () => ({ ok: true, ready: true, voiceReady: true });
   api.setEnabled = async value => { calls.push(['enabled', value]); state.enabled = value; return { ok: true }; };
   input(tree, 'Enable Orchestrator').props.onChange({ target: { checked: true } }); await flush(); tree = settings.render();
-  assert.deepEqual(calls.at(-1), ['enabled', true]); assert.match(text(tree), /Hold Space to talk/);
+  assert.deepEqual(calls.at(-1), ['enabled', true]); assert.match(text(tree), /[Hh]old Space to talk/);
   state.ready = true; tree = settings.render(); assert.equal(button(tree, 'Preview voice').props.disabled, false);
   input(tree, 'Assistant model').props.onChange({ target: { value: '' } }); tree = settings.render();
   assert.equal(button(tree, 'Preview voice').props.disabled, true);
@@ -69,7 +76,10 @@ async function flush() { for (let i = 0; i < 12; i++) await Promise.resolve(); }
   assert.equal(calls.length, beforeOff + 1); assert.deepEqual(calls.at(-1), ['enabled', false]);
   const advanced = nodes(tree).find(node => node.type === 'details' && text(node).startsWith('Advanced'));
   assert.ok(nodes(advanced).includes(input(tree, 'Voice')));
-  assert.ok(nodes(advanced).includes(button(tree, 'Save changes')));
+  assert.ok(!nodes(advanced).includes(button(tree, 'Save changes')), 'Save stays visible when Advanced is collapsed');
+  assert.equal(nodes(tree).filter(node => node.type === 'button' && text(node) === 'Save changes').length, 1);
+  const unsavedStatus = nodes(tree).find(node => node.props?.role === 'status' && text(node).startsWith('Unsaved changes.'));
+  assert.ok(unsavedStatus); assert.ok(!nodes(advanced).includes(unsavedStatus));
   let deviceCaptures = 0, trackStops = 0;
   Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { mediaDevices: { getUserMedia: async () => { deviceCaptures++; return { getTracks: () => [{ stop() { trackStops++; } }] }; }, enumerateDevices: async () => [] } } });
   voice.configure = async () => ({ ok: false, error: 'Microphone not allowed' });
@@ -91,12 +101,20 @@ async function flush() { for (let i = 0; i < 12; i++) await Promise.resolve(); }
   voice.configure = async patch => { events.push(patch); return { ok: true }; };
   voice.cancelSpeech = async () => {};
   global.window.vibe.orchestrator = { cancel: async () => {} };
-  let captures = 0, players = 0;
-  const audioMocks = { './voice/microphone': { VoiceMicrophone: class { constructor() { captures++; } stop() {} async start() {} } }, './voice/pcmPlayer': { PcmPlayer: class { constructor() { players++; } stop() { stopped++; } dispose() {} push() { pushed++; } } } };
+  let captures = 0, players = 0, frameCallback, flushListener;
+  voice.frames = frame => events.push({ frame });
+  voice.onFlush = cb => { flushListener = cb; return () => { flushListener = undefined; }; };
+  const audioMocks = { './voice/microphone': { VoiceMicrophone: class { constructor() { captures++; } stop() {} async start(cb) { frameCallback = cb; } async flush() { frameCallback([0.25], 320); return 321; } } }, './voice/pcmPlayer': { PcmPlayer: class { constructor() { players++; } stop() { stopped++; } dispose() {} push() { pushed++; } } } };
   const overlay = harness('VoiceOverlay.tsx', audioMocks);
   assert.equal(overlay.render(), null); assert.deepEqual(events.slice(0, 3), ['state-listener', 'audio-listener', { rendererReady: true }]);
   stateListener({ phase: 'listening', listening: true, captureToken: 7 }); resolveInitial({ phase: 'off', listening: false }); await flush(); assert.equal(overlay.render(), null);
   await flush(); assert.ok(events.some(event => event?.microphoneReady === true && event.captureToken === 7));
+  flushListener({ id: 'wrong', captureToken: 6 }); await flush();
+  assert.equal(events.some(event => event?.captureFlushed), false);
+  flushListener({ id: 'flush-1', captureToken: 7 }); await flush();
+  const frameIndex = events.findIndex(event => event?.frame);
+  assert.deepEqual(events[frameIndex].frame, { samples: [0.25], sampleStart: 320, sampleRate: 16000, captureToken: 7 });
+  assert.deepEqual(events[frameIndex + 1], { captureFlushed: true, flushId: 'flush-1', captureToken: 7, sampleEnd: 321 });
   stateListener({ phase: 'speaking', listening: false }); assert.equal(overlay.render(), null); audioListener({ data: [0, 0] });
   assert.equal(stopped, 0, 'Muted preview must not stop playback'); assert.equal(pushed, 1);
   const beforeIndicator = events.length;
@@ -107,6 +125,14 @@ async function flush() { for (let i = 0; i < 12; i++) await Promise.resolve(); }
   assert.match(nodes(tree).find(node => node.props?.className === 'voice-mic').props['aria-label'], /Hold to talk/);
   assert.deepEqual(events.slice(beforeIndicator), ['state-listener'], 'Main indicator must not own audio or issue rendererReady');
   assert.equal(captures, 1); assert.equal(players, 1);
+  stateListener({ phase: 'listening', listening: true, indicatorVisible: true, handsFreeStatus: 'ready' }); tree = indicator.render();
+  assert.match(text(tree), /Say Hey Vibe/);
+  stateListener({ phase: 'recording', listening: true, indicatorVisible: true, recordingSource: 'wake' }); tree = indicator.render();
+  assert.match(text(tree), /speak naturally/); assert.doesNotMatch(text(tree), /release Space/);
+  stateListener({ phase: 'recording', listening: true, indicatorVisible: true, recordingSource: 'wake', finishHint: true }); tree = indicator.render();
+  assert.match(text(tree), /hold and release Space/);
+  stateListener({ phase: 'listening', listening: true, indicatorVisible: true, handsFreeStatus: 'unavailable', handsFreeError: 'Retry hands-free voice.' }); tree = indicator.render();
+  assert.match(text(tree), /Retry hands-free voice.*Hold Space/);
   document.hidden = true; visibilityChanged(); tree = indicator.render(); assert.match(tree.props.className, /voice-hidden/);
   nodes(tree).find(node => node.props?.className === 'voice-mini voice-hide').props.onClick(); await flush(); assert.ok(events.some(event => event?.hideOverlay === true));
   assert.equal(nodes(tree).filter(node => node.type === 'button').length, 3);

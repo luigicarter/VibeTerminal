@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld("vibe", {
     sendAudio: payload => ipcRenderer.invoke("voice:send-audio", payload),
     cancelSpeech: () => ipcRenderer.invoke("voice:cancel-speech"),
     frames: payload => ipcRenderer.send("voice:frames", payload),
+    onFlush: callback => subscribe("voice:flush", callback),
     onAudio: callback => subscribe("voice:audio", callback)
   }
 });

@@ -3,6 +3,7 @@ const test = require("node:test"), assert = require("node:assert/strict");
 const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
 const { EventEmitter } = require("node:events");
 const { installOrchestrator, createSessionDirectory } = require("../../backend/orchestratorIntegration.cjs");
+const { interpretTestIntent } = require('./orchestrator-test-intent.cjs');
 
 function harness(t, telemetry = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "vibe-adapter-edges-"));
@@ -18,11 +19,11 @@ function harness(t, telemetry = {}) {
   };
   const snapshot = { id: "p", generation: "g", provider: "terminal", processState: "running", turnState: "idle", cwd: root };
   const send = engine => message => { sent.push({ engine, ...message }); return true; };
-  const integration = installOrchestrator({ app, ipcMain: ipc, BrowserWindow: { getAllWindows: () => [main] }, screen: {},
+  const integration = installOrchestrator({ interpretIntent: interpretTestIntent, app, ipcMain: ipc, BrowserWindow: { getAllWindows: () => [main] }, screen: {},
     shell: { openPath: async value => { opened.push(value); return ""; } }, safeStorage: { isEncryptionAvailable: () => false },
     getMainWindow: () => main, getRuntime: () => ({ listSnapshots: () => [snapshot] }),
     sendPty: send("terminal"), sendFusion: send("fusion"), sendOpenFusion: send("openfusion"), getTelemetry: () => telemetry, getChanges: () => ({}) });
-  t.after(() => { integration.dispose(); assert(path.resolve(root).startsWith(path.join(os.tmpdir(), "vibe-adapter-edges-"))); fs.rmSync(root, { recursive: true, force: true }); });
+  t.after(async () => { await integration.dispose(); assert(path.resolve(root).startsWith(path.join(os.tmpdir(), "vibe-adapter-edges-"))); fs.rmSync(root, { recursive: true, force: true }); });
   return { integration, root, ui, sent, opened, snapshot, ack, manual: () => { manualInventory = true; }, setInventory: value => { inventory = value; },
     invoke: (name, payload = {}) => ipc.handlers.get(`orchestrator:${name}`)({ sender: main.webContents }, payload),
     hostAck: (message, extra = {}) => integration.incoming(message.engine, { type: "action-result", id: message.payload.id, generation: message.payload.generation, actionId: message.payload.actionId, ok: true, status: "written", ...extra }) };

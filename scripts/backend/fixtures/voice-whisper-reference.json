@@ -1,0 +1,22 @@
+{
+  "transformers": "5.9.0",
+  "numpy": "2.4.3",
+  "reference": "WhisperFeatureExtractor._np_extract_fbank_features; normalized left-padded 8sec; Pipecat inference contract",
+  "cases": [
+    {
+      "samples": 6400,
+      "file": "voice-whisper-6400.f32.gz",
+      "sha256": "b6e1a55282c702e2b619630c6fd7a6361fcae26b7434114da0c95e267beb29fd"
+    },
+    {
+      "samples": 144000,
+      "file": "voice-whisper-144000.f32.gz",
+      "sha256": "ba4cd7ffa1c6a50f9fca6f24c71a55de2f4e54b5a86d19e8b3e472b1aba399ca"
+    },
+    {
+      "samples": 128000,
+      "file": "voice-whisper-128000.f32.gz",
+      "sha256": "5370f6ee894ac3a09228e12d29624c018f7ecd353bcdca9f9b14082d07d59b0c"
+    }
+  ]
+}

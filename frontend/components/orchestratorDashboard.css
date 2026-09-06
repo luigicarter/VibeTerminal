@@ -7,19 +7,11 @@
 .orchestrator-dashboard-header h1 { margin: 0; font-size: 28px; font-weight: 500; letter-spacing: -.6px; }
 .orchestrator-dashboard-header p { margin: 9px 0 0; color: #a7abb3; font-size: 14px; }
 .orchestrator-dashboard-scope { display: flex; gap: 8px; align-items: center; color: #c1a0ef; font-size: 13px; }
-.orchestrator-dashboard-viewport { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: auto; padding: 24px; scrollbar-width: thin; scrollbar-color: #40434a transparent; }
-.orchestrator-dashboard-grid { position: relative; flex: none; margin: auto; }
-.orchestrator-dashboard-cell { position: absolute; display: grid; place-items: center; width: var(--bubble-slot); height: var(--bubble-slot); }
-.orchestrator-dashboard-drift { position: relative; display: grid; place-items: center; width: 100%; height: 100%; opacity: var(--recency-opacity); animation: orchestrator-gentle-drift var(--drift-duration) ease-in-out var(--drift-delay) infinite; }
-@keyframes orchestrator-gentle-drift {
-  0%, 100% { transform: translate(0, calc(-1 * var(--drift-distance))); }
-  25% { transform: translate(var(--drift-distance), 0); }
-  50% { transform: translate(0, var(--drift-distance)); }
-  75% { transform: translate(calc(-1 * var(--drift-distance)), 0); }
-}
-.orchestrator-dashboard[data-motion="false"] .orchestrator-dashboard-drift { animation-play-state: paused; }
-.orchestrator-dashboard-cell:not([data-in-view="true"]) .orchestrator-dashboard-drift { animation-play-state: paused; }
-.orchestrator-dashboard-drift:focus-within { animation-play-state: paused; }
+.orchestrator-dashboard-viewport { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: clip; padding: clamp(8px, 2vw, 24px); }
+.orchestrator-dashboard-field { position: relative; flex: none; margin: auto; overflow: clip; }
+.orchestrator-dashboard-grid { position: absolute; top: 0; left: 0; transform-origin: top left; }
+.orchestrator-dashboard-cell { position: absolute; left: 0; top: 0; pointer-events: none; display: grid; place-items: center; width: var(--bubble-slot); height: var(--bubble-slot); }
+.orchestrator-dashboard-drift { position: relative; display: grid; place-items: center; width: 100%; height: 100%; opacity: var(--recency-opacity); }
 .orchestrator-dashboard-cell, .orchestrator-dashboard-legend > span { --status-color: #989ca4; }
 .orchestrator-dashboard [data-status="working"] { --status-color: #60baff; }
 .orchestrator-dashboard [data-status="done"] { --status-color: #82df9c; }
@@ -29,11 +21,12 @@
 .orchestrator-dashboard [data-status="response"] { --status-color: #9fc8c9; }
 .orchestrator-dashboard [data-status="unknown"] { --status-color: #a7a6ba; }
 .orchestrator-dashboard-bubble {
-  position: relative; display: grid; place-items: center; width: calc(var(--bubble-diameter) * var(--bubble-scale)); height: calc(var(--bubble-diameter) * var(--bubble-scale));
+  position: relative; pointer-events: auto; display: grid; place-items: center; width: calc(var(--bubble-diameter) * var(--bubble-scale)); height: calc(var(--bubble-diameter) * var(--bubble-scale));
   padding: 0; margin: 0; border: 0; border-radius: 50%; background: transparent; color: inherit; font-family: inherit; cursor: pointer;
 }
 .orchestrator-dashboard-bubble:focus-visible { outline: 2px solid #e4d5ff; outline-offset: 7px; }
 .orchestrator-dashboard-sphere { position: absolute; width: var(--bubble-diameter); height: var(--bubble-diameter); transform: scale(var(--bubble-scale)); transition: transform 320ms cubic-bezier(.2,.8,.2,1); pointer-events: none; }
+.orchestrator-dashboard-sphere-surface { position: absolute; inset: 0; transform-origin: center; }
 .orchestrator-dashboard-glass, .orchestrator-dashboard-rim, .orchestrator-dashboard-halo { position: absolute; inset: 0; border-radius: 50%; }
 .orchestrator-dashboard-glass {
   background-image: url("../assets/orchestrator-glass-bubble.png"), radial-gradient(ellipse at 30% 17%, #ffffff30 0%, #ffffff07 17%, transparent 35%), radial-gradient(circle at 50% 46%, #0a0d114d 46%, #becbd21b 67%, #ebf4ff66 70%, #15171b 72%);
@@ -49,18 +42,18 @@
 .orchestrator-dashboard-halo { inset: -5px; border: 1px solid #bd8aff; box-shadow: 0 0 9px #ba83ff60, inset 0 0 5px #b87dff40; opacity: 0; transition: opacity 320ms cubic-bezier(.2,.8,.2,1); }
 .orchestrator-dashboard-cell[data-targeted="true"] .orchestrator-dashboard-halo { opacity: 1; }
 .orchestrator-dashboard-label { position: relative; display: flex; flex-direction: column; align-items: center; width: var(--label-width); max-width: var(--label-width); pointer-events: none; text-shadow: 0 1px 5px #000; }
-.orchestrator-dashboard-label strong { width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 19px; line-height: 1.4; font-weight: 500; }
+.orchestrator-dashboard-label strong { width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 16px; line-height: 1.35; font-weight: 500; }
 .orchestrator-dashboard-provider { width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; margin-top: 3px; font-size: 13px; color: #d4dce4; }
-.orchestrator-dashboard-status { display: flex; align-items: center; gap: 7px; margin-top: 15px; padding: 5px 9px; border-radius: 20px; background: #101419a6; color: var(--status-color); font-size: 12px; white-space: nowrap; }
+.orchestrator-dashboard-status { display: flex; align-items: center; gap: 7px; max-width: 100%; box-sizing: border-box; justify-content: center; margin-top: 10px; padding: 5px 7px; border-radius: 20px; background: #101419a6; color: var(--status-color); font-size: 11px; line-height: 1.3; text-align: center; }
 .orchestrator-dashboard-status i, .orchestrator-dashboard-legend i { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; background: var(--status-color); }
-.orchestrator-dashboard-target { position: absolute; top: 2px; right: 0; display: flex; align-items: center; gap: 5px; padding: 2px 5px; border-radius: 5px; color: #c99eff; background: #19171f; font-size: 11px; pointer-events: none; opacity: 0; transition: opacity 320ms cubic-bezier(.2,.8,.2,1); }
+.orchestrator-dashboard-target { position: absolute; top: calc(50% - var(--bubble-diameter) / 2 + 13px); left: 50%; transform: translateX(-50%); white-space: nowrap; display: flex; align-items: center; gap: 5px; padding: 2px 5px; border-radius: 5px; color: #c99eff; background: #19171f; font-size: 11px; pointer-events: none; opacity: 0; transition: opacity 320ms cubic-bezier(.2,.8,.2,1); }
 .orchestrator-dashboard-cell[data-targeted="true"] .orchestrator-dashboard-target { opacity: 1; }
 .orchestrator-dashboard-legend { display: flex; justify-content: center; flex-wrap: wrap; gap: 14px 26px; padding: 18px 24px 25px; color: #aeb1b9; font-size: 12px; }
 .orchestrator-dashboard-legend > span { display: flex; align-items: center; gap: 8px; }
-.orchestrator-dashboard-empty { min-height: 260px; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; color: #989ca8; text-align: center; }
+.orchestrator-dashboard-empty { min-height: 0; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; color: #989ca8; text-align: center; }
 .orchestrator-dashboard-empty > svg { color: #ad87db; }
 .orchestrator-dashboard-empty h2 { margin: 18px 0 0; color: #dce0e7; font-weight: 500; font-size: 20px; }
 .orchestrator-dashboard-empty p { font-size: 13px; }
 @media (max-width: 600px) { .orchestrator-dashboard-header { padding: 22px 24px 8px; } .orchestrator-dashboard-header h1 { font-size: 24px; } }
-@media (prefers-reduced-motion: reduce) { .orchestrator-dashboard-sphere, .orchestrator-dashboard-target, .orchestrator-dashboard-halo, .orchestrator-dashboard-rim { transition: none; } .orchestrator-dashboard-drift { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .orchestrator-dashboard-sphere, .orchestrator-dashboard-target, .orchestrator-dashboard-halo, .orchestrator-dashboard-rim { transition: none; } }
 .orchestrator-dashboard[data-visible="false"] .orchestrator-dashboard-sphere, .orchestrator-dashboard[data-visible="false"] .orchestrator-dashboard-target, .orchestrator-dashboard[data-visible="false"] .orchestrator-dashboard-halo { transition: none; }

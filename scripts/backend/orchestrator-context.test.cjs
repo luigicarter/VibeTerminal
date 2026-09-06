@@ -2,6 +2,7 @@
 const test = require("node:test"), assert = require("node:assert/strict");
 const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
 const { createOrchestrator } = require("../../backend/orchestrator.cjs");
+const { interpretTestIntent } = require('./orchestrator-test-intent.cjs');
 const { serializeToolResult, listSessionSummaries } = require("../../backend/orchestratorContext.cjs");
 const reply = text => ({ choices: [{ message: { content: text } }] });
 const tool = args => ({ choices: [{ message: { tool_calls: [{ id: "call", type: "function", function: { name: "workspace", arguments: JSON.stringify(args) } }] } }] });
@@ -9,7 +10,7 @@ async function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "vibe-context-test-"));
   const state = { sessions: [{ id: "a", generation: "ga", launchToken: 1, name: "Worker A", kind: "codex", cwd: root, projectName: "Fixture" }], actions: [], requests: [], responses: [], reads: 0, now: 1000 };
   state.history = { id: "saved-b", title: "Saved B", provider: "codex", reference: "ref-b", cwd: root };
-  const relay = createOrchestrator({ userDataPath: root, secureStorage: { isEncryptionAvailable: () => false }, now: () => state.now,
+  const relay = createOrchestrator({ interpretIntent: interpretTestIntent, userDataPath: root, secureStorage: { isEncryptionAvailable: () => false }, now: () => state.now,
     getSessions: () => state.sessions, getRoots: () => ({ documents: root, projects: [{ name: "Fixture", path: root }] }),
     readSession: async () => { state.reads++; return { text: "PROVIDER_TRANSCRIPT_PRIVATE_BODY" }; },
     dispatchAction: async action => {
@@ -22,7 +23,7 @@ async function fixture(t) {
       if (url.endsWith("/models")) return { data: [{ id: "fake-brain", supported_parameters: ["tools"] }] };
       state.requests.push(JSON.parse(options.body)); return state.responses.shift() || reply("Ready.");
     } }) });
-  t.after(() => { relay.dispose(); assert(path.resolve(root).startsWith(path.join(os.tmpdir(), "vibe-context-test-"))); fs.rmSync(root, { recursive: true, force: true }); });
+  t.after(async () => { await relay.dispose(); assert(path.resolve(root).startsWith(path.join(os.tmpdir(), "vibe-context-test-"))); fs.rmSync(root, { recursive: true, force: true }); });
   await relay.configure({ apiKey: "fake-key", sessionOnly: true, model: "fake-brain" }); assert.equal((await relay.setEnabled(true)).ok, true);
   state.root = root; state.relay = relay;
   state.run = async (text, ...args) => { state.responses.push(...args.map(tool), reply("Acknowledged.")); return relay.send({ text, origin: "text" }); };

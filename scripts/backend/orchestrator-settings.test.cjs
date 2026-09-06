@@ -46,3 +46,14 @@ test('partly malformed preference entries are dropped instead of poisoning the l
   store.configure({ language: 'en' });
   assert.deepEqual(JSON.parse(fs.readFileSync(filename, 'utf8')).preferences, [{ id: 'a', text: 'Keep me' }]);
 });
+
+test('hands-free is opt-in, persists explicitly, and rejects malformed settings atomically', t => {
+  const { store, filename } = fixture(t, { settings: { handsFreeEnabled: 'true', microphoneId: 'saved-device' }, preferences: [] });
+  assert.equal(store.getSettings().handsFreeEnabled, false);
+  store.configure({ handsFreeEnabled: true });
+  assert.equal(createSettings({ userDataPath: path.dirname(filename) }).getSettings().handsFreeEnabled, true);
+  const before = fs.readFileSync(filename, 'utf8');
+  assert.throws(() => store.configure({ microphoneId: 'changed', handsFreeEnabled: 1 }), /Invalid handsFreeEnabled/);
+  assert.equal(fs.readFileSync(filename, 'utf8'), before);
+  assert.equal(store.getSettings().microphoneId, 'saved-device');
+});

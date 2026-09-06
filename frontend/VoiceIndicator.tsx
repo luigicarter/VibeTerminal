@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Mic, MicOff, X } from 'lucide-react';
 import type { VoiceApi, VoiceState } from './voice/types';
 import { pressToTalk } from './voice/pushToTalk';
@@ -25,7 +25,14 @@ export default function VoiceIndicator() {
   const busy = ['recording', 'awaiting-answer', 'transcribing', 'thinking', 'speaking'].includes(state.phase);
   const working = ['transcribing', 'thinking'].includes(state.phase);
   const error = localError || state.error;
-  const status = error || phases[state.phase] || state.phase;
+  const automatic = state.recordingSource === 'wake' || state.recordingSource === 'answer';
+  const status = error || (state.finishHint ? 'Still listening... hold and release Space to send' :
+    state.phase === 'recording' && automatic ? 'Listening... speak naturally' :
+    state.phase === 'awaiting-answer' && state.handsFreeStatus === 'ready' ? 'Listening for your answer' :
+    state.phase === 'listening' && state.handsFreeStatus === 'loading' ? 'Starting hands-free voice... hold Space to talk' :
+    state.phase === 'listening' && state.handsFreeStatus === 'ready' ? 'Say Hey Vibe or hold Space to talk' :
+    state.phase === 'listening' && state.handsFreeStatus === 'unavailable' ? `${state.handsFreeError || 'Hands-free voice unavailable.'} Hold Space to talk` :
+    phases[state.phase] || state.phase);
   const visual = error ? 'error' : !state.listening && !busy ? 'muted' : working ? 'thinking' : busy ? state.phase === 'speaking' ? 'speaking' : 'recording' : 'listening';
   const hold = useMemo(() => api && pressToTalk(api, result => { if (result?.ok === false) setLocalError(result.error || 'Voice action failed.'); }), [api]);
   async function act(run: () => Promise<{ ok?: boolean; error?: string } | unknown>) {
@@ -34,17 +41,21 @@ export default function VoiceIndicator() {
     catch (failure) { setLocalError(String(failure)); }
   }
   // The mic is the mouse equivalent of the Space key: press and hold, release to send.
+  const pointerHeld = useRef(false);
+  const releasePointer = () => { pointerHeld.current = false; hold?.release(); };
   async function press() {
+    pointerHeld.current = true;
     if (!api || !hold) return;
     if (working) return act(async () => { await orchestrator.cancel(); return api.cancelSpeech(); });
-    setLocalError('');
-    if (!state.listening) { const result = await api.setListening(true); if (!result.ok) { setLocalError(result.error || 'Voice action failed.'); return; } }
-    hold.start();
+    await act(async () => {
+      if (!state.listening) { const result = await api.setListening(true); if (!result.ok) return result; }
+      if (pointerHeld.current) hold.start();
+    });
   }
   const action = working ? 'Stop current request' : state.listening ? 'Hold to talk' : 'Enable microphone and hold to talk';
   if (!api || !state.indicatorVisible) return null;
   return <div className={`voice-indicator voice-${visual}${hidden ? ' voice-hidden' : ''}`} onContextMenu={event => { event.preventDefault(); void act(() => api.configure({ menu: true })); }}>
-    <button className="voice-mic" aria-label={`${status}. ${action}`} title={`${status}\n${action} · Right-click for options`} onPointerDown={event => { event.preventDefault(); void press(); }} onPointerUp={() => hold?.release()} onPointerLeave={() => hold?.release()} onPointerCancel={() => hold?.release()} onKeyDown={event => { if (event.key === ' ') event.preventDefault(); }}>{busy || state.listening ? <Mic size={29} strokeWidth={1.7}/> : <MicOff size={27} strokeWidth={1.7}/>}</button>
+    <button className="voice-mic" aria-label={`${status}. ${action}`} title={`${status}\n${action} · Right-click for options`} onPointerDown={event => { event.preventDefault(); void press(); }} onPointerUp={releasePointer} onPointerLeave={releasePointer} onPointerCancel={releasePointer} onKeyDown={event => { if (event.key === ' ') event.preventDefault(); }}>{busy || state.listening ? <Mic size={29} strokeWidth={1.7}/> : <MicOff size={27} strokeWidth={1.7}/>}</button>
     <button className="voice-mini voice-mute" aria-label={state.listening ? 'Mute microphone' : 'Enable microphone'} title={state.listening ? 'Mute microphone' : 'Enable microphone'} onClick={() => void act(() => api.setListening(!state.listening))}>{state.listening ? <MicOff size={12}/> : <Mic size={12}/>}</button>
     <button className="voice-mini voice-hide" aria-label="Hide microphone indicator; keep listening" title="Hide indicator; keep listening" onClick={() => void act(() => api.configure({ hideOverlay: true }))}><X size={13}/></button>
     <span className="voice-accessible-status" role={error ? 'alert' : 'status'}>{status}</span>

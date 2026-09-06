@@ -3,6 +3,7 @@ const test = require("node:test"), assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
 const { createSessionDirectory, installOrchestrator } = require("../../backend/orchestratorIntegration.cjs");
+const { interpretTestIntent } = require('./orchestrator-test-intent.cjs');
 const { createSettings } = require("../../backend/orchestratorSettings.cjs");
 test("explicit session-only key works without secure storage and never persists",t=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),"vibe-orchestrator-integration-"));
@@ -74,7 +75,7 @@ for (const kind of ["fusion", "openfusion"]) test(`${kind} directory follows liv
 test("real integration bridges UI and strict PTY acknowledgment without cloud or duplicate effects",async t=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),"vibe-orchestrator-integration-"));
   const docs=path.join(root,"Documents"),data=path.join(root,"data");fs.mkdirSync(docs);fs.mkdirSync(data);
-  t.after(()=>{ assert(path.resolve(root).startsWith(path.join(os.tmpdir(),"vibe-orchestrator-integration-")));fs.rmSync(root,{recursive:true,force:true}); });
+  t.after(async ()=>{ await integration.dispose(); assert(path.resolve(root).startsWith(path.join(os.tmpdir(),"vibe-orchestrator-integration-")));fs.rmSync(root,{recursive:true,force:true}); });
   const ipc=new EventEmitter();ipc.handlers=new Map();ipc.handle=(key,fn)=>ipc.handlers.set(key,fn);
   const app=new EventEmitter();app.getPath=key=>key==="documents"?docs:data;app.isPackaged=false;
   let integration; const uiActions=[],opened=[],sent=[];
@@ -88,7 +89,7 @@ test("real integration bridges UI and strict PTY acknowledgment without cloud or
   const BrowserWindow={getAllWindows:()=>[main]};
   const snapshot={id:"term",generation:"g1",launchToken:1,provider:"terminal",cwd:docs,turnState:"idle",processState:"running",agentProcessState:"unknown",revision:1};
   const sendPty=m=>{sent.push(m);queueMicrotask(()=>integration.incoming("terminal",{id:m.payload.id,generation:m.payload.generation,type:"action-result",actionId:m.payload.actionId,ok:true,status:"written"}));return true;};
-  integration=installOrchestrator({app,BrowserWindow,ipcMain:ipc,screen:{},shell:{openPath:async p=>{opened.push(p);return "";}},safeStorage:{isEncryptionAvailable:()=>false},getMainWindow:()=>main,getRuntime:()=>({listSnapshots:()=>[snapshot]}),sendPty,sendFusion:()=>false,sendOpenFusion:()=>false,getTelemetry:()=>({}),getChanges:()=>({})});
+  integration=installOrchestrator({ interpretIntent: interpretTestIntent,app,BrowserWindow,ipcMain:ipc,screen:{},shell:{openPath:async p=>{opened.push(p);return "";}},safeStorage:{isEncryptionAvailable:()=>false},getMainWindow:()=>main,getRuntime:()=>({listSnapshots:()=>[snapshot]}),sendPty,sendFusion:()=>false,sendOpenFusion:()=>false,getTelemetry:()=>({}),getChanges:()=>({})});
   t.after(()=>integration.dispose());
   const invoke=(name,p={})=>ipc.handlers.get(name)({sender:main.webContents},p);
   await integration.refreshInventory();
@@ -106,4 +107,11 @@ test("real integration bridges UI and strict PTY acknowledgment without cloud or
   assert.deepEqual(opened,[fs.realpathSync.native(doc)]);
   const stranger=await ipc.handlers.get("orchestrator:dispatch")({sender:{}},{kind:"close",targetId:"term"});assert.equal(stranger.ok,false);
   assert.equal((await invoke("voice:listening",{enabled:true})).ok,false);
+  let prevented = false;
+  const quit = new Promise(resolve => { app.quit = resolve; });
+  app.emit("before-quit", { preventDefault: () => { prevented = true; } });
+  await quit; assert.equal(prevented, true);
+  const log = fs.readFileSync(path.join(data, "logs", "orchestrator-errors.jsonl"), "utf8");
+  assert.match(log, /Stale session generation/);
+  assert.doesNotMatch(log, /echo test/);
 });

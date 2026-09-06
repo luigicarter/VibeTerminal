@@ -1,7 +1,7 @@
 # Voice push-to-talk (September 5, 2026)
 
-Voice is activated by holding the space bar. The "Hey Vibe" wake word, its native
-keyword spotter, and its model assets are gone; nothing listens for a phrase any more.
+Space push-to-talk is the default voice gesture. Optional [hands-free voice](voice-handsfree.md)
+adds "Hey Vibe" activation and automatic completion while retaining this gesture.
 
 ## The gesture
 
@@ -48,7 +48,10 @@ keyword spotter, and its model assets are gone; nothing listens for a phrase any
 - `backend/voiceAudio.cjs` `createRecording({ endpointing: false })` disables the
   silence detector: only the maximum-length cap can end a held turn.
 
-## What was removed
+## Historical cleanup before hands-free voice
+
+The following describes the earlier removal of the original wake implementation.
+The current optional implementation has its own models and helper lifecycle.
 
 - `backend/voiceWake.cjs`, `backend/voiceWakeHost.cjs`, `backend/voiceWakeProcess.cjs`.
 - The `sherpa-onnx-node` dependency, its `sherpa-onnx-win-x64` binaries, and the

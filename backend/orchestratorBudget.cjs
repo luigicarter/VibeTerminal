@@ -71,7 +71,7 @@ function createReadBudget({ maxBytes = 12000, perReadBytes = 4000 } = {}) {
   };
 }
 
-const CONTEXT_KEYS = new Set(['recentConversation', 'roots', 'sessions', 'preferences', 'observations', 'observedReads', 'sessionDirectory', 'readBookmarks']);
+const CONTEXT_KEYS = new Set(['recentConversation', 'recentActions', 'recentUserMessages', 'roots', 'sessions', 'preferences', 'observations', 'observedReads', 'sessionDirectory', 'readBookmarks']);
 function compactTool(content) {
   let value;
   try { value = JSON.parse(content); } catch { return JSON.stringify({ truncated: true, contextNote: 'Earlier tool output omitted for context. Never repeat an effect because its receipt was shortened.' }); }
@@ -116,7 +116,7 @@ function fitMessages({ messages, tools = [], contextLength, outputTokens = 1200,
       const original = payload[key];
       if (Array.isArray(original)) {
         while (payload[key].length && size() > budget) {
-          payload[key] = key === 'recentConversation' ? payload[key].slice(1) : payload[key].slice(0, Math.floor(payload[key].length / 2));
+          payload[key] = ['recentConversation', 'recentActions', 'recentUserMessages'].includes(key) ? payload[key].slice(1) : payload[key].slice(0, Math.floor(payload[key].length / 2));
           payload.contextNote = 'Workspace context shortened to fit this model. Use bounded directory or status reads for omitted context.';
           result[currentUser].content = JSON.stringify(payload);
         }

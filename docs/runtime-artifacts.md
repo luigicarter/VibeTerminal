@@ -12,6 +12,7 @@ Runtime artifacts are generated during install, build, development, smoke tests,
   - Open Fusion smoke tests use a sibling `openfusion/` runtime directory for generated pane-scoped OpenCode config, commands, TUI plugin, and pane model state.
   - In the real app the `openfusion/` directory lives under Electron userData (`%APPDATA%\vibe-terminal\openfusion\`) and also holds `opencode-home/` — the app-owned OpenCode data/config home (conversation threads in `opencode.db`, provider credentials in `auth.json`, logs, snapshots). It is user data, NOT a rebuildable artifact: deleting it deletes the user's Open Fusion conversations and connected providers. The stale-pane sweep only touches `openfusion/sessions/`.
 - `artifacts/` - QA outputs such as `artifacts/vibe-terminal-screenshot.png` and `artifacts/vibe-terminal-openfusion-screenshot.png`.
+- `output/` - Generated design previews, research exports, and voice QA recordings/reports. Kept locally and excluded from release source.
 
 ## Cleanup Policy
 

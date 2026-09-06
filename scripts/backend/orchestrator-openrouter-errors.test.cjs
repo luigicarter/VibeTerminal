@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createOrchestrator } = require('../../backend/orchestrator.cjs');
+const { interpretTestIntent } = require('./orchestrator-test-intent.cjs');
 const { classifyOpenRouterError, classifyTransportError, readOpenRouterResponse, upstreamErrorInfo } = require('../../backend/openRouterErrors.cjs');
 const response = (status, body) => new Response(JSON.stringify(body), { status });
 test('HTTP status and error envelopes classify without leaking provider bodies', async () => {
@@ -38,13 +39,13 @@ test('transport failures distinguish network, timeout and user cancellation', ()
 function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-upstream-errors-')); const events = [];
   let fail, chat;
-  const instance = createOrchestrator({ userDataPath: dir, onUpstreamError: e => events.push(e), readSession: async () => ({ text: 'working' }), getSessions: async () => [{ id: 's', generation: 1, status: 'running' }], fetch: async (url, options) => {
+  const instance = createOrchestrator({ interpretIntent: interpretTestIntent, userDataPath: dir, onUpstreamError: e => events.push(e), readSession: async () => ({ text: 'working' }), getSessions: async () => [{ id: 's', generation: 1, status: 'running' }], fetch: async (url, options) => {
     if (fail) return fail(url, options);
     if (url.endsWith('/key')) return response(200, { data: {} });
     if (url.includes('/models')) return response(200, { data: [{ id: 'brain', supported_parameters: ['tools'] }] });
     return chat ? chat(options) : response(402, { error: { code: 402, message: 'SECRET' } });
   } });
-  t.after(() => { instance.dispose(); fs.rmSync(dir, { recursive: true, force: true }); });
+  t.after(async () => { await instance.dispose(); fs.rmSync(dir, { recursive: true, force: true }); });
   return { instance, events, fail: fn => { fail = fn; }, chat: fn => { chat = fn; }, ready: async () => { await instance.configure({ apiKey: 'SECRET', sessionOnly: true, model: 'brain' }); assert.equal((await instance.setEnabled(true)).ok, true); } };
 }
 test('voice and text failures preserve error string and emit exactly once', async t => {

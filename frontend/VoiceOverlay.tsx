@@ -25,8 +25,14 @@ export default function VoiceOverlay() {
       const message = 'Allow microphone access and check that your selected microphone is connected.';
       void api.configure({ microphoneError: message, captureToken: state.captureToken });
     };
-    void microphone.start(samples => api.frames({ samples, sampleRate: 16000 }), state.microphoneId, microphoneError).then(() => { if (alive) void api.configure({ microphoneReady: true, captureToken: state.captureToken }); }).catch(microphoneError);
-    return () => { alive = false; microphone.stop(); };
+    const flushOff = api.onFlush(request => {
+      if (!alive || request.captureToken !== state.captureToken) return;
+      void microphone.flush().then(sampleEnd => {
+        if (alive) void api.configure({ captureFlushed: true, flushId: request.id, captureToken: request.captureToken, sampleEnd });
+      }).catch(() => { /* Main process deadline handles interrupted or failed flushes. */ });
+    });
+    void microphone.start((samples, sampleStart) => api.frames({ samples, sampleStart, sampleRate: 16000, captureToken: state.captureToken }), state.microphoneId, microphoneError).then(() => { if (alive) void api.configure({ microphoneReady: true, captureToken: state.captureToken }); }).catch(microphoneError);
+    return () => { alive = false; flushOff(); microphone.stop(); };
   }, [api, microphone, state.listening, state.microphoneId, state.captureToken]);
   return null;
 }

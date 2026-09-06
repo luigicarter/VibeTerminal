@@ -1,11 +1,11 @@
 'use strict';
 const path = require('node:path');
-const ACTIONS = new Set(['navigate', 'focus_session', 'create_session', 'stage_draft', 'get_draft', 'send_prompt', 'interrupt', 'restart', 'close', 'answer_question', 'permission', 'open_file', 'open_folder', 'add_project', 'launch_setup', 'save_setup', 'stage_handoff', 'resume_conversation']);
-const VERBS = 'navigate to|go to|take me to|focus|show|switch to|create|start|launch|open|reopen|resume|new|draft|stage|prepare|send|tell|ask|relay|forward|instruct|stop|interrupt|cancel|restart|close|add|make|load|remember|forget|save';
+const ACTIONS = new Set(['navigate', 'focus_session', 'create_session', 'stage_draft', 'get_draft', 'send_prompt', 'terminal_interact', 'interrupt', 'restart', 'close', 'answer_question', 'permission', 'open_file', 'open_folder', 'add_project', 'launch_setup', 'save_setup', 'stage_handoff', 'resume_conversation']);
+const VERBS = 'navigate to|go to|take me to|focus|show|switch to|create|start|launch|open|reopen|resume|new|draft|stage|prepare|send|tell|ask|prompt|relay|forward|instruct|stop|interrupt|cancel|restart|close|add|make|load|remember|forget|save';
 const INTENT = {
   navigate: /^(navigate to|go to|take me to|focus|show|switch to|open)\b/i,
   focus_session: /^(focus|show|switch to|go to|take me to|navigate to)\b/i, create_session: /^(create|start|launch|open|new)\b/i,
-  stage_draft: /^(draft|stage|prepare)\b/i, send_prompt: /^(send|tell|ask|relay|forward|instruct)\b/i,
+  stage_draft: /^(draft|stage|prepare)\b/i, send_prompt: /^(send|tell|ask|prompt|relay|forward|instruct)\b/i,
   interrupt: /^(stop|interrupt|cancel)\b/i, restart: /^restart\b/i, close: /^close\b/i,
   open_file: /^open\b/i, open_folder: /^open\b/i,
   add_project: /^(add|open)\s+(?:a\s+)?project\b/i, create_project: /^(create|new|make)\s+(?:a\s+)?(project|folder|directory)\b/i,
@@ -15,14 +15,20 @@ const INTENT = {
   forget_preference: /^forget\b/i,
 };
 // Strip conversational lead-ins only at the start, never search prose for a verb.
-const stripPlease = text => text.trim().replace(/^(?:(?:yeah|yes|okay|ok|thanks|thank you)[,.!]?\s+)+/i, '').replace(/^(?:please\s+)?(?:(?:(?:can|could|would|will) you|I want you to)\s+)?(?:please\s+)?/i, '');
+const stripPoliteness = text => text.trim().replace(/^(?:(?:yeah|yes|okay|ok|thanks|thank you)[,.!]?\s+)+/i, '').replace(/^(?:please\s+)?(?:(?:(?:can|could|would|will) you|I want you to)\s+)?(?:please\s+)?/i, '');
+function stripPlease(text) {
+  const cleaned = stripPoliteness(text);
+  if (!/^bye[.!]\s+/i.test(cleaned)) return cleaned;
+  const afterBye = stripPoliteness(cleaned.replace(/^bye[.!]\s+/i, ''));
+  return new RegExp(`^(?:${VERBS})\\b`, 'i').test(afterBye) ? afterBye : cleaned;
+}
 function commandClauses(text) {
   let quote = '', masked = '';
   for (let i = 0; i < text.length; i++) { const ch = text[i]; if (quote) { if (ch === quote && text[i - 1] !== '\\') quote = ''; masked += ' '; } else if ((ch === '"' || ch === "'") && !(ch === "'" && /\w/.test(text[i - 1] || '') && /\w/.test(text[i + 1] || ''))) { quote = ch; masked += ' '; } else masked += ch; }
   const separators = new RegExp(`(?:\\s+(?:and(?: then)?|then)\\s+|;\\s*)(?=(?:${VERBS})\\b)`, 'ig');
   const result = []; let start = 0, match;
   // Everything after a relay command is opaque payload, not another action grant.
-  while ((match = separators.exec(masked))) { const current = stripPlease(masked.slice(start)); if (/^(send|tell|ask|relay|forward|instruct|draft|stage|prepare|remember|forget)\b/i.test(current) || /\bwith (?:the )?prompt\b/i.test(masked.slice(start, match.index)) || /^(tell|ask) (it|them)\b/i.test(masked.slice(separators.lastIndex))) break; result.push({ text: stripPlease(text.slice(start, match.index)), syntax: stripPlease(masked.slice(start, match.index)) }); start = separators.lastIndex; }
+  while ((match = separators.exec(masked))) { const current = stripPlease(masked.slice(start)); if (/^(send|tell|ask|prompt|relay|forward|instruct|draft|stage|prepare|remember|forget)\b/i.test(current) || /\bwith (?:the )?prompt\b/i.test(masked.slice(start, match.index)) || /^(tell|ask) (it|them)\b/i.test(masked.slice(separators.lastIndex))) break; result.push({ text: stripPlease(text.slice(start, match.index)), syntax: stripPlease(masked.slice(start, match.index)) }); start = separators.lastIndex; }
   result.push({ text: stripPlease(text.slice(start)), syntax: stripPlease(masked.slice(start)) }); return result;
 }
 const aliases = kind => { const value = String(kind || '').toLowerCase(); return value === 'openfusion' ? ['openfusion', 'open fusion'] : value === 'claude' ? ['claude', 'claude code'] : [value]; };
@@ -229,6 +235,48 @@ function authorizeConversationResume(action, intent, conversations) {
   if (chosen.reference !== action.reference) throw new Error('The model selected a different saved conversation than the user.');
   return { kind: 'resume_conversation', reference: chosen.reference, selection };
 }
+// Directory antecedents come from a complete user query, not model list filters
+// or prose. Unsupported subset qualifiers fail closed instead of widening scope.
+function identifySessionGroup(intent, sessions) {
+  const query = stripPoliteness(intent.text).match(/^(?:how many|list|show(?: me)?|what are|which are)\s+(?:(?:all(?: of)?|the|my)\s+)*((?:[\w-]+\s+){0,2})(terminals?|sessions?|agents?)\b([\s\S]*)$/i);
+  if (!query) return null;
+  const descriptor = query[1].trim().toLowerCase();
+  const providerNames = [...new Set(['codex', 'claude', 'gemini', 'kimi', 'qwen', 'fusion', 'openfusion', 'shell', ...sessions.flatMap(s => [s.kind, s.provider])].filter(Boolean))];
+  const provider = providerNames.find(name => aliases(name).includes(descriptor));
+  if (descriptor && !provider && !['vyp', 'vibe'].includes(descriptor)) return null;
+  let suffix = query[3].trim().replace(/^(?:do I have|are there|are open)\b/i, '').trim().replace(/^[?.!]\s*/, '').replace(/[?.!]+$/, '').trim();
+  let project;
+  if (suffix) {
+    const location = suffix.match(/^(?:in|for|at)\s+(.+)$/i);
+    if (!location) return null;
+    const named = location[1].replace(/^the\s+/i, '').replace(/\s+project$/i, '');
+    const matches = new Map((intent.projects || []).filter(p => [p.name, p.path].some(label => label && locatorKey(label) === locatorKey(named))).map(p => [p.path, p]));
+    if (matches.size !== 1) return null;
+    project = [...matches.values()][0];
+  } else project = intent.projectContext;
+  if (!project?.path) return null;
+  const candidates = sessions.filter(s => s.cwd === project.path && (!provider || [s.kind, s.provider].some(kind => aliases(kind).some(alias => aliases(provider).includes(alias))))).map(({ id, generation }) => ({ id, generation }));
+  return { candidates, projectPath: project.path, ...(provider ? { provider } : {}) };
+}
+function groupRelay(clause, kind, intent, sessions) {
+  const addressed = clause.text.replace(new RegExp(`^(?:${VERBS})\\s+(?:to\\s+)?`, 'i'), '');
+  const match = addressed.match(/^((?:(?:any|one|either)(?:\s+one)?(?:\s+of)?|a\s+random|any\s+random)\s+.+?)(?:\s*[?.!]\s*)?(?:\s+to\s+|:\s*)([\s\S]+)$/i);
+  if (!match) return null;
+  const locator = match[1].trim();
+  let group;
+  if (/^(?:(?:one|any|either)(?:\s+one)?\s+of\s+(?:them|those|these)|a\s+random\s+one\s+of\s+(?:them|those|these))$/i.test(locator)) group = intent.conversationGroup;
+  else {
+    const named = locator.replace(/^(?:(?:one|any|either)(?:\s+one)?(?:\s+of)?|a\s+random|any\s+random)\s+(?:the\s+)?/i, '');
+    // A fresh group command must name its own project; a remembered project
+    // alone cannot turn an unbound pronoun into all of its sessions.
+    if (!/\s+(?:in|for|at)\s+/i.test(named)) return null;
+    group = identifySessionGroup({ ...intent, text: `list ${named}` }, sessions);
+  }
+  if (!group || !Array.isArray(group.candidates)) return null;
+  const candidates = sessions.filter(s => group.candidates.some(c => c.id === s.id && c.generation === s.generation) && (!group.projectPath || s.cwd === group.projectPath)).map(({ id, generation }) => ({ id, generation }));
+  if (!candidates.length) return null;
+  return { kind, text: relayPayload(':' + match[2]), candidates, selection: 'any' };
+}
 // A pending relay is captured from user syntax, never from a model's proposed
 // prompt. It is usable only by the immediately following target-only reply.
 function captureRelay(intent, sessions) {
@@ -236,6 +284,8 @@ function captureRelay(intent, sessions) {
   if (clauses.length !== 1) return null;
   const kind = ['send_prompt', 'stage_draft'].find(kind => INTENT[kind].test(clauses[0].syntax));
   if (!kind) return null;
+  const group = groupRelay(clauses[0], kind, intent, sessions);
+  if (group) return group;
   try { resolveTarget(clauses[0], intent, sessions); } catch (error) { if (error.message.startsWith('Multiple relay targets')) return null; }
   const candidates = [];
   for (const session of sessions) {
@@ -247,11 +297,22 @@ function captureRelay(intent, sessions) {
   if (!candidates.length || candidates.some(c => c.text !== candidates[0].text)) return null;
   return { kind, text: candidates[0].text, candidates: candidates.map(({ id, generation }) => ({ id, generation })) };
 }
-function clarifyRelay(text, pending, sessions) {
+function selectRelay(pending, sessions, targetId) {
+  if (!pending || !Array.isArray(pending.candidates)) return null;
+  const candidates = sessions.filter(session => (!targetId || session.id === targetId) && pending.candidates.some(c => c.id === session.id && c.generation === session.generation));
+  if (!candidates.length) return null;
+  const selected = candidates[Math.floor(Math.random() * candidates.length)];
+  return { kind: pending.kind, text: pending.text, target: { id: selected.id, generation: selected.generation } };
+}
+function clarifyRelay(text, pending, sessions, targetId) {
   if (!pending) return null;
+  // Only a complete selection reply delegates choice. Never find a command
+  // inside explanation, quotation, negation, or a conditional instruction.
+  const delegated = stripPoliteness(text).replace(/^(?:they're|they are)\s+empty(?:\s+right now)?[,.;]?\s+(?:so\s+)?/i, '').replace(/^just\s+/i, '').replace(/[.!?]+$/, '').trim();
+  if (/^(?:(?:pick|choose|select)\s+(?:(?:any|either)(?:\s+(?:one|of them|terminal|session))?|(?:a\s+)?random\s+(?:one|terminal|session)(?:\s+of them)?)|(?:you\s+(?:pick|choose|decide))|(?:any|either)\s+one(?:\s+of them)?)$/i.test(delegated)) return selectRelay(pending, sessions, targetId);
   const locator = stripPlease(text).replace(/[.!?]+$/, '').trim();
   const candidates = sessions.filter(session => pending.candidates.some(c => c.id === session.id && c.generation === session.generation) && matchesLocator(locator, session));
-  if (candidates.length !== 1) return null;
+  if (candidates.length !== 1 || (targetId && candidates[0].id !== targetId)) return null;
   return { kind: pending.kind, text: pending.text, target: { id: candidates[0].id, generation: candidates[0].generation } };
 }
 function identifyProject(text, projects, previous) {
@@ -268,4 +329,4 @@ function identifyProject(text, projects, previous) {
   if (matches.size === 1) return [...matches.values()][0];
   return projects.find(project => project.path === previous?.path) || null;
 }
-module.exports = { ACTIONS, authorizeModelAction, authorizeConversationResume, commandClauses, resolveTarget, relayPayload, identifyReadTarget, captureRelay, clarifyRelay, identifyProject };
+module.exports = { ACTIONS, authorizeModelAction, authorizeConversationResume, commandClauses, resolveTarget, relayPayload, identifyReadTarget, captureRelay, clarifyRelay, selectRelay, identifySessionGroup, identifyProject };

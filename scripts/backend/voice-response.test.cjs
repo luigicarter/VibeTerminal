@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { createVoiceController } = require('../../backend/voiceController.cjs');
 const { createOrchestrator } = require('../../backend/orchestrator.cjs');
+const { interpretTestIntent } = require('./orchestrator-test-intent.cjs');
 const { wavFromSamples } = require('../../backend/voiceAudio.cjs');
 const { ERROR_AUDIO_TEXT } = require('../../backend/localErrorAudio.cjs');
 const tick = () => new Promise(setImmediate);
@@ -29,13 +30,13 @@ async function fixture(t) {
     }
     throw Error('Unexpected fixture URL');
   };
-  const relay = createOrchestrator({ userDataPath: root, fetch: request,
+  const relay = createOrchestrator({ interpretIntent: interpretTestIntent, userDataPath: root, fetch: request,
     onSpeak: message => controller.speak(message), onUpstreamError: info => controller.announceError(info), onCancel: () => controller?.cancelSpeech() });
   controller = createVoiceController({ orchestrator: relay, fetch: request, getKey: () => relay.getKey(), getSettings: () => relay.getSettings(),
     emit: state => states.push(state),
     onAudio: chunk => { audio.push(chunk); if (chunk.done && !chunk.cancelled) queueMicrotask(() => controller.configure({ playbackDone: chunk.replyId })); } });
-  t.after(() => {
-    controller.dispose(); relay.dispose();
+  t.after(async () => {
+    controller.dispose(); await relay.dispose();
     assert(path.resolve(root).startsWith(path.join(os.tmpdir(), 'vibe-voice-response-')));
     fs.rmSync(root, { recursive: true, force: true });
   });

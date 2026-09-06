@@ -4,6 +4,8 @@ vibeTerminal is an Electron + React desktop workspace for running local terminal
 
 ## Docs Index
 
+- `docs/orchestrator-controls.md` - Current semantic Orchestrator contract: natural user goals, scoped per-terminal commands, unfinished work, supplied answers, native text/key controls, private diagnostics, and verification boundaries.
+
 - `docs/orchestrator-dashboard.md` - Clear-glass session visualization, truthful request activity, stable motion/recency, and verification.
 
 - `docs/orchestrator-voice-fixes.md` - Simple key/model/toggle setup, CPU wake listening, compact mic lifecycle, speech repair, and verification.
@@ -16,6 +18,7 @@ vibeTerminal is an Electron + React desktop workspace for running local terminal
 - `docs/orchestrator.md` - User-command relay, OpenRouter setup, voice overlay, observation/action contracts, saved setups, handoffs, and verification limits.
 
 - `docs/voice-push-to-talk.md` - Space push-to-talk: the hold gesture and its guards, the `pushToTalk` contract, what the wake word left behind, and verification.
+- `docs/voice-handsfree.md` - Optional account-free Hey Vibe activation, pretrained CPU models, automatic answers, capture fencing, fallback, and verification.
 - `docs/frontend.md` - React renderer files, UI state, terminal panes, layout board, and styling.
 - `docs/backend.md` - Electron main process, PTY host, and agent thread discovery files.
 - `docs/preload.md` - Context bridge and IPC surface exposed to the renderer.

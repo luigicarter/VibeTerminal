@@ -1,5 +1,12 @@
 # Orchestrator harness: operating model and edge-case review
 
+**Historical design review.** The literal-relay authority and five-round/model-tool
+limits below describe the earlier harness. The current [semantic command and
+terminal-control layer](orchestrator-controls.md) supersedes those parts: the Brain
+interprets natural requests into scoped grants, can answer user-directed questions
+and operate native terminal menus, and retains bounded action receipts across turns.
+The identity, transport and historical regression evidence below remains relevant.
+
 The Orchestrator is one ongoing relay conversation for the running application.
 Individual terminals keep their own native conversations. Their titles and stable
 identities form a directory the relay can search; they do not become separate

@@ -2,6 +2,10 @@
 
 The `backend/` folder contains Electron main-process code and Node-side terminal/session helpers.
 
+`orchestratorDiagnostics.cjs` writes the private rotating Orchestrator error log.
+See [Orchestrator storage and validation](orchestrator.md#storage-and-validation)
+for the location, retained fields, limits and verification.
+
 ## Files
 
 - `backend/main.cjs` - Electron app entry point from `package.json`; creates the BrowserWindow, starts child hosts, owns IPC handlers, handles folder selection, and brokers latest-agent-thread lookups. Also owns the `claude-providers:*` IPC family (list/models/upsert/delete/set-default/test) for Claude provider profiles, resolves `payload.providerProfileId` on `terminal:create` into per-pane `ANTHROPIC_*` spawn env via `resolveProviderEnv` — which also pins an app-owned `CLAUDE_CONFIG_DIR` (see `claudeCustomHome.cjs`) and passes `stripEnv` so ptyHost drops inherited `ANTHROPIC_*`/`CLAUDE_CONFIG_DIR`, keeping custom panes disconnected from the user's global Claude login and env (plus a validated per-pane `providerModelOverride` → `ANTHROPIC_MODEL`) — and injects the default (or pane-pinned) provider env into Fusion planner spawns and the Fusion MCP adapter env block. Helper hosts receive the custom home as `VIBE_CLAUDE_CUSTOM_HOME` via `getNodeHostEnv()`.
