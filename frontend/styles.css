@@ -4158,11 +4158,6 @@ button {
   padding:11px 12px;
   background:var(--bg-panel);
 }
-.workspace-list {
-  flex:0 1 auto;
-  max-height:42%;
-  min-height:60px;
-}
 .workspace-button {
   border-radius:7px;
   padding:10px 11px;

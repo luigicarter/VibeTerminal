@@ -1,0 +1,38 @@
+"use strict";
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const ts = require("typescript");
+const source = fs.readFileSync(path.resolve(__dirname, "../../frontend/App.tsx"), "utf8");
+const start = source.indexOf('if (kind === "navigate")');
+const end = source.indexOf('if (kind === "open_settings")', start);
+assert(start > 0 && end > start);
+const block = ts.transpileModule(source.slice(start, end), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+const setters = ["setLauncherMenuOpen", "setSettingsOpen", "setWorkspaceToolsOpen", "setWorkspaceToolsTab", "setOrchestratorViewOpen", "setSelectedSessionId", "setMaximizedSessionId", "setActiveView", "setActiveWorkspaceId"];
+const state = {};
+let commits = 0;
+const workspaces = [{ id: "existing", path: "C:/Projects/Existing", sessions: [{ id: "running", launchToken: 7, started: true }] }];
+const before = JSON.stringify(workspaces);
+const run = new Function("kind", "payload", "workspaces", "normalizeWorkspacePath", "flushSync", ...setters, block);
+const navigate = payload => run("navigate", payload, workspaces, value => value.replace(/\\/g, "/").replace(/\/$/, "").toLowerCase(), fn => { fn(); commits++; }, ...setters.map(name => value => { state[name] = value; }));
+for (const view of ["settings", "history", "orchestrator", "multi"]) {
+  const result = navigate({ view });
+  assert.equal(result.status, "navigated");
+  assert.equal(result.view, view);
+  assert.equal(state.setSettingsOpen, view === "settings");
+  assert.equal(state.setWorkspaceToolsOpen, view === "history");
+  if (view === "history") assert.equal(state.setWorkspaceToolsTab, "History");
+  if (view === "orchestrator") assert.equal(state.setOrchestratorViewOpen, true);
+}
+assert.equal(navigate({ view: "project", cwd: "c:\\projects\\existing\\" }).projectId, "existing");
+assert.equal(state.setActiveWorkspaceId, "existing");
+assert.equal(state.setActiveView, "project");
+assert.equal(state.setMaximizedSessionId, null);
+assert.equal(state.setSelectedSessionId, null);
+const accepted = commits;
+const previous = JSON.stringify(state);
+for (const payload of [{ view: "project", cwd: "C:/Unknown" }, { view: "project" }, { view: "project", cwd: "" }, { view: "unknown" }, {}]) assert.equal(navigate(payload).ok, false);
+assert.equal(commits, accepted);
+assert.equal(JSON.stringify(state), previous);
+assert.equal(JSON.stringify(workspaces), before);
+console.log("orchestrator navigation smoke passed");

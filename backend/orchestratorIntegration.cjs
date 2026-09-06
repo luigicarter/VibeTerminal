@@ -7,7 +7,7 @@ const path = require("node:path");
 // This facade composes existing engine owners. It never assigns work or makes
 // approval decisions. Its new command channel always captures a generation.
 function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
-  const ui = new Map(), chats = new Map(), activity = new Map(), bodies = new Map();
+  const ui = new Map(), chats = new Map(), activity = new Map(), bodies = new Map(), interactions = new Map();
   let projectPaths = [];
   let contentSequence = 0;
   function updateUi(items, roots = []) {
@@ -34,13 +34,14 @@ function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
           status: "starting", observation: "observed", model: p.plannerModel || p.model,
           mode: p.mode || p.runMode || "auto", signature, lastActivityAt: now(), closed: false });
         bodies.delete(p.id);
+        interactions.delete(p.id);
       }
     }
     const c = chats.get(p.id);
     if (c) {
       message = { ...message, payload: { ...p, generation: message.type === "start" ? c.generation : (p.generation || c.generation) } };
       if (message.type === "mode") c.mode = p.mode;
-      if (message.type === "stop") { c.closed = true; c.status = "exited"; bodies.delete(p.id); chats.delete(p.id); }
+      if (message.type === "stop") { c.closed = true; c.status = "exited"; bodies.delete(p.id); interactions.delete(p.id); chats.delete(p.id); }
     }
     return message;
   }
@@ -63,12 +64,28 @@ function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
     const c = chats.get(event.id);
     if (!c || (event.generation && event.generation !== c.generation)) return;
     c.revision++; c.lastActivityAt = t;
-    if (["turn-start", "tool-call", "delta", "text-delta"].includes(event.type)) c.status = "running";
-    if (["permission", "question", "interaction-request"].includes(event.type)) c.status = "waiting";
-    if (event.type === "result") c.status = event.subtype === "error" ? "failed" : "completed";
+    const pending = interactions.get(event.id) || new Set();
+    if (["permission", "question", "interaction-request"].includes(event.type)) {
+      pending.add(String(event.requestId || event.interaction?.id || event.interaction?.kind || event.type));
+      interactions.set(event.id, pending);
+      c.status = "waiting";
+    }
+    if (["permission-resolved", "question-resolved", "interaction-resolved"].includes(event.type)) {
+      pending.delete(String(event.requestId || event.interaction?.id || event.type.replace("-resolved", "")));
+      if (!pending.size && c.status === "waiting") c.status = "idle";
+    }
+    if (event.type === "engine-ready" && c.status === "starting") c.status = "idle";
+    // The hosts emit assistant-text/thinking; streamed work must not hide an
+    // unresolved question or permission from another concurrent operation.
+    if (["turn-start", "tool-call", "delta", "text-delta", "assistant-text", "thinking"].includes(event.type)) c.status = pending.size ? "waiting" : "running";
+    // Hosts retain interaction ownership through a planner result/error. Only
+    // explicit resolution or interruption retires those outstanding requests.
+    if (event.type === "interrupted") interactions.delete(event.id);
+    if (event.type === "interrupted") c.status = "interrupted";
+    if (event.type === "result") c.status = event.subtype === "error" ? "failed" : pending.size ? "waiting" : "completed";
     if (event.type === "result" && event.gate) c.checkEvidence = { ...event.gate, observedAt: t };
     if (event.type === "error") c.status = "failed";
-    if (event.type === "closed") { c.status = "exited"; c.closed = true; bodies.delete(event.id); chats.delete(event.id); }
+    if (event.type === "closed") { c.status = "exited"; c.closed = true; bodies.delete(event.id); interactions.delete(event.id); chats.delete(event.id); }
     if (event.type === "tool-call") c.lastTool = { name: event.name || event.toolName, at: t };
     const text = event.delta || event.text || (event.type === "error" ? event.message : "");
     if (typeof text === "string" && text) {
@@ -108,8 +125,8 @@ function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
       complete: false, status: s.status };
   }
   return { updateUi, outgoing, ingest, list, readChat, projectPaths: () => projectPaths, get: id => list().find(s => s.id === id),
-    forget: (id, generation) => { if (activity.get(id)?.generation === generation) activity.delete(id); if (chats.get(id)?.generation === generation) { chats.delete(id); bodies.delete(id); } },
-    clear: () => { ui.clear(); chats.clear(); activity.clear(); bodies.clear(); } };
+    forget: (id, generation) => { if (activity.get(id)?.generation === generation) activity.delete(id); if (chats.get(id)?.generation === generation) { chats.delete(id); bodies.delete(id); interactions.delete(id); } },
+    clear: () => { ui.clear(); chats.clear(); activity.clear(); bodies.clear(); interactions.clear(); } };
 }
 
 function installOrchestrator(options) {
@@ -261,6 +278,11 @@ function installOrchestrator(options) {
         ? { ...result, target: { id: session.id, generation: session.generation, launchToken: session.launchToken } } : result;
     };
     check();
+    if (kind === "navigate") {
+      if (!["settings", "history", "orchestrator", "multi", "project"].includes(action.view)) return { ok: false, error: "Choose a supported application view." };
+      if (action.view === "project" && (typeof action.cwd !== "string" || !action.cwd.trim())) return { ok: false, error: "An existing project folder is required." };
+      return requestUi("navigate", { view: action.view, ...(action.view === "project" ? { cwd: action.cwd } : {}) }, action.signal);
+    }
     if (kind === "list_conversations") return history.list({ provider: action.provider, cwd: action.cwd, query: action.query, limit: action.limit, offset: action.offset });
     if (kind === "read_conversation") return history.read({ reference: action.reference, cursor: action.cursor, maxChars: action.maxChars, maxBytes: action.maxBytes, limit: action.limit });
     if (kind === "search_conversation") return history.search({ reference: action.reference, query: action.query, cursor: action.cursor, limit: action.limit, maxBytes: action.maxBytes });

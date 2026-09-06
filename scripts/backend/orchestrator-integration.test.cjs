@@ -26,6 +26,51 @@ test("directory retains generations and streams text without splitting words", (
   assert.equal(d.get("f").status,"starting");
   assert.equal(d.outgoing("fusion",{type:"input",payload:{id:"f",generation}}).payload.generation,generation);
 });
+
+for (const kind of ["fusion", "openfusion"]) test(`${kind} directory follows live readiness, interruption and interaction activity`, () => {
+  const d = createSessionDirectory();
+  const start = () => d.outgoing(kind, { type: "start", payload: { id: "chat", cwd: "C:/project" } }).payload.generation;
+  const generation = start();
+  const emit = (type, extra = {}) => d.ingest(kind, { id: "chat", generation, type, ...extra });
+  const status = () => d.get("chat").status;
+  assert.equal(status(), "starting");
+  emit("engine-ready"); assert.equal(status(), "idle");
+  emit("turn-start");
+  emit("engine-ready"); assert.equal(status(), "running", "late readiness cannot overwrite work");
+  emit("interrupted"); assert.equal(status(), "interrupted");
+  emit("thinking", { delta: "Planning" }); assert.equal(status(), "running");
+  emit("permission", { requestId: "p" });
+  emit("interaction-request", { requestId: "p", interaction: { id: "p", kind: "permission" } });
+  emit("question", { requestId: "q" });
+  for (const type of ["turn-start", "assistant-text", "thinking", "tool-call"]) {
+    emit(type); assert.equal(status(), "waiting", `${type} cannot hide pending interactions`);
+  }
+  emit("result"); assert.equal(status(), "waiting", "planner completion does not retire host-owned requests");
+  for (const event of [{ type: "result", subtype: "error" }, { type: "error", message: "Planner failed" }]) {
+    emit(event.type, event); assert.equal(status(), "failed", "explicit failure remains visible");
+    emit("thinking"); assert.equal(status(), "waiting", "work after failure still respects host-owned requests");
+  }
+  emit("permission-resolved", { requestId: "p" });
+  emit("interaction-resolved", { requestId: "p" });
+  emit("result"); assert.equal(status(), "waiting", "completion after partial resolution still needs the remaining answer");
+  emit("assistant-text"); assert.equal(status(), "waiting", "a second unresolved request remains visible");
+  emit("question-resolved", { requestId: "q" }); assert.equal(status(), "idle", "resolution alone does not prove resumed work");
+  emit("assistant-text", { delta: "Resuming" }); assert.equal(status(), "running");
+  emit("permission", { requestId: "cancelled" });
+  emit("interrupted"); assert.equal(status(), "interrupted");
+  emit("turn-start"); assert.equal(status(), "running", "interruption retires pending requests");
+  emit("result"); assert.equal(status(), "completed");
+  emit("error"); assert.equal(status(), "failed", "failure without a pending request remains visible");
+  emit("result"); assert.equal(status(), "completed");
+  emit("engine-ready"); assert.equal(status(), "completed");
+  emit("thinking", { replay: true }); assert.equal(status(), "completed", "history replay is not current work");
+  emit("question", { requestId: "old" });
+  d.outgoing(kind, { type: "stop", payload: { id: "chat" } });
+  const next = start();
+  emit("interrupted"); assert.equal(status(), "starting", "old generation cannot interrupt a new owner");
+  d.ingest(kind, { id: "chat", generation: next, type: "thinking" });
+  assert.equal(status(), "running", "new generations do not inherit old requests");
+});
 test("real integration bridges UI and strict PTY acknowledgment without cloud or duplicate effects",async t=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),"vibe-orchestrator-integration-"));
   const docs=path.join(root,"Documents"),data=path.join(root,"data");fs.mkdirSync(docs);fs.mkdirSync(data);

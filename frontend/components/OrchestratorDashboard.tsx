@@ -57,7 +57,9 @@ export function OrchestratorDashboard({ sessions, activeTargets, busy, enabled, 
     return () => observer.disconnect();
   }, [visible]);
   const legend: DashboardStatus[] = ["working", "done", "needs-you", "idle", "error"];
-  if (live.some(session => dashboardStatus(session) === "unknown")) legend.push("unknown");
+  for (const status of ["starting", "pending", "response", "unknown"] as DashboardStatus[]) {
+    if (live.some(session => dashboardStatus(session) === status)) legend.push(status);
+  }
   return <section className="orchestrator-dashboard" hidden={!visible} aria-label="Orchestrator dashboard" data-visible={visible} data-motion={visible && documentVisible}>
     <header className="orchestrator-dashboard-header">
       <div><h1>Orchestrator</h1><p>{live.length} live {live.length === 1 ? "session" : "sessions"}</p></div>
@@ -67,8 +69,8 @@ export function OrchestratorDashboard({ sessions, activeTargets, busy, enabled, 
     </header>
     <div className="orchestrator-dashboard-viewport" ref={viewport}>
       {live.length === 0 ? <div className="orchestrator-dashboard-empty"><Sparkles size={30} aria-hidden="true" /><h2>Your sessions, together</h2><p>Start a session in a project to see it here.</p></div> :
-        <div className="orchestrator-dashboard-grid" style={{ gridTemplateColumns: `repeat(${layout.columns}, ${layout.slot}px)`, gridAutoRows: `${layout.slot}px`, gap: layout.gap, width: layout.width, "--bubble-diameter": `${layout.diameter}px` } as CSSProperties}>
-          {live.map(session => {
+        <div className="orchestrator-dashboard-grid" style={{ width: layout.width, height: layout.height, "--bubble-diameter": `${layout.diameter}px`, "--bubble-slot": `${layout.slot}px` } as CSSProperties}>
+          {live.map((session, index) => {
             const active = dashboardTargeted(session, targets);
             const status = dashboardStatus(session);
             const title = dashboardSessionTitle(session);
@@ -77,7 +79,7 @@ export function OrchestratorDashboard({ sessions, activeTargets, busy, enabled, 
             const label = DASHBOARD_STATUS_LABELS[status];
             const recency = dashboardRecency(session, renderedAt, active);
             const drift = dashboardDrift(session.id);
-            return <div key={session.id} className="orchestrator-dashboard-cell" data-dashboard-session-id={session.id} data-generation={session.generation} data-status={status} data-targeted={active} data-recent={recency.recent} style={{ "--drift-duration": `${drift.duration}s`, "--drift-delay": `${drift.delay}s`, "--drift-distance": `${drift.distance}px`, "--recency-opacity": recency.opacity } as CSSProperties}>
+            return <div key={session.id} className="orchestrator-dashboard-cell" data-dashboard-session-id={session.id} data-generation={session.generation} data-status={status} data-targeted={active} data-recent={recency.recent} style={{ left: layout.positions[index].x, top: layout.positions[index].y, "--drift-duration": `${drift.duration}s`, "--drift-delay": `${drift.delay}s`, "--drift-distance": `${drift.distance}px`, "--recency-opacity": recency.opacity } as CSSProperties}>
               <div className="orchestrator-dashboard-drift">
               <button type="button" className="orchestrator-dashboard-bubble" onClick={() => onOpenSession(session.id)} aria-label={`Open ${title}, ${provider}, ${label}${active ? ", Vibe handling" : ""}${recency.recent ? ", Recently used" : ""}`} title={`${title}\n${provider} · ${label}\n${session.cwd}${recency.recent ? "\nRecently used" : ""}${session.statusLabel ? `\n${session.statusLabel}` : ""}`} style={{ "--bubble-scale": scale, "--label-width": `${Math.max(116, layout.diameter * scale * 0.73)}px` } as CSSProperties}>
                 <span className="orchestrator-dashboard-sphere" aria-hidden="true"><span className="orchestrator-dashboard-glass" /><span className="orchestrator-dashboard-rim" /><span className="orchestrator-dashboard-halo" /></span>

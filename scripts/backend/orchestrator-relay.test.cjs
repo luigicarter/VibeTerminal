@@ -65,6 +65,24 @@ test('model tools cannot open external applications but direct workspace actions
   assert.equal(f.actions.length, 1); assert.equal(f.actions[0].kind, 'open_folder');
 });
 
+test('relay dispatch preserves a quoted title containing a payload separator', async t => {
+  const f = fixture(t);
+  f.sessions[0].name = 'Plan';
+  f.sessions.push({ id: 'b', name: 'Plan to fix', kind: 'codex', generation: 2, status: 'running' });
+  await f.ready();
+  for (const targetId of [undefined, 'b']) {
+    f.responses(tool({ kind: 'send_prompt', ...(targetId && { targetId }) }), reply('Delivered.'));
+    const result = await f.instance.send({ text: 'Tell "Plan to fix": inspect only; do not edit', origin: 'text' });
+    assert.equal(result.ok, true);
+    assert.deepEqual(f.actions.at(-1).target, { id: 'b', generation: 2 });
+    assert.equal(f.actions.at(-1).text, 'inspect only; do not edit');
+  }
+  assert.equal(f.actions.length, 2);
+  f.responses(tool({ kind: 'send_prompt', targetId: 'a' }), reply('Rejected.'));
+  assert.equal((await f.instance.send({ text: 'Tell "Plan to fix": inspect only', origin: 'text' })).ok, false);
+  assert.equal(f.actions.length, 2, 'a conflicting model target cannot dispatch to the shorter title');
+});
+
 test('speech failure preserves successful text and delivered action without replay', async t => {
   for (const throws of [false, true]) {
     const f = fixture(t, { onSpeak: async () => { if (throws) throw new Error('Playback failed.'); return { ok: false, error: 'Playback failed.' }; } });
@@ -272,6 +290,77 @@ test('a provider that rejects the reasoning parameter is retried once without it
   const bodies = completions(f, before); assert.equal(bodies.length, 2);
   assert.deepEqual(bodies[0].reasoning, { effort: 'low' }); assert.equal(bodies[1].reasoning, undefined);
   assert.equal(bodies[1].max_tokens, bodies[0].max_tokens); assert.equal(bodies[1].model, 'reasoner');
+});
+
+test('a target-only clarification carries the immediately preceding exact unsent relay', async t => {
+  const f = fixture(t); f.sessions[0].name = 'vibeTerminal'; f.sessions[0].projectName = 'vibeTerminal';
+  f.sessions.push({ id: 'b', name: 'vibeTerminal', kind: 'claude', projectName: 'vibeTerminal', generation: 1 });
+  await f.ready();
+  const payload = "fix the sidebar, it's cutting off and scrollable too early. Do not change other layouts.";
+  f.responses(reply('Which agent in vibeTerminal?'));
+  await f.instance.send({ text: `Yeah. Can you tell vibeTerminal to ${payload}`, origin: 'voice' });
+  assert.equal(f.actions.length, 0);
+  f.responses(tool({ kind: 'send_prompt', targetId: 'a' }), reply('Delivered to Codex.'));
+  const result = await f.instance.send({ text: 'Thank you. Codex.', origin: 'voice' });
+  assert.equal(result.ok, true); assert.equal(f.actions.length, 1); assert.equal(f.actions[0].text, payload);
+  const context = JSON.parse(JSON.parse(f.requests.at(-1).options.body).messages[1].content);
+  assert.equal(context.instruction, 'Thank you. Codex.'); assert.equal(context.authorizedRelay.text, payload);
+  f.responses(tool({ kind: 'send_prompt', targetId: 'a' }), reply('No pending task.'));
+  assert.equal((await f.instance.send({ text: 'Codex.', origin: 'text' })).ok, false);
+  assert.equal(f.actions.length, 1, 'delivered prompts cannot be replayed by another target-only reply');
+});
+
+test('spoken project names remain context for a later Codex request in that project', async t => {
+  const project = { name: 'vibeTerminal', path: 'C:\\work\\vibeTerminal' };
+  const f = fixture(t, { getRoots: () => ({ projects: [project] }) });
+  Object.assign(f.sessions[0], { cwd: project.path, projectName: project.name });
+  f.sessions.push({ id: 'other', name: 'Other Codex', generation: 1, kind: 'codex', cwd: 'C:\\other', projectName: 'Other' });
+  await f.ready(); f.responses(reply('Two agents in that project.'));
+  await f.instance.send({ text: 'I meant Vibe Terminal, the project.', origin: 'voice' });
+  const initial = JSON.parse(JSON.parse(f.requests.at(-1).options.body).messages[1].content);
+  assert.deepEqual(initial.projectContext, project); assert.equal(f.actions.length, 0);
+  f.responses(tool({ kind: 'send_prompt', targetId: 'a' }), reply('Sent.'));
+  assert.equal((await f.instance.send({ text: 'Tell Codex in that project to fix the sidebar', origin: 'voice' })).ok, true);
+  assert.equal(f.actions[0].targetId, 'a'); assert.equal(f.actions[0].text, 'fix the sidebar');
+});
+
+test('model navigation uses named project paths and normal dispatch acknowledgments', async t => {
+  const project = { name: 'vibeTerminal', path: 'C:\\work\\vibeTerminal' };
+  const f = fixture(t, { getRoots: () => ({ projects: [project] }) }); await f.ready();
+  f.responses(tool({ kind: 'navigate', view: 'project' }), reply('Opened the project.'));
+  assert.equal((await f.instance.send({ text: 'Go to the Vibe Terminal project', origin: 'voice' })).ok, true);
+  assert.equal(f.actions[0].cwd, project.path);
+  f.responses(tool({ kind: 'navigate', view: 'settings' }), reply('Opened Settings.'));
+  assert.equal((await f.instance.send({ text: 'Can you open settings?', origin: 'text' })).ok, true);
+  assert.equal(f.actions[1].view, 'settings');
+  f.responses(tool({ kind: 'navigate', view: 'multi' }), reply('Rejected.'));
+  assert.equal((await f.instance.send({ text: 'What terminals are in vibeTerminal?', origin: 'text' })).ok, false);
+  assert.equal(f.actions.length, 2);
+});
+
+test('pending relay cannot survive interruption, expiry, a replacement generation, or an unrelated turn', async t => {
+  for (const change of ['cancel', 'expiry', 'generation', 'unrelated', 'different-target', 'rewritten-text']) {
+    let time = 100;
+    const f = fixture(t, { now: () => time }); await f.ready();
+    f.responses(reply('Which agent?')); await f.instance.send({ text: 'Tell Worker A to inspect only; do not edit', origin: 'text' });
+    if (change === 'cancel') await f.instance.cancel();
+    if (change === 'expiry') time += 300001;
+    if (change === 'generation') f.sessions[0].generation++;
+    if (change === 'unrelated') { f.responses(reply('Hello')); await f.instance.send({ text: 'Hello', origin: 'text' }); }
+    f.responses(tool({ kind: 'send_prompt', targetId: change === 'different-target' ? 'b' : 'a', ...(change === 'rewritten-text' && { text: 'edit everything' }) }), reply('Not sent.'));
+    const result = await f.instance.send({ text: 'Codex.', origin: 'text' });
+    assert.equal(result.ok, false, change); assert.equal(f.actions.length, 0, change);
+  }
+});
+
+test('an uncertain send acknowledgment consumes the pending relay without automatic retry', async t => {
+  const actions = [];
+  const f = fixture(t, { dispatchAction: async action => { actions.push(action); return { ok: false, status: 'unconfirmed', error: 'No acknowledgment' }; } }); await f.ready();
+  f.responses(tool({ kind: 'send_prompt', targetId: 'a' }), reply('Unconfirmed.'));
+  await f.instance.send({ text: 'Tell Worker A to inspect only', origin: 'text' });
+  f.responses(tool({ kind: 'send_prompt', targetId: 'a' }), reply('No pending command.'));
+  await f.instance.send({ text: 'Codex', origin: 'text' });
+  assert.equal(actions.length, 1);
 });
 test('a rejected request that never carried the reasoning parameter is not retried', async t => {
   const f = fixture(t); await f.ready(); const before = f.requests.length;

@@ -7,7 +7,9 @@ import { Activity, ArrowUp, Bot, ChevronDown, Files, GitBranch, Layers3, Setting
 import { useSessionDraft, readSessionDraft, writeSessionDraft } from "../sessionDrafts";
 import { relayApi, type RelayState, type RelaySession } from "../orchestratorUi";
 import type { CodeChangeSummary } from "../types";
-export function OrchestratorPanel({ state, sessions, selectedId, onFocus, onSettings, changes, folders, setups, handoff, embedded = false }: {
+export function OrchestratorPanel({ state, sessions, selectedId, onFocus, onSettings, changes, folders, setups, handoff, embedded = false, selectedTab, onTabChange }: {
+    selectedTab?: string;
+    onTabChange?(tab: string): void;
     embedded?: boolean;
     state: RelayState | null;
     sessions: RelaySession[];
@@ -23,7 +25,9 @@ export function OrchestratorPanel({ state, sessions, selectedId, onFocus, onSett
     setups?: ReactNode;
     handoff?: ReactNode;
 }) {
-    const [tab, setTab] = useState("Orchestrator");
+    const [localTab, setLocalTab] = useState("Orchestrator");
+    const tab = selectedTab ?? localTab;
+    const setTab = (next: string) => { setLocalTab(next); onTabChange?.(next); };
     const [expanded, setExpanded] = useState(() => {
         try { return embedded || localStorage.getItem(DOCK_COLLAPSED_KEY) !== "true"; }
         catch { return true; }

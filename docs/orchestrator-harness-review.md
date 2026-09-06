@@ -124,6 +124,20 @@ provider/ID in another folder from being reused.
 
 ## Follow-ups such as “tell it…”
 
+Natural voice lead-ins such as `Yeah. Can you tell...` are accepted. A provider,
+terminal title and project can describe the same target, including spaced speech
+such as `Codex terminal, Vibe Terminal, and Vibe Terminal project? to fix...`.
+The complete payload remains verbatim. Known project mentions are carried as
+project context, so `Tell Codex in that project to...` uses the named project.
+Mentioning a project in a status question does not authorize focusing a pane.
+
+If a relay has not been dispatched, the immediately following target-only reply
+(for example `Thank you. Codex.`) can complete it. The application binds the exact
+original payload and candidate generations; model-written summaries grant no
+authority. This pending selection expires after five minutes and is discarded by
+cancellation, an unrelated turn, or any dispatch attempt, including unconfirmed
+delivery. It cannot replay a sent prompt or adopt a restarted target.
+
 The review reproduced a serious defect: focus A, resume B, then `Tell it: continue`
 could send to A. This is corrected.
 

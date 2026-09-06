@@ -40,6 +40,12 @@ Dragging previews the exact committed fit. Ordinary dragging prefers empty space
 
 After arrangement settles, xterm measures the final bounds and sends generation-scoped PTY dimensions. Hidden or zero-size bounds do not advertise default dimensions. Tail-following and intentionally viewed scrollback remain separate.
 
+## Codex cursor
+
+Codex panes use a steady bar cursor, including while unfocused. `frontend/terminalCursor.ts` handles Codex's default-user-shape reset (`CSI 0 SP q`, or omitted parameter) because xterm 5.5 otherwise turns it into a blinking block. The DOM renderer restarts that block's animation on row replacement, causing orange cursor flashes during redraws. Explicit application cursor styles still pass through. The handler survives snapshot resets and is disposed with the pane; other providers keep their existing defaults.
+
+`node scripts/qa/terminal-cursor-smoke.cjs` checks the real Electron/xterm DOM renderer in an isolated offscreen window with simulated focus. It verifies default resets, typing/output redraws, inactive rendering, snapshot reset, explicit styles, and disposal; it does not launch a live Codex turn.
+
 ## Bridge, persistence, and verification
 
 `terminal.getRuntimeSnapshots()` returns retained snapshots; `terminal.onRuntime(callback)` subscribes to full snapshot updates. Subscribe before requesting snapshots and compare generation/revision before applying them. The screen byte stream remains on `terminal.onEvent`. Input/resize/kill accept generation/launch-token scope. Snapshot fields include process/turn state, conversation and terminal title, observation health, active/last tools, child activity, attention identity, and elapsed timestamps.

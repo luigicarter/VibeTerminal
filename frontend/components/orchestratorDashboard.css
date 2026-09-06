@@ -7,9 +7,9 @@
 .orchestrator-dashboard-header h1 { margin: 0; font-size: 28px; font-weight: 500; letter-spacing: -.6px; }
 .orchestrator-dashboard-header p { margin: 9px 0 0; color: #a7abb3; font-size: 14px; }
 .orchestrator-dashboard-scope { display: flex; gap: 8px; align-items: center; color: #c1a0ef; font-size: 13px; }
-.orchestrator-dashboard-viewport { flex: 1; min-height: 0; overflow: auto; padding: 24px; scrollbar-width: thin; scrollbar-color: #40434a transparent; }
-.orchestrator-dashboard-grid { display: grid; margin: auto; min-height: 100%; align-content: center; }
-.orchestrator-dashboard-cell { position: relative; display: grid; place-items: center; }
+.orchestrator-dashboard-viewport { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: auto; padding: 24px; scrollbar-width: thin; scrollbar-color: #40434a transparent; }
+.orchestrator-dashboard-grid { position: relative; flex: none; margin: auto; }
+.orchestrator-dashboard-cell { position: absolute; display: grid; place-items: center; width: var(--bubble-slot); height: var(--bubble-slot); }
 .orchestrator-dashboard-drift { position: relative; display: grid; place-items: center; width: 100%; height: 100%; opacity: var(--recency-opacity); animation: orchestrator-gentle-drift var(--drift-duration) ease-in-out var(--drift-delay) infinite; }
 @keyframes orchestrator-gentle-drift {
   0%, 100% { transform: translate(0, calc(-1 * var(--drift-distance))); }
@@ -21,10 +21,12 @@
 .orchestrator-dashboard-cell:not([data-in-view="true"]) .orchestrator-dashboard-drift { animation-play-state: paused; }
 .orchestrator-dashboard-drift:focus-within { animation-play-state: paused; }
 .orchestrator-dashboard-cell, .orchestrator-dashboard-legend > span { --status-color: #989ca4; }
-.orchestrator-dashboard [data-status="working"] { --status-color: #70bafa; }
-.orchestrator-dashboard [data-status="done"] { --status-color: #9aca83; }
-.orchestrator-dashboard [data-status="needs-you"] { --status-color: #efbe6b; }
-.orchestrator-dashboard [data-status="error"] { --status-color: #ec8686; }
+.orchestrator-dashboard [data-status="working"] { --status-color: #60baff; }
+.orchestrator-dashboard [data-status="done"] { --status-color: #82df9c; }
+.orchestrator-dashboard [data-status="needs-you"] { --status-color: #ffc466; }
+.orchestrator-dashboard [data-status="error"] { --status-color: #ff808e; }
+.orchestrator-dashboard [data-status="starting"], .orchestrator-dashboard [data-status="pending"] { --status-color: #b9b4dc; }
+.orchestrator-dashboard [data-status="response"] { --status-color: #9fc8c9; }
 .orchestrator-dashboard [data-status="unknown"] { --status-color: #a7a6ba; }
 .orchestrator-dashboard-bubble {
   position: relative; display: grid; place-items: center; width: calc(var(--bubble-diameter) * var(--bubble-scale)); height: calc(var(--bubble-diameter) * var(--bubble-scale));
@@ -38,13 +40,18 @@
   background-position: center; background-size: 113% 113%, 100% 100%, 100% 100%; background-repeat: no-repeat;
   box-shadow: inset 0 0 20px #e9f0ff10, inset 0 -8px 18px #d4e7ff12;
 }
-.orchestrator-dashboard-rim { border: 1px solid color-mix(in srgb, var(--status-color) 73%, transparent); box-shadow: inset 0 0 9px color-mix(in srgb, var(--status-color) 12%, transparent), 0 0 7px color-mix(in srgb, var(--status-color) 15%, transparent); }
+.orchestrator-dashboard-rim {
+  border: 2px solid color-mix(in srgb, var(--status-color) 90%, transparent);
+  background: radial-gradient(circle at 50% 72%, color-mix(in srgb, var(--status-color) 28%, transparent), transparent 72%);
+  box-shadow: inset 0 0 32px color-mix(in srgb, var(--status-color) 24%, transparent), 0 0 15px color-mix(in srgb, var(--status-color) 27%, transparent);
+  transition: border-color 240ms ease, background 240ms ease, box-shadow 240ms ease;
+}
 .orchestrator-dashboard-halo { inset: -5px; border: 1px solid #bd8aff; box-shadow: 0 0 9px #ba83ff60, inset 0 0 5px #b87dff40; opacity: 0; transition: opacity 320ms cubic-bezier(.2,.8,.2,1); }
 .orchestrator-dashboard-cell[data-targeted="true"] .orchestrator-dashboard-halo { opacity: 1; }
 .orchestrator-dashboard-label { position: relative; display: flex; flex-direction: column; align-items: center; width: var(--label-width); max-width: var(--label-width); pointer-events: none; text-shadow: 0 1px 5px #000; }
 .orchestrator-dashboard-label strong { width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 19px; line-height: 1.4; font-weight: 500; }
 .orchestrator-dashboard-provider { width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; margin-top: 3px; font-size: 13px; color: #d4dce4; }
-.orchestrator-dashboard-status { display: flex; align-items: center; gap: 7px; margin-top: 15px; color: var(--status-color); font-size: 12px; white-space: nowrap; }
+.orchestrator-dashboard-status { display: flex; align-items: center; gap: 7px; margin-top: 15px; padding: 5px 9px; border-radius: 20px; background: #101419a6; color: var(--status-color); font-size: 12px; white-space: nowrap; }
 .orchestrator-dashboard-status i, .orchestrator-dashboard-legend i { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; background: var(--status-color); }
 .orchestrator-dashboard-target { position: absolute; top: 2px; right: 0; display: flex; align-items: center; gap: 5px; padding: 2px 5px; border-radius: 5px; color: #c99eff; background: #19171f; font-size: 11px; pointer-events: none; opacity: 0; transition: opacity 320ms cubic-bezier(.2,.8,.2,1); }
 .orchestrator-dashboard-cell[data-targeted="true"] .orchestrator-dashboard-target { opacity: 1; }
@@ -55,5 +62,5 @@
 .orchestrator-dashboard-empty h2 { margin: 18px 0 0; color: #dce0e7; font-weight: 500; font-size: 20px; }
 .orchestrator-dashboard-empty p { font-size: 13px; }
 @media (max-width: 600px) { .orchestrator-dashboard-header { padding: 22px 24px 8px; } .orchestrator-dashboard-header h1 { font-size: 24px; } }
-@media (prefers-reduced-motion: reduce) { .orchestrator-dashboard-sphere, .orchestrator-dashboard-target, .orchestrator-dashboard-halo { transition: none; } .orchestrator-dashboard-drift { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .orchestrator-dashboard-sphere, .orchestrator-dashboard-target, .orchestrator-dashboard-halo, .orchestrator-dashboard-rim { transition: none; } .orchestrator-dashboard-drift { animation: none; } }
 .orchestrator-dashboard[data-visible="false"] .orchestrator-dashboard-sphere, .orchestrator-dashboard[data-visible="false"] .orchestrator-dashboard-target, .orchestrator-dashboard[data-visible="false"] .orchestrator-dashboard-halo { transition: none; }

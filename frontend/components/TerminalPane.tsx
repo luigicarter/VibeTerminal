@@ -8,6 +8,7 @@ import {
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
+import { configureCodexCursor } from "../terminalCursor";
 import {
   CopyPlus,
   GripVertical,
@@ -704,6 +705,9 @@ export default function TerminalPane({
       }
     });
 
+    const cursorStyleHandler = session.kind === "codex"
+      ? configureCodexCursor(terminal)
+      : undefined;
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.loadAddon(new WebLinksAddon());
@@ -1105,6 +1109,7 @@ export default function TerminalPane({
       syncOutput.reset();
       syncOutputRef.current = null;
       sgrMouseRef.current = null;
+      cursorStyleHandler?.dispose();
       terminal.dispose();
       terminalRef.current = null;
       fitRef.current = null;

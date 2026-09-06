@@ -4,6 +4,45 @@ const assert = require('node:assert/strict');
 const { authorizeModelAction, authorizeConversationResume, commandClauses } = require('../../backend/orchestratorPolicy.cjs');
 const sessions = [{ id: 'a', name: 'Refactor headers', kind: 'codex', projectName: 'Website', cwd: 'C:\\Projects\\Website', generation: 1 }, { id: 'b', name: 'Fix budget', kind: 'codex', projectName: 'Budget Tracker', cwd: 'C:\\Projects\\Budget Tracker', generation: 2 }];
 
+test('natural speech identifies one provider, terminal and project without modifying the payload', () => {
+  const workers = [{ id: 'codex', name: 'vibeTerminal', kind: 'codex', projectName: 'vibeTerminal', generation: 1 }, { id: 'claude', name: 'Claude Code', kind: 'claude', projectName: 'vibeTerminal', generation: 1 }];
+  const payload = "fix the sidebar, it's cutting off and scrollable too early. it should go all the way down to the settings button.";
+  for (const locator of ['Codex Terminal, Vibe Terminal, and Vibe Terminal Project?', 'Codex terminal in Vibe Terminal project', 'Codex']) {
+    const result = authorizeModelAction({ kind: 'send_prompt' }, { text: `Yeah. Can you tell ${locator} to ${payload}` }, workers);
+    assert.equal(result.targetId, 'codex'); assert.equal(result.text, payload);
+  }
+  for (const text of ['No, do not tell Codex to fix it', 'If ready, please tell Codex to fix it', 'Can you explain how to tell Codex to fix it']) assert.throws(() => authorizeModelAction({ kind: 'send_prompt' }, { text }, workers));
+  const literal = 'explain Codex in that project; do not edit';
+  assert.equal(authorizeModelAction({ kind: 'send_prompt' }, { text: `Tell Codex: ${literal}`, projectContext: { path: 'C:\\unrelated' } }, workers).text, literal);
+  assert.equal(authorizeModelAction({ kind: 'focus_session' }, { text: 'Can you take me to Codex?' }, workers).targetId, 'codex');
+  assert.throws(() => authorizeModelAction({ kind: 'send_prompt' }, { text: 'Tell Codex and Claude to fix the sidebar' }, workers), /Multiple relay targets/);
+});
+
+test('relay separators inside longer session titles preserve identity and complete payload', () => {
+  const payload = 'inspect only: explain how to fix it; do not edit';
+  for (const name of ['Plan to fix', 'Plan: fix', "Plan to fix what's broken"]) for (const quote of ['', '"', "'"]) {
+    const workers = [{ id: 'a', name: 'Plan', kind: 'codex' }, { id: 'b', name, kind: 'codex' }];
+    const text = `Tell ${quote}${name}${quote}: ${payload}`;
+    for (const targetId of [undefined, 'b']) {
+      const result = authorizeModelAction({ kind: 'send_prompt' }, { text, targetId }, workers);
+      assert.equal(result.targetId, 'b', text); assert.equal(result.text, payload, text);
+    }
+    assert.throws(() => authorizeModelAction({ kind: 'send_prompt' }, { text, targetId: 'a' }, workers), /conflicts/);
+    for (const targetId of [undefined, 'a', 'b']) assert.throws(() => authorizeModelAction({ kind: 'send_prompt' }, { text, targetId }, [...workers, { ...workers[1], id: 'c' }]), /ambiguous/);
+  }
+  assert.throws(() => authorizeModelAction({ kind: 'send_prompt' }, { text: 'Tell "Plan to unknown": inspect only' }, [{ id: 'a', name: 'Plan' }]), /ambiguous/);
+});
+
+test('navigation selects only the explicitly named app view or existing project', () => {
+  const projects = [{ name: 'vibeTerminal', path: 'C:\\work\\vibeTerminal' }];
+  for (const view of ['settings', 'history', 'orchestrator', 'multi']) assert.equal(authorizeModelAction({ kind: 'navigate', view }, { text: `Could you take me to ${view}?`, projects }, sessions).view, view);
+  assert.equal(authorizeModelAction({ kind: 'navigate', view: 'project' }, { text: 'Go to the Vibe Terminal project', projects }, sessions).cwd, projects[0].path);
+  for (const text of ['What is in settings?', 'Do not open settings', 'If ready open settings', 'Tell Codex in Website to open settings']) assert.throws(() => authorizeModelAction({ kind: 'navigate', view: 'settings' }, { text, projects }, sessions));
+  assert.throws(() => authorizeModelAction({ kind: 'navigate', view: 'settings' }, { text: 'Open history', projects }, sessions));
+  assert.throws(() => authorizeModelAction({ kind: 'navigate', view: 'project', cwd: 'C:\\other' }, { text: 'Open vibeTerminal', projects }, sessions));
+  assert.throws(() => authorizeModelAction({ kind: 'navigate', view: 'project' }, { text: 'Open vibeTerminal', projects: [...projects, { name: 'vibeTerminal', path: 'D:\\other' }] }, sessions));
+});
+
 test('model authorization confines controls to vibeTerminal instead of external applications', () => {
   for (const kind of ['open_file', 'open_folder']) assert.throws(() => authorizeModelAction({ kind, path: sessions[0].cwd }, { text: `Open ${sessions[0].cwd}`, allowedPaths: [sessions[0].cwd] }, sessions), /Workspace tools/);
 });

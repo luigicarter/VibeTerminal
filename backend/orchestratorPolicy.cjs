@@ -1,9 +1,10 @@
 'use strict';
 const path = require('node:path');
-const ACTIONS = new Set(['focus_session', 'create_session', 'stage_draft', 'get_draft', 'send_prompt', 'interrupt', 'restart', 'close', 'answer_question', 'permission', 'open_file', 'open_folder', 'add_project', 'launch_setup', 'save_setup', 'stage_handoff', 'resume_conversation']);
-const VERBS = 'focus|show|switch to|create|start|launch|open|reopen|resume|new|draft|stage|prepare|send|tell|ask|relay|forward|instruct|stop|interrupt|cancel|restart|close|add|make|load|remember|forget|save';
+const ACTIONS = new Set(['navigate', 'focus_session', 'create_session', 'stage_draft', 'get_draft', 'send_prompt', 'interrupt', 'restart', 'close', 'answer_question', 'permission', 'open_file', 'open_folder', 'add_project', 'launch_setup', 'save_setup', 'stage_handoff', 'resume_conversation']);
+const VERBS = 'navigate to|go to|take me to|focus|show|switch to|create|start|launch|open|reopen|resume|new|draft|stage|prepare|send|tell|ask|relay|forward|instruct|stop|interrupt|cancel|restart|close|add|make|load|remember|forget|save';
 const INTENT = {
-  focus_session: /^(focus|show|switch to)\b/i, create_session: /^(create|start|launch|open|new)\b/i,
+  navigate: /^(navigate to|go to|take me to|focus|show|switch to|open)\b/i,
+  focus_session: /^(focus|show|switch to|go to|take me to|navigate to)\b/i, create_session: /^(create|start|launch|open|new)\b/i,
   stage_draft: /^(draft|stage|prepare)\b/i, send_prompt: /^(send|tell|ask|relay|forward|instruct)\b/i,
   interrupt: /^(stop|interrupt|cancel)\b/i, restart: /^restart\b/i, close: /^close\b/i,
   open_file: /^open\b/i, open_folder: /^open\b/i,
@@ -13,7 +14,8 @@ const INTENT = {
   remember_preference: /^remember\b/i,
   forget_preference: /^forget\b/i,
 };
-const stripPlease = text => text.trim().replace(/^(?:(?:(?:can|could|would) you|I want you to)\s+)?(?:please\s+)?/i, '');
+// Strip conversational lead-ins only at the start, never search prose for a verb.
+const stripPlease = text => text.trim().replace(/^(?:(?:yeah|yes|okay|ok|thanks|thank you)[,.!]?\s+)+/i, '').replace(/^(?:please\s+)?(?:(?:(?:can|could|would|will) you|I want you to)\s+)?(?:please\s+)?/i, '');
 function commandClauses(text) {
   let quote = '', masked = '';
   for (let i = 0; i < text.length; i++) { const ch = text[i]; if (quote) { if (ch === quote && text[i - 1] !== '\\') quote = ''; masked += ' '; } else if ((ch === '"' || ch === "'") && !(ch === "'" && /\w/.test(text[i - 1] || '') && /\w/.test(text[i + 1] || ''))) { quote = ch; masked += ' '; } else masked += ch; }
@@ -29,8 +31,27 @@ function prefixLength(text, label) {
   for (const candidate of [wanted, `"${wanted}"`, `'${wanted}'`]) if (normalized.startsWith(candidate) && (!normalized[candidate.length] || /[\s:,.!?]/.test(normalized[candidate.length]))) return candidate.length;
   return 0;
 }
+const locatorKey = text => String(text || '').toLowerCase().replace(/[\s"']/g, '');
+function matchesLocator(text, session) {
+  const names = [session.id, session.name, session.conversationTitle, ...(session.aliases || [])].filter(Boolean);
+  const kinds = [...new Set([...aliases(session.kind), ...aliases(session.provider)])].filter(Boolean);
+  const projects = [session.projectName, session.cwd, session.cwd && path.basename(session.cwd)].filter(Boolean);
+  const labels = [...names, ...kinds.flatMap(kind => [kind, `${kind} terminal`, `${kind} session`, `${kind} agent`])];
+  for (const kind of [...labels]) for (const project of projects) for (const prep of ['in', 'for', 'at']) for (const suffix of ['', ' project']) labels.push(`${kind} ${prep} ${project}${suffix}`);
+  if (labels.some(label => locatorKey(label) === locatorKey(text))) return true;
+  // Speech often repeats one target as provider, title, and project. Each part
+  // must describe the SAME session; a list of different agents stays ambiguous.
+  const parts = text.split(/\s*,\s*(?:and\s+)?|\s+and\s+/i).filter(Boolean);
+  const descriptors = [...labels, ...projects.flatMap(project => [project, `${project} project`])];
+  return parts.length > 1 && parts.every(part => descriptors.some(label => locatorKey(label) === locatorKey(part)));
+}
 function resolveTarget(clause, intent, sessions) {
-  const addressed = clause.text.replace(new RegExp(`^(?:${VERBS})\\s+(?:(?:to|the)\\s+)?`, 'i'), '');
+  let addressed = clause.text.replace(new RegExp(`^(?:${VERBS})\\s+(?:(?:to|the)\\s+)?`, 'i'), '');
+  const projectPronoun = addressed.match(/^(.+?)\s+(in|for|at)\s+(?:that|this|the) project\b/i);
+  if (projectPronoun && sessions.some(session => matchesLocator(projectPronoun[1], session))) {
+    if (!intent.projectContext?.path) throw new Error('Name the project first.');
+    addressed = `${projectPronoun[1]} ${projectPronoun[2]} ${intent.projectContext.path}` + addressed.slice(projectPronoun[0].length);
+  }
   const pronoun = addressed.match(/^(it|that terminal|that session|that agent|this terminal|this session)\b/i);
   if (pronoun) {
     const bound = intent.conversationTarget;
@@ -45,6 +66,31 @@ function resolveTarget(clause, intent, sessions) {
     const length = Math.max(0, ...labels.map(label => prefixLength(addressed, label))); if (length) candidates.push({ session, length });
   }
   const longest = Math.max(0, ...candidates.map(c => c.length)); const matched = candidates.filter(c => c.length === longest);
+  // An explicit payload separator lets us validate the whole spoken locator,
+  // instead of mistaking "terminal, project" for part of the prompt.
+  const boundary = /(?:\s*[?.!]\s*)?\s+to\s+|:\s*/ig;
+  let delimiter, quote = '', scanned = 0;
+  while ((delimiter = boundary.exec(addressed))) {
+    // Separators belong to a known longer identity or a quoted locator until
+    // that identity ends; only then can they introduce the user's payload.
+    for (; scanned < delimiter.index; scanned++) {
+      const ch = addressed[scanned];
+      if (quote) { if (ch === quote && addressed[scanned - 1] !== '\\') quote = ''; }
+      else if ((ch === '"' || ch === "'") && !(ch === "'" && /\w/.test(addressed[scanned - 1] || '') && /\w/.test(addressed[scanned + 1] || ''))) quote = ch;
+    }
+    if (quote || delimiter.index < longest) continue;
+    const locator = addressed.slice(0, delimiter.index).trim();
+    const matching = sessions.filter(session => matchesLocator(locator, session));
+    if (!matching.length) {
+      const parts = locator.split(/\s*,\s*(?:and\s+)?|\s+and\s+/i).filter(Boolean);
+      if (parts.length > 1 && parts.every(part => sessions.some(session => matchesLocator(part, session)))) throw new Error('Multiple relay targets were named. Send one instruction per target.');
+      continue;
+    }
+    if (matching.length !== 1) throw new Error('The target is ambiguous or was not identified. Specify one session and project.');
+    const session = matching[0];
+    if (intent.targetId && intent.targetId !== session.id) throw new Error('The named target conflicts with the selected session or is ambiguous.');
+    return { session, remainder: ':' + addressed.slice(boundary.lastIndex), explicit: true };
+  }
   if (intent.targetId) { const selected = sessions.find(s => s.id === intent.targetId); if (!selected) throw new Error('Unknown selected session.'); if (matched.length && (matched.length !== 1 || matched[0].session.id !== selected.id)) throw new Error('The named target conflicts with the selected session or is ambiguous.'); const explicit = matched.find(c => c.session.id === selected.id); return { session: selected, remainder: explicit ? addressed.slice(explicit.length) : addressed, explicit: Boolean(explicit) }; }
   if (matched.length !== 1) throw new Error('The target is ambiguous or was not identified. Specify one session and project.'); return { session: matched[0].session, remainder: addressed.slice(longest), explicit: true };
 }
@@ -78,6 +124,21 @@ function authorizeModelAction(action, intent, sessions) {
   for (const clause of candidates) {
     try {
       const result = { ...action }; let payload;
+      if (action.kind === 'navigate') {
+        const destination = clause.text.replace(/^(navigate to|go to|take me to|focus|show|switch to|open)\s+(?:the\s+)?/i, '').replace(/[.!?]+$/, '').trim();
+        const views = { settings: ['settings', 'workspace settings', 'app settings'], history: ['history', 'conversation history'], orchestrator: ['orchestrator', 'orchestrator dashboard', 'dashboard'], multi: ['multi', 'multi mode', 'all projects'] };
+        if (action.view === 'project') {
+          const named = destination.replace(/^project\s+/i, '').replace(/\s+project$/i, '');
+          const projects = new Map((intent.projects || []).filter(project => [project.name, project.path].some(label => label && locatorKey(label) === locatorKey(named))).map(project => [project.path, project]));
+          if (projects.size !== 1) throw new Error('Name one existing project to navigate to.');
+          const cwd = [...projects.keys()][0];
+          if (action.cwd && action.cwd !== cwd) throw new Error('The model selected a different project.');
+          result.cwd = cwd;
+        } else if (!views[action.view]?.includes(destination.toLowerCase()) || action.cwd !== undefined) throw new Error('Name the application view to open: settings, history, orchestrator, multi, or a project.');
+        // Navigation carries no prompt, settings mutation, or external path.
+        if (Object.keys(action).some(key => !['kind', 'view', 'cwd'].includes(key))) throw new Error('Navigation only accepts a view and an existing project.');
+        return result;
+      }
       if (action.kind === 'remember_preference') {
         if (!/^remember\s+\S/i.test(clause.text)) throw new Error('Specify the complete preference to remember.');
         payload = clause.text.replace(/^remember\s+(?:(?:my\s+)?preference\s*:\s*|that\s+)?/i, '');
@@ -168,4 +229,43 @@ function authorizeConversationResume(action, intent, conversations) {
   if (chosen.reference !== action.reference) throw new Error('The model selected a different saved conversation than the user.');
   return { kind: 'resume_conversation', reference: chosen.reference, selection };
 }
-module.exports = { ACTIONS, authorizeModelAction, authorizeConversationResume, commandClauses, resolveTarget, relayPayload, identifyReadTarget };
+// A pending relay is captured from user syntax, never from a model's proposed
+// prompt. It is usable only by the immediately following target-only reply.
+function captureRelay(intent, sessions) {
+  const clauses = commandClauses(intent.text);
+  if (clauses.length !== 1) return null;
+  const kind = ['send_prompt', 'stage_draft'].find(kind => INTENT[kind].test(clauses[0].syntax));
+  if (!kind) return null;
+  try { resolveTarget(clauses[0], intent, sessions); } catch (error) { if (error.message.startsWith('Multiple relay targets')) return null; }
+  const candidates = [];
+  for (const session of sessions) {
+    try {
+      const action = authorizeModelAction({ kind }, intent, [session]);
+      candidates.push({ id: session.id, generation: session.generation, text: action.text });
+    } catch {}
+  }
+  if (!candidates.length || candidates.some(c => c.text !== candidates[0].text)) return null;
+  return { kind, text: candidates[0].text, candidates: candidates.map(({ id, generation }) => ({ id, generation })) };
+}
+function clarifyRelay(text, pending, sessions) {
+  if (!pending) return null;
+  const locator = stripPlease(text).replace(/[.!?]+$/, '').trim();
+  const candidates = sessions.filter(session => pending.candidates.some(c => c.id === session.id && c.generation === session.generation) && matchesLocator(locator, session));
+  if (candidates.length !== 1) return null;
+  return { kind: pending.kind, text: pending.text, target: { id: candidates[0].id, generation: candidates[0].generation } };
+}
+function identifyProject(text, projects, previous) {
+  const matches = new Map();
+  for (const project of projects) {
+    const labels = [project.name, project.path].filter(label => typeof label === 'string' && label.length >= 3);
+    for (const label of labels) {
+      const words = label.replace(/([a-z])([A-Z])/g, '$1 $2').split(/\s+/);
+      const pattern = words.map(word => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s*');
+      if (new RegExp(`(?:^|[\\s"'])${pattern}(?=$|[\\s"':,.!?])`, 'i').test(text)) matches.set(project.path, project);
+    }
+  }
+  if (matches.size > 1) return null;
+  if (matches.size === 1) return [...matches.values()][0];
+  return projects.find(project => project.path === previous?.path) || null;
+}
+module.exports = { ACTIONS, authorizeModelAction, authorizeConversationResume, commandClauses, resolveTarget, relayPayload, identifyReadTarget, captureRelay, clarifyRelay, identifyProject };

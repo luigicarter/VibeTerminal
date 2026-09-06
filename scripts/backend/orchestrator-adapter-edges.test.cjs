@@ -30,6 +30,28 @@ function harness(t, telemetry = {}) {
 const tick = () => new Promise(resolve => setImmediate(resolve));
 async function until(predicate) { for (let i = 0; i < 100 && !predicate(); i++) await new Promise(resolve => setTimeout(resolve, 5)); assert(predicate(), "Expected adapter checkpoint was reached"); }
 
+test("navigation waits for renderer acknowledgment and propagates rejected projects without host effects", async t => {
+  const h = harness(t);
+  const invalid = await h.invoke("dispatch", { kind: "navigate", view: "credentials" });
+  assert.equal(invalid.ok, false);
+  assert.equal(h.ui.filter(request => request.kind === "navigate").length, 0);
+  for (const view of ["settings", "history", "orchestrator", "multi", "project"]) {
+    let settled = false;
+    const before = h.ui.length;
+    const action = { kind: "navigate", view, ...(view === "project" ? { cwd: h.root } : {}) };
+    const pending = h.invoke("dispatch", action).then(result => { settled = true; return result; });
+    await until(() => h.ui.slice(before).some(request => request.kind === "navigate"));
+    const request = h.ui.slice(before).find(request => request.kind === "navigate");
+    await tick(); assert.equal(settled, false);
+    assert.equal(request.payload.view, view);
+    const result = view === "project" ? { ok: false, error: "That project is not open." } : { ok: true, status: "navigated", view };
+    h.ack(request, result);
+    assert.deepEqual(await pending, result);
+  }
+  assert.equal(h.sent.length, 0);
+  assert.equal(h.opened.length, 0);
+});
+
 test("host acknowledgment must match engine, session, generation and action ID", async t => {
   const h = harness(t); let settled = false;
   const work = h.invoke("dispatch", { kind: "send_prompt", target: { id: "p", generation: "g" }, text: "hello" }).then(value => { settled = true; return value; });

@@ -3,6 +3,7 @@ const { randomUUID } = require('node:crypto');
 const { RATE, wavFromSamples, createRecording, decodeSpeechAudio, shouldSpeak } = require('./voiceAudio.cjs');
 const { createLocalErrorAudio, ERROR_AUDIO_TEXT } = require('./localErrorAudio.cjs');
 const { matchAnswer, questionSpeech } = require('./voiceAnswers.cjs');
+const { spokenText } = require('./voiceText.cjs');
 const { OpenRouterError, readOpenRouterResponse, classifyTransportError, upstreamErrorInfo } = require('./openRouterErrors.cjs');
 const { STT_MODEL, TTS_MODEL, TTS_VOICE, TTS_VOICES } = require('../shared/voiceConfig.cjs');
 // A push-to-talk hold shorter than this carries no command; it is a tap, not speech.
@@ -235,6 +236,8 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
         return { ok: false, operation: 'speech', error };
       }
       text = text.split(key).join('[REDACTED]');
+      const speechText = spokenText(text);
+      if (!speechText) return { ok: true };
       const abort = requestAbort = new AbortController();
       const replyId = activeReply = randomUUID(); activeInteraction = message.kind === 'interaction' ? identity : null;
       update({ phase: 'speaking', reply: text, replyId, error: null, errorOperation: null }); let sequence = 0, bytes = 0;
@@ -243,7 +246,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
         checkSpending();
         if (settings.ttsModel && settings.ttsModel !== TTS_MODEL) throw Error(`Voice playback currently supports ${TTS_MODEL}. Select this speech model in Orchestrator settings.`);
         if (settings.voice && !TTS_VOICES.includes(settings.voice)) throw Error('Select a supported Kokoro voice in Orchestrator settings.');
-        const response = await requestAudio('https://openrouter.ai/api/v1/audio/speech', { method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, signal: AbortSignal.any([abort.signal, AbortSignal.timeout(120000)]), body: JSON.stringify({ model: settings.ttsModel || TTS_MODEL, input: text, voice: settings.voice || TTS_VOICE, response_format: 'pcm' }) }, abort);
+        const response = await requestAudio('https://openrouter.ai/api/v1/audio/speech', { method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, signal: AbortSignal.any([abort.signal, AbortSignal.timeout(120000)]), body: JSON.stringify({ model: settings.ttsModel || TTS_MODEL, input: speechText, voice: settings.voice || TTS_VOICE, response_format: 'pcm' }) }, abort);
         if (!response.ok) await audioJson(response, abort);
         if (!response.body) throw new OpenRouterError('upstream', response.status);
         const contentType = response.headers?.get?.('content-type') || '';

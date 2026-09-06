@@ -8,8 +8,13 @@ const compiled = ts.transpileModule(fs.readFileSync(sourcePath, "utf8"), { compi
 const helper = new Module(sourcePath, module);
 helper.filename = sourcePath;
 helper.paths = Module._nodeModulePaths(path.dirname(sourcePath));
+const runtimePath = path.resolve(path.dirname(sourcePath), "../terminalRuntime.ts");
+const runtime = new Module(runtimePath, module);
+runtime._compile(ts.transpileModule(fs.readFileSync(runtimePath, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, runtimePath);
+const originalRequire = helper.require.bind(helper);
+helper.require = id => id === "../terminalRuntime" ? runtime.exports : originalRequire(id);
 helper._compile(compiled, sourcePath);
-const { dashboardLayout, dashboardScale, dashboardSessionVisible, dashboardStatus, dashboardTargeted, dashboardSessionTitle, dashboardProvider, dashboardSessionOrder, dashboardRecency, dashboardDrift } = helper.exports;
+const { dashboardLayout, dashboardScale, dashboardSessionVisible, dashboardStatus, dashboardSessionMetadata, dashboardTargeted, dashboardSessionTitle, dashboardProvider, dashboardSessionOrder, dashboardRecency, dashboardDrift } = helper.exports;
 
 // All possible simultaneous enlargements must fit, even when the viewport needs scrolling.
 for (const viewport of [0, 132, 180, 212, 260, 272, 320, 600, 1000, 1600]) {
@@ -19,8 +24,8 @@ for (const viewport of [0, 132, 180, 212, 260, 272, 320, 600, 1000, 1600]) {
     assert.ok(Number.isFinite(layout.width) && layout.columns >= 1);
     for (const activeIndices of [[], Array.from({ length: count }, (_, i) => i), [0], [1, 3, 5]]) {
       const circles = Array.from({ length: count }, (_, i) => ({
-        x: (i % layout.columns) * (layout.slot + layout.gap) + layout.slot / 2,
-        y: Math.floor(i / layout.columns) * (layout.slot + layout.gap) + layout.slot / 2,
+        x: layout.positions[i].x + layout.slot / 2,
+        y: layout.positions[i].y + layout.slot / 2,
         radius: layout.diameter * dashboardScale(activeIndices.includes(i), activeIndices.length > 0) / 2 + layout.halo
       }));
       for (const [i, circle] of circles.entries()) {
@@ -43,8 +48,25 @@ assert.equal(dashboardSessionVisible({ ...session, agentProcessState: "failed" }
 assert.equal(dashboardSessionVisible({ ...session, kind: "terminal", agentProcessState: "exited" }), true);
 assert.equal(dashboardSessionVisible({ ...session, processState: "running", status: "failed" }), true);
 assert.equal(dashboardSessionVisible({ ...session, statusLabel: "paused" }), false);
-for (const [status, expected] of [["running", "working"], ["waiting", "needs-you"], ["done", "done"], ["failed", "error"], ["idle", "idle"], ["starting", "unknown"], ["something new", "unknown"]]) assert.equal(dashboardStatus({ ...session, status }), expected);
-for (const statusLabel of ["unobserved", "observing", "awaiting activity", "interrupt requested", "response available"]) assert.equal(dashboardStatus({ ...session, statusLabel }), "unknown", "Do not guess from a coarse running status");
+for (const [status, expected] of [["running", "working"], ["waiting", "needs-you"], ["done", "done"], ["failed", "error"], ["idle", "idle"], ["starting", "starting"], ["response", "response"], ["something new", "unknown"]]) assert.equal(dashboardStatus({ ...session, status }), expected);
+for (const statusLabel of ["unobserved", "observing"]) assert.equal(dashboardStatus({ ...session, statusLabel }), "unknown", "Do not guess from a coarse running status");
+for (const statusLabel of ["awaiting activity", "interrupt requested"]) assert.equal(dashboardStatus({ ...session, statusLabel }), "pending");
+assert.equal(dashboardStatus({ ...session, statusLabel: "response available" }), "response");
+const current = { ...session, revision: 12, status: "waiting" };
+assert.equal(dashboardStatus(dashboardSessionMetadata(current, { ...session, revision: 11, statusLabel: "working" })), "needs-you", "Older renderer revisions cannot override live state");
+assert.equal(dashboardSessionMetadata(current, { ...session, revision: 12, generation: "old", statusLabel: "working" }).statusLabel, undefined);
+const native = { ...current, provider: "codex", processState: "running", agentProcessState: "running", turnState: "completed", children: [], observation: "observed", telemetryHealth: "available" };
+const projectedStatus = patch => dashboardStatus(dashboardSessionMetadata({ ...native, ...patch }, { ...current, statusLabel: "working" }));
+assert.equal(projectedStatus({}), "done");
+assert.equal(projectedStatus({ observation: "provisional" }), "response", "Provisional completion is not confirmed Done");
+assert.equal(projectedStatus({ observation: "unavailable" }), "unknown");
+assert.equal(projectedStatus({ turnState: "unknown", provider: "terminal" }), "idle");
+assert.equal(projectedStatus({ pendingInput: "submit" }), "pending");
+assert.equal(projectedStatus({ turnState: "waiting" }), "needs-you");
+assert.equal(projectedStatus({ children: [{ id: "child" }] }), "working");
+const cloud = dashboardLayout(1600, 20);
+assert.ok(new Set(cloud.positions.slice(0, cloud.columns).map(p => Math.round(p.y))).size > 1, "Bubbles do not form a rigid horizontal row");
+assert.deepEqual(dashboardLayout(1600, 21).positions.slice(0, 20), cloud.positions, "Appending within the same column count keeps centers stable");
 const longTitle = "Conversation title ".repeat(120);
 assert.equal(dashboardSessionTitle({ ...session, conversationTitle: longTitle }), longTitle.trim(), "Full accessible title is preserved; CSS ellipsis handles display");
 assert.equal(dashboardSessionTitle({ ...session, threadRef: { title: "Stale" } }), "API", "A stale thread title cannot replace the current name");

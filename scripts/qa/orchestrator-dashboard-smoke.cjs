@@ -65,7 +65,7 @@ function smooth(values, low, high, label) { assert(values.some(v=>v.scale>low+.0
   const port = await new Promise(resolve=>{const server=net.createServer();server.listen(0,'127.0.0.1',()=>{const p=server.address().port;server.close(()=>resolve(p));});});
   const env={...process.env,VIBE_SCREENSHOT_MODE:'1',VIBE_INTERNAL_SCREENSHOT:'0',VIBE_SCREENSHOT_USER_DATA:path.join(output,'userData'),VIBE_SCREENSHOT_PTY_DEBUG:ptyLog,VIBE_AGENT_SHIM_BASE_DIR:path.join(output,'shims'),CODEX_HOME:path.join(output,'codex'),CLAUDE_CONFIG_DIR:path.join(output,'claude'),GEMINI_CLI_HOME:path.join(output,'gemini'),QWEN_HOME:path.join(output,'qwen'),KIMI_CODE_HOME:path.join(output,'kimi'),XDG_CONFIG_HOME:path.join(output,'config'),XDG_DATA_HOME:path.join(output,'data')};
   for(const key of Object.keys(env))if(/API_KEY|AUTH_TOKEN/.test(key)||['ELECTRON_RUN_AS_NODE','VITE_DEV_SERVER_URL'].includes(key))delete env[key];
-  child=spawn(path.join(root,'node_modules/electron/dist/electron.exe'),[entry,`--remote-debugging-port=${port}`],{cwd:root,env,windowsHide:true,stdio:['ignore','pipe','pipe']});
+  child=spawn(path.join(root,'node_modules/electron/dist/electron.exe'),[entry,`--remote-debugging-port=${port}`,'--disable-renderer-backgrounding','--disable-backgrounding-occluded-windows'],{cwd:root,env,windowsHide:true,stdio:['ignore','pipe','pipe']});
   const log=fs.createWriteStream(path.join(output,'electron.log'));child.stdout.pipe(log);child.stderr.pipe(log);
   const page=await until(async()=>{const p=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();return p.find(p=>p.type==='page'&&p.url.startsWith('file:')&&!p.url.includes('surface='));},'main renderer',30000);
   cdp=new Cdp(page.webSocketDebuggerUrl);await cdp.open();await cdp.send('Page.enable');
@@ -76,6 +76,9 @@ function smooth(values, low, high, label) { assert(values.some(v=>v.scale>low+.0
   await cdp.eval(`(()=>{localStorage.setItem('vibe-terminal:workspaces:v2',${JSON.stringify(JSON.stringify([{id:'qa',name:'Dashboard QA',path:output,sessions}]))});localStorage.setItem('vibe-terminal:active-workspace:v1','qa');localStorage.setItem('vibe-terminal:active-view:v1','project');localStorage.setItem('vibe-terminal.session-recency.v1',${JSON.stringify(JSON.stringify({'fixture-2':seededAt,'real-shell':seededAt-300000}))});location.reload()})()`);
   await until(()=>cdp.eval(`document.querySelector('[data-session-id="real-shell"] .xterm-rows')?.textContent.length>0`),'actual PowerShell PTY',30000);
   await wait(800);
+  // Observe the saved 70% board layout after initial measurement/transition,
+  // before comparing it with the covered workspace.
+  await until(()=>cdp.eval(`(()=>{const p=document.querySelector('[data-session-id="real-shell"]').getBoundingClientRect(),b=document.querySelector('.terminal-board').getBoundingClientRect();return p.width/b.width<.8&&p.width/b.width>.6})()`),'initial fluid pane layout');
   const before=await cdp.eval(`(async()=>{window.__main=document.querySelector('main.workspace');window.__term=document.querySelector('[data-session-id="real-shell"] .xterm');window.__pane=document.querySelector('[data-session-id="real-shell"]');return {runtime:await window.vibe.terminal.getRuntimeSnapshots(),pane:window.__pane.getBoundingClientRect().toJSON(),main:window.__main.getBoundingClientRect().toJSON(),layout:localStorage.getItem('vibe-terminal:workspaces:v2')}})()`);
   const ptyBefore=fs.readFileSync(ptyLog,'utf8');
   assert(await cdp.eval(`Boolean(document.querySelector('.orchestrator-nav-button').compareDocumentPosition(document.querySelector('[aria-label="Multi mode"]'))&Node.DOCUMENT_POSITION_FOLLOWING)`));
@@ -85,6 +88,13 @@ function smooth(values, low, high, label) { assert(values.some(v=>v.scale>low+.0
   assert(after.sameMain&&after.sameTerm&&after.samePane&&after.inert);assert.equal(after.hidden,'true');assert.equal(after.visibility,'hidden');assert.deepEqual(after.pane,before.pane);assert.deepEqual(after.main,before.main);assert.equal(after.layout,before.layout);assert.equal(after.runtime[0].generation,before.runtime[0].generation);assert.equal(fs.readFileSync(ptyLog,'utf8'),ptyBefore);record('cover-preserves-main-xterm-generation-layout-and-PTY-size',{before,after});
   await cdp.eval(`window.__cells=[...document.querySelectorAll('[data-dashboard-session-id]')];window.__bubbles=window.__cells.map(e=>e.querySelector('button'));void 0`);
   const initialRecency=await cdp.eval(`JSON.parse(localStorage.getItem('vibe-terminal.session-recency.v1'))`);const order=await cdp.eval(`window.__cells.map(e=>e.dataset.dashboardSessionId)`);assert(order.indexOf('fixture-2')<order.indexOf('fixture-0'));record('seeded-recency-orders-otherwise-unused-sessions',{initialRecency,order});await geometry('wide-zero-targets');await shot('normal');
+  const colors=await cdp.eval(`[...document.querySelectorAll('.orchestrator-dashboard-cell')].filter(e=>e.dataset.dashboardSessionId.startsWith('fixture-')).map(e=>({status:e.dataset.status,color:getComputedStyle(e).getPropertyValue('--status-color').trim(),fill:getComputedStyle(e.querySelector('.orchestrator-dashboard-rim')).backgroundImage,border:getComputedStyle(e.querySelector('.orchestrator-dashboard-rim')).borderTopWidth}))`);
+  assert.equal(new Set(colors.map(c=>c.color)).size,5);assert(colors.every(c=>c.fill.includes('gradient')&&c.border==='2px'));record('distinct-status-colors-with-visible-fill',colors);
+  const native={provider:'codex',processState:'running',agentProcessState:'running',children:[],telemetryHealth:'available',observation:'observed',revision:12};
+  for(const [patch,expected] of [[{turnState:'running'},'working'],[{turnState:'waiting'},'needs-you'],[{turnState:'completed'},'done'],[{turnState:'completed',observation:'provisional'},'response'],[{turnState:'running',observation:'unavailable'},'unknown'],[{turnState:'running',pendingInput:'submit'},'pending']]) {
+    writeControl({revisions:{'fixture-0':{...native,...patch}}});await refresh();await until(()=>cdp.eval(`document.querySelector(${JSON.stringify(cell('fixture-0'))}).dataset.status===${JSON.stringify(expected)}`),`native status ${expected}`);
+  }
+  writeControl({revisions:{}});await refresh();record('native-observation-status-transitions',true);
   const readRecency=await cdp.eval(`localStorage.getItem('vibe-terminal.session-recency.v1')`);
   writeControl({hold:['fixture-0']});await read('fixture-0');smooth(await sample('fixture-0'),.82,1,'expand-frames');assert.equal(await activeCount(),1);await shot('one-active');assert.equal(await cdp.eval(`localStorage.getItem('vibe-terminal.session-recency.v1')`),readRecency);record('passive-read-does-not-update-user-recency',true);
   writeControl({hold:['fixture-0','fixture-1']});await read('fixture-1');smooth(await sample('fixture-1'),.65,1,'second-expand-frames');assert.equal(await activeCount(),2);await geometry('two-targets');await shot('two-active');
@@ -112,6 +122,13 @@ function smooth(values, low, high, label) { assert(values.some(v=>v.scale>low+.0
   await cdp.send('Input.dispatchKeyEvent',{type:'keyDown',key:'ArrowLeft',code:'ArrowLeft',windowsVirtualKeyCode:37});await cdp.send('Input.dispatchKeyEvent',{type:'keyUp',key:'ArrowLeft',code:'ArrowLeft',windowsVirtualKeyCode:37});
   const keyUsed=await cdp.eval(`JSON.parse(localStorage.getItem('vibe-terminal.session-recency.v1'))['real-shell']`);assert(keyUsed>pointerUsed);record('explicit-pane-keyboard-updates-recency',keyUsed);
   assert.equal(await cdp.eval(`document.getAnimations().filter(a=>a.animationName==='orchestrator-gentle-drift').length`),0);record('closed-dashboard-has-no-running-drift-animations',true);
+  writeControl({count:0});await refresh();await click('.orchestrator-nav-button');
+  await cdp.send('Emulation.setDeviceMetricsOverride',{width:1500,height:1100,deviceScaleFactor:1,mobile:false});
+  await until(()=>cdp.eval(`document.querySelectorAll('[data-dashboard-session-id]').length===1`),'single session');await wait(400);
+  await until(()=>cdp.eval(`document.querySelector('.orchestrator-dashboard-cell')?.dataset.inView==='true'`),'reopened single session resumes visible motion');
+  await geometry('single-session');
+  assert(await cdp.eval(`(()=>{const v=document.querySelector('.orchestrator-dashboard-viewport').getBoundingClientRect(),c=document.querySelector('.orchestrator-dashboard-cell').getBoundingClientRect();return Math.abs(c.x+c.width/2-v.x-v.width/2)<10&&Math.abs(c.y+c.height/2-v.y-v.height/2)<10})()`),'single bubble centered in viewport');
+  await shot('single');
   await click('.orchestrator-nav-button');await click('[aria-label="Multi mode"]');assert(!await cdp.eval(`Boolean(document.querySelector('.orchestrator-view-host'))`));record('navigation-opens-and-closes-dashboard',true);
   result.pass=true;
 }catch(e){result.pass=false;result.error=e.stack;console.error(e.stack);process.exitCode=1;}

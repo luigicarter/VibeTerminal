@@ -45,6 +45,9 @@ synthesized speech all use OpenRouter.
 
 ## Examples
 
+- `Go to the Vibe Terminal project.`
+- `Open History.` / `Take me to Settings.`
+- `Show Multi mode.` / `Open the Orchestrator dashboard.`
 - `What is Codex in Budget Tracker doing?`
 - `Tell Codex in Budget Tracker to rerun the tests.`
 - `Tell Worker A: explain why deleting the production data is a bad idea.`
@@ -61,6 +64,20 @@ An explicitly identified session can become the target of a follow-up such as
 restart cannot silently redirect the old request. Relay payloads preserve the
 whole explicitly supplied instruction, including qualifiers. Ambiguous targets
 or command shapes are rejected or require clarification.
+
+Native `navigate` actions open Settings, History, the Orchestrator dashboard,
+Multi mode, or an existing project. The renderer acknowledges the view change;
+navigation does not restart running terminals or edit settings. `list_roots`
+exposes known projects for discovery. Speech output removes Markdown decoration
+before synthesis while displayed conversation text retains its formatting.
+
+September 2026 verification: the reported spoken relay and target clarification
+are covered by deterministic policy/model-loop tests. Isolated Electron QA in
+`.tmp/orchestrator-navigation-smoke/1788718505848-50676/` exercised all five views,
+History tab reselection, unknown-project rejection and a stable local terminal
+generation. Sidebar overflow fixtures at 1440×960 and 1024×640 reached the fixed
+Settings footer. Speech checks use mocked audio; live chosen-model interpretation
+and audible provider output were not tested by these checks.
 
 ## Workspace UI
 

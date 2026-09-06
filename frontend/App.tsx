@@ -12,6 +12,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent
 } from "react";
+import { flushSync } from "react-dom";
 import {
   Check,
   Mic,
@@ -108,6 +109,7 @@ import { createWorkspaceSetup, instantiateWorkspaceSetup, SETUP_CONFIG_FIELDS, t
 import { OrchestratorPanel } from "./components/OrchestratorPanel";
 import { WorkspaceToolsDialog } from "./components/WorkspaceToolsDialog";
 import { OrchestratorDashboard } from "./components/OrchestratorDashboard";
+import { dashboardSessionMetadata } from "./components/orchestratorDashboardLayout";
 import { RECENCY_STORAGE_KEY, loadSessionRecency, recordSessionRecency } from "./sessionRecency";
 import VoiceIndicator from "./VoiceIndicator";
 import VoicePushToTalk from "./VoicePushToTalk";
@@ -1304,6 +1306,7 @@ export default function App() {
   // provider configured yet.
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [workspaceToolsOpen, setWorkspaceToolsOpen] = useState(false);
+  const [workspaceToolsTab, setWorkspaceToolsTab] = useState("Orchestrator");
   const [orchestratorViewOpen, setOrchestratorViewOpen] = useState(false);
   const [sessionRecency, setSessionRecency] = useState(() => loadSessionRecency(localStorage));
   const sessionRecencyRef = useRef(sessionRecency);
@@ -4614,6 +4617,31 @@ export default function App() {
           if(result && typeof result === "object" && "ok" in result && result.ok === false) return {ok:false,error:"error" in result ? String(result.error) : "Setup could not be saved."};
           return { ok: true, recipe };
       }
+      if (kind === "navigate") {
+          const view = payload.view;
+          if (typeof view !== "string" || !["settings", "history", "orchestrator", "multi", "project"].includes(view)) return { ok: false, error: "Choose a supported application view." };
+          const project = view === "project" && typeof payload.cwd === "string" && payload.cwd.trim()
+              ? workspaces.find(workspace => normalizeWorkspacePath(workspace.path) === normalizeWorkspacePath(payload.cwd as string)) : undefined;
+          if (view === "project" && !project) return { ok: false, error: "That project is not open. Choose an existing project folder." };
+          // Commit the requested surface before acknowledging navigation. Pane
+          // ownership and launch state are unchanged by these view switches.
+          flushSync(() => {
+              setLauncherMenuOpen(false);
+              setSettingsOpen(view === "settings");
+              setWorkspaceToolsOpen(view === "history");
+              if (view === "history") setWorkspaceToolsTab("History");
+              if (["orchestrator", "multi", "project"].includes(view)) {
+                  setOrchestratorViewOpen(view === "orchestrator");
+                  if (view !== "orchestrator") {
+                      setSelectedSessionId(null);
+                      setMaximizedSessionId(null);
+                      setActiveView(view === "project" ? "project" : "multi");
+                      if (project) setActiveWorkspaceId(project.id);
+                  }
+              }
+          });
+          return { ok: true, status: "navigated", view, ...(project ? { projectId: project.id, cwd: project.path } : {}) };
+      }
       if (kind === "open_settings") { setSettingsOpen(true); return { ok: true }; }
       if (kind === "inventory")
           return { ok: true, projectPaths: workspaces.map(workspace=>workspace.path), sessions: relaySessions.map(session => ({ ...session, projectId: workspaces.find(p => p.sessions.some(s => s.id === session.id))?.id })) };
@@ -5518,12 +5546,11 @@ export default function App() {
       {orchestratorViewOpen && <div className="orchestrator-view-host">
         <OrchestratorDashboard sessions={(orchestratorState?.sessions || []).map(session => {
           const metadata = relaySessions.find(item => item.id === session.id);
-          return { ...metadata, ...session, projectName: metadata?.projectName || session.projectName, lastUsedAt: sessionRecency[session.id],
-            statusLabel: session.statusLabel || (metadata?.generation === session.generation ? metadata?.statusLabel : undefined) };
+          return { ...dashboardSessionMetadata(session, metadata), lastUsedAt: sessionRecency[session.id] };
         })} activeTargets={orchestratorState?.activeTargets || []} busy={orchestratorState?.busy || false} enabled={orchestratorState?.enabled || false} visible onOpenSession={id => { focusRelaySession(id); }} />
       </div>}
       {workspaceToolsOpen && <WorkspaceToolsDialog onClose={() => setWorkspaceToolsOpen(false)}>
-        <OrchestratorPanel embedded state={orchestratorState} sessions={relaySessions} selectedId={selectedSessionId} onFocus={id => { focusRelaySession(id); setWorkspaceToolsOpen(false); }} onSettings={() => { setWorkspaceToolsOpen(false); setSettingsOpen(true); }} changes={activeWorkspaceChangeSummary} folders={workspaces}
+        <OrchestratorPanel embedded selectedTab={workspaceToolsTab} onTabChange={setWorkspaceToolsTab} state={orchestratorState} sessions={relaySessions} selectedId={selectedSessionId} onFocus={id => { focusRelaySession(id); setWorkspaceToolsOpen(false); }} onSettings={() => { setWorkspaceToolsOpen(false); setSettingsOpen(true); }} changes={activeWorkspaceChangeSummary} folders={workspaces}
           setups={setupsApi ? <WorkspaceSetups sessions={boardSessions} projectPath={activeView === "project" ? activeWorkspace?.path : undefined} api={setupsApi} onLoad={loadRelaySetup} /> : <p className="dock-note">Setup storage is unavailable in this build.</p>}
           handoff={<HandoffPanel sessions={(orchestratorState?.sessions || relaySessions).filter((session): session is RelaySession & {generation:string} => Boolean(session.generation)).map(session=>({id:session.id,generation:session.generation,name:session.name}))} onStage={async draft => {const api=relayApi();return api ? api.dispatch({kind:"stage_handoff",target:{id:draft.target.id,generation:draft.target.generation},sourceId:draft.source.id,sourceGeneration:draft.source.generation,text:draft.text,paths:draft.paths}) : {ok:false,error:"Orchestrator unavailable."};}} />}
         />
