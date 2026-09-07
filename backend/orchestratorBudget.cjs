@@ -71,7 +71,9 @@ function createReadBudget({ maxBytes = 12000, perReadBytes = 4000 } = {}) {
   };
 }
 
-const CONTEXT_KEYS = new Set(['tasks', 'pendingCommands', 'recentConversation', 'recentActions', 'recentUserMessages', 'roots', 'preferences', 'observations', 'observedReads', 'sessionDirectory', 'readBookmarks', 'sessions']);
+// Directory totals are small identity metadata, not disposable context. Keep
+// them even when the directory page itself must shrink for a smaller model.
+const CONTEXT_KEYS = new Set(['tasks', 'pendingCommands', 'recentConversation', 'recentActions', 'recentUserMessages', 'roots', 'preferences', 'observations', 'observedReads', 'readBookmarks', 'sessions']);
 function compactTool(content) {
   let value;
   try { value = JSON.parse(content); } catch { return JSON.stringify({ truncated: true, contextNote: 'Earlier tool output omitted for context. Never repeat an effect because its receipt was shortened.' }); }
@@ -123,6 +125,7 @@ function fitMessages({ messages, tools = [], contextLength, outputTokens = 1200,
             if (!others.length) break;
             payload[key] = [...protectedEntries, ...others.slice(0, Math.floor(others.length / 2))];
           } else payload[key] = ['recentConversation', 'recentActions', 'recentUserMessages'].includes(key) ? payload[key].slice(1) : payload[key].slice(0, Math.floor(payload[key].length / 2));
+          if (key === 'sessions' && payload[key].length < original.length && payload.sessionDirectory) payload.sessionDirectory = { ...payload.sessionDirectory, truncated: true };
           payload.contextNote = 'Workspace context shortened to fit this model. Use bounded directory or status reads for omitted context.';
           result[currentUser].content = JSON.stringify(payload);
         }

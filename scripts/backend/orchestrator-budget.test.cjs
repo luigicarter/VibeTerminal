@@ -53,6 +53,19 @@ test('fit shrinks context but preserves current exact instruction and target wit
   assert.equal(user.targetId, 'a');
   assert.equal(JSON.stringify(messages), initial);
 });
+test('directory totals survive forced context pressure while its page shrinks', () => {
+  const sessions = Array.from({ length: 40 }, (_, index) => ({ id: `pane-${index}`, generation: `g-${index}`, cwd: 'D:/runner/' + 'long-path/'.repeat(30) }));
+  for (const total of [40, 67]) {
+  const messages = [{ role: 'system', content: 'POLICY' }, { role: 'user', content: JSON.stringify({ instruction: 'Find the requested terminal.', sessionDirectory: { total, truncated: total > sessions.length }, sessions }) }];
+  const fitted = fitMessages({ messages, contextLength: 4096 });
+  const payload = JSON.parse(fitted[1].content);
+  assert.deepEqual(payload.sessionDirectory, { total, truncated: true });
+  assert(payload.sessions.length > 0 && payload.sessions.length < sessions.length);
+  assert(size({ messages: fitted, tools: [] }) <= modelInputBudget(4096));
+  assert.equal(payload.instruction, 'Find the requested terminal.');
+  }
+});
+
 test('tool compaction retains protocol pairing and authoritative receipts', () => {
   const messages = [{ role: 'system', content: 'POLICY' }, { role: 'user', content: 'current exact request' }];
   for (let i = 0; i < 5; i++) {

@@ -4,10 +4,10 @@ vibeTerminal ships to Windows users as an Electron Builder NSIS installer hosted
 
 ## Current Public Release
 
-The current Windows release is `v0.1.97`:
+The current Windows release is `v0.1.98`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.97`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.97/vibeTerminal-Setup-0.1.97.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.98`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.98/vibeTerminal-Setup-0.1.98.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -57,7 +57,7 @@ The compiled `dist/` renderer is still included because it is the UI Electron di
 
 ## Local Build
 
-Version `0.1.97` adds request-owned Orchestrator tasks, queueing, parallel execution,
+Version `0.1.98` adds request-owned Orchestrator tasks, queueing, parallel execution,
 verified-result dependencies, dynamic project context and local conversation history.
 Voice clarifications accept automatic answers, and a compatibility fallback repairs
 providers that reject forced named-tool selection. See the [task contract](orchestrator-tasks.md)
