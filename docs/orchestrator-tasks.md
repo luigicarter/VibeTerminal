@@ -76,10 +76,24 @@ new listing, and stale paging cursors must restart at a valid page.
 
 Submitting voice input releases the microphone while the task runs. Further requests
 can use Space or Hey Vibe. Replies are spoken one at a time and defer to active
-recording. After an Orchestrator clarification, hands-free mode listens for an answer
-for fifteen seconds. Silence returns quietly to wake mode while retaining the question.
-Ordinary replies do not automatically open an answer window. Native terminal questions
-retain their existing request, revision and generation checks.
+recording. The model uses `respond` with explicit `responseTurn` metadata: `listen`
+opens a request-owned question and listens for an answer for fifteen seconds;
+`complete` returns to standby; `dismiss` ends the voice exchange. `ask_user` also
+opens an answer window. This covers conversational questions and user decisions,
+without inferring intent from question marks. Silence returns quietly to standby
+while retaining the question. Followup detection can run temporarily with wake
+detection disabled; Space remains the fallback if detection is unavailable.
+Native terminal questions retain their request, revision and generation checks.
+Whole-utterance dismissal phrases such as “never mind” or “that's all”, and the
+microphone indicator's X, dismiss voice without answering a question, granting
+permission, cancelling terminal work, or changing the saved voice preference.
+
+Saved conversation resume uses exact requested titles or IDs. If speech appears to
+have misrecognized a listed title, the model must ask a canonical confirmation of
+the title, project, provider, and applicable Claude home, bound to that conversation's
+opaque reference and the unfinished resume grant. An explicit
+affirmative answer to that current question confirms only that candidate. A stale,
+unbound, or unrelated reply does not authorize substituting another saved chat.
 
 Chat and public task outcomes are stored in `orchestrator-conversation.json` under
 Electron userData, bounded to thirty days and ten MiB. Credentials, grants and live

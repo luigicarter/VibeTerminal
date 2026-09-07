@@ -5,6 +5,37 @@ dedicated pane inside vibeTerminal, showing live sessions as clear-glass bubbles
 Session status is expressed by a label, tinted glass, and a bright colored rim/dot. Violet halos
 and expansion independently identify Vibe's current request targets.
 
+## Work history
+
+The dashboard's **Work history** view shows a table of observed completed, failed,
+and interrupted agent turns. **All projects** is the global view; the project
+selector groups by full working-directory path, keeping projects with the same
+name separate. Search covers the work title, terminal, project, provider, status,
+and result evidence. Live terminal links require the original generation; closed
+terminals remain readable in the table.
+
+`backend/orchestratorWork.cjs` retains up to 2,000 records for 90 days in the local
+`orchestrator-work.json`, with bounded storage and secret redaction. Records are
+keyed by terminal, generation, and turn. The event integration captures endings
+even for work started directly in a terminal, independently of Orchestrator
+requests. A turn must have observed lifecycle status and start/end timestamps;
+idle, provisional responses, submitted input, and plain shells do not become
+completed work. Active child work or pending input also prevents recording.
+Work that ended before tracking was installed or without telemetry is absent.
+
+Results are excerpts from the existing immutable completion evidence, when
+available. They are expandable and labelled as terminal excerpts or agent
+responses. An observed completed turn means the agent stopped responding; it
+does not independently prove that code changes, tests, or the user's goal
+succeeded. A terminal closed before its ending can be observed may have no
+record; one closed during excerpt capture can retain status without result text.
+
+The read-only `list_work` tool exposes the same records to Vibe for questions such
+as “What's been done?” globally or in a project. It accepts exact `cwd`, text
+`query`, `offset`, and `limit`, returns explicit coverage and stable pagination,
+and bounds model-facing excerpts without changing the stored evidence. History
+is data, never authorization or evidence that releases a task dependency.
+
 ## Identity and activity
 
 The dashboard uses the backend session directory for native generation, process

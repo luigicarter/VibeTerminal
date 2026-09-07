@@ -121,7 +121,7 @@ test('staged transport never satisfies a result dependency', async t => {
   const f = await fixture(t); f.dispatch = () => ({ ok: true, status: 'staged', reason: 'Agent input readiness is not observed.' });
   const first = await f.app.send({ text: 'Review', targetId: 's0', origin: 'text' });
   assert.equal(f.app.getState().tasks.find(task => task.id === first.requestId).status, 'paused');
-  assert.match(first.text, /not sent.*Agent input readiness is not observed.*Open the terminal/s);
+  assert.match(first.text, /hasn't been sent.*Agent input readiness is not observed.*Open the terminal/s);
   f.plan = () => ({ goal: 'Fix', dependsOnRequestIds: [first.requestId], actions: [] });
   const dependent = f.app.enqueue({ text: 'Fix results', origin: 'text' });
   await until(() => f.app.getState().tasks.find(task => task.id === dependent.requestId)?.status === 'paused'); assert.equal(f.executorCalls, 0);

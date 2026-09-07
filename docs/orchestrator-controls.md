@@ -1,5 +1,50 @@
 # Orchestrator and terminal controls
 
+## Conversation and recovery
+
+Vibe's response contract calls for a warm, direct voice, brief useful replies, and
+no parroting of the request. Voice history listings offer at most three relevant
+choices unless the user asks for more. Direct actions use named, factual outcomes
+instead of raw labels such as “Action written”; drafts, queues, accepted input,
+requested interruption and observed completion remain distinct.
+
+The intent schema describes each command's own fields. A failed interpretation
+gets one repair with the validator's reason and the original user context, without
+echoing malformed model arguments. Execution advertises read/conversation tools
+and the request's granted effects through closed per-operation field lists. Shared
+field definitions keep schemas small; default excerpts also account for the space
+left by the instruction and tools. Unread pages never advance saved bookmarks.
+
+The active model exchange preserves opaque `reasoning_details` and tool-call
+metadata, as required by [OpenRouter's reasoning continuity contract](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens).
+These blocks stay in that request's memory; they are excluded from saved chats,
+diagnostics and speech. The earlier recorded HTTP 400 did not retain its raw
+provider explanation, so its precise cause cannot be established retrospectively.
+
+Finishing an operator interaction still requires an unused, recent observation
+after its last action, with the same terminal generation. Background runtime
+revision changes do not invalidate this non-input completion report. Input effects
+retain their freshness checks, and uncertain delivery cannot be retried or reported
+as completed. Native operator sends and interrupts may omit counter copies already
+bound by their validated observation token. The app fills only those missing
+transport fields after claiming the original action; explicit mismatches still
+fail, and the action's replay identity does not change.
+See [voice turns and saved-title confirmation](orchestrator-tasks.md)
+and [project/global work history](orchestrator-dashboard.md) for the related flows.
+
+September 7 verification: 642 backend/voice regressions, the renderer build,
+voice capture/frontend checks and isolated Electron dashboard QA passed. The
+parent inspected global, project and closed-terminal table screenshots in
+`.tmp/orchestrator-dashboard-smoke/1788813730138-58912/`.
+Configured-model checks in
+`.tmp/orchestrator-conversation-live/1788814088933-51728/report.json` exercised
+a single commit-review submission through changing completion telemetry, a spoken
+title mismatch, and its request-owned affirmative resume. Earlier cases also
+checked concise history/greeting replies and explicit conversational listening.
+These used disposable terminal/history adapters; physical microphone capture and
+live coding-agent behavior were not exercised. Changes are in source and the
+local renderer build, not the installed release.
+
 See [conversations and tasks](orchestrator-tasks.md) for request ownership,
 scheduling, dependencies, recovery and saved history.
 

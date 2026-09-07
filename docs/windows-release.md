@@ -4,10 +4,10 @@ vibeTerminal ships to Windows users as an Electron Builder NSIS installer hosted
 
 ## Current Public Release
 
-The current Windows release is `v0.1.99`:
+The current Windows release is `v0.1.100`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.99`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.99/vibeTerminal-Setup-0.1.99.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.100`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.100/vibeTerminal-Setup-0.1.100.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -57,13 +57,14 @@ The compiled `dist/` renderer is still included because it is the UI Electron di
 
 ## Local Build
 
-Version `0.1.99` overhauls Orchestrator terminal operation with persistent user
-objectives, an observe-act-verify loop, delegated answers, expanded keyboard/paste
-and supported mouse controls, and no automatic draft fallback. Fresh input revisions,
-request ownership and continuation receipts protect interactive input and uncertain
-writes. See the [terminal-control contract](orchestrator-controls.md) for capabilities
-and verification boundaries. Installed applications apply updates through the user's
-Update/Restart action; publication does not restart an active workspace.
+Version `0.1.100` improves Orchestrator conversation, automatic follow-up listening
+and dismissal, saved-conversation resume, and terminal operation reliability. The
+new Work history view retains observed agent results across project/global views
+and closed terminals, and supports questions such as “What's been done?” See the
+[terminal-control contract](orchestrator-controls.md), [voice turns](orchestrator-tasks.md),
+and [work history](orchestrator-dashboard.md) for behavior and verification.
+Installed applications apply updates through the user's Update/Restart action;
+publication does not restart an active workspace.
 
 Use these commands before publishing a release:
 

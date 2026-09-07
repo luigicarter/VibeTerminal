@@ -1,5 +1,6 @@
 import type { AgentSession } from "./types";
 import type { HISTORY_CONFIG_FIELDS } from "./orchestratorHistory";
+import type { WorkRecord } from "./components/orchestratorWorkHistoryModel";
 import { useEffect, useState } from "react";
 export interface RelaySession extends Partial<Pick<AgentSession, typeof HISTORY_CONFIG_FIELDS[number] | "threadRef" | "resumeRef" | "fusion" | "openFusion">> {
     id: string;
@@ -59,6 +60,7 @@ export interface RelayState {
     ready: boolean;
     busy: boolean;
     tasks?: RelayTask[];
+    workHistory?: WorkRecord[];
     activeTargets?: RelayActiveTarget[];
     phase: string;
     error?: string;

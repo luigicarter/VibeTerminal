@@ -37,7 +37,9 @@ session-only storage is available in Advanced. The legacy speech selection
 is migrated to the supported voice configuration without replacing credentials.
 
 The mic is drawn only inside vibeTerminal and never over other applications. Its
-audio renderer stays permanently hidden and non-focusable. The mic's X hides the indicator while capture continues. **Show microphone** in
+audio renderer stays permanently hidden and non-focusable. The mic's X dismisses
+the current voice exchange and returns to standby. The context menu can hide the
+indicator while capture continues. **Show microphone** in
 the main toolbar restores it. Its context menu offers disable and settings. The
 main application must remain running; closing the application stops listening.
 Startup listening is off unless the user explicitly enables that preference.

@@ -5547,7 +5547,7 @@ export default function App() {
         <OrchestratorDashboard sessions={(orchestratorState?.sessions || []).map(session => {
           const metadata = relaySessions.find(item => item.id === session.id);
           return { ...dashboardSessionMetadata(session, metadata), lastUsedAt: sessionRecency[session.id] };
-        })} activeTargets={orchestratorState?.activeTargets || []} busy={orchestratorState?.busy || false} enabled={orchestratorState?.enabled || false} visible onOpenSession={id => { focusRelaySession(id); }} />
+        })} workHistory={orchestratorState?.workHistory || []} activeTargets={orchestratorState?.activeTargets || []} busy={orchestratorState?.busy || false} enabled={orchestratorState?.enabled || false} visible onOpenSession={id => { focusRelaySession(id); }} />
       </div>}
       {workspaceToolsOpen && <WorkspaceToolsDialog onClose={() => setWorkspaceToolsOpen(false)}>
         <OrchestratorPanel embedded selectedTab={workspaceToolsTab} onTabChange={setWorkspaceToolsTab} state={orchestratorState} sessions={relaySessions} selectedId={selectedSessionId} onFocus={id => { focusRelaySession(id); setWorkspaceToolsOpen(false); }} onSettings={() => { setWorkspaceToolsOpen(false); setSettingsOpen(true); }} changes={activeWorkspaceChangeSummary} folders={workspaces}

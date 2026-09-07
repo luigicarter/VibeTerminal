@@ -36,7 +36,9 @@ export default function VoiceIndicator() {
   const automatic = state.phase === 'recording' && (state.recordingSource === 'wake' || state.recordingSource === 'answer');
   const status = error || (state.finishHint ? 'Still listening… click Send when finished' :
     automatic ? 'Listening… speak naturally, or click Send' :
-    state.phase === 'awaiting-answer' && state.handsFreeStatus === 'ready' ? 'Listening for your answer' :
+    state.phase === 'awaiting-answer' && state.handsFreeStatus === 'ready' ? 'Listening for your answer · say “never mind” to dismiss' :
+    state.phase === 'awaiting-answer' && state.handsFreeStatus === 'loading' ? 'Getting ready to listen… or hold Space to answer' :
+    state.phase === 'awaiting-answer' && state.handsFreeStatus === 'unavailable' ? 'Automatic listening unavailable · hold Space to answer' :
     state.phase === 'listening' && state.handsFreeStatus === 'loading' ? 'Starting hands-free voice... hold Space to talk' :
     state.phase === 'listening' && state.handsFreeStatus === 'ready' ? 'Say Hey Vibe or hold Space to talk' :
     state.phase === 'listening' && state.handsFreeStatus === 'unavailable' ? `${state.handsFreeError || 'Hands-free voice unavailable.'} Hold Space to talk` :
@@ -82,7 +84,7 @@ export default function VoiceIndicator() {
   return <div className={`voice-indicator voice-${visual}${hidden ? ' voice-hidden' : ''}`} onContextMenu={event => { event.preventDefault(); void act(() => api.configure({ menu: true })); }}>
     <button className="voice-mic" aria-label={`${status}. ${action}`} title={`${status}\n${action} · Right-click for options`} onPointerDown={event => { if (event.button !== 0) return; event.preventDefault(); void press(); }} onPointerUp={event => { if (event.button === 0) releasePointer(true); }} onPointerLeave={() => releasePointer()} onPointerCancel={() => releasePointer()} onKeyDown={event => { if (event.key === ' ') event.preventDefault(); if (event.key === 'Enter' && automatic && !event.repeat) sendAutomatic(automaticIdentity()); }}>{automatic ? <Send size={26} strokeWidth={1.7}/> : busy || state.listening ? <Mic size={29} strokeWidth={1.7}/> : <MicOff size={27} strokeWidth={1.7}/>}</button>
     <button className="voice-mini voice-mute" aria-label={state.listening ? 'Mute microphone' : 'Enable microphone'} title={state.listening ? 'Mute microphone' : 'Enable microphone'} onClick={() => void act(() => api.setListening(!state.listening))}>{state.listening ? <MicOff size={12}/> : <Mic size={12}/>}</button>
-    <button className="voice-mini voice-hide" aria-label="Hide microphone indicator; keep listening" title="Hide indicator; keep listening" onClick={() => void act(() => api.configure({ hideOverlay: true }))}><X size={13}/></button>
+    <button className="voice-mini voice-hide" aria-label="Dismiss voice conversation" title="Dismiss voice conversation; return to standby" onClick={() => void act(() => api.configure({ dismiss: true }))}><X size={13}/></button>
     <span className="voice-status" role={error ? 'alert' : 'status'}>{status}</span>
   </div>;
 }

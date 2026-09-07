@@ -126,7 +126,7 @@ function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
       b.sequence = ++contentSequence; b.at = t; bodies.set(event.id, b);
     }
     if (["result", "error", "interrupted"].includes(event.type) && c.turnEndedAt && c.turnId) {
-      completedResults.set(JSON.stringify([c.id, c.generation, c.turnId]), { turnId: c.turnId, actionId: c.completedActionId, status: c.turnState, at: c.turnEndedAt, text: c.turnText || "" });
+      completedResults.set(JSON.stringify([c.id, c.generation, c.turnId]), { turnId: c.turnId, actionId: c.completedActionId, status: c.turnState, at: c.turnEndedAt, text: c.turnText || "", source: "chat-events" });
       while (completedResults.size > 200) completedResults.delete(completedResults.keys().next().value);
     }
   }
@@ -684,7 +684,17 @@ function installOrchestrator(options) {
       if (pending && pending.engine === kind && pending.id === event.id && pending.generation === event.generation) pending.finish({ ...event, status: event.status || "acknowledged" }); }
     if (current && event.generation && current.generation !== event.generation) return false;
     directory.ingest(kind, event);
-    if (kind === "terminal") void observations.ingest(event).then(() => completions.capture(directory.get(event.id))).catch(() => {});
+    const ended = directory.get(event.id);
+    if (ended) relay.observeWork?.([ended]);
+    if (kind === "terminal") void observations.ingest(event).then(async () => {
+      const session = directory.get(event.id);
+      if (!session) return;
+      const result = await completions.capture(session);
+      relay.observeWork?.([session], result);
+    }).catch(() => {});
+    else if (ended && ["result", "error", "interrupted"].includes(event.type)) {
+      relay.observeWork?.([ended], directory.readChat(ended).completedResult);
+    }
     if (event?.type === "interaction-request") relay.ingestInteraction(event.interaction || { ...event, id: event.requestId, sessionId: event.id });
     if (event?.type === "interaction-resolved" || event?.type === "question-resolved" || event?.type === "permission-resolved") {
       const resolved = relay.resolveInteraction({ id: event.requestId, sessionId: event.id, generation: event.generation, revision: event.revision });

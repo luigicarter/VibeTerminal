@@ -1,6 +1,6 @@
 {
   "name": "vibe-terminal",
-  "version": "0.1.99",
+  "version": "0.1.100",
   "private": true,
   "description": "A tiled local workspace for running multiple coding agents side by side.",
   "author": "vibeTerminal contributors",
@@ -91,7 +91,8 @@
     "smoke:electron:voice-experience": "node scripts/qa/voice-experience-smoke.cjs",
     "smoke:frontend:orchestrator-dashboard": "node scripts/frontend/orchestrator-dashboard-smoke.cjs",
     "smoke:frontend:session-recency": "node scripts/frontend/session-recency-smoke.cjs",
-    "smoke:electron:orchestrator-dashboard": "node scripts/qa/orchestrator-dashboard-smoke.cjs"
+    "smoke:electron:orchestrator-dashboard": "node scripts/qa/orchestrator-dashboard-smoke.cjs",
+    "smoke:frontend:orchestrator-work": "node scripts/frontend/orchestrator-work-smoke.cjs"
   },
   "dependencies": {
     "@xterm/addon-canvas": "^0.7.0",

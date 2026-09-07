@@ -196,17 +196,54 @@ function authorizeModelAction(action, intent, sessions) {
   }
   throw lastError;
 }
+// Only application-created, immutable candidates can back a structured user answer.
+// The request router owns question identity, expiry and single-use consumption.
+const resumeCandidates = new WeakSet();
+const resumeIdentityFields = ['id', 'provider', 'cwd', 'title', 'claudeHome', 'providerProfileId', 'fusion', 'openFusion', 'plannerProvider'];
+function resumeIdentity(conversation) {
+  return Object.fromEntries(resumeIdentityFields.map(key => [key, conversation[key]]));
+}
+function captureConversationResumeCandidate(reference, grant, conversations) {
+  if (typeof reference !== 'string' || !reference.trim()) throw new Error('List history to identify one saved conversation candidate.');
+  if (grant?.kind !== 'resume_conversation') throw new Error('A saved conversation question requires an unfinished resume grant.');
+  const matches = conversations.filter(item => item.reference === reference);
+  if (matches.length !== 1) throw new Error('List history to identify one saved conversation candidate.');
+  const conversation = matches[0];
+  if (['id', 'provider', 'cwd', 'title'].some(key => typeof conversation[key] !== 'string' || !conversation[key].trim())) throw new Error('The saved conversation candidate has incomplete identity.');
+  for (const key of ['provider', 'cwd', 'reference']) {
+    if (grant.args?.[key] !== undefined && grant.args[key] !== conversation[key]) throw new Error('The saved conversation candidate falls outside the resume grant.');
+  }
+  const selection = Object.freeze({ kind: 'title', value: conversation.title, provider: conversation.provider, cwd: conversation.cwd,
+    ...(conversation.claudeHome ? { claudeHome: conversation.claudeHome } : {}) });
+  const candidate = Object.freeze({ reference, selection, identity: Object.freeze(resumeIdentity(conversation)) });
+  resumeCandidates.add(candidate);
+  return candidate;
+}
+function isConversationResumeConfirmation(text) {
+  if (typeof text !== 'string') return false;
+  return /^(?:(?:yes|yeah|yep|yup|sure|ok|okay)(?:[, ]+(?:please|go ahead|resume (?:it|that)(?: conversation)?|that's (?:it|the one)|that is (?:it|the one)))?|that's (?:it|the one)|that is (?:it|the one)|go ahead|resume (?:it|that)(?: conversation)?)[.!]?$/i.test(text.trim());
+}
 function authorizeConversationResume(action, intent, conversations) {
+  if (intent.confirmedResume !== undefined) {
+    const candidate = intent.confirmedResume;
+    if (!candidate || !resumeCandidates.has(candidate)) throw new Error('The saved conversation confirmation is not application-owned.');
+    const matches = conversations.filter(item => item.reference === candidate.reference);
+    if (action.reference !== candidate.reference) throw new Error('The model selected a different saved conversation than the confirmed candidate.');
+    if (matches.length !== 1 || resumeIdentityFields.some(key => matches[0][key] !== candidate.identity[key])) throw new Error('The saved conversation candidate changed. Identify it again.');
+    return { kind: 'resume_conversation', reference: candidate.reference, selection: { ...candidate.selection } };
+  }
   // Native titles and transcript content cannot grant an effect. Resolve the
   // user's current command against returned identities, never a model guess.
   let matches = new Map();
   // Exact punctuation belongs to a title. Only try sentence punctuation if
   // the literal command did not identify any candidate.
+  for (const trimWrapper of [false, true]) {
   for (const trimPunctuation of [false, true]) {
   for (const clause of commandClauses(intent.text)) {
     if (!/^(open|reopen|resume)\b/i.test(clause.syntax)) continue;
     const raw = clause.text.replace(/^(open|reopen|resume)\s+/i, '').trim();
-    const command = trimPunctuation ? raw.replace(/[.!]$/, '') : raw;
+    const punctuated = trimPunctuation ? raw.replace(/[.!?]$/, '') : raw;
+    const command = trimWrapper ? punctuated.replace(/\s+(?:conversation|chat|session)$/i, '') : punctuated;
     for (const conversation of conversations) {
       const providerNames = [...new Set([...aliases(conversation.provider), ...(conversation.fusion ? ['fusion'] : []), ...(conversation.openFusion ? ['open fusion'] : [])])];
       const prefixes = ['', 'the ', 'conversation ', 'chat ', 'session ', 'the conversation ', 'the chat ', 'the session ', 'saved conversation ', 'previous conversation ', 'the saved conversation ', 'the previous conversation '].map(text => ({ text }));
@@ -226,6 +263,8 @@ function authorizeConversationResume(action, intent, conversations) {
         }
       }
     }
+  }
+  if (matches.size) break;
   }
   if (matches.size) break;
   }
@@ -329,4 +368,4 @@ function identifyProject(text, projects, previous) {
   if (matches.size === 1) return [...matches.values()][0];
   return /\b(?:that|this|same)\s+(?:project|repo(?:sitory)?|folder)\b/i.test(text) ? projects.find(project => project.path === previous?.path) || null : null;
 }
-module.exports = { ACTIONS, authorizeModelAction, authorizeConversationResume, commandClauses, resolveTarget, relayPayload, identifyReadTarget, captureRelay, clarifyRelay, selectRelay, identifySessionGroup, identifyProject };
+module.exports = { ACTIONS, authorizeModelAction, authorizeConversationResume, captureConversationResumeCandidate, isConversationResumeConfirmation, commandClauses, resolveTarget, relayPayload, identifyReadTarget, captureRelay, clarifyRelay, selectRelay, identifySessionGroup, identifyProject };

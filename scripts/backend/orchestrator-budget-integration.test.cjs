@@ -74,8 +74,10 @@ test('a source page rejected before model delivery does not advance the cross-re
   let reads = 0;
   const f = fixture(t, { dispatchAction: async () => { reads++; return { ok: true, text: 'PAGE_CONTENT ' + 'x'.repeat(3000), nextCursor: 'unseen-next', hasMore: true }; } });
   await f.ready();
-  f.handle(() => calls([{ kind: 'read_conversation', reference: 'ref' }]));
-  const result = await f.instance.send({ text: 'Read source. ' + 'x'.repeat(7000), origin: 'text' });
+  // A large provider-issued tool envelope can exhaust context after the read,
+  // even when the default source excerpt was sized to fit the initial request.
+  f.handle(() => calls([{ kind: 'read_conversation', reference: 'ref', cursor: 'x'.repeat(16000) }]));
+  const result = await f.instance.send({ text: 'Read source.', origin: 'text' });
   assert.equal(reads, 1); assert.match(result.error, /Local context limit/);
   let nextBookmarks;
   f.handle(body => {

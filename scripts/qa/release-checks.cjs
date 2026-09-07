@@ -17,7 +17,7 @@ const checks = [
   'smoke:frontend:workspace-setups', 'smoke:frontend:orchestrator-history', 'smoke:frontend:conversation-live',
   'smoke:frontend:workspace-dock', 'smoke:frontend:conversation-pages', 'smoke:frontend:orchestrator-tasks',
   'smoke:frontend:voice-experience', 'test:voice:capture', 'smoke:voice:native', 'smoke:voice:matrix', 'smoke:voice:workflow', 'smoke:frontend:orchestrator-dashboard',
-  'smoke:frontend:session-recency', 'test:orchestrator'
+  'smoke:frontend:session-recency', 'smoke:frontend:orchestrator-work', 'test:orchestrator'
 ];
 if (require.main === module) {
   for (const script of checks) {

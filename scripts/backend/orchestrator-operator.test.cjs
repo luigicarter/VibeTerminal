@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createOrchestrator } = require('../../backend/orchestrator.cjs');
+const { createOperatorObservations } = require('../../backend/orchestratorOperator.cjs');
 
 // Script the model, not the authorization/observation/dispatch implementation.
 const reply = content => ({ choices: [{ message: { content }, finish_reason: 'stop' }] });
@@ -72,6 +73,34 @@ test('fresh Codex reads unknown state, sends a composed task, then verifies with
   assert.deepEqual(f.effects.map(action => action.kind), ['send_prompt']);
   assert.equal(f.effects[0].text, 'Review the latest changes. Report concrete defects.');
   assert.ok(f.effects[0].requestId, 'Delivery must be attributed to the application request.');
+});
+
+for (const kind of ['codex', 'openfusion']) test(`${kind} can finish from a post-action read while runtime telemetry advances`, async t => {
+  const f = await fixture(t, kind);
+  f.sessions[0].revision = 1;
+  const result = await f.run([read(), body => operation(body, 'send_prompt', { text: 'Review the latest changes.' }),
+    read(), body => { f.sessions[0].revision++; return finish(body); }, reply('Review started.')]);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(f.reads, 2); assert.equal(f.effects.length, 1);
+});
+
+test('finishing tolerates telemetry churn without relaxing effect or token authority', () => {
+  let time = 100;
+  const observations = createOperatorObservations({ now: () => time });
+  const target = { id: 'pane', generation: 'g1', revision: 1, kind: 'codex' };
+  const screen = { ok: true, sequence: 10, inputRevision: 2 };
+  const observe = () => observations.observe(target, screen);
+  const finishAction = { kind: 'finish_terminal' };
+  const old = observe(), consumed = observe();
+  observations.consume(observations.authorize(consumed, target, { kind: 'terminal_interact', observationSequence: 10, inputRevision: 2 }), target, { kind: 'terminal_interact' });
+  const fresh = observe(); target.revision++;
+  assert.throws(() => observations.authorize(fresh, target, { kind: 'terminal_interact', observationSequence: 10, inputRevision: 2 }), /terminal changed/);
+  assert.throws(() => observations.authorize(consumed, target, finishAction), /missing, used, or stale/);
+  assert.throws(() => observations.authorize(old, target, finishAction), /after the last action/);
+  assert.throws(() => observations.authorize(fresh, { ...target, generation: 'g2' }, finishAction), /missing, used, or stale/);
+  assert.ok(observations.authorize(fresh, target, finishAction));
+  time += 30001;
+  assert.throws(() => observations.authorize(fresh, target, finishAction), /missing, used, or stale/);
 });
 
 test('menu navigation permits multiple submissions using fresh reads even if output sequence is unchanged', async t => {
@@ -180,13 +209,65 @@ test('unknown delivery cannot be replayed under a new step or reported completed
   assert.equal(result.ok, false, JSON.stringify(result)); assert.equal(f.effects.length, 1);
 });
 
-test('native interrupt requires observed output and input revisions', async t => {
+test('native interrupt rejects an explicit mismatched revision and preserves observed evidence', async t => {
   const f = await fixture(t);
-  const result = await f.run([read(), body => { const action = JSON.parse(operation(body, 'interrupt').choices[0].message.tool_calls[0].function.arguments); delete action.inputRevision; return call(action); },
+  const result = await f.run([read(), body => operation(body, 'interrupt', { inputRevision: 999 }),
     body => { assert.equal(latest(body).ok, false); assert.equal(f.effects.length, 0); return read(); },
     body => operation(body, 'interrupt'), read(), finish, reply('Stopped the terminal.')], { text: 'Interrupt the running task in Work and verify it stopped.' });
   assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(f.effects.length, 1);
   assert.equal(f.effects[0].kind, 'interrupt'); assert.equal(f.effects[0].operator, true); assert.equal(f.effects[0].observationSequence, 10); assert.equal(f.effects[0].inputRevision, 2);
+});
+
+for (const kind of ['send_prompt', 'interrupt']) for (const omitted of [['observationSequence', 'inputRevision'], ['inputRevision'], ['observationSequence']]) {
+  test(`${kind} derives omitted ${omitted.join('/')} from its token without changing step replay identity`, async t => {
+    const f = await fixture(t); let original;
+    const result = await f.run([read(), body => {
+      original = JSON.parse(operation(body, kind, { ...(kind === 'send_prompt' && { text: 'Review the latest changes.' }), stepId: 'derived-once' }).choices[0].message.tool_calls[0].function.arguments);
+      for (const field of omitted) delete original[field];
+      return call(original);
+    }, body => { assert.equal(latest(body).ok, true, JSON.stringify(latest(body))); return call(original); },
+    body => { assert.equal(latest(body).ok, true, 'An exact replay returns its receipt despite the consumed observation token.'); return read(); }, finish, reply('Done.')]);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(f.effects.length, 1);
+    assert.equal(f.effects[0].observationSequence, 10);
+    assert.equal(f.effects[0].inputRevision, 2);
+    assert.equal(f.effects[0].operator, true);
+    assert.ok(f.effects[0].requestId);
+  });
+}
+
+test('derived counters require valid fresh evidence and never replace supplied mismatches', () => {
+  let time = 100;
+  const observations = createOperatorObservations({ now: () => time });
+  const target = { id: 'pane', generation: 'g1', revision: 1, kind: 'codex' };
+  const token = observations.observe(target, { sequence: 0, inputRevision: 0 });
+  for (const kind of ['send_prompt', 'interrupt']) {
+    assert.ok(observations.authorize(token, target, { kind }));
+    for (const field of ['observationSequence', 'inputRevision']) for (const value of [1, null, -1])
+      assert.throws(() => observations.authorize(token, target, { kind, [field]: value }), /screen sequence and input revision/);
+    assert.throws(() => observations.authorize(token, { ...target, revision: 2 }, { kind }), /terminal changed/);
+    assert.throws(() => observations.authorize(token, { ...target, generation: 'g2' }, { kind }), /missing, used, or stale/);
+    for (const screen of [{ sequence: 0 }, { inputRevision: 0 }, { sequence: -1, inputRevision: 0 }, { sequence: 0, inputRevision: -1 }])
+      assert.throws(() => observations.authorize(observations.observe(target, screen), target, { kind }), /screen sequence and input revision/);
+  }
+  assert.throws(() => observations.authorize(token, target, { kind: 'terminal_interact' }), /screen sequence and input revision/);
+  time += 30001;
+  assert.throws(() => observations.authorize(token, target, { kind: 'send_prompt' }), /missing, used, or stale/);
+});
+
+test('a write using derived evidence remains unconfirmed and cannot be replayed with a fresh step', async t => {
+  const f = await fixture(t); let original;
+  f.dispatch = () => ({ ok: false, status: 'unknown', error: 'No acknowledgment.' });
+  const result = await f.run([read(), body => {
+    original = JSON.parse(operation(body, 'send_prompt', { text: 'Review changes.', stepId: 'unknown-derived' }).choices[0].message.tool_calls[0].function.arguments);
+    delete original.observationSequence; delete original.inputRevision; return call(original);
+  }, () => call(original), body => { assert.equal(latest(body).status, 'unknown'); return read(); },
+  body => operation(body, 'send_prompt', { text: 'Review changes.', stepId: 'another-step' }),
+  body => { assert.match(latest(body).error, /unconfirmed/); return read(); },
+  body => operation(body, 'finish_terminal', { outcome: 'blocked', text: 'Submission remains unconfirmed.' }), reply('Submission remains unconfirmed.')]);
+  assert.equal(result.ok, false);
+  assert.equal(f.effects.length, 1);
+  assert.equal(f.effects[0].inputRevision, 2);
 });
 
 test('completion after an action requires another read, not the consumed pre-action observation', async t => {

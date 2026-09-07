@@ -217,6 +217,83 @@ test('silence fallback cannot end a manual hold or an obsolete capture', async t
   assert.equal(f.diagnostics.filter(x => x.stage === 'cancel').at(-1).reason, 'cancelled');
 });
 
+test('question followup starts a temporary detector with wake preference off and stops after reply', async t => {
+  const f = fixture({ text: 'yes' }); t.after(() => f.controller.dispose());
+  f.settings.handsFreeEnabled = false; await f.activate();
+  const question = { id: 'q1', requestId: 'r1', text: 'Continue.' };
+  f.relayState.tasks = [{ requestId: 'r1', status: 'needs-answer', question }];
+  await f.controller.speak({ origin: 'voice', requestId: 'r1', text: question.text, question, responseTurn: 'listen' });
+  await until(() => f.controller.getState().handsFreeStatus === 'ready');
+  assert.equal(f.starts, 1); assert.equal(f.settings.handsFreeEnabled, false);
+  f.frame(100, true); assert.equal(f.controller.getState().recordingSource, 'answer');
+  f.frame(1200); await until(() => f.sent.length && f.stopped);
+  assert.deepEqual(f.sent[0], { text: 'yes', origin: 'voice', replyToRequestId: 'r1', questionId: 'q1' });
+  assert.equal(f.controller.getState().handsFreeStatus, 'off');
+  const packets = f.packets.length; f.capture(); assert.equal(f.packets.length, packets, 'Temporary followup never enables wake detection');
+});
+
+test('temporary detector startup cannot reopen a dismissed answer window', async t => {
+  let start;
+  const f = fixture({ start: () => new Promise(resolve => { start = resolve; }) });
+  t.after(() => f.controller.dispose()); f.settings.handsFreeEnabled = false; await f.activate();
+  const question = { id: 'q1', requestId: 'r1', text: 'Choose.' }; f.relayState.tasks = [{ requestId: 'r1', status: 'needs-answer', question }];
+  await f.controller.speak({ origin: 'voice', requestId: 'r1', text: question.text, question });
+  await until(() => start); f.controller.configure({ dismiss: true }); await tick(); start(); await tick();
+  assert.equal(f.controller.getState().phase, 'listening'); assert.equal(f.controller.getState().handsFreeStatus, 'off');
+  const packets = f.packets.length; f.capture(); assert.equal(f.packets.length, packets);
+});
+
+test('temporary detector failure preserves the question for a scoped Space answer', async t => {
+  const f = fixture({ text: 'yes', start: async () => { throw Error('Detector unavailable'); } });
+  t.after(() => f.controller.dispose()); f.settings.handsFreeEnabled = false; await f.activate();
+  const question = { id: 'q1', requestId: 'r1', text: 'Choose.' }; f.relayState.tasks = [{ requestId: 'r1', status: 'needs-answer', question }];
+  await f.controller.speak({ origin: 'voice', requestId: 'r1', text: question.text, question });
+  await until(() => f.controller.getState().handsFreeStatus === 'unavailable');
+  assert.equal(f.controller.getState().phase, 'awaiting-answer'); assert.match(f.controller.getState().handsFreeError, /Space/);
+  f.controller.configure({ pushToTalk: 'start', holdId: 'answer' }); f.capture(300, .1);
+  f.controller.configure({ pushToTalk: 'stop', holdId: 'answer' }); await until(() => f.sent.length);
+  assert.deepEqual(f.sent[0], { text: 'yes', origin: 'voice', replyToRequestId: 'r1', questionId: 'q1' });
+});
+
+test('spoken dismissal of native permission returns to wake standby without approving or disabling', async t => {
+  const f = fixture({ text: 'stop listening' }); t.after(() => f.controller.dispose()); await f.activate();
+  const interaction = { id: 'p1', sessionId: 'pane', generation: 1, revision: 2, state: 'pending', kind: 'permission', detail: 'Allow the command?' };
+  f.relayState.requests = [interaction]; await f.controller.announceInteraction(interaction);
+  f.frame(300, true); f.frame(1200); await until(() => f.uploads.length && f.controller.getState().phase === 'listening');
+  assert.equal(f.dispatched.length, 0); assert.equal(f.sent.length, 0);
+  assert.equal(interaction.state, 'pending'); assert.equal(f.settings.handsFreeEnabled, true);
+  f.frame(); assert.equal(f.packets.at(-1).mode, 'wake');
+});
+
+test('dismissal fences late automatic completion and late question playback', async t => {
+  let complete;
+  const f = fixture({ manualPlayback: true, analyze: input => new Promise(resolve => { complete = () => resolve({ ...input, probability: .99, complete: true }); }) });
+  t.after(() => f.controller.dispose()); await f.activate();
+  f.frame(100, true, true); f.frame(300, true); f.frame(200);
+  f.controller.configure({ dismiss: true }); complete(); await tick(); f.frame(1500);
+  assert.equal(f.uploads.length, 0);
+  const question = { id: 'q1', requestId: 'r1', text: 'Choose.' }; f.relayState.tasks = [{ requestId: 'r1', status: 'needs-answer', question }];
+  const speech = f.controller.speak({ origin: 'voice', requestId: 'r1', text: question.text, question });
+  await until(() => f.controller.getState().phase === 'speaking');
+  const replyId = f.controller.getState().replyId;
+  f.controller.configure({ dismiss: true }); f.controller.configure({ playbackDone: replyId });
+  assert.equal((await speech).status, 'cancelled');
+  assert.equal(f.controller.getState().phase, 'listening');
+  assert.equal(f.relayState.tasks[0].question.id, 'q1');
+});
+
+test('a replaced structured question cannot degrade into a generic followup after playback', async t => {
+  const f = fixture({ manualPlayback: true }); t.after(() => f.controller.dispose()); await f.activate();
+  const question = { id: 'old', requestId: 'r1', text: 'Choose the old option.' };
+  f.relayState.tasks = [{ requestId: 'r1', status: 'needs-answer', question }];
+  const speech = f.controller.speak({ origin: 'voice', requestId: 'r1', text: question.text, question, responseTurn: 'listen' });
+  await until(() => f.controller.getState().phase === 'speaking');
+  // Wait for the renderer's actual PCM delivery, then replace the identity before ACK.
+  await tick(); f.relayState.tasks[0].question = { ...question, id: 'new' };
+  f.controller.configure({ playbackDone: f.controller.getState().replyId }); await speech;
+  assert.equal(f.controller.getState().phase, 'listening');
+});
+
 test('explicit send finishes only its current automatic recording and cannot end a manual hold', async t => {
   const f = fixture(); t.after(() => f.controller.dispose()); await f.activate();
   f.frame(100, true, true); f.frame(300, true);

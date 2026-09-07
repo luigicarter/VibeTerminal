@@ -49,8 +49,8 @@ permissionModule.createMicrophonePermission=options=>permissionFactory({...optio
 const handle=electron.ipcMain.handle.bind(electron.ipcMain);
 // Use the same deterministic interpretation stand-in as the backend integration
 // suite; recognition, recording, transport and playback remain real here.
-const orchestration=require(${JSON.stringify(path.join(root, 'backend/orchestrator.cjs'))});const createRelay=orchestration.createOrchestrator;
-orchestration.createOrchestrator=options=>createRelay({...options,interpretIntent:require(${JSON.stringify(path.join(root, 'scripts/backend/orchestrator-test-intent.cjs'))}).interpretTestIntent});
+const orchestration=require(${JSON.stringify(path.join(root, 'backend/orchestrator.cjs'))});const createRelay=orchestration.createOrchestrator;let qaRelay;
+orchestration.createOrchestrator=options=>(qaRelay=createRelay({...options,interpretIntent:require(${JSON.stringify(path.join(root, 'scripts/backend/orchestrator-test-intent.cjs'))}).interpretTestIntent}));
 electron.ipcMain.handle=(channel,listener)=>handle(channel,async(event,...args)=>{ const value=await listener(event,...args); if(channel==='voice:configure')log({channel,payload:args[0],value}); return value; });
 const surface=require(${JSON.stringify(path.join(root, 'backend/voiceOverlayWindow.cjs'))}); const original=surface.createVoiceOverlayWindow;
 surface.createVoiceOverlayWindow=options=>original({...options,BrowserWindow:class extends options.BrowserWindow{constructor(config){super(config);log({nativeOptions:{width:config.width,height:config.height,frame:config.frame,transparent:config.transparent,alwaysOnTop:config.alwaysOnTop,focusable:config.focusable,backgroundThrottling:config.webPreferences.backgroundThrottling}});this.on('show',()=>log({unexpectedNativeAudioShow:true}));}}});
@@ -78,7 +78,7 @@ globalThis.fetch=async(url,options={})=>{
  }
  throw Error('Fixture blocked network: '+url);
 };
-setInterval(()=>{const all=electron.BrowserWindow.getAllWindows();fs.writeFileSync(${JSON.stringify(stateFile)},JSON.stringify(all.map(w=>({id:w.id,webContentsId:w.webContents.id,url:w.webContents.getURL(),visible:w.isVisible(),bounds:w.getBounds()}))));if(fs.existsSync(${JSON.stringify(commandFile)})){const command=JSON.parse(fs.readFileSync(${JSON.stringify(commandFile)},'utf8'));fs.unlinkSync(${JSON.stringify(commandFile)});if(command.closeVoice)all.find(w=>w.webContents.getURL().includes('surface=voice'))?.close();}},100).unref();
+setInterval(()=>{const all=electron.BrowserWindow.getAllWindows();fs.writeFileSync(${JSON.stringify(stateFile)},JSON.stringify(all.map(w=>({id:w.id,webContentsId:w.webContents.id,url:w.webContents.getURL(),visible:w.isVisible(),bounds:w.getBounds()}))));if(fs.existsSync(${JSON.stringify(commandFile)})){const command=JSON.parse(fs.readFileSync(${JSON.stringify(commandFile)},'utf8'));fs.unlinkSync(${JSON.stringify(commandFile)});if(command.closeVoice)all.find(w=>w.webContents.getURL().includes('surface=voice'))?.close();if(command.question)log({fixtureQuestion:qaRelay.ingestInteraction(command.question)});if(command.resolveQuestion)log({fixtureQuestionResolved:qaRelay.resolveInteraction(command.resolveQuestion)});}},100).unref();
 require(${JSON.stringify(path.join(root, 'backend/main.cjs'))});
 `);
 let child, cdp, voice;
@@ -144,7 +144,26 @@ async function screenshot(client, name) { if (hidden) { result.skippedScreenshot
   assert.equal(indicator.width,112);assert.equal(indicator.height,112);assert.equal(indicator.inside,true);assert.equal(indicator.background,'rgba(0, 0, 0, 0)');
   if (hidden) { result.skippedScreenshots ||= []; result.skippedScreenshots.push('microphone.png'); } else { const micShot=await cdp.send('Page.captureScreenshot',{format:'png',clip:{x:indicator.x,y:indicator.y,width:indicator.width,height:indicator.height,scale:1}});fs.writeFileSync(path.join(output,'microphone.png'),Buffer.from(micShot.data,'base64')); }
   record('112-transparent-microphone-inside-app-hidden-native-audio', { indicator, ...native, options: opts });
-  await click('[aria-label="Hide microphone indicator; keep listening"]');
+  const fixtureQuestion = { id: 'qa-dismiss-question', sessionId: 'qa-isolated-terminal', generation: 'qa-generation', revision: 1, kind: 'question', questions: [{ id: 'choice', question: 'Which fixture option should I use?', options: [{ label: 'First' }, { label: 'Second' }] }] };
+  const beforeDismiss = await cdp.eval('window.vibe.orchestrator.getState()');
+  fs.writeFileSync(commandFile, JSON.stringify({ question: fixtureQuestion }));
+  await until(async () => { const s = await cdp.eval('window.vibe.voice.getState()'); return ['awaiting-answer', 'recording'].includes(s.phase) && s.request?.id === fixtureQuestion.id; }, 'native question answer window before dismissal');
+  const pendingBeforeDismiss = (await cdp.eval('window.vibe.orchestrator.getState()')).requests.find(request => request.id === fixtureQuestion.id);
+  assert.equal(pendingBeforeDismiss.state, 'pending');
+  await click('[aria-label="Dismiss voice conversation"]');
+  const dismissed = await until(async () => { const s = await cdp.eval('window.vibe.voice.getState()'); return s.phase === 'listening' && s.handsFreeStatus === 'off' && s; }, 'dismissed voice returns to standby');
+  assert.equal(dismissed.listening, true); assert.equal(dismissed.indicatorVisible, true); assert.equal(dismissed.request, undefined);
+  assert.equal(await cdp.eval('Boolean(document.querySelector(".voice-indicator"))'), true);
+  const afterDismiss = await cdp.eval('window.vibe.orchestrator.getState()');
+  assert.equal(afterDismiss.settings.handsFreeEnabled, beforeDismiss.settings.handsFreeEnabled);
+  assert.equal(afterDismiss.enabled, beforeDismiss.enabled);
+  assert.deepEqual(afterDismiss.requests.find(request => request.id === fixtureQuestion.id), pendingBeforeDismiss);
+  assert.deepEqual(afterDismiss.receipts, beforeDismiss.receipts, 'Dismissal must not answer or dispatch terminal work');
+  assert(events().some(e => e.payload?.dismiss === true && e.value?.status === 'dismissed'));
+  record('dismiss-native-question-preserves-visible-standby-preference-and-pending-question', { dismissed, question: pendingBeforeDismiss, handsFreeEnabled: afterDismiss.settings.handsFreeEnabled });
+  fs.writeFileSync(commandFile, JSON.stringify({ resolveQuestion: fixtureQuestion }));
+  await until(() => events().some(e => e.fixtureQuestionResolved?.ok), 'fixture question cleanup');
+  assert.equal((await cdp.eval('window.vibe.voice.configure({hideOverlay:true})')).ok, true);
   await until(() => cdp.eval('!document.querySelector(".voice-indicator")'), 'hidden in-app indicator'); assert.equal((await cdp.eval('window.vibe.voice.getState()')).listening, true);
   await click('[aria-label="Show microphone"]');
   await until(() => cdp.eval('Boolean(document.querySelector(".voice-indicator"))'), 'main app indicator restored');

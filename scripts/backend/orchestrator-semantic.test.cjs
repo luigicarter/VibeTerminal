@@ -69,6 +69,7 @@ test('invalid interpretation is repaired once using original context, with both 
   assert.deepEqual(metadata(f.compiler[1]), metadata(f.compiler[0]));
   assert.equal(JSON.stringify(f.compiler[1]).includes('UNTRUSTED_REPAIR_MARKER'), false);
   assert.match(f.compiler[1].messages[0].content, /previous interpretation/);
+  assert.match(f.compiler[1].messages[0].content, /Validation failure: .*unexpected intent fields/i);
   assert.ok(Math.abs(f.relay.getState().usage.brain - 0.3) < 1e-9);
   await f.relay.flushDiagnostics();
   const log = fs.readFileSync(path.join(f.root, 'logs', 'orchestrator-errors.jsonl'), 'utf8');
@@ -76,6 +77,47 @@ test('invalid interpretation is repaired once using original context, with both 
   const events = log.trim().split('\n').map(JSON.parse).filter(event => event.stage === 'interpretation');
   assert.deepEqual(events.map(event => event.status), ['retry', 'repaired']);
   assert.match(events[0].error.message, /unexpected intent fields/);
+  assert.ok(f.compiler[1].messages[0].content.includes(`Validation failure: ${events[0].error.message}`));
+});
+
+test('opaque provider reasoning survives prose repair and tool exchanges only within its request', async t => {
+  const f = await fixture(t);
+  const proseDetails = [{ type: 'reasoning.encrypted', data: 'PRIVATE_PROSE_REASONING_MARKER', id: 'reasoning-1', format: 'provider-v1', index: 0 }];
+  const toolDetails = [
+    { type: 'reasoning.text', text: 'PRIVATE_TOOL_REASONING_MARKER', signature: 'opaque-signature', index: 0 },
+    { type: 'reasoning.encrypted', data: 'opaque+/=payload', id: 'reasoning-2', format: 'provider-v1', index: 1 }
+  ];
+  const premature = reply('I will show Codex 1.');
+  premature.choices[0].message.reasoning_details = proseDetails;
+  const toolReply = tools({ kind: 'focus_session' });
+  toolReply.choices[0].message.reasoning_details = toolDetails;
+  toolReply.choices[0].message.tool_calls[0].extra_content = { google: { thought_signature: 'PRIVATE_TOOL_SIGNATURE_MARKER' } };
+  const result = await f.run('Show Codex 1.', { goal: 'Show Codex 1.', actions: [{ kind: 'focus_session', targetIds: ['c1'] }] }, premature,
+    body => {
+      const prior = body.messages.find(message => message.role === 'assistant' && message.content === 'I will show Codex 1.');
+      assert.deepEqual(prior?.reasoning_details, proseDetails);
+      assert.match(body.messages.at(-1).content, /unfinished work/);
+      return toolReply;
+    }, body => {
+      const assistant = body.messages.filter(message => message.role === 'assistant');
+      assert.deepEqual(assistant.map(message => message.reasoning_details), [proseDetails, toolDetails]);
+      assert.deepEqual(assistant.at(-1).tool_calls, toolReply.choices[0].message.tool_calls);
+      assert.equal(body.messages.at(-1).tool_call_id, toolReply.choices[0].message.tool_calls[0].id);
+      return reply('Codex 1 is open.');
+    });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(f.effects.length, 1);
+  const privateMarker = /PRIVATE_(?:PROSE_REASONING|TOOL_REASONING|TOOL_SIGNATURE)_MARKER/;
+  assert.doesNotMatch(JSON.stringify(result), privateMarker);
+  assert.doesNotMatch(JSON.stringify(f.relay.getState()), privateMarker);
+  await f.run('Thanks.', context => { assert.doesNotMatch(JSON.stringify(context), privateMarker); return none; }, body => {
+    assert.doesNotMatch(JSON.stringify(body), privateMarker);
+    return reply('You’re welcome.');
+  });
+  await f.relay.flushDiagnostics();
+  const files = fs.readdirSync(f.root, { recursive: true }).map(file => path.join(f.root, file)).filter(file => fs.statSync(file).isFile());
+  assert.ok(files.some(file => file.endsWith('orchestrator-errors.jsonl')), 'Check persisted diagnostics as well as state.');
+  for (const file of files) assert.doesNotMatch(fs.readFileSync(file, 'utf8'), privateMarker, file);
 });
 
 test('persistent invalid interpretation and unknown targets fail closed after one repair', async t => {

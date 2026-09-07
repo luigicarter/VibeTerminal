@@ -30,7 +30,7 @@ const modulePath=${JSON.stringify(path.join(root, 'backend/orchestrator.cjs'))};
 const mod=require(modulePath),factory=mod.createOrchestrator;
 mod.createOrchestrator=options=>factory({...options,
  getSessions:async()=>{const c=control();const actual=await options.getSessions();return [...actual,...Array.from({length:c.count},(_,i)=>({id:'fixture-'+i,name:['API','UI','Tests','Docs','Build'][i]||('Long session '+i+' '+ 'description '.repeat(18)),kind:['codex','claude','gemini','opencode','qwen'][i%5],cwd:${JSON.stringify(output)},generation:'fixture-generation-'+i,started:true,status:['working','done','waiting','idle','error'][i%5],...(c.revisions['fixture-'+i]||{})}))];},
- readSession:async payload=>{while(control().hold.includes(payload.id))await new Promise(r=>setTimeout(r,20));return payload.id.startsWith('fixture-')?{ok:true,text:'Fixture observation',generation:payload.generation}:options.readSession(payload);}
+ readSession:async payload=>{while(control().hold.includes(payload.id))await new Promise(r=>setTimeout(r,20));const s=control().revisions[payload.id];return payload.id.startsWith('fixture-')?{ok:true,text:'Fixture observation',generation:payload.generation,...(s?.turnId&&s?.turnState==='completed'?{completedResult:{turnId:s.turnId,status:'completed',at:s.turnEndedAt,text:'Updated API route validation and added focused tests. Agent reports all checks passed.',source:'terminal-screen'}}:{})}:options.readSession(payload);}
 });
 require(${JSON.stringify(path.join(root, 'backend/main.cjs'))});
 `);
@@ -163,6 +163,33 @@ function smooth(values, low, high, label) { assert(values.some(v=>v.scale>low+.0
   await geometry('single-session');
   assert(await cdp.eval(`(()=>{const v=document.querySelector('.orchestrator-dashboard-viewport').getBoundingClientRect(),c=document.querySelector('.orchestrator-dashboard-cell').getBoundingClientRect();return Math.abs(c.x+c.width/2-v.x-v.width/2)<30&&Math.abs(c.y+c.height/2-v.y-v.height/2)<30})()`),'single bubble starts near center and can roam');
   await shot('single');
+  // Durable work records are observed turn endings, including work begun outside
+  // Orchestrator. A provisional response must not appear as completed work.
+  const workTime=Date.now();
+  writeControl({count:3,revisions:{
+    'fixture-0':{...native,name:'Fix API route validation',projectName:'API',cwd:output+'\\API',turnId:'api-work',turnState:'completed',turnStartedAt:workTime-60000,turnEndedAt:workTime-1000},
+    'fixture-1':{...native,provider:'claude',name:'Build settings screen',projectName:'Website',cwd:output+'\\Website',turnId:'website-work',turnState:'failed',turnStartedAt:workTime-50000,turnEndedAt:workTime-500},
+    'fixture-2':{...native,observation:'provisional',turnId:'unverified-work',turnState:'completed',turnStartedAt:workTime-50000,turnEndedAt:workTime-300}
+  }});
+  await refresh();await read('fixture-0');await release();
+  await click('.orchestrator-dashboard-tabs button:nth-child(2)');
+  await until(()=>cdp.eval(`document.querySelectorAll('.orchestrator-work tbody tr').length===2`),'two observed work records');
+  assert.equal(await cdp.eval(`document.querySelector('.orchestrator-dashboard').dataset.motion`),'false');
+  assert.deepEqual(await cdp.eval(`[...document.querySelectorAll('.orchestrator-work tbody tr')].map(row=>row.dataset.workStatus)`),['failed','completed']);
+  assert.equal(await cdp.eval(`document.querySelectorAll('.orchestrator-work select option').length`),3);
+  await cdp.send('Emulation.setDeviceMetricsOverride',{width:1440,height:1000,deviceScaleFactor:1,mobile:false});
+  await cdp.eval(`document.querySelector('.orchestrator-work details').open=true`);await shot('work-global');
+  await cdp.eval(`(()=>{const select=document.querySelector('.orchestrator-work select');select.value=[...select.options].find(option=>option.text.startsWith('API —')).value;select.dispatchEvent(new Event('change',{bubbles:true}))})()`);
+  await until(()=>cdp.eval(`document.querySelectorAll('.orchestrator-work tbody tr').length===1`),'project filtered work');
+  assert.match(await cdp.eval(`document.querySelector('.orchestrator-work tbody').textContent`),/Fix API route validation/);
+  await shot('work-project');
+  writeControl({count:0,revisions:{}});await refresh();
+  await cdp.eval(`(()=>{const select=document.querySelector('.orchestrator-work select');select.value='';select.dispatchEvent(new Event('change',{bubbles:true}))})()`);
+  await until(()=>cdp.eval(`document.querySelectorAll('.orchestrator-work tbody tr').length===2`),'closed terminal work retained');
+  assert.equal(await cdp.eval(`document.querySelectorAll('.orchestrator-work-open').length`),0);
+  assert.equal(await cdp.eval(`(document.querySelector('.orchestrator-work tbody').textContent.match(/Closed/g)||[]).length`),2);
+  const history=await cdp.eval(`window.vibe.orchestrator.dispatch({kind:'list_work'})`);assert.equal(history.records.length,2);
+  await shot('work-closed');record('work-history-global-project-closure-and-truth',{records:history.records,provisionalExcluded:true});
   await click('.orchestrator-nav-button');await click('[aria-label="Multi mode"]');assert(!await cdp.eval(`Boolean(document.querySelector('.orchestrator-view-host'))`));record('navigation-opens-and-closes-dashboard',true);
   result.pass=true;
 }catch(e){result.pass=false;result.error=e.stack;console.error(e.stack);process.exitCode=1;}

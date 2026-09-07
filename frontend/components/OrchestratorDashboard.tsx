@@ -4,9 +4,12 @@ import type { RelaySession } from "../orchestratorUi";
 import { DASHBOARD_STATUS_LABELS, dashboardLayout, dashboardProvider, dashboardRecency, dashboardScale, dashboardSessionOrder, dashboardSessionTitle, dashboardSessionVisible, dashboardStatus, dashboardTargeted, type DashboardStatus, type DashboardTarget } from "./orchestratorDashboardLayout";
 import { createBubbleMotion, stepBubbleMotion, type BubbleMotion } from "./orchestratorBubbleMotion";
 import "./orchestratorDashboard.css";
+import { OrchestratorWorkHistory } from "./OrchestratorWorkHistory";
+import type { WorkRecord } from "./orchestratorWorkHistoryModel";
 
 export interface OrchestratorDashboardProps {
   sessions: RelaySession[];
+  workHistory?: WorkRecord[];
   activeTargets: DashboardTarget[];
   busy: boolean;
   enabled: boolean;
@@ -14,7 +17,9 @@ export interface OrchestratorDashboardProps {
   onOpenSession(id: string): void;
 }
 
-export function OrchestratorDashboard({ sessions, activeTargets, busy, enabled, visible, onOpenSession }: OrchestratorDashboardProps) {
+export function OrchestratorDashboard({ sessions, workHistory = [], activeTargets, busy, enabled, visible, onOpenSession }: OrchestratorDashboardProps) {
+  const [view, setView] = useState<"sessions" | "work">("sessions");
+  const liveVisible = visible && view === "sessions";
   const viewport = useRef<HTMLDivElement>(null);
   const motion = useRef<{ key: string; bodies: BubbleMotion[] }>({ key: "", bodies: [] });
   const [size, setSize] = useState({ width: 0, height: 0 });
@@ -22,9 +27,9 @@ export function OrchestratorDashboard({ sessions, activeTargets, busy, enabled, 
   const [documentVisible, setDocumentVisible] = useState(() => !document.hidden);
   const eligible = useMemo(() => sessions.filter(dashboardSessionVisible), [sessions]);
   useLayoutEffect(() => {
-    if (!visible) { setOrder(null); return; }
+    if (!liveVisible) { setOrder(null); return; }
     setOrder(previous => dashboardSessionOrder(previous, eligible));
-  }, [visible, eligible]);
+  }, [liveVisible, eligible]);
   const renderedAt = Date.now();
   useEffect(() => {
     if (!visible) return;
@@ -42,7 +47,7 @@ export function OrchestratorDashboard({ sessions, activeTargets, busy, enabled, 
   const targetedCount = live.filter(session => dashboardTargeted(session, targets)).length;
   const layout = useMemo(() => dashboardLayout(size.width, live.length, size.height), [size.width, size.height, live.length]);
   useLayoutEffect(() => {
-    if (!visible || !viewport.current) return;
+    if (!liveVisible || !viewport.current) return;
     const element = viewport.current;
     const measure = () => {
       const style = getComputedStyle(element);
@@ -54,11 +59,11 @@ export function OrchestratorDashboard({ sessions, activeTargets, busy, enabled, 
     const observer = new ResizeObserver(measure);
     observer.observe(element);
     return () => observer.disconnect();
-  }, [visible]);
+  }, [liveVisible]);
   const logicalWidth = layout.fitScale ? size.width / layout.fitScale : 0;
   const logicalHeight = layout.fitScale ? size.height / layout.fitScale : 0;
   useLayoutEffect(() => {
-    if (!visible || !viewport.current || !layout.fitScale) return;
+    if (!liveVisible || !viewport.current || !layout.fitScale) return;
     const cells = Array.from(viewport.current.querySelectorAll<HTMLElement>(".orchestrator-dashboard-cell"));
     const key = `${liveIdentity}:${logicalWidth}:${logicalHeight}:${layout.columns}`;
     const seed = () => cells.map((cell, index) => createBubbleMotion(cell.dataset.dashboardSessionId!,
@@ -104,19 +109,24 @@ export function OrchestratorDashboard({ sessions, activeTargets, busy, enabled, 
     update();
     preference.addEventListener("change", update);
     return () => { cancelAnimationFrame(frame); preference.removeEventListener("change", update); };
-  }, [visible, documentVisible, liveIdentity, layout, logicalWidth, logicalHeight]);
+  }, [liveVisible, documentVisible, liveIdentity, layout, logicalWidth, logicalHeight]);
   const legend: DashboardStatus[] = ["working", "done", "needs-you", "idle", "error"];
   for (const status of ["starting", "pending", "response", "unknown"] as DashboardStatus[]) {
     if (live.some(session => dashboardStatus(session) === status)) legend.push(status);
   }
-  return <section className="orchestrator-dashboard" hidden={!visible} aria-label="Orchestrator dashboard" data-visible={visible} data-motion={visible && documentVisible}>
+  return <section className="orchestrator-dashboard" hidden={!visible} aria-label="Orchestrator dashboard" data-visible={visible} data-motion={liveVisible && documentVisible}>
     <header className="orchestrator-dashboard-header">
       <div><h1>Orchestrator</h1><p>{live.length} live {live.length === 1 ? "session" : "sessions"}</p></div>
       <div className="orchestrator-dashboard-scope" title="Sessions addressed by Vibe during the current request" aria-live="polite">
         <Sparkles size={16} aria-hidden="true" /> {targetedCount ? `Vibe handling ${targetedCount} ${targetedCount === 1 ? "session" : "sessions"}` : busy ? "Vibe is thinking" : enabled ? "Vibe is ready" : "Orchestrator is off"}
       </div>
     </header>
-    <div className="orchestrator-dashboard-viewport" ref={viewport}>
+    <nav className="orchestrator-dashboard-tabs" aria-label="Dashboard view">
+      <button type="button" aria-pressed={view === "sessions"} onClick={() => setView("sessions")}>Live sessions</button>
+      <button type="button" aria-pressed={view === "work"} onClick={() => setView("work")}>Work history{workHistory.length ? ` (${workHistory.length})` : ""}</button>
+    </nav>
+    {view === "work" && <OrchestratorWorkHistory records={workHistory} sessions={sessions} onOpenSession={onOpenSession} />}
+    <div className="orchestrator-dashboard-viewport" ref={viewport} hidden={!liveVisible}>
       {live.length === 0 ? <div className="orchestrator-dashboard-empty"><Sparkles size={30} aria-hidden="true" /><h2>Your sessions, together</h2><p>Start a session in a project to see it here.</p></div> :
         <div className="orchestrator-dashboard-field" style={{ width: size.width, height: size.height }}><div className="orchestrator-dashboard-grid" style={{ width: logicalWidth, height: logicalHeight, transform: `scale(${layout.fitScale})`, "--bubble-diameter": `${layout.diameter}px`, "--bubble-slot": `${layout.slot}px` } as CSSProperties}>
           {live.map((session) => {
@@ -139,6 +149,6 @@ export function OrchestratorDashboard({ sessions, activeTargets, busy, enabled, 
           })}
         </div></div>}
     </div>
-    <footer className="orchestrator-dashboard-legend" aria-label="Session status legend">{legend.map(status => <span key={status} data-status={status}><i />{DASHBOARD_STATUS_LABELS[status]}</span>)}</footer>
+    <footer className="orchestrator-dashboard-legend" hidden={!liveVisible} aria-label="Session status legend">{legend.map(status => <span key={status} data-status={status}><i />{DASHBOARD_STATUS_LABELS[status]}</span>)}</footer>
   </section>;
 }

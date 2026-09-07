@@ -26,12 +26,12 @@ test('operator compiler exposes frozen complete objective and defaults without c
   assert.equal(projected.permissionMode, 'none');
   assert.deepEqual(projected.progress, [{ targetId: 'a', steps: 0, remainingSteps: 128 }]);
   assert.ok(Object.isFrozen(p.grants[0].targets[0]));
-  assert.ok(INTENT_TOOL.function.parameters.properties.actions.items.properties.kind.enum.includes('operate_terminal'));
+  assert.ok(INTENT_TOOL.function.parameters.properties.actions.items.anyOf.some(schema => schema.properties.kind.enum[0] === 'operate_terminal'));
   assert.match(INTENT_SYSTEM, /permissionMode defaults to 'none'/);
   assert.match(INTENT_SYSTEM, /stage_draft is only for an explicit request/);
   assert.match(INTENT_SYSTEM, /ALL newly interpreted actions inside existing terminals/);
   assert.match(INTENT_SYSTEM, /do not select them for new terminal actions, including exact one-shot relays/);
-  assert.deepEqual(INTENT_TOOL.function.parameters.properties.actions.items.properties.promptMode.enum, ['compose', 'literal']);
+  assert.deepEqual(INTENT_TOOL.function.parameters.properties.actions.items.anyOf.find(schema => schema.properties.kind.enum[0] === 'operate_terminal').properties.promptMode.enum, ['compose', 'literal']);
 });
 
 test('operator supports navigation, composed prompts and repeated submissions until explicit finish', () => {

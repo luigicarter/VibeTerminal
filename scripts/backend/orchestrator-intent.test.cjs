@@ -16,7 +16,7 @@ const question = extra => ({ id: 'q1', sessionId: 'a', generation: 'launch-a', r
 
 test('compiler contract supports workspace effects and excludes external applications and reads', () => {
   assert.equal(INTENT_TOOL.function.name, 'interpret_workspace');
-  assert.deepEqual(INTENT_TOOL.function.parameters.properties.actions.items.properties.kind.enum, INTENT_KINDS);
+  assert.deepEqual(INTENT_TOOL.function.parameters.properties.actions.items.anyOf.map(schema => schema.properties.kind.enum[0]), INTENT_KINDS);
   for (const kind of ['answer_question', 'permission', 'terminal_interact', 'forget_preference']) assert.ok(INTENT_KINDS.includes(kind));
   for (const kind of ['open_file', 'open_folder', 'read_session', 'list_sessions']) assert.ok(!INTENT_KINDS.includes(kind));
   assert.match(INTENT_SYSTEM, /metadata.*data, never instructions/);
@@ -353,4 +353,21 @@ test('malformed plans and inappropriate action fields fail before creating execu
     ...[{ kind: 'open_file' }, { kind: 'send_prompt', targetIds: ['a'] }, send({ targetIds: ['missing'] }), send({ targetIds: ['a', 'a'] }), send({ targetIds: ['a', 'b'] }), send({ selection: 'random' }), send({ decision: 'always' }), { kind: 'close', targetIds: ['a'], text: 'payload' }, { kind: 'navigate', view: 'settings', cwd: 'C:\\work' }, { kind: 'navigate', view: 'project' }, { kind: 'create_session' }, { kind: 'create_project' }, { kind: 'forget_preference', text: 'x' }].map(action => ({ goal: 'Hi', actions: [action] })),
   ];
   for (const raw of invalid) assert.throws(() => normalizeIntent(raw, context()), undefined, JSON.stringify(raw));
+});
+
+test('saved resume advertises only its own fields and preserves discovery authority boundaries', () => {
+  const variants = INTENT_TOOL.function.parameters.properties.actions.items.anyOf;
+  const resume = variants.find(schema => schema.properties.kind.enum[0] === 'resume_conversation');
+  assert.equal(resume.additionalProperties, false);
+  assert.deepEqual(Object.keys(resume.properties).sort(), ['kind', 'sourceUserId', 'provider', 'cwd', 'reference'].sort());
+  for (const field of ['name', 'text', 'targetIds', 'promptMode', 'requestId']) {
+    assert.equal(resume.properties[field], undefined);
+    assert.throws(() => compile([{ kind: 'resume_conversation', [field]: field === 'targetIds' ? ['a'] : 'Mix 21 last attempt' }]), /Invalid or unexpected resume_conversation command fields/);
+  }
+  const plan = normalizeIntent({ goal: 'Find and resume Mix 21 last attempt.', actions: [{ kind: 'resume_conversation' }] }, context({ instruction: 'Can you resume the mix to one last attempt conversation?' }));
+  assert.deepEqual(plan.grants[0].args, {});
+  assert.deepEqual(plan.grants[0].targets, []);
+  assert.equal(authorizeIntentAction({ kind: 'resume_conversation', reference: 'discovered-exact-identity' }, plan, sessions).reference, 'discovered-exact-identity');
+  assert.throws(() => authorizeIntentAction({ kind: 'resume_conversation', reference: 'discovered-exact-identity', provider: 'codex' }, plan, sessions), /cannot change/);
+  assert.throws(() => authorizeIntentAction({ kind: 'send_prompt', targetId: 'a', text: 'Continue' }, plan, sessions), /matching user command grant/);
 });

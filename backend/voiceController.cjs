@@ -4,6 +4,7 @@ const { RATE, wavFromSamples, createRecording, decodeSpeechAudio, shouldSpeak } 
 const { createLocalErrorAudio, ERROR_AUDIO_TEXT } = require('./localErrorAudio.cjs');
 const { matchAnswer, questionSpeech } = require('./voiceAnswers.cjs');
 const { spokenText } = require('./voiceText.cjs');
+const { isVoiceDismissal } = require('../shared/voiceDismissal.cjs');
 const { OpenRouterError, readOpenRouterResponse, classifyTransportError, upstreamErrorInfo } = require('./openRouterErrors.cjs');
 const { STT_MODEL, TTS_MODEL, TTS_VOICE, TTS_VOICES } = require('../shared/voiceConfig.cjs');
 // A push-to-talk hold shorter than this carries no command; it is a tap, not speech.
@@ -40,7 +41,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
   const snapshot = () => ({ ...state });
   const update = patch => { const previousPhase = state.phase; state = { ...state, ...patch }; emit(snapshot());
     for (const wake of speechWaiters) wake(); speechWaiters.clear();
-    if (state.phase !== previousPhase) { if (previousPhase === 'speaking' || state.phase === 'speaking') recentAudio = []; syncDetectionMode(true); }
+    if (state.phase !== previousPhase) { if (previousPhase === 'speaking' || state.phase === 'speaking') recentAudio = []; syncDetectionMode(true); queueMicrotask(() => { if (!disposed) void refreshHandsFree(); }); }
     if (deferredError && state.listening && state.phase === 'listening') {
       const pending = deferredError, scheduledEpoch = epoch; deferredError = null;
       queueMicrotask(() => { if (scheduledEpoch === epoch && enabled() && state.listening) void announceError(pending); });
@@ -75,7 +76,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
   }
   function resetRecording(reason = 'cancelled', stage = reason === 'cancelled' ? 'cancel' : 'finish') { captureDiagnostic(stage, reason); recording = null; turn = null; state.recordingSource = undefined; state.recordingId = undefined; state.finishHint = false; }
   function syncDetectionMode(force = false) {
-    const mode = state.listening && state.handsFreeStatus === 'ready' ? (recording ? turn?.manual ? null : 'vad' : state.phase === 'listening' ? 'wake' : state.phase === 'awaiting-answer' ? 'vad' : null) : null;
+    const mode = state.listening && state.handsFreeStatus === 'ready' ? (recording ? turn?.manual ? null : 'vad' : state.phase === 'listening' && getSettings().handsFreeEnabled ? 'wake' : state.phase === 'awaiting-answer' ? 'vad' : null) : null;
     if (force || mode !== detectionMode) { streamId++; detectionMode = mode; }
   }
   function stopInference() {
@@ -91,12 +92,13 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     update({ handsFreeStatus: 'unavailable', handsFreeError: 'Hands-free detection is unavailable. Use Space to talk, or toggle hands-free to retry.', ...(state.phase === 'recording' && !recording ? { phase: idlePhase(), error: 'Automatic recording cancelled. Hold Space to try again.' } : {}) });
   }
   async function refreshHandsFree() {
-    if (!state.listening || !enabled() || !getSettings().handsFreeEnabled) {
+    if (!state.listening || !enabled() || (!getSettings().handsFreeEnabled && !answerContext)) {
       stopInference();
       if (turn && !turn.manual) { resetRecording(); update({ phase: answerContext ? 'awaiting-answer' : idlePhase() }); }
       update({ handsFreeStatus: 'off', handsFreeError: null }); return { ok: true };
     }
     if (inference && state.handsFreeStatus === 'ready') return { ok: true };
+    if (state.handsFreeStatus === 'unavailable') return { ok: false, status: 'unavailable' };
     if (startupPromise) return startupPromise;
     const generation = ++inferenceGeneration;
     update({ handsFreeStatus: 'loading', handsFreeError: null });
@@ -185,20 +187,28 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
   }
   function accountAnswerSilence(duration) {
     answerSilenceMs += duration;
-    if (answerSilenceMs >= ANSWER_SILENCE_MS) { const taskQuestion = answerContext?.taskQuestion; answerSilenceMs = 0; answerContext = null; if (taskQuestion) { update({ phase: idlePhase(), transcript: '', request: undefined }); return; } update({ transcript: '' }); void announceError({ category: 'not-understood', origin: 'voice', operation: 'transcription' }); }
+    if (answerSilenceMs >= ANSWER_SILENCE_MS) { const quiet = answerContext?.taskQuestion || answerContext?.followup; answerSilenceMs = 0; answerContext = null; if (quiet) { update({ phase: idlePhase(), transcript: '', request: undefined }); return; } update({ transcript: '' }); void announceError({ category: 'not-understood', origin: 'voice', operation: 'transcription' }); }
   }
   function cancelSpeech({ requestId, preserveQueue = false } = {}) {
     if (requestId) {
       cancelledSpeechRequests.add(requestId);
       if (cancelledSpeechRequests.size > 512) cancelledSpeechRequests.delete(cancelledSpeechRequests.values().next().value);
       for (const wake of speechWaiters) wake(); speechWaiters.clear();
-      if (activeSpeechRequestId !== requestId && answerContext?.taskQuestion?.requestId !== requestId) return { ok: true };
+      if (activeSpeechRequestId !== requestId && answerContext?.taskQuestion?.requestId !== requestId && answerContext?.followup?.requestId !== requestId) return { ok: true };
     } else if (!preserveQueue) speechGeneration++;
     deferredError = null;
     epoch++; requestAbort?.abort(); requestAbort = null; clearTimeout(playbackTimer); playbackTimer = null; playbackResolve?.(); playbackResolve = null;
     if (activeReply) onAudio({ replyId: activeReply, sequence: 0, data: [], sampleRate: 24000, channels: 1, format: 's16le', cancelled: true, done: true });
     activeReply = null; activeSpeechRequestId = null; activeInteraction = null; answerContext = null; answerSilenceMs = 0; recentAudio = []; resetRecording();
     update({ phase: idlePhase(), replyId: undefined }); syncDetectionMode(true); return { ok: true };
+  }
+  function dismiss() {
+    // Dismiss this exchange, not the user's microphone preference or terminal work.
+    deferredInteractions.clear(); clearTimeout(deferredTimer); deferredTimer = null;
+    announcementPending = null;
+    cancelSpeech();
+    update({ transcript: '', reply: '', request: undefined, error: null, errorOperation: null });
+    return { ok: true, status: 'dismissed' };
   }
   async function requestAudio(url, options, abort) {
     try { return await request(url, options); }
@@ -349,6 +359,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       if (typeof data.text !== 'string') throw new OpenRouterError('upstream', response.status);
       const rawText = data.text.split(key).join('[REDACTED]').trim();
       const text = recordingSource === 'wake' ? rawText.replace(/^\s*hey[\s,!.:;—-]+vibe\b[\s,!.:;—-]*/i, '').trim() : rawText;
+      if (isVoiceDismissal(text)) return dismiss();
       if (recordingSource === 'wake' && !/[\p{L}\p{N}]/u.test(text)) {
         update({ phase: idlePhase(), transcript: '', error: 'No command heard. Say Hey Vibe and your command, or hold Space.' });
         return { ok: true, status: 'wake-only' };
@@ -422,6 +433,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       while (!queueCancelled() && (recording || (['transcribing', 'awaiting-answer'].includes(state.phase) && !message.answerFollowup))) await new Promise(resolve => speechWaiters.add(resolve));
       const queuedEpoch = epoch;
       if (queueCancelled() || (!message.preview && (!state.listening || !enabled()))) return { ok: false, status: 'cancelled' };
+      if (message.responseTurn === 'dismiss') return dismiss();
       if (message.question && !currentInteraction({ taskQuestion: message.question })) return { ok: false, status: 'resolved' };
       if (message.kind === 'interaction') {
         if (!currentInteraction({ interaction: identity })) return { ok: false, status: 'resolved' };
@@ -491,6 +503,10 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
           if (question?.id && question?.requestId && typeof question.text === 'string' && currentInteraction({ taskQuestion: question })) {
             answerContext = { taskQuestion: { ...question } }; answerSilenceMs = 0;
             update({ phase: 'awaiting-answer', replyId: undefined });
+          } else if (!message.question && message.responseTurn === 'listen' && message.requestId && !cancelledSpeechRequests.has(message.requestId)) {
+            const followup = { requestId: message.requestId, text: message.text, speechGeneration };
+            if (currentInteraction({ followup })) { answerContext = { followup }; answerSilenceMs = 0; }
+            update({ phase: answerContext && currentInteraction(answerContext) ? 'awaiting-answer' : idlePhase(), replyId: undefined });
           } else update({ phase: answerContext && currentInteraction(answerContext) ? 'awaiting-answer' : idlePhase(), replyId: undefined });
         }
         return { ok: true };
@@ -517,7 +533,8 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       captureToken = patch.captureToken; samplePosition = 0; recentAudio = []; syncDetectionMode(true);
       if (recording) { resetRecording(); answerContext = null; update({ phase: idlePhase(), error: 'Microphone changed. Please start your recording again.' }); }
     }
-    if (patch.refreshHandsFree) return refreshHandsFree();
+    if (patch.dismiss === true) return dismiss();
+    if (patch.refreshHandsFree) { if (state.handsFreeStatus === 'unavailable') update({ handsFreeStatus: 'off' }); return refreshHandsFree(); }
     if (Object.hasOwn(patch, 'finishRecording')) {
       if (!recording || !turn || turn.manual || !Number.isSafeInteger(patch.finishRecording) || patch.finishRecording !== turn.id) return { ok: true, status: 'stale-recording' };
       return finishRecording('manual-send');
@@ -536,6 +553,11 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     return { ok: true };
   }
   function currentInteraction(context) {
+    if (context.followup) {
+      const followup = context.followup;
+      const task = (orchestrator.getState?.().tasks || []).find(item => (item.requestId || item.id) === followup.requestId);
+      return followup.speechGeneration === speechGeneration && !cancelledSpeechRequests.has(followup.requestId) && !['cancelled', 'failed', 'paused'].includes(task?.status);
+    }
     if (context.taskQuestion) {
       const question = context.taskQuestion;
       return (orchestrator.getState?.().tasks || []).some(task => (task.requestId || task.id) === question.requestId && task.question?.id === question.id && !['cancelled', 'finished', 'failed', 'paused'].includes(task.status));
@@ -546,14 +568,23 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
   }
   async function askQuestion(context, prefix = '') {
     if (!currentInteraction(context)) return { ok: false, status: 'resolved' };
+    if (context.followup) return speak({ text: prefix + context.followup.text, responseTurn: 'listen', requestId: context.followup.requestId, origin: 'voice', answerFollowup: true });
     if (context.taskQuestion) return speak({ text: prefix + context.taskQuestion.text, question: context.taskQuestion, requestId: context.taskQuestion.requestId, kind: 'reply', origin: 'voice', answerFollowup: true });
+    const generation = speechGeneration;
     const result = await speak({ text: prefix + questionSpeech(context.interaction, context.index), kind: 'interaction', interaction: context.interaction, answerFollowup: !!context.answering });
-    if (result.ok && currentInteraction(context) && state.listening) { answerContext = context; answerSilenceMs = 0; update({ phase: 'awaiting-answer', request: { ...context.interaction, currentQuestion: context.index } }); }
+    if (result.ok && generation === speechGeneration && currentInteraction(context) && state.listening) { answerContext = context; answerSilenceMs = 0; update({ phase: 'awaiting-answer', request: { ...context.interaction, currentQuestion: context.index } }); }
     return result;
   }
   async function submitAnswer(text, current) {
     const context = answerContext;
     if (!context || !currentInteraction(context)) { answerContext = null; update({ phase: idlePhase() }); return { ok: false, status: 'resolved' }; }
+    if (context.followup) {
+      answerContext = null; answerSilenceMs = 0;
+      const input = { text, origin: 'voice' };
+      const result = await (orchestrator.enqueue ? orchestrator.enqueue(input) : orchestrator.send(input));
+      if (current === epoch && state.phase === 'thinking') update({ phase: idlePhase() });
+      return result;
+    }
     if (context.taskQuestion) {
       const question = context.taskQuestion; answerContext = null; answerSilenceMs = 0;
       const input = { text, origin: 'voice', replyToRequestId: question.requestId, questionId: question.id };

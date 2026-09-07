@@ -4,14 +4,15 @@ const { createVoiceController } = require('../../backend/voiceController.cjs');
 const { wavFromSamples } = require('../../backend/voiceAudio.cjs');
 const audioBase64 = wavFromSamples(Array(4000).fill(.1)).toString('base64');
 const tick = () => new Promise(setImmediate);
-async function fixture(t) {
+async function fixture(t, fixtureOptions = {}) {
   const inputs = [], spoken = [], tasks = [];
   let voice;
   voice = createVoiceController({
     orchestrator: { getState: () => ({ enabled: true, tasks }), enqueue: input => { inputs.push(input); return { ok: true, requestId: `r${inputs.length}`, status: 'queued' }; } },
     getKey: () => 'test',
+    inferenceFactory: () => ({ start: async () => { throw Error('No detector in this fixture'); }, dispose() {} }),
     fetch: async (url, options) => {
-      if (url.endsWith('/transcriptions')) return new Response(JSON.stringify({ text: 'yes do that' }));
+      if (url.endsWith('/transcriptions')) return new Response(JSON.stringify({ text: fixtureOptions.text ?? 'yes do that' }));
       spoken.push(JSON.parse(options.body).input);
       return new Response(Buffer.alloc(100), { headers: { 'content-type': 'audio/pcm' } });
     },
@@ -102,4 +103,52 @@ test('background task error waits for capture without interrupting a newer utter
   f.voice.configure({ pushToTalk: 'cancel', holdId: 'hold' });
   assert.equal((await errorSpeech).status, 'announced');
   assert.equal(f.voice.getState().phase, 'listening');
+});
+
+test('explicit response-turn metadata opens conversational followup without punctuation guessing', async t => {
+  const f = await fixture(t);
+  await f.voice.speak({ origin: 'voice', requestId: 'r1', text: 'Tell me which project to use.', responseTurn: 'listen' });
+  assert.equal(f.voice.getState().phase, 'awaiting-answer');
+  await f.voice.sendAudio({ audioBase64 });
+  assert.deepEqual(f.inputs[0], { text: 'yes do that', origin: 'voice' });
+  await f.voice.speak({ origin: 'voice', requestId: 'r2', text: 'All set?', responseTurn: 'complete' });
+  assert.equal(f.voice.getState().phase, 'listening');
+});
+
+test('conversational followup expires quietly and targeted cancellation closes its route', async t => {
+  const f = await fixture(t);
+  await f.voice.speak({ origin: 'voice', requestId: 'r1', text: 'Tell me more.', responseTurn: 'listen' });
+  for (let i = 0; i < 150; i++) f.voice.frames({ samples: Array(1600).fill(0), sampleRate: 16000 });
+  assert.equal(f.voice.getState().phase, 'listening');
+  assert.equal(f.voice.getState().error, null);
+  await f.voice.speak({ origin: 'voice', requestId: 'r2', text: 'Choose a project.', responseTurn: 'listen' });
+  f.voice.cancelSpeech({ requestId: 'r2' });
+  assert.equal(f.voice.getState().phase, 'listening');
+});
+
+test('spoken dismissal preserves task question and does not submit an answer', async t => {
+  const f = await fixture(t, { text: 'Hey Vibe, never mind.' });
+  const question = { id: 'q1', requestId: 'r1', text: 'Which terminal?' };
+  f.tasks.push({ requestId: 'r1', status: 'needs-answer', question });
+  await f.voice.speak({ origin: 'voice', requestId: 'r1', text: question.text, question });
+  assert.equal((await f.voice.sendAudio({ audioBase64 })).status, 'dismissed');
+  assert.equal(f.inputs.length, 0);
+  assert.equal(f.tasks[0].question.id, 'q1');
+  assert.equal(f.voice.getState().phase, 'listening');
+  assert.equal(f.voice.getState().listening, true);
+});
+
+test('UI dismissal aborts STT and fences queued speech and old manual releases', async t => {
+  const f = await fixture(t);
+  f.voice.configure({ pushToTalk: 'start', holdId: 'old' });
+  const queued = f.voice.speak({ origin: 'voice', requestId: 'r1', text: 'Choose.', responseTurn: 'listen' });
+  await tick();
+  assert.equal(f.voice.configure({ dismiss: true }).status, 'dismissed');
+  assert.equal((await queued).status, 'cancelled');
+  assert.equal(f.voice.configure({ pushToTalk: 'stop', holdId: 'old' }).status, 'idle');
+  const transcribing = f.voice.sendAudio({ audioBase64 });
+  f.voice.configure({ dismiss: true });
+  assert.equal((await transcribing).status, 'cancelled');
+  assert.equal(f.inputs.length, 0);
+  assert.equal(f.spoken.length, 0);
 });

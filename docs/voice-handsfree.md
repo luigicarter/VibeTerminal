@@ -7,8 +7,22 @@ Transcription and spoken replies still use the existing OpenRouter configuration
 
 Wake detection runs while idle, including when the workspace is in the background.
 It pauses during recording, transcription, assistant work, and playback. Space can
-interrupt playback. When a spoken question finishes, hands-free mode listens for
-the answer automatically and retains the question's pane/generation/revision identity.
+interrupt playback. When a spoken question finishes, voice listens for the answer
+automatically and retains the question's request or pane/generation/revision identity.
+The model explicitly marks whether its response needs a reply; punctuation does not
+decide microphone behavior. Questions and decisions open a fifteen-second answer
+window. Completed replies return to standby. Followup detection also runs temporarily
+when **Hands-free voice** is off, without enabling wake detection or changing the
+saved preference. If the detector cannot start, the indicator offers Space to answer.
+
+Say **never mind**, **that's all**, **stop listening**, **dismiss**, or **go back to
+sleep** to dismiss the voice exchange, or click the indicator's **X**. These phrases
+must be the whole utterance (an optional Vibe/Hey Vibe and “please” are accepted).
+They stop capture/playback and return to standby without submitting an answer,
+granting permission, cancelling terminal work, or changing the microphone preference.
+Pending questions remain in the conversation. Commands such as “dismiss the dialog”
+still go to the Orchestrator. The indicator stays visible; its menu separately offers
+**Hide microphone · keep listening**. Mute turns off the microphone.
 
 ## Models and processes
 

@@ -127,6 +127,10 @@ async function flush() { for (let i = 0; i < 12; i++) await Promise.resolve(); }
   assert.equal(captures, 1); assert.equal(players, 1);
   stateListener({ phase: 'listening', listening: true, indicatorVisible: true, handsFreeStatus: 'ready' }); tree = indicator.render();
   assert.match(text(tree), /Say Hey Vibe/);
+  stateListener({ phase: 'awaiting-answer', listening: true, indicatorVisible: true, handsFreeStatus: 'ready' }); tree = indicator.render();
+  assert.match(text(tree), /Listening for your answer.*never mind/);
+  stateListener({ phase: 'awaiting-answer', listening: true, indicatorVisible: true, handsFreeStatus: 'unavailable' }); tree = indicator.render();
+  assert.match(text(tree), /Automatic listening unavailable.*Space to answer/);
   stateListener({ phase: 'recording', listening: true, indicatorVisible: true, recordingSource: 'wake', recordingId: 31 }); tree = indicator.render();
   assert.match(text(tree), /speak naturally/); assert.doesNotMatch(text(tree), /release Space/);
   assert.equal(nodes(tree).find(node => node.props?.role === 'status').props.className, 'voice-status');
@@ -213,7 +217,9 @@ async function flush() { for (let i = 0; i < 12; i++) await Promise.resolve(); }
   stateListener({ phase: 'listening', listening: true, indicatorVisible: true, handsFreeStatus: 'unavailable', handsFreeError: 'Retry hands-free voice.' }); tree = indicator.render();
   assert.match(text(tree), /Retry hands-free voice.*Hold Space/);
   document.hidden = true; visibilityChanged(); tree = indicator.render(); assert.match(tree.props.className, /voice-hidden/);
-  nodes(tree).find(node => node.props?.className === 'voice-mini voice-hide').props.onClick(); await flush(); assert.ok(events.some(event => event?.hideOverlay === true));
+  const dismissVoice = nodes(tree).find(node => node.props?.className === 'voice-mini voice-hide');
+  assert.equal(dismissVoice.props['aria-label'], 'Dismiss voice conversation');
+  dismissVoice.props.onClick(); await flush(); assert.ok(events.some(event => event?.dismiss === true));
   assert.equal(nodes(tree).filter(node => node.type === 'button').length, 3);
   stateListener({ phase: 'listening', listening: true, indicatorVisible: false }); assert.equal(indicator.render(), null);
   assert.equal(captures, 1, 'Hiding main indicator never restarts capture');
