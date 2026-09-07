@@ -15,7 +15,7 @@ const checks = [
   'smoke:frontend:session-persistence', 'smoke:frontend:terminal-output',
   'test:frontend:terminal-links',
   'smoke:frontend:workspace-setups', 'smoke:frontend:orchestrator-history', 'smoke:frontend:conversation-live',
-  'smoke:frontend:workspace-dock', 'smoke:frontend:conversation-pages',
+  'smoke:frontend:workspace-dock', 'smoke:frontend:conversation-pages', 'smoke:frontend:orchestrator-tasks',
   'smoke:frontend:voice-experience', 'test:voice:capture', 'smoke:voice:native', 'smoke:voice:matrix', 'smoke:voice:workflow', 'smoke:frontend:orchestrator-dashboard',
   'smoke:frontend:session-recency', 'test:orchestrator'
 ];

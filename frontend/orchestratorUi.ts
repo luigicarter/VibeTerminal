@@ -29,10 +29,36 @@ export interface RelayResult {
     status?: string;
     [key: string]: unknown;
 }
+export interface RelayInput {
+    text: string;
+    origin: "text" | "voice";
+    targetId?: string;
+    replyToRequestId?: string;
+    questionId?: string;
+}
+export interface RelayTask {
+    id: string;
+    requestId: string;
+    sequence: number;
+    text: string;
+    origin: string;
+    status: "queued" | "routing" | "running" | "waiting-results" | "needs-answer" | "finished" | "failed" | "cancelled" | "paused";
+    label?: string;
+    targetIds: string[];
+    targets: { id: string; generation: string; cwd: string; name: string }[];
+    dependsOn: string[];
+    replyToRequestId?: string;
+    question?: { id: string; requestId: string; text: string };
+    createdAt: number;
+    updatedAt: number;
+    error?: string;
+    waitingReason?: string;
+}
 export interface RelayState {
     enabled: boolean;
     ready: boolean;
     busy: boolean;
+    tasks?: RelayTask[];
     activeTargets?: RelayActiveTarget[];
     phase: string;
     error?: string;
@@ -57,9 +83,11 @@ export interface RelayState {
         text: string;
         at: number;
         origin?: string;
+        requestId?: string;
     }[];
     receipts: {
         id: string;
+        requestId?: string;
         kind: string;
         status: string;
         text: string;
@@ -97,12 +125,11 @@ export interface RelayApi {
     }[]>;
     testConnection(): Promise<RelayResult>;
     setEnabled(enabled: boolean): Promise<RelayResult>;
-    send(input: {
-        text: string;
-        origin: "text" | "voice";
-        targetId?: string;
-    }): Promise<RelayResult>;
-    cancel(): Promise<RelayResult>;
+    enqueue(input: RelayInput): Promise<RelayResult>;
+    send(input: RelayInput): Promise<RelayResult>;
+    retry(input: { requestId: string }): Promise<RelayResult>;
+    cancel(input?: { requestId: string }): Promise<RelayResult>;
+    clearHistory(): Promise<RelayResult>;
     dispatch(input: Record<string, unknown>): Promise<RelayResult>;
     preferences(input: Record<string, unknown>): Promise<RelayResult>;
     showOverlay(): Promise<RelayResult>;

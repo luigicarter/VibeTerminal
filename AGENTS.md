@@ -4,6 +4,8 @@ vibeTerminal is an Electron + React desktop workspace for running local terminal
 
 ## Docs Index
 
+- `docs/orchestrator-tasks.md` - Request-owned conversations, immediate queueing, independent execution, result dependencies, dynamic targets, cancellation, saved history, and voice clarification routing.
+
 - `docs/orchestrator-controls.md` - Current semantic Orchestrator contract: natural user goals, scoped per-terminal commands, unfinished work, supplied answers, native text/key controls, private diagnostics, and verification boundaries.
 
 - `docs/orchestrator-dashboard.md` - Clear-glass session visualization, truthful request activity, stable motion/recency, and verification.

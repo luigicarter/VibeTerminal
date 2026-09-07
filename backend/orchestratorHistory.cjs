@@ -166,7 +166,7 @@ function createOrchestratorHistory(options = {}) {
     const reference = typeof input === 'string' ? input : input?.reference;
     const selection = typeof input === 'object' ? input?.selection : undefined;
     const identity = references.get(reference);
-    if (!identity) throw new Error('Unknown or expired conversation reference. List history again.');
+    if (!identity) { const error = new Error('Unknown or expired conversation reference. List history again.'); error.code = 'HISTORY_NEEDS_LIST'; throw error; }
     const result = await discover(identity);
     const thread = result.threads?.find(value => value.id === identity.id);
     if (result.status !== 'found' || !rootThread(thread)) throw new Error('Conversation is no longer available in its original store.');
@@ -239,6 +239,14 @@ function createOrchestratorHistory(options = {}) {
     const value = await fn(input);
     return { ...value, ok: value.status === 'found', ...(value.status !== 'found' && value.message ? { error: value.message } : {}), ...(value.messages ? { text: value.messages.map(message => `${message.role}: ${message.text}`).join('\n\n') } : {}) };
   }
-  return { list: input => result(list, input), read: input => result(read, input), search: input => result(search, input), resolve };
+  // Only the parent process may supply this identity, from its prior list cache.
+  // Rediscover the exact native ID in the original scope; titles never select it.
+  async function refresh(identity) {
+    if (!normalizedScope(identity) || !SAFE_ID.test(identity.id || '')) throw new Error('Invalid saved conversation identity.');
+    const discovered = await discover(identity);
+    if (discovered.status !== 'found' || !discovered.threads?.some(thread => thread.id === identity.id && rootThread(thread))) throw new Error('Conversation is no longer available in its original store.');
+    return { reference: remember(identity) };
+  }
+  return { list: input => result(list, input), read: input => result(read, input), search: input => result(search, input), resolve, refresh };
 }
 module.exports = { createOrchestratorHistory };

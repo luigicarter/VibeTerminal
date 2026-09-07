@@ -8,6 +8,7 @@ const path = require("node:path");
 // approval decisions. Its new command channel always captures a generation.
 function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
   const ui = new Map(), chats = new Map(), activity = new Map(), bodies = new Map(), interactions = new Map();
+  const completedResults = new Map();
   let projectPaths = [];
   let contentSequence = 0;
   function updateUi(items, roots = []) {
@@ -32,7 +33,8 @@ function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
       if (!old || old.signature !== signature || old.closed) {
         chats.set(p.id, { id: p.id, kind, cwd: p.cwd, generation: randomUUID(), revision: 1,
           status: "starting", observation: "observed", model: p.plannerModel || p.model,
-          mode: p.mode || p.runMode || "auto", signature, lastActivityAt: now(), closed: false });
+          mode: p.mode || p.runMode || "auto", signature, lastActivityAt: now(), closed: false,
+          turnState: "unknown", turnSequence: 0, turnActive: false });
         bodies.delete(p.id);
         interactions.delete(p.id);
       }
@@ -41,6 +43,13 @@ function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
     if (c) {
       message = { ...message, payload: { ...p, generation: message.type === "start" ? c.generation : (p.generation || c.generation) } };
       if (message.type === "mode") c.mode = p.mode;
+      if (["input", "steer"].includes(message.type)) {
+        // A second/human input makes attribution ambiguous; it must not let an
+        // unrelated result release an Orchestrator dependency.
+        if (c.turnActive || c.pendingInput) { c.activeActionId = undefined; c.pendingActionId = undefined; c.completionAttribution = "ambiguous"; }
+        else { c.pendingActionId = p.actionId; c.completionAttribution = p.actionId ? "action" : "observed"; }
+        c.pendingInput = true;
+      }
       if (message.type === "stop") { c.closed = true; c.status = "exited"; bodies.delete(p.id); interactions.delete(p.id); chats.delete(p.id); }
     }
     return message;
@@ -65,6 +74,11 @@ function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
     const c = chats.get(event.id);
     if (!c || (event.generation && event.generation !== c.generation)) return;
     c.revision++; c.lastActivityAt = t;
+    if (event.type === "action-result" && event.ok === false) {
+      if (c.pendingActionId === event.actionId) { c.pendingActionId = undefined; c.pendingInput = false; }
+      if (c.activeActionId === event.actionId) c.activeActionId = undefined;
+      if (c.completedActionId === event.actionId) c.completedActionId = undefined;
+    }
     const pending = interactions.get(event.id) || new Set();
     if (["permission", "question", "interaction-request"].includes(event.type)) {
       pending.add(String(event.requestId || event.interaction?.id || event.interaction?.kind || event.type));
@@ -75,10 +89,19 @@ function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
       pending.delete(String(event.requestId || event.interaction?.id || event.type.replace("-resolved", "")));
       if (!pending.size && c.status === "waiting") c.status = "idle";
     }
-    if (event.type === "engine-ready" && c.status === "starting") c.status = "idle";
+    if (event.type === "engine-ready" && c.status === "starting") { c.status = "idle"; c.turnState = "idle"; }
     // The hosts emit assistant-text/thinking; streamed work must not hide an
     // unresolved question or permission from another concurrent operation.
-    if (["turn-start", "tool-call", "delta", "text-delta", "assistant-text", "thinking"].includes(event.type)) c.status = pending.size ? "waiting" : "running";
+    if (["turn-start", "tool-call", "delta", "text-delta", "assistant-text", "thinking"].includes(event.type)) {
+      if (!c.turnActive) {
+        c.turnActive = true; c.turnSequence++;
+        c.turnId = event.turnId || event.providerTurnId || `${c.generation}:${c.turnSequence}`;
+        c.turnStartedAt = t; c.turnEndedAt = undefined; c.turnText = "";
+        c.activeActionId = c.pendingActionId; c.pendingActionId = undefined; c.pendingInput = false;
+      }
+      c.status = pending.size ? "waiting" : "running";
+      c.turnState = c.status;
+    }
     // Hosts retain interaction ownership through a planner result/error. Only
     // explicit resolution or interruption retires those outstanding requests.
     if (event.type === "interrupted") interactions.delete(event.id);
@@ -86,14 +109,25 @@ function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
     if (event.type === "result") c.status = event.subtype === "error" ? "failed" : pending.size ? "waiting" : "completed";
     if (event.type === "result" && event.gate) c.checkEvidence = { ...event.gate, observedAt: t };
     if (event.type === "error") c.status = "failed";
+    if (["permission", "question", "interaction-request"].includes(event.type)) c.turnState = "waiting";
+    if (["result", "error", "interrupted"].includes(event.type) && c.status !== "waiting") {
+      c.turnState = c.status; c.turnEndedAt = t;
+      c.completedTurnId = c.turnId; c.completedActionId = c.activeActionId;
+      c.turnActive = false; c.pendingInput = false;
+    }
     if (event.type === "closed") { c.status = "exited"; c.closed = true; bodies.delete(event.id); interactions.delete(event.id); chats.delete(event.id); }
     if (event.type === "tool-call") c.lastTool = { name: event.name || event.toolName, at: t };
     const text = event.delta || event.text || (event.type === "error" ? event.message : "");
     if (typeof text === "string" && text) {
+      if (["assistant-text", "delta", "text-delta", "result"].includes(event.type)) c.turnText = ((c.turnText || "") + text).slice(-16000);
       const b = bodies.get(event.id) || { text: "", sequence: 0, truncated: false };
       b.text += text + (typeof event.delta === "string" || ["delta", "text-delta"].includes(event.type) ? "" : "\n");
       if (b.text.length > 200000) { b.text = b.text.slice(-200000); b.truncated = true; }
       b.sequence = ++contentSequence; b.at = t; bodies.set(event.id, b);
+    }
+    if (["result", "error", "interrupted"].includes(event.type) && c.turnEndedAt && c.turnId) {
+      completedResults.set(JSON.stringify([c.id, c.generation, c.turnId]), { turnId: c.turnId, actionId: c.completedActionId, status: c.turnState, at: c.turnEndedAt, text: c.turnText || "" });
+      while (completedResults.size > 200) completedResults.delete(completedResults.keys().next().value);
     }
   }
   function list() {
@@ -124,11 +158,12 @@ function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
     const limit = Math.max(100, Math.min(32000, Number(target.maxChars) || 16000));
     return { id: s.id, generation: s.generation, source: "chat-events", sequence: b?.sequence || 0,
       observedAt: b?.at, text: b?.text.slice(-limit) || "", truncated: Boolean(b?.truncated || b?.text.length > limit),
-      complete: false, status: s.status };
+      complete: false, status: s.status, turnId: s.turnId, turnState: s.turnState,
+      completedResult: structuredClone(completedResults.get(JSON.stringify([s.id, s.generation, target.completedTurnId || s.completedTurnId]))) };
   }
   return { updateUi, outgoing, ingest, list, readChat, projectPaths: () => projectPaths, get: id => list().find(s => s.id === id),
-    forget: (id, generation) => { if (activity.get(id)?.generation === generation) activity.delete(id); if (chats.get(id)?.generation === generation) { chats.delete(id); bodies.delete(id); interactions.delete(id); } },
-    clear: () => { ui.clear(); chats.clear(); activity.clear(); bodies.clear(); interactions.clear(); } };
+    forget: (id, generation) => { if (activity.get(id)?.generation === generation) activity.delete(id); if (chats.get(id)?.generation === generation) { chats.delete(id); bodies.delete(id); interactions.delete(id); } for (const key of completedResults.keys()) { const identity = JSON.parse(key); if (identity[0] === id && identity[1] === generation) completedResults.delete(key); } },
+    clear: () => { ui.clear(); chats.clear(); activity.clear(); bodies.clear(); interactions.clear(); completedResults.clear(); } };
 }
 
 function installOrchestrator(options) {
@@ -140,6 +175,8 @@ function installOrchestrator(options) {
   const { createOrchestratorDelivery } = require("./orchestratorDelivery.cjs");
   const { createTerminalInput } = require("./orchestratorTerminalInput.cjs");
   const { createOrchestratorHistoryProcess } = require("./orchestratorHistoryProcess.cjs");
+  const { createWorkspaceIdentity } = require("./orchestratorWorkspaceIdentity.cjs");
+  const { createCompletionEvidence } = require("./orchestratorCompletion.cjs");
   const { createVoiceController } = require("./voiceController.cjs");
   const { createVoiceOverlayWindow } = require("./voiceOverlayWindow.cjs");
   const { createMicrophonePermission } = require("./microphonePermission.cjs");
@@ -147,6 +184,7 @@ function installOrchestrator(options) {
   const changes = require("./workspaceChanges.cjs");
   const directory = createSessionDirectory({ getRuntime });
   const observations = createTerminalObservation();
+  const completions = createCompletionEvidence({ getSession: id => directory.get(id), readObservation: target => observations.read(target) });
   const setups = createWorkspaceSetupStore({ userDataPath: app.getPath("userData") });
   const pendingUi = new Map(), pendingHost = new Map();
   let inventorySequence = 0, appliedInventorySequence = 0;
@@ -386,11 +424,21 @@ function installOrchestrator(options) {
     throw new Error(`Unsupported action: ${kind}`);
   }
   const relay = createOrchestrator({ userDataPath: app.getPath("userData"), secureStorage: safeStorage, fetch: options.fetch, interpretIntent: options.interpretIntent,
+    resolveWorkspaceIdentity: createWorkspaceIdentity(),
     getSessions: () => directory.list(),
-    readSession: async target => ["fusion", "openfusion"].includes(directory.get(target.id)?.kind) ? directory.readChat(target) : observations.read(target),
+    readSession: async target => {
+      const session = directory.get(target.id);
+      if (["fusion", "openfusion"].includes(session?.kind)) return directory.readChat(target);
+      const observation = await observations.read(target);
+      if (target.beforeSequence === undefined && session?.generation === target.generation) {
+        await completions.capture(session);
+        return { ...observation, turnId: session.turnId, turnState: session.turnState, completedResult: completions.get(session, target.completedTurnId) };
+      }
+      return observation;
+    },
     dispatchAction,
     getRoots: () => ({ documents: app.getPath("documents"), projects: [...new Set([...directory.projectPaths(), ...directory.list().map(s => s.cwd)].filter(Boolean))] }),
-    onCancel: () => { delivery.cancel(); voice?.cancelSpeech(); },
+    onCancel: input => { if (!input?.requestId) delivery.cancel(); voice?.cancelSpeech(input); },
     onUpstreamError: info => voice?.announceError(info),
     onChange: state => broadcast("orchestrator:state", { ...state, ready: state.ready && voiceReady, voiceReady }),
     onSpeak: event => {
@@ -554,7 +602,10 @@ function installOrchestrator(options) {
   guarded("orchestrator:test", testConnection, true);
   guarded("orchestrator:enabled", p => setEnabled(p.enabled));
   guarded("orchestrator:send", async p => { await refreshInventory(); return relay.send(p); });
-  guarded("orchestrator:cancel", () => { voice.cancelSpeech(); return relay.cancel(); });
+  guarded("orchestrator:enqueue", p => relay.enqueue(p));
+  guarded("orchestrator:retry", p => relay.retry(p));
+  guarded("orchestrator:history-clear", () => relay.clearHistory());
+  guarded("orchestrator:cancel", p => relay.cancel(p));
   guarded("orchestrator:dispatch", async p => { await refreshInventory(); return relay.dispatch(p); });
   guarded("orchestrator:preferences", p => relay.preferences(p));
   guarded("orchestrator:overlay", showIndicator);
@@ -637,7 +688,7 @@ function installOrchestrator(options) {
       if (pending && pending.engine === kind && pending.id === event.id && pending.generation === event.generation) pending.finish({ ...event, status: event.status || "acknowledged" }); }
     if (current && event.generation && current.generation !== event.generation) return false;
     directory.ingest(kind, event);
-    if (kind === "terminal") void observations.ingest(event).catch(() => {});
+    if (kind === "terminal") void observations.ingest(event).then(() => completions.capture(directory.get(event.id))).catch(() => {});
     if (event?.type === "interaction-request") relay.ingestInteraction(event.interaction || { ...event, id: event.requestId, sessionId: event.id });
     if (event?.type === "interaction-resolved" || event?.type === "question-resolved" || event?.type === "permission-resolved") {
       const resolved = relay.resolveInteraction({ id: event.requestId, sessionId: event.id, generation: event.generation, revision: event.revision });
@@ -648,23 +699,24 @@ function installOrchestrator(options) {
     return true;
   }
   function forgetTerminal(id, generation) {
-    delivery.forget(id, generation); observations.forget(id, generation); directory.forget(id, generation);
+    delivery.forget(id, generation); observations.forget(id, generation); completions.forget(id, generation); directory.forget(id, generation);
     for (const request of relay.getState().requests) if (request.sessionId === id && request.generation === generation && request.state === "pending") {
       const scope = { id: request.id, sessionId: id, generation, revision: request.revision };
       relay.resolveInteraction(scope); voice.resolveInteraction?.(scope);
     }
     publishSoon();
   }
+  let disposal;
   function dispose() {
-    if (disposed) return relay.flushDiagnostics(); disposed = true; activation++; clearInterval(inventoryTimer); clearTimeout(publicationTimer);
+    if (disposed) return disposal || Promise.resolve(); disposed = true; activation++; clearInterval(inventoryTimer); clearTimeout(publicationTimer);
     permissionLifetime.abort(); permissionActivation?.abort(); permissionActivation = null;
-    delivery.dispose(); terminalInput.dispose(); history.dispose(); voice.dispose(); relay.dispose(); observations.dispose(); directory.clear();
+    delivery.dispose(); terminalInput.dispose(); history.dispose(); voice.dispose(); disposal = relay.dispose(); observations.dispose(); completions.clear(); directory.clear();
     finishCapture({ ok: false, error: "Application closed." });
     for (const pending of captureFlushes.values()) pending.finish({ ok: false, status: 'cancelled', error: 'Application closed.' });
     surface.dispose();
     for (const finish of pendingUi.values()) finish({ ok: false, status: "cancelled", error: "Application closed." });
     for (const pending of pendingHost.values()) pending.finish({ ok: false, status: "unknown", error: "Application closed before acknowledgment." });
-    return relay.flushDiagnostics();
+    return disposal;
   }
   app.once("before-quit", event => {
     const flushed = dispose();

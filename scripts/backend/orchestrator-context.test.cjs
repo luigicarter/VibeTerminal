@@ -96,12 +96,12 @@ test("new pane creation uses the same launch-bound follow-up selection", async t
   f.sessions[1] = f.b(); await f.run("Tell it: begin", { kind: "send_prompt" }); assert.equal(f.sends()[0].targetId, "b");
 });
 
-test("initial context carries only eight recent relay messages and no native transcript body", async t => {
+test("initial context carries only twelve recent relay messages and no native transcript body", async t => {
   const f = await fixture(t); f.sessions[0].transcript = "PROVIDER_TRANSCRIPT_PRIVATE_BODY";
   f.sessions[0].conversation = { id: "native-a", title: "Native title", body: "PROVIDER_TRANSCRIPT_PRIVATE_BODY" };
   for (let i = 0; i < 7; i++) await f.run(`Relay message ${i}`);
   const request = f.requests.at(-1), initial = JSON.parse(request.messages[1].content);
-  assert.equal(initial.recentConversation.length, 8); assert.equal(initial.recentConversation[0].text, "Relay message 2");
+  assert.equal(initial.recentConversation.length, 12); assert.equal(initial.recentConversation[0].text, "Relay message 0");
   assert.equal(initial.sessions[0].conversationId, "native-a"); assert.equal(initial.sessions[0].conversationTitle, "Native title");
   assert.equal(JSON.stringify(request).includes("PROVIDER_TRANSCRIPT_PRIVATE_BODY"), false); assert.equal(f.reads, 0);
 });

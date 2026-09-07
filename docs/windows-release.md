@@ -4,10 +4,10 @@ vibeTerminal ships to Windows users as an Electron Builder NSIS installer hosted
 
 ## Current Public Release
 
-The current public Windows release is `v0.1.96`:
+The current Windows release is `v0.1.97`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.96`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.96/vibeTerminal-Setup-0.1.96.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.97`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.97/vibeTerminal-Setup-0.1.97.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -57,12 +57,12 @@ The compiled `dist/` renderer is still included because it is the UI Electron di
 
 ## Local Build
 
-Version `0.1.96` repairs recording boundaries, manual/automatic handover and
-keyboard feedback, exposes recording status and click-to-send, and retries
-invalid Brain interpretations once. The [voice audit](orchestrator-voice-deep-dive.md)
-records the findings, final-review corrections, and remaining product/hardware
-limits. Installed applications apply updates through the user's Update/Restart
-action; publication does not restart an active workspace.
+Version `0.1.97` adds request-owned Orchestrator tasks, queueing, parallel execution,
+verified-result dependencies, dynamic project context and local conversation history.
+Voice clarifications accept automatic answers, and a compatibility fallback repairs
+providers that reject forced named-tool selection. See the [task contract](orchestrator-tasks.md)
+for context budgets and verification boundaries. Installed applications apply updates
+through the user's Update/Restart action; publication does not restart an active workspace.
 
 Use these commands before publishing a release:
 

@@ -6,6 +6,7 @@ const fs = require('node:fs'), path = require('node:path'), net = require('node:
 const { spawn, spawnSync } = require('node:child_process');
 const { wavFromSamples } = require('../../backend/voiceAudio.cjs');
 const root = path.resolve(__dirname, '../..');
+const hidden = process.argv.includes('--hidden');
 const output = path.join(root, '.tmp', 'voice-experience-smoke', `${Date.now()}-${process.pid}`);
 fs.mkdirSync(output, { recursive: true });
 const result = { output, checks: [], audiblePlaybackVerified: false, physicalMicrophoneVerified: false, liveProviderVerified: false, nativePermissionDialogVisualVerified: false, consentDialogAndOsStatusScripted: true };
@@ -26,7 +27,16 @@ const windows = () => JSON.parse(fs.readFileSync(stateFile, 'utf8'));
 const record = (name, value) => { result.checks.push({ name, value }); console.log(name, JSON.stringify(value)); };
 const entry = path.join(output, 'main.cjs');
 fs.writeFileSync(entry, `
-const fs=require('node:fs'); const electron=require('electron');
+const fs=require('node:fs'); let electron=require('electron');
+if (${hidden}) {
+ const NativeWindow=electron.BrowserWindow,Module=require('node:module'),load=Module._load;
+ const facade=Object.create(electron);
+ Object.defineProperty(facade,'BrowserWindow',{value:new Proxy(NativeWindow,{
+  construct(target,[options]){const window=new target({...options,show:false});for(const name of ['show','showInactive','maximize','restore','focus'])window[name]=()=>{};return window;}
+ })});
+ Module._load=function(name,...args){return name==='electron'?facade:load.call(this,name,...args);};
+ electron=facade;
+}
 const log=data=>fs.appendFileSync(${JSON.stringify(traceFile)},JSON.stringify(data)+'\\n');
 const permissionModule=require(${JSON.stringify(path.join(root,'backend/microphonePermission.cjs'))});const permissionFactory=permissionModule.createMicrophonePermission;
 permissionModule.createMicrophonePermission=options=>permissionFactory({...options,
@@ -73,7 +83,7 @@ require(${JSON.stringify(path.join(root, 'backend/main.cjs'))});
 `);
 let child, cdp, voice;
 async function click(selector, client = cdp) { await client.eval(`document.querySelector(${JSON.stringify(selector)}).click()`); }
-async function screenshot(client, name) { const r = await client.send('Page.captureScreenshot', { format: 'png' }); fs.writeFileSync(path.join(output, name), Buffer.from(r.data, 'base64')); }
+async function screenshot(client, name) { if (hidden) { result.skippedScreenshots ||= []; result.skippedScreenshots.push(name); return; } const r = await client.send('Page.captureScreenshot', { format: 'png' }); fs.writeFileSync(path.join(output, name), Buffer.from(r.data, 'base64')); }
 (async () => { try {
   assert.equal(process.platform, 'win32');
   const speechWav = path.join(output, 'fake-microphone.wav');
@@ -89,11 +99,13 @@ async function screenshot(client, name) { const r = await client.send('Page.capt
   for (const key of Object.keys(env)) if (/API_KEY|AUTH_TOKEN/.test(key) || ['ELECTRON_RUN_AS_NODE', 'VITE_DEV_SERVER_URL'].includes(key)) delete env[key];
   const executable = path.join(root, 'node_modules/electron/dist/electron.exe');
   assert(fs.existsSync(executable), 'Electron test runtime missing. Run node node_modules/electron/install.js first.');
-  child = spawn(executable, [entry, `--remote-debugging-port=${port}`, '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${speechWav}`], { cwd: root, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  child = spawn(executable, [entry, `--remote-debugging-port=${port}`, '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows', '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${speechWav}`], { cwd: root, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   const log = fs.createWriteStream(path.join(output, 'electron.log')); child.stdout.pipe(log); child.stderr.pipe(log);
   const pages = async () => (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json());
   const page = await until(async () => (await pages()).find(p => p.type === 'page' && p.url.startsWith('file:') && !p.url.includes('surface=voice')), 'workspace');
   cdp = new Cdp(page.webSocketDebuggerUrl); await cdp.open();
+  await cdp.send('Page.enable');
+  if (hidden) await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1500, height: 1100, deviceScaleFactor: 1, mobile: false });
   await until(() => cdp.eval('Boolean(window.vibe?.orchestrator && document.querySelector(".orchestrator-mic"))'), 'workspace UI');
   const cleanBoard = await cdp.eval('({navigation:!!document.querySelector(".session-navigation"),dock:!!document.querySelector(".orchestrator-dock"),tools:!!document.querySelector("[aria-label=\\"Open workspace tools\\"]")})');
   assert.equal(cleanBoard.navigation, false); assert.equal(cleanBoard.dock, false); assert.equal(cleanBoard.tools, true); record('clean-workspace', cleanBoard);
@@ -130,7 +142,7 @@ async function screenshot(client, name) { const r = await client.send('Page.capt
   await click('[aria-label="Close settings"]');
   const indicator = await until(()=>cdp.eval('(()=>{const e=document.querySelector(".voice-indicator");if(!e)return null;const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,inside:r.x>=0&&r.y>=0&&r.right<=innerWidth&&r.bottom<=innerHeight,background:getComputedStyle(e).backgroundColor};})()'),'main app microphone');
   assert.equal(indicator.width,112);assert.equal(indicator.height,112);assert.equal(indicator.inside,true);assert.equal(indicator.background,'rgba(0, 0, 0, 0)');
-  const micShot=await cdp.send('Page.captureScreenshot',{format:'png',clip:{x:indicator.x,y:indicator.y,width:indicator.width,height:indicator.height,scale:1}});fs.writeFileSync(path.join(output,'microphone.png'),Buffer.from(micShot.data,'base64'));
+  if (hidden) { result.skippedScreenshots ||= []; result.skippedScreenshots.push('microphone.png'); } else { const micShot=await cdp.send('Page.captureScreenshot',{format:'png',clip:{x:indicator.x,y:indicator.y,width:indicator.width,height:indicator.height,scale:1}});fs.writeFileSync(path.join(output,'microphone.png'),Buffer.from(micShot.data,'base64')); }
   record('112-transparent-microphone-inside-app-hidden-native-audio', { indicator, ...native, options: opts });
   await click('[aria-label="Hide microphone indicator; keep listening"]');
   await until(() => cdp.eval('!document.querySelector(".voice-indicator")'), 'hidden in-app indicator'); assert.equal((await cdp.eval('window.vibe.voice.getState()')).listening, true);

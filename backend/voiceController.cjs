@@ -35,9 +35,11 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
   let speechQueue = Promise.resolve(), answerContext = null, announcementPending = null, recentAudio = [], answerSilenceMs = 0, deferredTimer = null; const resolvedInteractions = new Set(), legacyResolvedIds = new Set(), announcedInteractions = new Set(), deferredInteractions = new Map();
   const alerts = errorAudio || createLocalErrorAudio({ directory: path.join(modelPath, 'alerts') });
   const lastErrorAudio = new Map();
-  let deferredError = null;
+  let deferredError = null, speechGeneration = 0, activeSpeechRequestId = null;
+  const cancelledSpeechRequests = new Set(), speechWaiters = new Set();
   const snapshot = () => ({ ...state });
   const update = patch => { const previousPhase = state.phase; state = { ...state, ...patch }; emit(snapshot());
+    for (const wake of speechWaiters) wake(); speechWaiters.clear();
     if (state.phase !== previousPhase) { if (previousPhase === 'speaking' || state.phase === 'speaking') recentAudio = []; syncDetectionMode(true); }
     if (deferredError && state.listening && state.phase === 'listening') {
       const pending = deferredError, scheduledEpoch = epoch; deferredError = null;
@@ -183,13 +185,19 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
   }
   function accountAnswerSilence(duration) {
     answerSilenceMs += duration;
-    if (answerSilenceMs >= ANSWER_SILENCE_MS) { answerSilenceMs = 0; answerContext = null; update({ transcript: '' }); void announceError({ category: 'not-understood', origin: 'voice', operation: 'transcription' }); }
+    if (answerSilenceMs >= ANSWER_SILENCE_MS) { const taskQuestion = answerContext?.taskQuestion; answerSilenceMs = 0; answerContext = null; if (taskQuestion) { update({ phase: idlePhase(), transcript: '', request: undefined }); return; } update({ transcript: '' }); void announceError({ category: 'not-understood', origin: 'voice', operation: 'transcription' }); }
   }
-  function cancelSpeech() {
+  function cancelSpeech({ requestId, preserveQueue = false } = {}) {
+    if (requestId) {
+      cancelledSpeechRequests.add(requestId);
+      if (cancelledSpeechRequests.size > 512) cancelledSpeechRequests.delete(cancelledSpeechRequests.values().next().value);
+      for (const wake of speechWaiters) wake(); speechWaiters.clear();
+      if (activeSpeechRequestId !== requestId && answerContext?.taskQuestion?.requestId !== requestId) return { ok: true };
+    } else if (!preserveQueue) speechGeneration++;
     deferredError = null;
     epoch++; requestAbort?.abort(); requestAbort = null; clearTimeout(playbackTimer); playbackTimer = null; playbackResolve?.(); playbackResolve = null;
     if (activeReply) onAudio({ replyId: activeReply, sequence: 0, data: [], sampleRate: 24000, channels: 1, format: 's16le', cancelled: true, done: true });
-    activeReply = null; activeInteraction = null; answerContext = null; answerSilenceMs = 0; recentAudio = []; resetRecording();
+    activeReply = null; activeSpeechRequestId = null; activeInteraction = null; answerContext = null; answerSilenceMs = 0; recentAudio = []; resetRecording();
     update({ phase: idlePhase(), replyId: undefined }); syncDetectionMode(true); return { ok: true };
   }
   async function requestAudio(url, options, abort) {
@@ -205,6 +213,16 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     catch (error) { throw classifyTransportError(error, { signal: abort.signal }); }
   }
   async function announceError(info = {}) {
+    if (info.requestId && !info.queuedSpeech) {
+      const generation = speechGeneration;
+      const cancelled = () => disposed || generation !== speechGeneration || cancelledSpeechRequests.has(info.requestId);
+      const run = async () => {
+        while (!cancelled() && ['recording', 'transcribing', 'awaiting-answer'].includes(state.phase)) await new Promise(resolve => speechWaiters.add(resolve));
+        if (cancelled()) return { ok: false, status: 'cancelled' };
+        return announceError({ ...info, queuedSpeech: true });
+      };
+      const result = speechQueue.then(run, run); speechQueue = result.catch(() => {}); return result;
+    }
     if (!state.listening || !enabled()) return { ok: true, status: 'silent' };
     const operation = ['transcription', 'speech', 'orchestration'].includes(info.operation) ? info.operation : 'orchestration';
     const stage = operation === 'speech' ? 'The answer is ready, but speech playback failed.' : operation === 'transcription' ? 'I could not transcribe that.' : 'I could not complete that request.';
@@ -224,9 +242,9 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     let clip;
     try { clip = alerts.load(info.category); }
     catch (error) { diagnostic('alert-audio', error); update({ phase: idlePhase() }); return { ok: false, status: 'audio-unavailable', error: message }; }
-    cancelSpeech();
+    cancelSpeech({ preserveQueue: true });
     lastErrorAudio.set(info.category, now());
-    const current = epoch, replyId = activeReply = randomUUID();
+    const current = epoch, replyId = activeReply = randomUUID(); activeSpeechRequestId = info.requestId || null;
     update({ phase: 'speaking', reply: clip.text || '', replyId, error: message, errorOperation: operation });
     const finished = new Promise(resolve => { playbackResolve = resolve; playbackTimer = setTimeout(() => resolve({ error: 'Speech playback did not finish. Check your audio output.' }), clip.durationMs + 5000); });
     let sequence = 0;
@@ -237,7 +255,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     onAudio({ replyId, sequence, data: [], sampleRate: 24000, channels: 1, format: 's16le', done: true, local: true });
     const playback = await finished;
     if (current !== epoch) return { ok: false, status: 'cancelled' };
-    clearTimeout(playbackTimer); playbackTimer = null; playbackResolve = null; activeReply = null;
+    clearTimeout(playbackTimer); playbackTimer = null; playbackResolve = null; activeReply = null; activeSpeechRequestId = null;
     update({ phase: idlePhase(), replyId: undefined, ...(playback?.error && { error: `${message} ${playback.error}` }) });
     if (playback?.error) { diagnostic('playback', playback.diagnosticError || Error(playback.error), { replyId }); return { ok: false, status: 'playback-failed', error: state.error }; }
     return { ok: true, status: 'announced', category: info.category };
@@ -283,7 +301,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     }
     const preRoll = recentAudio; recentAudio = []; answerSilenceMs = 0;
     // Talking over a reply interrupts it; talking over a question keeps the answer route.
-    if (state.phase !== 'awaiting-answer') cancelSpeech();
+    if (state.phase !== 'awaiting-answer') cancelSpeech({ preserveQueue: true });
     recording = createRecording({ ...recordingOptions, preRoll, endpointing: false });
     turn = { id: ++turnSequence, manual: true, holdId };
     update({ phase: 'recording', recordingSource: 'ptt', recordingId: turn.id, transcript: '', error: null });
@@ -346,7 +364,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       operation = 'orchestration';
       update({ phase: 'thinking', transcript: text });
       if (answerContext) return await submitAnswer(text, current);
-      const result = await orchestrator.send({ text, origin: 'voice' });
+      const result = await (orchestrator.enqueue ? orchestrator.enqueue({ text, origin: 'voice' }) : orchestrator.send({ text, origin: 'voice' }));
       if (current === epoch && result?.ok === false && result.status !== 'cancelled' && !result.text) {
         await announceError({ ...(result.upstreamError || { category: failureCategory(result.error, operation) }), origin: 'voice', operation });
       }
@@ -398,14 +416,22 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     if (message.origin === 'interaction') message = { ...message, kind: 'interaction', id: message.requestId || message.id };
     const identity = message.interaction || { id: message.requestId || message.id, sessionId: message.sessionId, generation: message.generation, revision: message.revision };
     if (!message.preview && (!shouldSpeak(message) || !state.listening || !enabled())) return Promise.resolve({ ok: true, status: 'silent' });
-    const queuedEpoch = epoch;
+    const queuedGeneration = speechGeneration;
+    const queueCancelled = () => disposed || queuedGeneration !== speechGeneration || (message.requestId && cancelledSpeechRequests.has(message.requestId));
     const run = async () => {
-      if (disposed || queuedEpoch !== epoch || (!message.preview && (!state.listening || !enabled()))) return { ok: false, status: 'cancelled' };
+      while (!queueCancelled() && (recording || (['transcribing', 'awaiting-answer'].includes(state.phase) && !message.answerFollowup))) await new Promise(resolve => speechWaiters.add(resolve));
+      const queuedEpoch = epoch;
+      if (queueCancelled() || (!message.preview && (!state.listening || !enabled()))) return { ok: false, status: 'cancelled' };
+      if (message.question && !currentInteraction({ taskQuestion: message.question })) return { ok: false, status: 'resolved' };
       if (message.kind === 'interaction') {
         if (!currentInteraction({ interaction: identity })) return { ok: false, status: 'resolved' };
-        if (recording || (['transcribing', 'thinking'].includes(state.phase) && !message.answerFollowup)) return { ok: false, status: 'user-speaking' };
+        if (recording || (['transcribing', 'awaiting-answer'].includes(state.phase) && !message.answerFollowup)) return { ok: false, status: 'user-speaking' };
       }
-      let text = String(message.text || '').trim().slice(0, 4000); if (!text) return { ok: true };
+      let text = String(message.text || '').trim().slice(0, 4000);
+      const tasks = orchestrator.getState?.().tasks || [];
+      const task = tasks.find(item => item.requestId === message.requestId || item.id === message.requestId);
+      const label = message.targetLabel || task?.targets?.map(target => target.name || (target.cwd && path.basename(target.cwd))).filter(Boolean).join(', ') || task?.label;
+      if (label && tasks.filter(item => !['finished', 'cancelled', 'failed'].includes(item.status)).length > 1) text = `${label}. ${text}`; if (!text) return { ok: true };
       let key;
       try { key = await getKey(); } catch (error) { if (queuedEpoch === epoch) diagnostic('speech', error, { requestId: identity.id }); }
       if (queuedEpoch !== epoch) return { ok: false, status: 'cancelled' };
@@ -420,7 +446,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       if (!speechText) return { ok: true };
       const abort = requestAbort = new AbortController();
       let speechStage = 'speech';
-      const replyId = activeReply = randomUUID(); activeInteraction = message.kind === 'interaction' ? identity : null;
+      const replyId = activeReply = randomUUID(); activeSpeechRequestId = message.requestId || null; activeInteraction = message.kind === 'interaction' ? identity : null;
       update({ phase: 'speaking', reply: text, replyId, error: null, errorOperation: null }); let sequence = 0, bytes = 0;
       try {
         const settings = getSettings();
@@ -459,7 +485,14 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
         clearTimeout(playbackTimer); playbackTimer = null; playbackResolve = null;
         if (queuedEpoch !== epoch) return { ok: false, status: 'cancelled' };
         if (playback?.error) throw Object.assign(Error(playback.error), { diagnosticError: playback.diagnosticError });
-        if (queuedEpoch === epoch) { activeReply = null; activeInteraction = null; update({ phase: idlePhase(), replyId: undefined }); }
+        if (queuedEpoch === epoch) {
+          activeReply = null; activeSpeechRequestId = null; activeInteraction = null;
+          const question = message.question;
+          if (question?.id && question?.requestId && typeof question.text === 'string' && currentInteraction({ taskQuestion: question })) {
+            answerContext = { taskQuestion: { ...question } }; answerSilenceMs = 0;
+            update({ phase: 'awaiting-answer', replyId: undefined });
+          } else update({ phase: answerContext && currentInteraction(answerContext) ? 'awaiting-answer' : idlePhase(), replyId: undefined });
+        }
         return { ok: true };
       } catch (e) {
         if (queuedEpoch !== epoch || abort.signal.aborted) return { ok: false, status: 'cancelled' };
@@ -474,6 +507,9 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
         return { ok: false, operation: 'speech', error, ...(upstreamError && { upstreamError }) };
       } finally { if (requestAbort === abort) requestAbort = null; }
     };
+    // A repeated answer prompt must bypass replies waiting for this answer window.
+    // Capture/STT owns the channel here, so there is no concurrent playback.
+    if (message.answerFollowup && !activeReply) return run();
     const result = speechQueue.then(run, run); speechQueue = result.catch(() => {}); return result;
   }
   function configure(patch = {}) {
@@ -500,12 +536,17 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     return { ok: true };
   }
   function currentInteraction(context) {
+    if (context.taskQuestion) {
+      const question = context.taskQuestion;
+      return (orchestrator.getState?.().tasks || []).some(task => (task.requestId || task.id) === question.requestId && task.question?.id === question.id && !['cancelled', 'finished', 'failed', 'paused'].includes(task.status));
+    }
     const requests = orchestrator.getState?.().requests;
     const item = context.interaction;
     return !resolvedInteractions.has(interactionKey(item)) && !(item.sessionId == null && legacyResolvedIds.has(item.id)) && (!Array.isArray(requests) || requests.some(r => sameInteraction(r, item) && r.state === 'pending'));
   }
   async function askQuestion(context, prefix = '') {
     if (!currentInteraction(context)) return { ok: false, status: 'resolved' };
+    if (context.taskQuestion) return speak({ text: prefix + context.taskQuestion.text, question: context.taskQuestion, requestId: context.taskQuestion.requestId, kind: 'reply', origin: 'voice', answerFollowup: true });
     const result = await speak({ text: prefix + questionSpeech(context.interaction, context.index), kind: 'interaction', interaction: context.interaction, answerFollowup: !!context.answering });
     if (result.ok && currentInteraction(context) && state.listening) { answerContext = context; answerSilenceMs = 0; update({ phase: 'awaiting-answer', request: { ...context.interaction, currentQuestion: context.index } }); }
     return result;
@@ -513,6 +554,13 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
   async function submitAnswer(text, current) {
     const context = answerContext;
     if (!context || !currentInteraction(context)) { answerContext = null; update({ phase: idlePhase() }); return { ok: false, status: 'resolved' }; }
+    if (context.taskQuestion) {
+      const question = context.taskQuestion; answerContext = null; answerSilenceMs = 0;
+      const input = { text, origin: 'voice', replyToRequestId: question.requestId, questionId: question.id };
+      const result = await (orchestrator.enqueue ? orchestrator.enqueue(input) : orchestrator.send(input));
+      if (current === epoch && state.phase === 'thinking') update({ phase: idlePhase() });
+      return result;
+    }
     const interaction = context.interaction;
     context.answering = true;
     const question = interaction.questions?.[context.index] || { id: '0', options: [] };
@@ -549,7 +597,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     for (const [key, item] of deferredInteractions) if (matches(item)) deferredInteractions.delete(key);
     while (resolvedInteractions.size > 512) resolvedInteractions.delete(resolvedInteractions.values().next().value);
     if (matches(state.request)) update({ request: undefined });
-    if (matches(activeInteraction) || matches(answerContext?.interaction)) cancelSpeech();
+    if (matches(activeInteraction) || matches(answerContext?.interaction)) cancelSpeech({ preserveQueue: true });
   }
   function announceInteraction(interaction, repeat = false) {
     const key = interactionKey(interaction);
@@ -559,7 +607,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     // A mouse answer may advance the same native form while voice is still reading it.
     const supersedes = previous => sameRequest(previous, interaction) && previous.revision !== interaction.revision && (Number(interaction.revision) > Number(previous.revision) || !currentInteraction({ interaction: previous }));
     if ([activeInteraction, answerContext?.interaction, announcementPending?.interaction].some(supersedes)) {
-      cancelSpeech(); announcementPending = null;
+      cancelSpeech({ preserveQueue: true }); announcementPending = null;
     }
     for (const [oldKey, item] of deferredInteractions) if (supersedes(item)) deferredInteractions.delete(oldKey);
     if (interaction.kind !== 'permission' && context.index >= (interaction.questions?.length || 0)) {

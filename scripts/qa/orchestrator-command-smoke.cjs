@@ -165,9 +165,11 @@ function toolsFrom(reply, expectedOk = true) { assert.equal(reply.ok, expectedOk
   fs.writeFileSync(planFile, JSON.stringify({ actions: [], hold: true }));
   await cdp.eval(`window.__pendingRelay=window.vibe.orchestrator.send({text:'Read ${id}',origin:'text'});void 0`);
   await until(() => fs.existsSync(path.join(output, "held")), "held inference");
-  const busy = await command(`Read ${id}`); assert.equal(busy.ok, false); assert.match(busy.error, /running/);
+  const busy = await cdp.eval(`window.vibe.orchestrator.enqueue({text:'Read ${id}',origin:'text'})`); assert.equal(busy.ok, true); assert.equal(busy.status, 'queued'); assert(busy.requestId);
   await cdp.eval("window.vibe.orchestrator.cancel()"); const cancelled = await cdp.eval("window.__pendingRelay"); assert.equal(cancelled.status, "cancelled");
-  record("busy-and-cancel", { busy, cancelled });
+  const cancelledTasks = await cdp.eval('window.vibe.orchestrator.getState().then(state=>state.tasks.filter(task=>task.status === "cancelled"))');
+  assert(cancelledTasks.some(task=>task.requestId === busy.requestId), 'cancel-all includes the accepted follow-up');
+  record("queued-follow-up-and-cancel", { busy, cancelled, cancelledTaskIds: cancelledTasks.map(task=>task.requestId) });
   const selectedAfter = await cdp.eval("({project:localStorage.getItem('vibe-terminal:active-workspace:v1'),view:localStorage.getItem('vibe-terminal:active-view:v1'),panes:Array.from(document.querySelectorAll('[data-pane-id]'),e=>e.dataset.paneId)})");
   assert.deepEqual(selectedAfter, selectedBefore); record("relay-workspace-view-preserved", selectedAfter);
   plan([{ kind: "list_conversations", provider: "codex", cwd: project.path }]);

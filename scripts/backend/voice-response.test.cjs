@@ -31,7 +31,7 @@ async function fixture(t) {
     throw Error('Unexpected fixture URL');
   };
   const relay = createOrchestrator({ interpretIntent: interpretTestIntent, userDataPath: root, fetch: request,
-    onSpeak: message => controller.speak(message), onUpstreamError: info => controller.announceError(info), onCancel: () => controller?.cancelSpeech() });
+    onSpeak: message => controller.speak(message), onUpstreamError: info => controller.announceError(info), onCancel: input => controller?.cancelSpeech(input) });
   controller = createVoiceController({ orchestrator: relay, fetch: request, getKey: () => relay.getKey(), getSettings: () => relay.getSettings(),
     emit: state => states.push(state),
     onAudio: chunk => { audio.push(chunk); if (chunk.done && !chunk.cancelled) queueMicrotask(() => controller.configure({ playbackDone: chunk.replyId })); } });
@@ -43,14 +43,23 @@ async function fixture(t) {
   await relay.configure({ apiKey: 'fixture-secret', sessionOnly: true, model: 'brain' });
   assert.equal((await relay.setEnabled(true)).ok, true);
   await controller.setListening(true);
-  return { controller, relay, calls, audio, states, transcript: value => { transcript = value; }, fail: fn => { failure = fn; } };
+  const settled = async requestId => {
+    for (let attempt = 0; attempt < 500; attempt++) {
+      await tick();
+      const task = relay.getState().tasks.find(item => item.requestId === requestId);
+      if (task && ['finished', 'failed', 'cancelled', 'paused'].includes(task.status) && controller.getState().phase === 'listening') return task;
+    }
+    throw Error(`Voice task did not settle: ${requestId}`);
+  };
+  return { controller, relay, calls, audio, states, settled, transcript: value => { transcript = value; }, fail: fn => { failure = fn; } };
 }
 
 test('real voice-to-relay-to-speech composition responds with acknowledged PCM', async t => {
   const f = await fixture(t);
   const result = await f.controller.sendAudio({ audioBase64 });
-  assert.equal(result.ok, true); assert.deepEqual(result.speech, { ok: true });
-  assert.equal(result.text, 'Hello! How can I help?');
+  assert.equal(result.ok, true); assert.equal(result.status, 'queued');
+  assert.equal((await f.settled(result.requestId)).status, 'finished');
+  assert(f.relay.getState().messages.some(message => message.requestId === result.requestId && message.text === 'Hello! How can I help?'));
   assert.equal(f.controller.getState().transcript, 'hello');
   assert.equal(f.controller.getState().phase, 'listening');
   assert.deepEqual(f.audio.flatMap(chunk => chunk.data), [0, 128, 255, 127]);
@@ -95,7 +104,8 @@ test('local relay failures and spending limits speak explanations', async t => {
   const f = await fixture(t);
   f.fail(() => json({ choices: [{ finish_reason: 'length', message: { content: 'Incomplete' } }] }));
   const result = await f.controller.sendAudio({ audioBase64 });
-  assert.equal(result.ok, false);
+  assert.equal(result.ok, true);
+  assert.equal((await f.settled(result.requestId)).status, 'failed');
   assert.equal(f.controller.getState().reply, ERROR_AUDIO_TEXT.orchestration);
   await f.relay.configure({ spendingLimit: .01 });
   f.relay.recordSpeechUsage('transcription', .02);
@@ -103,21 +113,26 @@ test('local relay failures and spending limits speak explanations', async t => {
   assert.equal(f.controller.getState().reply, ERROR_AUDIO_TEXT['spending-limit']);
 });
 
-test('a busy relay gives spoken feedback without dispatching another brain request', async t => {
+test('a busy relay accepts another voice request and speaks its eventual result', async t => {
   const f = await fixture(t); let release;
   f.fail(() => new Promise(resolve => { release = resolve; }));
   const pending = f.relay.send({ text: 'Existing text request', origin: 'text' });
   await tick(); assert(release);
   const result = await f.controller.sendAudio({ audioBase64 });
-  assert.equal(result.ok, false); assert.equal(f.controller.getState().reply, ERROR_AUDIO_TEXT.busy);
-  assert.equal(f.calls.filter(call => call.url.endsWith('/chat/completions')).length, 1);
+  assert.equal(result.ok, true); assert.equal(result.status, 'queued');
+  assert.equal(f.controller.getState().phase, 'listening');
+  f.fail(undefined);
   release(json({ choices: [{ message: { content: 'Done.' } }] })); await pending;
+  assert.equal((await f.settled(result.requestId)).status, 'finished');
+  assert.equal(f.calls.filter(call => call.url.endsWith('/chat/completions')).length, 2);
+  assert.equal(f.calls.filter(call => call.url.endsWith('/speech')).length, 1);
 });
 
 test('brain upstream error callback produces one local spoken explanation per explicit voice attempt', async t => {
   const f = await fixture(t); f.fail(() => json({ error: { code: 402 } }, 402));
   for (let i = 0; i < 2; i++) {
-    assert.equal((await f.controller.sendAudio({ audioBase64 })).ok, false); await tick();
+    const ack = await f.controller.sendAudio({ audioBase64 });
+    assert.equal(ack.ok, true); assert.equal((await f.settled(ack.requestId)).status, 'failed');
   }
   assert.equal(new Set(f.audio.filter(chunk => chunk.local).map(chunk => chunk.replyId)).size, 2);
   assert.equal(f.controller.getState().reply, ERROR_AUDIO_TEXT.credits);
@@ -130,6 +145,7 @@ test('cancelled relay requests do not produce a failure announcement', async t =
   const pending = f.controller.sendAudio({ audioBase64 });
   await tick(); assert(release); await f.relay.cancel();
   release(json({ error: { code: 503 } }, 503));
-  assert.equal((await pending).status, 'cancelled');
+  const ack = await pending; assert.equal(ack.status, 'queued');
+  assert.equal((await f.settled(ack.requestId)).status, 'cancelled');
   assert.equal(f.audio.length, 0);
 });

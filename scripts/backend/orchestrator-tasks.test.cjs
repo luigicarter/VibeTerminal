@@ -1,0 +1,241 @@
+'use strict';
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { createOrchestrator } = require('../../backend/orchestrator.cjs');
+const { createTaskScheduler } = require('../../backend/orchestratorTasks.cjs');
+const { fitMessages } = require('../../backend/orchestratorBudget.cjs');
+const tick = () => new Promise(resolve => setImmediate(resolve));
+async function until(fn) { for (let i = 0; i < 300; i++) { if (fn()) return; await tick(); } assert.fail('Condition was not reached.'); }
+const reply = text => ({ choices: [{ finish_reason: 'stop', message: { content: text } }] });
+async function fixture(t, overrides = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-tasks-'));
+  const f = { root, contexts: [], effects: [], executorCalls: 0, activeCalls: 0, maxCalls: 0, sessions: Array.from({ length: 5 }, (_, i) => ({ id: `s${i}`, generation: `g${i}`, name: `Agent ${i}`, kind: 'fusion', cwd: path.join(root, `p${i}`), turnState: 'idle' })) };
+  f.plan = context => ({ goal: context.instruction, executionMode: 'direct', actions: [{ kind: 'send_prompt', targetIds: [context.targetId || 's0'], text: context.instruction }] });
+  f.finish = async (id, status = 'completed') => { const session = f.sessions.find(session => session.id === id); Object.assign(session, { turnState: status, turnEndedAt: Date.now(), completedTurnId: session.turnId, completedActionId: session.actionId }); await f.app.refresh(); await tick(); };
+  f.app = createOrchestrator({ userDataPath: root, secureStorage: { isEncryptionAvailable: () => false }, getSessions: () => f.sessions, getRoots: () => ({ documents: root, projects: [] }),
+    readSession: async ({ id, completedTurnId }) => ({ completedResult: { turnId: completedTurnId || f.sessions.find(session => session.id === id).turnId, text: `Observed review in ${id}`, status: 'completed' } }),
+    interpretIntent: async context => { f.contexts.push(context); return f.plan(context); },
+    dispatchAction: async action => { f.effects.push(action); if (f.dispatch) return f.dispatch(action); const session = f.sessions.find(session => session.id === action.targetId); if (session && action.kind === 'send_prompt' && session.kind !== 'terminal') Object.assign(session, { turnId: `turn-${f.effects.length}`, turnState: 'running', turnStartedAt: Date.now(), actionId: action.actionId }); return { ok: true, status: 'written', turnId: session?.turnId }; },
+    fetch: async (url, options) => {
+      if (url.endsWith('/key')) return new Response(JSON.stringify({ data: {} }));
+      if (url.endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'model', context_length: 128000, supported_parameters: ['tools'] }] }));
+      f.executorCalls++; f.activeCalls++; f.maxCalls = Math.max(f.maxCalls, f.activeCalls);
+      try { return new Response(JSON.stringify(f.respond ? await f.respond(JSON.parse(options.body)) : reply('Done.'))); } finally { f.activeCalls--; }
+    }, ...overrides });
+  await f.app.configure({ apiKey: 'fixture', sessionOnly: true, model: 'model' }); await f.app.setEnabled(true);
+  t.after(async () => { await f.app.dispose(); fs.rmSync(root, { recursive: true, force: true }); });
+  return f;
+}
+
+test('five rapid requests acknowledge immediately and run independently with isolated targets', async t => {
+  const f = await fixture(t);
+  const acks = f.sessions.map(session => f.app.enqueue({ text: `Review ${session.id}`, origin: 'text', targetId: session.id }));
+  assert.ok(acks.every(ack => ack.ok && ack.status === 'queued'));
+  assert.equal(new Set(acks.map(ack => ack.requestId)).size, 5);
+  await until(() => f.effects.length === 5 && f.app.getState().tasks.every(task => task.status === 'waiting-results'));
+  assert.deepEqual(f.effects.map(action => action.targetId), ['s0', 's1', 's2', 's3', 's4']);
+  assert.equal(f.executorCalls, 0, 'fully bound sends take the direct path');
+  assert.ok(f.app.getState().receipts.every(receipt => acks.some(ack => ack.requestId === receipt.requestId)));
+  for (const session of f.sessions) await f.finish(session.id);
+  assert.ok(f.app.getState().tasks.every(task => task.status === 'finished'));
+});
+
+test('executor calls are limited to two while serial routing continues', async t => {
+  const f = await fixture(t); f.plan = () => ({ goal: 'Read context.', actions: [] });
+  const releases = []; f.respond = () => new Promise(resolve => releases.push(() => resolve(reply('Read.'))));
+  for (let i = 0; i < 5; i++) f.app.enqueue({ text: `Question ${i}`, origin: 'text' });
+  await until(() => f.contexts.length === 5 && releases.length === 2);
+  assert.equal(f.maxCalls, 2);
+  for (let i = 0; i < 5; i++) { await until(() => releases.length > i); releases[i](); await tick(); }
+  await until(() => f.app.getState().tasks.every(task => task.status === 'finished'));
+  assert.equal(f.maxCalls, 2);
+});
+
+test('same target and same worktree mutations wait for terminal completion; another project progresses', async t => {
+  const f = await fixture(t); f.sessions[1].cwd = f.sessions[0].cwd;
+  const first = f.app.enqueue({ text: 'First edit', targetId: 's0', origin: 'text' });
+  await until(() => f.effects.length === 1);
+  f.app.enqueue({ text: 'Second edit', targetId: 's1', origin: 'text' });
+  f.app.enqueue({ text: 'Third edit', targetId: 's2', origin: 'text' });
+  await until(() => f.contexts.length === 3 && f.effects.length === 2);
+  assert.deepEqual(f.effects.map(action => action.targetId), ['s0', 's2']);
+  await f.finish('s0'); await until(() => f.effects.length === 3);
+  assert.equal(f.effects[2].targetId, 's1'); assert.equal(f.app.getState().tasks.find(task => task.id === first.requestId).status, 'finished');
+});
+
+test('targeted cancellation does not abort sibling requests or unlock still-running terminal work', async t => {
+  const f = await fixture(t); const first = f.app.enqueue({ text: 'First edit', targetId: 's0', origin: 'text' });
+  await until(() => f.effects.length === 1);
+  await f.app.cancel({ requestId: first.requestId });
+  f.app.enqueue({ text: 'Later edit', targetId: 's0', origin: 'text' });
+  f.app.enqueue({ text: 'Independent edit', targetId: 's2', origin: 'text' });
+  await until(() => f.contexts.length === 3 && f.effects.length === 2);
+  assert.equal(f.effects[1].targetId, 's2'); assert.equal(f.effects[1].signal.aborted, false);
+  await f.finish('s0'); await until(() => f.effects.length === 3);
+});
+
+test('plain shell independent commands preserve dispatch order without inventing completion', async t => {
+  const f = await fixture(t); f.sessions[0].kind = 'terminal';
+  await f.app.send({ text: 'echo one', targetId: 's0', origin: 'text' });
+  await f.app.send({ text: 'echo two', targetId: 's0', origin: 'text' });
+  assert.deepEqual(f.effects.map(action => action.text), ['echo one', 'echo two']);
+  assert.ok(f.app.getState().tasks.every(task => task.status === 'waiting-results'));
+});
+
+test('semantic dependencies wait without executor calls, then include observed results', async t => {
+  const f = await fixture(t); const first = f.app.enqueue({ text: 'Review', targetId: 's0', origin: 'text' });
+  await until(() => f.effects.length === 1);
+  f.plan = context => ({ goal: 'Fix findings', dependsOnRequestIds: [first.requestId], actions: [{ kind: 'send_prompt', targetIds: ['s1'], text: 'Fix findings' }] });
+  f.respond = body => { const meta = JSON.parse(body.messages[1].content); const grants = meta.authorizedCommands.grants; return body.messages.some(message => message.role === 'tool') ? reply('Sent.') : { choices: [{ message: { tool_calls: [{ id: 'send', function: { name: 'workspace', arguments: JSON.stringify({ kind: 'send_prompt', grantId: grants[0].id, targetId: 's1' }) } }] } }] }; };
+  f.app.enqueue({ text: 'Fix the review findings', targetId: 's1', origin: 'text' });
+  await until(() => f.contexts.length === 2); assert.equal(f.executorCalls, 0); assert.equal(f.effects.length, 1);
+  await f.finish('s0'); await until(() => f.effects.length === 2);
+  assert.match(f.effects[1].text, /Observed review in s0/);
+});
+
+test('one utterance review then fix starts its literal future clause once with full constraints', async t => {
+  const f = await fixture(t); const original = 'Review changes then fix findings, and do not commit.';
+  f.plan = context => context.instruction === original ? { goal: 'Review before fixing.', executionMode: 'direct', afterResults: { instruction: 'fix findings' }, actions: [{ kind: 'send_prompt', targetIds: ['s0'], text: 'Review changes. Do not commit.' }] } : { goal: 'Fix findings without committing.', executionMode: 'direct', actions: [{ kind: 'send_prompt', targetIds: ['s0'], text: `Fix findings. Do not commit. ${context.dependencyResults[0].result.text}` }] };
+  await f.app.send({ text: original, targetId: 's0', origin: 'text' });
+  assert.equal(f.effects.length, 1); await f.finish('s0'); await until(() => f.effects.length === 2);
+  assert.equal(f.contexts[1].originalInstruction, original); assert.equal(f.contexts[1].instruction, 'fix findings');
+  await f.app.refresh(); await tick(); assert.equal(f.effects.length, 2);
+});
+
+test('structured clarification survives unrelated work and assistant context is supplied as reference', async t => {
+  const f = await fixture(t);
+  f.plan = context => context.instruction === 'Review one' ? { goal: 'Review one', clarification: 'Which agent?', actions: [] } : context.instruction === 's0' ? { goal: 'Send review.', executionMode: 'direct', continuationOf: context.previousCommand.requestId, actions: [{ kind: 'send_prompt', sourceUserId: context.previousCommand.requestId, targetIds: ['s0'], text: 'Review changes' }] } : { goal: 'Greet.', actions: [] };
+  const result = await f.app.send({ text: 'Review one', origin: 'text' });
+  const pending = f.app.getState().tasks.find(task => task.id === result.requestId);
+  assert.equal(pending.status, 'needs-answer'); assert.equal(pending.question.text, 'Which agent?');
+  await f.app.send({ text: 'Hello', origin: 'text' });
+  await f.app.send({ text: 's0', origin: 'text', replyToRequestId: result.requestId, questionId: pending.question.id });
+  assert.equal(f.effects.length, 1); assert.ok(f.contexts.at(-1).recentConversation.some(message => message.role === 'assistant' && message.text === 'Which agent?'));
+  assert.equal(f.app.enqueue({ text: 's0', origin: 'text', replyToRequestId: result.requestId, questionId: pending.question.id }).ok, false);
+});
+
+test('staged transport never satisfies a result dependency', async t => {
+  const f = await fixture(t); f.dispatch = () => ({ ok: true, status: 'staged' });
+  const first = await f.app.send({ text: 'Review', targetId: 's0', origin: 'text' });
+  assert.equal(f.app.getState().tasks.find(task => task.id === first.requestId).status, 'waiting-results');
+  f.plan = () => ({ goal: 'Fix', dependsOnRequestIds: [first.requestId], actions: [] });
+  f.app.enqueue({ text: 'Fix results', origin: 'text' }); await until(() => f.contexts.length === 2); assert.equal(f.executorCalls, 0);
+});
+
+test('failed dependencies pause without recursion and future dependency IDs are rejected', async () => {
+  const tasks = createTaskScheduler(); const first = tasks.create({ text: 'one', origin: 'text' }); const next = tasks.create({ text: 'two', origin: 'text' });
+  next.task.dependsOn = [first.task.requestId]; tasks.cancel(first.task.requestId);
+  await assert.rejects(tasks.ready(next), /prerequisite/); assert.equal(next.task.status, 'paused');
+});
+
+test('partial executor failure retries only unconsumed slots and transfers authority once', async t => {
+  const f = await fixture(t); f.plan = () => ({ goal: 'Review both', actions: [{ kind: 'send_prompt', targetIds: ['s0', 's1'], selection: 'all', text: 'Review only. Do not edit.' }] });
+  let phase = 0;
+  f.respond = body => {
+    const grant = JSON.parse(body.messages[1].content).authorizedCommands.grants[0];
+    if (phase++ === 1) throw new Error('Fixture connection interrupted.');
+    if (phase > 3) return reply('Sent remaining review.');
+    return { choices: [{ message: { tool_calls: [{ id: `call-${phase}`, function: { name: 'workspace', arguments: JSON.stringify({ kind: 'send_prompt', grantId: grant.id, targetId: phase === 1 ? 's0' : 's1' }) } }] } }] };
+  };
+  const first = await f.app.send({ text: 'Review both agents without editing', origin: 'text' });
+  assert.equal(first.ok, false); assert.equal(f.effects.length, 1);
+  const retry = f.app.retry({ requestId: first.requestId }); assert.equal(retry.ok, true);
+  await until(() => f.effects.length === 2 && f.app.getState().tasks.find(task => task.id === retry.requestId)?.status === 'waiting-results');
+  assert.deepEqual(f.effects.map(action => action.targetId), ['s0', 's1']);
+  assert.equal(f.app.retry({ requestId: first.requestId }).ok, false);
+  assert.equal(f.app.enqueue({ text: 'forge', origin: 'text', retryOf: first.requestId }).ok, false);
+});
+
+test('out-of-order action acknowledgments cannot overwrite a later routed target', async t => {
+  const f = await fixture(t); let release;
+  f.plan = context => ({ goal: 'Focus', executionMode: 'direct', actions: [{ kind: 'focus_session', targetIds: [context.targetId] }] });
+  f.dispatch = action => action.targetId === 's0' ? new Promise(resolve => { release = () => resolve({ ok: true }); }) : { ok: true };
+  const first = f.app.send({ text: 'Focus Agent 0', targetId: 's0', origin: 'text' }); await until(() => release);
+  await f.app.send({ text: 'Focus Agent 1', targetId: 's1', origin: 'text' }); release(); await first;
+  f.plan = context => { assert.equal(context.conversationTarget.id, 's1'); return { goal: 'Explain', actions: [] }; };
+  await f.app.send({ text: 'What is it doing?', origin: 'text' });
+});
+
+test('uncertain transport retains occupancy and missing action identity never proves completion', async () => {
+  const tasks = createTaskScheduler(); const job = tasks.create({ text: 'one', origin: 'text' });
+  tasks.track(job, { kind: 'send_prompt', actionId: 'a', targetId: 's', generation: 'g' }, { ok: true, status: 'unconfirmed' }, { submittedAt: 10 });
+  tasks.track(job, { kind: 'send_prompt', actionId: 'a', targetId: 's', generation: 'g' }, { ok: false, status: 'unknown' }, {});
+  assert.equal(job.waits[0].done, false);
+  tasks.reconcile([{ id: 's', generation: 'g', turnState: 'completed' }]); assert.equal(job.waits[0].done, false);
+});
+
+test('dependent prompt preparation rejects additional global effects before dispatch', async t => {
+  const f = await fixture(t); const first = await f.app.send({ text: 'Review', targetId: 's0', origin: 'text' }); await f.finish('s0');
+  f.plan = context => ({ goal: 'Fix', dependsOnRequestIds: [first.requestId], actions: [{ kind: 'send_prompt', targetIds: ['s1'], text: 'Fix findings' }, ...(context.dependencyResults.length ? [{ kind: 'create_project', parent: f.root, name: 'Unexpected' }] : [])] });
+  const next = await f.app.send({ text: 'Fix the review findings', targetId: 's1', origin: 'text' });
+  assert.equal(next.ok, false); assert.match(next.error, /frozen operations/); assert.equal(f.effects.length, 1);
+});
+
+test('a terminal already busy outside this conversation is queued instead of implicitly steered', async t => {
+  const f = await fixture(t); Object.assign(f.sessions[0], { turnState: 'running', turnId: 'human-turn' });
+  f.app.enqueue({ text: 'Review after current work', targetId: 's0', origin: 'text' });
+  await until(() => f.contexts.length === 1); await tick(); assert.equal(f.effects.length, 0);
+  await f.finish('s0'); await until(() => f.effects.length === 1);
+});
+
+test('large archived and pending task context shrinks before the selected terminal identity', () => {
+  const selected = { id: 'chosen', generation: 'g', name: 'Current terminal' };
+  const payload = { instruction: 'Tell it to inspect only.', conversationTarget: { id: selected.id, generation: selected.generation }, sessions: [...Array.from({ length: 100 }, (_, i) => ({ id: `s${i}`, generation: `g${i}`, name: `Other ${i}` })), selected], tasks: Array.from({ length: 120 }, (_, i) => ({ requestId: `r${i}`, text: 'Earlier task context '.repeat(100) })), pendingCommands: Array.from({ length: 50 }, (_, i) => ({ requestId: `p${i}`, instruction: 'Unrelated pending work '.repeat(100) })), previousCommand: { requestId: 'protected', instruction: 'Review only; never edit.', grants: [] } };
+  const messages = fitMessages({ contextLength: 7000, outputTokens: 1200, messages: [{ role: 'system', content: 'Interpret.' }, { role: 'user', content: JSON.stringify(payload) }] });
+  const fitted = JSON.parse(messages[1].content);
+  assert.ok(fitted.sessions.some(session => session.id === selected.id));
+  assert.equal(fitted.instruction, payload.instruction); assert.deepEqual(fitted.previousCommand, payload.previousCommand);
+  assert.ok(Buffer.byteLength(JSON.stringify({ messages, tools: [] })) <= 4776);
+});
+
+test('an unverified shell command does not permanently lock another agent in its worktree', async t => {
+  const f = await fixture(t); f.sessions[0].kind = 'terminal'; f.sessions[1].cwd = f.sessions[0].cwd;
+  const shell = await f.app.send({ text: 'echo one', targetId: 's0', origin: 'text' });
+  await f.app.send({ text: 'Review changes', targetId: 's1', origin: 'text' });
+  assert.deepEqual(f.effects.map(action => action.targetId), ['s0', 's1']);
+  assert.equal(f.app.getState().tasks.find(task => task.id === shell.requestId).status, 'waiting-results');
+  f.plan = () => ({ goal: 'Use shell result', dependsOnRequestIds: [shell.requestId], actions: [] });
+  f.app.enqueue({ text: 'Act on that shell result', origin: 'text' });
+  await until(() => f.contexts.length === 3); assert.equal(f.executorCalls, 0);
+  await f.app.cancel({ requestId: shell.requestId });
+  await until(() => f.app.getState().tasks.at(-1).status === 'paused');
+});
+
+test('cancelled shell tracking cannot block a resumed agent in the same project', async t => {
+  const f = await fixture(t); f.sessions[0].kind = 'terminal'; f.sessions[1].cwd = f.sessions[0].cwd;
+  const shell = await f.app.send({ text: 'echo one', targetId: 's0', origin: 'text' });
+  await f.app.cancel({ requestId: shell.requestId });
+  await f.app.send({ text: 'Send follow-up to the resumed agent', targetId: 's1', origin: 'text' });
+  assert.deepEqual(f.effects.map(action => action.targetId), ['s0', 's1']);
+});
+
+test('restart preserves unfinished task as paused and explicit resume asks the missing step without replay', async t => {
+  const f = await fixture(t); const sent = await f.app.send({ text: 'Review changes, then fix only confirmed bugs.', targetId: 's0', origin: 'text' });
+  await f.app.dispose();
+  let effects = 0, interpretations = 0;
+  const restored = createOrchestrator({ userDataPath: f.root, secureStorage: { isEncryptionAvailable: () => false }, getSessions: () => f.sessions,
+    interpretIntent: () => { interpretations++; return { goal: 'No effect.', actions: [] }; }, dispatchAction: () => { effects++; return { ok: true }; },
+    fetch: async url => new Response(JSON.stringify(url.endsWith('/key') ? { data: {} } : { data: [{ id: 'model', supported_parameters: ['tools'] }] })) });
+  t.after(() => restored.dispose());
+  assert.equal(restored.getState().tasks.find(task => task.id === sent.requestId).status, 'paused'); assert.equal(effects, 0);
+  await restored.configure({ apiKey: 'fixture', model: 'model', sessionOnly: true }); await restored.setEnabled(true);
+  assert.equal(effects, 0); assert.equal(interpretations, 0);
+  const ack = restored.retry({ requestId: sent.requestId }); assert.equal(ack.ok, true);
+  await until(() => restored.getState().tasks.find(task => task.id === ack.requestId)?.status === 'needs-answer');
+  assert.equal(effects, 0); assert.equal(interpretations, 0);
+  assert.match(restored.getState().tasks.find(task => task.id === ack.requestId).question.text, /unfinished step/);
+});
+
+test('two queued answers to one clarification cannot consume its authority twice', async t => {
+  const f = await fixture(t);
+  f.plan = context => context.instruction === 'Review' ? { goal: 'Review', clarification: 'Which terminal?', actions: [] } : { goal: 'Review the selected terminal', executionMode: 'direct', continuationOf: context.previousCommand.requestId, actions: [{ kind: 'send_prompt', sourceUserId: context.previousCommand.requestId, targetIds: ['s0'], text: 'Review only' }] };
+  const first = await f.app.send({ text: 'Review', origin: 'text' });
+  const question = f.app.getState().tasks.find(task => task.id === first.requestId).question;
+  const input = { text: 's0', origin: 'text', replyToRequestId: first.requestId, questionId: question.id };
+  const answers = [f.app.enqueue(input), f.app.enqueue(input)]; assert.ok(answers.every(answer => answer.ok));
+  await until(() => f.app.getState().tasks.find(task => task.id === answers[1].requestId).status === 'failed');
+  await until(() => f.effects.length === 1); assert.equal(f.effects.length, 1);
+});

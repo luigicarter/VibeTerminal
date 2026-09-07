@@ -5,7 +5,7 @@ import { DOCK_COLLAPSED_KEY, DOCK_HEIGHT_KEY, clampDockHeight, defaultDockHeight
 import "./workspaceDock.css";
 import { Activity, ArrowUp, Bot, ChevronDown, Files, GitBranch, Layers3, Settings2, Square } from "lucide-react";
 import { useSessionDraft, readSessionDraft, writeSessionDraft } from "../sessionDrafts";
-import { relayApi, type RelayState, type RelaySession } from "../orchestratorUi";
+import { relayApi, type RelayState, type RelaySession, type RelayTask, type RelayResult } from "../orchestratorUi";
 import type { CodeChangeSummary } from "../types";
 export function OrchestratorPanel({ state, sessions, selectedId, onFocus, onSettings, changes, folders, setups, handoff, embedded = false, selectedTab, onTabChange }: {
     selectedTab?: string;
@@ -85,6 +85,31 @@ export function OrchestratorPanel({ state, sessions, selectedId, onFocus, onSett
         if (gripRef.current?.hasPointerCapture(pointerId)) gripRef.current.releasePointerCapture(pointerId);
     }
     const [text, setText] = useState("");
+    const textRevision = useRef(0);
+    const submitting = useRef(false);
+    const composerRef = useRef<HTMLTextAreaElement>(null);
+    const [reply, setReply] = useState<{ requestId: string; questionId: string; text: string } | null>(null);
+    const tasks = state?.tasks ?? [];
+    const taskByRequest = new Map(tasks.map(task => [task.requestId, task]));
+    function taskLabel(task: RelayTask) {
+        const targets = task.targets?.map(item => `${item.name} · ${item.cwd}`).join(", ");
+        return `#${task.sequence} · ${targets || task.label || "Workspace"}`;
+    }
+    async function taskAction(action: (() => Promise<RelayResult>) | undefined) {
+        if (!action) return;
+        setError("");
+        try { const result = await action(); if (!result.ok) setError(result.error || "Action failed."); }
+        catch (cause) { setError(String(cause)); }
+    }
+    function taskControls(task: RelayTask) {
+        return <div className="relay-task-meta"><span className={`relay-task-status ${task.status}`}>{task.status.replaceAll("-", " ")}</span><span title={taskLabel(task)}>{taskLabel(task)}</span>
+            {!["finished", "failed", "cancelled"].includes(task.status) && <button type="button" onClick={() => void taskAction(() => relayApi()!.cancel({ requestId: task.requestId }))}>Cancel</button>}
+            {["paused", "failed"].includes(task.status) && <button type="button" onClick={() => void taskAction(() => relayApi()!.retry({ requestId: task.requestId }))}>{task.status === "paused" ? "Resume" : "Retry"}</button>}
+            {task.status === "needs-answer" && task.question && <button type="button" onClick={() => { setReply({ requestId: task.requestId, questionId: task.question!.id, text: task.question!.text }); composerRef.current?.focus(); }}>Reply</button>}
+            {task.waitingReason && <small className="relay-task-waiting">{task.waitingReason}</small>}
+            {task.error && <small className="relay-error">{task.error}</small>}
+        </div>;
+    }
     const [target, setTarget] = useState("");
     const [error, setError] = useState("");
     const [fileQuery, setFileQuery] = useState("");
@@ -117,17 +142,24 @@ export function OrchestratorPanel({ state, sessions, selectedId, onFocus, onSett
         }
     }
     const tabs = [{ name: "Orchestrator", icon: Bot }, { name: "History", icon: Files }, { name: "Activity", icon: Activity }, { name: "Changes", icon: GitBranch }, { name: "Files", icon: Files }, { name: "Setups", icon: Layers3 }];
-    async function send() { const api = relayApi(); if (!api || !text.trim())
-        return; followThread.current = true; setError(""); try {
-        const result = await api.send({ text, origin: "text", ...(target ? { targetId: target } : {}) });
-        if (result.ok)
-            setText("");
-        else
-            setError(result.error ?? "Command was not accepted.");
+    async function send() {
+        const api = relayApi();
+        if (!api || !text.trim() || !state?.ready || !state.enabled || submitting.current) return;
+        const submittedText = text;
+        const submittedRevision = textRevision.current;
+        const submittedReply = reply;
+        submitting.current = true;
+        followThread.current = true;
+        setError("");
+        try {
+            const result = await api.enqueue({ text: submittedText, origin: "text", ...(target ? { targetId: target } : {}), ...(submittedReply ? { replyToRequestId: submittedReply.requestId, questionId: submittedReply.questionId } : {}) });
+            if (result.ok) {
+                if (textRevision.current === submittedRevision) setText("");
+                setReply(current => current === submittedReply ? null : current);
+            } else setError(result.error ?? "Command was not accepted.");
+        } catch (cause) { setError(String(cause)); }
+        finally { submitting.current = false; }
     }
-    catch (e) {
-        setError(String(e));
-    } }
     return <section ref={dockRef} className={`orchestrator-dock ${expanded ? "expanded" : "collapsed"} ${resizing ? "resizing" : ""}`} style={{ "--workspace-dock-height": `${height}px` } as CSSProperties} aria-label="Workspace dock">
     {!embedded && <div ref={gripRef} className="dock-resize-handle" role="separator" tabIndex={0} aria-label="Resize workspace dock" aria-orientation="horizontal" aria-valuemin={expanded ? bounds.min : 0} aria-valuemax={bounds.max} aria-valuenow={expanded ? height : 0} aria-valuetext={expanded ? `${height} pixels high` : "Collapsed"} title="Drag to resize · Arrow keys to adjust · Double-click to reset"
       onPointerDown={event => {
@@ -160,12 +192,17 @@ export function OrchestratorPanel({ state, sessions, selectedId, onFocus, onSett
       }}><span aria-hidden="true" /></div>}
     <header className="dock-tabs"><div role="tablist" aria-label="Workspace tools">{tabs.map(({ name, icon: Icon }) => <button key={name} role="tab" aria-selected={tab === name} className={tab === name ? "active" : ""} onClick={() => { setTab(name); setExpanded(true); }}><Icon size={14}/>{name}{name === "Activity" && !!state?.requests?.length && <b>{state.requests.length}</b>}</button>)}</div><span className="dock-phase"><i className={state?.enabled ? "enabled" : ""}/>{state?.enabled ? state.phase : "Off"}</span>{!embedded && <button className="dock-collapse" aria-label={expanded ? "Collapse dock" : "Expand dock"} onClick={() => setExpanded(!expanded)}><ChevronDown size={15} style={{ transform: expanded ? undefined : "rotate(180deg)" }}/></button>}</header>
     <div className="dock-content" role="tabpanel" hidden={!expanded}>
-      {tab === "Orchestrator" && <div className="relay-view"><div className="relay-thread" ref={threadRef} onScroll={event => { const node = event.currentTarget; followThread.current = node.scrollHeight - node.scrollTop - node.clientHeight < 32; }}>{state?.requests?.filter(request=>!["resolved","cancelled"].includes(request.state)).map(request=><div className="relay-request" key={`${request.id}-${request.revision}`}><span>{sessions.find(session=>session.id===request.sessionId)?.name || "Session"} needs your {request.kind === "permission" ? "permission" : "answer"}</span>{request.questions?.map((question,index)=><p key={index}>{question.question}{question.options?.length ? <small>{question.options.map(option=>option.label).join(" · ")}</small> : null}</p>)}{request.detail && <p>{request.detail}</p>}<button onClick={()=>onFocus(request.sessionId)}>Review in session</button></div>)}{state?.messages?.length ? state.messages.map(message => <div className={`relay-message ${message.role}`} key={message.id}><span>{message.role === "user" ? "You" : message.origin === "monitor" ? "Activity report" : "Orchestrator"}</span><p>{message.text}</p></div>) : <div className="relay-welcome"><Bot size={23}/><div><strong>{!state?.ready ? "Set up your orchestrator" : state.enabled ? "Ready for your command" : "Orchestrator is off"}</strong><p>{!state?.ready ? "Connect OpenRouter and choose a model for text and voice commands." : "Ask for a session update, find a saved conversation, or send an instruction."}</p></div>{!state?.ready && <button onClick={onSettings}><Settings2 size={14}/> Connect OpenRouter</button>}</div>}{(error || state?.error) && <p role="alert" className="relay-error">{error || state?.error}</p>}</div>
+      {tab === "Orchestrator" && <div className="relay-view"><div className="relay-thread" ref={threadRef} onScroll={event => { const node = event.currentTarget; followThread.current = node.scrollHeight - node.scrollTop - node.clientHeight < 32; }}>{state?.requests?.filter(request=>!["resolved","cancelled"].includes(request.state)).map(request=><div className="relay-request" key={`${request.id}-${request.revision}`}><span>{sessions.find(session=>session.id===request.sessionId)?.name || "Session"} needs your {request.kind === "permission" ? "permission" : "answer"}</span>{request.questions?.map((question,index)=><p key={index}>{question.question}{question.options?.length ? <small>{question.options.map(option=>option.label).join(" · ")}</small> : null}</p>)}{request.detail && <p>{request.detail}</p>}<button onClick={()=>onFocus(request.sessionId)}>Review in session</button></div>)}{state?.messages?.length ? state.messages.map(message => {
+            const task = message.requestId ? taskByRequest.get(message.requestId) : undefined;
+            return <div className={`relay-message ${message.role}`} key={message.id}><span>{message.role === "user" ? "You" : message.origin === "monitor" ? "Activity report" : "Orchestrator"}{task && message.role !== "user" ? ` · ${taskLabel(task)}` : ""}</span><p>{message.text}</p>{task && message.role === "user" && taskControls(task)}</div>;
+        }) : <div className="relay-welcome"><Bot size={23}/><div><strong>{!state?.ready ? "Set up your orchestrator" : state.enabled ? "Ready for your command" : "Orchestrator is off"}</strong><p>{!state?.ready ? "Connect OpenRouter and choose a model for text and voice commands." : "Ask for a session update, find a saved conversation, or send an instruction."}</p></div>{!state?.ready && <button onClick={onSettings}><Settings2 size={14}/> Connect OpenRouter</button>}</div>}{(error || state?.error) && <p role="alert" className="relay-error">{error || state?.error}</p>}</div>
         {draft && draftTarget && <details className="relay-staged-draft"><summary>Staged draft · {sessions.find(session => session.id === draftTarget)?.name}</summary><textarea aria-label="Staged session draft" value={draft} onChange={event => setDraft(event.target.value)}/><button type="button" onClick={() => void sendDraft()}>Send to session</button><button type="button" onClick={() => onFocus(draftTarget)}>Open session</button></details>}
-        <form className="relay-composer" onSubmit={event => { event.preventDefault(); void send(); }}><select aria-label="Command target" value={target} onChange={event => setTarget(event.target.value)}><option value="">Entire workspace</option>{sessions.map(session => <option value={session.id} key={session.id}>{session.name}</option>)}</select><textarea aria-label="Orchestrator instruction" placeholder={state?.ready ? "Tell Orchestrator what to do…" : "Connect a model in Settings to get started"} value={text} onChange={event => setText(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) {
+        <div className="relay-thread-actions">{(state?.busy || tasks.some(task => !["finished", "failed", "cancelled"].includes(task.status))) && <button type="button" onClick={() => void taskAction(() => relayApi()!.cancel())}><Square size={12}/> Stop all</button>}{!!state?.messages?.length && <button type="button" onClick={() => void taskAction(async () => { const result = await relayApi()!.clearHistory(); if (result.ok) setReply(null); return result; })}>Clear history</button>}</div>
+        {reply && <div className="relay-reply-context"><span>Replying to: {reply.text}</span><button type="button" aria-label="Cancel reply" onClick={() => setReply(null)}>×</button></div>}
+        <form className="relay-composer" onSubmit={event => { event.preventDefault(); void send(); }}><select aria-label="Command target" value={target} onChange={event => setTarget(event.target.value)}><option value="">Entire workspace</option>{sessions.map(session => <option value={session.id} key={session.id}>{session.name}</option>)}</select><textarea ref={composerRef} aria-label="Orchestrator instruction" placeholder={state?.ready ? "Tell Orchestrator what to do…" : "Connect a model in Settings to get started"} value={text} onChange={event => { textRevision.current++; setText(event.target.value); }} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault();
                 void send();
-            } }} rows={1}/>{state?.busy ? <button type="button" title="Cancel command" onClick={() => void relayApi()?.cancel()}><Square size={15}/></button> : <button type="submit" disabled={!text.trim() || !state?.ready || !state.enabled} title="Send instruction"><ArrowUp size={17}/></button>}</form>{!state?.enabled && state?.ready && <button className="relay-enable" onClick={() => void relayApi()?.setEnabled(true)}>Enable Orchestrator for this session</button>}</div>}
+            } }} rows={1}/><button type="submit" disabled={!text.trim() || !state?.ready || !state.enabled} title="Send instruction"><ArrowUp size={17}/></button></form>{!state?.enabled && state?.ready && <button className="relay-enable" onClick={() => void relayApi()?.setEnabled(true)}>Enable Orchestrator for this session</button>}</div>}
       {tab === "Activity" && <div className="dock-activity">{sessions.map(session => <button key={session.id} className={`activity-session ${selectedId === session.id ? "active" : ""}`} onClick={() => onFocus(session.id)}><i className={`session-dot status-${session.status}`}/><span><strong>{session.name}</strong><small>{session.projectName || session.cwd}</small></span><span>{session.statusLabel || session.status.replaceAll("-", " ")}</span>{session.lastTool && <small>{session.lastTool}</small>}</button>)}{state?.receipts?.slice(-10).reverse().map(receipt => <p className="activity-receipt" key={receipt.id}><span>{receipt.status}</span> {receipt.text}</p>)}{!sessions.length && <p className="dock-note">Launch a session to see its live activity here.</p>}</div>}
       {tab === "History" && <ConversationHistory folders={folders} />}
       {tab === "Changes" && <ChangesPanel cwd={changes?.cwd} />}

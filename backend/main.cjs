@@ -30,6 +30,7 @@ const claudeCustomHome = require("./claudeCustomHome.cjs");
 
 const isScreenshotMode =
   process.env.VIBE_SCREENSHOT_MODE === "1" || Boolean(process.env.VIBE_SCREENSHOT_PATH);
+const isHiddenScreenshot = isScreenshotMode && process.env.VIBE_SCREENSHOT_HIDDEN === "1";
 const IMAGE_FILE_EXTENSIONS = new Set([
   ".apng",
   ".avif",
@@ -1840,7 +1841,7 @@ function createMainWindow() {
     backgroundColor: "#111111",
     icon: getAppIconPath(),
     title: "vibeTerminal",
-    show: isScreenshotMode,
+    show: isScreenshotMode && !isHiddenScreenshot,
     autoHideMenuBar: false,
     webPreferences: {
       preload: path.join(__dirname, "..", "preload", "preload.cjs"),
@@ -1869,15 +1870,15 @@ function createMainWindow() {
   installApplicationMenu(mainWindow);
 
   mainWindow.once("ready-to-show", () => {
-    if (isScreenshotMode) {
+    if (isScreenshotMode && !isHiddenScreenshot) {
       mainWindow.maximize();
     }
-    mainWindow.show();
+    if (!isHiddenScreenshot) mainWindow.show();
     scheduleFusionBuildFixtureEvents();
     scheduleScreenshotCapture();
   });
 
-  if (isScreenshotMode) {
+  if (isScreenshotMode && !isHiddenScreenshot) {
     mainWindow.maximize();
   }
 

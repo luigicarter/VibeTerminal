@@ -327,6 +327,6 @@ function identifyProject(text, projects, previous) {
   }
   if (matches.size > 1) return null;
   if (matches.size === 1) return [...matches.values()][0];
-  return projects.find(project => project.path === previous?.path) || null;
+  return /\b(?:that|this|same)\s+(?:project|repo(?:sitory)?|folder)\b/i.test(text) ? projects.find(project => project.path === previous?.path) || null : null;
 }
 module.exports = { ACTIONS, authorizeModelAction, authorizeConversationResume, commandClauses, resolveTarget, relayPayload, identifyReadTarget, captureRelay, clarifyRelay, selectRelay, identifySessionGroup, identifyProject };

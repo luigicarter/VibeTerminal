@@ -48,7 +48,7 @@ function createHostService() {
     if (typeof config.homes?.claudeCustom === 'string') homes.claudeCustom = config.homes.claudeCustom;
     if (homes.claudeCustom) process.env.VIBE_CLAUDE_CUSTOM_HOME = homes.claudeCustom;
     else delete process.env.VIBE_CLAUDE_CUSTOM_HOME;
-    if (!['list', 'read', 'search', 'resolve'].includes(method)) throw new Error('Unknown history operation.');
+    if (!['list', 'read', 'search', 'resolve', 'refresh'].includes(method)) throw new Error('Unknown history operation.');
     return service[method](input);
   } };
 }
@@ -56,7 +56,7 @@ if (require.main === module) {
   const host = createHostService(); let queue = Promise.resolve();
   process.on('message', message => { queue = queue.then(async () => {
     try { process.send?.({ id: message.id, result: await host.dispatch(message.method, message.input, message.config) }); }
-    catch (error) { process.send?.({ id: message.id, error: String(error.message || 'Conversation history failed.').slice(0, 500) }); }
+    catch (error) { process.send?.({ id: message.id, error: String(error.message || 'Conversation history failed.').slice(0, 500), code: error.code }); }
   }).catch(() => {}); });
   process.on('disconnect', () => process.exit(0));
 }

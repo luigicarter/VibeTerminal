@@ -1,5 +1,8 @@
 # Semantic Orchestrator and terminal controls
 
+See [conversations and queued tasks](orchestrator-tasks.md) for request ownership,
+parallel execution, dynamic project context, persisted history and voice clarifications.
+
 The Orchestrator is a user-directed workspace operator. Users can ask it to send
 work to one or several terminals, choose a terminal on their behalf, navigate the
 workspace, inspect terminal output, and submit the answers they provide. They do
@@ -12,11 +15,11 @@ tool envelope, JSON or plan gets one repair attempt using the original authorize
 context and a fixed schema reminder. Both attempts pass the same strict validator;
 malformed output never supplies authority. Repeated failure gives a short retry
 message and preserves the detailed reason in private diagnostics. This
-request contains the current user instruction, recent user-authored context,
+request contains the current user instruction, bounded recent user/assistant context,
 application-owned unfinished work, and typed project/session/question metadata.
-Terminal output, history bodies, assistant summaries and private diagnostic logs
-are excluded from this interpretation request. Titles and question options are
-identity/state data, not instructions.
+Verified prerequisite results may enter preparation of an explicitly dependent task.
+Assistant replies and prerequisite results provide reference data, not instructions
+or permission. Private diagnostic logs never enter model context.
 
 `orchestratorIntent.cjs` normalizes that plan into immutable grants with app-minted
 IDs, frozen terminal generations, bound prompts or literal user answer sources,
@@ -49,9 +52,9 @@ and qualifiers survive, without asking the user to repeat them.
 
 Partial work retains only unfinished grants/target slots. Focusing a pane does not
 discard its unsent review; completing the first of two reviews retains the second.
-Further clarification can identify the same original source explicitly. Pending
-work expires after five minutes; unrelated new requests replace it, and explicit
-cancellation clears it. A restarted or new terminal cannot inherit an old slot.
+Further clarification can identify the same original source explicitly. Unrelated
+requests retain separately owned unfinished work. Explicit cancellation clears unsent
+work for the selected request. A restarted terminal cannot inherit an old dispatch slot.
 
 Grants are claimed at the dispatch boundary, including uncertain outcomes. Repeated
 equivalent tool calls may return the recorded receipt but cannot resend the action.

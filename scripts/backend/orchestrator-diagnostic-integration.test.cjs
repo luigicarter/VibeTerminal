@@ -23,7 +23,7 @@ function fixture(t, overrides = {}) {
   t.after(async () => { await instance.dispose(); assert(path.resolve(root).startsWith(path.join(os.tmpdir(), 'vibe-diagnostic-integration-'))); fs.rmSync(root, { recursive: true, force: true }); });
   const filename = path.join(root, 'logs', 'orchestrator-errors.jsonl');
   return { instance, actions, requests, responses, filename, root,
-    read: async () => { await instance.flushDiagnostics(); return fs.existsSync(filename) ? fs.readFileSync(filename, 'utf8').trim().split('\n').map(JSON.parse) : []; },
+    read: async () => { await instance.flushDiagnostics(); const entries = fs.existsSync(filename) ? fs.readFileSync(filename, 'utf8').trim().split('\n').map(JSON.parse) : []; for (const entry of entries.filter(entry => entry.event === 'request_stage')) { assert.deepEqual(Object.keys(entry).sort(), ['time', 'event', 'stage', 'requestId', 'origin', 'model', 'status', 'elapsedMs'].sort()); assert.equal(typeof entry.requestId, 'string'); assert.equal(typeof entry.elapsedMs, 'number'); assert(entry.elapsedMs >= 0); assert.doesNotMatch(JSON.stringify(entry), /PRIVATE_|private-configured-key|Can you prompt|random one/); } return entries.filter(entry => entry.event !== 'request_stage'); },
     ready: async () => { assert.equal((await instance.configure({ apiKey: 'private-configured-key', sessionOnly: true, model: 'test-brain' })).ok, true); assert.equal((await instance.setEnabled(true)).ok, true); } };
 }
 
@@ -45,7 +45,7 @@ test('unbound selection rejection keeps private diagnostics and a bounded later 
   assert(!JSON.stringify(f.requests.at(-1)).includes(entry.error.stack));
   assert(!JSON.stringify(f.instance.getState()).includes('orchestrator-errors.jsonl'));
   assert.doesNotMatch(fs.readFileSync(f.filename, 'utf8'), /PRIVATE_PROMPT_SENTINEL|private-configured-key|Can you prompt|random one/);
-  await f.instance.dispose(); assert.equal(JSON.parse(fs.readFileSync(f.filename, 'utf8').trim()).error.message, entry.error.message);
+  await f.instance.dispose(); assert.equal((await f.read())[0].error.message, entry.error.message);
 });
 
 test('adapter failures retain their reason and are logged once with safe terminal identity', async t => {
@@ -63,6 +63,10 @@ test('queued delivery failure retains the originating request and tool identifie
   f.responses.push(tool({ kind: 'send_prompt', targetId: 'vyp-1' }, 'queued-tool'), reply('Queued.'));
   await f.instance.send({ text: 'Tell Codex 1 to review the last changes.', origin: 'text' });
   assert.deepEqual(await f.read(), []);
+  const timings = fs.readFileSync(f.filename, 'utf8').trim().split('\n').map(JSON.parse).filter(entry => entry.event === 'request_stage');
+  assert(timings.some(entry => entry.stage === 'routing' && entry.status === 'complete'));
+  assert(timings.some(entry => entry.stage === 'execution' && entry.status === 'started'));
+  assert.equal(new Set(timings.map(entry => entry.requestId)).size, 1);
   f.instance.recordDelivery({ actionId: sent.actionId, id: 'vyp-1', generation: 3, ok: false, status: 'not-running' });
   const [entry] = await f.read(); assert.equal(entry.stage, 'delivery'); assert.equal(entry.toolCallId, 'queued-tool'); assert(entry.requestId); assert.equal(entry.actionId, sent.actionId); assert.equal(entry.error.message, 'Action not-running.');
 });
@@ -115,6 +119,7 @@ test('cancelled requests stay out of error logs and an unwritable log cannot pre
   f.responses.push(() => { enter(); return new Promise(resolve => { release = () => resolve({ ok: false, status: 503, json: async () => ({}) }); }); });
   const pending = f.instance.send({ text: 'hello', origin: 'text' }); await entered; await f.instance.cancel(); release();
   assert.equal((await pending).status, 'cancelled'); assert.deepEqual(await f.read(), []);
+  fs.rmSync(path.join(f.root, 'logs'), { recursive: true, force: true });
   fs.writeFileSync(path.join(f.root, 'logs'), 'This fixture prevents directory creation.');
   f.responses.push(tool({ kind: 'send_prompt', targetId: 'vyp-1' }), reply('Unable to send.'));
   assert.equal((await f.instance.send({ text: 'pick a random one', origin: 'text' })).text, 'Unable to send.');

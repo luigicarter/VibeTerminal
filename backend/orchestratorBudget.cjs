@@ -71,7 +71,7 @@ function createReadBudget({ maxBytes = 12000, perReadBytes = 4000 } = {}) {
   };
 }
 
-const CONTEXT_KEYS = new Set(['recentConversation', 'recentActions', 'recentUserMessages', 'roots', 'sessions', 'preferences', 'observations', 'observedReads', 'sessionDirectory', 'readBookmarks']);
+const CONTEXT_KEYS = new Set(['tasks', 'pendingCommands', 'recentConversation', 'recentActions', 'recentUserMessages', 'roots', 'preferences', 'observations', 'observedReads', 'sessionDirectory', 'readBookmarks', 'sessions']);
 function compactTool(content) {
   let value;
   try { value = JSON.parse(content); } catch { return JSON.stringify({ truncated: true, contextNote: 'Earlier tool output omitted for context. Never repeat an effect because its receipt was shortened.' }); }
@@ -115,8 +115,14 @@ function fitMessages({ messages, tools = [], contextLength, outputTokens = 1200,
       if (!Object.hasOwn(payload, key)) continue;
       const original = payload[key];
       if (Array.isArray(original)) {
+        const protectedIds = key === 'sessions' ? new Set([payload.targetId, payload.conversationTarget?.id, payload.interactionContext?.sessionId].filter(Boolean)) : new Set();
+        const protectedEntries = original.filter(item => protectedIds.has(item.id));
         while (payload[key].length && size() > budget) {
-          payload[key] = ['recentConversation', 'recentActions', 'recentUserMessages'].includes(key) ? payload[key].slice(1) : payload[key].slice(0, Math.floor(payload[key].length / 2));
+          if (key === 'sessions' && protectedEntries.length) {
+            const others = payload[key].filter(item => !protectedIds.has(item.id));
+            if (!others.length) break;
+            payload[key] = [...protectedEntries, ...others.slice(0, Math.floor(others.length / 2))];
+          } else payload[key] = ['recentConversation', 'recentActions', 'recentUserMessages'].includes(key) ? payload[key].slice(1) : payload[key].slice(0, Math.floor(payload[key].length / 2));
           payload.contextNote = 'Workspace context shortened to fit this model. Use bounded directory or status reads for omitted context.';
           result[currentUser].content = JSON.stringify(payload);
         }

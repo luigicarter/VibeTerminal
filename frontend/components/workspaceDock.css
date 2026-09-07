@@ -44,3 +44,22 @@
 .orchestrator-dock .relay-composer,
 .orchestrator-dock .relay-enable { flex-shrink:0; }
 .orchestrator-dock .relay-staged-draft { flex-shrink:0; max-height:35%; overflow:auto; }
+.orchestrator-dock .relay-task-meta { display:flex; align-items:center; flex-wrap:wrap; gap:6px; margin-top:5px; color:var(--text-muted); font-size:11px; }
+.relay-task-meta > span:nth-child(2) { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:min(65vw, 540px); }
+.relay-task-meta .relay-task-status { border:1px solid var(--border); border-radius:5px; padding:2px 5px; white-space:nowrap; }
+.relay-task-status.needs-answer, .relay-task-status.failed { color:var(--text-primary); }
+.relay-task-meta button, .relay-thread-actions button, .relay-reply-context button { background:transparent; color:var(--text-secondary); border:1px solid var(--border); border-radius:5px; padding:3px 7px; cursor:pointer; font-size:11px; }
+.relay-task-meta button:hover, .relay-thread-actions button:hover { color:var(--text-primary); background:var(--bg-element); }
+.relay-task-meta small { flex-basis:100%; }
+.relay-thread-actions { display:flex; justify-content:flex-end; gap:8px; flex-shrink:0; }
+.relay-thread-actions:empty { display:none; }
+.relay-thread-actions button { display:flex; align-items:center; gap:5px; }
+.relay-reply-context { display:flex; align-items:center; gap:8px; flex-shrink:0; font-size:12px; color:var(--text-secondary); }
+.relay-reply-context span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
+.orchestrator-dock .relay-message { display:block; min-width:0; }
+.orchestrator-dock .relay-message > span { display:block; overflow-wrap:anywhere; }
+.orchestrator-dock .relay-message p { overflow-wrap:anywhere; }
+.orchestrator-dock .relay-task-meta { min-width:0; }
+.orchestrator-dock .relay-task-meta > span:nth-child(2) { min-width:0; max-width:100%; }
+.orchestrator-dock .relay-thread { overflow-x:hidden; }
+.orchestrator-dock .relay-task-waiting { color:var(--text-muted); overflow-wrap:anywhere; min-width:0; }
