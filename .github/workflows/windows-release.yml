@@ -27,6 +27,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Prepare Electron runtime for UI tests
+        shell: pwsh
+        run: |
+          node node_modules/electron/install.js
+          if ($LASTEXITCODE -ne 0) { throw "Electron test runtime preparation failed." }
+          $expected = node -p "require('./node_modules/electron/package.json').version"
+          $actual = (Get-Content -LiteralPath "node_modules/electron/dist/version" -Raw).Trim().TrimStart("v")
+          if ($actual -ne $expected -or -not (Test-Path -LiteralPath "node_modules/electron/dist/electron.exe")) {
+            throw "Electron test runtime does not match the installed package."
+          }
+
       - name: Prepare embedded Codex binary
         shell: pwsh
         run: |
@@ -138,3 +149,20 @@ jobs:
             release/*.exe
             release/*.blockmap
             release/latest.yml
+
+      - name: Upload UI diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-ui-failure-diagnostics
+          retention-days: 7
+          if-no-files-found: ignore
+          include-hidden-files: true
+          path: |
+            .tmp/voice-experience-smoke/**/results.json
+            .tmp/voice-experience-smoke/**/electron.log
+            .tmp/voice-experience-smoke/**/events.jsonl
+            .tmp/voice-experience-smoke/**/*.png
+            .tmp/context-history-smoke/**/results.json
+            .tmp/context-history-smoke/**/electron.log
+            .tmp/context-history-smoke/**/*.png

@@ -1,10 +1,10 @@
 # Voice interface: architecture, behavior, and reliability audit
 
-Audit date: September 6–7, 2026. Scope: installed 0.1.94, the 0.1.95 implementation, production diagnostic metadata, previous native/Electron/live-provider evidence, and new focused reproductions. This replaces the superseded audit at the same canonical path. The subsequent final review corrected findings V1–V5 before release; their original reproductions and resolutions are recorded below. The local installed application was not restarted during this work.
+Audit date: September 6–7, 2026. Scope: installed 0.1.94, the 0.1.96 implementation, production diagnostic metadata, previous native/Electron/live-provider evidence, and new focused reproductions. This replaces the superseded audit at the same canonical path. The subsequent final review corrected findings V1–V5 before release; their original reproductions and resolutions are recorded below. The local installed application was not restarted during this work.
 
 ## Assessment
 
-The voice interface has working capture, local inference, cloud transcription, assistant execution, and audio playback components. This wider audit found defects where those components exchanged control, beyond the initial recording fixes. Final review corrected the reproduced handover, short-speech and stale-feedback defects in 0.1.95. Half-duplex operation, sequential cloud latency and microphone/assistant coupling remain product limitations; physical microphone quality still needs direct measurement.
+The voice interface has working capture, local inference, cloud transcription, assistant execution, and audio playback components. This wider audit found defects where those components exchanged control, beyond the initial recording fixes. Final review corrected the reproduced handover, short-speech and stale-feedback defects in 0.1.96. Half-duplex operation, sequential cloud latency and microphone/assistant coupling remain product limitations; physical microphone quality still needs direct measurement.
 
 The most consequential findings at the start of the audit were:
 
@@ -21,7 +21,7 @@ These are distinct problems. Increasing wake sensitivity alone would not resolve
 
 At the start of this audit, the installed executable reported **0.1.94**. Its keyword and turn-completion helpers were running. Saved settings had hands-free enabled, the system-default microphone, English transcription, `z-ai/glm-5.3-flash`, `openai/whisper-large-v3-turbo`, and Kokoro `af_heart`. Automatic microphone startup was off.
 
-| Behavior | Installed 0.1.94 at audit start | 0.1.95 |
+| Behavior | Installed 0.1.94 at audit start | 0.1.96 |
 | --- | --- | --- |
 | Earliest confident automatic commitment | 200 ms classified quiet | 1,200 ms classified quiet |
 | Low-confidence result followed by silence | Can wait until recording limit | Sends after 3 seconds quiet with at least 250 ms speech; shorter uncertain speech gets a retry without transcription upload |
@@ -30,7 +30,7 @@ At the start of this audit, the installed executable reported **0.1.94**. Its ke
 | Invalid assistant interpretation | Request fails | Explicit format guidance and one repair attempt |
 | Voice diagnostics | Timing values discarded by sanitizer | Bounded timing, confidence and automatic-recording events retained |
 
-The following sections describe the **0.1.95 implementation**, with installed behavior called out where material. Findings explicitly marked as audit reproductions describe the pre-correction candidate. Passing tests do not establish that a running installation has applied the update.
+The following sections describe the **0.1.96 implementation**, with installed behavior called out where material. Findings explicitly marked as audit reproductions describe the pre-correction candidate. Passing tests do not establish that a running installation has applied the update.
 
 ## 2. The complete path
 
@@ -170,7 +170,7 @@ The same selected model serves both roles. This is not two separately selected m
 
 The production error at **2026-09-07 00:05:40 UTC** occurred at this interpretation boundary: `Invalid or unexpected intent fields.` Its stack showed `normalizeIntent` called from the voice request path. That establishes a real downstream failure after a voice attempt reached the assistant. It does not establish which extra field the model returned, because the log intentionally omits raw replies.
 
-Version 0.1.95 supplies a clearer argument-shape contract and allows one repair attempt using the original authorized context. The strict validator remains in place. Repeated failure still stops the request. This improves recovery; it does not prove the selected provider will always follow the contract.
+Version 0.1.96 supplies a clearer argument-shape contract and allows one repair attempt using the original authorized context. The strict validator remains in place. Repeated failure still stops the request. This improves recovery; it does not prove the selected provider will always follow the contract.
 
 After a final text response, speech generation sends up to 4,000 characters, with Markdown normalized for speech, to Kokoro. The app currently supports its ten configured English voice presets. The speech model is not freely interchangeable through the generic model text field.
 
@@ -282,7 +282,7 @@ The installed log contained 1,966 stream events, four completion events and one 
 
 The Brain error proves that a voice attempt reached interpretation and failed there. Its exact original response arguments are unavailable. The old logger discarded the numeric inference timings and did not record automatic recording starts/finishes, so it cannot reconstruct the complete acoustic sequence surrounding that failure.
 
-Version 0.1.95 adds timing values, completion confidence, recording identity and start/finish/cancel reasons. Useful evidence is still missing: actual input level, packet age, per-turn timestamps for every cloud stage, and renderer playback-start timing.
+Version 0.1.96 adds timing values, completion confidence, recording identity and start/finish/cancel reasons. Useful evidence is still missing: actual input level, packet age, per-turn timestamps for every cloud stage, and renderer playback-start timing.
 
 Native helper exceptions are also reduced to generic failure messages. A load error, inference failure and runtime problem can therefore be hard to distinguish. A future diagnostic should preserve a bounded error class/code and stage without logging microphone audio, transcripts, or raw model arguments.
 
@@ -358,6 +358,11 @@ tests and the paced native voice workflow. The release workflow also gates
 publication on packaged inference and the real Electron voice/context tests.
 These checks cover the corrected transitions; physical microphone accuracy and
 audible playback quality remain separate acceptance work.
+
+The initial v0.1.95 publication attempt passed the build and packaged-inference
+checks but stopped before publication because the UI test executable was absent
+from a clean npm install. Version 0.1.96 adds explicit, version-checked Electron
+test-runtime preparation. The voice/history gates remain mandatory.
 
 ## Repository cleanup performed with this audit
 

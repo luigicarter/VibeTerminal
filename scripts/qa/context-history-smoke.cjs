@@ -46,7 +46,9 @@ const rows = file => fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim().
   for (const key of Object.keys(env)) if (/API_KEY|AUTH_TOKEN/.test(key) || ['ELECTRON_RUN_AS_NODE', 'VITE_DEV_SERVER_URL'].includes(key) || key.toLowerCase() === 'path') delete env[key];
   env.PATH = [path.join(process.env.SystemRoot, 'System32'), process.env.SystemRoot, path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0')].join(path.delimiter);
   env.VIBE_NODE_PATH = process.execPath;
-  child = spawn(path.join(root, 'node_modules/electron/dist/electron.exe'), [entry, `--remote-debugging-port=${port}`], { cwd: root, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const executable = path.join(root, 'node_modules/electron/dist/electron.exe');
+  assert(fs.existsSync(executable), 'Electron test runtime missing. Run node node_modules/electron/install.js first.');
+  child = spawn(executable, [entry, `--remote-debugging-port=${port}`], { cwd: root, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   const log = fs.createWriteStream(path.join(output, 'electron.log')); child.stdout.pipe(log); child.stderr.pipe(log);
   const pages = async () => (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json());
   const page = await until(async () => (await pages()).find(p => p.type === 'page' && p.url.startsWith('file:') && !p.url.includes('surface=voice')), 'main page');

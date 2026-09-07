@@ -4,10 +4,10 @@ vibeTerminal ships to Windows users as an Electron Builder NSIS installer hosted
 
 ## Current Public Release
 
-The current public Windows release is `v0.1.95`:
+The current public Windows release is `v0.1.96`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.95`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.95/vibeTerminal-Setup-0.1.95.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.96`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.96/vibeTerminal-Setup-0.1.96.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -57,7 +57,7 @@ The compiled `dist/` renderer is still included because it is the UI Electron di
 
 ## Local Build
 
-Version `0.1.95` repairs recording boundaries, manual/automatic handover and
+Version `0.1.96` repairs recording boundaries, manual/automatic handover and
 keyboard feedback, exposes recording status and click-to-send, and retries
 invalid Brain interpretations once. The [voice audit](orchestrator-voice-deep-dive.md)
 records the findings, final-review corrections, and remaining product/hardware
@@ -68,6 +68,7 @@ Use these commands before publishing a release:
 
 ```powershell
 npm ci
+node node_modules/electron/install.js
 $codexVersion = (Get-ChildItem vendor/codex-appserver -Directory | Where-Object Name -match '^\d+\.\d+\.\d+$').Name
 npm install --prefix .tmp/codex-release-cli --no-save "@openai/codex@$codexVersion"
 $env:VIBE_CODEX_BIN_SEARCH_ROOTS = (Resolve-Path .tmp/codex-release-cli/node_modules/@openai).Path
@@ -129,6 +130,8 @@ Production downloads and update metadata live in the public GitHub repository:
 `https://github.com/luigicarter/VibeTerminal/releases`
 
 The GitHub Actions workflow `.github/workflows/windows-release.yml` builds on `windows-latest`.
+It explicitly installs and verifies the pinned Electron executable for UI tests;
+the Electron npm package does not provide an automatic install lifecycle script.
 It verifies the bundled voice alert clips and models, runs `scripts/qa/release-checks.cjs`
 with fail-fast handling, and verifies installer/feed hashes, packaged voice checksums,
 and native inference dependencies using `scripts/qa/verify-release-artifacts.cjs`.

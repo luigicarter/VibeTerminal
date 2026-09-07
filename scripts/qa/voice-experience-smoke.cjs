@@ -87,7 +87,9 @@ async function screenshot(client, name) { const r = await client.send('Page.capt
   const port = await new Promise(resolve => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const port = s.address().port; s.close(() => resolve(port)); }); });
   const env = { ...process.env, VIBE_SCREENSHOT_MODE: '1', VIBE_INTERNAL_SCREENSHOT: '0', VIBE_SCREENSHOT_USER_DATA: path.join(output, 'userData'), VIBE_AGENT_SHIM_BASE_DIR: path.join(output, 'shims'), CODEX_HOME: path.join(output, 'codex'), CLAUDE_CONFIG_DIR: path.join(output, 'claude'), XDG_CONFIG_HOME: path.join(output, 'config'), XDG_DATA_HOME: path.join(output, 'data') };
   for (const key of Object.keys(env)) if (/API_KEY|AUTH_TOKEN/.test(key) || ['ELECTRON_RUN_AS_NODE', 'VITE_DEV_SERVER_URL'].includes(key)) delete env[key];
-  child = spawn(path.join(root, 'node_modules/electron/dist/electron.exe'), [entry, `--remote-debugging-port=${port}`, '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${speechWav}`], { cwd: root, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const executable = path.join(root, 'node_modules/electron/dist/electron.exe');
+  assert(fs.existsSync(executable), 'Electron test runtime missing. Run node node_modules/electron/install.js first.');
+  child = spawn(executable, [entry, `--remote-debugging-port=${port}`, '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${speechWav}`], { cwd: root, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   const log = fs.createWriteStream(path.join(output, 'electron.log')); child.stdout.pipe(log); child.stderr.pipe(log);
   const pages = async () => (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json());
   const page = await until(async () => (await pages()).find(p => p.type === 'page' && p.url.startsWith('file:') && !p.url.includes('surface=voice')), 'workspace');
