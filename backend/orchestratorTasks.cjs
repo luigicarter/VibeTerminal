@@ -52,7 +52,10 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
   // unknown result still blocks explicit dependencies, but cannot lease the
   // entire project forever after an echo or other completed shell command.
   function occupiedLanes(job) { return job.executionDone ? job.lanes.filter(lane => job.waits.some(wait => !wait.done && wait.delivered && !wait.nativeShell && (!lane.targetIds || lane.targetIds.includes(wait.targetId)))) : job.lanes; }
-  function conflict(a, b) { if (b.executionDone && b.waits.length && b.waits.every(wait => wait.nativeShell) && a.task.targetIds.length === 1 && b.task.targetIds.length === 1 && a.task.targetIds[0] === b.task.targetIds[0]) return false; return a.lanes.some(lane => occupiedLanes(b).some(other => lane.key === other.key && !(lane.readOnly && other.readOnly))); }
+  // Operators serialize their control loops, but must be able to answer or
+  // interrupt work a previous loop already dispatched. Result dependencies
+  // remain a separate prerequisite below; ordinary sends retain their leases.
+  function conflict(a, b) { if (b.executionDone && b.waits.length && b.waits.every(wait => wait.nativeShell) && a.task.targetIds.length === 1 && b.task.targetIds.length === 1 && a.task.targetIds[0] === b.task.targetIds[0]) return false; return a.lanes.some(lane => !(lane.operator && lane.key.startsWith('terminal:') && b.executionDone) && occupiedLanes(b).some(other => lane.key === other.key && !(lane.readOnly && other.readOnly))); }
   async function ready(job) {
     const signal = job.controller.signal;
     await new Promise((resolve, reject) => {
@@ -65,7 +68,7 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
           if (!prior || ['failed', 'cancelled', 'paused'].includes(prior.task.status)) { finish(new Error('A prerequisite did not finish successfully.')); update(job, { status: 'paused', error: 'A prerequisite did not finish successfully. Submit a new instruction to continue.' }); return; }
           if (prior.task.status !== 'finished') return;
         }
-        for (const lane of job.lanes.filter(lane => lane.key.startsWith('terminal:'))) { const session = currentSessions.find(session => lane.targetIds?.includes(session.id)); if (session && ['running', 'busy', 'starting'].includes(session.turnState) && session.kind !== 'terminal') return; }
+        for (const lane of job.lanes.filter(lane => lane.key.startsWith('terminal:') && !lane.operator)) { const session = currentSessions.find(session => lane.targetIds?.includes(session.id)); if (session && ['running', 'busy', 'starting'].includes(session.turnState) && session.kind !== 'terminal') return; }
         for (const prior of jobs.values()) if (prior.task.sequence < job.task.sequence && ((!terminalStates.has(prior.task.status) && prior.task.status !== 'needs-answer') || prior.waits.some(wait => !wait.done && wait.delivered)) && conflict(job, prior)) return;
         finish();
       };
@@ -73,17 +76,24 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
     });
   }
   function track(job, action, result, baseline) {
-    if (!(action.kind === 'send_prompt' || (action.kind === 'create_session' && action.prompt))) return;
+    const nativeTask = action.operator === true && action.kind === 'terminal_interact' && action.inputPurpose === 'task' && (action.submit === true || action.keys?.some(key => ['enter', 'ctrl-m', 'ctrl-j'].includes(key)) || ['click', 'up'].includes(action.mouse?.action));
+    if (!(action.kind === 'send_prompt' || nativeTask || (action.kind === 'create_session' && action.prompt))) return;
     let wait = job.waits.find(wait => wait.actionId === action.actionId);
-    const rejected = ['cancelled', 'rejected', 'stale'].includes(result.status) || (result.ok === false && !result.status);
+    // A scoped operator may recover a pre-write rejection after reading again.
+    // Such an attempt has no terminal result to await or failed turn to retain.
+    if (action.operator && result.delivery === 'not-dispatched') {
+      if (wait) job.waits.splice(job.waits.indexOf(wait), 1);
+      return;
+    }
+    const rejected = result.delivery === 'not-dispatched' || ['cancelled', 'rejected', 'stale', 'stale-generation', 'not-running'].includes(result.status) || (result.ok === false && !result.status);
     if (!wait && rejected) return;
     if (!wait) {
-      wait = { actionId: action.actionId, targetId: action.targetId || result.target?.id || result.id, generation: action.generation || result.target?.generation || result.generation, submittedAt: baseline?.submittedAt ?? now(), nativeShell: baseline?.kind === 'terminal', baselineTurnId: baseline?.turnId, baselineIdle: !['running', 'busy', 'starting'].includes(baseline?.turnState), done: false };
+      wait = { actionId: action.actionId, operator: action.operator === true, targetId: action.targetId || result.target?.id || result.id, generation: action.generation || result.target?.generation || result.generation, submittedAt: baseline?.submittedAt ?? now(), nativeShell: baseline?.kind === 'terminal', baselineTurnId: baseline?.turnId, baselineIdle: !['running', 'busy', 'starting'].includes(baseline?.turnState), done: false };
       job.waits.push(wait);
     }
     wait.targetId ||= result.target?.id || result.id; wait.generation ||= result.target?.generation || result.generation;
     wait.turnId ||= result.turnId; wait.staged = result.status === 'staged'; wait.delivered = !['queued', 'staged'].includes(result.status);
-    if (rejected) { wait.done = true; wait.failed = true; }
+    if (rejected) { wait.done = true; wait.failed = true; wait.delivered = false; wait.error = result.error || result.reason; }
   }
   function reconcile(sessions) {
     currentSessions = sessions;
@@ -94,6 +104,7 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
         if (!wait.targetId) continue;
         const session = sessions.find(session => session.id === wait.targetId);
         if (!session || session.generation !== wait.generation) { wait.done = true; wait.failed = true; wait.error = 'The terminal changed before its result could be verified.'; dirty = true; continue; }
+        if (!wait.delivered || wait.nativeShell) continue;
         const exactAction = Boolean(wait.actionId) && (session.completedActionId === wait.actionId || session.actionId === wait.actionId);
         if (session.completionAttribution === 'ambiguous') continue;
         if (!wait.turnId && wait.delivered && (exactAction || (wait.baselineIdle && session.turnId && session.turnId !== wait.baselineTurnId && Number(session.turnStartedAt) >= wait.submittedAt))) wait.turnId = session.completedTurnId || session.turnId;
@@ -104,6 +115,18 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
         const failed = job.waits.find(wait => wait.failed);
         Object.assign(job.task, { status: failed ? 'failed' : 'finished', updatedAt: now(), ...(failed && { error: failed.error || 'The terminal task did not finish successfully.' }) }); dirty = true;
       }
+      if (job.executionDone && (job.task.status === 'waiting-results' || job.stagedPause)) {
+        const outstanding = job.waits.filter(wait => !wait.done);
+        const stagedOnly = outstanding.length > 0 && outstanding.every(wait => wait.staged);
+        const waitingReason = stagedOnly ? 'Prompt saved as a draft, not sent. Open the terminal to review and send it.'
+          : outstanding.some(wait => wait.staged) ? 'Some prompts were saved as drafts, not sent. Waiting for the other terminal results.'
+            : outstanding.length ? 'Waiting for a verified terminal result.' : undefined;
+        const status = stagedOnly ? 'paused' : outstanding.length ? 'waiting-results' : job.waits.some(wait => wait.failed) ? 'failed' : 'finished';
+        job.stagedPause = stagedOnly;
+        if (job.task.status !== status || job.task.waitingReason !== waitingReason) {
+          Object.assign(job.task, { status, waitingReason, updatedAt: now() }); dirty = true;
+        }
+      }
     }
     if (dirty) changed(); else for (const listener of [...listeners]) listener();
   }
@@ -111,8 +134,9 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
     for (const job of jobs.values()) {
       const wait = job.waits.find(wait => wait.actionId === result.actionId);
       if (!wait) continue;
-      if (['cancelled', 'rejected', 'stale'].includes(result.status) || (result.ok === false && !result.status)) { wait.done = true; wait.failed = true; }
-      else { wait.delivered = result.status !== 'staged'; if (result.turnId) wait.turnId = result.turnId; }
+      if (wait.operator && result.delivery === 'not-dispatched') { job.waits.splice(job.waits.indexOf(wait), 1); continue; }
+      if (result.delivery === 'not-dispatched' || ['cancelled', 'rejected', 'stale', 'stale-generation', 'not-running'].includes(result.status) || (result.ok === false && !result.status)) { wait.done = true; wait.failed = true; wait.delivered = false; wait.error = result.error || result.reason; }
+      else { wait.staged = result.status === 'staged'; wait.delivered = !['queued', 'staged'].includes(result.status); if (result.turnId) wait.turnId = result.turnId; }
     }
   }
   function cancel(requestId) {

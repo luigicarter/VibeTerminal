@@ -1,133 +1,119 @@
-# Semantic Orchestrator and terminal controls
+# Orchestrator and terminal controls
 
-See [conversations and queued tasks](orchestrator-tasks.md) for request ownership,
-parallel execution, dynamic project context, persisted history and voice clarifications.
+See [conversations and tasks](orchestrator-tasks.md) for request ownership,
+scheduling, dependencies, recovery and saved history.
 
-The Orchestrator is a user-directed workspace operator. Users can ask it to send
-work to one or several terminals, choose a terminal on their behalf, navigate the
-workspace, inspect terminal output, and submit the answers they provide. They do
-not need a particular command verb or colon-delimited syntax.
+The Orchestrator carries out a user objective across identified terminals. Users
+can delegate a review, navigation, terminal settings changes or a sequence of
+answers without supplying a keystroke script or special command syntax.
 
-## Interpretation and execution
+## Interpretation and persistent execution
 
-The selected Brain first returns an `interpret_workspace` command plan. An invalid
-tool envelope, JSON or plan gets one repair attempt using the original authorized
-context and a fixed schema reminder. Both attempts pass the same strict validator;
-malformed output never supplies authority. Repeated failure gives a short retry
-message and preserves the detailed reason in private diagnostics. This
-request contains the current user instruction, bounded recent user/assistant context,
-application-owned unfinished work, and typed project/session/question metadata.
-Verified prerequisite results may enter preparation of an explicitly dependent task.
-Assistant replies and prerequisite results provide reference data, not instructions
-or permission. Private diagnostic logs never enter model context.
+The selected Brain returns an `interpret_workspace` plan. Invalid tool envelopes,
+JSON or plans receive one repair attempt against the original context and strict
+validator. Repeated failure cannot authorize effects. Current user instructions
+and application-owned unfinished work supply authority; terminal output, assistant
+replies, metadata and prerequisite findings are reference data. Private diagnostic
+logs do not enter model context.
 
-`orchestratorIntent.cjs` normalizes that plan into immutable grants with app-minted
-IDs, frozen terminal generations, bound prompts or literal user answer sources,
-and operation-specific arguments. A `selection: one` grant chooses one eligible
-target once; `selection: all` creates one submission slot per target. The main
-workspace tool loop can then read output and execute those grants. It cannot
-change their target set, task payload, answer values or permission scope.
-Project creation binds an omitted parent to the application's Documents folder
-before minting its grant; the executor cannot substitute another parent.
+`operate_terminal` grants bind the complete objective and constraints to frozen
+terminal IDs and generations. A delegated choice selects one eligible target once;
+all-target requests retain their exact target set. The grant stays open across an
+observe-act-verify loop, allowing task-relevant prompts and intermediate controls.
+The executor reports a verified outcome with `finish_terminal`; saying “done” or
+repeating the objective is not evidence that effects occurred. Finishing control
+of a terminal does not itself establish completion of a delegated coding task.
 
-The interpreter can compose a useful prompt from a user's goal, including a
-review request and its constraints. Answers are stricter: their source text must
-appear in the current user instruction or the identified unfinished user command.
-The executor maps that source to the currently observed options. This separates
-natural-language understanding from deterministic identity and dispatch checks;
-the quality of language interpretation still depends on the selected model.
+Each effect requires a fresh, single-use `observationToken` from `read_session`
+and a new `stepId`. Native controls also bind the observed screen sequence and
+input revision. Read again after acting, including after an unchanged screen.
+Generation, revision, recipient, input ownership and tool-shape checks are local;
+the model interprets the screen and objective. Requests allow up to 24 grants,
+128 operator steps per target and 32 operator model rounds. Legacy fixed-action
+requests retain the 12-round loop. Context and spending limits still apply.
 
-Up to 24 grants and 12 workspace rounds of six tool calls are permitted in one
-turn. Existing model-input and spending limits still apply. Interpretation uses
-one extra Brain request; it does not run another semantic check for every key or
-terminal operation. Small-context models can reject locally before any effect if
-protected instructions and grants cannot fit.
+Exact/verbatim prompt requests use an operator with `promptMode: literal`,
+which binds the complete user-supplied prompt without bypassing observation.
+Legacy `send_prompt`, supplied-answer and navigation grants retain their bound
+arguments and one-shot dispatch slots. Project creation binds its default parent
+to Documents before execution. `stage_draft` requires an explicit draft request:
+failed or unverified delivery never creates a draft automatically.
 
-## Follow-ups and unfinished work
+## Answers and permissions
 
-The original request remains available through clarification replies. For example,
-counting the six project terminals, asking one to review the last changes, then
-saying `pick a random one` yields one bound review submission. The complete task
-and qualifiers survive, without asking the user to repeat them.
+Operator `answerMode: delegated` permits reasonable task-relevant answers when the
+user delegates carrying out the objective. `supplied` requires the identified
+user's answer text. Missing user knowledge still calls for clarification.
+Structured answers validate the current interaction identity, revision and options;
+custom and multiple-choice answers retain their provider-native mapping.
 
-Partial work retains only unfinished grants/target slots. Focusing a pane does not
-discard its unsent review; completing the first of two reviews retains the second.
-Further clarification can identify the same original source explicitly. Unrelated
-requests retain separately owned unfinished work. Explicit cancellation clears unsent
-work for the selected request. A restarted terminal cannot inherit an old dispatch slot.
+Permission authority is separate and defaults to none. Supplied decisions require
+explicit user text; delegated permission decisions require explicit delegation for
+this objective and cannot authorize persistent always-allow approval. A terminal
+permission prompt cannot confer that authority. Native menu meaning and permission
+classification remain semantic model decisions; local byte, identity and ownership
+checks do not provide deterministic semantic approval enforcement.
 
-Grants are claimed at the dispatch boundary, including uncertain outcomes. Repeated
-equivalent tool calls may return the recorded receipt but cannot resend the action.
-The newest action receipt and a short older receipt history enter later executor
-context so the model can explain a failure accurately. These receipts are evidence,
-not authorization to retry. The private diagnostic log remains separate.
+## Terminal adapters
 
-## Terminal operations
-
-| Operation | Fusion / Open Fusion | Standalone agents and shells |
+| Capability | Fusion / Open Fusion | Native terminals |
 |---|---|---|
-| Discover, focus, navigate workspace | Workspace APIs | Workspace APIs |
-| Read current activity/questions | Native chat events and structured requests | Decoded current screen |
-| Send a requested prompt | Structured input/steering | Existing readiness-checked PTY delivery |
-| Submit a user's answer | Current request/revision/options validated by `answer_question` or `permission` | Fresh screen plus `terminal_interact` |
-| Navigate menus or type literal input | Use structured controls | Named keys and bound user text |
+| Observe | Structured chat and current requests | Decoded terminal screen and input state |
+| Deliver task | Structured input or supported steering | Observed composer through guarded native input |
+| Answer | Structured question/permission APIs | Observed menus, keys, text and mouse |
+| Verify | Native events and result evidence | Fresh screen plus separately attributed provider completion |
 
-Structured multiple-choice answers accept labels, option numbers and multiple
-labels such as `Unit and Smoke`. Allowed custom answers do not require saying
-`custom answer`. A semantic permission answer of `yes` applies only once to that
-specific current request; it cannot become an always-allow decision. The existing
-literal voice answer path remains fast, while unmatched natural wording reaches
-the semantic Orchestrator with the current question identity.
+Native controls cover Claude, Codex, Cursor, Gemini, Kimi, custom Kimi, Qwen,
+OpenCode and plain shells. Unknown startup state does not imply an unusable
+composer: an operator can inspect and act without inventing an idle state. The
+live root process and current observed identity must still pass transport checks.
+Fusion/OpenFusion use their structured APIs rather than simulated keyboard events.
 
-`terminal_interact` covers Codex, Claude, Cursor, Gemini, Kimi/custom Kimi, Qwen,
-OpenCode and plain shells through their native PTY. It requires a fresh
-`read_session` screen sequence, matching runtime generation/revision, and a live
-root PID. An observed silent terminal starts at sequence zero, which is valid.
-Waiting menus do not use the idle-only new-prompt route. A human draft blocks
-automated input. Assistant text staged through this route also blocks an
-unrelated background prompt until submitted.
+Named controls include navigation/editing keys, function keys, Ctrl/Alt shortcuts
+and supported modified navigation. Raw escape bytes are not model input. Multiline
+text and literal tabs require observed bracketed-paste mode. Mouse controls use
+1-based terminal cell coordinates within the current dimensions and require the
+application's SGR mouse reporting mode; drag motion requires the corresponding
+tracking mode. Unsupported modes produce a recoverable refusal.
 
-Native input is bounded to 4096 UTF-8 bytes of literal single-line text and named
-keys: arrows, Tab, Shift-Tab, Enter, Escape, Home, End, Backspace and Space. A grant
-permits at most 16 key/input steps per target. Navigation-only grants cannot
-submit; the user must supply an answer or explicit input instruction. Enter is
-final and may occur once; combining Enter and `submit` is rejected. The model reads
-the screen again after navigation or submission.
+Input is request-owned. Current input revisions fence human edits and other
+requests; pending typed text and mouse drags retain their owner across steps.
+Manual input invalidates the previous owner. Editing/submitting existing human
+input requires the authorized `editInput` path; unrelated requests cannot consume
+another request's unfinished text or drag. A task submission through
+`terminal_interact` identifies `inputPurpose: task`; menu answers use `interaction`.
+Typing alone does not create a task-completion wait.
 
-PTY receipts mean transport acceptance. Windows ConPTY does not provide atomic
-foreground-recipient proof, and a successful write does not prove that an agent
-consumed the answer or completed its task. Unknown results are not automatically
-retried. Structured host acknowledgments preserve their native meaning.
+PTY receipts establish transport acceptance, not foreground consumption or task
+success. Windows ConPTY provides no atomic foreground-recipient proof. Proven
+pre-write blocks return `delivery: not-dispatched` and can be recovered after a
+fresh read. Unknown writes retain uncertainty and cannot be replayed. A per-source
+operator ledger preserves prior step receipts, budgets and uncertain submissions
+through clarification/continuation; minting a continuation does not reset them.
 
-Saved-history resumption still has its separate exact title/ID selection and
-revalidation contract. External applications, clipboard operations and global
-keyboard injection are outside these terminal controls.
+Saved-history resumption retains its separate exact-identity contract. External
+applications, clipboard access and global keyboard injection are outside these
+terminal controls.
 
 ## Files and verification
 
-- `backend/orchestratorIntent.cjs`: semantic schema, normalization, frozen grants,
-  pending-source inheritance, literal answers and dispatch claims.
-- `backend/orchestrator.cjs`: interpretation/execution loop, unfinished work,
-  structured answer mapping, action receipts and diagnostics.
-- `backend/orchestratorTerminalInput.cjs`, `backend/ptyHost.cjs`: guarded native
-  input, terminal modes, draft protection, sequence validation and acknowledgments.
-- `backend/orchestratorIntegration.cjs`: structured/native adapters and shell PID
-  retention; `voiceController.cjs` routes natural voice follow-ups.
+- `backend/orchestratorIntent.cjs`: immutable objectives, delegation, frozen targets
+  and per-source step/dispatch accounting.
+- `backend/orchestrator.cjs`: observation tokens, model loop, recovery, receipts and
+  verified scope completion.
+- `backend/orchestratorTerminalInput.cjs`, `backend/ptyHost.cjs`,
+  `shared/terminalControls.cjs`: native input, modes, ownership and acknowledgments.
+- `backend/orchestratorIntegration.cjs`, `backend/terminalObservation.cjs`:
+  structured/native adapters and current screen/input evidence.
 
-`npm run test:orchestrator` runs the default compiler/executor regression scenarios,
-grant validation, native helper/PTY tests, provider bridge matrix, voice lifecycle,
-history and diagnostic tests. Existing protocol fixtures use a test-only semantic
-interpreter stand-in; `orchestrator-semantic.test.cjs` separately exercises the
-default HTTP interpretation and execution path using scripted Brain responses.
+`npm run test:orchestrator` covers semantic compiler/executor fixtures, grants,
+provider bridges, native controls, task dependencies, history, diagnostics and
+voice lifecycle. Scripted responses verify protocol behavior rather than model
+judgment. The configured Brain passed four of four live disposable-adapter cases;
+those checks sent no actions to the user's terminals.
 
-`node scripts/qa/orchestrator-command-smoke.cjs --hidden` runs the isolated real
-Electron/preload/PTY command checks without displaying a test window. It verifies
-delivery, output, refusal, cancellation, saved-history resumption and pane binding.
-That mode explicitly skips screenshots, foreground/clipboard checks and
-microphone/overlay activation; the normal visual smoke retains those checks.
-
-The original conversation, all-six submission, supplied/custom/multiple answers,
-multiple clarifications, partial completion, error readback and replay protection
-are covered by these tests. Live configured-model interpretation and physical CLI
-menu behavior remain separate acceptance boundaries. No live terminal tasks are
-sent by the isolated fixtures.
+`node scripts/qa/orchestrator-command-smoke.cjs --hidden` exercises isolated
+Electron/preload/PTY paths without a visible test window. Native helper fixtures
+and real hidden PTY smoke checks do not establish every installed CLI's physical
+menu behavior. Hidden mode skips screenshots, foreground/clipboard checks and
+microphone/overlay activation; those remain separate acceptance boundaries.

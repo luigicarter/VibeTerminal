@@ -310,7 +310,7 @@ function ptyChecks() {
     spawned.push(terminal); return terminal;
   } };
   const context = vm.createContext({
-    require: (name) => name === "node-pty" ? pty : name === "readline" ? { createInterface: () => ({ on() {} }) } : require(name),
+    require: (name) => name === "node-pty" ? pty : name === "readline" ? { createInterface: () => ({ on() {} }) } : name === '../shared/terminalControls.cjs' ? require('../../shared/terminalControls.cjs') : require(name),
     process: { platform: "win32", env: {}, stdin: {}, cwd: () => root,
       stdout: { write: (line) => events.push(JSON.parse(line)) }, exit() {} },
     setTimeout: (fn) => timers.push(fn)

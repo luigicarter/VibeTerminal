@@ -1,6 +1,6 @@
 {
   "name": "vibe-terminal",
-  "version": "0.1.98",
+  "version": "0.1.99",
   "private": true,
   "description": "A tiled local workspace for running multiple coding agents side by side.",
   "author": "vibeTerminal contributors",
@@ -133,6 +133,7 @@
     "asar": true,
     "asarUnpack": [
       "backend/**/*.cjs",
+      "shared/**/*.cjs",
       "node_modules/node-pty/**",
       "node_modules/sherpa-onnx-node/**",
       "node_modules/sherpa-onnx-win-x64/**",

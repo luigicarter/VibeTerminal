@@ -75,6 +75,12 @@ function createTerminalObservation({ maxHistoryBytes = 1024 * 1024, globalHistor
     }
     if (!pane || pane.generation !== event.generation) return Promise.resolve();
     pane.metadataAt = event.at || Date.now();
+    if (['created', 'snapshot', 'input-state'].includes(event.type) && Number.isSafeInteger(event.inputRevision) && event.inputRevision >= (pane.inputRevision ?? 0)) {
+      pane.inputRevision = event.inputRevision;
+      pane.manualInputPending = event.manualInputPending === true;
+      pane.interactionInputPending = event.interactionInputPending === true;
+      pane.ownerRequestId = typeof event.ownerRequestId === 'string' ? event.ownerRequestId : undefined;
+    }
     if (event.type === 'snapshot') return pane.pending; // UI replay never counts as new output.
     if (event.type === 'exit') pane.exited = true;
     if (event.type === 'resize') {
@@ -142,6 +148,7 @@ function createTerminalObservation({ maxHistoryBytes = 1024 * 1024, globalHistor
     }
     return { ok: true, source: 'terminal-screen', historySource: 'display-samples', id, generation: pane.generation, text, history, sequence: pane.sequence, outputAt: pane.outputAt, metadataAt: pane.metadataAt, readAt: Date.now(), cursor: { x: buffer.cursorX, y: buffer.cursorY }, alternateScreen: buffer.type === 'alternate', cols: pane.terminal.cols, rows: pane.terminal.rows, fromLaunch: true, exited: !!pane.exited, truncated: pane.truncated || historyClipped || text.length < full.length || (since !== undefined && pane.history.length > 0 && since < pane.history[0].sequence - 1), historyBytes: pane.bytes,
       nextBeforeSequence: pane.history.length > 1 ? pane.history.at(-1).sequence : null,
+      inputRevision: pane.inputRevision, manualInputPending: pane.manualInputPending, interactionInputPending: pane.interactionInputPending, ownerRequestId: pane.ownerRequestId,
       hasEarlier: pane.history.length > 1, historyUnavailable: Boolean(pane.evictedThroughSequence) };
   }
   return { ingest, read, forget, dispose() { for (const id of panes.keys()) forget(id); } };

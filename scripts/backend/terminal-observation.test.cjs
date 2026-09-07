@@ -5,6 +5,22 @@ const vm = require('node:vm');
 const path = require('node:path');
 const { createTerminalObservation } = require('../../backend/terminalObservation.cjs');
 
+test('live input revisions update independently of output and reject stale identity or revision', async () => {
+  const observation = createTerminalObservation();
+  try {
+    await observation.ingest({ type: 'created', id: 'p', generation: 'g', inputRevision: 0 });
+    await observation.ingest({ type: 'data', id: 'p', generation: 'g', sequence: 1, data: 'Prompt' });
+    await observation.ingest({ type: 'input-state', id: 'p', generation: 'g', inputRevision: 2, manualInputPending: true, ownerRequestId: 'request' });
+    await observation.ingest({ type: 'input-state', id: 'p', generation: 'old', inputRevision: 3 });
+    await observation.ingest({ type: 'snapshot', id: 'p', generation: 'g', inputRevision: 1 });
+    const read = await observation.read({ id: 'p', generation: 'g' });
+    assert.equal(read.inputRevision, 2); assert.equal(read.sequence, 1); assert.equal(read.manualInputPending, true); assert.equal(read.ownerRequestId, 'request');
+    await observation.ingest({ type: 'input-state', id: 'p', generation: 'g', inputRevision: 3, interactionInputPending: true });
+    const next = await observation.read({ id: 'p', generation: 'g' });
+    assert.equal(next.inputRevision, 3); assert.equal(next.manualInputPending, false); assert.equal(next.ownerRequestId, undefined); assert.equal(next.interactionInputPending, true);
+  } finally { observation.dispose(); }
+});
+
 test('older display samples paginate by generation and skip unchanged displays without changing UI history', async () => {
   const observation = createTerminalObservation();
   try {
@@ -132,7 +148,7 @@ test('PTY action channel rejects stale and unproven recipients and reports write
   const context = vm.createContext({ require: name => name === 'node-pty' ? { spawn() {
     const terminal = { writes: [], pid: 42, onData(fn) { this.data = fn; }, onExit() {}, resize() {}, kill() { this.killed = true; }, write(data) { if (data === 'FAIL') throw new Error('fixture failure'); this.writes.push(data); } };
     terminals.push(terminal); return terminal;
-  } } : name === 'readline' ? { createInterface: () => ({ on() {} }) } : require(name), process: { platform: 'win32', env: {}, stdin: {}, cwd: () => process.cwd(), stdout: { write: line => events.push(JSON.parse(line)) }, kill(pid) { if (pid === 99) throw new Error('dead'); } }, setTimeout() {} });
+  } } : name === 'readline' ? { createInterface: () => ({ on() {} }) } : name === '../shared/terminalControls.cjs' ? require('../../shared/terminalControls.cjs') : require(name), process: { platform: 'win32', env: {}, stdin: {}, cwd: () => process.cwd(), stdout: { write: line => events.push(JSON.parse(line)) }, kill(pid) { if (pid === 99) throw new Error('dead'); } }, setTimeout() {} });
   vm.runInContext(fs.readFileSync(path.resolve(__dirname, '../../backend/ptyHost.cjs'), 'utf8'), context);
   context.handleMessage({ type: 'create', payload: { id: 'p', generation: 'g', launchToken: 1 } });
   let actionSequence = 0;

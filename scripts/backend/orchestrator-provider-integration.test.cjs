@@ -42,6 +42,21 @@ function harness(t, provider, state = "idle") {
 }
 
 for (const provider of ['claude', 'codex', 'cursor', 'gemini', 'kimi', 'kimi-custom', 'qwen', 'opencode', 'terminal']) {
+  test(`${provider}: operator sends from an observed unknown startup screen without staging or declaring idle`, async t => {
+    const h = harness(t, provider, 'unknown'), generation = h.snapshot.generation;
+    h.integration.incoming('terminal', { id: 'pane', generation, type: 'created', pid: 32123, cols: 80, rows: 24, inputRevision: 0 });
+    h.integration.incoming('terminal', { id: 'pane', generation, type: 'data', data: 'Ask the agent anything', sequence: 1 });
+    h.integration.incoming('terminal', { id: 'pane', generation, type: 'input-state', inputRevision: 2, manualInputPending: false, interactionInputPending: false });
+    const screen = await h.invoke('dispatch', { kind: 'read_session', target: { id: 'pane', generation } });
+    assert.equal(screen.observation.inputRevision, 2);
+    const result = await h.invoke('dispatch', { kind: 'send_prompt', target: { id: 'pane', generation }, operator: true, requestId: 'owner', editInput: false,
+      observationSequence: screen.observation.sequence, inputRevision: screen.observation.inputRevision, text: 'Review the last commit.\nDo not edit.' });
+    assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(h.sent.length, 1);
+    assert.equal(h.sent[0].payload.kind, 'interaction'); assert.equal(h.sent[0].payload.operator, true);
+    assert.equal(h.sent[0].payload.requestId, 'owner'); assert.equal(h.sent[0].payload.editInput, false);
+    assert.equal(h.sent[0].payload.interactionEvidence.inputRevision, 2); assert.equal(h.sent[0].payload.submit, true);
+    assert.equal(h.snapshot.turnState, 'unknown'); assert.equal(h.uiActions.filter(action => action.kind === 'stage_draft').length, 0);
+  });
   test(`${provider}: a current waiting screen supports identity-bound terminal interaction through the real bridge`, async t => {
     const h = harness(t, provider, 'waiting'), generation = h.snapshot.generation;
     h.integration.incoming('terminal', { id: 'pane', generation, type: 'created', pid: 32123, cols: 80, rows: 24 });
@@ -97,9 +112,9 @@ for (const provider of ["claude", "codex", "cursor", "gemini", "kimi", "kimi-cus
     await h.integration.refreshInventory(); assert.equal(h.sent.length, 2); assert.equal(h.sent[1].payload.data, "Queue exactly this\r");
     await h.integration.refreshInventory(); assert.equal(h.sent.length, 2);
   });
-  test(`${provider}: unverified parent is staged, pending permission is rejected`, async t => {
+  test(`${provider}: unverified parent is blocked, pending permission is rejected`, async t => {
     const h = harness(t, provider); h.snapshot.agentProcessState = "unknown";
-    const staged = await h.send(); assert.equal(staged.status, "staged"); assert.equal(h.sent.length, 0); assert.equal(h.uiActions.filter(a => a.kind === "stage_draft").length, 1);
+    const blocked = await h.send(); assert.equal(blocked.status, "blocked"); assert.equal(blocked.delivery, "not-dispatched"); assert.equal(h.sent.length, 0); assert.equal(h.uiActions.filter(a => a.kind === "stage_draft").length, 0);
     h.snapshot.agentProcessState = "running"; await h.integration.refreshInventory();
     h.integration.incoming("terminal", { id: "pane", generation: h.snapshot.generation, type: "interaction-request", interaction: { id: "permission-1", sessionId: "pane", generation: h.snapshot.generation, revision: 1, kind: "permission", detail: "Allow?" } });
     const pending = await h.send(); assert.equal(pending.ok, false); assert.match(pending.error, /pending interaction/); assert.equal(h.sent.length, 0);

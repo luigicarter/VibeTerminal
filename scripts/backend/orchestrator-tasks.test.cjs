@@ -118,11 +118,131 @@ test('structured clarification survives unrelated work and assistant context is 
 });
 
 test('staged transport never satisfies a result dependency', async t => {
-  const f = await fixture(t); f.dispatch = () => ({ ok: true, status: 'staged' });
+  const f = await fixture(t); f.dispatch = () => ({ ok: true, status: 'staged', reason: 'Agent input readiness is not observed.' });
   const first = await f.app.send({ text: 'Review', targetId: 's0', origin: 'text' });
-  assert.equal(f.app.getState().tasks.find(task => task.id === first.requestId).status, 'waiting-results');
+  assert.equal(f.app.getState().tasks.find(task => task.id === first.requestId).status, 'paused');
+  assert.match(first.text, /not sent.*Agent input readiness is not observed.*Open the terminal/s);
   f.plan = () => ({ goal: 'Fix', dependsOnRequestIds: [first.requestId], actions: [] });
-  f.app.enqueue({ text: 'Fix results', origin: 'text' }); await until(() => f.contexts.length === 2); assert.equal(f.executorCalls, 0);
+  const dependent = f.app.enqueue({ text: 'Fix results', origin: 'text' });
+  await until(() => f.app.getState().tasks.find(task => task.id === dependent.requestId)?.status === 'paused'); assert.equal(f.executorCalls, 0);
+  f.app.retry({ requestId: first.requestId });
+  await until(() => f.app.getState().tasks.some(task => task.status === 'needs-answer'));
+  assert.equal(f.effects.length, 1, 'resuming a draft must not replay the consumed send');
+});
+
+test('mixed staged and delivered work keeps occupancy until sent work finishes, then pauses', async () => {
+  const tasks = createTaskScheduler();
+  const job = tasks.create({ text: 'Review both', origin: 'text' });
+  job.lanes = [{ key: 'terminal:s1', targetIds: ['s1'], readOnly: false }];
+  job.task.targetIds = ['s1'];
+  const sessions = [{ id: 's1', generation: 'g', turnState: 'idle' }, { id: 's2', generation: 'g', turnState: 'idle' }];
+  tasks.track(job, { kind: 'send_prompt', actionId: 'a', targetId: 's1', generation: 'g' }, { ok: true, status: 'written', turnId: 't1' });
+  tasks.track(job, { kind: 'send_prompt', actionId: 'b', targetId: 's2', generation: 'g' }, { ok: true, status: 'staged' });
+  job.executionDone = true; tasks.update(job, { status: 'waiting-results' }); tasks.reconcile(sessions);
+  assert.equal(job.task.status, 'waiting-results');
+  const next = tasks.create({ text: 'Next', origin: 'text' }); next.lanes = job.lanes; next.task.targetIds = ['s1'];
+  let ready = false; const waiting = tasks.ready(next).then(() => { ready = true; }); await tick(); assert.equal(ready, false);
+  Object.assign(sessions[0], { turnState: 'completed', turnId: 't1' }); tasks.reconcile(sessions); await waiting;
+  assert.equal(job.task.status, 'paused'); assert.match(job.task.waitingReason, /not sent/);
+  assert.equal(job.waits[1].done, false);
+});
+
+test('asynchronous queued staging pauses without inventing completion and later delivery clears staging', () => {
+  const tasks = createTaskScheduler(); const job = tasks.create({ text: 'Review', origin: 'text' });
+  const action = { kind: 'send_prompt', actionId: 'a', targetId: 's', generation: 'g' };
+  const sessions = [{ id: 's', generation: 'g', turnState: 'completed', actionId: 'a', turnId: 'unrelated' }];
+  tasks.track(job, action, { ok: true, status: 'queued' }); job.executionDone = true; tasks.update(job, { status: 'waiting-results' });
+  tasks.delivery({ actionId: 'a', ok: true, status: 'staged' }); tasks.reconcile(sessions);
+  assert.equal(job.task.status, 'paused'); assert.equal(job.waits[0].staged, true); assert.equal(job.waits[0].done, false);
+  sessions[0].turnState = 'running'; sessions[0].turnId = 'actual';
+  tasks.delivery({ actionId: 'a', ok: true, status: 'written', turnId: 'actual' }); tasks.reconcile(sessions);
+  assert.equal(job.task.status, 'waiting-results'); assert.equal(job.waits[0].staged, false); assert.doesNotMatch(job.task.waitingReason, /draft/);
+  sessions[0].turnState = 'completed'; tasks.reconcile(sessions); assert.equal(job.task.status, 'finished');
+});
+
+test('proven blocked sends terminate their waits and release occupancy, including asynchronous rejection', async () => {
+  for (const asynchronous of [false, true]) {
+    const tasks = createTaskScheduler(); const job = tasks.create({ text: 'Review', origin: 'text' });
+    const action = { kind: 'send_prompt', actionId: 'a', targetId: 's', generation: 'g' };
+    job.lanes = [{ key: 'terminal:s', targetIds: ['s'], readOnly: false }]; job.task.targetIds = ['s'];
+    tasks.track(job, action, { ok: true, status: 'unconfirmed' });
+    const blocked = { actionId: 'a', ok: false, status: 'blocked', delivery: 'not-dispatched', error: 'Read the current screen.' };
+    if (asynchronous) tasks.delivery(blocked); else tasks.track(job, action, blocked);
+    job.executionDone = true; tasks.update(job, { status: 'waiting-results' }); tasks.reconcile([{ id: 's', generation: 'g', turnState: 'unknown' }]);
+    assert.equal(job.task.status, 'failed'); assert.equal(job.waits[0].done, true); assert.equal(job.waits[0].delivered, false);
+    const next = tasks.create({ text: 'Operate the screen', origin: 'text' }); next.lanes = job.lanes; next.task.targetIds = ['s'];
+    await tasks.ready(next);
+  }
+});
+
+test('operator recovery retires only proven unsent attempts and preserves successful result tracking', () => {
+  for (const asynchronous of [false, true]) {
+    const tasks = createTaskScheduler(); const job = tasks.create({ text: 'Operate', origin: 'text' });
+    const action = { kind: 'send_prompt', operator: true, actionId: 'a', targetId: 's', generation: 'g' };
+    tasks.track(job, action, { ok: true, status: 'unconfirmed' });
+    const blocked = { actionId: 'a', ok: false, status: 'blocked', delivery: 'not-dispatched' };
+    if (asynchronous) tasks.delivery(blocked); else tasks.track(job, action, blocked);
+    assert.equal(job.waits.length, 0);
+    tasks.track(job, { ...action, actionId: 'b' }, { ok: true, status: 'written', turnId: 'result' });
+    job.executionDone = true; tasks.update(job, { status: 'waiting-results' });
+    tasks.reconcile([{ id: 's', generation: 'g', turnId: 'result', turnState: 'completed' }]);
+    assert.equal(job.task.status, 'finished');
+    const uncertain = tasks.create({ text: 'Uncertain', origin: 'text' });
+    tasks.track(uncertain, action, { ok: false, status: 'unknown' });
+    assert.equal(uncertain.waits.length, 1); assert.equal(uncertain.waits[0].delivered, true);
+  }
+});
+
+test('operator lanes serialize active harnesses but can operate busy terminals after prior dispatch', async () => {
+  const tasks = createTaskScheduler();
+  const first = tasks.create({ text: 'Operate first', origin: 'text' });
+  first.lanes = [{ key: 'terminal:s', targetIds: ['s'], operator: true, readOnly: false }]; first.task.targetIds = ['s'];
+  tasks.reconcile([{ id: 's', generation: 'g', kind: 'codex', turnState: 'running' }]);
+  await tasks.ready(first); tasks.update(first, { status: 'running' });
+  const next = tasks.create({ text: 'Answer the running terminal', origin: 'text' }); next.lanes = first.lanes; next.task.targetIds = ['s'];
+  let ready = false; const pending = tasks.ready(next).then(() => { ready = true; }); await tick();
+  assert.equal(ready, false, 'only one active harness can control this terminal');
+  tasks.track(first, { kind: 'send_prompt', operator: true, actionId: 'a', targetId: 's', generation: 'g' }, { ok: true, status: 'written' });
+  first.executionDone = true; tasks.update(first, { status: 'waiting-results' }); await pending;
+  assert.equal(ready, true); assert.equal(first.waits[0].done, false, 'operator readiness does not invent completion');
+  const dependent = tasks.create({ text: 'Use the result', origin: 'text' }); dependent.lanes = first.lanes; dependent.task.dependsOn = [first.task.requestId];
+  let dependencyReady = false; const dependency = tasks.ready(dependent).then(() => { dependencyReady = true; }, () => {}); await tick();
+  assert.equal(dependencyReady, false, 'explicit result dependencies still wait');
+  dependent.controller.abort(); await dependency;
+  const ordinary = tasks.create({ text: 'Ordinary send', origin: 'text' }); ordinary.lanes = [{ key: 'terminal:s', targetIds: ['s'], readOnly: false }];
+  let ordinaryReady = false; const waiting = tasks.ready(ordinary).then(() => { ordinaryReady = true; }, () => {}); await tick();
+  assert.equal(ordinaryReady, false, 'ordinary send still waits for busy terminal'); ordinary.controller.abort(); await waiting;
+});
+
+test('native task submission waits for its provider result, including Enter after earlier typing', async () => {
+  for (const submit of [true, false]) {
+    const tasks = createTaskScheduler({ now: () => 100 }); const job = tasks.create({ text: 'Review then fix', origin: 'text' });
+    const base = { kind: 'terminal_interact', operator: true, inputPurpose: 'task', targetId: 's', generation: 'g' };
+    const baseline = { kind: 'codex', turnId: 'old', turnState: 'unknown', submittedAt: 100 };
+    tasks.track(job, { ...base, actionId: 'typing', text: 'Review last commit' }, { ok: true, status: 'written' }, baseline);
+    assert.equal(job.waits.length, 0, 'typing without submission does not start a task');
+    tasks.track(job, { ...base, actionId: 'submission', ...(submit ? { submit: true, text: 'Review last commit' } : { keys: ['enter'] }) }, { ok: true, status: 'written' }, baseline);
+    assert.equal(job.waits.length, 1);
+    job.executionDone = true; tasks.update(job, { status: 'waiting-results' });
+    const dependent = tasks.create({ text: 'Fix findings', origin: 'text' }); dependent.task.dependsOn = [job.task.requestId];
+    let ready = false; const waiting = tasks.ready(dependent).then(() => { ready = true; });
+    tasks.reconcile([{ id: 's', generation: 'g', turnId: 'old', turnState: 'completed', turnStartedAt: 90 }]); await tick(); assert.equal(ready, false);
+    tasks.reconcile([{ id: 's', generation: 'g', turnId: 'new', turnState: 'running', turnStartedAt: 101 }]);
+    assert.equal(job.waits[0].turnId, 'new'); assert.equal(job.task.status, 'waiting-results');
+    tasks.reconcile([{ id: 's', generation: 'g', turnId: 'new', turnState: 'completed', turnStartedAt: 101 }]); await waiting;
+    assert.equal(ready, true); assert.equal(job.task.status, 'finished');
+  }
+});
+
+test('interaction-only controls and shell transport cannot supply provider completion evidence', () => {
+  const tasks = createTaskScheduler(); const job = tasks.create({ text: 'Operate controls', origin: 'text' });
+  const action = { kind: 'terminal_interact', operator: true, actionId: 'a', targetId: 's', generation: 'g', keys: ['enter'] };
+  for (const inputPurpose of ['interaction', undefined]) tasks.track(job, { ...action, inputPurpose }, { ok: true, status: 'written' }, { kind: 'codex' });
+  assert.equal(job.waits.length, 0);
+  tasks.track(job, { ...action, inputPurpose: 'task' }, { ok: true, status: 'written', turnId: 'shell-turn' }, { kind: 'terminal' });
+  job.executionDone = true; tasks.update(job, { status: 'waiting-results' });
+  tasks.reconcile([{ id: 's', generation: 'g', turnId: 'shell-turn', actionId: 'a', turnState: 'completed' }]);
+  assert.equal(job.waits[0].done, false); assert.equal(job.task.status, 'waiting-results');
 });
 
 test('failed dependencies pause without recursion and future dependency IDs are rejected', async () => {

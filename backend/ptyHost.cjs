@@ -1,4 +1,5 @@
 const readline = require("readline");
+const { encodeTerminalControls } = require('../shared/terminalControls.cjs');
 
 let pty = null;
 try {
@@ -112,7 +113,8 @@ function emitSnapshot(id, session) {
     terminalTitle: session.terminalTitle,
     exitCode: session.exitCode,
     signal: session.signal,
-    cols: session.cols, rows: session.rows, sequence: session.sequence, outputAt: session.outputAt
+    cols: session.cols, rows: session.rows, sequence: session.sequence, outputAt: session.outputAt,
+    ...inputState(session)
   });
 }
 
@@ -124,13 +126,25 @@ function matchesSession(session, payload) {
 
 // Conservative "user may have an unsent draft" marker, not a reconstruction
 // of a provider editor. Output never clears it; arrow/tab input can dirty it.
+function inputState(session) {
+  return { inputRevision: session.inputRevision, manualInputPending: Boolean(session.manualInputPending),
+    interactionInputPending: Boolean(session.interactionInputPending || session.heldMouseButton), ownerRequestId: session.ownerRequestId || session.mouseOwnerRequestId || null };
+}
+function inputChanged(session) {
+  session.inputRevision += 1;
+  emit({ type: 'input-state', id: session.id, generation: session.generation, ...inputState(session) });
+}
 function noteManualInput(session, data) {
   if (typeof data !== "string" || !data) return;
   // xterm emits these replies through onData without a user editing anything.
   // Match whole packets only; navigation/paste and mixed packets stay dirty.
   if (/^\x1b\[(?:[IO]|\??\d+;\d+R|[?>][0-9]+(?:;[0-9]+)*c|[03]n)$/.test(data)) return;
   session.interactionInputPending = false;
+  session.ownerRequestId = null;
+  session.heldMouseButton = null;
+  session.mouseOwnerRequestId = null;
   session.manualInputPending = !["\r", "\n", "\r\n", "\x03"].includes(data);
+  inputChanged(session);
 }
 
 // Observe OSC titles without changing the byte stream supplied to xterm.
@@ -247,6 +261,7 @@ function createSession(payload) {
       ? payload.instrumentation.stripEnv
       : [];
   const session = {
+    id: payload.id, inputRevision: 0, interactionInputPending: false, ownerRequestId: null,
     terminal: null,
     buffer: "",
     cols,
@@ -275,7 +290,7 @@ function createSession(payload) {
 
     session.terminal = terminal;
     sessions.set(payload.id, session);
-    emit({ id: payload.id, type: "created", generation: session.generation, launchToken: session.launchToken, cols, rows, pid: terminal.pid });
+    emit({ id: payload.id, type: "created", generation: session.generation, launchToken: session.launchToken, cols, rows, pid: terminal.pid, ...inputState(session) });
 
     terminal.onData((data) => {
       if (sessions.get(payload.id) !== session) {
@@ -288,6 +303,13 @@ function createSession(payload) {
       for (const match of modeText.matchAll(modes)) {
         if (match[1].split(";").includes("2004")) session.bracketedPaste = match[2] === "h";
         if (match[1].split(";").includes("1")) session.applicationCursorKeys = match[2] === "h";
+        for (const mode of match[1].split(';').map(Number)) {
+          if (mode === 1006) session.mouseSgr = match[2] === 'h';
+          if ([1000, 1002, 1003].includes(mode)) {
+            if (match[2] === 'h') session.mouseTracking = mode;
+            else if (session.mouseTracking === mode) session.mouseTracking = null;
+          }
+        }
       }
       // Retain only a possible incomplete mode sequence across output chunks.
       session.modeTail = modeText.match(/\x1b(?:\[(?:\?[0-9;]{0,64})?)?$/)?.[0] || "";
@@ -413,7 +435,7 @@ function handleAction(payload, strict) {
   const resultKey = JSON.stringify([payload.id, payload.generation, payload.actionId]);
   if (payload.actionId && checkedResults.has(resultKey)) { emit(checkedResults.get(resultKey)); return; }
   const result = (ok, status, error) => {
-    const event = { type: "action-result", actionId: payload.actionId, id: payload.id, generation: payload.generation, ok, status, ...(status === "written" ? { delivery: "pty-transport-only" } : {}), ...(error ? { error } : {}) };
+    const event = { type: "action-result", actionId: payload.actionId, id: payload.id, generation: payload.generation, ok, status, ...(status === "written" ? { delivery: "pty-transport-only" } : !ok && !['unknown', 'write-failed'].includes(status) ? { delivery: 'not-dispatched' } : {}), ...(error ? { error } : {}) };
     if (payload.actionId) { checkedResults.set(resultKey, event); if (checkedResults.size > 1000) checkedResults.delete(checkedResults.keys().next().value); }
     emit(event);
   };
@@ -429,20 +451,38 @@ function handleAction(payload, strict) {
       const age = Date.now() - Number(evidence?.observedAt);
       if (payload.generation == null || !Number.isSafeInteger(pid) || pid <= 0 || evidence?.id !== payload.id || evidence?.generation !== session.generation || evidence?.pid !== pid || !Number.isSafeInteger(evidence?.sequence) || evidence.sequence !== session.sequence || !Number.isFinite(age) || age < 0 || age > 5000 || (evidence.shell && pid !== session.terminal.pid)) return result(false, "stale-observation", "Fresh generation-bound terminal interaction evidence is required.");
       try { process.kill(pid, 0); } catch { return result(false, "recipient-unavailable", "The expected input recipient is no longer alive."); }
-      if (session.manualInputPending) return result(false, "input-buffer-occupied", "This terminal may contain unsent user input.");
-      const prefix = session.applicationCursorKeys ? "\x1bO" : "\x1b[";
-      const keys = { up: prefix + "A", down: prefix + "B", right: prefix + "C", left: prefix + "D", home: prefix + "H", end: prefix + "F", tab: "\t", "shift-tab": "\x1b[Z", enter: "\r", escape: "\x1b", backspace: "\x7f", space: " " };
-      if ((payload.text !== undefined && (typeof payload.text !== "string" || require('node:buffer').Buffer.byteLength(payload.text) > 4096 || /[\x00-\x1f\x7f-\x9f]/.test(payload.text))) || (payload.keys !== undefined && (!Array.isArray(payload.keys) || payload.keys.length > 16 || payload.keys.some(key => !Object.prototype.hasOwnProperty.call(keys, key)))) || (payload.submit !== undefined && typeof payload.submit !== "boolean") || (!payload.text && !payload.keys?.length && !payload.submit)) return result(false, "invalid-action", "Use bounded literal text and named terminal keys.");
-      if (payload.keys?.includes("enter") && (payload.submit || payload.keys.filter(key => key === "enter").length !== 1 || payload.keys.at(-1) !== "enter")) return result(false, "invalid-action", "Use Enter once as the final key, or submit, never both.");
-      const text = payload.text || "";
-      const data = (text && session.bracketedPaste ? "\x1b[200~" + text + "\x1b[201~" : text) + (payload.keys || []).map(key => keys[key]).join("") + (payload.submit ? "\r" : "");
-      if (text) session.interactionInputPending = true;
-      session.terminal.write(data);
-      for (const key of payload.keys || []) {
-        if (key === "enter") session.interactionInputPending = false;
-        else if (["space", "backspace"].includes(key)) session.interactionInputPending = true;
+      const freshInput = Number.isSafeInteger(evidence.inputRevision) && evidence.inputRevision === session.inputRevision;
+      if ((payload.operator || payload.editInput || evidence.inputRevision !== undefined) && !freshInput) return result(false, "stale-observation", "Read the current terminal input revision before interacting.");
+      if (payload.operator && (typeof payload.requestId !== 'string' || !payload.requestId)) return result(false, "invalid-action", "Operator controls require a request owner.");
+      const encoded = encodeTerminalControls(payload, session);
+      if (!encoded.ok) return result(false, encoded.status || "invalid-action", encoded.error);
+      if (session.manualInputPending && !payload.editInput) return result(false, "input-buffer-occupied", "This terminal may contain unsent user input.");
+      if (session.interactionInputPending && session.ownerRequestId !== (payload.requestId || null) && !payload.editInput) return result(false, "input-buffer-occupied", "Another request owns the staged terminal input.");
+      if (session.heldMouseButton && session.mouseOwnerRequestId !== (payload.requestId || null) && !payload.editInput) return result(false, "input-buffer-occupied", "Another request owns the held mouse button.");
+      if (session.heldMouseButton && payload.mouse && !payload.mouse.button.startsWith('wheel-') && payload.mouse.button !== session.heldMouseButton) return result(false, 'invalid-action', 'Release the currently held mouse button before using another button.');
+      // Reserve before the write: a throwing transport may already have consumed
+      // bytes. Its input revision and lease cannot be reused after uncertainty.
+      const submitted = payload.submit || payload.keys?.some(key => ['enter', 'ctrl-m', 'ctrl-j'].includes(key));
+      const changedDraft = Boolean(encoded.text || payload.keys?.some(key => !['enter', 'escape', 'ctrl-c'].includes(key)));
+      if (payload.editInput) {
+        session.manualInputPending = false;
+        if (session.interactionInputPending) session.ownerRequestId = payload.requestId || null;
+        if (session.heldMouseButton) session.mouseOwnerRequestId = payload.requestId || null;
       }
-      if (payload.submit) session.interactionInputPending = false;
+      if (changedDraft) { session.interactionInputPending = true; session.ownerRequestId = payload.requestId || null; }
+      if (payload.mouse && ['down', 'move'].includes(payload.mouse.action)) {
+        session.heldMouseButton = payload.mouse.button; session.mouseOwnerRequestId = payload.requestId || null;
+      }
+      inputChanged(session);
+      session.terminal.write(encoded.data);
+      if (payload.mouse && ['up', 'click'].includes(payload.mouse.action) && payload.mouse.button === session.heldMouseButton) {
+        session.heldMouseButton = null; session.mouseOwnerRequestId = null;
+        emit({ type: 'input-state', id: session.id, generation: session.generation, ...inputState(session) });
+      }
+      if (submitted || payload.keys?.includes('ctrl-c')) {
+        session.manualInputPending = false; session.interactionInputPending = false; session.ownerRequestId = null;
+        emit({ type: 'input-state', id: session.id, generation: session.generation, ...inputState(session) });
+      }
       return result(true, "written"); // ConPTY acceptance, not foreground ownership or answer consumption.
     }
     if (payload.expectedAgentPid !== undefined) {
@@ -462,7 +502,7 @@ function handleAction(payload, strict) {
     let data = payload.data;
     if (payload.kind === "input" && payload.promptText !== undefined) {
       if (typeof payload.promptText !== "string" || !payload.promptText.trim() || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/.test(payload.promptText)) return result(false, "invalid-action", "Prompt contains unsupported control characters or is empty.");
-      if (session.manualInputPending || session.interactionInputPending) return result(false, "input-buffer-occupied", "This terminal may contain unsent user input. Prompt preserved as a draft without changing that input.");
+      if (session.manualInputPending || session.interactionInputPending || session.heldMouseButton) return result(false, "input-buffer-occupied", "This terminal may contain unsent user input. Prompt preserved as a draft without changing that input.");
       if (payload.expectedAgentPid !== undefined) {
         if (/[\r\n]/.test(payload.promptText) && !session.bracketedPaste) return result(false, "needs-staging", "This agent has not enabled bracketed paste; multiline prompt preserved for review.");
         data = session.bracketedPaste ? "\x1b[200~" + payload.promptText.replace(/\r\n?/g, "\n") + "\x1b[201~\r" : payload.promptText + "\r";
@@ -475,6 +515,7 @@ function handleAction(payload, strict) {
     }
     if (payload.kind === "interrupt") noteManualInput(session, "\x03");
     else if (payload.promptText === undefined) noteManualInput(session, data);
+    if (payload.promptText !== undefined) inputChanged(session);
     session.terminal.write(payload.kind === "interrupt" ? "\x03" : data);
     return result(true, "written"); // Transport acceptance, never agent completion.
   } catch (error) {

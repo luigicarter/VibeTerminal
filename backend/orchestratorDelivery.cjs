@@ -2,7 +2,7 @@
 
 // In-memory command delivery only. Readiness is observed, never inferred from
 // silence or terminal output. Transport acceptance does not prove consumption.
-function createOrchestratorDelivery({ getSession, write, stage, reserveInput = () => {}, onUpdate = () => {}, now = Date.now, maxWaitMs = 120000, maxQueued = 50 } = {}) {
+function createOrchestratorDelivery({ getSession, write, reserveInput = () => {}, onUpdate = () => {}, now = Date.now, maxWaitMs = 120000, maxQueued = 50 } = {}) {
   const queued = new Map(), results = new Map(), locks = new Map();
   let disposed = false, pumping = false;
   const key = s => JSON.stringify([s.id, s.generation]);
@@ -25,12 +25,8 @@ function createOrchestratorDelivery({ getSession, write, stage, reserveInput = (
     if (!lock.inFlight && (stamp(s) !== lock.stamp || (lock.sawBusy && ["idle", "completed", "response", "interrupted"].includes(s.turnState)))) { locks.delete(key(s)); return false; }
     return true;
   }
-  async function staged(a, reason) {
-    if (disposed || a.signal?.aborted) return receipt(a, "cancelled", false);
-    try {
-      const result = await stage(a, reason);
-      return receipt(a, result?.ok ? "staged" : result?.status || "failed", Boolean(result?.ok), { ...result, reason });
-    } catch (error) { return receipt(a, "failed", false, { error: String(error?.message || error), reason }); }
+  function blockedDelivery(a, reason) {
+    return receipt(a, "blocked", false, { reason, error: reason, delivery: "not-dispatched" });
   }
   async function deliver(a, s, entry) {
     if (disposed || a.signal?.aborted) return receipt(a, "cancelled", false);
@@ -56,14 +52,17 @@ function createOrchestratorDelivery({ getSession, write, stage, reserveInput = (
       if (result?.ok === false && result.status && result.status !== "unknown") {
         locks.delete(key(latest));
         if (typeof rollback === "function") rollback();
-        if (!entry?.cancelRequested && ["needs-staging", "input-buffer-occupied", "input-surface-unverified", "recipient-unavailable"].includes(result?.status)) return staged(a, result.error || result.status);
+        if (["needs-staging", "input-buffer-occupied", "input-surface-unverified", "recipient-unavailable"].includes(result?.status)) {
+          if (!entry?.cancelRequested) return blockedDelivery(a, result.error || result.status);
+          return receipt(a, result.status, false, { ...result, delivery: "not-dispatched" });
+        }
       }
       return receipt(a, result?.status || "unknown", Boolean(result?.ok), result || {});
     } catch (error) { lock.inFlight = false; return receipt(a, "unknown", false, { error: String(error?.message || error) }); }
   }
   function enqueue(a) {
     if (disposed || a.signal?.aborted) return receipt(a, "cancelled", false);
-    if (queued.size >= maxQueued) return staged(a, "Delivery queue is full.");
+    if (queued.size >= maxQueued) return blockedDelivery(a, "Delivery queue is full. Wait for pending work, then try again.");
     const entry = { action: a, expiresAt: now() + maxWaitMs };
     entry.abort = () => { entry.cancelRequested = true; if (!entry.dispatched) finish(entry, receipt(a, "cancelled", false)); };
     queued.set(a.actionId, entry); a.signal?.addEventListener("abort", entry.abort, { once: true });
@@ -82,8 +81,8 @@ function createOrchestratorDelivery({ getSession, write, stage, reserveInput = (
       if (disposed || a.signal?.aborted) return receipt(a, "cancelled", false);
       if (typeof a.text !== "string" || !a.text.trim() || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/.test(a.text)) return receipt(a, "invalid-action", false, { error: "Prompt contains unsupported control characters or is empty." });
       const s = getSession(a.target?.id || a.id || a.targetId), state = classify(s, a);
-      if (["stale-generation", "not-running"].includes(state)) return receipt(a, state, false);
-      if (["waiting", "unverified"].includes(state)) return staged(a, state === "waiting" ? "Answer the pending request before sending." : "Agent input readiness is not observed.");
+      if (["stale-generation", "not-running"].includes(state)) return receipt(a, state, false, { delivery: "not-dispatched" });
+      if (["waiting", "unverified"].includes(state)) return blockedDelivery(a, state === "waiting" ? "Answer the pending request before sending." : "Agent input readiness is not observed. Read the terminal before operating its current screen.");
       const earlier = [...queued.values()].some(e => (e.action.target?.id || e.action.id || e.action.targetId) === s.id && (e.action.target?.generation || e.action.generation) === s.generation);
       if (state === "busy" || blocked(s) || earlier) return enqueue(a);
       return await deliver(a, s) || enqueue(a);
@@ -100,8 +99,8 @@ function createOrchestratorDelivery({ getSession, write, stage, reserveInput = (
         const a = entry.action;
         if (!queued.has(a.actionId)) continue;
         const s = getSession(a.target?.id || a.id || a.targetId), state = classify(s, a);
-        if (a.signal?.aborted || ["stale-generation", "not-running"].includes(state)) { finish(entry, receipt(a, a.signal?.aborted ? "cancelled" : state, false)); continue; }
-        if (now() >= entry.expiresAt || ["waiting", "unverified"].includes(state)) { finish(entry, await staged(a, "Delivery readiness was not confirmed; prompt preserved as a draft.")); continue; }
+        if (a.signal?.aborted || ["stale-generation", "not-running"].includes(state)) { finish(entry, receipt(a, a.signal?.aborted ? "cancelled" : state, false, { delivery: "not-dispatched" })); continue; }
+        if (now() >= entry.expiresAt || ["waiting", "unverified"].includes(state)) { finish(entry, blockedDelivery(a, "Delivery readiness was not confirmed. Read the terminal before trying again.")); continue; }
         if (state === "busy") { blocked(s); continue; }
         if (blocked(s)) continue;
         const result = await deliver(a, s, entry);

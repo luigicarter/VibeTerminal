@@ -201,12 +201,6 @@ function installOrchestrator(options) {
     getSession: id => { const s = directory.get(id); return s && { ...s, pendingInteraction: relay.getState().requests.some(r => r.sessionId === id && r.generation === s.generation && r.state === "pending") }; },
     write: payload => hostAction(sendPty, payload),
     reserveInput: payload => { const runtime = getRuntime(), reservation = runtime.recordInput?.(payload); return reservation ? () => runtime.releaseInput?.(reservation) : undefined; },
-    stage: async (action, reason) => {
-      await currentTarget(action);
-      const result = await requestUi("stage_draft", { id: action.target.id, text: action.text, generation: action.target.generation,
-        ...(action.expectedDraftRevision !== undefined ? { mode: "replace", expectedRevision: action.expectedDraftRevision } : {}) }, action.signal);
-      return result.ok ? { ...result, text: `Prompt preserved as a draft: ${reason}` } : result;
-    },
     onUpdate: result => relay.recordDelivery(result)
   });
   const terminalInput = createTerminalInput({ getSession: id => directory.get(id), readSession: target => observations.read(target),
@@ -405,6 +399,7 @@ function installOrchestrator(options) {
     if (kind === "interrupt") {
       if (s.kind === "fusion") { check(); currentTarget(action); await getTelemetry().interruptFusionSession(s.id); return checkedHost(sendFusion, { id: s.id, generation: s.generation, actionId: action.actionId }, "interrupt"); }
       if (s.kind === "openfusion") return checkedHost(sendOpenFusion, { id: s.id, generation: s.generation, actionId: action.actionId }, "interrupt");
+      if (action.operator === true) return terminalInput.handle({ ...action, target: { id: s.id, generation: s.generation }, keys: ['ctrl-c'] });
       return checkedHost(sendPty, { id: s.id, generation: s.generation, actionId: action.actionId, kind: "interrupt" });
     }
     if (kind === "send_prompt") {
@@ -419,6 +414,7 @@ function installOrchestrator(options) {
         return checkedHost(sendFusion, { id: s.id, generation: s.generation, text: action.text, actionId: action.actionId }, "input");
       }
       if (s.kind === "openfusion") return checkedHost(sendOpenFusion, { id: s.id, generation: s.generation, text: action.text, mode: s.mode || "auto", actionId: action.actionId }, "input");
+      if (action.operator === true) return terminalInput.handle({ ...action, target: { id: s.id, generation: s.generation }, submit: true });
       return delivery.submit({ ...action, target: { id: s.id, generation: s.generation } });
     }
     throw new Error(`Unsupported action: ${kind}`);

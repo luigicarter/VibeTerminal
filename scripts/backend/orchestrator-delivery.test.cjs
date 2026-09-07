@@ -42,8 +42,8 @@ test("cancel, restart, pending question and expiry never inject queued work", as
     if (mode === "question") h.s.turnState = "waiting";
     if (mode === "expiry") h.advance();
     await h.delivery.pump();
-    assert.equal(h.writes.length, 0, mode);
-    assert.equal(h.updates[0].status, { cancel: "cancelled", restart: "stale-generation", question: "staged", expiry: "staged" }[mode]);
+    assert.equal(h.writes.length, 0, mode); assert.equal(h.drafts.length, 0, mode);
+    assert.equal(h.updates[0].status, { cancel: "cancelled", restart: "stale-generation", question: "blocked", expiry: "blocked" }[mode]);
   }
 });
 test("cancelling queued work after transport dispatch preserves the actual acknowledgment", async () => {
@@ -68,7 +68,8 @@ test("cancelling queued work after transport dispatch preserves the actual ackno
 test("unobserved and stopped providers report honest outcomes", async () => {
   for (const provider of ["codex", "claude", "cursor", "gemini", "opencode", "kimi", "kimi-custom", "qwen"]) {
     const h = harness(); h.s.provider = provider; h.s.turnState = "unknown";
-    assert.equal((await h.delivery.submit(h.action("a"))).status, "staged");
+    assert.equal((await h.delivery.submit(h.action("a"))).status, "blocked");
+    assert.equal((await h.delivery.submit(h.action("a"))).delivery, "not-dispatched"); assert.equal(h.drafts.length, 0);
     h.s.processState = "exited";
     assert.equal((await h.delivery.submit(h.action("b"))).status, "not-running");
     assert.equal(h.writes.length, 0);
@@ -82,11 +83,11 @@ test("unknown acknowledgment keeps delivery lock and a definite rejection releas
   assert.equal((await j.delivery.submit(j.action("a"))).status, "write-failed");
   assert.equal((await j.delivery.submit(j.action("b"))).status, "write-failed");
 });
-test("occupied user input stages and rolls back the submission reservation", async () => {
+test("occupied user input blocks and rolls back the submission reservation", async () => {
   let rollbackCount = 0;
   const h = harness({ reserveInput: () => () => { rollbackCount++; }, write: async () => ({ ok: false, status: "input-buffer-occupied" }) });
-  assert.equal((await h.delivery.submit(h.action("a"))).status, "staged");
-  assert.equal(h.drafts.length, 1); assert.equal(rollbackCount, 1);
+  assert.equal((await h.delivery.submit(h.action("a"))).status, "blocked");
+  assert.equal(h.drafts.length, 0); assert.equal(rollbackCount, 1);
 });
 test("submitted text reserves runtime input and rollback cannot clear a later observation", () => {
   const runtime = createTerminalRuntime();
@@ -103,7 +104,7 @@ test("submitted text reserves runtime input and rollback cannot clear a later ob
 });
 test("PTY multiline framing follows split bracketed-paste mode and deduplicates writes", () => {
   const events = [], terminals = [];
-  const context = vm.createContext({ require: name => name === "node-pty" ? { spawn() { const t = { pid: 42, writes: [], onData(fn) { this.data = fn; }, onExit() {}, resize() {}, kill() {}, write(data) { this.writes.push(data); } }; terminals.push(t); return t; } } : name === "readline" ? { createInterface: () => ({ on() {} }) } : require(name), process: { platform: "win32", env: {}, stdin: {}, cwd: () => process.cwd(), stdout: { write: line => events.push(JSON.parse(line)) }, kill() {} }, setTimeout() {} });
+  const context = vm.createContext({ require: name => name === "node-pty" ? { spawn() { const t = { pid: 42, writes: [], onData(fn) { this.data = fn; }, onExit() {}, resize() {}, kill() {}, write(data) { this.writes.push(data); } }; terminals.push(t); return t; } } : name === "readline" ? { createInterface: () => ({ on() {} }) } : name === '../shared/terminalControls.cjs' ? require('../../shared/terminalControls.cjs') : require(name), process: { platform: "win32", env: {}, stdin: {}, cwd: () => process.cwd(), stdout: { write: line => events.push(JSON.parse(line)) }, kill() {} }, setTimeout() {} });
   vm.runInContext(fs.readFileSync(path.resolve(__dirname, "../../backend/ptyHost.cjs"), "utf8"), context);
   context.handleMessage({ type: "create", payload: { id: "p", generation: "g", launchToken: 1 } });
   const send = (actionId, promptText = "one\ntwo") => { context.handleMessage({ type: "action", payload: { id: "p", generation: "g", actionId, kind: "input", data: promptText + "\r", promptText, expectedAgentPid: 42, recipientEvidence: { generation: "g", pid: 42, state: "idle", observedAt: Date.now() } } }); return events.at(-1); };
