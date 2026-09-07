@@ -72,8 +72,13 @@ The mic and Settings identify whether transcription, the assistant request, or
 speech failed. A spoken-reply failure does not imply that an action was rejected.
 HTTP status and safe classified details remain available; raw provider bodies and
 keys are never spoken. Mute, cancellation and deferred background errors remain
-in effect. Background alerts retain cooldown; every explicit voice attempt gets
-feedback, without a recursive cloud request to announce an error.
+in effect. Background alerts retain cooldown. Wake-only transcripts use visible
+no-command feedback, while provider/relay failures and missed manual speech use
+the corresponding local clips. Short uncertain automatic speech also ends with
+local retry feedback without an upload, preserving any pending question. Manual
+start/flush failures are reported by backend state scoped to the matching hold;
+stale failures cannot overwrite a later recording. The
+[voice audit](orchestrator-voice-deep-dive.md) records the remaining limitations.
 
 Speech uses the supported Kokoro English voices through OpenRouter. The app
 requests PCM and validates response rate/channel metadata, frame alignment,
@@ -88,20 +93,24 @@ configuration, speech, and microphone readiness are separate checks.
 
 ## Verification
 
-The v0.1.89 live History follow-up passes all 37 release checks, including the
-289 backend tests and deterministic refresh/pagination/visibility race checks.
-Isolated Electron QA at `.tmp/history-live-smoke/1788651527561-52252/` appended
+Run `npm run test:orchestrator` for context budgets, progressive pages, source
+revisions, Unicode reconstruction, cursor rejection, error classification,
+offline assets, cancel/mute/cooldown, partial/empty TTS failures and billing pause.
+`npm run smoke:frontend:orchestrator-history` checks renderer history behavior;
+`npm run smoke:electron:context-history` checks real UI pagination, Unicode,
+search/jump and source preservation without voice or provider activation;
+`npm run smoke:electron:voice-experience` covers current playback/capture behavior.
+`npm run typecheck` checks the TypeScript surface. Commands describe available
+coverage, not a claim that they were rerun for this documentation consolidation.
+
+Historical isolated Electron QA from v0.1.89 at
+`.tmp/history-live-smoke/1788651527561-52252/` appended
 and edited a real fixture rollout while History stayed open, reconstructed
 54,029 Unicode characters, preserved the browsing scroll position, and verified
 that closing the view stopped reads. No provider request or voice activation
 occurred. The parent inspected the code, assertions, artifacts and screenshot.
 
-The targeted suite passes 207 tests, including context budgets, progressive pages,
-source revisions, Unicode reconstruction, cursor rejection, error classification,
-offline assets, cancel/mute/cooldown, partial/empty TTS failures and billing pause.
-Frontend merge/paging and TypeScript checks pass.
-
-Real isolated Electron QA at `.tmp/audio-context-smoke/1788634805105-33592/`
+Earlier isolated Electron QA at `.tmp/audio-context-smoke/1788634805105-33592/`
 reconstructed a 54,476-character Unicode message after three earlier-page loads,
 searched/jumped to an early marker, returned to Latest and verified the original
 file hash was unchanged. A scripted 402 passed through the real relay/IPC path,
@@ -112,4 +121,5 @@ were checked against actual scripted upstream failures.
 The microphone was stubbed and playback used a zero-gain node. These checks prove
 the pipeline, not audible speaker quality, microphone hardware, or live account
 behavior. Parent review inspected source, test assertions, artifacts and UI
-screenshots.
+screenshots. See the [current voice deep dive](orchestrator-voice-deep-dive.md)
+for subsequent provider evidence and remaining physical-audio verification limits.

@@ -4,10 +4,10 @@ vibeTerminal ships to Windows users as an Electron Builder NSIS installer hosted
 
 ## Current Public Release
 
-The current public Windows release is `v0.1.94`:
+The current public Windows release is `v0.1.95`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.94`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.94/vibeTerminal-Setup-0.1.94.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.95`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.95/vibeTerminal-Setup-0.1.95.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -56,6 +56,13 @@ The package excludes development and reference material:
 The compiled `dist/` renderer is still included because it is the UI Electron displays in production.
 
 ## Local Build
+
+Version `0.1.95` repairs recording boundaries, manual/automatic handover and
+keyboard feedback, exposes recording status and click-to-send, and retries
+invalid Brain interpretations once. The [voice audit](orchestrator-voice-deep-dive.md)
+records the findings, final-review corrections, and remaining product/hardware
+limits. Installed applications apply updates through the user's Update/Restart
+action; publication does not restart an active workspace.
 
 Use these commands before publishing a release:
 
@@ -126,7 +133,9 @@ It verifies the bundled voice alert clips and models, runs `scripts/qa/release-c
 with fail-fast handling, and verifies installer/feed hashes, packaged voice checksums,
 and native inference dependencies using `scripts/qa/verify-release-artifacts.cjs`.
 `scripts/qa/voice-packaged-smoke.cjs` then starts both inference helpers with the
-shipped Electron executable before publication. `vendor/voice` is committed with
+shipped Electron executable before publication. Real Electron voice capture and
+history/context checks also gate publication. Tag releases and manual artifact
+builds share the same build and verification steps. `vendor/voice` is committed with
 byte-preserving Git attributes because its runtime assets are checksummed on load.
 
 Treat the `main` branch as production. If this repository is ever referred to as

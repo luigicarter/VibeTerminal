@@ -17,6 +17,19 @@ test('diagnostics persist across reopen with one JSON object per line and only a
   const records = f.read(); assert.equal(records.length, 2); assert.equal(records[0].time, '1970-01-01T00:00:00.000Z'); assert.equal(records[0].error.message, 'line one\nline two'); assert.equal(records[0].httpStatus, 503); assert.equal(records[0].generation, 3); assert.equal(records[1].requestId, 'two');
   assert.doesNotMatch(fs.readFileSync(f.filename, 'utf8'), /private/);
 });
+
+test('voice timing and turn identity survive sanitization without audio or transcripts', async t => {
+  const f = fixture(t), logger = f.open();
+  logger.record({ event: 'voice_recording', stage: 'finish', reason: 'silence', recordingSource: 'wake', recordingId: 7, elapsedMs: 4800, silenceMs: 3000, voicedMs: 700, probability: .2, processingMs: 4, queuedSamples: 320, totalMs: 20, preprocessingMs: 5, inferenceMs: 15, transcript: 'private transcript', samples: [0.1], audio: 'private audio' });
+  logger.record({ event: 'voice_inference', processingMs: Infinity, queuedSamples: -1, totalMs: 1e12, probability: 2, recordingSource: 'private content' });
+  await logger.flush();
+  const [recording, invalid] = f.read();
+  assert.equal(recording.recordingId, 7); assert.equal(recording.recordingSource, 'wake');
+  for (const [field, value] of Object.entries({ elapsedMs: 4800, silenceMs: 3000, voicedMs: 700, probability: .2, processingMs: 4, queuedSamples: 320, totalMs: 20, preprocessingMs: 5, inferenceMs: 15 })) assert.equal(recording[field], value, field);
+  assert.equal(invalid.totalMs, 1e9);
+  for (const field of ['processingMs', 'queuedSamples', 'probability', 'recordingSource']) assert.equal(invalid[field], undefined);
+  assert.doesNotMatch(fs.readFileSync(f.filename, 'utf8'), /private|samples|transcript/);
+});
 test('adapter string errors retain the exact reason and voice reply identity with redaction', async t => {
   const f = fixture(t, { getSecrets: () => ['secret-value'] }); const logger = f.open();
   logger.record({ event: 'action-rejected', error: 'Agent host is unavailable.', replyId: 'voice-reply-1', generation: 'paused:2' });

@@ -1,14 +1,14 @@
 'use strict';
-// Isolated real Electron/UI/IPC QA. All provider HTTP is scripted; microphone is
-// never opened and real WebAudio buffer scheduling goes through a zero gain node.
+// Isolated real Electron history pagination/search QA. Provider fetches are blocked;
+// voice stays disabled. Audio playback is covered by voice-experience-smoke.cjs.
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), net = require('node:net');
 const { createHash } = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
 const root = path.resolve(__dirname, '../..');
-const output = path.join(root, '.tmp', 'audio-context-smoke', `${Date.now()}-${process.pid}`);
+const output = path.join(root, '.tmp', 'context-history-smoke', `${Date.now()}-${process.pid}`);
 fs.mkdirSync(output, { recursive: true });
-const result = { output, checks: [], limits: ['Scripted provider HTTP; no live model or paid calls.', 'No microphone capture or audible speaker output; hardware audio quality untested.'] };
+const result = { output, checks: [], limits: ['Provider requests are blocked; model context selection is covered by backend tests.', 'Voice remains disabled; this does not test microphone capture or playback.'] };
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(fn, label, ms = 30000) { let last; const end = Date.now() + ms; while (Date.now() < end) { try { const value = await fn(); if (value) return value; } catch (error) { last = error; } await wait(150); } throw Error(`Timeout: ${label}; ${last || ''}`); }
 class Cdp {
@@ -19,8 +19,8 @@ class Cdp {
   close() { this.ws.close(); }
 }
 function record(name, value) { result.checks.push({ name, value }); console.log(name, JSON.stringify(value)); }
-const userData = path.join(output, 'userData'), fault = path.join(output, 'fault.json'), trace = path.join(output, 'network.jsonl'), acknowledgements = path.join(output, 'playback.jsonl');
-const id = '33333333-3333-4333-8333-333333333333', project = path.join(userData, 'Documents', 'Audio Context QA');
+const userData = path.join(output, 'userData'), trace = path.join(output, 'network.jsonl');
+const id = '33333333-3333-4333-8333-333333333333', project = path.join(userData, 'Documents', 'Context History QA');
 const historyRoot = path.join(output, 'codex', 'sessions', '2026', '09', '05');
 fs.mkdirSync(historyRoot, { recursive: true });
 const early = 'EARLY_CONTEXT_MARKER_5937';
@@ -29,23 +29,12 @@ const latest = 'LATEST_CONTEXT_MARKER_9271';
 const historyFile = path.join(historyRoot, `rollout-2026-09-05T00-00-00-${id}.jsonl`);
 fs.writeFileSync(historyFile, [{ type: 'session_meta', payload: { id, cwd: project, name: 'Progressive history fixture', timestamp: new Date().toISOString(), originator: 'Codex CLI' } }, ...[longMessage, latest].map((text, i) => ({ type: 'response_item', payload: { type: 'message', role: i ? 'assistant' : 'user', content: [{ type: i ? 'output_text' : 'input_text', text }] } }))].map(r => JSON.stringify(r)).join('\n') + '\n');
 const hash = () => createHash('sha256').update(fs.readFileSync(historyFile)).digest('hex'), beforeHash = hash();
-fs.writeFileSync(fault, JSON.stringify({ status: 402 }));
 const entry = path.join(output, 'main.cjs');
 fs.writeFileSync(entry, `const fs=require('node:fs');
-const {ipcMain}=require('electron');
-const handle=ipcMain.handle.bind(ipcMain);ipcMain.handle=(channel,fn)=>handle(channel,async(event,...args)=>{if(channel==='voice:configure'&&args[0]?.playbackDone)fs.appendFileSync(${JSON.stringify(acknowledgements)},JSON.stringify({replyId:args[0].playbackDone,time:Date.now()})+'\\n');return fn(event,...args)});
-globalThis.fetch=async(url,options={})=>{
- const body=options.body?JSON.parse(options.body):null;fs.appendFileSync(${JSON.stringify(trace)},JSON.stringify({url,body})+'\\n');
- const reply=data=>({ok:true,status:200,json:async()=>data});
- if(url==='https://openrouter.ai/api/v1/key')return reply({data:{is_free_tier:true}});
- if(url==='https://openrouter.ai/api/v1/models')return reply({data:[{id:'fixture/relay',name:'Scripted context fixture',context_length:128000,supported_parameters:['tools']}]});
- if(url!=='https://openrouter.ai/api/v1/chat/completions')throw Error('Fixture blocked network: '+url);
- const status=JSON.parse(fs.readFileSync(${JSON.stringify(fault)},'utf8')).status;
- return {ok:false,status,json:async()=>({error:{code:status,message:'Scripted provider failure'}})};
-};
+globalThis.fetch=async(url)=>{fs.appendFileSync(${JSON.stringify(trace)},JSON.stringify({blockedNetwork:String(url)})+'\\n');throw Error('Context/history QA forbids provider requests');};
 require(${JSON.stringify(path.join(root, 'backend/main.cjs'))});
 `);
-let child, cdp, voice;
+let child, cdp;
 const button = text => cdp.eval(`(()=>{const e=[...document.querySelectorAll('button')].find(e=>e.textContent===${JSON.stringify(text)});if(!e||e.disabled)return false;e.click();return true})()`);
 const reader = () => cdp.eval(`Array.from(document.querySelector('[aria-label="Saved conversation messages"]')?.children||[]).filter(e=>e.tagName==='DIV').map(e=>e.lastElementChild.textContent)`);
 async function screenshot(client, name) { const s = await client.send('Page.captureScreenshot', { format: 'png' }); fs.writeFileSync(path.join(output, name), Buffer.from(s.data, 'base64')); }
@@ -62,12 +51,13 @@ const rows = file => fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim().
   const pages = async () => (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json());
   const page = await until(async () => (await pages()).find(p => p.type === 'page' && p.url.startsWith('file:') && !p.url.includes('surface=voice')), 'main page');
   cdp = new Cdp(page.webSocketDebuggerUrl); await cdp.open();
-  await until(() => cdp.eval("Boolean(window.vibe?.orchestrator && document.querySelector('.orchestrator-mic'))"), 'UI ready');
-  assert.equal((await cdp.eval("window.vibe.orchestrator.configure({key:'fixture-no-real-key',sessionOnly:true,model:'fixture/relay',monitoringIntervalSeconds:300})")).ok, true);
-  assert.equal((await cdp.eval('window.vibe.orchestrator.setEnabled(true)')).ok, true);
-  const created = await cdp.eval(`window.vibe.orchestrator.dispatch(${JSON.stringify({ kind: 'create_project', parent: path.join(userData, 'Documents'), name: 'Audio Context QA' })})`);
+  await until(() => cdp.eval(`Boolean(window.vibe?.orchestrator && document.querySelector('[aria-label="Open workspace tools"]'))`), 'UI ready');
+  assert.equal((await cdp.eval('window.vibe.orchestrator.getState()')).enabled, false);
+  const created = await cdp.eval(`window.vibe.orchestrator.dispatch(${JSON.stringify({ kind: 'create_project', parent: path.join(userData, 'Documents'), name: 'Context History QA' })})`);
   assert.equal(created.ok, true, JSON.stringify(created));
-  await cdp.eval("Array.from(document.querySelectorAll('[role=tab]')).find(e=>e.textContent==='History').click()");
+  await cdp.eval(`document.querySelector('[aria-label="Open workspace tools"]').click()`);
+  await until(() => cdp.eval('Boolean(document.querySelector(".workspace-tools-heading"))'), 'workspace tools');
+  await cdp.eval("Array.from(document.querySelectorAll('button')).find(e=>e.textContent.trim()==='History').click()");
   await until(() => cdp.eval("Boolean(document.querySelector('.conversation-history-item'))"), 'fixture history');
   await cdp.eval("document.querySelector('.conversation-history-item').click()");
   const recent = await until(async () => { const messages = await reader(); return messages.some(s => s.includes(latest)) && messages; }, 'latest history');
@@ -86,36 +76,10 @@ const rows = file => fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim().
   await screenshot(cdp, 'history-search-jump.png');
   await button('Latest'); await until(async () => { const s = (await reader()).join(''); return s.includes(latest) && !s.includes(early); }, 'latest after jump');
   assert.equal(hash(), beforeHash); record('history-search-jump-latest-no-file-mutation', true);
-  const voicePage = await until(async () => (await pages()).find(p => p.url.includes('surface=voice')), 'voice overlay');
-  voice = new Cdp(voicePage.webSocketDebuggerUrl); await voice.open();
-  await until(() => voice.eval("Boolean(document.querySelector('.voice-overlay'))"), 'voice DOM');
-  await voice.eval(`(()=>{window.__packets=[];window.__audioStarts=0;window.__micRequests=0;Object.defineProperty(navigator.mediaDevices,'getUserMedia',{value:()=>{window.__micRequests++;return new Promise(()=>{})}});const original=AudioContext.prototype.createBufferSource;AudioContext.prototype.createBufferSource=function(){const source=original.call(this),connect=source.connect.bind(source),start=source.start.bind(source),gain=this.createGain();gain.gain.value=0;gain.connect(this.destination);source.connect=()=>connect(gain);source.start=(...args)=>{window.__audioStarts++;return start(...args)};return source};window.vibe.voice.onAudio(c=>window.__packets.push({local:c.local,sampleRate:c.sampleRate,dataLen:c.data.length,replyId:c.replyId,done:c.done,cancelled:c.cancelled}));})()`);
-  assert.equal((await voice.eval('window.vibe.voice.setListening(true)')).ok, true);
-  await until(() => voice.eval("window.vibe.voice.getState().then(s=>s.listening&&s.phase==='listening')"), 'voice enabled');
-  const failed = await cdp.eval("window.vibe.orchestrator.send({text:'Please summarize the current workspace.',origin:'text'})");
-  assert.equal(failed.ok, false);
-  assert.equal(failed.upstreamError?.category, 'credits');
-  const packets = await until(() => voice.eval('window.__packets.some(p=>p.local&&p.done)&&window.__packets'), 'local error PCM');
-  assert(packets.some(p => p.local && p.dataLen > 0 && p.sampleRate === 24000));
-  assert.match(await voice.eval("document.querySelector('.voice-conversation')?.textContent||''"), /insufficient credits/i);
-  await screenshot(voice, 'local-credit-audio.png');
-  const replyId = packets.find(p => p.local).replyId;
-  await until(() => rows(acknowledgements).some(r => r.replyId === replyId), 'real PcmPlayer playbackDone', 20000);
-  assert(await voice.eval('window.__audioStarts>0')); record('local-credit-pcm-and-renderer-playback-ack', { packets, acknowledgements: rows(acknowledgements), scheduledBuffers: await voice.eval('window.__audioStarts') });
-  const count = await voice.eval('window.__packets.length');
-  const repeated = await cdp.eval("window.vibe.orchestrator.send({text:'Try the summary again.',origin:'voice'})");
-  assert.equal(repeated.upstreamError?.category, 'credits'); await wait(500);
-  assert.equal(await voice.eval('window.__packets.length'), count); record('repeat-category-cooldown', true);
-  await voice.eval('window.vibe.voice.setListening(false)');
-  fs.writeFileSync(fault, JSON.stringify({ status: 503 }));
-  const muted = await cdp.eval("window.vibe.orchestrator.send({text:'Read the workspace status.',origin:'text'})");
-  assert.equal(muted.upstreamError?.category, 'upstream'); assert.equal(muted.upstreamError?.status, 503); await wait(500);
-  assert.equal(await voice.eval('window.__packets.length'), count); record('mute-prevents-new-category-audio', true);
-  const calls = rows(trace); assert(!calls.some(c => c.url.includes('/audio/speech')));
-  const bodies = calls.filter(c => c.url.includes('/chat/completions')).map(c => JSON.stringify(c.body));
-  assert(bodies.length >= 3); assert(bodies.every(b => b.length < 128000 && !b.includes(early)));
-  assert.equal(hash(), beforeHash);
-  record('no-paid-tts-no-history-auto-injection', { endpoints: [...new Set(calls.map(c => c.url))], requestCharacters: bodies.map(b => b.length), microphoneRequestsStubbed: await voice.eval('window.__micRequests') });
+  assert.equal(rows(trace).length, 0, 'History must not trigger provider requests');
+  assert.equal((await cdp.eval('window.vibe.voice.getState()')).listening, false);
+  assert(!(await pages()).some(page => page.url.includes('surface=voice')), 'History must not create an audio renderer');
+  record('no-provider-network-no-voice', true);
   result.ok = true;
 } catch (error) { result.ok = false; result.error = error.stack; console.error(error); process.exitCode = 1; }
-finally { fs.writeFileSync(path.join(output, 'results.json'), JSON.stringify(result, null, 2)); cdp?.close(); voice?.close(); if (child?.pid) spawnSync('taskkill', ['/pid', String(child.pid), '/t', '/f'], { windowsHide: true, stdio: 'ignore' }); console.log(`Artifacts: ${output}`); } })();
+finally { fs.writeFileSync(path.join(output, 'results.json'), JSON.stringify(result, null, 2)); cdp?.close(); if (child?.pid) spawnSync('taskkill', ['/pid', String(child.pid), '/t', '/f'], { windowsHide: true, stdio: 'ignore' }); console.log(`Artifacts: ${output}`); } })();

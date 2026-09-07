@@ -12,9 +12,9 @@ export default function VoicePushToTalk() {
   const api = (window.vibe as unknown as { voice?: VoiceApi }).voice;
   useEffect(() => {
     if (!api) return;
-    let phase = 'off', alive = true;
-    const off = api.onState(next => { if (alive) phase = next.phase; });
-    void api.getState().then(next => { if (alive) phase = next.phase; }).catch(() => { /* The indicator reports voice failures. */ });
+    let phase = 'off', alive = true, received = false;
+    const off = api.onState(next => { received = true; if (alive) phase = next.phase; });
+    void api.getState().then(next => { if (alive && !received) phase = next.phase; }).catch(() => { /* The indicator reports voice failures. */ });
     const hold = pressToTalk(api);
     const down = (event: KeyboardEvent) => {
       if (event.code !== 'Space' || event.ctrlKey || event.altKey || event.metaKey) return;

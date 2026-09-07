@@ -89,4 +89,4 @@ function createWhisperFeatures() {
     return features;
   };
 }
-module.exports = { createWhisperFeatures, SAMPLE_COUNT, FRAMES, BANDS };
+module.exports = { createWhisperFeatures };

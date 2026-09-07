@@ -47,11 +47,6 @@ function createRecording({ silenceMs = 900, initialSilenceMs = 6000, maxMs = 600
     get preRollVoicedMs() { return preRollVoiced; },
   };
 }
-// Network boundaries can split a signed 16-bit sample between two chunks.
-function createPcmFramer() {
-  let carry = Buffer.alloc(0);
-  return { push(chunk) { const b = Buffer.concat([carry, Buffer.from(chunk)]); const end = b.length - b.length % 2; carry = Buffer.from(b.subarray(end)); return b.subarray(0, end); }, finish() { if (carry.length) throw Error('Speech stream ended with an incomplete PCM sample'); } };
-}
 function shouldSpeak({ origin, kind } = {}) { return origin === 'voice' || kind === 'interaction'; }
 function decodedPcm(pcm, sampleRate, channels, invalid) {
   if (!pcm.length || !Number.isInteger(sampleRate) || sampleRate < 8000 || sampleRate > 48000 || ![1, 2].includes(channels) || pcm.length % (channels * 2)) invalid();
@@ -119,8 +114,4 @@ function decodeSpeechWav(input) {
   if (!format || !pcm?.length || format.encoding !== 1 || format.bits !== 16 || ![1, 2].includes(format.channels) || format.sampleRate < 8000 || format.sampleRate > 48000 || format.align !== format.channels * 2 || format.byteRate !== format.sampleRate * format.align || pcm.length % format.align) invalid();
   return decodedPcm(pcm, format.sampleRate, format.channels, invalid);
 }
-function errorChime() {
-  const samples = Array.from({ length: 5760 }, (_, i) => 0.12 * Math.sin(2 * Math.PI * 660 * i / 24000) * Math.sin(Math.PI * i / 5760) ** 2);
-  return { pcm: wavFromSamples(samples, 24000).subarray(44), durationMs: 240, text: '' };
-}
-module.exports = { RATE, wavFromSamples, createRecording, createPcmFramer, shouldSpeak, decodeSpeechWav, decodeSpeechAudio, errorChime };
+module.exports = { RATE, wavFromSamples, createRecording, shouldSpeak, decodeSpeechWav, decodeSpeechAudio };

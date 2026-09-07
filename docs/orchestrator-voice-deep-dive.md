@@ -1,119 +1,382 @@
-# Orchestrator voice deep dive (September 5, 2026)
+# Voice interface: architecture, behavior, and reliability audit
 
-> **Superseded.** The “Hey Vibe” wake word described below was removed in favour of
-> Space push-to-talk: hold the space bar while no terminal or text field is focused,
-> release to send. The native keyword spotter, its model assets and its packaging
-> entries are gone with it. See [voice push-to-talk](voice-push-to-talk.md). The rest
-> of this file is kept as history of how the wake-word build behaved.
+Audit date: September 6–7, 2026. Scope: installed 0.1.94, the 0.1.95 implementation, production diagnostic metadata, previous native/Electron/live-provider evidence, and new focused reproductions. This replaces the superseded audit at the same canonical path. The subsequent final review corrected findings V1–V5 before release; their original reproductions and resolutions are recorded below. The local installed application was not restarted during this work.
 
-Troubleshooting pass over the Hey Vibe voice feature after two repair releases (0.1.87 "repair voice lifecycle", 0.1.88 "repair spoken replies and missed-speech feedback") still left two complaints: turns kept failing, and "the voice is very robotic". This document records how the pipeline actually behaves on a real machine, which root causes were found with evidence, what was ruled out, what changed, and what remains unverified. `docs/orchestrator-voice-fixes.md` and `docs/orchestrator-context-and-audio.md` describe the feature as designed; this file describes what was measured.
+## Assessment
 
-## Method
+The voice interface has working capture, local inference, cloud transcription, assistant execution, and audio playback components. This wider audit found defects where those components exchanged control, beyond the initial recording fixes. Final review corrected the reproduced handover, short-speech and stale-feedback defects in 0.1.95. Half-duplex operation, sequential cloud latency and microphone/assistant coupling remain product limitations; physical microphone quality still needs direct measurement.
 
-Three tracks, all against the installed 0.1.89 layout and the repo at the same version:
+The most consequential findings at the start of the audit were:
 
-- Baseline: `npm run test:orchestrator` (289 tests at the time) and `npm run smoke:electron:voice-experience` both passed before any change. The smoke injects a synthetic recording through `voice.sendAudio()`; it never drives the wake word or the endpointer with audio, which is the gap that let the main defect ship.
-- Live reproduction: Windows SAPI synthesized "Hey Vibe" plus a command into 16 kHz WAVs, fed to the real app through Chromium's fake microphone (`--use-fake-ui-for-media-stream --use-fake-device-for-media-stream --use-file-for-fake-audio-capture=<wav>`), with the smoke's provider stub, an isolated userData directory, and every `voice:state` transition, wake-helper event, provider request, and hidden-window Web Audio call logged with timestamps. The same WAVs were also run offline through `createWakeDetector` and `createRecording`.
-- Static defect hunt: every voice file read end to end, each suspect settled with a small repro script or a quoted code path, plus the public OpenRouter catalog for the configured models.
+1. Switching from an automatic recording to a short Space hold and back preserved an old silence timer and sent the recording too soon. Fixed before release.
+2. A short, uncertain utterance remained recording through 40 seconds of silence. It now receives a bounded retry outcome.
+3. Space silently failed with stale initial state or discarded capture errors. Both paths now have regression coverage and corrected state handling.
+4. Saying “Hey Vibe” during transcription, assistant work, or playback is intentionally ignored.
+5. Even successful requests pass through several sequential cloud operations before sound starts.
+6. “Mute microphone” also disables the text Orchestrator. A microphone failure can take the text assistant down with it.
 
-No physical microphone, no audible playback, and no authenticated OpenRouter call were part of this pass. Those limits are listed at the end.
+These are distinct problems. Increasing wake sensitivity alone would not resolve them.
 
-## What the pipeline actually does
+## 1. Version and evidence boundaries
 
-Measured in the live run (fake mic, stubbed provider):
+At the start of this audit, the installed executable reported **0.1.94**. Its keyword and turn-completion helpers were running. Saved settings had hands-free enabled, the system-default microphone, English transcription, `z-ai/glm-5.3-flash`, `openai/whisper-large-v3-turbo`, and Kokoro `af_heart`. Automatic microphone startup was off.
 
-| Stage | Result | Measurement |
+| Behavior | Installed 0.1.94 at audit start | 0.1.95 |
 | --- | --- | --- |
-| Enable to listening | works | 1.27 s; wake helper ready in 0.98 s; first mic frame 150 ms after enable |
-| Wake helper throughput | works | 1.0 to 1.9 ms inference per 100 ms frame, max 8.7 ms; the 4-frame IPC queue cap is never approached |
-| Wake detection, offline | works | 9 of 9 clips (3 SAPI voices at 0, -12, -24 dB); 0 false positives over 84 s of non-wake speech |
-| Wake detection, live | mostly works | one of two identical utterances missed (see "ruled out" for why) |
-| Recording and endpointing | failed | capture closed 400 ms after the wake word, before the command |
-| Transcription request | works | valid 16 kHz mono 16-bit WAV, JSON body with `input_audio` |
-| Relay and speech request | works | Kokoro `hexgrad/kokoro-82m`, voice `af_heart`, `response_format: pcm` |
-| Chunking and playback | works | 1 s chunks at 24000 Hz mono; hidden window ACKs 133 ms after the audio ends, well inside the 5 s watchdog slack |
+| Earliest confident automatic commitment | 200 ms classified quiet | 1,200 ms classified quiet |
+| Low-confidence result followed by silence | Can wait until recording limit | Sends after 3 seconds quiet with at least 250 ms speech; shorter uncertain speech gets a retry without transcription upload |
+| Automatic recording control | Hold/release Space or mouse | Also offers identity-bound click-to-send |
+| Main microphone status | Primarily tooltip/accessibility text | Visible text above microphone |
+| Invalid assistant interpretation | Request fails | Explicit format guidance and one repair attempt |
+| Voice diagnostics | Timing values discarded by sanitizer | Bounded timing, confidence and automatic-recording events retained |
 
-## Root causes
+The following sections describe the **0.1.95 implementation**, with installed behavior called out where material. Findings explicitly marked as audit reproductions describe the pre-correction candidate. Passing tests do not establish that a running installation has applied the update.
 
-### 1. The recording closed before the user started speaking
+## 2. The complete path
 
-`createRecording` in `backend/voiceAudio.cjs` ran its voice/silence accounting over the pre-roll (the two seconds of mic history handed over when the wake word fires). The pre-roll always holds the wake word (about 600 ms voiced, which already satisfies the 250 ms minimum) followed by the silence between detection and the user's next word. That silence was charged against the 900 ms end-of-speech budget, so the user had whatever remained, typically 300 to 400 ms, to begin talking. Captured in the run:
-
+```mermaid
+flowchart LR
+    A[Physical microphone] --> B[Hidden renderer: capture and resample]
+    B --> C[Main process: audio history and turn controller]
+    C --> D[Local keyword and speech detector]
+    D --> C
+    C --> E[Local completion model]
+    E --> C
+    C --> F[OpenRouter transcription]
+    F --> G[Brain call: interpret request]
+    G --> H[Strict application validation]
+    H --> I[Brain call: reply or use workspace tools]
+    I --> J[OpenRouter speech generation]
+    J --> K[Hidden renderer: playback]
+    K --> C
 ```
-pre-roll frame RMS: [0,0,0,0,0,0,0,0, 0.00002, 0.0267,0.15116,0.07191,0.13712,0.07074,0.01346,0.00126,0.00003, 0,0,0]
-live push 1..3: rms=0 result=recording   live push 4 (400 ms): result=complete
+
+This is a staged voice-command system. The local wake detector does not transcribe the request. The completion model does not operate terminals. The cloud assistant does not directly own microphone capture.
+
+The separation is useful: each component has a narrower responsibility, and terminal actions remain subject to application checks. It also creates several transitions that must agree about whether the user is still speaking, whether a request has been cancelled, and which recording or terminal a result belongs to.
+
+| Component | Responsibility | Runs locally? |
+| --- | --- | --- |
+| `VoiceMicrophone` and AudioWorklet | Read microphone, resample, frame audio, flush final samples | Yes |
+| sherpa-onnx keyword model | Detect the configured English wake phrase | Yes, CPU |
+| Silero VAD | Classify whether recent audio contains speech | Yes, CPU |
+| Smart Turn | Estimate whether the speaker has finished the turn | Yes, CPU |
+| Whisper through OpenRouter | Convert a completed recording into text | No |
+| Configured Brain | Interpret the request, then answer or operate the workspace | No |
+| Kokoro through OpenRouter | Generate the spoken response | No |
+| `PcmPlayer` | Schedule and play returned audio | Yes |
+
+Sherpa describes its keyword spotter as a small recognizer constrained to supplied phrases; the phrase can be configured without retraining. Its threshold trades missed detections against false activations. [Sherpa keyword-spotting documentation](https://k2-fsa.github.io/sherpa/onnx/kws/index.html).
+
+Smart Turn estimates completion from the waveform. It is not checking a transcript for a period or deciding whether a workspace request is valid. Its documented usage takes 16 kHz mono audio and limits the analysis window to roughly the latest eight seconds. [Smart Turn model card](https://huggingface.co/pipecat-ai/smart-turn-v3), [upstream inference guidance](https://github.com/pipecat-ai/smart-turn/blob/main/README.md).
+
+## 3. What enabling voice actually does
+
+The settings form maintains a draft. Checking Hands-free changes the draft; saving applies it. Turning Orchestrator on first saves and verifies the draft, then enables the application service. The checkbox therefore describes the chosen setting, while the readiness message describes whether the runtime actually started.
+
+The main process performs these steps:
+
+1. Check remembered app consent and operating-system microphone permission.
+2. Enable the relay and validate the selected Brain.
+3. Validate transcription availability and the app-supported speech model/voice.
+4. Create or reuse the permanently hidden audio renderer.
+5. Wait for its readiness acknowledgment.
+6. Assign a new capture token and request microphone capture.
+7. Wait for the microphone acknowledgment.
+8. Start local inference when hands-free is enabled.
+
+Microphone capture and hands-free inference have separate readiness states. An open microphone can be ready for Space while the wake helpers are loading or unavailable. A successful settings save or cloud model check does not prove that a physical wake phrase will be recognized.
+
+The hidden audio renderer is sandboxed, non-focusable, omitted from the taskbar, and kept alive when the visible microphone indicator is hidden. Its background throttling is disabled. Hiding the microphone is intentionally different from turning voice off.
+
+Sources: [settings UI](../frontend/components/OrchestratorSettings.tsx), [activation and configuration](../backend/orchestratorIntegration.cjs#L438), [hidden audio renderer](../backend/voiceOverlayWindow.cjs), [microphone consent](../backend/microphonePermission.cjs).
+
+## 4. Microphone capture and wake detection
+
+The microphone stays open while voice is enabled, including during idle listening. Capture requests mono audio, echo cancellation, noise suppression and automatic gain control. It uses the selected device ID exactly, or the system default when no ID is saved. There is no automatic fallback from an unavailable explicitly selected microphone.
+
+The AudioWorklet converts the actual input sample rate to 16 kHz, then sends 320 samples per packet: **20 milliseconds of audio**. Packets carry a capture token and increasing sample positions. A zero-gain output connection keeps the audio graph active without playing microphone input through the speakers.
+
+The controller retains two seconds of recent audio. When wake detection fires or a manual hold begins, that history is prepended to the recording. This protects speech that started before activation was recognized, but the eventual transcription upload includes that retained audio too.
+
+Keyword processing uses a continuous stream and a second stream refreshed around speech onsets. The second stream replays 300 ms of history and has a two-second refresh cooldown. This attempts to reduce framing/context misses without repeatedly resetting the continuous detector.
+
+The current configuration uses keyword threshold 0.25, one trailing blank, and a single CPU thread. Silero uses threshold 0.5, 64 ms minimum speech and 32 ms minimum silence. These are implementation settings, not demonstrated accuracy guarantees for every voice or room.
+
+The keyword/VAD helper and completion helper are separate processes because their ONNX Runtime libraries are incompatible in one Windows process. Both must initialize before hands-free reports ready.
+
+Sources: [capture implementation](../frontend/voice/microphone.ts), [capture lifecycle](../frontend/VoiceOverlay.tsx), [keyword/VAD implementation](../backend/voiceKeywordModel.cjs), [helper service](../backend/voiceInferenceService.cjs), [pinned assets](../vendor/voice/models/manifest.json).
+
+## 5. What starts and stops a recording
+
+There are three recording origins: wake, automatic answer to a question, and manual push-to-talk. The controller preserves the origin even when a Space hold temporarily takes over an automatic recording.
+
+| Situation | Current behavior |
+| --- | --- |
+| Wake while idle and helpers ready | Start automatic recording with pre-roll |
+| 200 ms quiet after post-wake speech | Ask Smart Turn for a completion estimate |
+| Confident completion | Commit only after at least 1.2 seconds uninterrupted classified quiet |
+| Uncertain completion, at least 250 ms classified speech | Commit after 3 seconds quiet |
+| Uncertain completion, less than 250 ms speech | After 3 seconds quiet, cancel without transcription upload and give retry feedback; a current agent question is repeated through TTS |
+| Wake with no post-wake speech | Give six seconds, transcribe retained audio, suppress wake-only text |
+| Automatic recording reaches total audio limit | Cancel at 60 seconds rather than send continuously unfinished speech |
+| Manual hold under 300 ms | Treat as a tap and cancel, or hand control back to the adopted automatic turn |
+| Manual hold at least 300 ms | Flush and send on release |
+| Manual recording reaches maximum length | Send even if the key remains held |
+| Click Send during automatic recording | Flush and finish only the identified current automatic recording |
+
+There is one completion analysis per unchanged speech revision. Additional speech invalidates the old prediction. The controller waits for VAD to classify already received packets before accepting a completion result, so queued speech can veto an apparent pause.
+
+Automatic and manual recordings use different evidence for very quiet speech. Automatic recording can accept neural speech detection even when amplitude is low. An ordinary manual hold requires at least 250 ms of RMS-voiced audio, including pre-roll, before upload. The two modes are consequently not identical audio gates.
+
+A short command spoken entirely before wake detection finishes can remain in the six-second grace path because its words are in pre-roll rather than counted as post-wake command speech. Its audio is retained, but the extra delay remains.
+
+Sources: [recording and inference decisions](../backend/voiceController.cjs#L120), [manual handover](../backend/voiceController.cjs#L246), [audio recording](../backend/voiceAudio.cjs).
+
+## 6. Why repeating “Hey Vibe” sometimes does nothing
+
+The current system is half-duplex: it takes turns listening for a new command and processing or speaking the previous one.
+
+| Phase | Wake phrase accepted? | Space accepted? | Main microphone action |
+| --- | --- | --- | --- |
+| Off | No | No | Enable and hold |
+| Idle listening, helpers ready | Yes | Yes, subject to focus guards | Hold to talk |
+| Automatic recording | No new wake turn | Yes; adopts recording | Send |
+| Awaiting an agent answer | Uses speech detection without another wake | Yes | Hold to answer |
+| Transcribing | No | No | Stop request |
+| Thinking | No | No | Stop request |
+| Speaking | No | Yes; interrupts playback | Hold to interrupt and talk |
+
+“Hey Vibe” cannot currently interrupt a response or a slow cloud request. This is intentional behavior, and it plausibly contributes to the feeling that activation is unreliable. It is different from a keyword detector failing while idle.
+
+Space is a **window keyboard listener**, not a system-wide hotkey. It is ignored while typing inside a terminal pane, input, textarea, select or editable field. The idle label still says “hold Space” even in those contexts. Losing window focus during a sufficiently long manual hold sends the recording.
+
+The visible mic changes appearance by phase. It is not a microphone level meter. A glowing or pulsing button does not prove that the selected microphone is delivering intelligible speech.
+
+There is no audible wake acknowledgment. In another application, the in-window visual change may be invisible to the speaker. A short optional local cue would help distinguish activation from silence, provided its interaction with capture and echo cancellation is tested.
+
+Sources: [detection mode selection](../backend/voiceController.cjs#L75), [manual busy/barge-in rules](../backend/voiceController.cjs#L264), [Space listener and focus guards](../frontend/VoicePushToTalk.tsx), [visible controls](../frontend/VoiceIndicator.tsx).
+
+## 7. What happens after recording
+
+The completed audio becomes a WAV in memory and is uploaded as base64 JSON to OpenRouter transcription. The app waits for the full transcription response. Only then does it remove a leading wake phrase from a wake-origin transcript. A wake-only result does not reach the assistant.
+
+The configured Brain normally runs **twice before a simple spoken reply**:
+
+1. An interpretation call returns an `interpret_workspace` plan. It receives the user request and bounded application identity/context metadata. Terminal output, private diagnostics, and assistant prose cannot create authority here.
+2. Application code validates the plan and creates scoped grants. A separate executor call answers or uses workspace tools within those grants. It can request additional bounded output/history/file context, which may add further model calls.
+
+The same selected model serves both roles. This is not two separately selected models. The extra validation step helps prevent a model from inventing target identities, answers, or repeated effects. It also adds latency and another response-format boundary.
+
+The production error at **2026-09-07 00:05:40 UTC** occurred at this interpretation boundary: `Invalid or unexpected intent fields.` Its stack showed `normalizeIntent` called from the voice request path. That establishes a real downstream failure after a voice attempt reached the assistant. It does not establish which extra field the model returned, because the log intentionally omits raw replies.
+
+Version 0.1.95 supplies a clearer argument-shape contract and allows one repair attempt using the original authorized context. The strict validator remains in place. Repeated failure still stops the request. This improves recovery; it does not prove the selected provider will always follow the contract.
+
+After a final text response, speech generation sends up to 4,000 characters, with Markdown normalized for speech, to Kokoro. The app currently supports its ten configured English voice presets. The speech model is not freely interchangeable through the generic model text field.
+
+The TTS response is downloaded completely, validated and decoded, and then emitted to the hidden renderer as ordered PCM chunks. The renderer schedules playback and acknowledges completion. The source phase named `speaking` begins before the TTS request, so that label can appear while no sound is yet available.
+
+OpenRouter documents raw audio responses and PCM output suitable for progressive playback. The app's complete-download behavior is its present implementation choice, rather than a requirement that all PCM must wait until the response ends. [OpenRouter TTS contract](https://openrouter.ai/docs/guides/overview/multimodal/tts).
+
+Sources: [transcription and dispatch](../backend/voiceController.cjs#L294), [interpretation and repair](../backend/orchestrator.cjs#L147), [strict grants](../backend/orchestratorIntent.cjs#L97), [executor loop](../backend/orchestrator.cjs#L441), [speech download/playback](../backend/voiceController.cjs#L376).
+
+## 8. Latency and deadlines
+
+For a normal voice reply, perceived delay contains all of these terms:
+
+`end-of-speech wait + transcription + interpretation + executor work + TTS generation/download + playback startup`
+
+Local detection is only one portion. The earlier native tests measured completion-model execution in tens of milliseconds on this development machine. They do not imply a response will be heard in tens of milliseconds.
+
+The final previous live synthetic test recorded these HTTP waits:
+
+| Operation | Fetch-to-response-headers measurement |
+| --- | ---: |
+| Transcription | 637 ms |
+| Interpretation | 1,026 ms |
+| Executor reply | 5,402 ms |
+| Speech generation | 362 ms |
+| Sum | 7,427 ms |
+
+This is one test, not a latency distribution. The harness measured response headers, not complete body parsing, decoding, or sound at the speaker. These waits are sequential, so their sum illustrates substantial delay before playback; it is not a measured total audible response time. The test also bypassed microphone endpointing by submitting a generated WAV directly.
+
+| Boundary | Limit |
+| --- | ---: |
+| Hidden renderer readiness | 15 seconds |
+| Initial microphone readiness | 15 seconds |
+| Both model helpers ready | 15 seconds |
+| Worklet flush | 1 second, with a 1.5-second main-process deadline |
+| Queued local inference audio | 500 ms |
+| Individual local frame response | 2 seconds |
+| Completion-model response | 1 second |
+| Transcription request | 60 seconds |
+| Each Brain request | 45 seconds |
+| Speech request | 120 seconds |
+| Playback acknowledgment | Decoded duration plus 5 seconds |
+
+There is no single end-to-end interaction deadline. Repairs, reasoning-budget retries and additional workspace-tool rounds can extend a turn. Cancellation must therefore be obvious and dependable.
+
+The highest-value latency change is first to measure full stage boundaries and actual renderer playback start. Progressive TTS is a promising next change, but it needs tests for metadata, chunk alignment, cancellation, partial responses and errors after playback has begun. Reducing or combining Brain calls requires retaining the existing authorization boundary.
+
+Evidence: [previous live result](../.tmp/voice-live-validation/1788740715547/result.json), [native report](../output/voice-handsfree/native-smoke.json), [request timeout](../backend/orchestrator.cjs#L125), [speech buffering](../backend/voiceController.cjs#L417).
+
+## 9. Newly reproduced defects and remaining risks
+
+The original reproductions used the pre-correction candidate's real application
+modules with controlled inputs. They established code behavior, not occurrence
+rates in the user's acoustic environment. **V1–V5 are now corrected and covered
+by release regression tests. V6 remains an intentional product coupling.**
+
+| ID | Priority | Finding | Evidence and implication |
+| --- | --- | --- | --- |
+| V1 | High | Old silence survives automatic → Space → automatic handover | 500 ms speech, 2,900 ms quiet, 100 ms new speech during a short Space hold, then 100 ms quiet produced an upload. The controller counted 3,000 ms silence despite only 100 ms quiet after the new speech. |
+| V2 | High | Space discards action failures | A failed stop/flush returned an error, but the separate Space helper supplied no feedback callback; the indicator continued to show readiness. |
+| V3 | High | Space can use stale startup state | A live listening event followed by a late initial `getState()` result of off left Space issuing no start call. Other voice subscribers have a guard against this ordering. |
+| V4 | Medium | Short uncertain speech lacks a bounded completion path | 200 ms classified speech and probability 0.2 remained recording after 40 seconds quiet, with only one analysis. It fails the 250 ms fallback requirement. |
+| V5 | Medium | A late manual mouse error can overwrite a new turn | A delayed PTT stop failure arriving after a new automatic recording replaced its Listening status. The recent error fencing covers `act()`, but not the PTT helper callback. |
+| V6 | Medium | Microphone controls are coupled to the entire assistant | Calling the UI's voice-listening off endpoint disabled the relay. A simulated microphone failure and denied microphone consent also disabled or prevented the text Orchestrator. |
+
+**V1 fixed:** handback now resets silence and the classification boundary while
+retaining recorded audio. New quiet must accumulate after the handback; old
+predictions cannot commit it. [Handover code](../backend/voiceController.cjs).
+
+**V2/V3 fixed:** Space ignores initial snapshots that arrive after live state.
+Current-hold flush failures are published through shared backend voice state;
+obsolete holds cannot mark a newer turn as failed. Off/busy start refusals also
+publish feedback. [Space subscriber](../frontend/VoicePushToTalk.tsx),
+[flush handling](../backend/orchestratorIntegration.cjs).
+
+**V4 fixed:** after three seconds quiet, uncertain short speech cancels without
+transcription or dispatch and gets a bundled retry prompt for a wake-origin turn.
+A still-current agent question is repeated through cloud TTS and remains answerable.
+Confident short answers retain the
+normal semantic-completion path. [Completion policy](../backend/voiceController.cjs#L145).
+
+**V5 fixed:** manual helper replies no longer write a separate mouse-only error.
+Automatic Send captures recording ID, source and revision; stale pointer releases
+are discarded before IPC. Pending errors cannot cross into a new turn or a manual
+adoption of the same turn. Final review reproduced and corrected that latter
+pointer race too. [Indicator action scopes](../frontend/VoiceIndicator.tsx).
+
+**V6 product decision needed:** separate assistant availability from microphone availability, or label the coupled operation accurately. A text assistant should be able to stay usable after microphone trouble. [Enable/disable coupling](../backend/orchestratorIntegration.cjs#L477).
+
+Three further risks deserve targeted tests:
+
+- **Residual wake speech:** the controller treats any post-detection VAD speech as command speech. A controlled 100 ms wake tail plus a confident completion prediction causes submission after 1.2 seconds, potentially before a delayed command. The earlier native delayed-command fixture passed because it did not classify residual wake speech. This is a conditional mechanism, not a reproduced physical-microphone failure.
+- **A capture graph that stops delivering without an error:** recording duration and answer silence advance with samples. Once all helper requests have completed, its per-frame timeout cannot detect a complete absence of new microphone packets. Track-ended and processor-error events are handled, but no ongoing packet-heartbeat watchdog was found. This remains a conditional failure mode.
+- **Accessible button activation:** the large mic relies on pointer events; a conventional click activation has no handler. Enter is implemented for automatic Send, but not for enabling the large mic or stopping a working request. Accessible labels and focus outlines help, but do not replace complete activation behavior.
+
+A proposed settings-save race was excluded from the findings: a direct-handler harness could edit during Save, but the actual disabled fieldset prevents that user action. Likewise, unproven external settings drift is not presented as an established user-facing defect.
+
+Maintained regression commands for the corrected paths, using controlled inputs:
+
+```text
+node --test scripts/backend/voice-handsfree.test.cjs scripts/backend/voice-lifecycle.test.cjs
+npm run smoke:frontend:voice-experience
+npm run test:voice:capture
 ```
 
-The uploaded audio contained only "Hey Vibe". `sendAudio` strips that prefix, the remainder has no letters, and the app plays the "I didn't catch that" clip. Replayed against the captured mic stream, the old code ended the recording at 13.5 s while the command started at 14.3 s; the fixed code captures the whole command (ends at 16.3 s).
+## 10. What the logs establish—and what they cannot establish
 
-### 2. The robotic voice is the fallback clip set, not Kokoro
+The installed log contained 1,966 stream events, four completion events and one Brain error when sampled for this audit. Stream events prove that local inference processed packets at those times. They do not prove that speech was loud enough, the right input device was selected, or every wake phrase was recognized.
 
-The 14 clips in `vendor/voice/alerts/` are rendered by Windows SAPI "Microsoft Zira Desktop" (`manifest.json`, `generator` and `voice` fields), 4.4 to 7.1 s each. Kokoro is heard only when the whole chain succeeds; every failure speaks Zira, and voice-origin failures skip the 60 s repeat cooldown by design. With root cause 1 firing on most turns, the user heard Zira far more often than Kokoro.
+The Brain error proves that a voice attempt reached interpretation and failed there. Its exact original response arguments are unavailable. The old logger discarded the numeric inference timings and did not record automatic recording starts/finishes, so it cannot reconstruct the complete acoustic sequence surrounding that failure.
 
-### 3. The configured Brain model cannot answer inside the old budget
+Version 0.1.95 adds timing values, completion confidence, recording identity and start/finish/cancel reasons. Useful evidence is still missing: actual input level, packet age, per-turn timestamps for every cloud stage, and renderer playback-start timing.
 
-The saved settings use `z-ai/glm-5.3-flash`. The public catalog lists it with `reasoning.mandatory: true` and `default_effort: "max"`, while the relay sent `max_tokens: 1200` (monitor: 350). Reasoning tokens count as output, so the model can spend the entire budget thinking and return `finish_reason: "length"` with no content, which the relay turned into an error and the voice path into the "orchestration" Zira clip. This is the best single explanation for turns that never produced a reply. It is proven at the metadata level only; one authenticated request confirms it.
+Native helper exceptions are also reduced to generic failure messages. A load error, inference failure and runtime problem can therefore be hard to distinguish. A future diagnostic should preserve a bounded error class/code and stage without logging microphone audio, transcripts, or raw model arguments.
 
-### 4. A malformed `preferences` value can blank the app
+Source: [diagnostic sanitizer and rotation](../backend/orchestratorDiagnostics.cjs), [helper failures](../backend/voiceInferenceService.cjs#L36), [keyword host](../backend/voiceKeywordHost.cjs), [completion host](../backend/voiceTurnHost.cjs).
 
-The user's `orchestrator-settings.json` stored `preferences` as `{}` instead of an array. The loader kept it verbatim, `OrchestratorSettings.tsx` calls `.map` on it during render, and `frontend/` has no error boundary, so opening Settings unmounts the React root. Remember/forget preference and the policy check threw as well. The repo never writes that shape; it came from outside, but the loader has to normalize it regardless.
+## 11. Privacy, storage, costs and safeguards
 
-### 5. Wake failure switched off the whole Orchestrator
+Idle wake processing stays local. After a turn is committed, the complete retained recording is sent for cloud transcription. Prefix removal happens after transcription; it does not remove the wake phrase or pre-roll from the uploaded WAV.
 
-`voiceController` deliberately returns `status: 'manual-only'` when the wake helper cannot start, but `installOrchestrator` treated anything without `wakeReady` as failure and disabled the relay, the mic, and Talk now together. A 15 s cold start of `onnxruntime.dll` plus the int8 model therefore took the text assistant down with it.
+The interpreter receives the request and bounded workspace identity metadata. The executor can additionally receive selected terminal output, history, files and saved preferences when needed. Generated reply text goes to the speech provider. Local-only wake detection therefore does not make the entire assistant local.
 
-### 6. A stuck audio window was never replaced
+Persistent application settings include model choices, devices, toggles, explicit preferences and an encrypted API key. Persistent keys use operating-system secure storage; session-only keys remain in memory. Preferences are ordinary settings data, not encrypted with the key.
 
-`ensureReady` timed out after 15 s but kept the hidden renderer, so the advertised "turn Hey Vibe off and on" retry waited another 15 s on the same dead window.
+No production audio/transcript disk-writing path was found in the audited voice and relay modules. Audio buffers, recent conversation, transcript, reply and usage live in memory there. Terminals that receive prompts may independently store their own histories. The synthetic QA harness intentionally creates its own WAVs and reports under `.tmp`; that is separate from production recording behavior.
 
-### 7. The wake helper's stderr was discarded
+Private diagnostic files retain operational metadata and bounded errors, including possible file paths in stacks. They exclude raw audio/transcript fields and redact keys. Rotation keeps a current file plus two backups at approximately 1 MiB each. No automatic diagnostic-upload path was found. Provider retention policies cannot be inferred from application source.
 
-The helper was forked with stderr ignored, so a native loader failure surfaced only as "Hey Vibe is unavailable" with nothing to diagnose.
+Usage is based on provider-reported costs. TTS billing uses a best-effort generation lookup; missing metadata can leave speech usage at zero. The previous successful live test did report zero speech usage despite receiving audio. This should be displayed as unknown or pending, rather than interpreted as free speech generation.
 
-### 8. Speech decoding failed closed on benign content types
+The spending limit is a soft threshold against known session costs. It does not reserve costs before all in-flight requests or every repair, and it resets with in-memory session usage. It should not be described as a guaranteed account billing cap.
 
-`decodeSpeechAudio` rejected any `audio/pcm` response with an extra parameter or a missing rate or channel count, and routed `application/octet-stream` raw PCM to the WAV parser. Each of those became a "speech failed" Zira clip. OpenRouter documents `audio/pcm;rate=24000;channels=1`, but Kokoro is served by two providers with no provider pin, so header shape is not guaranteed.
+The strongest existing safeguards should be preserved: generation-bound terminal grants, literal answer matching, capture/turn/hold identities, stale-result rejection, verified audio formats, bounded inference queues, hashed model/error assets, and cancellation of future work. None of these can undo an already executed terminal command or an already incurred provider charge.
 
-## Ruled out
+Sources: [settings storage](../backend/orchestratorSettings.cjs), [voice request/cost handling](../backend/voiceController.cjs), [assistant context and grants](../backend/orchestrator.cjs), [audio decoding](../backend/voiceAudio.cjs), [diagnostics](../backend/orchestratorDiagnostics.cjs).
 
-- Wrong sample rate or pitch: the decoder never guessed a rate, it failed instead, so slowed or deepened Kokoro was impossible.
-- Hidden-window throttling: `backgroundThrottling: false` and `autoplayPolicy: 'no-user-gesture-required'` are set; measured `setTimeout(100)` delays were 100 to 112 ms; the AudioContext stayed `running`; playback ACK arrived 133 ms after the audio ended.
-- PCM chunk boundaries: always frame-aligned; odd byte counts are rejected before chunking.
-- Playback watchdog: about 4.9 s of slack at every reply length; IPC marshalling tops out near 277 ms for a 3 minute reply.
-- Packaging: the installed 0.1.89 contains `sherpa-onnx-win-x64` binaries, the model files, and all 14 alert clips; the native addon loads under plain Node.
-- Legacy `openai/gpt-4o-mini-tts` settings: migrated to Kokoro in memory on load and re-persisted on the next save.
-- Wake thresholds: a 12-point sweep (threshold 0.25 to 0.10, score 1.5 to 2.5) over 144 wake trials and 96 non-wake trials found zero false positives everywhere and no setting that removes the live miss. The miss depends on how much audio the streaming decoder consumed before the word, not on the threshold; lowering it only reshuffles which contexts fail. The constants were left unchanged.
+## 12. Recommended repair order and acceptance checks
 
-## Changes landed
+**Completed before release:** V1–V5 and the final-review pointer race have scoped
+regression tests and corrected handling. **Next:** add a wall-clock capture-health
+check and test transport loss separately from the now-reported backend capture
+errors. These are narrower changes than replacing the wake model.
 
-All uncommitted, for review. Tests: 301 pass, smoke 12 checks pass, `npm run typecheck` clean.
+**Second: make the interface explain its state.** Keep the compact microphone, but show the selected device, actual input activity, recording duration and explicit Listening / Transcribing / Working / Preparing speech / Playing states. Make Send and Cancel ordinary accessible controls. Clarify the terminal-focus Space guard. Add an optional wake cue and a local microphone test that does not dispatch workspace commands.
 
-- `backend/voiceAudio.cjs`: pre-roll audio is kept for transcription but no longer feeds the endpointer; its voiced duration is exposed as `preRollVoicedMs`. `decodeSpeechAudio` ignores unknown content-type parameters, defaults a missing rate or channel count to Kokoro's native 24000 Hz mono (`TTS_NATIVE_RATE`, `TTS_NATIVE_CHANNELS` in `shared/voiceConfig.cjs`), and sniffs unlabeled bodies for a RIFF header before treating them as raw PCM. Parameters that contradict 16-bit signed PCM still fail.
-- `backend/voiceController.cjs`: when live audio stays silent but the pre-roll holds more voiced audio than a wake phrase (`PRE_ROLL_COMMAND_MS`, 800 ms), the audio is uploaded so transcription decides, instead of being discarded. `audio/vnd.wave` is now admitted by the content-type gate. `wakeErrorDetail` carries the helper's stderr tail in `voice:state`.
-- `backend/orchestrator.cjs`: output budget scales with context (minimum 1200, up to 4000 for the Brain, 1200 for the monitor); `reasoning: { effort: 'low' }` is sent only to models whose catalog entry advertises `reasoning`; `finish_reason: length` and an empty reply each produce a specific message.
-- `backend/orchestratorSettings.cjs` and `frontend/components/OrchestratorSettings.tsx`: preferences are normalized to well-formed entries on load and on persist; the panel renders defensively.
-- `backend/orchestratorIntegration.cjs`: a wake startup failure with healthy capture is a degraded success (`status: 'manual-only'`) on both the enable path and the settings-change restart path: relay enabled, mic on, Talk now available, wake-error text visible. `audio/L16` stays refused because RFC 2586 defines it as big-endian.
-- `backend/voiceOverlayWindow.cjs`: the ready timeout destroys the stuck renderer so the retry builds a fresh one; the timeout is injectable for tests.
-- `backend/voiceWakeProcess.cjs`: stderr is piped into a bounded 2 KB tail attached to the failure.
-- Tests: `scripts/backend/voice-wake-preroll-endpoint.test.cjs` (new, encodes the captured run), plus updates in `voice-pcm-format`, `voice-pipeline`, `voice-lifecycle`, `voice-wake-process`, `orchestrator-relay`, and `orchestrator-settings` tests.
+**Third: separate failures.** Assistant enabled, microphone enabled, wake ready and interaction phase should be distinct concepts. Losing the microphone should not disable text operation. A temporary completion-helper problem should produce a specific, recoverable explanation.
 
-## Still unverified
+**Fourth: reduce measured latency.** Add timestamps at capture commitment, STT body completion, valid intent, final assistant text, TTS first byte, decoded audio and renderer playback start/end. Measure cold and warm runs. Then consider progressive TTS and a faster interpretation path while retaining strict authorization and cancellation.
 
-- The real provider: the content type Kokoro's providers send for `pcm`, and whether the new budget and `reasoning.effort` let `z-ai/glm-5.3-flash` answer. Both need one authenticated request. If a turn still fails, the reply text now names the budget rather than a generic upstream failure.
-- Audible quality: nothing in this pass listened to the output. The "robotic" attribution rests on provenance and trigger paths.
-- Physical microphone behavior: AGC, noise suppression, and echo cancellation on a real device were not exercised; the fake device produced a suspiciously quiet second pass that may be a capture artifact.
+**Fifth: validate the physical experience.** Use the actual microphone, real room conditions and audible speakers, with consent for each collected test recording. A useful matrix includes immediate commands, one- and two-second wake gaps, mid-sentence pauses, short yes/no/stop responses, quiet speech, background sound, repeated wakes, headset changes and requests during playback. Measure missed wakes, false activations, clipped words, time to first sound and recovery after failure. Report results per condition rather than one overall pass percentage.
 
-## Recommended follow-ups
+| Acceptance area | Required observation |
+| --- | --- |
+| Manual/automatic handover | Speech captured during a short hold restarts the quiet window; no inherited early send |
+| Short utterance | Every detected short attempt reaches a bounded send/retry/cancel outcome |
+| Keyboard boot and errors | Late snapshots cannot regress readiness; failed start/flush/stop is visible |
+| Stale actions | A retired key, pointer, capture or provider result cannot alter a newer turn |
+| Input health | Device loss, suspended graph and absent packets produce specific feedback |
+| Text independence | Muting or losing a microphone preserves intended text-only operation |
+| Playback | Status distinguishes waiting for audio from actual playback; cancellation stops queued sound |
+| Wake reliability | Physical repetitions across gaps, levels and background conditions are measured |
+| Cloud behavior | Contract violations stay bounded and cannot widen workspace authority |
 
-- Regenerate the alert clips with Kokoro at build time, or shorten them; failure speech should match success speech.
-- Endpointer tuning with data: a 900 ms pause truncates a sentence, answers under 250 ms ("yes", "stop") can never complete, speech below 0.012 RMS is treated as silence, and there is no start-of-recording cue before the 6 s grace expires.
-- Trim trailing silence before uploading a banked pre-roll (it can carry up to 6 s of quiet).
-- Give the answer path the same pre-roll the wake path has, so a reply spoken over the tail of the question keeps its first word.
-- Restart the wake helper after a mid-session crash and stop streaming mic frames while it is down.
-- Retry `getUserMedia` without the saved `deviceId` when it no longer exists; watch for a mic that stops producing frames.
-- A `voice:diagnostics` ring plus "Copy diagnostics" in the indicator menu; `wakeErrorDetail` is the first field of that surface.
-- An error boundary around the Settings dialog.
+## 13. Verification ledger
 
-## Reproducing the live harness
+The investigation reused earlier evidence and ran focused additional
+reproductions without more authenticated provider calls. The subsequently
+requested cleanup was checked with the full 470-test backend suite, the build,
+frontend/capture checks and the migrated Electron history/context smoke.
 
-Synthesize speech with `System.Speech` in PowerShell (`SetOutputToWaveFile` with a 16 kHz, 16-bit, mono `SpeechAudioFormatInfo`), leave 10 to 12 s of leading silence and a long tail because Chromium loops the capture file, then launch Electron with the fake-media switches above, `ELECTRON_RUN_AS_NODE` removed from the environment, an isolated userData directory, and a wrapper `main.cjs` modeled on `scripts/qa/voice-experience-smoke.cjs` that stubs `fetch` and records `voice:state` broadcasts. Offline, `createWakeDetector` and `createRecording` accept the same 1600-sample frames directly.
+| Evidence | What it establishes | Limit |
+| --- | --- | --- |
+| Earlier 470 backend tests and affected final interpretation tests | Tested controller, ownership, action, format and error contracts | Do not cover every ordering or acoustic condition |
+| Earlier native model smoke | Bundled keyword/VAD/completion models operate on synthetic fixtures | Does not establish physical microphone accuracy |
+| Earlier real-model/controller workflow smoke | Two-second wake gap, mid-command pause and wake-only handling for supplied fixtures | Synthetic speaker and stubbed transcription/relay |
+| Earlier Electron voice smoke | Chromium capture, wake, completion, playback acknowledgment, repeat wake and pointer Send | Fake microphone; provider replies scripted; output silenced |
+| Final prior live synthetic run | Configured STT, Brain and TTS produced a valid reply and decodable audio | Bypasses wake/capture, auto-acknowledges playback, no real workspace effects |
+| D1/D2 and parent integration reproductions | Original state/silence/feedback defects, subsequent corrected outcomes, and retained microphone/relay coupling | Controlled event ordering; not occurrence-rate measurements |
+
+An earlier live attempt genuinely failed interpretation. A later attempt failed because of the diagnostic harness itself and was excluded. Subsequent live calls succeeded. This small, heterogeneous set does not support a provider reliability percentage or a claim that the exact original malformed field has been fixed.
+
+Final local verification passed all 42 release checks, including 476 backend
+tests and the paced native voice workflow. The release workflow also gates
+publication on packaged inference and the real Electron voice/context tests.
+These checks cover the corrected transitions; physical microphone accuracy and
+audible playback quality remain separate acceptance work.
+
+## Repository cleanup performed with this audit
+
+- Replaced the old deep dive here, keeping one canonical audit rather than a
+  second date-named document.
+- Removed the superseded voice-fixes, experience-audit and validation documents.
+  Current contracts remain in the hands-free/PTT guides; historical transport
+  verification boundaries were consolidated into the harness review.
+- Removed unused PCM-framing and synthesized-chime helpers, their obsolete
+  assertions, and unused helper exports. Current PCM decoding and error-clip
+  tests remain.
+- Replaced the obsolete combined audio/context smoke with
+  `smoke:electron:context-history`. It preserves Unicode pagination, search/jump,
+  source-hash and no-provider checks. Current audio coverage remains in the
+  voice-experience smoke.
+- Corrected stale local/cloud, setup, gesture and result-type descriptions and
+  updated the documentation index and script references.
+
+Original audit scripts remain local evidence under `.tmp`. The release-blocking
+reproductions were converted into passing production regression tests during
+the subsequently authorized final review; remaining product and hardware limits
+are explicitly retained above.

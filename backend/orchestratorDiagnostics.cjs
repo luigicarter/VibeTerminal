@@ -26,6 +26,13 @@ function createDiagnostics({ userDataPath, getSecrets = () => [], now = Date.now
       const value = redact(input?.[key], 256); if (value !== undefined) result[key] = value;
     }
     if (Number.isFinite(input?.generation)) result.generation = input.generation;
+    // Keep voice timing evidence without recording microphone content. Unknown
+    // fields still stay out of the log, and every numeric metric is bounded.
+    for (const key of ['processingMs', 'queuedSamples', 'totalMs', 'preprocessingMs', 'inferenceMs', 'elapsedMs', 'silenceMs', 'voicedMs', 'recordingId']) {
+      if (Number.isFinite(input?.[key]) && input[key] >= 0) result[key] = Math.min(input[key], 1e9);
+    }
+    if (Number.isFinite(input?.probability) && input.probability >= 0 && input.probability <= 1) result.probability = input.probability;
+    if (['wake', 'answer', 'ptt'].includes(input?.recordingSource)) result.recordingSource = input.recordingSource;
     if (Number.isInteger(input?.httpStatus) && input.httpStatus >= 100 && input.httpStatus <= 599) result.httpStatus = input.httpStatus;
     const error = typeof input?.error === 'string' ? { message: input.error } : input?.error;
     if (error && typeof error === 'object') {

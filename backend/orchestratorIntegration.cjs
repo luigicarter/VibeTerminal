@@ -591,17 +591,25 @@ function installOrchestrator(options) {
     if (p.menu) return showMenu();
     if (p.openWorkspace) { const w = getMainWindow(); if (w?.isMinimized()) w.restore(); w?.show(); }
     if (p.preview) { await surface.ensureReady(); return voice.configure({ preview: true }); }
+    // Capture identities are assigned by main, never by either renderer.
+    if (p.captureToken !== undefined) return { ok: false, error: 'Unsupported capture configuration.' };
+    if (p.finishRecording !== undefined) {
+      const token = captureToken, recordingId = p.finishRecording;
+      const recording = voice.getState();
+      if (!Number.isSafeInteger(recordingId) || recording.recordingId !== recordingId || recording.phase !== 'recording' || !['wake', 'answer'].includes(recording.recordingSource)) return { ok: true, status: 'stale-recording' };
+      const flushed = await flushCapture();
+      if (!flushed.ok || token !== captureToken) return flushed.ok ? { ok: false, status: 'stale' } : flushed;
+      return voice.configure({ finishRecording: recordingId, sampleEnd: flushed.sampleEnd });
+    }
     if (p.pushToTalk === 'stop') {
       const token = captureToken;
       const flushed = await flushCapture();
       if (!flushed.ok || token !== captureToken) {
-        if (token === captureToken) voice.configure({ pushToTalk: 'cancel', holdId: p.holdId });
+        if (token === captureToken && !flushed.ok) voice.failPushToTalk(p.holdId, flushed.error);
         return flushed.ok ? { ok: false, status: 'cancelled' } : flushed;
       }
       return voice.configure({ ...p, sampleEnd: flushed.sampleEnd });
     }
-    // Capture identities are assigned by main, never by either renderer.
-    if (p.captureToken !== undefined) return { ok: false, error: 'Unsupported capture configuration.' };
     return voice.configure(p);
   });
   guarded("voice:listening", p => setEnabled(Boolean(p.enabled)));

@@ -30,6 +30,13 @@
 .voice-indicator .voice-hide { right: 8px; }
 .voice-indicator:hover .voice-mini, .voice-indicator:focus-within .voice-mini { opacity: 1; }
 .voice-indicator .voice-mini:hover { background: #354548; }
-.voice-indicator .voice-accessible-status { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+.voice-indicator .voice-status {
+  position: absolute; bottom: 100%; right: 0; width: max-content;
+  max-width: min(280px, calc(100vw - 40px)); max-height: calc(100vh - 152px);
+  box-sizing: border-box; overflow: auto; overflow-wrap: anywhere;
+  padding: 8px 11px; border: 1px solid rgba(var(--voice-glow), .4); border-radius: 10px;
+  background: #172325; box-shadow: 0 3px 14px #0005; text-align: left;
+  -webkit-app-region: no-drag;
+}
 @keyframes voice-active { 50% { opacity: .75; transform: scale(.95); } }
 @media(prefers-reduced-motion: reduce) { .voice-indicator .voice-mic { animation: none !important; } .voice-indicator button { transition: none; } }

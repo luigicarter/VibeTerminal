@@ -7,7 +7,11 @@ not need a particular command verb or colon-delimited syntax.
 
 ## Interpretation and execution
 
-The selected Brain first returns an `interpret_workspace` command plan. This
+The selected Brain first returns an `interpret_workspace` command plan. An invalid
+tool envelope, JSON or plan gets one repair attempt using the original authorized
+context and a fixed schema reminder. Both attempts pass the same strict validator;
+malformed output never supplies authority. Repeated failure gives a short retry
+message and preserves the detailed reason in private diagnostics. This
 request contains the current user instruction, recent user-authored context,
 application-owned unfinished work, and typed project/session/question metadata.
 Terminal output, history bodies, assistant summaries and private diagnostic logs

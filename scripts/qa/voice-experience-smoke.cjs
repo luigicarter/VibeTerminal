@@ -77,9 +77,11 @@ async function screenshot(client, name) { const r = await client.send('Page.capt
 (async () => { try {
   assert.equal(process.platform, 'win32');
   const speechWav = path.join(output, 'fake-microphone.wav');
-  const sentence = 'Push to talk works. Show me the workspace. Hey Vibe. Open the project and run the tests.';
+  // Mid-command pauses must survive; the final pause gives completion a quiet
+  // window before Chromium loops the fake microphone again.
+  const sentence = '<speak version="1.0" xml:lang="en-US">Push to talk works. Show me the workspace. Hey Vibe.<break time="500ms"/>Open the project<break time="600ms"/>and run the tests.<break time="4s"/></speak>';
   const synthesis = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-    `$ErrorActionPreference='Stop';Add-Type -AssemblyName System.Speech;$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;$f=New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo(16000,[System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen,[System.Speech.AudioFormat.AudioChannel]::Mono);$s.SetOutputToWaveFile('${speechWav}',$f);$s.Speak('${sentence}');$s.Dispose()`],
+    `$ErrorActionPreference='Stop';Add-Type -AssemblyName System.Speech;$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;$f=New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo(16000,[System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen,[System.Speech.AudioFormat.AudioChannel]::Mono);$s.SetOutputToWaveFile('${speechWav}',$f);$s.SpeakSsml('${sentence}');$s.Dispose()`],
     { windowsHide: true, encoding: 'utf8', timeout: 120000 });
   if (synthesis.status !== 0 || !fs.existsSync(speechWav)) throw Error(`Could not synthesize the fake microphone recording: ${synthesis.stderr || synthesis.status}`);
   const port = await new Promise(resolve => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const port = s.address().port; s.close(() => resolve(port)); }); });
@@ -118,7 +120,7 @@ async function screenshot(client, name) { const r = await client.send('Page.capt
   voice = new Cdp(vp.webSocketDebuggerUrl); await voice.open();
   // Preserve actual AudioContext scheduling/end ACK, silence only the physical output.
   await voice.eval(`(()=>{const connect=AudioNode.prototype.connect;AudioNode.prototype.connect=function(destination,...args){if(destination instanceof AudioDestinationNode){const gain=this.context.createGain();gain.gain.value=0;connect.call(gain,destination);return connect.call(this,gain,...args);}return connect.call(this,destination,...args);};window.__qaSilentPlayback=true;window.__qaStoppedTracks=[];const stop=MediaStreamTrack.prototype.stop;MediaStreamTrack.prototype.stop=function(){const before=this.readyState;stop.call(this);window.__qaStoppedTracks.push({kind:this.kind,before,after:this.readyState});};})()`);
-  await voice.eval(`(()=>{window.__qaVoiceAudio=[];window.__qaVoiceStates=[];window.vibe.voice.onAudio(({data,...chunk})=>window.__qaVoiceAudio.push({...chunk,bytes:data.length}));window.vibe.voice.onState(state=>window.__qaVoiceStates.push({phase:state.phase,reply:state.reply,replyId:state.replyId,transcript:state.transcript,recordingSource:state.recordingSource,handsFreeStatus:state.handsFreeStatus,finishHint:state.finishHint}));})()`);
+  await voice.eval(`(()=>{window.__qaVoiceAudio=[];window.__qaVoiceStates=[];window.vibe.voice.onAudio(({data,...chunk})=>window.__qaVoiceAudio.push({...chunk,bytes:data.length}));window.vibe.voice.onState(state=>window.__qaVoiceStates.push({phase:state.phase,reply:state.reply,replyId:state.replyId,transcript:state.transcript,recordingSource:state.recordingSource,recordingId:state.recordingId,handsFreeStatus:state.handsFreeStatus,finishHint:state.finishHint}));})()`);
   const native = await until(() => windows().find(w => w.url.includes('surface=voice') && !w.visible), 'hidden native audio renderer');
   assert.equal(native.bounds.width, 112); assert.equal(native.bounds.height, 112);
   const opts = events().find(e => e.nativeOptions).nativeOptions; assert.equal(opts.frame, false); assert.equal(opts.transparent, true); assert.equal(opts.backgroundThrottling, false); assert.equal(opts.alwaysOnTop,false); assert.equal(opts.focusable,false);
@@ -182,10 +184,23 @@ async function screenshot(client, name) { const r = await client.send('Page.capt
   assert.equal((await cdp.eval('window.vibe.orchestrator.configure({handsFreeEnabled:true})')).ok, true);
   await until(async () => (await cdp.eval('window.vibe.voice.getState()')).handsFreeStatus === 'ready', 'native hands-free helpers ready', 20000);
   const automatic = await until(() => voice.eval(`window.__qaVoiceStates.find(s=>s.recordingSource==='wake')`), 'native wake starts recording from fake microphone', 30000);
+  const status = await cdp.eval(`(()=>{const e=document.querySelector('.voice-status');const r=e.getBoundingClientRect();const style=getComputedStyle(e);return {text:e.textContent,width:r.width,height:r.height,visible:style.clipPath==='none'&&style.visibility!=='hidden',inside:r.x>=0&&r.y>=0&&r.right<=innerWidth&&r.bottom<=innerHeight};})()`);
+  assert(status.visible && status.inside && status.width > 100 && status.height > 20, JSON.stringify(status));
+  await screenshot(cdp, 'automatic-recording-status.png');
+  record('visible-automatic-recording-status', status);
   const automaticTranscript = await until(() => voice.eval(`window.__qaVoiceStates.find(s=>s.transcript==='open the project and run the tests')`), 'automatic completion and wake-prefix removal', 30000);
   const automaticUpload = events().find(e => e.transcription === 'Hey Vibe open the project and run the tests');
   assert(automaticUpload?.peak > 600, 'Wake recording must contain microphone audio');
   record('native-wake-vad-completion-through-real-capture', { automatic, automaticTranscript, upload: automaticUpload });
+  await until(async () => (await cdp.eval('window.vibe.voice.getState()')).phase === 'listening', 'automatic reply returns to wake listening');
+  const nextRecording = await until(async () => { const s=await cdp.eval('window.vibe.voice.getState()');return s.phase==='recording'&&s.recordingSource==='wake'&&s.recordingId!==automatic.recordingId&&s; }, 'another native wake after the reply', 30000);
+  const beforeSend = events().filter(e=>e.transcription).length;
+  const point = await cdp.eval(`(()=>{const r=document.querySelector('.voice-mic').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);
+  await cdp.send('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',clickCount:1,...point});
+  await cdp.send('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',clickCount:1,...point});
+  await until(()=>events().filter(e=>e.transcription).length===beforeSend+1, 'click Send uploads automatic recording');
+  assert(events().some(e=>e.channel==='voice:configure'&&e.payload?.finishRecording===nextRecording.recordingId&&e.value?.status==='sent'));
+  record('repeat-wake-and-click-send-through-real-flush', { recordingId:nextRecording.recordingId });
   assert.equal((await cdp.eval('window.vibe.orchestrator.configure({handsFreeEnabled:false})')).ok, true);
   assert.equal((await cdp.eval('window.vibe.voice.getState()')).handsFreeStatus, 'off');
   assert.equal((await cdp.eval('window.vibe.orchestrator.setEnabled(false)')).ok, true);

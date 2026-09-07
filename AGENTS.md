@@ -8,8 +8,7 @@ vibeTerminal is an Electron + React desktop workspace for running local terminal
 
 - `docs/orchestrator-dashboard.md` - Clear-glass session visualization, truthful request activity, stable motion/recency, and verification.
 
-- `docs/orchestrator-voice-fixes.md` - Simple key/model/toggle setup, CPU wake listening, compact mic lifecycle, speech repair, and verification.
-- `docs/orchestrator-voice-deep-dive.md` - September 2026 troubleshooting deep dive: measured pipeline timings, root causes with evidence (pre-roll endpointing, SAPI fallback clips, Brain reasoning budget, malformed preferences, degraded wake mode), what was ruled out, changes landed, and the fake-microphone reproduction harness.
+- `docs/orchestrator-voice-deep-dive.md` - Current voice architecture and reliability audit: local/cloud stages, recording and interruption rules, repaired defects, remaining limits, installed/source version boundaries, diagnostics, privacy, and verification.
 
 - `docs/orchestrator-context-and-audio.md` - Progressive output/history access, model-only context budgets, and bundled OpenRouter error announcements.
 
@@ -17,7 +16,7 @@ vibeTerminal is an Electron + React desktop workspace for running local terminal
 
 - `docs/orchestrator.md` - User-command relay, OpenRouter setup, voice overlay, observation/action contracts, saved setups, handoffs, and verification limits.
 
-- `docs/voice-push-to-talk.md` - Space push-to-talk: the hold gesture and its guards, the `pushToTalk` contract, what the wake word left behind, and verification.
+- `docs/voice-push-to-talk.md` - Space and mouse hold gestures, focus guards, automatic-recording handover, capture flushing, and verification.
 - `docs/voice-handsfree.md` - Optional account-free Hey Vibe activation, pretrained CPU models, automatic answers, capture fencing, fallback, and verification.
 - `docs/frontend.md` - React renderer files, UI state, terminal panes, layout board, and styling.
 - `docs/backend.md` - Electron main process, PTY host, and agent thread discovery files.

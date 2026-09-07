@@ -225,26 +225,43 @@ them or completed the task. Completion requires native runtime/chat evidence.
 
 ## Verification
 
-The final targeted suite has 158 passing tests. New cases cover A-to-B follow-up
-binding, provisional launches, replacement generations, hidden duplicate titles,
-renames, punctuation, folder/home identity, Fusion provenance, wrong host
-acknowledgments, late cancellation, out-of-order inventory and valid bounded JSON.
-Frontend identity, workspace and dock helper checks also pass. Model tool
-selection and free-form summaries remain probabilistic; actual action receipts
-and native evidence are authoritative. Live chosen-model evaluations are still
-needed to measure reliability across natural speech/wording.
+Run `npm run test:orchestrator` for policy, semantic grants, settings, context,
+history, delivery, interaction identity and voice regressions. Coverage includes
+complete user payloads, A-to-B follow-ups, provisional launches, replacement
+generations, duplicate titles, wrong-host acknowledgments, cancellation and
+out-of-order inventory. Multi-question answers retain session/generation/request/
+revision identity; partial GUI answers cannot be overwritten by stale voice
+answers. Provider integration fixtures exercise idle/busy routing, pending
+permissions, queues, staged outcomes and uncertain steering without duplicate
+submission. Model transport and host acknowledgments are simulated where noted
+by each fixture; test counts are intentionally not presented as a current result.
 
-The dock now drags to zero content height, retains its tabs/grip, remembers its
-collapsed state and pulls open continuously. Project rows have reorder grips,
-keyboard movement and persisted order. Separate Electron tests exercised both
-controls and verified unchanged running terminal identity/layout; project drag
-testing also covered insertion lines, cancellation and long-list edge scrolling.
+`npm run smoke:electron:orchestrator-command` uses real Electron, preload/IPC,
+a PowerShell PTY, native history fixtures and a PATH-isolated fake provider
+executable. It checks evaluated shell output, exact payload/target routing,
+history resume/follow-up, cancellation and internal selection preservation.
+The strict external sentinel checks foreground ownership, selected text and
+clipboard sequence. Its `--observe-external` alternative observes an existing
+foreground application and makes no selected-text claim. A failed sentinel
+prerequisite is not evidence of an application routing failure.
 
-The command E2E harness uses real Electron, preload/IPC, a real PowerShell PTY and
-native history fixtures, with scripted model replies and a fake provider
-executable. Its results must be read separately from live-model acceptance.
-See [validation evidence](orchestrator-validation.md) for final artifact paths and
-the current live-test boundary.
+Historical reviewed artifacts include
+`.tmp/orchestrator-command-smoke/1788635671910-36960/` (strict sentinel, 18 samples
+without observed foreground/clipboard/selected-text violations),
+`.tmp/project-order-smoke/1788621609242-40084/` (native drag/drop, keyboard ordering,
+reload, cancellation and unchanged pane identity), and
+`.tmp/orchestrator-smoke/1788630846262-41124/` (packaged Electron workflow).
+Those runs also checked packaged history-helper startup/IPC and source/package
+identity. They describe historical evidence, not verification of every later build.
+
+Real PTY execution and helper loading do not prove live agent acceptance, model
+selection reliability, physical microphone behavior or audible playback. Terminal
+TUIs without sufficient recipient evidence remain staged/manual; structured
+Fusion/Open Fusion interactions have stronger identity checks. Actual action
+receipts and native observations remain authoritative. See the
+[current voice deep dive](orchestrator-voice-deep-dive.md) for the separate cloud,
+microphone and playback evidence, and [context/audio verification](orchestrator-context-and-audio.md#verification)
+for source preservation and offline-error fixtures.
 
 Main implementation: [relay loop](../backend/orchestrator.cjs),
 [context projection](../backend/orchestratorContext.cjs),

@@ -158,17 +158,30 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, fetc
         sessionDirectory: { total: context.sessions.length, truncated: context.sessions.length > 200 },
         requests: context.requests, roots: context.roots };
       const messages = [{ role: 'system', content: INTENT_SYSTEM }, { role: 'user', content: JSON.stringify(redact(payload)) }];
-      const ask = outputTokens => completionWithFallback({ model: model.id,
-        messages: fitMessages({ messages, tools: [INTENT_TOOL], contextLength: model.contextLength, outputTokens }),
+      const ask = (outputTokens, repair) => completionWithFallback({ model: model.id,
+        messages: fitMessages({ messages: repair ? [{ role: 'system', content: `${INTENT_SYSTEM}\nYour previous interpretation did not conform to the tool contract. Interpret the original user request again. Return exactly one interpret_workspace call whose arguments are an object with only required top-level goal and actions plus optional clarification and continuationOf. Never wrap it in intent, name, or arguments, or add commentary keys. A greeting-only example is {"goal":"Respond to the greeting.","actions":[]}; actionable requests still require their authorized effects. Preserve all original authorization constraints; do not guess missing targets or answers.` }, ...messages.slice(1)] : messages, tools: [INTENT_TOOL], contextLength: model.contextLength, outputTokens }),
         tools: [INTENT_TOOL], ...(model.supportedParameters?.includes('tool_choice') && { tool_choice: { type: 'function', function: { name: INTENT_TOOL.function.name } } }),
         max_tokens: outputTokens, temperature: 0, ...reasoningOptions(model) }, signal);
-      let response = await ask(tokens); state.usage.brain += usageCost(response);
-      if (model.reasoning && exhaustedReply(response)) { response = await ask(Math.min(tokens * 2, model.maxCompletionTokens || BRAIN_RETRY_CEILING)); state.usage.brain += usageCost(response); }
-      if (response.choices?.[0]?.finish_reason === 'length') throw new Error('The command interpretation was incomplete. No command was dispatched.');
-      const calls = response.choices?.[0]?.message?.tool_calls;
-      if (calls?.length !== 1 || calls[0].function?.name !== INTENT_TOOL.function.name) throw new Error('The Brain did not return a valid command interpretation. No command was dispatched.');
-      try { raw = JSON.parse(calls[0].function.arguments); }
-      catch { throw new Error('The Brain returned malformed command interpretation JSON. No command was dispatched.'); }
+      let widened = false;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (signal.aborted) throw new Error('Cancelled.');
+        let response = await ask(tokens, attempt > 0); state.usage.brain += usageCost(response);
+        if (!widened && model.reasoning && exhaustedReply(response)) { widened = true; response = await ask(Math.min(tokens * 2, model.maxCompletionTokens || BRAIN_RETRY_CEILING), attempt > 0); state.usage.brain += usageCost(response); }
+        if (signal.aborted) throw new Error('Cancelled.');
+        try {
+          if (response.choices?.[0]?.finish_reason === 'length') throw new Error('The command interpretation was incomplete. No command was dispatched.');
+          const calls = response.choices?.[0]?.message?.tool_calls;
+          if (calls?.length !== 1 || calls[0].function?.name !== INTENT_TOOL.function.name) throw new Error('The Brain did not return a valid command interpretation. No command was dispatched.');
+          try { raw = JSON.parse(calls[0].function.arguments); }
+          catch { throw new Error('The Brain returned malformed command interpretation JSON. No command was dispatched.'); }
+          const plan = normalizeIntent(raw, context);
+          if (attempt) recordDiagnostic({ ...diagnosticContext, event: 'intent_repair', stage: 'interpretation', status: 'repaired' });
+          return plan;
+        } catch (error) {
+          diagnosticError(error, { ...diagnosticContext, stage: 'interpretation', status: attempt ? 'retry-failed' : 'retry' });
+          if (attempt) throw new Error('I could not interpret that request. Please try again.');
+        }
+      }
     }
     const plan = normalizeIntent(raw, context);
     return plan;

@@ -65,6 +65,7 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `npm run dev:frontend` - Vite frontend only.
 - `npm run dev:renderer` - Compatibility alias for `dev:frontend`.
 - `npm run typecheck` - TypeScript check with no emit.
+- `npm run smoke:electron:context-history` - Isolated Electron history pagination, exact Unicode reconstruction, search/jump/Latest navigation, and source-file preservation; asserts no provider requests or voice activation. Replaces the obsolete combined audio/context smoke; playback coverage lives in `smoke:electron:voice-experience`.
 - `npm run build` - TypeScript check plus Vite production build.
 - `npm run prepare:codex-bin` - Optionally copies the global `@openai/codex` native binary into `vendor/codex-bin/<platform>-<arch>` for Fusion packaging.
 - `npm run prepare:codex-bin:required` - Required release variant; exits nonzero if the pinned native Codex binary is missing or version-incompatible.

@@ -38,15 +38,54 @@ async function fixture(t) {
       (compiler ? f.compiler : f.executor).push(body);
       const step = queue.shift(), result = typeof step === 'function' ? await step(compiler ? metadata(body) : body) : step;
       if (compiler) assert.equal(body.tool_choice.function.name, 'interpret_workspace');
-      return new Response(JSON.stringify(compiler ? calls('interpret_workspace', result) : result));
+      return new Response(JSON.stringify(compiler ? (result?.choices ? result : calls('interpret_workspace', result)) : result));
     } });
   t.after(async () => { await f.relay.dispose(); assert.ok(path.resolve(root).startsWith(path.join(os.tmpdir(), 'vibe-semantic-test-'))); fs.rmSync(root, { recursive: true, force: true }); });
   await f.relay.configure({ apiKey: 'fixture-key', sessionOnly: true, model: 'scripted-brain' });
   assert.equal((await f.relay.setEnabled(true)).ok, true);
-  f.run = async (text, plan, ...steps) => { f.plans.push(plan); f.steps.push(...steps); const result = await f.relay.send({ text, origin: 'text' }); assert.equal(f.plans.length, 0, JSON.stringify(result)); assert.equal(f.steps.length, 0, JSON.stringify(result)); return result; };
+  f.run = async (text, plan, ...steps) => { f.plans.push(...(Array.isArray(plan) ? plan : [plan])); f.steps.push(...steps); const result = await f.relay.send({ text, origin: 'text' }); assert.equal(f.plans.length, 0, JSON.stringify(result)); assert.equal(f.steps.length, 0, JSON.stringify(result)); return result; };
   f.question = (extra = {}) => ({ id: 'question', sessionId: 'c1', generation: 'g1', revision: 3, kind: 'question', questions: [{ id: 'scope', question: 'Which scope?', options: [{ label: 'Small' }, { label: 'Large' }] }], ...extra });
   return f;
 }
+
+test('invalid interpretation is repaired once using original context, with both attempts charged', async t => {
+  const f = await fixture(t);
+  const invalid = { ...calls('interpret_workspace', { ...none, explanation: 'UNTRUSTED_REPAIR_MARKER' }), usage: { cost: 0.1 } };
+  const repaired = { ...calls('interpret_workspace', none), usage: { cost: 0.2 } };
+  const result = await f.run('Hello.', [invalid, repaired], reply('Hello.'));
+  assert.equal(result.ok, true); assert.equal(f.compiler.length, 2); assert.equal(f.effects.length, 0);
+  assert.deepEqual(metadata(f.compiler[1]), metadata(f.compiler[0]));
+  assert.equal(JSON.stringify(f.compiler[1]).includes('UNTRUSTED_REPAIR_MARKER'), false);
+  assert.match(f.compiler[1].messages[0].content, /previous interpretation/);
+  assert.ok(Math.abs(f.relay.getState().usage.brain - 0.3) < 1e-9);
+  await f.relay.flushDiagnostics();
+  const log = fs.readFileSync(path.join(f.root, 'logs', 'orchestrator-errors.jsonl'), 'utf8');
+  assert.equal(log.includes('UNTRUSTED_REPAIR_MARKER'), false);
+  const events = log.trim().split('\n').map(JSON.parse).filter(event => event.stage === 'interpretation');
+  assert.deepEqual(events.map(event => event.status), ['retry', 'repaired']);
+  assert.match(events[0].error.message, /unexpected intent fields/);
+});
+
+test('persistent invalid interpretation and unknown targets fail closed after one repair', async t => {
+  for (const invalid of [{ ...none, unexpected: true }, { goal: 'Close target.', actions: [{ kind: 'close', targetIds: ['missing'] }] },
+    { choices: [{ message: { tool_calls: [{ function: { name: 'interpret_workspace', arguments: '{broken' } }] } }] }]) {
+    const f = await fixture(t), result = await f.run('Hello.', [invalid, invalid]);
+    assert.equal(result.error, 'I could not interpret that request. Please try again.');
+    assert.equal(f.compiler.length, 2); assert.equal(f.executor.length, 0); assert.equal(f.effects.length, 0);
+    await f.relay.flushDiagnostics();
+    const events = fs.readFileSync(path.join(f.root, 'logs', 'orchestrator-errors.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(events.some(event => event.stage === 'interpretation' && event.status === 'retry-failed' && event.error.message !== result.error), true);
+  }
+});
+
+test('cancellation during interpretation repair prevents executor and dispatch', async t => {
+  const f = await fixture(t);
+  const result = await f.run('Close Codex 1.', [{ ...none, unexpected: true }, async () => {
+    await f.relay.cancel(); return { goal: 'Close Codex 1.', actions: [{ kind: 'close', targetIds: ['c1'] }] };
+  }]);
+  assert.equal(result.status, 'cancelled'); assert.equal(f.compiler.length, 2);
+  assert.equal(f.executor.length, 0); assert.equal(f.effects.length, 0);
+});
 
 test('project creation binds an omitted parent to Documents and rejects a different execution parent', async t => {
   const f = await fixture(t);
@@ -103,8 +142,9 @@ test('pending selection cannot adopt restarted or new terminal generations', asy
     await f.run('How many Codex terminals in vibeTerminal?', none, reply('Six.'));
     await f.run('Ask one of them to review the latest changes.', { goal: 'Review changes.', clarification: 'Which one?', actions: [] });
     f.sessions[0].generation = 'restarted'; f.sessions.push({ ...f.sessions[1], id: 'new' });
-    const result = await f.run('Pick the first one.', context => ({ goal: 'Use the pending task.', actions: [{ kind: 'send_prompt', sourceUserId: context.previousCommand.requestId, targetIds: [targetId], text: 'Review the latest changes.' }] }));
-    assert.equal(result.ok, false); assert.match(result.error, /changed|original scope/); assert.equal(f.effects.length, 0);
+    const invalid = context => ({ goal: 'Use the pending task.', actions: [{ kind: 'send_prompt', sourceUserId: context.previousCommand.requestId, targetIds: [targetId], text: 'Review the latest changes.' }] });
+    const result = await f.run('Pick the first one.', [invalid, invalid]);
+    assert.equal(result.ok, false); assert.match(result.error, /could not interpret/); assert.equal(f.effects.length, 0);
   }
 });
 
@@ -159,8 +199,9 @@ test('terminal navigation and literal submission consume one grant without repea
 
 test('compiler cannot manufacture an answer the user never supplied', async t => {
   const f = await fixture(t); f.relay.ingestInteraction(f.question());
-  const result = await f.run('What does Codex 1 need from me?', { goal: 'Answer the question.', actions: [{ kind: 'answer_question', targetIds: ['c1'], answerText: 'Large' }] });
-  assert.equal(result.ok, false); assert.match(result.error, /literal text/); assert.equal(f.effects.length, 0); assert.equal(f.executor.length, 0);
+  const invalid = { goal: 'Answer the question.', actions: [{ kind: 'answer_question', targetIds: ['c1'], answerText: 'Large' }] };
+  const result = await f.run('What does Codex 1 need from me?', [invalid, invalid]);
+  assert.equal(result.ok, false); assert.match(result.error, /could not interpret/); assert.equal(f.effects.length, 0); assert.equal(f.executor.length, 0);
 });
 
 test('two clarifications preserve the original user command and its source identity', async t => {

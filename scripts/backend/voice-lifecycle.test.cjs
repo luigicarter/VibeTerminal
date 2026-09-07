@@ -95,7 +95,7 @@ async function fixture(t, options = {}) {
     fs.rmSync(root, { recursive: true, force: true });
   });
   const invoke = (name, payload = {}, sender = main.webContents) => handlers.get(name)({ sender }, payload);
-  assert.equal((await invoke('orchestrator:configure', { apiKey: 'fixture-key', sessionOnly: true, model: 'fixture/brain', sttModel: STT_MODEL, ttsModel: TTS_MODEL, voice: TTS_VOICE })).ok, true);
+  assert.equal((await invoke('orchestrator:configure', { apiKey: 'fixture-key', sessionOnly: true, model: 'fixture/brain', sttModel: STT_MODEL, ttsModel: TTS_MODEL, voice: TTS_VOICE, handsFreeEnabled: !!options.handsFree })).ok, true);
   const overlay = () => BrowserWindow.instances.find(window => window !== main && !window.destroyed);
   async function renderer() {
     await until(() => overlay(), 'audio window creation');
@@ -151,6 +151,78 @@ test('manual release waits for the audio worklet tail before submitting the WAV'
   assert.equal(Buffer.from(uploads[0].input_audio.data, 'base64').length, 44 + 4817 * 2);
 });
 
+async function automaticFixture(t, options = {}) {
+  let callbacks, packet, position = 0;
+  const uploads = [];
+  const f = await fixture(t, { ...options, handsFree: true, controllerOptions: {
+    inferenceFactory: value => { callbacks = value; return { start: async () => {}, dispose() {}, feed: value => { packet = value; }, analyze: async input => ({ ...input, complete: false }) }; },
+    fetch: async (_url, options) => { uploads.push(JSON.parse(options.body)); return new Response(JSON.stringify({ text: '' })); },
+  } });
+  await f.enable();
+  const { captureToken } = await f.invoke('voice:get-state'), sender = f.overlay().webContents;
+  function feed(count = 1600, wake = false, classify = true) {
+    f.ipcMain.emit('voice:frames', { sender }, { captureToken, sampleStart: position, sampleRate: 16000, samples: Array(count).fill(.1) });
+    position += count;
+    if (classify) callbacks.onFrame({ ...packet, samples: undefined, sampleEnd: position, speech: true, ...(wake ? { wake: { keyword: 'HEY VIBE', startSample: packet.sampleStart, lastTokenSample: position } } : {}) });
+  }
+  feed(1600, true); feed(); feed();
+  assert.equal(f.controller.getState().recordingSource, 'wake');
+  return { ...f, uploads, feed, sender, captureToken, get position() { return position; } };
+}
+
+test('automatic Send flushes the worklet tail without a PTT hold', async t => {
+  const f = await automaticFixture(t);
+  const recordingId = f.controller.getState().recordingId;
+  let flush;
+  f.overlay().onSend = (channel, payload) => { if (channel === 'voice:flush') flush = payload; };
+  assert.equal((await f.invoke('voice:configure', { finishRecording: recordingId, captureToken: f.captureToken })).ok, false);
+  assert.equal(flush, undefined, 'Renderer capture identities are refused before flushing');
+  assert.equal((await f.invoke('voice:configure', { finishRecording: recordingId - 1 })).status, 'stale-recording');
+  assert.equal(flush, undefined, 'An obsolete Send must not request a flush of the current recording');
+  const sent = f.invoke('voice:configure', { finishRecording: recordingId });
+  await until(() => flush, 'automatic worklet flush'); assert.equal(f.uploads.length, 0);
+  f.feed(17, false, false);
+  await f.invoke('voice:configure', { captureFlushed: true, flushId: flush.id, captureToken: f.captureToken, sampleEnd: f.position }, f.sender);
+  assert.equal((await sent).status, 'sent');
+  await until(() => f.uploads.length, 'automatic WAV upload');
+  assert.equal(Buffer.from(f.uploads[0].input_audio.data, 'base64').length, 44 + f.position * 2);
+});
+
+test('automatic Send cannot finish a newer turn while its flush is pending', async t => {
+  const f = await automaticFixture(t), recordingId = f.controller.getState().recordingId;
+  let flush;
+  f.overlay().onSend = (channel, payload) => { if (channel === 'voice:flush') flush = payload; };
+  const sent = f.invoke('voice:configure', { finishRecording: recordingId });
+  await until(() => flush, 'automatic flush');
+  // Cancel the old automatic turn, then trigger a new wake on the same capture stream.
+  await f.controller.setListening(false); await f.controller.setListening(true);
+  await f.controller.configure({ refreshHandsFree: true });
+  f.feed(1600, true); f.feed();
+  const nextId = f.controller.getState().recordingId;
+  assert.notEqual(nextId, recordingId); assert.equal(f.controller.getState().phase, 'recording');
+  await f.invoke('voice:configure', { captureFlushed: true, flushId: flush.id, captureToken: f.captureToken, sampleEnd: f.position }, f.sender);
+  assert.equal((await sent).status, 'stale-recording');
+  assert.equal(f.controller.getState().recordingId, nextId); assert.equal(f.uploads.length, 0);
+});
+
+test('automatic Send flush timeout returns an error without uploading', async t => {
+  const f = await automaticFixture(t, { captureFlushTimeoutMs: 15 });
+  const result = await f.invoke('voice:configure', { finishRecording: f.controller.getState().recordingId });
+  assert.equal(result.ok, false); assert.match(result.error, /audio did not finish/); assert.equal(f.uploads.length, 0);
+});
+
+test('automatic Send refuses a flush from a retired microphone capture', async t => {
+  const f = await automaticFixture(t);
+  let flush;
+  f.overlay().onSend = (channel, payload) => { if (channel === 'voice:flush') flush = payload; };
+  const sent = f.invoke('voice:configure', { finishRecording: f.controller.getState().recordingId });
+  await until(() => flush, 'automatic flush');
+  await f.invoke('orchestrator:enabled', { enabled: false });
+  assert.equal((await sent).status, 'cancelled');
+  assert.equal((await f.invoke('voice:configure', { captureFlushed: true, flushId: flush.id, captureToken: f.captureToken, sampleEnd: f.position }, f.sender)).status, 'stale');
+  assert.equal(f.uploads.length, 0);
+});
+
 test('audio positions and flush acknowledgments reject stale or unauthorized capture data', async t => {
   const f = await fixture(t); await f.enable();
   const { captureToken } = await f.invoke('voice:get-state');
@@ -189,6 +261,20 @@ test('flush deadline cancels the held attempt without uploading incomplete audio
   const result = await f.invoke('voice:configure', { pushToTalk: 'stop', holdId: 'missing-tail' });
   assert.equal(result.ok, false); assert.match(result.error, /audio did not finish/);
   assert.equal(uploaded, false); assert.equal(f.controller.getState().phase, 'listening');
+  assert.match(f.controller.getState().error, /audio did not finish/, 'Keyboard failures reach the shared voice state');
+});
+
+test('an older hold flush failure cannot cancel or mark a newer hold as failed', async t => {
+  const f = await fixture(t, { captureFlushTimeoutMs: 15 }); await f.enable();
+  await f.invoke('voice:configure', { pushToTalk: 'start', holdId: 'old-hold' });
+  const pending = f.invoke('voice:configure', { pushToTalk: 'stop', holdId: 'old-hold' });
+  await f.invoke('voice:configure', { pushToTalk: 'cancel', holdId: 'old-hold' });
+  await f.invoke('voice:configure', { pushToTalk: 'start', holdId: 'new-hold' });
+  const currentId = f.controller.getState().recordingId;
+  assert.equal((await pending).ok, false);
+  assert.equal(f.controller.getState().phase, 'recording');
+  assert.equal(f.controller.getState().recordingId, currentId);
+  assert.equal(f.controller.getState().error, null);
 });
 
 test('failed indicator load destroys the failed renderer and permits retry', async t => {

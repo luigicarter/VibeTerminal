@@ -54,7 +54,7 @@ function createVoiceInferenceService({ modelPath, onFrame = () => {}, onError = 
             onFrame({ ...message.result, captureToken: frame.captureToken, streamId: frame.streamId, sampleStart: frame.sampleStart, sampleEnd: frame.sampleStart + frame.samples.length });
           } else if (message?.type === 'result' && child === children[1] && pending?.id === message.id) {
             const task = pending; pending = null; clear(task.timer);
-            onDiagnostic({ type: 'completion', totalMs: message.result?.totalMs, preprocessingMs: message.result?.preprocessingMs, inferenceMs: message.result?.inferenceMs });
+            onDiagnostic({ type: 'completion', totalMs: message.result?.totalMs, preprocessingMs: message.result?.preprocessingMs, inferenceMs: message.result?.inferenceMs, probability: message.result?.probability });
             task.resolve({ ...message.result, ...task.identity });
           }
         });

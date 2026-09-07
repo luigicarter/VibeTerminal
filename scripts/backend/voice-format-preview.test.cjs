@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { decodeSpeechWav, wavFromSamples, errorChime } = require('../../backend/voiceAudio.cjs');
+const { decodeSpeechWav, wavFromSamples } = require('../../backend/voiceAudio.cjs');
 const { createVoiceController } = require('../../backend/voiceController.cjs');
 const { TTS_MODEL, TTS_VOICE } = require('../../shared/voiceConfig.cjs');
 
@@ -39,8 +39,8 @@ test('preview reports missing key and speech failure while remaining muted', asy
   assert.equal((await other.configure({ preview: true })).ok, false); assert.equal(other.getState().phase, 'off'); assert.equal(other.getState().errorOperation, 'speech');
 });
 
-test('legacy nonverbal chime remains available and default voice is Heart', () => {
-  const clip = errorChime(); assert.equal(clip.text, ''); assert(clip.durationMs < 500); assert(clip.pcm.some(n => n !== 0)); assert.equal(TTS_VOICE, 'af_heart');
+test('default voice is Heart', () => {
+  assert.equal(TTS_VOICE, 'af_heart');
 });
 
 test('playback error fails preview without stopping the microphone', async t => {

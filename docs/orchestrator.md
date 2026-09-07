@@ -24,12 +24,16 @@ For the reading/voice follow-up, see [progressive context and local error audio]
    ignored while a terminal pane or a text field has focus. The assistant goes back
    to waiting after its reply. Use the Orchestrator switch to turn it off.
    See [voice push-to-talk](voice-push-to-talk.md) for the full gesture.
+5. For activation without a key press, check **Hands-free voice – Hey Vibe** and
+   choose **Save changes**. Wait for the runtime's ready message, then say the
+   wake phrase followed by your request. See [hands-free voice](voice-handsfree.md).
 
-A saved key is greyed out with a **Change** button. No separate Save/Test sequence
-is required. Public model browsing works before a key is saved. Advanced settings
+A saved key is greyed out with a **Change** button. Enabling saves and verifies
+the draft; later edits require **Save changes**. Public model browsing works
+before a key is saved. Advanced settings
 contain microphone/voice selection, preview, optional launch-time enablement,
 spending limits, and opt-in activity reports. Keys use OS encryption; optional
-session-only storage is available in Advanced. The old unavailable speech default
+session-only storage is available in Advanced. The legacy speech selection
 is migrated to the supported voice configuration without replacing credentials.
 
 The mic is drawn only inside vibeTerminal and never over other applications. Its
@@ -42,8 +46,8 @@ has not been granted, enable voice from the foreground vibeTerminal window.
 If Windows blocks microphone access, the app offers **Open Windows microphone
 settings**. It opens the system privacy page only after that explicit click.
 The same permission gate applies when refreshing the microphone device list.
-Nothing is recognized on this machine: transcription, the assistant model, and
-synthesized speech all use OpenRouter.
+Wake detection, speech activity and turn completion run locally. Completed
+recordings, assistant requests and generated speech use OpenRouter.
 
 ## Examples
 
@@ -242,13 +246,26 @@ voice advances the same question request rather than repeating earlier answers.
 
 ## Voice
 
-Recording is started by holding the space bar and ended by releasing it, with the
-last two seconds of microphone history prepended so the first word survives. Taps
-under 300 ms and holds carrying under 250 ms of voiced audio are discarded, the
-second with spoken feedback. A microphone that cannot start prevents activation
-and reports the error instead of claiming to be listening.
+[Space push-to-talk](voice-push-to-talk.md) is the default: hold Space outside
+terminal panes and text fields to record, then release to send. Optional
+[hands-free voice](voice-handsfree.md) adds local “Hey Vibe” activation and automatic
+completion after speech. During an automatic recording, the mic's Send button
+can finish it immediately. Both manual release and Send flush the final microphone
+packet before submission. A microphone that cannot start prevents activation and
+reports the error instead of claiming to be listening.
 
-Held audio is held in memory and sent to OpenRouter's transcription
+Manual capture includes the preceding two seconds of microphone history. Taps
+under 300 ms are discarded silently; holds with under 250 ms of voiced audio get
+spoken feedback. Automatic recordings use separate speech/completion checks and
+a bounded silence fallback; they do not use the manual release gesture as their
+end condition. See the [current voice deep dive](orchestrator-voice-deep-dive.md)
+for the full pipeline, measured evidence and remaining limitations.
+An uncertain automatic turn with less than 250 ms of detected speech ends after
+three seconds of quiet with retry feedback, without a transcription upload. Pending
+questions survive that retry. A short manual tap that returns control to an
+automatic recording starts a fresh silence interval.
+
+Completed audio is held in memory and sent to OpenRouter's transcription
 endpoint. The default is `openai/whisper-large-v3-turbo`. The user-selected
 Orchestrator handles the recognized text. Spoken replies use
 `hexgrad/kokoro-82m` with the Heart English voice by default. PCM responses are
@@ -260,12 +277,17 @@ feedback and stage-specific text without another cloud request. Speech captured
 before the key went down is uploaded with the rest of the hold, preserving short
 commands. Empty transcriptions ask the user to try again; empty answers to
 pending questions repeat the question without dispatching a guessed answer.
+A wake-only transcript returns to listening with a visible no-command message;
+it is not sent to the assistant.
 
 There is no MP3/file-save workflow. Audio chunks are ordered, bounded, and
 cancelled by playback identity. Holding Space during a reply interrupts it and
 records instead. Voice is turn-based; a stop-speaking control is available. An
-agent question opens a 15-second answer window, answered with the same hold. Choices map literally from labels or numbers; custom
-answers use the announced format. Permission answers use explicit `allow once`,
+agent question opens a 15-second answer window. When hands-free inference is
+available, speech starts answer capture without repeating the wake phrase;
+Space remains available for manual answers. The answer timer pauses when speech
+is detected. Choices map literally from labels or numbers; custom answers use
+the announced format. Permission answers use explicit `allow once`,
 `allow always`, or `reject`; `yes` never becomes an expanded permission.
 
 The compact mic shows listening/transcribing/thinking/speaking/error states inside
@@ -315,6 +337,9 @@ Useful commands:
 npm run test:orchestrator
 npm run smoke:frontend:workspace-setups
 npm run smoke:frontend:orchestrator-history
+npm run smoke:electron:context-history
+npm run smoke:voice:native
+npm run smoke:voice:workflow
 npm run build
 npm run smoke:electron:orchestrator
 npm run smoke:electron:orchestrator-command
@@ -327,7 +352,12 @@ workflow, and a push-to-talk checkpoint that drives real key events against a
 synthesized microphone stream. Real microphones, varied acoustic environments, and
 live OpenRouter account/model behavior require separate acceptance checks.
 
-Packaging includes `vendor/voice`, which now holds only the offline alert clips. If the global
+`smoke:voice:workflow` uses fixtures generated by `smoke:voice:native`; run them
+in that order. The context/history smoke checks real pagination and source
+preservation without provider requests or voice activation.
+
+Packaging includes the offline alert clips and pinned hands-free models under
+`vendor/voice`, plus their native runtimes and helpers. If the global
 Codex version differs from the app's pinned schema, use
 `VIBE_CODEX_BIN_SEARCH_ROOTS` to point preparation at a matching local payload;
 do not replace the user's global CLI just to package the app.

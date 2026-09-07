@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const ts = require('typescript');
-const { createRecording, wavFromSamples, createPcmFramer, shouldSpeak } = require('../../backend/voiceAudio.cjs');
+const { createRecording, wavFromSamples, shouldSpeak } = require('../../backend/voiceAudio.cjs');
 const { createVoiceController } = require('../../backend/voiceController.cjs');
 const { matchAnswer, questionSpeech } = require('../../backend/voiceAnswers.cjs');
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -118,8 +118,6 @@ test('an answer given by holding to talk is matched and dispatched, not sent to 
   f.controller.dispose();
 });
 test('PCM boundaries preserve signed samples and text requests remain silent', async () => {
-  const framer = createPcmFramer(); const bytes = Buffer.concat([framer.push([0, 128, 255]), framer.push([127, 0, 0])]); framer.finish();
-  assert.deepEqual([bytes.readInt16LE(0), bytes.readInt16LE(2), bytes.readInt16LE(4)], [-32768, 32767, 0]);
   assert.equal(shouldSpeak({ origin: 'text' }), false); assert.equal(shouldSpeak({ kind: 'interaction' }), true);
   const f = fixture(); await f.controller.setListening(true); await f.controller.speak({ text: 'text answer', origin: 'text' }); assert.equal(f.calls.length, 0);
   await f.controller.speak({ text: 'voice answer', origin: 'voice' }); assert.equal(f.calls.length, 1);

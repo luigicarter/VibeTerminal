@@ -4,7 +4,7 @@ export const TAP_MS = 300;
 type Result = Partial<VoiceResult> | undefined;
 let nextHold = 0;
 const holdPrefix = Math.random().toString(36).slice(2);
-// One hold at a time, shared by the Space key and the indicator's press-and-hold mic.
+// Shared gesture implementation; each caller owns its hold and receives unique IDs.
 export function pressToTalk(api: VoiceApi, onResult: (result: Result) => void = () => {}) {
   let since = 0, holdId = '';
   const send = (pushToTalk: string, after: (result: Result) => void = onResult) =>
