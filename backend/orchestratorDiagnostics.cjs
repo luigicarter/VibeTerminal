@@ -1,8 +1,9 @@
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
+const namedControls = new Set(require('../shared/terminalControls.cjs').TERMINAL_KEYS);
 
-// Private diagnostics, never a transcript. Callers supply only failure metadata.
+// Private diagnostics, never a transcript. Only bounded operational metadata.
 function createDiagnostics({ userDataPath, getSecrets = () => [], now = Date.now, maxFileBytes = 1024 * 1024, maxQueuedRecords = 100, fsImpl = fs.promises } = {}) {
   const filename = path.join(userDataPath, 'logs', 'orchestrator-errors.jsonl');
   const fileLimit = Number.isSafeInteger(maxFileBytes) && maxFileBytes >= 256 ? maxFileBytes : 1024 * 1024;
@@ -22,17 +23,22 @@ function createDiagnostics({ userDataPath, getSecrets = () => [], now = Date.now
       return text.slice(0, limit);
     };
     const result = { time: new Date(now()).toISOString() };
-    for (const key of ['event', 'stage', 'requestId', 'toolCallId', 'receiptId', 'replyId', 'actionId', 'origin', 'model', 'actionKind', 'targetId', 'generation', 'status', 'category', 'reason', 'endpoint']) {
+    for (const key of ['event', 'stage', 'requestId', 'modelCallId', 'toolCallId', 'receiptId', 'replyId', 'actionId', 'origin', 'model', 'actionKind', 'targetId', 'generation', 'status', 'category', 'reason', 'endpoint']) {
       const value = redact(input?.[key], 256); if (value !== undefined) result[key] = value;
     }
     if (Number.isFinite(input?.generation)) result.generation = input.generation;
+    if (Array.isArray(input?.nativeKeys) && input.nativeKeys.length <= 16 && input.nativeKeys.every(key => typeof key === 'string' && namedControls.has(key))) result.nativeKeys = [...input.nativeKeys];
+    if (['preserve', 'interrupt', 'exit'].includes(input?.lifecycleMode)) result.lifecycleMode = input.lifecycleMode;
+    if (typeof input?.editInput === 'boolean') result.editInput = input.editInput;
+    for (const key of ['processState', 'agentProcessState']) if (['starting', 'running', 'exited', 'failed', 'unknown'].includes(input?.[key])) result[key] = input[key];
     // Keep voice timing evidence without recording microphone content. Unknown
     // fields still stay out of the log, and every numeric metric is bounded.
-    for (const key of ['processingMs', 'queuedSamples', 'totalMs', 'preprocessingMs', 'inferenceMs', 'elapsedMs', 'silenceMs', 'voicedMs', 'recordingId']) {
+    for (const key of ['processingMs', 'queuedSamples', 'droppedSamples', 'totalMs', 'preprocessingMs', 'inferenceMs', 'elapsedMs', 'silenceMs', 'voicedMs', 'recordingId', 'captureToken']) {
       if (Number.isFinite(input?.[key]) && input[key] >= 0) result[key] = Math.min(input[key], 1e9);
     }
     if (Number.isFinite(input?.probability) && input.probability >= 0 && input.probability <= 1) result.probability = input.probability;
     if (['wake', 'answer', 'ptt'].includes(input?.recordingSource)) result.recordingSource = input.recordingSource;
+    if (['keyword', 'completion'].includes(input?.helper)) result.helper = input.helper;
     if (Number.isInteger(input?.httpStatus) && input.httpStatus >= 100 && input.httpStatus <= 599) result.httpStatus = input.httpStatus;
     const error = typeof input?.error === 'string' ? { message: input.error } : input?.error;
     if (error && typeof error === 'object') {

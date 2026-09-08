@@ -2480,6 +2480,25 @@ ipcMain.handle("terminal:create", async (_event, payload) => {
 
 ipcMain.handle("terminal:get-runtime-snapshots", () => getTerminalRuntime().listSnapshots());
 
+// A visual pane only attaches to an admitted launch. It cannot start a new
+// process or revive a closed generation when a delayed mount arrives.
+ipcMain.handle("terminal:attach", (_event, payload) => {
+  const snapshot = payload?.id && getTerminalRuntime().getSnapshot(payload.id);
+  if (!snapshot) return { ok: false, status: "not-running" };
+  if (payload.launchToken !== snapshot.launchToken ||
+      (payload.generation !== undefined && payload.generation !== snapshot.generation)) {
+    return { ok: false, status: "stale", generation: snapshot.generation };
+  }
+  if (snapshot.processState === "starting") return { ok: false, status: "starting", generation: snapshot.generation };
+  if (snapshot.processState === "failed") return { ok: false, status: "failed", generation: snapshot.generation, error: snapshot.binding?.message || "Terminal launch failed." };
+  const ok = sendToPtyHost({ type: "attach", payload: {
+    id: payload.id, generation: snapshot.generation, launchToken: snapshot.launchToken,
+    ...(Number.isFinite(payload.cols) && payload.cols > 0 ? { cols: payload.cols } : {}),
+    ...(Number.isFinite(payload.rows) && payload.rows > 0 ? { rows: payload.rows } : {})
+  } });
+  return { ok, generation: snapshot.generation, launchToken: snapshot.launchToken };
+});
+
 ipcMain.handle("fusion-chat:start", async (_event, payload) => {
   const id = payload?.id;
   if (!id) {

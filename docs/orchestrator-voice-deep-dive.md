@@ -4,6 +4,40 @@ Audit date: September 6–7, 2026. Scope: installed 0.1.94, the 0.1.96 implement
 
 ## Assessment
 
+### Subsequent source improvements: wake sensitivity and conversation continuity
+
+The expanded local keyword matrix reproduced eight quiet-speech misses across
+David/Zira synthetic voices and speaking rates. A fixed, bounded onset gain on
+the companion detector recovered them: 130/138 to 138/138 positive cases, with
+42/42 negative cases and 4/4 spaced phrases passing before and after. The raw
+primary stream, VAD and keyword threshold are unchanged. Reports are under
+`output/voice-handsfree/keyword-matrix-before.json` and
+`output/voice-handsfree/keyword-matrix-after.json`; these are synthetic regression
+results, not physical microphone accuracy measurements.
+
+Space can now interrupt a question during speech generation or playback without
+losing its request, native generation/revision or earlier form answers. Follow-up
+utterances carry their request identity, and both model stages receive bounded
+context for that exact exchange even after unrelated requests displace recent
+history. This context does not revive completed action grants. Natural explicit
+choices such as “the second one” avoid an extra interpretation call; qualified
+answers retain semantic routing. Four configured-Brain checks passed with
+disposable workspace/history adapters, including a spoken title clarification
+and its affirmative answer (`.tmp/orchestrator-conversation-live/1788818070870-41808/report.json`).
+
+Parent verification passed 694 backend/Orchestrator/voice regressions, the renderer
+build, capture and frontend voice checks, and the independent native keyword
+matrix. Hidden Electron QA passed real Chromium fake-microphone capture through
+the native helpers, reply acknowledgment and a second wake after playback
+(`.tmp/voice-experience-smoke/1788818243569-39948/results.json`). The initial broad
+run found an obsolete provisional-pane launch expectation from concurrent launch
+work; its fixture now waits for the matching running process, and the final broad
+run passed. No production launch behavior was changed by this voice work.
+
+These refinements do not enable wake-word interruption during playback, measure
+audible output or update an already-running installed application. The broader
+architecture and remaining limits below still apply.
+
 The voice interface has working capture, local inference, cloud transcription, assistant execution, and audio playback components. This wider audit found defects where those components exchanged control, beyond the initial recording fixes. Final review corrected the reproduced handover, short-speech and stale-feedback defects in 0.1.96. Half-duplex operation, sequential cloud latency and microphone/assistant coupling remain product limitations; physical microphone quality still needs direct measurement.
 
 The most consequential findings at the start of the audit were:
@@ -260,10 +294,18 @@ pointer race too. [Indicator action scopes](../frontend/VoiceIndicator.tsx).
 
 **V6 product decision needed:** separate assistant availability from microphone availability, or label the coupled operation accurately. A text assistant should be able to stay usable after microphone trouble. [Enable/disable coupling](../backend/orchestratorIntegration.cjs#L477).
 
-Three further risks deserve targeted tests:
+Capture-health follow-up fixes now in the workspace: the 500 ms fatal backlog
+threshold is replaced with bounded queued dispatch; completion-helper failure is
+isolated from keyword/VAD; keyword faults retry automatically with a rolling
+budget. Renderer and main-process PCM heartbeats restart stalled capture with
+fresh identities, preserving current question routing while cancelling partial
+audio. Native helper errors retain bounded helper/stage details. These changes
+require a rebuilt application; see [current recovery limits](voice-handsfree.md#recording-and-failure-behavior).
+
+The original additional risks and their current disposition:
 
 - **Residual wake speech:** the controller treats any post-detection VAD speech as command speech. A controlled 100 ms wake tail plus a confident completion prediction causes submission after 1.2 seconds, potentially before a delayed command. The earlier native delayed-command fixture passed because it did not classify residual wake speech. This is a conditional mechanism, not a reproduced physical-microphone failure.
-- **A capture graph that stops delivering without an error:** recording duration and answer silence advance with samples. Once all helper requests have completed, its per-frame timeout cannot detect a complete absence of new microphone packets. Track-ended and processor-error events are handled, but no ongoing packet-heartbeat watchdog was found. This remains a conditional failure mode.
+- **A capture graph that stops delivering without an error — corrected in source:** PCM heartbeats now detect absent packets separately from silence, attempt a bounded suspended-context resume, and recreate capture with a fresh token. Old frames/acknowledgments cannot finish the replacement recording. Persistent faults are reported after bounded retries; no automatic retry survives mute or shutdown.
 - **Accessible button activation:** the large mic relies on pointer events; a conventional click activation has no handler. Enter is implemented for automatic Send, but not for enabling the large mic or stopping a working request. Accessible labels and focus outlines help, but do not replace complete activation behavior.
 
 A proposed settings-save race was excluded from the findings: a direct-handler harness could edit during Save, but the actual disabled fieldset prevents that user action. Likewise, unproven external settings drift is not presented as an established user-facing defect.
@@ -311,9 +353,9 @@ Sources: [settings storage](../backend/orchestratorSettings.cjs), [voice request
 ## 12. Recommended repair order and acceptance checks
 
 **Completed before release:** V1–V5 and the final-review pointer race have scoped
-regression tests and corrected handling. **Next:** add a wall-clock capture-health
-check and test transport loss separately from the now-reported backend capture
-errors. These are narrower changes than replacing the wake model.
+regression tests and corrected handling. **Capture-health follow-up completed in
+source:** wall-clock packet checks, bounded restart, failure isolation and stale
+recovery tests now cover transport/graph stalls separately from inference errors.
 
 **Second: make the interface explain its state.** Keep the compact microphone, but show the selected device, actual input activity, recording duration and explicit Listening / Transcribing / Working / Preparing speech / Playing states. Make Send and Cancel ordinary accessible controls. Clarify the terminal-focus Space guard. Add an optional wake cue and a local microphone test that does not dispatch workspace commands.
 

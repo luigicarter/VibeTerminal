@@ -8,6 +8,9 @@ export interface TerminalRuntimeSnapshot {
   provider: string;
   cwd: string;
   processState: "starting" | "running" | "exited" | "failed";
+  launchState?: "pending" | "ready";
+  cols?: number;
+  rows?: number;
   agentProcessState: "unknown" | "running" | "exited" | "failed";
   turnState: "unknown" | "idle" | "running" | "waiting" | "completed" | "failed" | "interrupted" | "response";
   observation: "observed" | "provisional" | "unavailable";
@@ -33,7 +36,7 @@ export interface TerminalRuntimeSnapshot {
 export function runtimeSessionStatus(runtime: TerminalRuntimeSnapshot): SessionStatus {
   if (runtime.processState === "failed") return "failed";
   if (runtime.processState === "exited") return "idle";
-  if (runtime.processState === "starting") return "starting";
+  if (runtime.processState === "starting" || runtime.launchState === "pending") return "starting";
   if (runtime.provider !== "terminal") {
     if (runtime.agentProcessState === "failed") return "failed";
     if (runtime.agentProcessState === "exited") return "idle";
@@ -52,7 +55,7 @@ export function runtimeStatusLabel(runtime?: TerminalRuntimeSnapshot, started = 
   if (!runtime) return started ? "observing" : "paused";
   if (runtime.processState === "failed") return "failed";
   if (runtime.processState === "exited") return "exited";
-  if (runtime.processState === "starting") return "starting";
+  if (runtime.processState === "starting" || runtime.launchState === "pending") return "starting";
   if (runtime.provider !== "terminal") {
     if (runtime.agentProcessState === "failed") return "agent failed";
     if (runtime.agentProcessState === "exited") return "agent exited";

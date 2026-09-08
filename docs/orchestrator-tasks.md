@@ -44,6 +44,34 @@ unfinished work. Saved history does not imply unlimited active model memory.
 
 ## Delivery, cancellation and recovery
 
+An already-working terminal can receive a followup prompt. For an observed Codex
+root composer, `send_prompt` submits the text while the existing turn continues,
+including during logical background/subagent activity. It rechecks the original
+root PID, generation, turn and input revision; output-only churn cannot starve
+this pure prompt path. Arbitrary keys, input editing, pending questions, manual
+draft ownership and unverified recipients keep their existing guards. The app
+never interrupts the agent or clears human input just to deliver a busy prompt.
+
+Other native busy composers use the immutable prompt queue after a proven-unsent
+readiness refusal. Queued prompts survive healthy work longer than two minutes
+and can deliver on fresh readiness after application suspension. Cancellation,
+replacement generations, pending questions, lost readiness and unresolved delivery
+locks remain distinct. Unknown writes are never queued for automatic replay.
+Fusion/Open Fusion keep their structured input/steering routes.
+
+The actual prewrite baseline is installed before a transport can emit completion
+events. Busy submission acknowledges input, not incorporation into the existing
+turn: that turn's ending cannot satisfy the new followup's result dependency.
+Without separate provider-linked result evidence, incorporation remains explicitly
+unverified. `send_prompt` already submits its text; the model must not follow a
+written/queued receipt with another Enter to make sure.
+
+The configured Brain passed both `prompt-while-working` and `safe-clear-input`
+in the disposable native-adapter live harness. Busy input left the agent running;
+clearing emptied the fixture composer without exiting. The integrated regression
+suite and hidden Electron/PTY checks cover routing, ownership and queue boundaries;
+the live harness does not certify custom keymaps or every installed CLI version.
+
 Queued delivery, accepted input, explicit saved drafts, observed results and unknown
 outcomes remain distinct. Delivery never falls back to saving a draft. A proven
 unsent block reports its reason and `delivery: not-dispatched`; operator recovery
@@ -61,7 +89,9 @@ instructions already accepted by a terminal. Already-dispatched work remains rel
 to conflicting tasks until native completion or interruption is observed. Use an
 explicit terminal interrupt when the terminal's own work must stop.
 
-Failed interpretation and execution retain unconsumed work. Retry does not replay
+Failed interpretation and execution retain unconsumed work. A blocked operator
+finish ends the attempt while retaining its target and original objective;
+successful completion alone consumes the objective. Retry does not replay
 consumed operations or uncertain deliveries. Persistent `operate_terminal` scopes
 retain objective, targets and per-source execution accounting through clarification:
 step receipts, the 128-step budget and uncertain submissions cannot be reset by a
@@ -108,6 +138,82 @@ messages/receipts. `replyToRequestId` and `questionId` identify a clarification 
 `cancel({requestId})` and `retry({requestId})` operate on one task. Cancellation without
 a request ID cancels Orchestrator requests together. Internal continuation metadata is
 not part of the public submission interface.
+
+## Progress and outcome reports
+
+Users can say **“Watch Atlas and tell me when its current task finishes, including
+what it did and any issues”** or **“Tell me when Atlas is ready.”** The interpreter
+registers a read-only `watch_terminal` grant. Completion watches bind the selected
+terminal generation and current turn; readiness watches wait for explicit observed
+readiness, including after overlapping input makes task attribution ambiguous.
+Ambiguous readiness does not establish a task result: it cannot supply an
+accomplishment summary or release work that requires that result. Watching never
+submits input, grants permission, interrupts work, or
+occupies a terminal execution lane. Cancel the request to stop its watch without
+stopping the terminal. An unregistered watch retained through clarification or
+retry keeps its original turn. Restored watches remain paused after an app restart.
+
+While the Orchestrator is enabled, live submitted tasks receive request-linked chat
+reports for observed agent activity, input blockers, completion, interruption and
+failure. Each terminal reports independently, so one failed terminal is reported
+while sibling work continues. Repeated inventory refreshes do not repeat the same
+report; a new input blockage can report again. Voice-origin requests also queue
+spoken outcome and issue reports through the existing speech controller. Input
+questions retain their existing revision-bound interaction speech, avoiding a
+generic blocker announcement after the user has answered. Chat reports do not
+wait for earlier speech playback to finish.
+
+Turn-end events are reconciled immediately so a newer terminal turn cannot hide
+the earlier completion between inventory refreshes. These event snapshots do not
+replace the live inventory or change unrelated terminals' readiness.
+
+Status reports use application-owned delivery and turn evidence and need no Brain
+call or optional monitoring setting. They continue while prompts or lookups queue
+and when a model spending limit prevents further inference. Optional model summaries
+can run while requests wait in terminal queues; they include turn-state changes,
+and failed reads or incomplete summaries remain eligible for another lookup.
+
+Watch start, resumed work, and input blockers can also queue a short progress
+summary of available output, the last reported tool/activity, and current questions.
+Unchanged polls do not repeat reports. Summaries are discarded when the terminal,
+turn, or blocker changes while the model is responding. They have no action tools.
+
+On completion, an independent bounded queue asks the selected Brain to summarize
+the exact turn's captured result: accomplishments or findings, reported checks,
+and unresolved work. The status notification does not wait for this summary or
+for speech playback. Late result evidence can add the summary afterwards. A ready
+terminal receives an accomplishment summary only when an actual completed turn's
+evidence is also available. The app never treats startup readiness as completed work.
+Detailed summaries honor the session spending limit. If a model cannot summarize,
+structured agent output can be shown as an attributed excerpt; ambiguous native
+screen content receives an explicit unavailable-result explanation. These are agent
+reports, not independent verification of changes. Plain shells and idle screens
+do not establish task completion. Voice-origin final summaries use the existing
+queued speech channel; progress details remain in chat and native questions retain
+their own current-interaction speech.
+
+A queued prompt uses the observation immediately before its actual write for
+result attribution. An intervening terminal turn cannot satisfy its wait using the
+old queue-time observation. Ambiguous input/result attribution reports uncertainty
+without unlocking dependent work. If accepted managed-agent input has no attributed
+start after sixty seconds, the next inventory refresh reports that completion is
+still unverified; this does not fail, replay or release the task. Plain shells
+explicitly report the lack of automatic completion verification. Observed agent
+turn completion never means changes were independently verified. Cancelled requests
+and restored history do not emit new lifecycle reports.
+
+Regression coverage lives in `orchestrator-task-reports.test.cjs` and
+`orchestrator-task-report-integration.test.cjs`, alongside scheduler, delivery and
+voice-turn tests. The hidden Electron command smoke uses a declared 128k fixture
+model context and real preload/PTY delivery; it does not validate a live model or
+physical microphone.
+
+The configured Brain passed the `watch-existing-work` live scenario in
+`scripts/qa/orchestrator-conversation-live.cjs`: it registered a watch from natural
+language, reported progress, and summarized the exact completed turn's findings
+and 12 passing tests, with no terminal input dispatched. This used disposable
+terminal adapters. It does not establish live installed-provider telemetry or
+physical microphone behavior.
 
 Run `npm run test:orchestrator`, `npm run test:voice:capture`, and
 `node scripts/frontend/orchestrator-tasks-smoke.cjs` for offline regressions. The task

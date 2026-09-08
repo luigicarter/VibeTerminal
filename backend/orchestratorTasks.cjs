@@ -38,6 +38,31 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
     jobs.set(task.requestId, { task, restored: true, waits: [], lanes: [] });
   }
   function update(job, patch) { Object.assign(job.task, patch, { updatedAt: now() }); changed(); }
+  function deliveryEvidence(wait, result) {
+    const baseline = result.deliveryBaseline;
+    if (baseline) {
+      wait.submittedAt = baseline.submittedAt;
+      wait.baselineTurnId = baseline.turnId;
+      wait.baselineIdle = !['running', 'busy', 'starting'].includes(baseline.turnState);
+      wait.nativeShell = baseline.kind === 'terminal';
+    } else if (wait.deliveryStatus === 'queued' && !['queued', 'staged'].includes(result.status)) {
+      // The original observation predates the queued write. Only explicit
+      // action/turn evidence can attribute a result without a fresh baseline.
+      wait.baselineIdle = false;
+    }
+    wait.deliveryStatus = result.status || (result.ok ? 'acknowledged' : 'unknown');
+    if (['queued', 'staged'].includes(result.status) || result.delivery === 'not-dispatched') {
+      delete wait.inputDisposition;
+    } else if (['submitted-while-running', 'submitted-when-ready'].includes(result.inputDisposition)) {
+      wait.inputDisposition = result.inputDisposition;
+      if (result.inputDisposition === 'submitted-while-running') {
+        wait.baselineIdle = false;
+        if (wait.turnId === wait.baselineTurnId) wait.turnId = undefined;
+      }
+    }
+  }
+  const eligibleResultTurn = (wait, turnId) => wait.inputDisposition !== 'submitted-while-running'
+    || Boolean(wait.baselineTurnId && turnId && turnId !== wait.baselineTurnId);
   const evictable = job => terminalStates.has(job.task.status) && !job.waits.some(wait => !wait.done && wait.delivered && !wait.nativeShell) && ![...jobs.values()].some(other => other.task.dependsOn.includes(job.task.requestId));
   function hasCapacity() { return jobs.size < 200 || [...jobs.values()].some(evictable); }
   function create(input) {
@@ -92,24 +117,94 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
       job.waits.push(wait);
     }
     wait.targetId ||= result.target?.id || result.id; wait.generation ||= result.target?.generation || result.generation;
-    wait.turnId ||= result.turnId; wait.staged = result.status === 'staged'; wait.delivered = !['queued', 'staged'].includes(result.status);
+    deliveryEvidence(wait, result);
+    if (eligibleResultTurn(wait, result.turnId)) wait.turnId ||= result.turnId;
+    wait.staged = result.status === 'staged'; wait.delivered = !['queued', 'staged'].includes(result.status);
     if (rejected) { wait.done = true; wait.failed = true; wait.delivered = false; wait.error = result.error || result.reason; }
   }
-  function reconcile(sessions) {
-    currentSessions = sessions;
+  function watch(job, action, session) {
+    const target = action.watchTarget;
+    const reject = (status, error) => ({ ok: false, status, error });
+    if (!target || !session || session.id !== target.id || session.generation !== target.generation) return reject('blocked', 'The watched terminal changed. Identify it again.');
+    const mode = action.watchUntil || 'completion';
+    if (!['completion', 'ready'].includes(mode)) return reject('blocked', 'Invalid watch condition.');
+    if (mode === 'completion' && (['terminal', 'shell'].includes(session.kind) || session.provider === 'terminal')) return reject('unverified', 'Shell task completion cannot be verified automatically.');
+    if (mode === 'completion' && session.observation !== 'observed') return reject('unverified', 'The current task is not reliably observed.');
+    if (mode === 'completion' && (!target.turnId || target.turnId !== session.turnId || (target.turnStartedAt !== undefined && target.turnStartedAt !== session.turnStartedAt))) return reject('unverified', 'The original task is no longer the observed current turn. Inspect its result.');
+    if (mode === 'completion' && !['running', 'busy', 'waiting', 'completed', 'complete', 'finished', 'succeeded', 'failed', 'cancelled', 'interrupted'].includes(session.turnState)) return reject('unverified', 'No observable current task is available to watch.');
+    if (mode === 'completion' && session.completionAttribution === 'ambiguous') return reject('unverified', 'The current task cannot be attributed reliably. Inspect the terminal.');
+    const existing = job.waits.find(wait => wait.source === 'watch' && wait.actionId === action.actionId);
+    if (existing) return { ok: true, status: existing.done ? existing.failed ? 'blocked' : mode === 'ready' ? 'ready' : 'already-completed' : 'watching' };
+    const wait = { source: 'watch', watchUntil: mode, actionId: action.actionId, targetId: target.id, generation: target.generation, turnId: mode === 'completion' ? target.turnId : undefined, submittedAt: now(), baselineIdle: false, nativeShell: false, delivered: true, deliveryStatus: 'watching', done: false };
+    job.waits.push(wait);
+    reconcile([session], { partial: true });
+    return { ok: !wait.failed, status: wait.done ? wait.failed ? 'blocked' : mode === 'ready' ? 'ready' : 'already-completed' : 'watching', targetId: target.id, generation: target.generation, turnId: wait.turnId, ...(wait.error && { error: wait.error }) };
+  }
+  function reconcile(sessions, { partial = false } = {}) {
+    if (!partial) currentSessions = sessions;
     let dirty = false;
     for (const job of jobs.values()) {
       if (job.restored) continue;
       for (const wait of job.waits.filter(wait => !wait.done)) {
         if (!wait.targetId) continue;
         const session = sessions.find(session => session.id === wait.targetId);
+        // Event snapshots preserve a short-lived turn end without replacing
+        // the full readiness inventory or implying unrelated panes vanished.
+        if (partial && (!session || session.generation !== wait.generation)) continue;
         if (!session || session.generation !== wait.generation) { wait.done = true; wait.failed = true; wait.error = 'The terminal changed before its result could be verified.'; dirty = true; continue; }
         if (!wait.delivered || wait.nativeShell) continue;
-        const exactAction = Boolean(wait.actionId) && (session.completedActionId === wait.actionId || session.actionId === wait.actionId);
-        if (session.completionAttribution === 'ambiguous') continue;
-        if (!wait.turnId && wait.delivered && (exactAction || (wait.baselineIdle && session.turnId && session.turnId !== wait.baselineTurnId && Number(session.turnStartedAt) >= wait.submittedAt))) wait.turnId = session.completedTurnId || session.turnId;
-        const exactTurn = wait.turnId && (session.completedTurnId === wait.turnId || session.turnId === wait.turnId);
-        if ((exactTurn || exactAction) && (completedStates.has(session.turnState) || failedStates.has(session.turnState))) { wait.done = true; wait.failed = failedStates.has(session.turnState); dirty = true; }
+        const stopped = ['exited', 'failed'].includes(session.processState) || ['exited', 'failed'].includes(session.agentProcessState) || ['closed', 'exited'].includes(session.status);
+        const failStopped = () => {
+          if (!stopped || wait.done) return;
+          wait.done = true; wait.failed = true;
+          wait.error = 'The agent stopped before this task result could be verified. Completion remains unverified.';
+          dirty = true;
+        };
+        // Readiness is observable even when overlapping input prevents us from
+        // attributing the completed work to one request.
+        const readinessWatch = wait.source === 'watch' && wait.watchUntil === 'ready';
+        const ambiguous = !readinessWatch && (session.completionAttribution === 'ambiguous' || (wait.source === 'watch' && wait.watchUntil === 'completion' && Boolean(session.turnId) && session.turnId !== wait.turnId));
+        if (wait.attributionAmbiguous !== ambiguous) { wait.attributionAmbiguous = ambiguous; dirty = true; }
+        if (ambiguous) { failStopped(); continue; }
+        if (readinessWatch) {
+          if (wait.observedState !== session.turnState) { wait.observedState = session.turnState; dirty = true; }
+          const stopped = session.started === false || ['exited', 'failed'].includes(session.processState) || ['exited', 'failed'].includes(session.agentProcessState) || ['paused', 'closed', 'exited'].includes(session.status);
+          const ready = !stopped && session.observation === 'observed' && ['idle', 'completed', 'complete', 'finished', 'succeeded'].includes(session.turnState) && !session.pendingInput && !session.childActivity;
+          if (ready || stopped || failedStates.has(session.turnState)) {
+            wait.done = true; wait.failed = !ready;
+            if (ready) {
+              wait.observedState = 'ready';
+              if (completedStates.has(session.turnState) && session.completionAttribution !== 'ambiguous') {
+                wait.turnId = session.turnId; wait.resultStatus = session.turnState;
+                if (Number.isFinite(session.turnEndedAt)) wait.turnEndedAt = session.turnEndedAt;
+              }
+            }
+            if (wait.failed) wait.error = stopped ? 'The terminal stopped before becoming ready.' : `The terminal ${session.turnState} before becoming ready.`;
+            dirty = true;
+          }
+          continue;
+        }
+        if (wait.source === 'watch' && session.observation !== 'observed') { failStopped(); continue; }
+        // Completed identity can remain cached while a newer turn runs. Its
+        // current state must never be assigned to that older completed task.
+        const completedIsCurrent = !session.turnId || session.completedTurnId === session.turnId;
+        const exactCompletedAction = Boolean(wait.actionId) && session.completedActionId === wait.actionId && completedIsCurrent && eligibleResultTurn(wait, session.completedTurnId || session.turnId);
+        const exactAction = Boolean(wait.actionId) && (exactCompletedAction || session.actionId === wait.actionId && eligibleResultTurn(wait, session.turnId));
+        if (!wait.turnId && session.completedActionId === wait.actionId && session.completedTurnId && eligibleResultTurn(wait, session.completedTurnId)) wait.turnId = session.completedTurnId;
+        if (!wait.turnId && wait.delivered && (exactAction || (wait.baselineIdle && session.turnId && session.turnId !== wait.baselineTurnId && Number(session.turnStartedAt) >= wait.submittedAt))) wait.turnId = exactCompletedAction ? session.completedTurnId || session.turnId : session.turnId;
+        const exactTurn = wait.turnId && eligibleResultTurn(wait, wait.turnId) && ((completedIsCurrent && session.completedTurnId === wait.turnId) || session.turnId === wait.turnId);
+        if (exactTurn || exactAction) {
+          if (wait.observedState !== session.turnState) { wait.observedState = session.turnState; dirty = true; }
+          if (completedStates.has(session.turnState) || failedStates.has(session.turnState)) {
+            wait.done = true; wait.failed = failedStates.has(session.turnState);
+            if (Number.isFinite(session.turnEndedAt)) wait.turnEndedAt = session.turnEndedAt;
+            if (wait.failed) wait.error = session.error || `The terminal task ${session.turnState}.`;
+            dirty = true;
+          }
+        }
+        // A native CLI may exit while its outer PTY/generation stays alive.
+        // Prefer an exact ending above; process exit alone never proves success.
+        failStopped();
       }
       if (job.executionDone && job.waits.length && job.waits.every(wait => wait.done) && job.task.status === 'waiting-results') {
         const failed = job.waits.find(wait => wait.failed);
@@ -120,7 +215,13 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
         const stagedOnly = outstanding.length > 0 && outstanding.every(wait => wait.staged);
         const waitingReason = stagedOnly ? 'Prompt saved as a draft, not sent. Open the terminal to review and send it.'
           : outstanding.some(wait => wait.staged) ? 'Some prompts were saved as drafts, not sent. Waiting for the other terminal results.'
-            : outstanding.length ? 'Waiting for a verified terminal result.' : undefined;
+            : outstanding.some(wait => wait.attributionAmbiguous) ? 'The terminal result cannot be attributed to this request. Inspect the terminal before continuing.'
+            : outstanding.some(wait => wait.observedState === 'waiting') ? 'The terminal needs input before its task can continue.'
+              : outstanding.some(wait => !wait.observedState && ['unknown', 'unconfirmed', 'uncertain'].includes(wait.deliveryStatus)) ? 'Delivery is uncertain; waiting for evidence. The prompt will not be resent automatically.'
+                : outstanding.some(wait => wait.deliveryStatus === 'queued') ? 'Prompt queued until the terminal is ready.'
+                  : outstanding.some(wait => wait.nativeShell) ? 'Shell input was sent; task completion cannot be verified automatically.'
+                    : outstanding.some(wait => wait.inputDisposition === 'submitted-while-running' && !wait.observedState) ? 'Prompt submitted while the agent was working; incorporation into its result remains unverified.'
+                      : outstanding.length ? 'Waiting for a verified terminal result.' : undefined;
         const status = stagedOnly ? 'paused' : outstanding.length ? 'waiting-results' : job.waits.some(wait => wait.failed) ? 'failed' : 'finished';
         job.stagedPause = stagedOnly;
         if (job.task.status !== status || job.task.waitingReason !== waitingReason) {
@@ -134,16 +235,17 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
     for (const job of jobs.values()) {
       const wait = job.waits.find(wait => wait.actionId === result.actionId);
       if (!wait) continue;
+      deliveryEvidence(wait, result);
       if (wait.operator && result.delivery === 'not-dispatched') { job.waits.splice(job.waits.indexOf(wait), 1); continue; }
       if (result.delivery === 'not-dispatched' || ['cancelled', 'rejected', 'stale', 'stale-generation', 'not-running'].includes(result.status) || (result.ok === false && !result.status)) { wait.done = true; wait.failed = true; wait.delivered = false; wait.error = result.error || result.reason; }
-      else { wait.staged = result.status === 'staged'; wait.delivered = !['queued', 'staged'].includes(result.status); if (result.turnId) wait.turnId = result.turnId; }
+      else { wait.staged = result.status === 'staged'; wait.delivered = !['queued', 'staged'].includes(result.status); if (result.turnId && eligibleResultTurn(wait, result.turnId)) wait.turnId = result.turnId; }
     }
   }
   function cancel(requestId) {
     const selected = requestId ? [jobs.get(requestId)].filter(Boolean) : [...jobs.values()];
-    for (const job of selected) if (!terminalStates.has(job.task.status)) { job.controller?.abort(); Object.assign(job.task, { status: 'cancelled', updatedAt: now(), waitingReason: job.waits.some(wait => !wait.done && wait.delivered) ? 'Request cancelled; previously sent terminal work may still be running.' : undefined }); }
+    for (const job of selected) if (!terminalStates.has(job.task.status)) { job.controller?.abort(); for (const wait of job.waits) if (wait.source === 'watch') { wait.done = true; wait.delivered = false; } Object.assign(job.task, { status: 'cancelled', updatedAt: now(), waitingReason: job.waits.some(wait => !wait.done && wait.delivered) ? 'Request cancelled; previously sent terminal work may still be running.' : undefined }); }
     changed(); return { ok: selected.length > 0 || !requestId, status: 'cancelled' };
   }
-  return { create, hasCapacity, update, ready, track, reconcile, delivery, cancel, jobs, get: id => jobs.get(id), snapshot: () => [...jobs.values()].map(project), busy: () => [...jobs.values()].some(job => ['queued', 'routing', 'running'].includes(job.task.status)), clear() { for (const [id, job] of jobs) if (terminalStates.has(job.task.status) && !job.waits.some(wait => !wait.done && wait.delivered && !wait.nativeShell)) jobs.delete(id); changed(); } };
+  return { create, hasCapacity, update, ready, track, watch, reconcile, delivery, cancel, jobs, get: id => jobs.get(id), snapshot: () => [...jobs.values()].map(project), busy: () => [...jobs.values()].some(job => ['queued', 'routing', 'running'].includes(job.task.status)), clear() { for (const [id, job] of jobs) if (terminalStates.has(job.task.status) && !job.waits.some(wait => !wait.done && wait.delivered && !wait.nativeShell)) jobs.delete(id); changed(); } };
 }
 module.exports = { createTaskScheduler, createSemaphore };

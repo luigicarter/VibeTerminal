@@ -6,6 +6,7 @@ const target = ['grantId', 'targetId'];
 const observed = [...target, 'stepId', 'observationToken'];
 const native = ['observationSequence', 'inputRevision'];
 const fields = {
+  watch_terminal: [...target, 'watchUntil'],
   navigate: ['grantId', 'view', 'cwd'],
   list_roots: [], list_sessions: ['query', 'provider', 'cwd', 'offset', 'limit'],
   read_session: ['targetId', 'beforeSequence', 'maxChars'],

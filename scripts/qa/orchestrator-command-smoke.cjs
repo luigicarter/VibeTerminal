@@ -55,7 +55,7 @@ permissionModule.createMicrophonePermission=options=>{fs.mkdirSync(options.userD
 globalThis.fetch=async(url,options={})=>{
  const reply=data=>({ok:true,json:async()=>data});
  if(url==='https://openrouter.ai/api/v1/key')return reply({data:{is_free_tier:true}});
- if(String(url).startsWith('https://openrouter.ai/api/v1/models'))return reply({data:[{id:'fixture/relay',name:'Scripted fixture',supported_parameters:['tools']},{id:'openai/whisper-large-v3-turbo',architecture:{output_modalities:['transcription']}},{id:'hexgrad/kokoro-82m',architecture:{output_modalities:['speech']}}]});
+ if(String(url).startsWith('https://openrouter.ai/api/v1/models'))return reply({data:[{id:'fixture/relay',name:'Scripted fixture',context_length:128000,supported_parameters:['tools']},{id:'openai/whisper-large-v3-turbo',architecture:{output_modalities:['transcription']}},{id:'hexgrad/kokoro-82m',architecture:{output_modalities:['speech']}}]});
  if(url!=='https://openrouter.ai/api/v1/chat/completions')throw Error('Fixture blocked network: '+url);
  const body=JSON.parse(options.body);fs.appendFileSync(${JSON.stringify(traceFile)},JSON.stringify(body)+'\\n');
  const answer=message=>reply({choices:[{message}],usage:{cost:0}});

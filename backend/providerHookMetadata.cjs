@@ -12,6 +12,7 @@ function hookMetadata(input) {
     taskLabel: ["agent_type", "subagent_type", "task_name"],
     parentThreadId: ["parent_session_id", "parentSessionId", "parent_conversation_id"],
     transcriptPath: ["transcript_path", "transcriptPath"],
+    notificationType: ["notification_type", "notificationType"],
     cwd: ["cwd"]
   };
   for (const [key, candidates] of Object.entries(fields)) {
@@ -77,7 +78,7 @@ function powershellHookMetadata() {
   return [
     "try {",
     "  $hook = $raw | ConvertFrom-Json",
-    "  $fields = @{ providerThreadId = @('session_id','sessionId','conversation_id'); providerTurnId = @('turn_id','turnId','generation_id'); toolId = @('tool_use_id','toolUseId','tool_call_id','call_id'); toolName = @('tool_name','toolName'); taskId = @('agent_id','subagent_id','task_id'); taskLabel = @('agent_type','subagent_type','task_name'); parentThreadId = @('parent_session_id','parentSessionId','parent_conversation_id'); transcriptPath = @('transcript_path','transcriptPath'); cwd = @('cwd') }",
+    "  $fields = @{ providerThreadId = @('session_id','sessionId','conversation_id'); providerTurnId = @('turn_id','turnId','generation_id'); toolId = @('tool_use_id','toolUseId','tool_call_id','call_id'); toolName = @('tool_name','toolName'); taskId = @('agent_id','subagent_id','task_id'); taskLabel = @('agent_type','subagent_type','task_name'); parentThreadId = @('parent_session_id','parentSessionId','parent_conversation_id'); transcriptPath = @('transcript_path','transcriptPath'); notificationType = @('notification_type','notificationType'); cwd = @('cwd') }",
     "  foreach ($field in $fields.Keys) {",
     "    foreach ($key in $fields[$field]) {",
     "      $value = $hook.$key",

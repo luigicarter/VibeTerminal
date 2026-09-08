@@ -1,6 +1,6 @@
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
-const { RATE, wavFromSamples, createRecording, decodeSpeechAudio, shouldSpeak } = require('./voiceAudio.cjs');
+const { RATE, wavFromSamples, createRecording, createSpeechAudioStream, shouldSpeak } = require('./voiceAudio.cjs');
 const { createLocalErrorAudio, ERROR_AUDIO_TEXT } = require('./localErrorAudio.cjs');
 const { matchAnswer, questionSpeech } = require('./voiceAnswers.cjs');
 const { spokenText } = require('./voiceText.cjs');
@@ -29,10 +29,11 @@ function answerContextFor(interaction) {
   }
   return context;
 }
-function createVoiceController({ orchestrator, getKey, getSettings = () => ({}), emit = () => {}, onAudio = () => {}, fetch: request = globalThis.fetch, modelPath = path.join(__dirname, '../vendor/voice'), recordingOptions, errorAudio, now = Date.now, inferenceFactory = options => require('./voiceInferenceService.cjs').createVoiceInferenceService(options) } = {}) {
+function createVoiceController({ orchestrator, getKey, getSettings = () => ({}), emit = () => {}, onAudio = () => {}, fetch: request = globalThis.fetch, modelPath = path.join(__dirname, '../vendor/voice'), recordingOptions, errorAudio, now = Date.now, monotonicNow = () => performance.now(), recoveryTimers = globalThis, inferenceFactory = options => require('./voiceInferenceService.cjs').createVoiceInferenceService(options) } = {}) {
   let state = { phase: 'off', muted: true, ready: false, listening: false, transcript: '', reply: '', error: null, microphoneId: '', handsFreeStatus: 'off', handsFreeError: null, recordingSource: undefined, finishHint: false };
-  let epoch = 0, recording = null, requestAbort = null, disposed = false, playbackTimer = null, playbackResolve = null, activeReply = null, activeInteraction = null;
+  let epoch = 0, recording = null, requestAbort = null, disposed = false, playbackTimer = null, playbackResolve = null, activeReply = null, activeInteraction = null, activeAnswerContext = null, playbackTiming = null;
   let turn = null, turnSequence = 0, inference = null, inferenceGeneration = 0, streamId = 0, detectionMode = null, captureToken, samplePosition = 0, startupPromise = null, activeAnalysis = null;
+  let inferenceRetryTimer = null, inferenceFailures = [];
   let speechQueue = Promise.resolve(), answerContext = null, announcementPending = null, recentAudio = [], answerSilenceMs = 0, deferredTimer = null; const resolvedInteractions = new Set(), legacyResolvedIds = new Set(), announcedInteractions = new Set(), deferredInteractions = new Map();
   const alerts = errorAudio || createLocalErrorAudio({ directory: path.join(modelPath, 'alerts') });
   const lastErrorAudio = new Map();
@@ -74,12 +75,19 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     if (!turn?.source) return;
     try { Promise.resolve(orchestrator?.recordDiagnostic?.({ event: 'voice_recording', origin: 'voice', stage, reason, recordingSource: turn.source, recordingId: turn.id, elapsedMs: turn.elapsedMs || 0, voicedMs: turn.voicedMs || 0, silenceMs: turn.silenceMs || 0 })).catch(() => {}); } catch { /* Best effort. */ }
   }
+  function timingDiagnostic(stage, startedAt, details = {}) {
+    try { Promise.resolve(orchestrator?.recordDiagnostic?.({ event: 'request_stage', origin: 'voice', stage,
+      model: stage.startsWith('stt_') ? getSettings().sttModel || STT_MODEL : getSettings().ttsModel || TTS_MODEL,
+      elapsedMs: Math.max(0, Math.round(monotonicNow() - startedAt)), ...details })).catch(() => {}); } catch { /* Best effort. */ }
+  }
   function resetRecording(reason = 'cancelled', stage = reason === 'cancelled' ? 'cancel' : 'finish') { captureDiagnostic(stage, reason); recording = null; turn = null; state.recordingSource = undefined; state.recordingId = undefined; state.finishHint = false; }
   function syncDetectionMode(force = false) {
     const mode = state.listening && state.handsFreeStatus === 'ready' ? (recording ? turn?.manual ? null : 'vad' : state.phase === 'listening' && getSettings().handsFreeEnabled ? 'wake' : state.phase === 'awaiting-answer' ? 'vad' : null) : null;
     if (force || mode !== detectionMode) { streamId++; detectionMode = mode; }
   }
   function stopInference() {
+    if (inferenceRetryTimer !== null) recoveryTimers.clearTimeout(inferenceRetryTimer);
+    inferenceRetryTimer = null;
     inferenceGeneration++; const service = inference; inference = null; startupPromise = null; activeAnalysis = null;
     try { Promise.resolve(service?.dispose ? service.dispose() : service?.stop?.()).catch(() => {}); } catch { /* Already stopped. */ }
     detectionMode = null; streamId++;
@@ -88,8 +96,27 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     if (generation !== inferenceGeneration || disposed) return;
     diagnostic('hands-free', error instanceof Error ? error : Error(String(error)));
     stopInference();
-    if (turn && !turn.manual) { resetRecording(); answerContext = null; answerSilenceMs = 0; }
-    update({ handsFreeStatus: 'unavailable', handsFreeError: 'Hands-free detection is unavailable. Use Space to talk, or toggle hands-free to retry.', ...(state.phase === 'recording' && !recording ? { phase: idlePhase(), error: 'Automatic recording cancelled. Hold Space to try again.' } : {}) });
+    if (turn && !turn.manual) {
+      resetRecording('inference-recovery', 'cancel'); answerSilenceMs = 0;
+      if (answerContext && !currentInteraction(answerContext)) answerContext = null;
+    }
+    inferenceFailures = inferenceFailures.filter(at => now() - at < 60000);
+    const delay = [500, 1500, 4000][inferenceFailures.length];
+    inferenceFailures.push(now());
+    const retry = delay !== undefined && state.listening && enabled() && (getSettings().handsFreeEnabled || answerContext);
+    if (retry) {
+      const retryGeneration = inferenceGeneration;
+      inferenceRetryTimer = recoveryTimers.setTimeout(() => {
+        if (retryGeneration !== inferenceGeneration || disposed || !state.listening || !enabled()) return;
+        inferenceRetryTimer = null;
+        update({ handsFreeStatus: 'off', handsFreeError: null });
+        void refreshHandsFree();
+      }, delay);
+      inferenceRetryTimer?.unref?.();
+    }
+    update({ handsFreeStatus: retry ? 'recovering' : 'unavailable',
+      handsFreeError: retry ? 'Restarting hands-free detection. Hold Space to talk.' : 'Hands-free detection could not recover. Use Space to talk, or toggle hands-free to retry.',
+      ...(state.phase === 'recording' && !recording ? { phase: answerContext ? 'awaiting-answer' : idlePhase(), error: 'Automatic recording cancelled. Please try again.' } : {}) });
   }
   async function refreshHandsFree() {
     if (!state.listening || !enabled() || (!getSettings().handsFreeEnabled && !answerContext)) {
@@ -98,7 +125,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       update({ handsFreeStatus: 'off', handsFreeError: null }); return { ok: true };
     }
     if (inference && state.handsFreeStatus === 'ready') return { ok: true };
-    if (state.handsFreeStatus === 'unavailable') return { ok: false, status: 'unavailable' };
+    if (['unavailable', 'recovering'].includes(state.handsFreeStatus)) return { ok: false, status: state.handsFreeStatus };
     if (startupPromise) return startupPromise;
     const generation = ++inferenceGeneration;
     update({ handsFreeStatus: 'loading', handsFreeError: null });
@@ -108,13 +135,21 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
         const service = inferenceFactory({ modelPath, onFrame: event => { if (generation === inferenceGeneration) inferenceFrame(event); }, onError: error => inferenceFailed(error, generation), onDiagnostic: details => {
           if (generation !== inferenceGeneration) return;
           const bounded = {};
-          for (const field of ['processingMs', 'queuedSamples', 'totalMs', 'preprocessingMs', 'inferenceMs']) if (Number.isFinite(details?.[field])) bounded[field] = Math.max(0, Math.min(1e9, details[field]));
+          for (const field of ['processingMs', 'queuedSamples', 'droppedSamples', 'totalMs', 'preprocessingMs', 'inferenceMs']) if (Number.isFinite(details?.[field])) bounded[field] = Math.max(0, Math.min(1e9, details[field]));
           if (Number.isFinite(details?.probability)) bounded.probability = Math.max(0, Math.min(1, details.probability));
+          if (['keyword', 'completion'].includes(details?.helper)) bounded.helper = details.helper;
+          if (typeof details?.reason === 'string') bounded.reason = details.reason.slice(0, 128);
+          else if (typeof details?.stage === 'string') bounded.reason = details.stage.slice(0, 128);
+          if (details?.type === 'error' && details.error) {
+            bounded.error = {};
+            for (const field of ['name', 'message', 'code']) if (typeof details.error[field] === 'string') bounded.error[field] = details.error[field].slice(0, 240);
+          }
           try { Promise.resolve(orchestrator?.recordDiagnostic?.({ event: 'voice_inference', origin: 'voice', stage: ['stream', 'completion', 'error'].includes(details?.type) ? details.type : 'inference', ...bounded })).catch(() => {}); } catch { /* Best effort. */ }
         } });
         inference = service; await service.start();
         if (generation !== inferenceGeneration || disposed) return { ok: false, status: 'cancelled' };
-        update({ handsFreeStatus: 'ready', handsFreeError: null }); syncDetectionMode(true);
+        update({ handsFreeStatus: 'ready', handsFreeError: null,
+          ...(state.error === 'Automatic recording cancelled. Please try again.' ? { error: null } : {}) }); syncDetectionMode(true);
         return { ok: true };
       } catch (error) { inferenceFailed(error, generation); return { ok: false, status: 'unavailable' }; }
       finally { if (generation === inferenceGeneration) startupPromise = null; }
@@ -174,7 +209,10 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       if (generation !== inferenceGeneration || turn !== currentTurn || currentTurn.manual || currentTurn.speechRevision !== identity.speechRevision || captureToken !== identity.captureToken || result.captureToken !== identity.captureToken || result.turnId !== identity.turnId || result.speechRevision !== identity.speechRevision) return;
       if (result.probability > 0.5 && result.complete !== false && currentTurn.silenceMs >= 200) { currentTurn.completionReady = true; finishAnalyzedTurn(); }
     } catch (error) {
-      if (['BusyError', 'AbortError'].includes(error?.name)) { if (currentTurn.analyzedRevision === identity.speechRevision) currentTurn.analyzedRevision = null; }
+      if (error?.name === 'CompletionUnavailableError') {
+        // Keyword/VAD stays healthy. Retain this analyzed revision and use the
+        // existing classified-silence fallback; never retry on every audio frame.
+      } else if (['BusyError', 'AbortError'].includes(error?.name)) { if (currentTurn.analyzedRevision === identity.speechRevision) currentTurn.analyzedRevision = null; }
       else if (generation === inferenceGeneration) inferenceFailed(error, generation);
     }
     finally { currentTurn.pending = false; if (activeAnalysis === identity) activeAnalysis = null; }
@@ -199,7 +237,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     deferredError = null;
     epoch++; requestAbort?.abort(); requestAbort = null; clearTimeout(playbackTimer); playbackTimer = null; playbackResolve?.(); playbackResolve = null;
     if (activeReply) onAudio({ replyId: activeReply, sequence: 0, data: [], sampleRate: 24000, channels: 1, format: 's16le', cancelled: true, done: true });
-    activeReply = null; activeSpeechRequestId = null; activeInteraction = null; answerContext = null; answerSilenceMs = 0; recentAudio = []; resetRecording();
+    activeReply = null; activeSpeechRequestId = null; activeInteraction = null; activeAnswerContext = null; playbackTiming = null; answerContext = null; answerSilenceMs = 0; recentAudio = []; resetRecording();
     update({ phase: idlePhase(), replyId: undefined }); syncDetectionMode(true); return { ok: true };
   }
   function dismiss() {
@@ -219,8 +257,28 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     catch (error) { throw classifyTransportError(error, { signal: abort.signal }); }
   }
   async function* audioChunks(body, abort) {
-    try { for await (const chunk of body) yield chunk; }
+    const reader = body.getReader?.(), iterator = reader ? null : body[Symbol.asyncIterator]();
+    let completed = false;
+    const stop = () => {
+      // Do not await an async iterator's return while its next() is stuck.
+      // A real fetch reader is cancelled immediately, releasing its connection.
+      try { Promise.resolve(reader ? reader.cancel(abort.signal.reason) : iterator.return?.()).catch(() => {}); } catch { /* Already closed. */ }
+    };
+    let rejectAbort;
+    const cancelled = new Promise((_, reject) => { rejectAbort = reject; });
+    const onAbort = () => { stop(); rejectAbort(abort.signal.reason || Error('Speech cancelled.')); };
+    abort.signal.addEventListener('abort', onAbort, { once: true });
+    try {
+      if (abort.signal.aborted) onAbort();
+      while (true) {
+        const next = await Promise.race([reader ? reader.read() : iterator.next(), cancelled]);
+        if (abort.signal.aborted) throw abort.signal.reason;
+        if (next.done) { completed = true; break; }
+        yield next.value;
+      }
+    }
     catch (error) { throw classifyTransportError(error, { signal: abort.signal }); }
+    finally { abort.signal.removeEventListener('abort', onAbort); if (!completed) stop(); if (reader) { try { reader.releaseLock(); } catch { /* Pending reader was cancelled. */ } } }
   }
   async function announceError(info = {}) {
     if (info.requestId && !info.queuedSpeech) {
@@ -281,7 +339,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       void announceError({ category: 'not-understood', origin: 'voice', operation: 'transcription' });
       return { ok: true, status: 'empty' };
     }
-    void sendAudio({ audioBase64: wavFromSamples(data).toString('base64'), format: 'wav', recordingSource: finishedTurn?.source });
+    void sendAudio({ audioBase64: wavFromSamples(data).toString('base64'), format: 'wav', recordingSource: finishedTurn?.source, recordingId: finishedTurn?.id });
     return { ok: true, status: 'sent' };
   }
   function pushToTalk(action, holdId) {
@@ -311,7 +369,11 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     }
     const preRoll = recentAudio; recentAudio = []; answerSilenceMs = 0;
     // Talking over a reply interrupts it; talking over a question keeps the answer route.
-    if (state.phase !== 'awaiting-answer') cancelSpeech({ preserveQueue: true });
+    if (state.phase !== 'awaiting-answer') {
+      const interruptedAnswer = state.phase === 'speaking' && activeAnswerContext && currentInteraction(activeAnswerContext) ? activeAnswerContext : null;
+      cancelSpeech({ preserveQueue: true });
+      answerContext = interruptedAnswer;
+    }
     recording = createRecording({ ...recordingOptions, preRoll, endpointing: false });
     turn = { id: ++turnSequence, manual: true, holdId };
     update({ phase: 'recording', recordingSource: 'ptt', recordingId: turn.id, transcript: '', error: null });
@@ -325,7 +387,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     return { ok: true, status: 'cancelled' };
   }
   async function setListening(value) {
-    if (!value) { update({ listening: false, muted: true }); cancelSpeech(); stopInference(); update({ phase: 'off', handsFreeStatus: 'off', handsFreeError: null }); return { ok: true }; }
+    if (!value) { inferenceFailures = []; update({ listening: false, muted: true }); cancelSpeech(); stopInference(); update({ phase: 'off', handsFreeStatus: 'off', handsFreeError: null }); return { ok: true }; }
     if (state.listening && enabled()) return { ok: true };
     const activation = ++epoch;
     const key = await getKey?.();
@@ -340,12 +402,13 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     }
     return { ok: true };
   }
-  async function sendAudio({ audioBase64, format = 'wav', recordingSource } = {}) {
+  async function sendAudio({ audioBase64, format = 'wav', recordingSource, recordingId = turn?.id } = {}) {
     if (!enabled() || !state.listening) return { ok: false, error: 'Voice is off.' };
     if (typeof audioBase64 !== 'string' || audioBase64.length < 60 || audioBase64.length > 2600000 || format !== 'wav') return { ok: false, error: 'Expected a WAV recording of at most 60 seconds.' };
     resetRecording();
     const current = ++epoch; requestAbort?.abort(); const abort = requestAbort = new AbortController();
-    let key, operation = 'transcription';
+    let key, operation = 'transcription', sttElapsedMs, transcriptionRequestId;
+    const sttStartedAt = monotonicNow(), recordingCaptureToken = captureToken;
     update({ phase: 'transcribing', error: null, errorOperation: null });
     try {
       key = await getKey(); if (!key) throw Error('OpenRouter key is missing.');
@@ -357,6 +420,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       if (current !== epoch || !enabled()) return { ok: false, status: 'cancelled' };
       orchestrator.recordSpeechUsage?.('transcription', data.usage?.cost);
       if (typeof data.text !== 'string') throw new OpenRouterError('upstream', response.status);
+      sttElapsedMs = Math.max(0, Math.round(monotonicNow() - sttStartedAt));
       const rawText = data.text.split(key).join('[REDACTED]').trim();
       const text = recordingSource === 'wake' ? rawText.replace(/^\s*hey[\s,!.:;—-]+vibe\b[\s,!.:;—-]*/i, '').trim() : rawText;
       if (isVoiceDismissal(text)) return dismiss();
@@ -374,8 +438,12 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       }
       operation = 'orchestration';
       update({ phase: 'thinking', transcript: text });
-      if (answerContext) return await submitAnswer(text, current);
+      if (answerContext) {
+        transcriptionRequestId = answerContext.taskQuestion?.requestId || answerContext.followup?.requestId;
+        return await submitAnswer(text, current);
+      }
       const result = await (orchestrator.enqueue ? orchestrator.enqueue({ text, origin: 'voice' }) : orchestrator.send({ text, origin: 'voice' }));
+      transcriptionRequestId = result?.requestId;
       if (current === epoch && result?.ok === false && result.status !== 'cancelled' && !result.text) {
         await announceError({ ...(result.upstreamError || { category: failureCategory(result.error, operation) }), origin: 'voice', operation });
       }
@@ -391,7 +459,12 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       await announceError({ ...(upstreamError || { category: failureCategory(error, operation) }), origin: 'voice', operation });
       return { ok: false, operation, error: safeError, ...(upstreamError && { upstreamError }) };
     }
-    finally { if (requestAbort === abort) requestAbort = null; }
+    finally {
+      if (sttElapsedMs !== undefined) timingDiagnostic('stt_complete', sttStartedAt, { elapsedMs: sttElapsedMs,
+        ...(Number.isSafeInteger(recordingId) && { recordingId }), ...(Number.isSafeInteger(recordingCaptureToken) && { captureToken: recordingCaptureToken }),
+        ...(transcriptionRequestId && { requestId: transcriptionRequestId }) });
+      if (requestAbort === abort) requestAbort = null;
+    }
   }
   function frames({ samples, sampleRate, captureToken: frameToken, sampleStart } = {}) {
     if (!state.listening || !enabled()) return { ok: false, status: 'off' };
@@ -440,10 +513,9 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
         if (recording || (['transcribing', 'awaiting-answer'].includes(state.phase) && !message.answerFollowup)) return { ok: false, status: 'user-speaking' };
       }
       let text = String(message.text || '').trim().slice(0, 4000);
-      const tasks = orchestrator.getState?.().tasks || [];
-      const task = tasks.find(item => item.requestId === message.requestId || item.id === message.requestId);
-      const label = message.targetLabel || task?.targets?.map(target => target.name || (target.cwd && path.basename(target.cwd))).filter(Boolean).join(', ') || task?.label;
-      if (label && tasks.filter(item => !['finished', 'cancelled', 'failed'].includes(item.status)).length > 1) text = `${label}. ${text}`; if (!text) return { ok: true };
+      // Task labels can contain the user's command. Speak only the reply;
+      // any necessary project attribution belongs in that reply itself.
+      if (!text) return { ok: true };
       let key;
       try { key = await getKey(); } catch (error) { if (queuedEpoch === epoch) diagnostic('speech', error, { requestId: identity.id }); }
       if (queuedEpoch !== epoch) return { ok: false, status: 'cancelled' };
@@ -459,13 +531,32 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       const abort = requestAbort = new AbortController();
       let speechStage = 'speech';
       const replyId = activeReply = randomUUID(); activeSpeechRequestId = message.requestId || null; activeInteraction = message.kind === 'interaction' ? identity : null;
+      let playbackFailure, audioFinished = false, firstByte = false;
+      const speechStartedAt = monotonicNow();
+      const timingDetails = { replyId, ...(message.requestId && { requestId: message.requestId }) };
+      playbackTiming = { replyId, startedAt: speechStartedAt, details: timingDetails, playbackAt: null, audioEmitted: false };
+      const finished = new Promise(resolve => {
+        playbackResolve = result => {
+          if (result?.error) {
+            playbackFailure = Object.assign(Error(result.error), { diagnosticError: result.diagnosticError });
+            speechStage = 'playback'; abort.abort(playbackFailure); resolve(result);
+          } else if (audioFinished) resolve(result);
+        };
+      });
+      // Bind the answer before playback starts: Space may interrupt the question
+      // as soon as the user knows their answer, including while TTS is loading.
+      activeAnswerContext = message.question ? { taskQuestion: { ...message.question } }
+        : message.kind === 'interaction' ? message.answerContext || answerContextFor(message.interaction || identity)
+          : message.responseTurn === 'listen' && message.requestId ? { followup: { requestId: message.requestId, text: message.text, speechGeneration } } : null;
       update({ phase: 'speaking', reply: text, replyId, error: null, errorOperation: null }); let sequence = 0, bytes = 0;
       try {
         const settings = getSettings();
         checkSpending();
         if (settings.ttsModel && settings.ttsModel !== TTS_MODEL) throw Error(`Voice playback currently supports ${TTS_MODEL}. Select this speech model in Orchestrator settings.`);
         if (settings.voice && !TTS_VOICES.includes(settings.voice)) throw Error('Select a supported Kokoro voice in Orchestrator settings.');
+        timingDiagnostic('tts_started', speechStartedAt, timingDetails);
         const response = await requestAudio('https://openrouter.ai/api/v1/audio/speech', { method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, signal: AbortSignal.any([abort.signal, AbortSignal.timeout(120000)]), body: JSON.stringify({ model: settings.ttsModel || TTS_MODEL, input: speechText, voice: settings.voice || TTS_VOICE, response_format: 'pcm' }) }, abort);
+        if (queuedEpoch !== epoch || abort.signal.aborted) { if (playbackFailure) throw playbackFailure; return { ok: false, status: 'cancelled' }; }
         if (!response.ok) await audioJson(response, abort);
         if (!response.body) throw new OpenRouterError('upstream', response.status);
         const contentType = response.headers?.get?.('content-type') || '';
@@ -474,21 +565,29 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
         // reply dies here instead of playing: audio/vnd.wave was decodable but unreachable.
         // audio/L16 stays out: RFC 2586 makes it big-endian, which would play as noise.
         if (contentType && !/^(?:audio\/(?:pcm|wav|wave|x-wav|vnd\.wave)|application\/octet-stream)(?:\s*;|\s*$)/i.test(contentType)) throw new OpenRouterError('upstream', response.status);
-        const chunks = [];
+        const decoder = createSpeechAudioStream(contentType);
+        const emitChunks = chunks => {
+          for (const { pcm, sampleRate, channels } of chunks) {
+            if (queuedEpoch !== epoch || abort.signal.aborted) throw playbackFailure || Error('Speech cancelled.');
+            if (playbackTiming?.replyId === replyId) playbackTiming.audioEmitted = true;
+            onAudio({ replyId, sequence: sequence++, data: Array.from(pcm), sampleRate, channels, format: 's16le' });
+            if (queuedEpoch !== epoch || abort.signal.aborted) throw playbackFailure || Error('Speech cancelled.');
+          }
+        };
         for await (const raw of audioChunks(response.body, abort)) {
-          if (queuedEpoch !== epoch || abort.signal.aborted) return { ok: false, status: 'cancelled' };
+          if (queuedEpoch !== epoch || abort.signal.aborted) { if (playbackFailure) throw playbackFailure; return { ok: false, status: 'cancelled' }; }
           bytes += raw.length;
-          if (bytes > 48000 * 4 * 180 + 65536) throw Error('Speech exceeded the three-minute playback limit.');
-          chunks.push(Buffer.from(raw));
+          if (!firstByte && raw.length) { firstByte = true; timingDiagnostic('tts_first_byte', speechStartedAt, timingDetails); }
+          emitChunks(decoder.push(raw));
         }
         if (queuedEpoch !== epoch) return { ok: false, status: 'cancelled' };
         if (!bytes) throw new OpenRouterError('upstream', response.status);
-        const { pcm, sampleRate, channels, durationMs } = decodeSpeechAudio(Buffer.concat(chunks), contentType);
+        const { chunks, sampleRate, channels, durationMs } = decoder.finish();
+        emitChunks(chunks);
+        timingDiagnostic('tts_complete', speechStartedAt, timingDetails);
         speechStage = 'playback';
-        const finished = new Promise(resolve => { playbackResolve = resolve; playbackTimer = setTimeout(() => resolve({ error: 'Speech playback did not finish. Check your audio output.' }), durationMs + 5000); });
-        // One second per buffer bounds a three-minute reply to 180 playback nodes.
-        const chunkBytes = sampleRate * channels * 2;
-        for (let start = 0; start < pcm.length; start += chunkBytes) onAudio({ replyId, sequence: sequence++, data: Array.from(pcm.subarray(start, start + chunkBytes)), sampleRate, channels, format: 's16le' });
+        audioFinished = true;
+        playbackTimer = setTimeout(() => playbackResolve?.({ error: 'Speech playback did not finish. Check your audio output.' }), durationMs + 5000);
         onAudio({ replyId, sequence: sequence++, data: [], sampleRate, channels, format: 's16le', done: true });
         const generationId = response.headers?.get?.('x-generation-id');
         if (generationId) void request(`https://openrouter.ai/api/v1/generation?id=${encodeURIComponent(generationId)}`, { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(10000) }).then(r => r.ok ? r.json() : null).then(data => { if (!disposed) orchestrator.recordSpeechUsage?.('speech', data?.data?.total_cost); }).catch(() => {});
@@ -497,8 +596,9 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
         clearTimeout(playbackTimer); playbackTimer = null; playbackResolve = null;
         if (queuedEpoch !== epoch) return { ok: false, status: 'cancelled' };
         if (playback?.error) throw Object.assign(Error(playback.error), { diagnosticError: playback.diagnosticError });
+        timingDiagnostic('playback_complete', playbackTiming?.playbackAt ?? speechStartedAt, timingDetails);
         if (queuedEpoch === epoch) {
-          activeReply = null; activeSpeechRequestId = null; activeInteraction = null;
+          activeReply = null; activeSpeechRequestId = null; activeInteraction = null; activeAnswerContext = null; playbackTiming = null;
           const question = message.question;
           if (question?.id && question?.requestId && typeof question.text === 'string' && currentInteraction({ taskQuestion: question })) {
             answerContext = { taskQuestion: { ...question } }; answerSilenceMs = 0;
@@ -511,12 +611,14 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
         }
         return { ok: true };
       } catch (e) {
-        if (queuedEpoch !== epoch || abort.signal.aborted) return { ok: false, status: 'cancelled' };
+        if (queuedEpoch !== epoch || (abort.signal.aborted && !playbackFailure)) return { ok: false, status: 'cancelled' };
+        e = playbackFailure || e;
+        abort.abort(e);
         diagnostic(speechStage, e.diagnosticError || e, { replyId, requestId: identity.id, targetId: identity.sessionId, generation: identity.generation }, key);
         clearTimeout(playbackTimer); playbackTimer = null; playbackResolve = null;
         onAudio({ replyId, sequence, data: [], sampleRate: 24000, channels: 1, format: 's16le', done: true, cancelled: true });
         const error = String(e.message || 'Speech failed.').split(key).join('[REDACTED]');
-        activeReply = null; activeInteraction = null; update({ phase: 'error', errorOperation: 'speech', error });
+        activeReply = null; activeSpeechRequestId = null; activeInteraction = null; activeAnswerContext = null; playbackTiming = null; update({ phase: 'error', errorOperation: 'speech', error });
         const upstreamError = upstreamErrorInfo(e);
         if (state.listening) await announceError({ ...(upstreamError || { category: failureCategory(error, 'speech') }), origin: 'voice', operation: 'speech' });
         else update({ phase: idlePhase() });
@@ -531,15 +633,32 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
   function configure(patch = {}) {
     if (Object.hasOwn(patch, 'captureToken') && patch.captureToken !== captureToken) {
       captureToken = patch.captureToken; samplePosition = 0; recentAudio = []; syncDetectionMode(true);
-      if (recording) { resetRecording(); answerContext = null; update({ phase: idlePhase(), error: 'Microphone changed. Please start your recording again.' }); }
+      if (recording) {
+        // Automatic graph recovery must not turn a retry of an existing answer
+        // into a new command. Deliberate device changes retain their old reset.
+        const answer = patch.captureRecovery && answerContext && currentInteraction(answerContext) ? answerContext : null;
+        resetRecording(patch.captureRecovery ? 'capture-recovery' : 'cancelled', 'cancel');
+        answerContext = answer; answerSilenceMs = 0;
+        update({ phase: answer ? 'awaiting-answer' : idlePhase(), error: answer ? 'Microphone interrupted. Please repeat your answer.' : 'Microphone changed. Please start your recording again.' });
+      }
     }
     if (patch.dismiss === true) return dismiss();
-    if (patch.refreshHandsFree) { if (state.handsFreeStatus === 'unavailable') update({ handsFreeStatus: 'off' }); return refreshHandsFree(); }
+    if (patch.refreshHandsFree) {
+      inferenceFailures = [];
+      if (inferenceRetryTimer !== null) recoveryTimers.clearTimeout(inferenceRetryTimer);
+      inferenceRetryTimer = null;
+      if (['unavailable', 'recovering'].includes(state.handsFreeStatus)) update({ handsFreeStatus: 'off' });
+      return refreshHandsFree();
+    }
     if (Object.hasOwn(patch, 'finishRecording')) {
       if (!recording || !turn || turn.manual || !Number.isSafeInteger(patch.finishRecording) || patch.finishRecording !== turn.id) return { ok: true, status: 'stale-recording' };
       return finishRecording('manual-send');
     }
-    if (patch.playbackError && activeReply) { clearTimeout(playbackTimer); playbackResolve?.({ error: 'Speech playback failed. Check your audio output.', diagnosticError: Error(String(patch.playbackError)) }); return { ok: true }; }
+    if (patch.playbackStarted && patch.playbackStarted === activeReply && playbackTiming?.replyId === activeReply && playbackTiming.audioEmitted && playbackTiming.playbackAt === null) {
+      playbackTiming.playbackAt = monotonicNow();
+      timingDiagnostic('playback_started', playbackTiming.startedAt, playbackTiming.details);
+    }
+    if (patch.playbackError && activeReply && patch.playbackReplyId === activeReply) { clearTimeout(playbackTimer); playbackResolve?.({ error: 'Speech playback failed. Check your audio output.', diagnosticError: Error(String(patch.playbackError)) }); return { ok: true }; }
     if (patch.preview === true) {
       if (state.listening && !['listening', 'error'].includes(state.phase)) return { ok: false, error: 'Finish the current voice turn before checking the voice.' };
       cancelSpeech();
@@ -571,7 +690,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     if (context.followup) return speak({ text: prefix + context.followup.text, responseTurn: 'listen', requestId: context.followup.requestId, origin: 'voice', answerFollowup: true });
     if (context.taskQuestion) return speak({ text: prefix + context.taskQuestion.text, question: context.taskQuestion, requestId: context.taskQuestion.requestId, kind: 'reply', origin: 'voice', answerFollowup: true });
     const generation = speechGeneration;
-    const result = await speak({ text: prefix + questionSpeech(context.interaction, context.index), kind: 'interaction', interaction: context.interaction, answerFollowup: !!context.answering });
+    const result = await speak({ text: prefix + questionSpeech(context.interaction, context.index), kind: 'interaction', interaction: context.interaction, answerContext: context, answerFollowup: !!context.answering });
     if (result.ok && generation === speechGeneration && currentInteraction(context) && state.listening) { answerContext = context; answerSilenceMs = 0; update({ phase: 'awaiting-answer', request: { ...context.interaction, currentQuestion: context.index } }); }
     return result;
   }
@@ -580,7 +699,9 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     if (!context || !currentInteraction(context)) { answerContext = null; update({ phase: idlePhase() }); return { ok: false, status: 'resolved' }; }
     if (context.followup) {
       answerContext = null; answerSilenceMs = 0;
-      const input = { text, origin: 'voice' };
+      const requestId = context.followup.requestId;
+      const taskExists = (orchestrator.getState?.().tasks || []).some(task => (task.requestId || task.id) === requestId);
+      const input = { text, origin: 'voice', ...(taskExists ? { replyToRequestId: requestId } : {}) };
       const result = await (orchestrator.enqueue ? orchestrator.enqueue(input) : orchestrator.send(input));
       if (current === epoch && state.phase === 'thinking') update({ phase: idlePhase() });
       return result;

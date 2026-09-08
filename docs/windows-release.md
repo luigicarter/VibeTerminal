@@ -4,10 +4,10 @@ vibeTerminal ships to Windows users as an Electron Builder NSIS installer hosted
 
 ## Current Public Release
 
-The current Windows release is `v0.1.100`:
+The current Windows release is `v0.1.101`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.100`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.100/vibeTerminal-Setup-0.1.100.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.101`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.101/vibeTerminal-Setup-0.1.101.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -57,10 +57,10 @@ The compiled `dist/` renderer is still included because it is the UI Electron di
 
 ## Local Build
 
-Version `0.1.100` improves Orchestrator conversation, automatic follow-up listening
-and dismissal, saved-conversation resume, and terminal operation reliability. The
-new Work history view retains observed agent results across project/global views
-and closed terminals, and supports questions such as “What's been done?” See the
+Version `0.1.101` adds request-owned progress and result reports, terminal readiness
+watches, reliable background terminal startup, and voice streaming and recovery.
+It also improves busy-terminal follow-ups and protects agent processes during
+terminal editing. Readiness remains separate from verified task results. See the
 [terminal-control contract](orchestrator-controls.md), [voice turns](orchestrator-tasks.md),
 and [work history](orchestrator-dashboard.md) for behavior and verification.
 Installed applications apply updates through the user's Update/Restart action;
@@ -132,7 +132,8 @@ Production downloads and update metadata live in the public GitHub repository:
 `https://github.com/luigicarter/VibeTerminal/releases`
 
 The GitHub Actions workflow `.github/workflows/windows-release.yml` builds on `windows-latest`.
-It explicitly installs and verifies the pinned Electron executable for UI tests;
+It builds the renderer before release checks and explicitly installs and verifies
+the pinned Electron executable for UI tests;
 the Electron npm package does not provide an automatic install lifecycle script.
 It verifies the bundled voice alert clips and models, runs `scripts/qa/release-checks.cjs`
 with fail-fast handling, and verifies installer/feed hashes, packaged voice checksums,

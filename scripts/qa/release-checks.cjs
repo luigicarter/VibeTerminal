@@ -10,6 +10,7 @@ const checks = [
   'smoke:backend:openfusion-isolation', 'smoke:backend:fusion-appserver:embedded',
   'smoke:backend:terminal-runtime', 'smoke:backend:agent-generation', 'smoke:backend:metadata',
   'smoke:frontend:attention', 'smoke:frontend:workspace', 'smoke:frontend:session-launch',
+  'test:frontend:terminal-launch', 'test:frontend:voice-pcm', 'smoke:electron:orchestrator-background-launch',
   'smoke:frontend:fusion-settings', 'smoke:frontend:tiled-resize', 'smoke:frontend:pane-split',
   'smoke:frontend:cwd-conflicts', 'smoke:frontend:terminal-runtime', 'smoke:frontend:app-runtime',
   'smoke:frontend:session-persistence', 'smoke:frontend:terminal-output',

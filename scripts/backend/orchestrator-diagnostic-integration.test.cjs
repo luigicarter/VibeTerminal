@@ -6,6 +6,20 @@ const { createVoiceController } = require('../../backend/voiceController.cjs');
 const { interpretTestIntent } = require('./orchestrator-test-intent.cjs');
 const reply = content => ({ choices: [{ message: { content } }] });
 const tool = (args, id = 'tool-1') => ({ choices: [{ message: { tool_calls: [{ id, type: 'function', function: { name: 'workspace', arguments: typeof args === 'string' ? args : JSON.stringify(args) } }] } }] });
+function checkTiming(entry) {
+  const base = ['time', 'event', 'stage', 'requestId', 'origin', 'model', 'elapsedMs'];
+  const stages = {
+    routing_started: [], routing_acquired: [], routing: ['status'], execution: ['status'], executor_reply: ['status'], final_text: ['status'],
+    model_started: ['modelCallId', 'category'], model_complete: ['modelCallId', 'category', 'status', 'totalMs', 'httpStatus'],
+    tool_started: ['toolCallId', 'actionKind', 'targetId'], tool_complete: ['toolCallId', 'actionId', 'actionKind', 'targetId', 'generation', 'status', 'totalMs'],
+    first_effect: ['actionKind', 'targetId', 'generation', 'status']
+  };
+  assert(stages[entry.stage], `Unexpected timing stage: ${entry.stage}`);
+  assert(Object.keys(entry).every(key => [...base, ...stages[entry.stage]].includes(key)));
+  assert.equal(typeof entry.requestId, 'string'); assert.equal(typeof entry.elapsedMs, 'number'); assert(entry.elapsedMs >= 0);
+  if (entry.stage.startsWith('model_')) assert.equal(typeof entry.modelCallId, 'string');
+  assert.doesNotMatch(JSON.stringify(entry), /PRIVATE_|private-configured-key|Can you prompt|random one/);
+}
 function fixture(t, overrides = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-diagnostic-integration-'));
   const actions = [], requests = [], responses = [];
@@ -23,7 +37,7 @@ function fixture(t, overrides = {}) {
   t.after(async () => { await instance.dispose(); assert(path.resolve(root).startsWith(path.join(os.tmpdir(), 'vibe-diagnostic-integration-'))); fs.rmSync(root, { recursive: true, force: true }); });
   const filename = path.join(root, 'logs', 'orchestrator-errors.jsonl');
   return { instance, actions, requests, responses, filename, root,
-    read: async () => { await instance.flushDiagnostics(); const entries = fs.existsSync(filename) ? fs.readFileSync(filename, 'utf8').trim().split('\n').map(JSON.parse) : []; for (const entry of entries.filter(entry => entry.event === 'request_stage')) { assert.deepEqual(Object.keys(entry).sort(), ['time', 'event', 'stage', 'requestId', 'origin', 'model', 'status', 'elapsedMs'].sort()); assert.equal(typeof entry.requestId, 'string'); assert.equal(typeof entry.elapsedMs, 'number'); assert(entry.elapsedMs >= 0); assert.doesNotMatch(JSON.stringify(entry), /PRIVATE_|private-configured-key|Can you prompt|random one/); } return entries.filter(entry => entry.event !== 'request_stage'); },
+    read: async () => { await instance.flushDiagnostics(); const entries = fs.existsSync(filename) ? fs.readFileSync(filename, 'utf8').trim().split('\n').map(JSON.parse) : []; for (const entry of entries.filter(entry => entry.event === 'request_stage')) checkTiming(entry); return entries.filter(entry => entry.event !== 'request_stage'); },
     ready: async () => { assert.equal((await instance.configure({ apiKey: 'private-configured-key', sessionOnly: true, model: 'test-brain' })).ok, true); assert.equal((await instance.setEnabled(true)).ok, true); } };
 }
 

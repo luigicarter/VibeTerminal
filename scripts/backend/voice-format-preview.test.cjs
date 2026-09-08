@@ -47,7 +47,7 @@ test('playback error fails preview without stopping the microphone', async t => 
   let controller;
   controller = createVoiceController({ orchestrator: { getState: () => ({ enabled: true }) }, getKey: () => 'fake-key',
     fetch: async () => ({ ok: true, headers: new Headers({ 'content-type': 'audio/wav' }), body: (async function* () { yield wavFromSamples([0, 0], 24000); })() }),
-    onAudio: chunk => { if (chunk.done && !chunk.cancelled) queueMicrotask(() => controller.configure({ playbackError: 'Output unavailable' })); } });
+    onAudio: chunk => { if (chunk.done && !chunk.cancelled) queueMicrotask(() => controller.configure({ playbackError: 'Output unavailable', playbackReplyId: chunk.replyId })); } });
   t.after(() => controller.dispose()); await controller.setListening(true);
   const result = await controller.configure({ preview: true });
   assert.equal(result.ok, false); assert.equal(result.operation, 'speech'); assert.match(result.error, /audio output/); assert.equal(controller.getState().phase, 'listening');

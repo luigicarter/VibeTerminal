@@ -8,10 +8,10 @@ function createKeywordDetector({ paths, sherpa = require('sherpa-onnx-node') }) 
   });
   let vad = new sherpa.Vad({ sileroVad: { model: paths.vad.model, threshold: 0.5, minSpeechDuration: 0.064, minSilenceDuration: 0.032, windowSize: 512, maxSpeechDuration: 60 }, sampleRate: 16000, numThreads: 1, provider: 'cpu', debug: false }, 65);
   let primary = null, companion = null, identity = null, origin = 0, expected = null, lastWake = -Infinity;
-  let history = new Float32Array(0), lastSpeech = -Infinity, lastCompanion = -Infinity;
+  let history = new Float32Array(0), lastSpeech = -Infinity, lastCompanion = -Infinity, companionGain = 1;
   function reset() {
     primary = null; companion = null; identity = null; expected = null; lastWake = -Infinity;
-    history = new Float32Array(0); lastSpeech = -Infinity; lastCompanion = -Infinity; vad?.reset();
+    history = new Float32Array(0); lastSpeech = -Infinity; lastCompanion = -Infinity; companionGain = 1; vad?.reset();
   }
   function process(frame) {
     if (!spotter || !vad) throw new Error('Keyword detector is disposed.');
@@ -59,12 +59,23 @@ function createKeywordDetector({ paths, sherpa = require('sherpa-onnx-node') }) 
         // the companion identical to the primary at unlucky chunk alignments.
         const replay = new Float32Array(4800);
         replay.set(history, replay.length - history.length);
+        // Quiet microphones can satisfy VAD yet miss the keyword. Keep the raw
+        // primary path and give the companion a bounded, fixed onset gain. Do
+        // not pump gain between phonemes or change the acoustic threshold.
+        let peak = 0;
+        for (const sample of replay) peak = Math.max(peak, Math.abs(sample));
+        for (const sample of frame.samples) peak = Math.max(peak, Math.abs(sample));
+        companionGain = Math.max(1, Math.min(8, 0.15 / Math.max(peak, 0.0001)));
+        for (let i = 0; i < replay.length; i++) replay[i] *= companionGain;
         for (let offset = 0; offset < replay.length; offset += 320) {
           companion.acceptWaveform({ sampleRate: 16000, samples: replay.subarray(offset, offset + 320) });
           decode(companion);
         }
       }
-      if (companion) { companion.acceptWaveform({ sampleRate: 16000, samples: frame.samples }); decode(companion); }
+      if (companion) {
+        const samples = companionGain === 1 ? frame.samples : frame.samples.map(sample => Math.max(-1, Math.min(1, sample * companionGain)));
+        companion.acceptWaveform({ sampleRate: 16000, samples }); decode(companion);
+      }
       if (speech) lastSpeech = frame.sampleStart;
       const retained = new Float32Array(Math.min(4800, history.length + frame.samples.length));
       const joined = new Float32Array(history.length + frame.samples.length);

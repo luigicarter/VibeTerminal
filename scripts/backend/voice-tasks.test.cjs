@@ -76,15 +76,15 @@ test('queued task question is silent after its task pauses or replaces the quest
   assert.equal(f.spoken.length, 0);
   assert.equal(f.voice.getState().phase, 'listening');
 });
-test('two task questions keep separate answer windows and use public target labels', async t => {
+test('two task questions keep separate answer windows and speak explicit attribution', async t => {
   const f = await fixture(t);
-  const firstQuestion = { id: 'q1', requestId: 'one', text: 'Which branch?' };
-  const secondQuestion = { id: 'q2', requestId: 'two', text: 'Which file?' };
+  const firstQuestion = { id: 'q1', requestId: 'one', text: 'In Terminal Alpha, which branch?' };
+  const secondQuestion = { id: 'q2', requestId: 'two', text: 'In Project Beta, which file?' };
   f.tasks.push({ requestId: 'one', status: 'needs-answer', question: firstQuestion, targets: [{ name: 'Terminal Alpha' }] }, { requestId: 'two', status: 'needs-answer', question: secondQuestion, label: 'Project Beta' });
   await f.voice.speak({ origin: 'voice', requestId: 'one', text: firstQuestion.text, question: firstQuestion });
   const second = f.voice.speak({ origin: 'voice', requestId: 'two', text: secondQuestion.text, question: secondQuestion });
   await tick();
-  assert.deepEqual(f.spoken, ['Terminal Alpha. Which branch?']);
+  assert.deepEqual(f.spoken, [firstQuestion.text]);
   for (let i = 0; i < 150; i++) f.voice.frames({ samples: Array(1600).fill(0), sampleRate: 16000 });
   await second;
   assert.equal(f.voice.getState().phase, 'awaiting-answer');
@@ -92,7 +92,24 @@ test('two task questions keep separate answer windows and use public target labe
   await f.voice.sendAudio({ audioBase64 });
   assert.equal(f.inputs[0].replyToRequestId, 'two');
   assert.equal(f.inputs[0].questionId, 'q2');
-  assert.equal(f.spoken[1], 'Project Beta. Which file?');
+  assert.equal(f.spoken[1], secondQuestion.text);
+});
+
+test('task replies never read back request labels when older work is paused or awaiting an answer', async t => {
+  const f = await fixture(t);
+  const instruction = 'Open a terminal and run dir';
+  f.tasks.push({ requestId: 'current', status: 'running', label: instruction, targets: [] },
+    { requestId: 'older', status: 'paused' });
+  for (const status of ['paused', 'needs-answer']) {
+    f.tasks[1].status = status;
+    for (const metadata of [{ targetLabel: instruction }, {}]) {
+      const result = await f.voice.speak({ origin: 'voice', requestId: 'current', text: 'Opened the terminal.', ...metadata });
+      assert.equal(result.ok, true);
+      assert.equal(f.spoken.at(-1), 'Opened the terminal.');
+      assert.equal(f.voice.getState().reply, 'Opened the terminal.');
+    }
+  }
+  assert.equal(f.spoken.length, 4);
 });
 test('background task error waits for capture without interrupting a newer utterance', async t => {
   const f = await fixture(t);

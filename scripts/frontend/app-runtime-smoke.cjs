@@ -64,4 +64,160 @@ const chat = { ...session, fusion: true };
 assert.equal(context.withRuntime(chat), chat, "chat reducers keep ownership of their state");
 for (const phase of ["start", "start", "stop"]) context.applyAgentSubagent("pane", phase, "kimi");
 assert.equal(legacy.subagentDepth, 1, "compatibility path must retain the unfinished sibling");
-console.log("App runtime projection smoke passed (attention, children, exit, generations, aliases, chat isolation)");
+
+// Exercise retained backend state through the actual App projection and sidebar
+// summary. A prebuilt done/attention fixture misses Claude's provisional Stop.
+const { createTerminalRuntime } = require("../../backend/terminalRuntime.cjs");
+const capabilities = require("../../shared/providerCapabilities.json");
+function claudeFixture() {
+  let now = 10000;
+  const backend = createTerminalRuntime({ now: () => now, capabilities: provider => capabilities[provider] });
+  const pane = { ...session, id: "claude-status", kind: "claude" };
+  const launch = backend.beginLaunch({ ...pane, provider: "claude", cwd: root,
+    threadRef: { provider: "claude", id: "claude-root" } });
+  const event = (type, details = {}) => backend.ingest({ id: pane.id, generation: launch.generation,
+    providerThreadId: "claude-root", type, ...details });
+  event("created");
+  event("agent-process", { phase: "start", processId: "claude-process" });
+  const snapshot = () => backend.getSnapshot(pane.id);
+  const projected = () => {
+    context.runtimeSnapshots[pane.id] = snapshot();
+    return context.withRuntime(pane);
+  };
+  const check = (label, blocked) => {
+    assert.equal(runtime.runtimeStatusLabel(snapshot()), label);
+    assert.equal(attention.summarizeSessions([projected()]).blocked, blocked);
+    assert.equal(Boolean(projected().attention?.unread), blocked > 0);
+  };
+  return { backend, event, snapshot, projected, check, advance: ms => { now += ms; },
+    input: data => backend.recordInput({ id: pane.id, generation: launch.generation, data }) };
+}
+const idleNotifications = [
+  { attention: { state: "waiting", reason: "question" } }, // Previous generated hooks lost notification_type.
+  { notificationType: "idle_prompt", attention: { state: "waiting", reason: "question" } },
+  { notificationType: "idle_prompt", attention: { state: "waiting", reason: "approval" } }
+];
+for (const stage of ["startup", "idle", "response", "running", "pending", "failed"]) {
+  const h = claudeFixture();
+  if (stage === "idle") h.event("agent-session", { phase: "start" });
+  if (["response", "running", "pending", "failed"].includes(stage)) {
+    h.event("agent-running", { turnStart: true });
+    if (stage !== "running") {
+      h.advance(5000);
+      h.event("agent-attention", { attention: { state: stage === "failed" ? "failed" : "completed", reason: stage === "failed" ? "error" : "done" } });
+    }
+    if (stage === "pending") h.input("\r");
+  }
+  const before = h.snapshot();
+  const expectedLabel = runtime.runtimeStatusLabel(before);
+  h.advance(60000);
+  for (const details of idleNotifications) {
+    h.event("agent-attention", details);
+    assert.deepEqual(h.snapshot(), before, `${stage}: idle reminder must not alter retained lifecycle, attention or input intent`);
+  }
+  assert.equal(runtime.runtimeStatusLabel(h.snapshot()), expectedLabel);
+  assert.equal(attention.summarizeSessions([h.projected()]).blocked, 0);
+  if (stage === "response") {
+    h.check("response available", 0);
+    assert.equal(runtime.runtimeElapsed(h.snapshot(), before.turnEndedAt + 3600000), "5s", "idle must not restart the elapsed timer");
+    h.event("data", { data: "An ordinary response with no questions." });
+    h.check("response available", 0);
+  }
+  h.backend.dispose();
+}
+for (const reason of ["approval", "question"]) {
+  const h = claudeFixture();
+  h.event("agent-running", { turnStart: true, providerTurnId: "turn-one" });
+  const toolName = reason === "question" ? "AskUserQuestion" : "Bash";
+  const tool = { toolId: "tool-one", toolName, providerTurnId: "turn-one" };
+  h.event("agent-activity", { ...tool, phase: "start" });
+  h.event("agent-attention", { ...tool, attention: { state: "waiting", reason } });
+  h.check("needs input", 1);
+  const waiting = h.snapshot();
+  for (const details of idleNotifications) h.event("agent-attention", details);
+  assert.deepEqual(h.snapshot(), waiting, "idle notifications must not erase or replace a genuine wait");
+  if (reason === "question") {
+    for (const phase of ["start", "stop"]) {
+      h.event("agent-activity", { toolId: "parallel-read", toolName: "Read", phase });
+      h.event("agent-running", { toolId: "parallel-read", toolName: "Read", turnStart: false });
+      h.check("needs input", 1);
+      assert.deepEqual(h.snapshot().attention, waiting.attention, "unrelated tool callbacks must preserve the question occurrence");
+    }
+  }
+  h.input("\r");
+  h.check("awaiting activity", 0);
+  if (reason === "question") {
+    h.event("agent-activity", { toolId: "parallel-read", toolName: "Read", phase: "stop" });
+    h.event("agent-running", { toolId: "parallel-read", toolName: "Read", turnStart: false });
+    h.check("awaiting activity", 0);
+    assert.equal(h.snapshot().pendingInput, "submit", "only the matching question resolution proves the answer was accepted");
+  }
+  h.event("agent-activity", { ...tool, phase: "stop" });
+  h.event("agent-running", { ...tool, turnStart: false });
+  h.check("working", 0);
+  assert.equal(h.snapshot().pendingInput, undefined, `${reason}: an answer resumes the same native turn`);
+  if (reason === "question") {
+    const resumed = h.snapshot();
+    h.event("agent-activity", { ...tool, phase: "start" });
+    h.event("agent-attention", { ...tool, attention: { state: "waiting", reason } });
+    assert.deepEqual(h.snapshot(), resumed, "late duplicate question callbacks cannot reopen a resolved tool");
+  }
+  h.event("agent-attention", { providerTurnId: "turn-one", attention: { state: "completed", reason: "done" } });
+  h.check("response available", 0);
+  // A retry/continuation can ask a real question after a provisional Stop.
+  h.event("agent-attention", { toolId: "tool-two", toolName: "AskUserQuestion", attention: { state: "waiting", reason: "question" } });
+  h.check("needs input", 1);
+  h.backend.dispose();
+}
+// Questions may resolve or fail without an Enter observed by the PTY monitor.
+{
+  const h = claudeFixture();
+  const tool = { toolId: "auto-resolved-question", toolName: "AskUserQuestion" };
+  h.event("agent-running", { turnStart: true });
+  h.event("agent-activity", { ...tool, phase: "start" });
+  h.event("agent-attention", { ...tool, attention: { state: "waiting", reason: "question" } });
+  h.check("needs input", 1);
+  h.event("agent-activity", { ...tool, phase: "stop" });
+  h.event("agent-running", { ...tool, turnStart: false });
+  h.check("working", 0);
+  h.backend.dispose();
+}
+// Child question metadata must never claim the parent pane needs an answer.
+{
+  const h = claudeFixture();
+  h.event("agent-running", { turnStart: true });
+  h.event("agent-attention", { providerThreadId: "child", parentThreadId: "claude-root", toolName: "AskUserQuestion",
+    attention: { state: "waiting", reason: "question" } });
+  h.check("working", 0);
+  h.backend.dispose();
+}
+for (const answered of [false, true]) {
+  const h = claudeFixture();
+  const tool = { toolId: "superseded-question", toolName: "AskUserQuestion" };
+  h.event("agent-running", { turnStart: true });
+  h.event("agent-activity", { ...tool, phase: "start" });
+  h.event("agent-attention", { ...tool, attention: { state: "waiting", reason: "question" } });
+  if (answered) h.input("\r");
+  h.event("agent-running", { turnStart: true });
+  h.check("working", 0);
+  assert.equal(h.snapshot().activeTools.length, 0, "a genuine new turn supersedes prior question tools");
+  assert.equal(h.snapshot().pendingInput, undefined);
+  h.event("agent-activity", { ...tool, phase: "start" });
+  h.event("agent-attention", { ...tool, attention: { state: "waiting", reason: "question" } });
+  h.check("working", 0);
+  h.backend.dispose();
+}
+for (const outcome of ["completed", "failed"]) {
+  const h = claudeFixture();
+  const tool = { toolId: "settled-question", toolName: "AskUserQuestion" };
+  h.event("agent-running", { turnStart: true });
+  h.event("agent-activity", { ...tool, phase: "start" });
+  h.event("agent-attention", { ...tool, attention: { state: "waiting", reason: "question" } });
+  h.event("agent-attention", { attention: { state: outcome, reason: outcome === "failed" ? "error" : "done" } });
+  const settled = h.snapshot();
+  h.event("agent-activity", { ...tool, phase: "start" });
+  h.event("agent-attention", { ...tool, attention: { state: "waiting", reason: "question" } });
+  assert.deepEqual(h.snapshot(), settled, "late question callbacks must not replace a response or failure");
+  h.backend.dispose();
+}
+console.log("App runtime projection smoke passed (attention, children, exit, generations, aliases, chat isolation, Claude idle/question lifecycle)");

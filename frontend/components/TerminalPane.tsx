@@ -1207,12 +1207,8 @@ export default function TerminalPane({
     syncOutputRef.current?.reset();
     sgrMouseRef.current?.reset();
     clearIdleTimer();
-    // Only a genuine (re)launch shows "starting": every launch path (create,
-    // restart, resume, settings change) resets the status to "idle" first. A
-    // REMOUNT of a live pane (workspace switch, maximize) re-runs this effect
-    // too — the backend dedups the create into a snapshot — and must not
-    // disturb a settled pill (done/failed would be unlatched by
-    // "starting", then degraded to "waiting" by the settle timers).
+    // Standalone process startup belongs to App's launch coordinator. This
+    // effect prepares the view; remounting must preserve backend status.
     if (sessionRef.current.status === "idle") {
       setStatus("starting");
     }
@@ -1237,6 +1233,7 @@ export default function TerminalPane({
         rows: terminal.rows
       };
     }
+    if (ownsRuntime()) return;
     const lookupStartedAt = Date.now();
     if (!ownsRuntime()) threadLookupAfterRef.current = lookupStartedAt;
     if (!ownsRuntime() && isThreadedAgentKind(session.kind) && !session.threadRef?.id) {
@@ -1301,6 +1298,36 @@ export default function TerminalPane({
     session.started,
     terminalReadyToken
   ]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    const currentRuntime = runtimeRef.current;
+    if (!usesRuntime || !session.started || !terminal || terminalReadyToken === 0 ||
+        !currentRuntime || currentRuntime.processState === "starting") return;
+
+    // Preparation can fail before the PTY exists, leaving no snapshot to
+    // replay when the user first visits a background-created pane.
+    if (currentRuntime.processState === "failed") {
+      terminal.writeln(`\x1b[31m${currentRuntime.binding.message || "Terminal launch failed. Use Restart to retry."}\x1b[0m`);
+      return;
+    }
+    let cancelled = false;
+    // This operation can only replay an admitted generation. It never starts
+    // a process, resolves a command, or retries an unsuccessful launch.
+    void window.vibe?.terminal.attach({
+      id: session.id,
+      launchToken: session.launchToken,
+      generation: currentRuntime.generation,
+      cols: fitMeasuredRef.current ? terminal.cols : undefined,
+      rows: fitMeasuredRef.current ? terminal.rows : undefined
+    }).catch(error => {
+      if (!cancelled && terminalRef.current === terminal) {
+        terminal.writeln(`\x1b[31mCould not attach to terminal: ${String(error)}\x1b[0m`);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [session.id, session.launchToken, session.started, usesRuntime,
+    terminalReadyToken, runtime?.generation, runtime?.processState]);
 
   function scheduleThreadLookup(delayMs: number, finalAttempt = false) {
     if (ownsRuntime()) return;

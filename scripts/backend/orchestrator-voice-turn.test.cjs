@@ -112,7 +112,9 @@ test('respond complete cannot bypass an unfinished terminal grant and must conti
   };
   const result = await f.app.send({ text: 'Send echo ready to Project Alpha', origin: 'voice' });
   assert.equal(result.ok, true); assert.equal(f.effects.length, 1); assert.equal(f.effects[0].text, 'echo ready');
-  assert.equal(f.calls.length, 3); assert.equal(f.spoken.length, 1); assert.equal(f.spoken[0].text, 'Sent to Project Alpha.');
+  assert.equal(f.calls.length, 3); assert.equal(f.spoken.length, 2); assert.equal(f.spoken[0].text, 'Sent to Project Alpha.');
+  assert.equal(f.spoken[1].kind, 'task-report'); assert.equal(f.spoken[1].requestId, result.requestId);
+  assert.match(f.spoken[1].text, /plain shell.*Completion is unverified/);
 });
 
 test('a rejected response cannot make a later complete bypass unfinished authorized work', async t => {
@@ -132,5 +134,7 @@ test('a rejected response cannot make a later complete bypass unfinished authori
   const result = await f.app.send({ text: 'Send echo ready to Project Alpha', origin: 'voice' });
   assert.equal(f.effects.length, 1); assert.equal(f.effects[0].text, 'echo ready');
   assert.equal(f.calls.length, 4); assert.equal(result.actions[0].status, 'rejected');
-  assert.equal(f.spoken.length, 1); assert.notEqual(f.spoken[0].text, 'All done.');
+  assert.equal(f.spoken.length, 2); assert.notEqual(f.spoken[0].text, 'All done.');
+  assert.equal(f.spoken[1].kind, 'task-report'); assert.equal(f.spoken[1].requestId, result.requestId);
+  assert.match(f.spoken[1].text, /plain shell.*Completion is unverified/);
 });

@@ -154,6 +154,54 @@ function runMetadataHook(file, args, env, input) {
       assert.equal(activity.toolId, "native-tool");
       assert.equal(activity.rootVerified, undefined);
       assert.equal(events.at(-1).providerTurnId, "native-turn");
+
+      const question = { session_id: "native-thread", turn_id: "native-turn", tool_use_id: "question-tool",
+        tool_name: "AskUserQuestion", tool_input: { questions: [{ question: "SECRET QUESTION" }] } };
+      start = events.length;
+      await runMetadataHook(file, ["agent.running", "tool"], instrument.env, { ...question, hook_event_name: "PreToolUse" });
+      const questionEvents = events.slice(start);
+      assert.equal(questionEvents.length, 2);
+      assert.equal(questionEvents[0].type, "agent-activity");
+      assert.equal(questionEvents[0].phase, "start");
+      assert.equal(questionEvents[0].toolId, "question-tool");
+      assert.equal(questionEvents[1].type, provider === "claude" ? "agent-attention" : "agent-running");
+      if (provider === "claude") {
+        assert.equal(questionEvents[1].attention.state, "waiting");
+        assert.equal(questionEvents[1].attention.reason, "question");
+        assert.equal(questionEvents[1].toolName, "AskUserQuestion");
+        assert.equal(questionEvents[1].toolId, "question-tool");
+      }
+      assert.equal(JSON.stringify(questionEvents).includes("SECRET QUESTION"), false);
+      for (const hookEvent of ["PostToolUse", "PostToolUseFailure"]) {
+        start = events.length;
+        await runMetadataHook(file, ["agent.running", "tool"], instrument.env, {
+          ...question, hook_event_name: hookEvent, tool_response: "SECRET ANSWER", error: "SECRET FAILURE"
+        });
+        assert.deepEqual(events.slice(start).map(event => event.type), ["agent-activity", "agent-running"]);
+        assert.equal(events.at(-2).phase, "stop");
+        assert.equal(events.at(-2).toolId, "question-tool");
+        assert.equal(events.at(-1).turnStart, false);
+        assert.equal(JSON.stringify(events.slice(start)).includes("SECRET"), false);
+      }
+
+      if (provider === "claude") {
+        // Simulate the old generated idle hook, including the native payload.
+        start = events.length;
+        await runMetadataHook(file, ["agent.waiting", "question"], instrument.env, {
+          hook_event_name: "Notification", session_id: "native-thread", notification_type: "idle_prompt",
+          message: "SECRET IDLE MESSAGE"
+        });
+        assert.equal(events.length, start, "old idle notifications must not emit required-input attention");
+        await runMetadataHook(file, ["agent.waiting", "approval"], instrument.env, {
+          hook_event_name: "Notification", session_id: "native-thread", notification_type: "permission_prompt",
+          message: "SECRET PERMISSION MESSAGE"
+        });
+        assert.equal(events.at(-1).type, "agent-attention");
+        assert.equal(events.at(-1).attention.state, "waiting");
+        assert.equal(events.at(-1).attention.reason, "approval");
+        assert.equal(events.at(-1).notificationType, "permission_prompt");
+        assert.equal(JSON.stringify(events.at(-1)).includes("SECRET"), false);
+      }
     }
   }
   const cursor = await manager.prepareSession("metadata-cursor", { generation: "metadata", provider: "cursor" });

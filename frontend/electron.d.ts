@@ -147,6 +147,7 @@ declare global {
       };
       terminal: {
         create: (payload: TerminalLaunchPayload) => Promise<boolean | { ok?: boolean; generation?: string; launchToken?: number; cancelled?: boolean; error?: string }>;
+        attach: (payload: { id: string; launchToken: number; generation?: string; cols?: number; rows?: number }) => Promise<{ ok: boolean; generation?: string; launchToken?: number; status?: string; error?: string }>;
         input: (id: string, data: string, scope?: { generation?: string; launchToken?: number }) => void;
         resize: (id: string, cols: number, rows: number, scope?: { generation?: string; launchToken?: number }) => void;
         kill: (id: string, scope?: { generation?: string; launchToken?: number; reason?: "close" | "restart" }) => Promise<boolean>;

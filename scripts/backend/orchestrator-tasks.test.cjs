@@ -6,6 +6,65 @@ const os = require('node:os');
 const path = require('node:path');
 const { createOrchestrator } = require('../../backend/orchestrator.cjs');
 const { createTaskScheduler } = require('../../backend/orchestratorTasks.cjs');
+
+test('partial completion preserves sibling waits and current inventory readiness', async () => {
+  const tasks = createTaskScheduler();
+  const job = tasks.create({ text: 'Both tasks', origin: 'text' });
+  for (const id of ['s', 'other']) tasks.track(job, { kind: 'send_prompt', actionId: id, targetId: id, generation: 'g' }, { ok: true, status: 'written', turnId: `${id}-old` });
+  job.executionDone = true; tasks.update(job, { status: 'waiting-results' });
+  tasks.reconcile([{ id: 's', generation: 'g', kind: 'codex', turnId: 'newer', turnState: 'running' }, { id: 'other', generation: 'g', turnId: 'other-old', turnState: 'running' }]);
+  tasks.reconcile([{ id: 's', generation: 'stale', turnId: 's-old', turnState: 'completed' }], { partial: true });
+  assert.equal(job.waits[0].done, false);
+  tasks.reconcile([{ id: 's', generation: 'g', turnId: 's-old', turnState: 'completed' }], { partial: true });
+  assert.equal(job.waits[0].done, true);
+  assert.equal(job.waits[1].done, false); assert.equal(job.waits[1].failed, undefined);
+  const next = tasks.create({ text: 'Next task', origin: 'text' });
+  next.lanes = [{ key: 'terminal:s', targetIds: ['s'], readOnly: false }];
+  let ready = false;
+  const pending = tasks.ready(next).then(() => { ready = true; }, () => {});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(ready, false, 'old completion event cannot replace newer busy readiness');
+  next.controller.abort(); await pending;
+});
+
+test('cached completed identity never borrows the newer turn state, and ambiguity remains tracked', () => {
+  const tasks = createTaskScheduler({ now: () => 100 });
+  const job = tasks.create({ text: 'Work', origin: 'text' });
+  tasks.track(job, { kind: 'send_prompt', actionId: 'ours', targetId: 's', generation: 'g' }, { ok: true, status: 'unknown', turnId: 'our-turn' }, { kind: 'codex', turnState: 'idle' });
+  job.executionDone = true; tasks.update(job, { status: 'waiting-results' });
+  const session = { id: 's', generation: 'g', turnId: 'newer', completedTurnId: 'our-turn', completedActionId: 'ours', actionId: 'human' };
+  for (const turnState of ['running', 'failed', 'completed']) {
+    tasks.reconcile([{ ...session, turnState }]);
+    assert.equal(job.waits[0].done, false); assert.equal(job.waits[0].observedState, undefined);
+  }
+  tasks.reconcile([{ ...session, turnId: 'our-turn', actionId: 'ours', turnState: 'running' }]);
+  assert.equal(job.waits[0].observedState, 'running'); assert.doesNotMatch(job.task.waitingReason, /uncertain/);
+  tasks.reconcile([{ ...session, turnId: 'our-turn', turnState: 'completed', completionAttribution: 'ambiguous' }]);
+  assert.equal(job.waits[0].attributionAmbiguous, true); assert.equal(job.waits[0].done, false);
+  assert.match(job.task.waitingReason, /cannot be attributed/);
+  tasks.reconcile([{ ...session, turnId: 'our-turn', turnState: 'completed' }]);
+  assert.equal(job.waits[0].attributionAmbiguous, false); assert.equal(job.task.status, 'finished');
+});
+
+test('queued delivery cannot attribute an intervening turn using the original idle baseline', () => {
+  for (const freshBaseline of [false, true]) {
+    const tasks = createTaskScheduler({ now: () => 100 });
+    const job = tasks.create({ text: 'Queued work', origin: 'text' });
+    tasks.track(job, { kind: 'send_prompt', actionId: 'ours', targetId: 's', generation: 'g' }, { ok: true, status: 'queued' }, { kind: 'codex', turnId: 'old', turnState: 'idle', submittedAt: 100 });
+    job.executionDone = true; tasks.update(job, { status: 'waiting-results' });
+    const human = { id: 's', generation: 'g', turnId: 'human', completedTurnId: 'human', completedActionId: 'human-action', turnState: 'completed', turnStartedAt: 101 };
+    tasks.reconcile([human]);
+    tasks.delivery({ actionId: 'ours', ok: true, status: 'written', ...(freshBaseline && { deliveryBaseline: { kind: 'codex', submittedAt: 102, turnId: 'human', turnState: 'completed' } }) });
+    tasks.reconcile([human]);
+    assert.equal(job.task.status, 'waiting-results'); assert.equal(job.waits[0].observedState, undefined);
+    tasks.reconcile([{ ...human, turnId: 'our-turn', actionId: 'ours', turnStartedAt: 103, turnState: 'waiting' }]);
+    assert.equal(job.waits[0].observedState, 'waiting');
+    assert.equal(job.waits[0].turnId, 'our-turn');
+    assert.match(job.task.waitingReason, /needs input/);
+    tasks.reconcile([{ ...human, turnId: 'our-turn', completedTurnId: 'our-turn', completedActionId: 'ours', turnState: 'failed' }]);
+    assert.equal(job.task.status, 'failed'); assert.match(job.waits[0].error, /failed/);
+  }
+});
 const { fitMessages } = require('../../backend/orchestratorBudget.cjs');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 async function until(fn) { for (let i = 0; i < 300; i++) { if (fn()) return; await tick(); } assert.fail('Condition was not reached.'); }
@@ -99,7 +158,9 @@ test('semantic dependencies wait without executor calls, then include observed r
 test('one utterance review then fix starts its literal future clause once with full constraints', async t => {
   const f = await fixture(t); const original = 'Review changes then fix findings, and do not commit.';
   f.plan = context => context.instruction === original ? { goal: 'Review before fixing.', executionMode: 'direct', afterResults: { instruction: 'fix findings' }, actions: [{ kind: 'send_prompt', targetIds: ['s0'], text: 'Review changes. Do not commit.' }] } : { goal: 'Fix findings without committing.', executionMode: 'direct', actions: [{ kind: 'send_prompt', targetIds: ['s0'], text: `Fix findings. Do not commit. ${context.dependencyResults[0].result.text}` }] };
-  await f.app.send({ text: original, targetId: 's0', origin: 'text' });
+  f.respond = body => body.messages.some(message => message.role === 'tool') ? reply('The review prompt was sent.') : { choices: [{ message: { tool_calls: [{ id: 'send-review', function: { name: 'workspace', arguments: JSON.stringify({ kind: 'send_prompt', targetId: 's0', grantId: JSON.parse(body.messages[1].content).authorizedCommands.grants[0].id }) } }] } }] };
+  const initial = await f.app.send({ text: original, targetId: 's0', origin: 'text' });
+  assert.equal(initial.ok, true, JSON.stringify(initial));
   assert.equal(f.effects.length, 1); await f.finish('s0'); await until(() => f.effects.length === 2);
   assert.equal(f.contexts[1].originalInstruction, original); assert.equal(f.contexts[1].instruction, 'fix findings');
   await f.app.refresh(); await tick(); assert.equal(f.effects.length, 2);

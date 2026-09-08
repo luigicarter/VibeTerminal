@@ -71,3 +71,14 @@ test('secret lookup failure drops the record and oversized existing active logs 
   fail = false; logger.record({ event: 'recovered' }); await logger.flush();
   assert.deepEqual(f.read().map(r => r.event), ['recovered']); assert.deepEqual(fs.readdirSync(path.dirname(f.filename)), ['orchestrator-errors.jsonl']);
 });
+test('native control diagnostics retain bounded named controls without raw text or escape bytes', async t => {
+  const f = fixture(t), logger = f.open();
+  logger.record({ event:'terminal_control', nativeKeys:['ctrl-c','ctrl-u'], lifecycleMode:'preserve', editInput:true, processState:'running', agentProcessState:'exited', prompt:'private prompt', text:'private typed input', data:'\x03', keys:['private raw keys'] });
+  for (const nativeKeys of [['ctrl-c','private prompt'], ['\x03'], Array(17).fill('ctrl-u'), 'ctrl-c', [42]]) logger.record({ event:'invalid-control',nativeKeys,lifecycleMode:'private mode',editInput:'yes',processState:'private state',agentProcessState:'arbitrary' });
+  logger.record({event:'bounded-controls',nativeKeys:Array(16).fill('ctrl-u'),lifecycleMode:'interrupt',editInput:false,agentProcessState:'unknown'});
+  await logger.flush(); const records=f.read();
+  assert.deepEqual(records[0].nativeKeys,['ctrl-c','ctrl-u']); assert.equal(records[0].lifecycleMode,'preserve'); assert.equal(records[0].editInput,true); assert.equal(records[0].processState,'running'); assert.equal(records[0].agentProcessState,'exited');
+  for(const record of records.slice(1,-1)) for(const field of ['nativeKeys','lifecycleMode','editInput','processState','agentProcessState']) assert.equal(record[field],undefined);
+  assert.equal(records.at(-1).nativeKeys.length,16); assert.equal(records.at(-1).editInput,false);
+  assert.doesNotMatch(fs.readFileSync(f.filename,'utf8'),/private|arbitrary|prompt|typed|\\u0003/);
+});

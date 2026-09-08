@@ -1,5 +1,7 @@
 'use strict';
 const { randomUUID } = require('node:crypto');
+const { isObservedBusyPrompt } = require('./orchestratorBusyInput.cjs');
+const { projectInputAuthority, sameInputAuthority } = require('./orchestratorInputAuthority.cjs');
 
 // Observation authority belongs to one live request. Screen content is evidence,
 // never an instruction or a capability. Even unchanged screens need a new token
@@ -13,21 +15,30 @@ function createOperatorObservations({ now = Date.now } = {}) {
     const token = randomUUID();
     const record = { token, targetId: target.id, generation: target.generation, revision: target.revision,
       sequence: observation?.sequence, inputRevision: observation?.inputRevision, serial: ++serial, at: now(),
-      requests: structuredClone(requests), used: false };
+      runtime: Object.fromEntries(['id', 'generation', 'kind', 'provider', 'observation', 'started', 'launchState', 'processState', 'agentProcessState', 'agentPid', 'turnId', 'turnStartedAt', 'turnState', 'status', 'pendingInput', 'pendingInteraction', 'manualInputPending', 'interactionInputPending', 'heldMouseButton', 'binding', 'attention'].map(field => [field, structuredClone(target[field])])),
+      authority: projectInputAuthority(target, requests), requests: structuredClone(requests), used: false };
     tokens.set(token, record);
     while (tokens.size > 128) tokens.delete(tokens.keys().next().value);
     return token;
   }
-  function authorize(token, target, action) {
+  function authorize(token, target, action, requests = target.pendingInteractions || []) {
     const record = tokens.get(token);
     if (!record || record.used || record.targetId !== target.id || record.generation !== target.generation || now() - record.at > 30000)
       throw new Error('Read this terminal again before acting; the observation token is missing, used, or stale.');
-    // Runtime revisions include background telemetry and streamed output. A
-    // finish records the result supported by the last read, without sending
-    // input; requiring a quiet runtime across model latency can prevent it
-    // forever. Effects still require matching revisions, and finishing still
-    // requires an unexpired, unused token read after the last effect.
-    if (action.kind !== 'finish_terminal' && target.revision !== undefined && record.revision !== target.revision)
+    // Finishing records evidence without input. Native controls compare the
+    // frozen input authority rather than unrelated publication/metadata churn.
+    // Chat panes retain their existing broad revision boundary.
+    const prompt = { ...action, operator: true, promptSubmission: true, submit: true };
+    const busyPrompt = action.kind === 'send_prompt' && !record.requests.length && !requests.length
+      && isObservedBusyPrompt(prompt, record.runtime) && isObservedBusyPrompt(prompt, target)
+      && record.runtime.agentPid === target.agentPid && record.runtime.turnId === target.turnId
+      && record.runtime.turnStartedAt === target.turnStartedAt;
+    // Pure prompt submission rechecks live input ownership in the native adapter;
+    // unsupported busy composers queue for a fresh readiness check before writing.
+    const chat = ['fusion', 'openfusion'].includes(target.kind || target.provider);
+    if (action.kind !== 'finish_terminal' && !busyPrompt && (chat
+      ? target.revision !== undefined && record.revision !== target.revision
+      : !sameInputAuthority(record.authority, projectInputAuthority(target, requests))))
       throw new Error('The terminal changed after the last observation. Read it again.');
     const previous = lastActions.get(key(target));
     if (previous && record.serial <= previous.serial) throw new Error('Read the terminal after the last action before taking another step.');

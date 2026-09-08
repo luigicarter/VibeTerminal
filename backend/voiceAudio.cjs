@@ -72,6 +72,7 @@ function decodeSpeechAudio(input, contentType = '') {
       // decoding float or 32-bit data as s16le is noise, not a wrong-sounding voice.
       if (['bits', 'bitspersample'].includes(named[1]) && named[2] !== '16') invalid();
       if (['encoding', 'format'].includes(named[1]) && !['pcm', 'lpcm', 's16le', 'pcm_s16le', 'signed-integer'].includes(named[2])) invalid();
+      if (['endian', 'endianness'].includes(named[1]) && !['le', 'little', 'little-endian'].includes(named[2])) invalid();
       // Anything else descriptive (charset, codecs, ...) is not disqualifying; only a
       // malformed value for a parameter we actually read is.
       if (!['rate', 'channels'].includes(named[1])) continue;
@@ -114,4 +115,66 @@ function decodeSpeechWav(input) {
   if (!format || !pcm?.length || format.encoding !== 1 || format.bits !== 16 || ![1, 2].includes(format.channels) || format.sampleRate < 8000 || format.sampleRate > 48000 || format.align !== format.channels * 2 || format.byteRate !== format.sampleRate * format.align || pcm.length % format.align) invalid();
   return decodedPcm(pcm, format.sampleRate, format.channels, invalid);
 }
-module.exports = { RATE, wavFromSamples, createRecording, shouldSpeak, decodeSpeechWav, decodeSpeechAudio };
+
+// PCM can be played once its metadata and complete sample frames are known.
+// Containers must remain buffered until their complete structure is validated.
+function createSpeechAudioStream(contentType = '') {
+  if (contentType != null && (typeof contentType !== 'string' || contentType.length > 1024)) throw Error('Speech returned invalid or unsupported audio or PCM metadata.');
+  const mime = String(contentType ?? '').trim().split(';')[0].trim().toLowerCase();
+  let mode = ['', 'application/octet-stream'].includes(mime) ? 'sniff'
+    : ['audio/wav', 'audio/x-wav', 'audio/wave', 'audio/vnd.wave'].includes(mime) ? 'wav' : 'pcm';
+  let metadata = mode === 'pcm' ? decodeSpeechAudio(Buffer.alloc(4), contentType) : null;
+  let pending = Buffer.alloc(0), buffered = [], bytes = 0, pcmBytes = 0, initialChunk = true, ended = false;
+  const invalid = () => { throw Error('Speech returned invalid or unsupported audio or PCM metadata.'); };
+  const select = () => {
+    mode = pending.length >= 12 && pending.toString('ascii', 0, 4) === 'RIFF' && pending.toString('ascii', 8, 12) === 'WAVE' ? 'wav' : 'pcm';
+    if (mode === 'pcm') metadata = decodeSpeechAudio(Buffer.alloc(4), 'audio/pcm');
+  };
+  function drain(final = false) {
+    const chunks = [];
+    if (mode !== 'pcm') return chunks;
+    const { sampleRate, channels } = metadata, frameBytes = channels * 2;
+    if (final && (!pcmBytes || pending.length % frameBytes)) invalid();
+    while (pending.length) {
+      const size = (initialChunk ? Math.ceil(sampleRate / 10) : sampleRate) * frameBytes;
+      if (pending.length < size && !final) break;
+      const take = Math.min(size, pending.length);
+      chunks.push({ pcm: pending.subarray(0, take), sampleRate, channels });
+      pending = pending.subarray(take); initialChunk = false;
+    }
+    return chunks;
+  }
+  return {
+    push(raw) {
+      if (ended) throw Error('Speech audio stream already ended.');
+      const length = raw?.byteLength ?? raw?.length;
+      if (!Number.isSafeInteger(length) || length < 0) invalid();
+      if (bytes + length > 48000 * 4 * 180 + 65536 || bytes + length > 36 * 1024 * 1024) throw Error('Speech exceeded the audio size limit.');
+      const chunk = Buffer.from(raw); bytes += chunk.length;
+      if (mode === 'wav') { buffered.push(chunk); return []; }
+      pending = pending.length ? Buffer.concat([pending, chunk]) : chunk;
+      if (mode === 'sniff') {
+        if (pending.length < 12) return [];
+        select();
+        if (mode === 'wav') { buffered.push(pending); pending = Buffer.alloc(0); return []; }
+        pcmBytes = bytes;
+      } else pcmBytes += chunk.length;
+      if (pcmBytes > metadata.sampleRate * metadata.channels * 2 * 180) throw Error('Speech exceeded the three-minute playback limit.');
+      return drain();
+    },
+    finish() {
+      if (ended) throw Error('Speech audio stream already ended.');
+      ended = true;
+      if (mode === 'sniff') { select(); pcmBytes = bytes; }
+      if (mode === 'wav') {
+        const audio = decodeSpeechAudio(Buffer.concat(buffered), contentType);
+        metadata = audio; pending = audio.pcm; pcmBytes = pending.length; mode = 'pcm';
+        initialChunk = false; // Buffered WAV gains nothing from a shorter first node.
+      }
+      const chunks = drain(true);
+      return { chunks, sampleRate: metadata.sampleRate, channels: metadata.channels,
+        durationMs: pcmBytes / (metadata.sampleRate * metadata.channels * 2) * 1000 };
+    }
+  };
+}
+module.exports = { RATE, wavFromSamples, createRecording, shouldSpeak, decodeSpeechWav, decodeSpeechAudio, createSpeechAudioStream };

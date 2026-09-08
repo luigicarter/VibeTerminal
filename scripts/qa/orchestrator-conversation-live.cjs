@@ -7,18 +7,53 @@ const { spawnSync } = require('node:child_process');
 function fixture(cwd) {
   const pane = { id: 'Atlas', name: 'Atlas', provider: 'codex', kind: 'codex', cwd, generation: 'fixture-1', revision: 1, status: 'running', turnState: 'idle' };
   const actions = [], reads = [], history = Array.from({ length: 10 }, (_, i) => ({ id: `saved-${i}`, reference: `fixture-history-${i}`, title: i === 0 ? 'Mix 21 last attempt' : `Fixture conversation ${i}`, provider: 'codex', cwd, updatedAt: Date.now() - i * 1000 }));
-  let sequence = 1, inputRevision = 0, done = false;
+  let sequence = 1, inputRevision = 0, done = false, watchText, watchResult, draftText, draftCursor = 0, busyFollowup = false;
   return { pane, actions, reads, history,
-    sessions() { if (done) pane.revision++; return [{ ...pane }]; },
+    startBusyPrompt() { busyFollowup = true; draftText = undefined; watchText = undefined; watchResult = undefined; Object.assign(pane, { observation: 'observed', processState: 'running', agentProcessState: 'running', agentPid: 9001, turnState: 'running', status: 'running', turnId: 'fixture-busy', turnStartedAt: Date.now() - 1000, turnEndedAt: undefined, childActivity: true, pendingInput: undefined }); },
+    startDraft() { busyFollowup = false; draftText = 'unsent old draft'; draftCursor = draftText.length; watchText = undefined; watchResult = undefined; Object.assign(pane, { observation: 'observed', processState: 'running', agentProcessState: 'running', agentPid: 9001, turnState: 'idle', status: 'idle', childActivity: false, turnId: undefined, turnStartedAt: undefined, turnEndedAt: undefined }); },
+    get draft() { return draftText; },
+    startWatch() { busyFollowup = false; draftText = undefined; draftCursor = 0; watchText = 'The agent reports reviewing the last commit. Tests are running; no files have changed.'; watchResult = undefined; Object.assign(pane, { observation: 'observed', turnId: 'fixture-watch', turnStartedAt: Date.now() - 500, turnEndedAt: undefined, turnState: 'running', status: 'running', childActivity: false, actionId: undefined, completedTurnId: undefined, completedActionId: undefined }); },
+    endWatch() { watchText = 'Review complete. No defects were found in the last commit. 12 unit tests passed. No files changed.'; Object.assign(pane, { turnState: 'completed', status: 'completed', turnEndedAt: Date.now(), completedTurnId: pane.turnId }); return watchResult = { turnId: pane.turnId, status: 'completed', at: pane.turnEndedAt, source: 'terminal-screen', text: watchText }; },
+    sessions() { if (done || busyFollowup) pane.revision++; return [{ ...pane }]; },
     read(input) {
       assert.equal(input.id, pane.id); reads.push({ sequence, inputRevision, afterActions: actions.length });
-      return { ok: true, id: pane.id, generation: pane.generation, sequence, observationSequence: sequence, inputRevision, inputState: { kind: 'empty', hasText: false }, text: done ? 'Review complete: the last commit has no defects in this fixture. No files changed.' : 'Codex idle. Empty task prompt. Ready to receive a task.' };
+      if (busyFollowup) return { ok: true, id: pane.id, generation: pane.generation, turnId: pane.turnId, sequence, observationSequence: sequence, inputRevision, inputState: { kind: 'empty', hasText: false }, text: 'Codex is actively working on its current review. Background tools are running. Root task composer is empty and available for a followup. No question or permission is pending.' };
+      if (draftText !== undefined) return { ok: true, id: pane.id, generation: pane.generation, sequence, observationSequence: sequence, inputRevision,
+        manualInputPending: Boolean(draftText), inputState: { kind: draftText ? 'text' : 'empty', hasText: Boolean(draftText) },
+        text: `Codex is running. Task composer (cursor offset ${draftCursor}):\n> ${draftText}\n${draftText ? 'Unsent draft; nothing has been submitted.' : 'Empty task composer; agent remains open.'}` };
+      return { ok: true, id: pane.id, generation: pane.generation, turnId: pane.turnId, turnState: pane.turnState, sequence, observationSequence: sequence, inputRevision, inputState: { kind: 'empty', hasText: false }, completedResult: watchResult, text: watchText ?? (done ? 'Review complete: the last commit has no defects in this fixture. No files changed.' : 'Codex idle. Empty task prompt. Ready to receive a task.') };
     },
     dispatch(action) {
       if (action.kind === 'list_conversations') return { ok: true, conversations: history.filter(item => !action.query || item.title.toLowerCase().includes(action.query.toLowerCase())), total: history.length, nextOffset: null };
       if (['read_conversation', 'search_conversation'].includes(action.kind)) { const identity = history.find(item => item.reference === action.reference); assert.ok(identity); return { ok: true, identity, messages: [{ role: 'user', text: 'Review the Mix 21 implementation.' }], hasMore: false }; }
       if (action.kind === 'resume_conversation') { assert.equal(action.reference, history[0].reference); actions.push({ kind: action.kind, reference: action.reference }); return { ok: true, status: 'resumed', id: pane.id, target: { id: pane.id, generation: pane.generation } }; }
       assert.equal(action.targetId, pane.id); assert.equal(action.generation, pane.generation);
+      if (busyFollowup) {
+        assert.equal(action.kind, 'send_prompt', 'Busy followups must not interrupt, clear input or send extra Enter');
+        assert.equal(action.operator, true); assert.equal(action.observationSequence, sequence); assert.equal(action.inputRevision, inputRevision);
+        assert.equal(pane.turnState, 'running'); assert.equal(pane.agentProcessState, 'running');
+        assert.match(action.text, /error handling/i); assert.ok(!action.editInput);
+        actions.push({ kind: action.kind, text: action.text, whileWorking: true }); sequence++; inputRevision++;
+        return { ok: true, status: 'written', inputDisposition: 'submitted-while-running', deliveryBaseline: { kind: 'codex', turnId: pane.turnId, turnState: pane.turnState, submittedAt: Date.now() } };
+      }
+      if (draftText !== undefined) {
+        assert.equal(action.kind, 'terminal_interact', 'Clearing must not send a task or interrupt/exit');
+        if (draftText && action.editInput !== true) return { ok: false, status: 'input-buffer-occupied', delivery: 'not-dispatched', error: 'Unsent input is present. For the user-authorized edit, set editInput:true on terminal_interact. Nothing was written.' };
+        assert.equal(action.observationSequence, sequence); assert.equal(action.inputRevision, inputRevision);
+        assert.ok(!action.text && !action.submit && !action.mouse);
+        for (const key of action.keys || []) {
+          assert.ok(!['ctrl-c', 'ctrl-d', 'ctrl-z', 'ctrl-backslash', 'enter', 'ctrl-m', 'ctrl-j'].includes(key), 'Exit or submission key used for clearing');
+          if (['home', 'ctrl-home', 'ctrl-a'].includes(key)) draftCursor = 0;
+          else if (['end', 'ctrl-end', 'ctrl-e'].includes(key)) draftCursor = draftText.length;
+          else if (key === 'ctrl-u') { draftText = draftText.slice(draftCursor); draftCursor = 0; }
+          else if (key === 'ctrl-k') draftText = draftText.slice(0, draftCursor);
+          else if (key === 'backspace' && draftCursor > 0) { draftText = draftText.slice(0, draftCursor - 1) + draftText.slice(draftCursor); draftCursor--; }
+          else if (key === 'delete') draftText = draftText.slice(0, draftCursor) + draftText.slice(draftCursor + 1);
+          else assert.fail(`Unsupported fixture editing key ${key}`);
+        }
+        sequence++; inputRevision++; actions.push({ kind: action.kind, keys: action.keys, editInput: action.editInput });
+        return { ok: true, status: 'written' };
+      }
       assert.ok(['send_prompt', 'terminal_interact', 'focus_session'].includes(action.kind), `Unexpected effect ${action.kind}`);
       if (action.kind !== 'focus_session') {
         assert.equal(action.operator, true); assert.ok(action.stepId); assert.equal(action.observationSequence, sequence); assert.equal(action.inputRevision, inputRevision);
@@ -101,7 +136,30 @@ async function main() {
   assert.equal((await relay.configure({ apiKey: secret, sessionOnly: true, model, spendingLimit: budget })).ok, true);
   assert.equal((await relay.setEnabled(true)).ok, true);
   let beforeSpokenResume = 0, spokenQuestion;
+  let beforeWatchEffects = 0;
+  let beforeBusyEffects = 0;
   const scenarios = [
+    { name: 'prompt-while-working', text: 'Prompt Atlas to also review error handling while it continues its current work. Do not interrupt it.', input: () => { beforeBusyEffects = f.actions.length; f.startBusyPrompt(); return { text: 'Prompt Atlas to also review error handling while it continues its current work. Do not interrupt it.', targetId: 'Atlas', origin: 'voice' }; }, check: result => {
+      assert.equal(f.actions.length, beforeBusyEffects + 1); assert.equal(f.actions.at(-1).whileWorking, true);
+      assert.equal(f.pane.turnState, 'running'); assert.equal(f.pane.agentProcessState, 'running');
+      assert.ok(result.actions.some(action => action.inputDisposition === 'submitted-while-running'));
+      assert.equal(relay.getState().tasks.find(task => task.requestId === result.requestId)?.status, 'waiting-results');
+    } },
+    { name: 'safe-clear-input', text: 'Clear the unsent text in Atlas, keeping Codex open.', input: () => { f.startDraft(); return { text: 'Clear the unsent text in Atlas, keeping Codex open.', targetId: 'Atlas', origin: 'voice' }; }, check: result => {
+      assert.equal(f.draft, '', 'The editor must actually be empty'); assert.equal(f.pane.agentProcessState, 'running');
+      assert.equal(result.responseTurn, 'complete'); assert.match(result.text, /clear|empty|removed/i);
+    } },
+    { name: 'watch-existing-work', text: 'Watch Atlas and tell me when its current task is done, including what it did and any issues.', input: () => { beforeWatchEffects = f.actions.length; f.startWatch(); return { text: 'Watch Atlas and tell me when its current task is done, including what it did and any issues.', targetId: 'Atlas', origin: 'voice' }; }, check: async result => {
+      assert.equal(f.actions.length, beforeWatchEffects, 'Watching must not send anything to the terminal');
+      assert.equal(relay.getState().tasks.find(task => task.requestId === result.requestId)?.status, 'waiting-results');
+      const evidence = f.endWatch(); relay.observeWork([{ ...f.pane }]); relay.observeWork([{ ...f.pane }], evidence);
+      for (const deadline = Date.now() + 60000; Date.now() < deadline;) {
+        const summary = relay.getState().messages.find(message => message.requestId === result.requestId && message.origin === 'task-detail' && /12|twelve/i.test(message.text));
+        if (summary) { assert.match(summary.text, /test/i); assert.match(summary.text, /no (?:files|defects)|unchanged|without (?:any )?(?:file )?changes/i); assert.equal(f.actions.length, beforeWatchEffects); return; }
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      throw Error('The watched turn ended without a useful result summary.');
+    } },
     { name: 'greeting', text: 'Hey Vibe, how are you?', check: result => { assert.ok(result.text.length < 400); assert.doesNotMatch(result.text, /you (?:want|asked)|authorizedCommands|grantId/i); assert.equal(f.actions.length, 0); } },
     { name: 'history-shortlist', text: 'What recent saved conversations do I have?', check: result => { assert.match(result.text, /Mix 21/i); assert.ok(result.text.length < 1100, 'Voice history is too long'); assert.ok((result.text.match(/Fixture conversation/g) || []).length <= 2, 'Voice history dumped the directory'); } },
     { name: 'exact-history-resume', text: 'Resume conversation "Mix 21 last attempt"', check: () => assert.equal(f.actions.filter(action => action.kind === 'resume_conversation').length, 1) },
@@ -118,7 +176,7 @@ async function main() {
     try {
       const result = await relay.send(scenario.input ? scenario.input() : { text: scenario.text, origin: 'voice' });
       row.result = { ok: result.ok, text: clean(result.text), error: clean(result.error), status: result.status, responseTurn: result.responseTurn };
-      assert.equal(result.ok, true, clean(result.error || result.text)); scenario.check(result); row.ok = true;
+      assert.equal(result.ok, true, clean(result.error || result.text)); await scenario.check(result); row.ok = true;
     } catch (error) { row.ok = false; row.error = clean(error.message); }
     finally { clearTimeout(timer); scenarioSignal = undefined; }
     row.receipts = relay.getState().receipts.map(({ kind, status, text }) => ({ kind, status, text: clean(text) }));

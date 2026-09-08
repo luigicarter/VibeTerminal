@@ -52,6 +52,7 @@ const handle=electron.ipcMain.handle.bind(electron.ipcMain);
 const orchestration=require(${JSON.stringify(path.join(root, 'backend/orchestrator.cjs'))});const createRelay=orchestration.createOrchestrator;let qaRelay;
 orchestration.createOrchestrator=options=>(qaRelay=createRelay({...options,interpretIntent:require(${JSON.stringify(path.join(root, 'scripts/backend/orchestrator-test-intent.cjs'))}).interpretTestIntent}));
 electron.ipcMain.handle=(channel,listener)=>handle(channel,async(event,...args)=>{ const value=await listener(event,...args); if(channel==='voice:configure')log({channel,payload:args[0],value}); return value; });
+const captureTokensSeen=new Set();electron.ipcMain.on('voice:frames',(_event,packet)=>{if(packet?.samples?.length&&!captureTokensSeen.has(packet.captureToken)){captureTokensSeen.add(packet.captureToken);log({captureFrames:{captureToken:packet.captureToken,samples:packet.samples.length}});}});
 const surface=require(${JSON.stringify(path.join(root, 'backend/voiceOverlayWindow.cjs'))}); const original=surface.createVoiceOverlayWindow;
 surface.createVoiceOverlayWindow=options=>original({...options,BrowserWindow:class extends options.BrowserWindow{constructor(config){super(config);log({nativeOptions:{width:config.width,height:config.height,frame:config.frame,transparent:config.transparent,alwaysOnTop:config.alwaysOnTop,focusable:config.focusable,backgroundThrottling:config.webPreferences.backgroundThrottling}});this.on('show',()=>log({unexpectedNativeAudioShow:true}));}}});
 globalThis.fetch=async(url,options={})=>{
@@ -236,6 +237,19 @@ async function screenshot(client, name) { if (hidden) { result.skippedScreenshot
   record('repeat-wake-and-click-send-through-real-flush', { recordingId:nextRecording.recordingId });
   assert.equal((await cdp.eval('window.vibe.orchestrator.configure({handsFreeEnabled:false})')).ok, true);
   assert.equal((await cdp.eval('window.vibe.voice.getState()')).handsFreeStatus, 'off');
+  const beforeRecovery = await cdp.eval('window.vibe.voice.getState()');
+  const stoppedBeforeRecovery = await voice.eval('window.__qaStoppedTracks.length');
+  const recovered = await voice.eval(`window.vibe.voice.configure({captureStalled:true,captureToken:${beforeRecovery.captureToken}})`);
+  assert.equal(recovered.status, 'recovering');
+  const recoveredState = await until(async () => {
+    const s = await cdp.eval('window.vibe.voice.getState()');
+    return s.listening && s.captureToken !== beforeRecovery.captureToken && !s.captureRecovering &&
+      events().some(e => e.payload?.microphoneReady && e.payload.captureToken === s.captureToken && e.value?.ok) &&
+      events().some(e => e.captureFrames?.captureToken === s.captureToken) && s;
+  }, 'capture restart produces fresh microphone PCM and readiness', 20000);
+  assert((await voice.eval('window.__qaStoppedTracks.length')) > stoppedBeforeRecovery);
+  assert.equal((await voice.eval(`window.vibe.voice.configure({captureStalled:true,captureToken:${beforeRecovery.captureToken}})`)).status, 'stale');
+  record('capture-stall-recreates-real-graph-without-muting', { beforeToken: beforeRecovery.captureToken, captureToken: recoveredState.captureToken, listening: recoveredState.listening });
   assert.equal((await cdp.eval('window.vibe.orchestrator.setEnabled(false)')).ok, true);
   const stoppedTracks = await until(() => voice.eval('window.__qaStoppedTracks.some(t=>t.kind==="audio"&&t.before==="live"&&t.after==="ended")&&window.__qaStoppedTracks'), 'actual audio capture track stopped');
   const off = await cdp.eval('window.vibe.voice.getState()'); assert.equal(off.listening, false); assert.equal(off.phase, 'off'); record('off-tears-down-capture', { off, stoppedTracks });

@@ -9,6 +9,7 @@ function sessionSummary(s) {
     name: s.name, conversationTitle: s.conversationTitle || native?.title,
     aliases: [...new Set((s.aliases || []).filter(v => typeof v === 'string'))].slice(0, 5),
     kind: s.kind, provider: s.provider, cwd: s.cwd, projectName: s.projectName,
+    turnId: s.turnId, turnState: s.turnState, turnStartedAt: s.turnStartedAt, turnEndedAt: s.turnEndedAt, pendingInput: s.pendingInput,
     status: s.status, observation: s.observation, lastActivityAt: s.lastActivityAt,
     home: s.openFusion || s.kind === 'openfusion' ? 'openfusion' : s.providerProfileId ? 'custom' : 'global',
     conversationId: native?.id

@@ -5,10 +5,10 @@ const { createVoiceController } = require('../../backend/voiceController.cjs');
 function fixture(t, fetch, options = {}) {
   const events = []; let controller;
   controller = createVoiceController({
-    orchestrator: { getState: () => ({ enabled: true }), send: async () => ({ ok: true }), recordDiagnostic: event => { events.push(event); return options.hook?.(event); } },
+    orchestrator: { getState: () => ({ enabled: true }), send: async () => ({ ok: true }), recordDiagnostic: event => { if (event.event === 'voice_error') events.push(event); return options.hook?.(event); } },
     getKey: () => 'private-key', getSettings: () => ({ sttModel: 'test-stt' }), fetch,
     errorAudio: { load: () => ({ pcm: Buffer.alloc(2), durationMs: 1 }) },
-    onAudio: chunk => { if (chunk.done && !chunk.cancelled) queueMicrotask(() => controller.configure(options.playbackFailure && !chunk.local ? { playbackError: 'device failed' } : { playbackDone: chunk.replyId })); },
+    onAudio: chunk => { if (chunk.done && !chunk.cancelled) queueMicrotask(() => controller.configure(options.playbackFailure && !chunk.local ? { playbackError: 'device failed', playbackReplyId: chunk.replyId } : { playbackDone: chunk.replyId })); },
   });
   t.after(() => controller.dispose());
   return { controller, events };

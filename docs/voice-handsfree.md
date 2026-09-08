@@ -9,11 +9,18 @@ Wake detection runs while idle, including when the workspace is in the backgroun
 It pauses during recording, transcription, assistant work, and playback. Space can
 interrupt playback. When a spoken question finishes, voice listens for the answer
 automatically and retains the question's request or pane/generation/revision identity.
+Holding Space while a question is still being generated or spoken also retains
+that answer route, including earlier answers on a multi-question form. A short
+tap returns to its answer window; replaced questions cannot receive stale answers.
 The model explicitly marks whether its response needs a reply; punctuation does not
 decide microphone behavior. Questions and decisions open a fifteen-second answer
 window. Completed replies return to standby. Followup detection also runs temporarily
 when **Hands-free voice** is off, without enabling wake detection or changing the
 saved preference. If the detector cannot start, the indicator offers Space to answer.
+Conversational follow-ups carry their original request identity and bounded
+exchange context through both model stages, even after other requests fill recent
+history. Explicit choices such as “the second one” work without an extra model
+turn; qualified answers still go through the Orchestrator.
 
 Say **never mind**, **that's all**, **stop listening**, **dismiss**, or **go back to
 sleep** to dismiss the voice exchange, or click the indicator's **X**. These phrases
@@ -41,6 +48,10 @@ still go to the Orchestrator. The indicator stays visible; its menu separately o
   model. The companion is refreshed on a speech onset after 200 ms quiet, with
   a two-second cooldown and 300 ms replay. This addresses context and framing
   misses without resetting the primary stream mid-speech. Detections are deduplicated.
+  The companion applies a fixed gain chosen from that onset (target peak 0.15,
+  maximum 8×) to help quiet speech; later samples are clipped to the PCM range.
+  Gain stays fixed until its next onset/reset. The primary stream, VAD input and
+  keyword confidence threshold remain unchanged.
 - Native token timestamps lose their absolute origin after upstream resets. Reported
   positions are conservative approximations and are never used to trim recordings.
 
@@ -86,12 +97,29 @@ Automatic capture cancels at 60 seconds
 if speech keeps it open. Questions expire after 15 seconds without an answer; speech classification
 stops that timer. Manual recording retains its existing length cap.
 
-Startup has a 15-second deadline, completion a one-second deadline, each streaming
-response a two-second deadline, and streaming backlog is limited to 500 ms. The streaming
-deadline also catches a stalled helper after microphone delivery pauses.
-Failure disables hands-free for that activation and
-cancels affected automatic recording with feedback. Text and Space remain usable.
-Toggle hands-free off/on to retry. Mute, disable, and shutdown release the helpers.
+Keyword startup has a 15-second deadline and each dispatched streaming response
+has a two-second deadline. Only one frame is in flight; up to two seconds of audio
+can wait in the parent queue. Short delivery bursts retain every classification.
+Sustained idle wake backlog discards stale queued audio and resets the stream at
+the gap; recording/VAD backlog instead cancels the incomplete automatic turn.
+Keyword faults retry after 0.5, 1.5 and 4 seconds, at most three times in a rolling
+minute. Space remains available during recovery. Persistent failures show an
+explicit unavailable state; toggling hands-free retries with a fresh budget.
+
+Semantic completion loads and retries independently (1, 2 and 4 seconds). Its
+one-second inference deadline never disables a healthy wake/VAD helper. While
+completion is unavailable, the existing three-second classified-silence fallback
+finishes commands. Each helper verifies only its own required model assets;
+offline preparation still verifies the entire pinned manifest.
+
+Capture also has a PCM heartbeat: 3.5 seconds without packets attempts to resume a
+suspended audio context, with one second of grace. Main independently detects six
+seconds without incoming PCM. A stall rotates the capture token and recreates the
+graph, showing “Reconnecting microphone”; interrupted recordings/flushes are
+cancelled, never uploaded. Recovery permits three restarts per rolling minute
+and requires a readiness acknowledgment within 15 seconds. Zero-valued audio is
+healthy; stale packets, acknowledgments and retries cannot cross a token change.
+Mute, settings changes, and shutdown cancel pending recovery.
 Diagnostics contain recording start/finish/cancel reasons, pause duration,
 completion confidence, processing timing and bounded errors, not microphone
 content, transcripts or keys. This distinguishes a missed wake from a recording
@@ -105,8 +133,13 @@ that started, or a provider/interpretation failure after capture.
   worklet resampling/flush, gestures, settings, and indicator behavior.
 - `npm run smoke:voice:native`: actual keyword/VAD/completion models using Windows
   System.Speech fixtures, including negative audio and long commands.
+- `node scripts/qa/voice-recovery-smoke.cjs`: after generating the native fixtures,
+  verifies burst handling, completion-helper isolation, and another native wake
+  after a forced keyword-helper crash without toggling voice or submitting audio.
 - `node scripts/qa/voice-keyword-matrix.cjs`: additional preceding speech, volume,
   packet-boundary, and spaced-phrase regressions after native fixtures are generated.
+  It includes David/Zira synthetic voices at three speaking rates, low-amplitude
+  speech, deterministic background noise, near-phrase negatives and noise alone.
 - `npm run smoke:electron:voice-experience`: Chromium fake microphone through real
   capture, native helpers, automatic completion, and scripted provider responses.
 - `npm run smoke:voice:workflow` (after `npm run smoke:voice:native` creates

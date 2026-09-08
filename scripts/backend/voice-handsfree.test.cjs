@@ -10,7 +10,7 @@ function fixture(options = {}) {
   const service = { start: async () => { starts++; if (options.start) await options.start(); }, dispose: () => { stopped++; }, feed: packet => packets.push(packet), analyze: async input => {
     analyses.push(input); return options.analyze ? options.analyze(input) : { probability: .99, complete: true, ...input, samples: undefined };
   } };
-  controller = createVoiceController({ getSettings: () => settings, getKey: () => 'test-key', inferenceFactory: value => { callbacks = value; return service; },
+  controller = createVoiceController({ getSettings: () => settings, getKey: () => 'test-key', now: options.now, recoveryTimers: options.recoveryTimers, inferenceFactory: value => { callbacks = value; return service; },
     orchestrator: { recordDiagnostic: event => diagnostics.push(event), getState: () => relayState, send: async input => { sent.push(input); return { ok: true }; }, dispatch: async input => { dispatched.push(input); return { ok: true }; } },
     onAudio: chunk => { if (chunk.done && !chunk.cancelled && !options.manualPlayback) setImmediate(() => controller.configure({ playbackDone: chunk.replyId })); },
     fetch: async (url, init) => { if (url.endsWith('/transcriptions')) { uploads.push(JSON.parse(init.body)); return { ok: true, json: async () => ({ text: options.text ?? 'Hey Vibe, show my agents' }) }; } return { ok: true, headers: new Headers({ 'content-type': 'audio/pcm' }), body: (async function* () { yield Buffer.alloc(480); })() }; }
@@ -20,7 +20,7 @@ function fixture(options = {}) {
     capture(ms = 100, value = 0) { const length = ms * 16; const result = controller.frames({ samples: Array(length).fill(value), sampleRate: 16000, captureToken: token, sampleStart: position }); position += length; return result; },
     classify(packet, speech = false, wake = false) { callbacks.onFrame({ ...packet, samples: undefined, sampleEnd: packet.sampleStart + packet.samples.length, speech, ...(wake ? { wake: { keyword: 'HEY VIBE', startSample: packet.sampleStart, lastTokenSample: packet.sampleStart + packet.samples.length } } : {}) }); },
     frame(ms = 100, speech = false, wake = false) { while (ms > 0) { const duration = Math.min(ms, 100); f.capture(duration, speech ? .001 : 0); f.classify(packets.at(-1), speech, wake); ms -= duration; } },
-    changeCapture(next) { token = next; position = 0; controller.configure({ captureToken: next }); }
+    changeCapture(next, captureRecovery = false) { token = next; position = 0; controller.configure({ captureToken: next, captureRecovery }); }
   };
   return f;
 }
@@ -89,11 +89,106 @@ test('old capture and stream events cannot wake or finish a newer microphone gen
   f.frame(100, true, true); assert.equal(f.controller.getState().phase, 'recording');
   f.changeCapture(3); assert.equal(f.controller.getState().phase, 'listening'); assert.equal(f.uploads.length, 0);
 });
-test('runtime failure cancels automatic capture, keeps PTT available, and retries explicitly', async t => {
+test('runtime failure cancels automatic capture, keeps PTT available, and permits immediate explicit retry', async t => {
   const f = fixture(); t.after(() => f.controller.dispose()); await f.activate(); f.frame(100, true, true);
-  f.callbacks.onError(Error('worker exited')); assert.equal(f.controller.getState().handsFreeStatus, 'unavailable'); assert.equal(f.controller.getState().phase, 'listening');
+  f.callbacks.onError(Error('worker exited')); assert.equal(f.controller.getState().handsFreeStatus, 'recovering'); assert.equal(f.controller.getState().phase, 'listening');
   assert.equal(f.controller.configure({ pushToTalk: 'start' }).status, 'recording'); f.controller.configure({ pushToTalk: 'cancel' });
   await f.controller.configure({ refreshHandsFree: true }); assert.equal(f.starts, 2); assert.equal(f.controller.getState().handsFreeStatus, 'ready'); assert.equal(f.uploads.length, 0);
+});
+
+function recoveryClock() {
+  let time = 1000, sequence = 0;
+  const tasks = new Map();
+  return { now: () => time, tasks, timers: {
+    setTimeout(fn, delay) { const id = ++sequence; tasks.set(id, { fn, delay }); return id; },
+    clearTimeout(id) { tasks.delete(id); }
+  }, async retry(delay) {
+    const entry = [...tasks.entries()].find(([, task]) => task.delay === delay);
+    assert.ok(entry, `expected ${delay}ms recovery`);
+    tasks.delete(entry[0]); time += delay; entry[1].fn(); await tick();
+  }, advance(ms) { time += ms; } };
+}
+test('transient helper failure automatically restores wake with stale callbacks fenced', async t => {
+  const clock = recoveryClock(), f = fixture({ now: clock.now, recoveryTimers: clock.timers });
+  t.after(() => f.controller.dispose()); await f.activate();
+  f.frame(100, true, true); const oldCallbacks = f.callbacks, oldPacket = f.packets.at(-1);
+  oldCallbacks.onError(Error('worker stalled'));
+  assert.equal(f.controller.getState().recordingId, undefined); assert.equal(f.uploads.length, 0);
+  assert.equal(f.controller.getState().handsFreeStatus, 'recovering');
+  await clock.retry(500);
+  assert.equal(f.starts, 2); assert.equal(f.controller.getState().handsFreeStatus, 'ready');
+  oldCallbacks.onError(Error('obsolete exit'));
+  oldCallbacks.onFrame({ ...oldPacket, sampleEnd: oldPacket.sampleStart + oldPacket.samples.length, wake: { keyword: 'HEY_VIBE' } });
+  assert.equal(f.controller.getState().phase, 'listening'); assert.equal(clock.tasks.size, 0);
+  f.frame(100, true, true); assert.equal(f.controller.getState().recordingSource, 'wake');
+});
+test('helper recovery is bounded, resets after a healthy window, and explicit retry starts fresh', async t => {
+  const clock = recoveryClock(), f = fixture({ now: clock.now, recoveryTimers: clock.timers });
+  t.after(() => f.controller.dispose()); await f.activate();
+  for (const delay of [500, 1500, 4000]) { f.callbacks.onError(Error('unstable')); await clock.retry(delay); }
+  f.callbacks.onError(Error('still unstable'));
+  assert.equal(f.controller.getState().handsFreeStatus, 'unavailable'); assert.equal(clock.tasks.size, 0); assert.equal(f.starts, 4);
+  await f.controller.configure({ refreshHandsFree: true }); assert.equal(f.starts, 5);
+  f.callbacks.onError(Error('new activation')); await clock.retry(500);
+  clock.advance(61000);
+  f.callbacks.onError(Error('later transient')); await clock.retry(500);
+  assert.equal(f.controller.getState().handsFreeStatus, 'ready');
+});
+test('mute, preference-off and disposal cancel scheduled helper recovery', async () => {
+  for (const action of ['mute', 'preference', 'dispose']) {
+    const clock = recoveryClock(), f = fixture({ now: clock.now, recoveryTimers: clock.timers }); await f.activate();
+    f.callbacks.onError(Error('transient')); const stale = [...clock.tasks.values()][0].fn;
+    if (action === 'mute') await f.controller.setListening(false);
+    if (action === 'preference') { f.settings.handsFreeEnabled = false; await f.controller.configure({ refreshHandsFree: true }); }
+    if (action === 'dispose') f.controller.dispose();
+    assert.equal(clock.tasks.size, 0); stale(); await tick(); assert.equal(f.starts, 1);
+    f.controller.dispose();
+  }
+});
+test('unavailable semantic completion preserves wake and uses classified silence fallback', async t => {
+  const f = fixture({ analyze: async () => { throw Object.assign(Error('completion warming up'), { name: 'CompletionUnavailableError' }); } });
+  t.after(() => f.controller.dispose()); await f.activate(); f.frame(100, true, true); f.frame(400, true);
+  f.frame(200); await tick();
+  assert.equal(f.controller.getState().handsFreeStatus, 'ready'); assert.equal(f.analyses.length, 1);
+  f.frame(2600); await tick(); assert.equal(f.analyses.length, 1); assert.equal(f.uploads.length, 0);
+  f.frame(200); await until(() => f.sent.length);
+  assert.equal(f.controller.getState().handsFreeStatus, 'ready'); assert.equal(f.starts, 1);
+  assert.equal(f.diagnostics.filter(x => x.event === 'voice_recording').at(-1).reason, 'silence-fallback');
+});
+test('microphone recovery cancels partial audio but preserves the current question answer route', async t => {
+  for (const kind of ['native', 'task']) {
+    const f = fixture({ text: 'yes' }); t.after(() => f.controller.dispose()); await f.activate();
+    if (kind === 'native') {
+      const interaction = { id: 'native-q', sessionId: 'pane', generation: 4, revision: 2, state: 'pending', kind: 'question',
+        questions: [{ id: 'confirm', question: 'Continue?', options: [{ label: 'Yes' }, { label: 'No' }] }] };
+      f.relayState.requests = [interaction]; await f.controller.announceInteraction(interaction);
+    } else {
+      const question = { id: 'task-q', requestId: 'task-r', text: 'Continue?' };
+      f.relayState.tasks = [{ requestId: 'task-r', status: 'needs-answer', question }];
+      await f.controller.speak({ origin: 'voice', requestId: 'task-r', text: question.text, question });
+    }
+    f.frame(100, true); assert.equal(f.controller.getState().recordingSource, 'answer');
+    f.changeCapture(2, true);
+    assert.equal(f.uploads.length, 0); assert.equal(f.controller.getState().recordingId, undefined);
+    assert.equal(f.controller.getState().phase, 'awaiting-answer');
+    f.controller.configure({ pushToTalk: 'start', holdId: 'retry' }); f.capture(300, .1);
+    f.controller.configure({ pushToTalk: 'stop', holdId: 'retry' });
+    await until(() => f.dispatched.length || f.sent.length);
+    if (kind === 'native') {
+      assert.equal(f.sent.length, 0);
+      assert.deepEqual(f.dispatched[0], { kind: 'answer_question', targetId: 'pane', requestId: 'native-q', generation: 4, revision: 2, answers: { confirm: 'Yes' } });
+    } else assert.deepEqual(f.sent[0], { text: 'yes', origin: 'voice', replyToRequestId: 'task-r', questionId: 'task-q' });
+  }
+});
+test('automatic capture recovery cannot preserve a replaced question', async t => {
+  const f = fixture(); t.after(() => f.controller.dispose()); await f.activate();
+  const interaction = { id: 'native-q', sessionId: 'pane', generation: 4, revision: 2, state: 'pending', kind: 'question',
+    questions: [{ id: 'confirm', question: 'Continue?', options: [{ label: 'Yes' }] }] };
+  f.relayState.requests = [interaction]; await f.controller.announceInteraction(interaction); f.frame(100, true);
+  f.relayState.requests = [{ ...interaction, revision: 3 }];
+  f.changeCapture(2, true);
+  assert.equal(f.controller.getState().phase, 'listening'); assert.equal(f.uploads.length, 0);
+  assert.equal(f.sent.length, 0); assert.equal(f.dispatched.length, 0);
 });
 test('automatic maximum cancels instead of uploading and completion tail retains full recording', async t => {
   const f = fixture({ analyze: async input => ({ ...input, probability: .1, complete: false }) }); t.after(() => f.controller.dispose()); await f.activate(); f.frame(100, true, true);
@@ -108,7 +203,7 @@ test('late startup cannot reopen muted capture and startup failure remains retry
   const activating = f.activate(); await until(() => release); await f.controller.setListening(false); release(); await activating;
   assert.equal(f.controller.getState().handsFreeStatus, 'off'); assert.equal(f.stopped, 1);
   const failed = fixture({ start: () => { throw Error('load failed'); } }); t.after(() => failed.controller.dispose()); await failed.activate();
-  assert.equal(failed.controller.getState().handsFreeStatus, 'unavailable'); const attempts = failed.starts;
+  assert.equal(failed.controller.getState().handsFreeStatus, 'recovering'); const attempts = failed.starts;
   await failed.controller.configure({ refreshHandsFree: true }); assert.equal(failed.starts, attempts + 1);
 });
 test('playback suppresses wake frames and pending request resolution cancels an automatic answer', async t => {
@@ -248,7 +343,7 @@ test('temporary detector failure preserves the question for a scoped Space answe
   t.after(() => f.controller.dispose()); f.settings.handsFreeEnabled = false; await f.activate();
   const question = { id: 'q1', requestId: 'r1', text: 'Choose.' }; f.relayState.tasks = [{ requestId: 'r1', status: 'needs-answer', question }];
   await f.controller.speak({ origin: 'voice', requestId: 'r1', text: question.text, question });
-  await until(() => f.controller.getState().handsFreeStatus === 'unavailable');
+  await until(() => f.controller.getState().handsFreeStatus === 'recovering');
   assert.equal(f.controller.getState().phase, 'awaiting-answer'); assert.match(f.controller.getState().handsFreeError, /Space/);
   f.controller.configure({ pushToTalk: 'start', holdId: 'answer' }); f.capture(300, .1);
   f.controller.configure({ pushToTalk: 'stop', holdId: 'answer' }); await until(() => f.sent.length);

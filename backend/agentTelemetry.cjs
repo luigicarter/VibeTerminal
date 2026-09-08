@@ -2902,19 +2902,19 @@ function buildClaudeSettingsJson(scriptPath, isWin) {
         { matcher: "*", hooks: [hook("agent.running", "tool")] },
         { matcher: "Task", hooks: [hook("agent.subagent.stopped")] }
       ],
+      PostToolUseFailure: [
+        { matcher: "*", hooks: [hook("agent.running", "tool")] }
+      ],
       Stop: [{ matcher: "*", hooks: [hook("agent.completed")] }],
-      // Split so the pill can tell an approval prompt from an idle "your turn":
-      // answering an approval has no hook of its own (PreToolUse fires before
-      // the prompt, PostToolUse only when the tool ends), so the renderer flips
-      // waiting->running on the user's answer keystroke for approvals only.
+      // Only an actual permission notification requires user input. idle_prompt
+      // fires after ordinary completed turns, without a question to answer.
+      // AskUserQuestion is recognized from the wildcard tool hook's metadata.
+      // The reply can resume work before PostToolUse arrives; the terminal
+      // runtime also tracks submitted replies to the active input request.
       Notification: [
         {
           matcher: "permission_prompt",
           hooks: [hook("agent.waiting", "approval")]
-        },
-        {
-          matcher: "idle_prompt",
-          hooks: [hook("agent.waiting", "question")]
         }
       ]
     }
@@ -3347,9 +3347,9 @@ function mapTelemetryToAttention(event) {
   }
 
   if (event.type === "agent.waiting") {
-    // The claude Notification hooks tag the wait: "approval" (permission
-    // prompt) vs "question" (idle prompt). The renderer uses the distinction to
-    // flip waiting->running on the user's answer keystroke for approvals.
+    // Existing Claude launches may still use the old idle -> question hook.
+    // Idle is availability for another task, never proof of required input.
+    if (event.notificationType === "idle_prompt") return null;
     const reason = event.detail || event.reason;
     return {
       state: "waiting",
@@ -3536,7 +3536,7 @@ function createAgentTelemetryManager(options = {}) {
             // Generation is authenticated by the server-owned nonce. Never accept
             // a generation claimed in a child payload, or resurrect a released run.
             const eventMetadata = { generation: activeSession.generation };
-            const textMetadata = ["providerThreadId", "providerTurnId", "toolId", "toolName", "taskId", "taskLabel", "parentThreadId", "transcriptPath", "cwd"];
+            const textMetadata = ["providerThreadId", "providerTurnId", "toolId", "toolName", "taskId", "taskLabel", "parentThreadId", "transcriptPath", "cwd", "notificationType"];
             for (const key of textMetadata) {
               if (activeSession.generation === undefined && event.provider !== "codex") continue;
               if (typeof event[key] === "string" && event[key].length <= 4096) eventMetadata[key] = event[key];
@@ -3553,6 +3553,16 @@ function createAgentTelemetryManager(options = {}) {
                 (event.type === "agent.running" || event.type.startsWith("agent.subagent.")) &&
                 (event.phase === "start" || event.phase === "stop")) {
               emitEvent({ id: normalizedEventSessionId, type: "agent-activity", phase: event.phase });
+            }
+
+            // Interpret the single wildcard tool observer, rather than firing
+            // competing running and waiting hooks for the same tool start.
+            // Scope by the registered provider; other providers retain their
+            // own tool semantics. PostToolUse/Failure stays running/tool.
+            if (activeSession.provider === "claude" && event.type === "agent.running" &&
+                event.detail === "tool" && event.toolName === "AskUserQuestion" && event.phase === "start") {
+              event.type = "agent.waiting";
+              event.detail = "question";
             }
 
             if (event.type === "agent.process.started" || event.type === "agent.process.exited") {

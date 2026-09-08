@@ -13,8 +13,15 @@ const session = (patch = {}) => ({ id: 'api', generation: 'g1', turnId: 'turn1',
 const result = (patch = {}) => ({ turnId: 'turn1', status: 'completed', at: clock - 1000, text: 'Updated route validation. Unit tests passed.', source: 'terminal-screen', ...patch });
 function fixture(t, extra = {}) {
   const userDataPath = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-work-'));
-  t.after(() => fs.rmSync(userDataPath, { recursive: true, force: true }));
-  return { userDataPath, store: createWorkHistory({ userDataPath, now: () => clock, ...extra }) };
+  const store = createWorkHistory({ userDataPath, now: () => clock, ...extra }), disposers = [];
+  t.after(async () => {
+    for (const dispose of disposers) await dispose();
+    await store.flush();
+    assert.equal(path.dirname(path.resolve(userDataPath)), path.resolve(os.tmpdir()));
+    assert.ok(path.basename(userDataPath).startsWith('vibe-work-'));
+    fs.rmSync(userDataPath, { recursive: true, force: true });
+  });
+  return { userDataPath, store, disposeAfter: fn => disposers.push(fn) };
 }
 
 test('records observed agent endings, never idle, provisional, written or shell activity', async t => {
@@ -132,7 +139,7 @@ test('large escaped Unicode project paths evict oldest records before save and s
 
 test('model reads durable completed work after close and relaunch without any effect grant', async t => {
   const { createOrchestrator } = require('../../backend/orchestrator.cjs');
-  const { userDataPath } = fixture(t);
+  const { userDataPath, disposeAfter } = fixture(t);
   let live = [session()], modelReads = 0;
   const options = { userDataPath, now: () => clock, secureStorage: { isEncryptionAvailable: () => false },
     getSessions: async () => live, getRoots: async () => ({ documents: userDataPath, projects: [] }),
@@ -155,13 +162,14 @@ test('model reads durable completed work after close and relaunch without any ef
       return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'The API agent finished its turn and reported updated route validation and passing unit tests.' }, finish_reason: 'stop' }] }));
     } };
   const first = createOrchestrator(options);
+  disposeAfter(() => first.dispose());
   first.observeWork(live, result());
   live = [];
   await first.refresh();
   assert.equal(first.getState().workHistory.length, 1);
   await first.dispose();
   const restored = createOrchestrator(options);
-  t.after(() => restored.dispose());
+  disposeAfter(() => restored.dispose());
   assert.equal(restored.getState().workHistory.length, 1);
   await restored.configure({ apiKey: 'test-key', sessionOnly: true, model: 'brain' });
   await restored.setEnabled(true);

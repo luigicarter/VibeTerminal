@@ -29,7 +29,8 @@ test('operator compiler exposes frozen complete objective and defaults without c
   assert.ok(INTENT_TOOL.function.parameters.properties.actions.items.anyOf.some(schema => schema.properties.kind.enum[0] === 'operate_terminal'));
   assert.match(INTENT_SYSTEM, /permissionMode defaults to 'none'/);
   assert.match(INTENT_SYSTEM, /stage_draft is only for an explicit request/);
-  assert.match(INTENT_SYSTEM, /ALL newly interpreted actions inside existing terminals/);
+  assert.match(INTENT_SYSTEM, /ALL newly interpreted input actions inside existing terminals/);
+  assert.match(INTENT_SYSTEM, /watch_terminal.*observation only/s);
   assert.match(INTENT_SYSTEM, /do not select them for new terminal actions, including exact one-shot relays/);
   assert.deepEqual(INTENT_TOOL.function.parameters.properties.actions.items.anyOf.find(schema => schema.properties.kind.enum[0] === 'operate_terminal').properties.promptMode.enum, ['compose', 'literal']);
 });
@@ -92,7 +93,9 @@ test('operator has bounded per-target step budget and permits final verification
   claimGrant(action(p, { targetId: 'b', stepId: 'independent' }), p);
   const finish = authorizeIntentAction({ kind: 'finish_terminal', targetId: 'a', stepId: 'finish', text: 'Terminal blocked on unavailable credentials.', outcome: 'blocked' }, p, sessions);
   claimGrant(finish, p);
-  assert.deepEqual(projectIntent(p).grants[0].availableTargetIds, ['b']);
+  assert.deepEqual(projectIntent(p).grants[0].availableTargetIds, ['a', 'b']);
+  assert.deepEqual(projectIntent(p).grants[0].blockedTargetIds, ['a']);
+  assert.throws(() => action(p, { targetId: 'a', stepId: 'after-blocked' }), /limit/);
   assert.equal(projectIntent(p).grants[0].progress[0].outcome, 'blocked');
 });
 
@@ -220,4 +223,30 @@ test('literal mode remains frozen across continuation while default composed pro
   const composed = plan();
   assert.equal(composed.grants[0].promptMode, 'compose');
   assert.equal(authorizeIntentAction({ kind: 'send_prompt', stepId: 'composed', text: 'Explain the first review finding without edits.' }, composed, sessions).text, 'Explain the first review finding without edits.');
+});
+test('lifecycle defaults preserve agent and clearing input cannot use interrupt or exit controls', () => {
+ const p=plan({text:'Clear the unsent text without sending it.'});
+ assert.equal(projectIntent(p).grants[0].lifecycleMode,'preserve');
+ for(const key of ['ctrl-c','ctrl-d','ctrl-backslash','ctrl-z']) assert.throws(()=>action(p,{keys:[key],editInput:true}),/preserve/);
+ assert.throws(()=>authorizeIntentAction({kind:'interrupt',grantId:p.grants[0].id,stepId:'stop'},p,sessions),/preserve/);
+ assert.equal(action(p,{keys:['end','ctrl-u'],editInput:true}).editInput,true);
+ assert.throws(()=>action(p,{lifecycleMode:'exit'}));
+});
+test('explicit lifecycle authority bounds interrupt and exit controls without changing legacy interrupts', () => {
+ const interrupt=plan({text:'Interrupt current work',lifecycleMode:'interrupt'});
+ assert.deepEqual(action(interrupt,{keys:['ctrl-c']}).keys,['ctrl-c']);
+ assert.equal(authorizeIntentAction({kind:'interrupt',grantId:interrupt.grants[0].id,stepId:'stop'},interrupt,sessions).kind,'interrupt');
+ for(const key of ['ctrl-d','ctrl-backslash','ctrl-z']) assert.throws(()=>action(interrupt,{keys:[key]}),/exiting or suspending/);
+ const exit=plan({text:'Exit the terminal agent',lifecycleMode:'exit'});
+ for(const key of ['ctrl-c','ctrl-d','ctrl-backslash','ctrl-z']) assert.deepEqual(action(exit,{keys:[key],stepId:key}).keys,[key]);
+ const legacy=normalizeIntent({goal:'Interrupt',actions:[{kind:'interrupt',targetIds:['a']}]},{instruction:'Interrupt',requestId:'legacy',sessions});
+ assert.equal(authorizeIntentAction({kind:'interrupt',targetId:'a'},legacy,sessions).kind,'interrupt');
+});
+test('continuation retains lifecycle authority and refuses upgrade through supplied command fields', () => {
+ const original=plan();
+ const previousCommand={requestId:'user1',instruction,grants:original.grants,candidates:original.grants[0].targets,expiresAt:Date.now()+10000};
+ const compile=extra=>normalizeIntent({goal:'Continue',actions:[{kind:'operate_terminal',sourceUserId:'user1',targetIds:['a'],...extra}]},{instruction:'Continue',requestId:'next',sessions,previousCommand});
+ assert.equal(compile({}).grants[0].lifecycleMode,'preserve');
+ assert.throws(()=>compile({lifecycleMode:'exit'}),/match one unfinished/);
+ assert.throws(()=>plan({lifecycleMode:'whatever'}),/lifecycle/);
 });

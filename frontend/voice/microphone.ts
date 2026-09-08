@@ -28,23 +28,43 @@ export class VoiceMicrophone {
   private context?: AudioContext;
   private node?: AudioWorkletNode;
   private flushId = 0;
+  private heartbeat?: ReturnType<typeof setTimeout>;
   private pending = new Map<number, { resolve: (end: number) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
-  async start(onFrame: (samples: number[], sampleStart: number) => void, microphoneId?: string, onError?: () => void) {
+  async start(onFrame: (samples: number[], sampleStart: number) => void, microphoneId?: string, onError?: (error?: Error) => void, onStall?: (message: string) => void) {
     this.stop(); const generation = this.generation;
     const stream = await navigator.mediaDevices.getUserMedia({ audio: { ...(microphoneId ? { deviceId: { exact: microphoneId } } : {}), channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
     if (generation !== this.generation) { stream.getTracks().forEach(t => t.stop()); return; }
     this.stream = stream;
     try {
-    stream.getAudioTracks().forEach(track => { track.onended = () => { if (generation === this.generation) onError?.(); }; });
+    stream.getAudioTracks().forEach(track => { track.onended = () => { if (generation === this.generation) onError?.(new Error('The microphone disconnected or stopped.')); }; });
     const context = this.context = new AudioContext({ sampleRate: 16000 });
     const url = URL.createObjectURL(new Blob([workletSource], { type: 'text/javascript' }));
     try { await context.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
     if (generation !== this.generation) return;
     const node = this.node = new AudioWorkletNode(context, 'vibe-capture');
-    node.onprocessorerror = () => { if (generation === this.generation) onError?.(); };
+    node.onprocessorerror = () => { if (generation === this.generation) onError?.(new Error('Microphone audio processing failed.')); };
+    let stalled = false;
+    const reportStall = () => {
+      if (generation !== this.generation || stalled) return;
+      stalled = true;
+      clearTimeout(this.heartbeat); this.heartbeat = undefined;
+      onStall?.('The microphone stopped delivering audio.');
+    };
+    const armHeartbeat = () => {
+      if (generation !== this.generation || stalled || !onStall) return;
+      clearTimeout(this.heartbeat);
+      this.heartbeat = setTimeout(() => {
+        if (generation !== this.generation || stalled) return;
+        if (context.state === 'suspended') {
+          // Resume is allowed to hang or reject. Only actual PCM proves recovery.
+          this.heartbeat = setTimeout(reportStall, 1000);
+          void context.resume().catch(() => {});
+        } else reportStall();
+      }, 3500);
+    };
     node.port.onmessage = e => {
-      if (generation !== this.generation) return;
-      if (Array.isArray(e.data.samples)) onFrame(e.data.samples, e.data.sampleStart);
+      if (generation !== this.generation || stalled) return;
+      if (Array.isArray(e.data.samples) && e.data.samples.length) { armHeartbeat(); onFrame(e.data.samples, e.data.sampleStart); }
       else if (e.data.flushed !== undefined) {
         const pending = this.pending.get(e.data.flushed);
         if (pending) { clearTimeout(pending.timer); this.pending.delete(e.data.flushed); pending.resolve(e.data.sampleEnd); }
@@ -52,7 +72,9 @@ export class VoiceMicrophone {
     };
     const mute = context.createGain(); mute.gain.value = 0;
     context.createMediaStreamSource(stream).connect(node); node.connect(mute); mute.connect(context.destination);
+    armHeartbeat();
     await context.resume();
+    if (generation !== this.generation) return;
     } catch (error) {
       // A failed startup owns these resources only until a newer capture starts.
       if (generation === this.generation) this.stop();
@@ -70,6 +92,7 @@ export class VoiceMicrophone {
     });
   }
   stop() {
+    clearTimeout(this.heartbeat); this.heartbeat = undefined;
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new Error('Microphone capture changed.')); }
     this.pending.clear();
     this.generation++; this.node?.disconnect(); this.node?.port.close(); this.node = undefined;

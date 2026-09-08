@@ -1,5 +1,10 @@
 # Progressive context and local error audio
 
+Speech uses the assistant's response text, with Markdown converted to spoken
+prose. UI task labels and request excerpts are never prepended to speech, even
+when other requests are paused or awaiting answers. Responses can name a terminal
+or project explicitly when the listener needs that context.
+
 The model budget limits a copy of the material sent to the LLM. It does not
 rewrite native conversations, shorten loaded History UI pages, or reduce the
 terminal's existing user-facing output retention.
@@ -82,16 +87,45 @@ stale failures cannot overwrite a later recording. The
 
 Speech uses the supported Kokoro English voices through OpenRouter. The app
 requests PCM and validates response rate/channel metadata, frame alignment,
-duration and response size before playback. Framed WAV responses remain compatible.
+then streams the first approximately 100 ms before download completion. Later
+chunks contain at most one second; duration and byte limits apply throughout.
+Incomplete final frames or stream/playback errors cancel the remaining reply
+without replaying speech already heard. WAV containers remain fully buffered and
+validated. Unlabeled responses are inspected for a WAV signature before choosing
+buffered decoding or native PCM streaming.
 Preview works while the mic and orchestrator are off and waits for
 actual renderer playback completion. It does not enable capture. Missing or
 failed playback acknowledgments are reported as failures.
+
+The renderer reports `playbackStarted` with its reply ID at scheduled
+AudioContext output time, not physical speaker audibility. Playback errors also
+carry the reply ID, and completion follows actual source endings. Stale replies
+cannot stop newer speech or open an answer window. Private timing diagnostics
+link capture/recording IDs to STT completion and request IDs to model, tool,
+first-effect, final-text, TTS and playback stages. Actual provider calls have
+separate call IDs; synthetic replies do not count as model calls.
+
+Fully specified unprompted terminal creation can execute directly after intent
+validation. Completed operator scopes reuse their validated finish summaries
+without an extra model response, retaining queued/pending-result distinctions.
+Late delivery failures or uncertain outcomes require explicit reporting instead
+of a synthetic success. Independent terminal deliveries share four transport
+slots with one in flight per generation; inventory readers no longer wait on
+those acknowledgments. Concurrent inventory reads coalesce, while a workspace
+mutation invalidates older reads.
 
 Background monitoring is opt-in. Credit/authentication failures pause automatic
 monitoring until successful explicit validation; other failures back off. Model
 configuration, speech, and microphone readiness are separate checks.
 
 ## Verification
+
+`npm run bench:orchestrator:latency -- --baseline <snapshot-root> --delay-ms 50`
+compares an optional source snapshot with the current code using scripted
+providers and disposable adapters. It records actual model-call counts,
+first-effect/final-response timings, held-acknowledgment behavior and PCM before
+EOF. Its delays are synthetic; these are not live-provider speed measurements.
+`npm run test:frontend:voice-pcm` covers renderer ordering and playback completion.
 
 Run `npm run test:orchestrator` for context budgets, progressive pages, source
 revisions, Unicode reconstruction, cursor rejection, error classification,

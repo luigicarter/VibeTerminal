@@ -68,6 +68,7 @@ import {
   type SessionSummary
 } from "./attention";
 import TerminalPane from "./components/TerminalPane";
+import { createTerminalLaunchCoordinator } from "./terminalLaunchCoordinator";
 import { WorkspaceStart } from "./components/WorkspaceStart";
 import { runtimeDisplayTitle, runtimeSessionStatus, runtimeStatusLabel, type TerminalRuntimeSnapshot } from "./terminalRuntime";
 import { migrateRemovedAgent, serializeSession } from "./sessionPersistence";
@@ -1492,11 +1493,25 @@ export default function App() {
     ...multiSessions,
     ...workspaces.flatMap((workspace) => workspace.sessions)
   ].map(withRuntime);
+  const [terminalLaunchCoordinator] = useState(() => createTerminalLaunchCoordinator({
+    platform: window.vibe?.platform,
+    create: payload => window.vibe?.terminal.create(payload) ?? Promise.resolve(false),
+    isCurrent: session => {
+      const current = sessionsByIdRef.current.get(session.id);
+      return Boolean(current?.started && current.launchToken === session.launchToken &&
+        !closedRuntimeIdsRef.current.has(session.id));
+    },
+    onError: (session, message) => setShellMessage(`${session.name}: ${message}`)
+  }));
   useLayoutEffect(() => {
     sessionsByIdRef.current = new Map(
       allSessions.map((session) => [session.id, session])
     );
   }, [multiSessions, workspaces, runtimeSnapshots, runtimeAcknowledgements]);
+  useEffect(() => {
+    terminalLaunchCoordinator.reconcile(allSessions);
+  }, [multiSessions, workspaces, terminalLaunchCoordinator]);
+  useEffect(() => () => terminalLaunchCoordinator.suspend(), [terminalLaunchCoordinator]);
   const cwdConflicts = useMemo(
     () =>
       computeCwdConflicts([
@@ -2799,6 +2814,7 @@ export default function App() {
       return window.vibe?.openFusionChat?.stop(session.id) ?? Promise.resolve(false);
     }
 
+    terminalLaunchCoordinator.cancel(session.id, session.launchToken);
     const runtime = runtimeSnapshotsRef.current[session.id];
     return window.vibe?.terminal.kill(session.id, {
       launchToken: session.launchToken,

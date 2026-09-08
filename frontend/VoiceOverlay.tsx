@@ -7,7 +7,7 @@ export default function VoiceOverlay() {
   const api = (window.vibe as unknown as { voice: VoiceApi }).voice;
   const [state, setState] = useState<VoiceState>(initial);
   const microphone = useMemo(() => new VoiceMicrophone(), []);
-  const player = useMemo(() => new PcmPlayer(id => { void api.configure({ playbackDone: id }); }, message => { void api.configure({ playbackError: message }); }), [api]);
+  const player = useMemo(() => new PcmPlayer(id => { void api.configure({ playbackDone: id }); }, (message, id) => { void api.configure({ playbackError: message, playbackReplyId: id }); }, id => { void api.configure({ playbackStarted: id }); }), [api]);
   useEffect(() => {
     let alive = true, received = false;
     const stateOff = api.onState(next => { received = true; if (alive) setState(next); });
@@ -18,12 +18,19 @@ export default function VoiceOverlay() {
   }, [api, microphone, player]);
   useEffect(() => {
     if (!state.listening) { microphone.stop(); return; }
-    let alive = true;
-    const microphoneError = () => {
-      if (!alive) return;
+    let alive = true, failed = false;
+    const microphoneError = (error?: Error) => {
+      if (!alive || failed) return;
+      failed = true;
       microphone.stop();
-      const message = 'Allow microphone access and check that your selected microphone is connected.';
+      const message = error?.message || 'Allow microphone access and check that your selected microphone is connected.';
       void api.configure({ microphoneError: message, captureToken: state.captureToken });
+    };
+    const microphoneStalled = () => {
+      if (!alive || failed) return;
+      failed = true;
+      microphone.stop();
+      void api.configure({ captureStalled: true, captureToken: state.captureToken });
     };
     const flushOff = api.onFlush(request => {
       if (!alive || request.captureToken !== state.captureToken) return;
@@ -31,7 +38,7 @@ export default function VoiceOverlay() {
         if (alive) void api.configure({ captureFlushed: true, flushId: request.id, captureToken: request.captureToken, sampleEnd });
       }).catch(() => { /* Main process deadline handles interrupted or failed flushes. */ });
     });
-    void microphone.start((samples, sampleStart) => api.frames({ samples, sampleStart, sampleRate: 16000, captureToken: state.captureToken }), state.microphoneId, microphoneError).then(() => { if (alive) void api.configure({ microphoneReady: true, captureToken: state.captureToken }); }).catch(microphoneError);
+    void microphone.start((samples, sampleStart) => api.frames({ samples, sampleStart, sampleRate: 16000, captureToken: state.captureToken }), state.microphoneId, microphoneError, microphoneStalled).then(() => { if (alive && !failed) void api.configure({ microphoneReady: true, captureToken: state.captureToken }); }).catch(microphoneError);
     return () => { alive = false; flushOff(); microphone.stop(); };
   }, [api, microphone, state.listening, state.microphoneId, state.captureToken]);
   return null;

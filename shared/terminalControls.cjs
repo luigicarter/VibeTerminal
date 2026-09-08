@@ -9,6 +9,9 @@ for (const digit of '0123456789') KEYS.add(`alt-${digit}`);
 for (const letter of 'abcdefghijklmnopqrstuvwxyz') { KEYS.add(`ctrl-${letter}`); KEYS.add(`alt-${letter}`); }
 for (const modifier of ['shift', 'ctrl', 'ctrl-shift']) for (const key of Object.keys(base)) KEYS.add(`${modifier}-${key}`);
 for (let i = 1; i <= 12; i++) KEYS.add(`f${i}`);
+function normalizeTerminalKeys(keys) {
+  return Array.isArray(keys) ? keys.map(key => typeof key === 'string' ? key.trim().toLowerCase() : key) : keys;
+}
 function validateTerminalControls(action) {
   if (!action || (action.text !== undefined && (typeof action.text !== 'string' || Buffer.byteLength(action.text, 'utf8') > 100000 || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/.test(action.text))) ||
       (action.keys !== undefined && (!Array.isArray(action.keys) || action.keys.length > 16 || action.keys.some(key => !KEYS.has(key)))) ||
@@ -51,4 +54,4 @@ function encodeTerminalControls(action, modes = {}) {
   };
   return { ok: true, text, data: (text && modes.bracketedPaste ? '\x1b[200~' + text + '\x1b[201~' : text) + (action.keys || []).map(encode).join('') + (action.submit ? '\r' : '') };
 }
-module.exports = { TERMINAL_KEYS: [...KEYS], validateTerminalControls, encodeTerminalControls };
+module.exports = { TERMINAL_KEYS: [...KEYS], normalizeTerminalKeys, validateTerminalControls, encodeTerminalControls };

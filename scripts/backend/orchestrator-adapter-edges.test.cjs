@@ -84,10 +84,11 @@ test("cancellation during path checks prevents file, folder and UI effects", asy
   }
 });
 
-test("older inventory replies cannot regress newer applied pane identity", async t => {
+test("overlapping inventory readers share one current pane snapshot", async t => {
   const h = harness(t); h.manual(); const first = h.integration.refreshInventory(), second = h.integration.refreshInventory();
-  h.ack(h.ui[1], { ok: true, sessions: [{ id: "new", name: "New" }], projectPaths: ["new-root"] }); await second;
-  h.ack(h.ui[0], { ok: true, sessions: [{ id: "old", name: "Old" }], projectPaths: ["old-root"] }); await first;
+  await until(() => h.ui.length === 1);
+  h.ack(h.ui[0], { ok: true, sessions: [{ id: "new", name: "New" }], projectPaths: ["new-root"] }); await Promise.all([first, second]);
+  assert.equal(h.ui.length, 1);
   assert(h.integration.directory.get("new")); assert.equal(h.integration.directory.get("old"), undefined); assert.deepEqual(h.integration.directory.projectPaths(), ["new-root"]);
 });
 
@@ -117,10 +118,17 @@ test("runtime conversation title wins over lagging UI name and known aliases rem
   assert.deepEqual(session.aliases, ["Old title", "Saved title", "Fresh title"]);
 });
 
-test("new pane acknowledgment retains launch identity while inventory target remains provisional", async t => {
+test("new pane acknowledgment waits for the matching live runtime before returning a target", async t => {
   const h = harness(t); h.setInventory([{ id: "created", kind: "codex", launchToken: 7 }]);
-  const work = h.invoke("dispatch", { kind: "create_session", kindOfSession: "codex", cwd: h.root });
+  let settled = false;
+  const work = h.invoke("dispatch", { kind: "create_session", kindOfSession: "codex", cwd: h.root }).then(result => { settled = true; return result; });
   await until(() => h.ui.some(request => request.kind === "create_session"));
   h.ack(h.ui.find(request => request.kind === "create_session"), { ok: true, id: "created", launchToken: 7, status: "created" });
-  const result = await work; assert.deepEqual(result.target, { id: "created", generation: "paused:created:7", launchToken: 7 }); assert.equal(result.status, "created");
+  await until(() => h.integration.directory.get("created")?.generation === "paused:created:7");
+  await tick(); assert.equal(settled, false, "A renderer pane acknowledgment does not confirm a running process");
+  Object.assign(h.snapshot, { id: "created", generation: "created-runtime", launchToken: 7, provider: "codex", processState: "running" });
+  const result = await work;
+  assert.deepEqual(result.target, { id: "created", generation: "created-runtime", launchToken: 7 });
+  assert.equal(result.status, "created"); assert.equal(result.processState, "running");
+  assert.equal(h.ui.filter(request => request.kind === "create_session").length, 1);
 });

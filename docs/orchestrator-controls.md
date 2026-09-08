@@ -8,6 +8,15 @@ choices unless the user asks for more. Direct actions use named, factual outcome
 instead of raw labels such as “Action written”; drafts, queues, accepted input,
 requested interruption and observed completion remain distinct.
 
+Spoken replies retain the exact request they follow, including its question and
+bounded exchange context when unrelated work has moved it outside recent history.
+This context helps resolve follow-ups; it does not revive completed grants or turn
+assistant suggestions into authority. Topic changes remain new instructions.
+Structured choices accept explicit natural replies such as “the second one” and
+“go with option two” without another clarification. Qualified or ambiguous answers
+still go through the Orchestrator, and permission decisions retain their explicit
+vocabulary. Custom answers can be spoken naturally without a special prefix.
+
 The intent schema describes each command's own fields. A failed interpretation
 gets one repair with the validator's reason and the original user context, without
 echoing malformed model arguments. Execution advertises read/conversation tools
@@ -53,6 +62,15 @@ can delegate a review, navigation, terminal settings changes or a sequence of
 answers without supplying a keystroke script or special command syntax.
 
 ## Interpretation and persistent execution
+
+Operator grants bind `lifecycleMode`: `preserve` by default, `interrupt` for
+explicitly stopping current work, and `exit` for explicitly quitting/closing.
+Clearing text preserves the agent and cannot use quit/suspend shortcuts. Native
+edits require the same agent to remain alive before a completed report;
+interruption cannot repeatedly send Ctrl-C to an idle or already-interrupted turn.
+Named key casing is normalized before authorization without expanding the key
+vocabulary. See [the terminal exit review](orchestrator-exit-review.md) for the
+recorded incident, evidence limits and regression coverage.
 
 The selected Brain returns an `interpret_workspace` plan. Invalid tool envelopes,
 JSON or plans receive one repair attempt against the original context and strict
@@ -100,6 +118,13 @@ classification remain semantic model decisions; local byte, identity and ownersh
 checks do not provide deterministic semantic approval enforcement.
 
 ## Terminal adapters
+
+Working Codex root composers accept guarded pure followup prompts while output or
+logical child work continues. Unsupported busy native composers can queue the
+prompt until fresh readiness is observed. This does not relax general keyboard
+controls, draft ownership, question/permission handling or recipient identity.
+See [delivery and result attribution](orchestrator-tasks.md) for queue lifetime,
+prewrite evidence and the distinction between a submitted followup and its result.
 
 | Capability | Fusion / Open Fusion | Native terminals |
 |---|---|---|

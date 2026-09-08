@@ -25,6 +25,8 @@ test("busy queues, observes readiness, and prevents another send on old idle evi
   h.s.turnState = "completed"; h.s.turnId = "one";
   await h.delivery.pump(); assert.equal(h.writes.length, 1);
   assert.equal(h.updates[0].status, "written");
+  assert.equal(h.updates[0].inputDisposition, 'submitted-when-ready');
+  assert.deepEqual(h.updates[0].deliveryBaseline, { submittedAt: 100000, kind: "codex", turnId: "one", turnState: "completed" });
   assert.equal((await h.delivery.submit(h.action("b"))).status, "queued");
   h.s.revision = 999; h.s.lastActivityAt = 100001;
   await h.delivery.pump(); assert.equal(h.writes.length, 1);
@@ -45,6 +47,118 @@ test("cancel, restart, pending question and expiry never inject queued work", as
     assert.equal(h.writes.length, 0, mode); assert.equal(h.drafts.length, 0, mode);
     assert.equal(h.updates[0].status, { cancel: "cancelled", restart: "stale-generation", question: "blocked", expiry: "blocked" }[mode]);
   }
+});
+
+test('observed healthy busy work keeps queued prompts beyond two minutes until ready', async () => {
+  const h = harness(); Object.assign(h.s, { turnState: 'running', turnId: 'old', observation: 'observed' });
+  await h.delivery.submit(h.action('long'));
+  for (let i = 0; i < 4; i++) { h.advance(); await h.delivery.pump(); }
+  assert.equal(h.writes.length, 0); assert.equal(h.updates.length, 0);
+  Object.assign(h.s, { turnState: 'completed' });
+  await h.delivery.pump();
+  assert.equal(h.writes.length, 1); assert.equal(h.updates[0].status, 'written');
+  assert.equal(h.updates[0].deliveryBaseline.submittedAt, 580004);
+});
+
+test('explicit busy state queues and retains a prompt just like running state', async () => {
+  const h = harness(); Object.assign(h.s, { turnState: 'busy', turnId: 'old', observation: 'observed' });
+  assert.equal((await h.delivery.submit(h.action('busy-alias'))).status, 'queued');
+  h.advance(); await h.delivery.pump(); assert.equal(h.updates.length, 0); assert.equal(h.writes.length, 0);
+  h.s.turnState = 'idle'; await h.delivery.pump(); assert.equal(h.writes.length, 1);
+});
+
+test('first resumed sample ready after two minutes delivers queued prompt exactly once', async () => {
+  const h = harness(); Object.assign(h.s, { turnState: 'running', turnId: 'old', observation: 'observed' });
+  const action = h.action('resumed'); await h.delivery.submit(action);
+  h.advance(); h.s.turnState = 'completed';
+  await h.delivery.pump(); await h.delivery.pump();
+  assert.equal(h.writes.length, 1); assert.equal(h.updates.length, 1);
+  assert.equal((await h.delivery.submit(action)).status, 'written'); assert.equal(h.writes.length, 1);
+});
+
+test('prewrite attribution callback precedes transport without publishing a receipt', async () => {
+  const order = []; let h;
+  h = harness({ reserveInput: () => { order.push('reserve'); }, onBeforeWrite: metadata => {
+    order.push('prepare'); assert.equal(metadata.status, 'unconfirmed'); assert.equal(metadata.ok, true);
+    assert.equal(metadata.actionId, 'ordered'); assert.equal(metadata.id, 'p'); assert.equal(metadata.generation, 'g');
+    assert.equal(metadata.inputDisposition, 'submitted-when-ready'); assert.equal(metadata.deliveryBaseline.turnId, 'ready-turn');
+    assert.equal(h.updates.length, 0); assert.equal(h.writes.length, 0);
+  }, write: async () => { order.push('write'); return { ok: true, status: 'written' }; } });
+  Object.assign(h.s, { turnState: 'running', turnId: 'busy', observation: 'observed' });
+  await h.delivery.submit(h.action('ordered')); assert.deepEqual(order, []);
+  Object.assign(h.s, { turnState: 'completed', turnId: 'ready-turn' }); await h.delivery.pump();
+  assert.deepEqual(order, ['reserve', 'prepare', 'write']); assert.equal(h.updates.length, 1);
+});
+
+test('prewrite callback failure or cancellation proves no dispatch and rolls back reservation', async () => {
+  for (const mode of ['failure', 'cancel']) {
+    const controller = new AbortController(); let rolledBack = 0, written = 0;
+    const h = harness({ reserveInput: () => () => { rolledBack++; },
+      onBeforeWrite: () => { if (mode === 'failure') throw new Error('Preparation failed'); controller.abort(); },
+      write: async () => { written++; return { ok: true, status: 'written' }; } });
+    const result = await h.delivery.submit(h.action(mode, { signal: controller.signal }));
+    assert.equal(written, 0); assert.equal(rolledBack, 1); assert.equal(result.delivery, 'not-dispatched');
+    assert.equal(result.status, mode === 'failure' ? 'rejected' : 'cancelled');
+  }
+});
+
+test('expired queue behind an unresolved delivery lock does not bypass the lock', async () => {
+  const h = harness(); h.s.observation = 'observed';
+  await h.delivery.submit(h.action('first'));
+  await h.delivery.submit(h.action('second'));
+  h.advance(); await h.delivery.pump();
+  assert.equal(h.writes.length, 1); assert.equal(h.updates[0].status, 'blocked');
+});
+
+test('write-failed status without no-write proof retains reservation and uncertainty lock', async () => {
+  for (const status of ['write-failed', 'unconfirmed', 'uncertain']) {
+    let writes = 0, rollbacks = 0;
+    const h = harness({ reserveInput: () => () => { rollbacks++; },
+      write: async () => { writes++; return { ok: false, status, error: 'PTY write acknowledgment failed', reason: 'Transport may have accepted bytes' }; } });
+    const action = h.action('uncertain-write');
+    const result = await h.delivery.submit(action);
+    assert.equal(result.status, 'unknown'); assert.equal(result.ok, false);
+    assert.equal(result.error, 'PTY write acknowledgment failed'); assert.equal(result.reason, 'Transport may have accepted bytes');
+    assert.equal(result.deliveryBaseline.submittedAt, 100000); assert.equal(result.inputDisposition, 'submitted-when-ready');
+    assert.equal(rollbacks, 0);
+    assert.equal((await h.delivery.submit(action)).status, 'unknown'); assert.equal(writes, 1);
+    assert.equal((await h.delivery.submit(h.action('next'))).status, 'queued');
+    await h.delivery.pump(); assert.equal(writes, 1); assert.equal(rollbacks, 0);
+  }
+});
+
+test('write-failed with explicit not-dispatched proof remains recoverable', async () => {
+  let writes = 0, rollbacks = 0;
+  const h = harness({ reserveInput: () => () => { rollbacks++; },
+    write: async () => { writes++; return writes === 1 ? { ok: false, status: 'write-failed', delivery: 'not-dispatched', error: 'Nothing written' } : { ok: true, status: 'written' }; } });
+  const result = await h.delivery.submit(h.action('unsent'));
+  assert.equal(result.status, 'write-failed'); assert.equal(result.delivery, 'not-dispatched');
+  assert.equal(result.inputDisposition, undefined); assert.equal(rollbacks, 1);
+  assert.equal((await h.delivery.submit(h.action('retry'))).status, 'written'); assert.equal(writes, 2);
+});
+
+test('extended busy queues still cancel or reject lost readiness without a write', async () => {
+  for (const mode of ['cancel', 'restart', 'waiting', 'unknown']) {
+    const h = harness(); Object.assign(h.s, { turnState: 'running', observation: 'observed' });
+    const controller = new AbortController(); await h.delivery.submit(h.action(mode, { signal: controller.signal }));
+    h.advance(); await h.delivery.pump();
+    if (mode === 'cancel') controller.abort();
+    else if (mode === 'restart') h.s.generation = 'new';
+    else h.s.turnState = mode;
+    await h.delivery.pump();
+    assert.equal(h.writes.length, 0); assert.equal(h.updates.length, 1);
+    assert.equal(h.updates[0].ok, false);
+  }
+});
+
+test('actual attempted writes expose idle disposition, but proven unsent rejection does not', async () => {
+  for (const outcome of [{ ok: false, status: 'unknown' }, { ok: false, status: 'rejected', delivery: 'not-dispatched' }]) {
+    const h = harness({ write: async () => outcome });
+    const result = await h.delivery.submit(h.action('a'));
+    assert.equal(result.inputDisposition, outcome.delivery ? undefined : 'submitted-when-ready');
+  }
+  const h = harness({ write: async () => { throw new Error('ack unavailable'); } });
+  assert.equal((await h.delivery.submit(h.action('a'))).inputDisposition, 'submitted-when-ready');
 });
 test("cancelling queued work after transport dispatch preserves the actual acknowledgment", async () => {
   for (const outcome of [{ ok: true, status: "written" }, { ok: false, status: "unknown" }, { ok: false, status: "needs-staging" }]) {
@@ -79,7 +193,7 @@ test("unknown acknowledgment keeps delivery lock and a definite rejection releas
   const h = harness({ write: async () => ({ ok: false, status: "unknown" }) });
   assert.equal((await h.delivery.submit(h.action("a"))).status, "unknown");
   assert.equal((await h.delivery.submit(h.action("b"))).status, "queued");
-  const j = harness({ write: async () => ({ ok: false, status: "write-failed" }) });
+  const j = harness({ write: async () => ({ ok: false, status: "write-failed", delivery: 'not-dispatched' }) });
   assert.equal((await j.delivery.submit(j.action("a"))).status, "write-failed");
   assert.equal((await j.delivery.submit(j.action("b"))).status, "write-failed");
 });

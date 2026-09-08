@@ -75,7 +75,7 @@ test('background error announcements never discard a user recording', async t =>
 test('local spoken feedback reports renderer failure without retrying playback or cloud speech', async t => {
   const f = fixture(t, () => { throw Error('No network allowed'); }, false); await f.controller.setListening(true);
   const pending = f.controller.announceError({ category: 'not-understood', origin: 'voice', operation: 'transcription' });
-  f.controller.configure({ playbackError: 'Output unavailable' });
+  f.controller.configure({ playbackError: 'Output unavailable', playbackReplyId: f.controller.getState().replyId });
   const result = await pending;
   assert.equal(result.ok, false); assert.equal(result.status, 'playback-failed');
   assert.match(result.error, /audio output/); assert.equal(f.controller.getState().phase, 'listening');

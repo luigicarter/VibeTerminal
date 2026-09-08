@@ -34,7 +34,9 @@ export default function VoiceIndicator() {
   const working = ['transcribing', 'thinking'].includes(state.phase);
   const error = localError || state.error;
   const automatic = state.phase === 'recording' && (state.recordingSource === 'wake' || state.recordingSource === 'answer');
-  const status = error || (state.finishHint ? 'Still listening… click Send when finished' :
+  const status = state.captureRecovering ? 'Reconnecting microphone…' :
+    state.handsFreeStatus === 'recovering' && ['listening', 'awaiting-answer'].includes(state.phase) ? 'Restarting hands-free voice… hold Space to talk' :
+    error || (state.finishHint ? 'Still listening… click Send when finished' :
     automatic ? 'Listening… speak naturally, or click Send' :
     state.phase === 'awaiting-answer' && state.handsFreeStatus === 'ready' ? 'Listening for your answer · say “never mind” to dismiss' :
     state.phase === 'awaiting-answer' && state.handsFreeStatus === 'loading' ? 'Getting ready to listen… or hold Space to answer' :

@@ -1992,27 +1992,21 @@ function postTelemetry(callbackUrl, token, payload) {
       !runningCmd.includes("tool"),
       `claude UserPromptSubmit must be an undetailed (latch-overriding) turn start; got ${runningCmd}`
     );
-    for (const hookEvent of ["PreToolUse", "PostToolUse"]) {
+    for (const hookEvent of ["PreToolUse", "PostToolUse", "PostToolUseFailure"]) {
       const toolCmd = claudeHooks[hookEvent][0].hooks[0].command;
       assert(
         toolCmd.includes("'agent.running' 'tool'"),
         `claude ${hookEvent} should fire agent.running with the tool detail; got ${toolCmd}`
       );
     }
-    // The Notification hook is split so approvals and idle prompts are
-    // distinguishable: answering an approval flips waiting->running in the
-    // renderer, composing after an idle prompt does not.
+    // Ordinary idle notifications do not mean a question needs answering.
     assert(
-      claudeHooks.Notification.length === 2 &&
+      claudeHooks.Notification.length === 1 &&
         claudeHooks.Notification[0].matcher === "permission_prompt" &&
         claudeHooks.Notification[0].hooks[0].command.includes(
           "'agent.waiting' 'approval'"
-        ) &&
-        claudeHooks.Notification[1].matcher === "idle_prompt" &&
-        claudeHooks.Notification[1].hooks[0].command.includes(
-          "'agent.waiting' 'question'"
         ),
-      "claude Notification hooks should tag approval vs idle waits"
+      "claude Notification hooks should report permissions without treating idle as a question"
     );
     const winToolCmd = JSON.parse(
       buildClaudeSettingsJson("C:\\x\\notify.ps1", true)

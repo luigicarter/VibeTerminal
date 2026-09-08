@@ -318,7 +318,13 @@ function ptyChecks() {
   vm.runInContext(fs.readFileSync(path.join(root, "backend/ptyHost.cjs"), "utf8"), context);
   const create = { id: "pane", launchToken: 1, generation: "g1", command: "codex" };
   context.handleMessage({ type: "create", payload: create });
+  const premature = { id: "pane", generation: "g1", actionId: "before-launch", kind: "input", data: "echo too early\r" };
+  context.handleMessage({ type: "action", payload: premature });
+  assert.equal(events.at(-1).status, "launch-pending");
+  assert.equal(spawned[0].writes.length, 0, "checked input cannot overtake the delayed launcher");
   for (const fn of timers.splice(0)) fn();
+  assert.equal(events.at(-1).type, "launch-ready");
+  assert.deepEqual(spawned[0].writes, ["codex\r"]);
   assert.equal(spawned.length, 1);
   spawned[0].data("hello\x1b]2;Terminal ");
   spawned[0].data("Title\x1b");
@@ -328,12 +334,25 @@ function ptyChecks() {
   context.handleMessage({ type: "create", payload: create });
   assert.equal(spawned.length, 1);
   assert.equal(events.at(-1).terminalTitle, "Terminal Title");
+  const beforeAttach = events.length;
+  context.handleMessage({ type: "attach", payload: { id: "missing", launchToken: 1 } });
+  context.handleMessage({ type: "attach", payload: { ...create, generation: "old" } });
+  assert.equal(events.length, beforeAttach, "absent/stale attaches cannot create or replay a process");
+  context.handleMessage({ type: "attach", payload: { ...create, cols: 120, rows: 32 } });
+  assert.equal(spawned.length, 1, "visual attachment never launches a process");
+  assert.equal(events.at(-1).type, "snapshot");
+  assert.equal(events.at(-1).cols, 120);
+  assert.equal(spawned[0].writes.length, 1, "attachment never repeats the launcher command");
   context.handleMessage({ type: "input", payload: { id: "pane", generation: "stale", data: "NO" } });
   assert(!spawned[0].writes.includes("NO"));
   context.handleMessage({ type: "create", payload: { ...create, launchToken: 2, generation: "g2" } });
   const count = events.length;
   spawned[0].exit({ exitCode: 0 });
   assert.equal(events.length, count, "old onExit callback cannot terminate replacement");
+  context.handleMessage({ type: "kill", payload: { id: "pane", generation: "g2", launchToken: 2 } });
+  for (const fn of timers.splice(0)) fn();
+  assert.equal(spawned[1].writes.length, 0, "a closed launch cannot run its delayed command");
+  assert(!events.some(event => event.type === "launch-ready" && event.generation === "g2"));
 }
 
 function section(source, start, end) {
@@ -420,7 +439,12 @@ async function mainChecks() {
   assert.match(conflict.error, /already belongs/);
   assert.equal(runtime.getSnapshot("owner").conversation.id, "owned-thread");
   const ownerSnapshot = runtime.getSnapshot("owner");
+  assert.equal(handlers["terminal:attach"](null, { id: "missing", launchToken: 1 }).status, "not-running");
+  assert.equal(handlers["terminal:attach"](null, { id: "owner", launchToken: 0 }).status, "stale");
+  assert.equal(handlers["terminal:attach"](null, { id: "owner", launchToken: 1 }).status, "starting");
   runtime.ingest({ id: "owner", generation: ownerSnapshot.generation, type: "created" });
+  assert.equal(handlers["terminal:attach"](null, { id: "owner", launchToken: 1, generation: ownerSnapshot.generation }).ok, true);
+  assert.equal(sent.at(-1).type, "attach");
   handlers["terminal:input"](null, { id: "owner", generation: ownerSnapshot.generation, data: "\r" });
   assert.equal(runtime.getSnapshot("owner").pendingInput, "submit", "actual input IPC records intent before forwarding bytes");
   assert.equal(sent.at(-1).type, "input");

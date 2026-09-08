@@ -174,6 +174,7 @@ contextBridge.exposeInMainWorld("vibe", {
   },
   terminal: {
     create: (payload) => ipcRenderer.invoke("terminal:create", payload),
+    attach: (payload) => ipcRenderer.invoke("terminal:attach", payload),
     input: (id, data, scope = {}) => ipcRenderer.send("terminal:input", { ...scope, id, data }),
     resize: (id, cols, rows, scope = {}) =>
       ipcRenderer.send("terminal:resize", { ...scope, id, cols, rows }),

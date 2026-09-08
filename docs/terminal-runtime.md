@@ -6,6 +6,25 @@ Standalone panes use a main-process runtime service. The renderer subscribes to 
 
 Each pane launch has a backend-issued generation and renderer launch token. PTY events, authenticated callbacks, asynchronous metadata results, and cleanup are checked against that generation. Concurrent creates share preparation; reattachment reuses the live launch. Closing cancels pending preparation, and restart rotates instrumentation. Invalid folders, missing executables, and rejected duplicate conversation ownership produce observable failures.
 
+An App-level launch coordinator starts every explicitly started standalone session,
+including inactive projects, Multi sessions and panes hidden by maximization.
+Paused sessions remain paused. Visual panes use `terminal.attach` to replay and
+resize an existing generation; mounting or navigation cannot launch a process.
+Remote creation reports success after the matching backend process is running
+and its launcher command has been submitted. Failed, superseded, cancelled and
+timed-out starts keep the created pane identity and are never automatically
+recreated. Agent input retains its separate observed-readiness checks, and a
+staged draft remains unsent. Checked input cannot overtake the launcher command.
+
+Standalone operator input freezes recipient, lifecycle, turn, pending
+question/permission, ownership and geometry evidence instead of the general
+publication revision. Titles, timestamps and tool-label updates alone do not
+invalidate an otherwise current read. Screen/input revisions and final PTY
+recipient checks remain mandatory. Runtime snapshots retain `cols` and `rows`,
+and a resize rejects stale native control evidence even without new output.
+The separately constrained busy-Codex prompt path and chat-host controls retain
+their existing rules.
+
 The runtime separates shell lifetime, agent invocation lifetime, foreground turns, and child work. An agent exiting into its shell is not a completed task. Neither Enter nor quiet output establishes agent progress. Native turn IDs reject stale activity/completion; repeated semantic attention events retain their occurrence ID. End timestamps are frozen independently of metadata refresh timestamps.
 
 Submit/interrupt keystrokes are provisional input intent (“awaiting activity” / “interrupt requested”), cleared by provider evidence. They never manufacture a turn start or cancellation. Completion-only Codex configurations can report successive completed turns even when the optional lifecycle observer has not been trusted; no start time is invented for those turns.
@@ -19,6 +38,10 @@ The pane title prefers a provider conversation name or preview, then the live te
 Codex reads the latest saved name from `session_index.jsonl`; its first prompt is a fallback. Claude title reading follows later rename/generated-title records rather than only the transcript head. Kimi, Kimi + CC, Qwen, Cursor, and OpenCode use their metadata adapters. Existing titles continue refreshing.
 
 Click the status chip to inspect current/latest observed tools, child work, elapsed turn time, and observation availability. Exact child counts require identified tasks; anonymous hook brackets produce a generic child-activity indication. Status and sidebar totals use the same runtime projection. Attention is shown only while it matches the current lifecycle; parent completion stays separate from unfinished child work.
+
+Claude's `idle_prompt` is an idle reminder after a response, not evidence of a question ([native hook semantics](https://code.claude.com/docs/en/hooks#notification)). Generated settings omit that notification. The telemetry adapter preserves notification type and ignores known idle reminders; the runtime also rejects the metadata-free question events emitted by older hooks. This applies during startup, provisional responses, active work, and pending submissions, without changing an existing real wait or restarting elapsed time.
+
+Claude permission notifications still produce approval attention. The single wildcard tool observer recognizes `AskUserQuestion` starts as explicit question attention, and tool success/failure resumes the same turn. Unrelated tool callbacks cannot dismiss an open question or consume its pending reply. Resolved or superseded question tool IDs fence delayed duplicate callbacks. Hook metadata carries identities and notification type, without question or answer text. An ordinary final response, including optional follow-up prose, remains “response available”; the monitor does not infer required input from its wording or elapsed silence.
 
 `shared/providerCapabilities.json` defines the retained standalone providers, launch commands, thread support, and adapter capabilities. These capabilities describe the adapter, not proof that a particular installed CLI has emitted usable telemetry. Missing native fields remain coarse. Aider is removed; saved Aider panes migrate to paused plain terminals, preserving folders, names, and tile membership without running the old command.
 
@@ -60,6 +83,8 @@ Focused commands:
 - `npm run smoke:frontend:terminal-runtime`
 - `npm run smoke:frontend:app-runtime`
 - `npm run smoke:frontend:session-persistence`
+- `npm run test:frontend:terminal-launch`
+- `npm run smoke:electron:orchestrator-background-launch`
 - `npm run smoke:frontend:tiled-resize`
 - `npm run build` followed by `npm run smoke:electron:terminal-board`
 

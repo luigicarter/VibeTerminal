@@ -4,7 +4,7 @@ const fs = require('node:fs'), path = require('node:path'), vm = require('node:v
 const { createTerminalInput } = require('../../backend/orchestratorTerminalInput.cjs');
 function fixture(overrides = {}) {
   const session = { id: 'p', generation: 'g', revision: 1, provider: 'codex', kind: 'codex', processState: 'running', agentProcessState: 'running', agentPid: 42, turnState: 'waiting' };
-  const observation = { ok: true, id: 'p', generation: 'g', sequence: 7 }; const writes = [];
+  const observation = { ok: true, id: 'p', generation: 'g', sequence: 7, cols: 100, rows: 28 }; const writes = [];
   const input = createTerminalInput({ getSession: () => session, readSession: async () => observation, write: async payload => { writes.push(payload); return { ok: true, status: 'written', delivery: 'pty-transport-only' }; }, now: () => 1000, ...overrides });
   return { input, session, observation, writes, action: (actionId, rest = {}) => ({ target: { id: 'p', generation: 'g' }, actionId, observationSequence: 7, keys: ['down'], ...rest }) };
 }
@@ -12,7 +12,7 @@ test('waiting native menus allow bounded navigation, preserve evidence and dedup
   const h = fixture(); const a = h.action('one');
   const result = await h.input.handle(a); assert.equal(result.status, 'written'); assert.equal(result.delivery, 'pty-transport-only');
   assert.deepEqual(await h.input.handle(a), result); assert.equal(h.writes.length, 1);
-  assert.equal(h.writes[0].kind, 'interaction'); assert.deepEqual(h.writes[0].interactionEvidence, { id: 'p', generation: 'g', pid: 42, sequence: 7, revision: 1, observedAt: 1000, shell: false });
+  assert.equal(h.writes[0].kind, 'interaction'); assert.deepEqual(h.writes[0].interactionEvidence, { id: 'p', generation: 'g', pid: 42, sequence: 7, revision: 1, observedAt: 1000, shell: false, cols: 100, rows: 28 });
   assert.equal((await h.input.handle(h.action('two', { text: 'literal answer', keys: [], submit: true }))).status, 'written');
 });
 test('stale screen, wrong generation, stopped/rootless/chat panes and runtime changes reject before writes', async () => {
@@ -20,7 +20,7 @@ test('stale screen, wrong generation, stopped/rootless/chat panes and runtime ch
     const h = fixture(); Object.assign(h.session, patch); assert.equal((await h.input.handle(h.action('one'))).ok, false); assert.equal(h.writes.length, 0);
   }
   const h = fixture(); h.observation.sequence++; assert.equal((await h.input.handle(h.action('stale'))).status, 'stale-observation');
-  const changed = fixture({ readSession: async () => { changed.session.revision++; return changed.observation; } });
+  const changed = fixture({ readSession: async () => { changed.session.turnId = 'replacement'; return changed.observation; } });
   assert.equal((await changed.input.handle(changed.action('changed'))).ok, false); assert.equal(changed.writes.length, 0);
 });
 test('literal inputs reject controls, excess bytes and unknown or excessive keys', async () => {
@@ -54,7 +54,12 @@ function host() {
   const context = vm.createContext({ require: name => name === 'node-pty' ? { spawn() { const terminal = { pid: 42, writes: [], onData(fn) { this.data = fn; }, onExit() {}, resize() {}, kill() {}, write(data) { this.writes.push(data); if (this.fail) throw Error('transport uncertain'); } }; terminals.push(terminal); return terminal; } } : name === 'readline' ? { createInterface: () => ({ on() {} }) } : name === '../shared/terminalControls.cjs' ? require('../../shared/terminalControls.cjs') : require(name), process: { platform: 'win32', env: {}, stdin: {}, cwd: () => process.cwd(), stdout: { write: line => events.push(JSON.parse(line)) }, kill() { if (dead) throw Error('gone'); } }, setTimeout() {} });
   vm.runInContext(fs.readFileSync(path.resolve(__dirname, '../../backend/ptyHost.cjs'), 'utf8'), context);
   context.handleMessage({ type: 'create', payload: { id: 'p', generation: 'g', launchToken: 1 } });
-  const send = (actionId, fields = {}) => { context.handleMessage({ type: 'action', payload: { kind: 'interaction', id: 'p', generation: 'g', actionId, expectedAgentPid: 42, interactionEvidence: { id: 'p', generation: 'g', pid: 42, sequence: events.filter(e => e.type === 'data').at(-1)?.sequence || 0, observedAt: Date.now() }, keys: ['down'], ...fields } }); return events.at(-1); };
+  const send = (actionId, fields = {}) => {
+    const geometry = events.filter(e => e.cols && e.rows).at(-1);
+    const payload = { kind: 'interaction', id: 'p', generation: 'g', actionId, expectedAgentPid: 42, interactionEvidence: { id: 'p', generation: 'g', pid: 42, sequence: events.filter(e => e.type === 'data').at(-1)?.sequence || 0, observedAt: Date.now() }, keys: ['down'], ...fields };
+    if (payload.interactionEvidence) payload.interactionEvidence = { cols: geometry.cols, rows: geometry.rows, ...payload.interactionEvidence };
+    context.handleMessage({ type: 'action', payload }); return events.at(-1);
+  };
   return { send, context, terminal: terminals[0], events, dead: () => { dead = true; }, manual: data => context.handleMessage({ type: 'input', payload: { id: 'p', generation: 'g', data } }) };
 }
 test('PTY encodes named keys, bracketed literal text and requested submission only', () => {
@@ -205,4 +210,14 @@ test('held mouse drag is request owned until release or manual input; uncertain 
   assert.equal(send('new-down', 4, 'a', 'down').ok, true);
   h.manual('x');
   assert.equal(h.events.filter(e => e.type === 'input-state').at(-1).ownerRequestId, null);
+});
+
+test('PTY rejects a resize with identical output and input revisions before any write', () => {
+  const h = host();
+  const evidence = { id: 'p', generation: 'g', pid: 42, sequence: 0, inputRevision: 0, cols: 100, rows: 28, observedAt: Date.now() };
+  h.context.handleMessage({ type: 'resize', payload: { id: 'p', generation: 'g', cols: 120, rows: 40 } });
+  const result = h.send('resized-since-read', { operator: true, requestId: 'owner', interactionEvidence: evidence });
+  assert.equal(result.status, 'stale-observation'); assert.match(result.error, /geometry/);
+  assert.equal(h.terminal.writes.length, 0);
+  assert.equal(h.send('fresh-size', { operator: true, requestId: 'owner', interactionEvidence: { ...evidence, cols: 120, rows: 40 } }).status, 'written');
 });

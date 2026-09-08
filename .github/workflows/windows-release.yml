@@ -52,8 +52,8 @@ jobs:
           npm run prepare:codex-bin:required
           if ($LASTEXITCODE -ne 0) { throw "Codex preparation failed." }
 
-      - name: Typecheck
-        run: npm run typecheck
+      - name: Build renderer for release checks
+        run: npm run build
 
       - name: Verify release tag matches package version
         if: startsWith(github.ref, 'refs/tags/v')

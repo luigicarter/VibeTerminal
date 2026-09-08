@@ -108,6 +108,7 @@ function emitSnapshot(id, session) {
     type: "snapshot",
     data: session.buffer,
     isRunning: Boolean(session.terminal),
+    launchPending: Boolean(session.launchPending),
     launchToken: session.launchToken,
     generation: session.generation,
     terminalTitle: session.terminalTitle,
@@ -263,6 +264,7 @@ function createSession(payload) {
   const session = {
     id: payload.id, inputRevision: 0, interactionInputPending: false, ownerRequestId: null,
     terminal: null,
+    launchPending: Boolean(payload.command),
     buffer: "",
     cols,
     rows,
@@ -290,7 +292,7 @@ function createSession(payload) {
 
     session.terminal = terminal;
     sessions.set(payload.id, session);
-    emit({ id: payload.id, type: "created", generation: session.generation, launchToken: session.launchToken, cols, rows, pid: terminal.pid, ...inputState(session) });
+    emit({ id: payload.id, type: "created", generation: session.generation, launchToken: session.launchToken, cols, rows, pid: terminal.pid, launchPending: session.launchPending, ...inputState(session) });
 
     terminal.onData((data) => {
       if (sessions.get(payload.id) !== session) {
@@ -353,7 +355,13 @@ function createSession(payload) {
             id: payload.id,
             command: payload.command
           });
-          terminal.write(`${payload.command}${lineEnding}`);
+          try {
+            terminal.write(`${payload.command}${lineEnding}`);
+            session.launchPending = false;
+            emit({ id: payload.id, type: "launch-ready", generation: session.generation, launchToken: session.launchToken });
+          } catch (error) {
+            emit({ id: payload.id, type: "error", generation: session.generation, launchToken: session.launchToken, message: `Terminal launcher failed: ${error.message}` });
+          }
         }
       }, 250);
     }
@@ -376,6 +384,23 @@ function handleMessage(message) {
     case "create":
       createSession(message.payload);
       break;
+
+    case "attach": {
+      const payload = message.payload || {};
+      const session = sessions.get(payload.id);
+      if (!matchesSession(session, payload)) break;
+      if (session.terminal && (payload.cols || payload.rows)) {
+        const cols = Math.max(20, Number(payload.cols || session.cols));
+        const rows = Math.max(6, Number(payload.rows || session.rows));
+        if (cols !== session.cols || rows !== session.rows) {
+          session.terminal.resize(cols, rows);
+          session.cols = cols; session.rows = rows;
+          emit({ id: payload.id, type: "resize", generation: session.generation, cols, rows });
+        }
+      }
+      emitSnapshot(payload.id, session);
+      break;
+    }
 
     case "input": {
       if (message.payload.actionId) { handleAction({ ...message.payload, kind: "input" }, false); break; }
@@ -444,12 +469,14 @@ function handleAction(payload, strict) {
   const session = sessions.get(payload.id);
   if (!matchesSession(session, payload)) return result(false, "stale-generation", "The terminal generation is no longer current.");
   if (!session.terminal) return result(false, "not-running", "The terminal has exited.");
+  if (session.launchPending && ["input", "interaction"].includes(payload.kind)) return result(false, "launch-pending", "The terminal launcher has not been submitted yet. Wait for startup before sending input.");
   if (payload.kind === "input" && typeof payload.data !== "string") return result(false, "invalid-action", "Input must be a string.");
   try {
     if (payload.kind === "interaction") {
       const evidence = payload.interactionEvidence, pid = payload.expectedAgentPid;
       const age = Date.now() - Number(evidence?.observedAt);
       if (payload.generation == null || !Number.isSafeInteger(pid) || pid <= 0 || evidence?.id !== payload.id || evidence?.generation !== session.generation || evidence?.pid !== pid || !Number.isSafeInteger(evidence?.sequence) || evidence.sequence !== session.sequence || !Number.isFinite(age) || age < 0 || age > 5000 || (evidence.shell && pid !== session.terminal.pid)) return result(false, "stale-observation", "Fresh generation-bound terminal interaction evidence is required.");
+      if (!Number.isSafeInteger(evidence.cols) || evidence.cols !== session.cols || !Number.isSafeInteger(evidence.rows) || evidence.rows !== session.rows) return result(false, "stale-observation", "The terminal geometry changed after the last observation.");
       try { process.kill(pid, 0); } catch { return result(false, "recipient-unavailable", "The expected input recipient is no longer alive."); }
       const freshInput = Number.isSafeInteger(evidence.inputRevision) && evidence.inputRevision === session.inputRevision;
       if ((payload.operator || payload.editInput || evidence.inputRevision !== undefined) && !freshInput) return result(false, "stale-observation", "Read the current terminal input revision before interacting.");

@@ -173,6 +173,8 @@ function installOrchestrator(options) {
   const { createTerminalObservation } = require("./terminalObservation.cjs");
   const { createWorkspaceSetupStore } = require("./workspaceSetups.cjs");
   const { createOrchestratorDelivery } = require("./orchestratorDelivery.cjs");
+  const { createInventoryRefresh } = require("./orchestratorInventory.cjs");
+  const { waitForSessionLaunch } = require("./orchestratorLaunch.cjs");
   const { createTerminalInput } = require("./orchestratorTerminalInput.cjs");
   const { createOrchestratorHistoryProcess } = require("./orchestratorHistoryProcess.cjs");
   const { createWorkspaceIdentity } = require("./orchestratorWorkspaceIdentity.cjs");
@@ -187,7 +189,9 @@ function installOrchestrator(options) {
   const completions = createCompletionEvidence({ getSession: id => directory.get(id), readObservation: target => observations.read(target) });
   const setups = createWorkspaceSetupStore({ userDataPath: app.getPath("userData") });
   const pendingUi = new Map(), pendingHost = new Map();
-  let inventorySequence = 0, appliedInventorySequence = 0;
+  const inventoryReader = createInventoryRefresh({ read: () => requestUi("inventory"),
+    apply: result => { if (!disposed) directory.updateUi(result.sessions || result.items || [], result.projectPaths || []); },
+    after: async () => { if (!disposed) await relay.refresh(); } });
   const history = createOrchestratorHistoryProcess({ getConfig: () => {
     const current = directory.list();
     const roots = [...new Set([...directory.projectPaths(), ...current.map(s => s.cwd)].filter(Boolean))];
@@ -198,23 +202,35 @@ function installOrchestrator(options) {
     return { ...options.getHistoryConfig?.(), scopes };
   } });
   const delivery = createOrchestratorDelivery({
-    getSession: id => { const s = directory.get(id); return s && { ...s, pendingInteraction: relay.getState().requests.some(r => r.sessionId === id && r.generation === s.generation && r.state === "pending") }; },
+    getSession: inputSession,
     write: payload => hostAction(sendPty, payload),
     reserveInput: payload => { const runtime = getRuntime(), reservation = runtime.recordInput?.(payload); return reservation ? () => runtime.releaseInput?.(reservation) : undefined; },
-    onUpdate: result => relay.recordDelivery(result)
+    onUpdate: result => relay.recordDelivery(result),
+    onBeforeWrite: metadata => relay.prepareDelivery(metadata)
   });
-  const terminalInput = createTerminalInput({ getSession: id => directory.get(id), readSession: target => observations.read(target),
+  const terminalInput = createTerminalInput({ getSession: inputSession, readSession: target => observations.read(target),
+    onBeforeWrite: metadata => relay.prepareDelivery(metadata),
     write: ({ signal, ...payload }) => hostAction(sendPty, payload, 'action', signal) });
   let disposed = false, inventoryTimer = null, publicationTimer = null, voice, activation = 0;
+  function inputSession(id) {
+    const session = directory.get(id);
+    if (!session) return;
+    const pendingInteractions = relay.getState().requests.filter(request => request.sessionId === id &&
+      (request.generation === undefined || request.generation === session.generation) && request.state === "pending");
+    return { ...session, pendingInteraction: pendingInteractions.length > 0, pendingInteractions: structuredClone(pendingInteractions) };
+  }
   let permissionActivation = null;
   const permissionLifetime = new AbortController();
+  const launchLifetime = new AbortController();
   const microphonePermission = options.microphonePermission || createMicrophonePermission({ userDataPath: app.getPath("userData"), getMainWindow, dialog, systemPreferences, shell });
-  let voiceReady = false, captureToken = 0, captureReady = false, indicatorVisible = false;
+  let voiceReady = false, captureToken = 0, captureReady = false, captureRecovering = false, indicatorVisible = false;
+  let captureHeartbeatTimer = null, captureRecoveryTimer = null;
+  const captureRestarts = [];
   const captureWaiters = new Set();
   const captureFlushes = new Map();
   let capturedSamples = 0;
   const surface = createVoiceOverlayWindow({ BrowserWindow, screen, canCapture: () => microphonePermission.isGranted(),
-    onClosed: () => { void voice?.setListening(false); },
+    onClosed: () => { if (disposed) return; captureReady = false; invalidateCapture(); finishCapture({ ok: false, status: 'cancelled', error: 'Voice audio window closed.' }); void voice?.setListening(false); },
     onFailure: error => { void microphoneFailure(error); },
   });
   function broadcast(channel, value) {
@@ -239,7 +255,7 @@ function installOrchestrator(options) {
     const id = randomUUID();
     return new Promise(resolve => {
       let dispatched = false, settled = false;
-      const finish = result => { if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener("abort", abort); pendingUi.delete(id); resolve(result); };
+      const finish = result => { if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener("abort", abort); pendingUi.delete(id); if (kind !== "inventory" && dispatched) inventoryReader.invalidate(); resolve(result); };
       const abort = () => finish({ ok: false, status: dispatched ? "unknown" : "cancelled", error: dispatched ? "Workspace action was dispatched before cancellation; its outcome is unconfirmed. No automatic retry." : "Cancelled before workspace dispatch." });
       const timer = setTimeout(() => finish({ ok: false, status: "unknown", error: "Workspace acknowledgment timed out; no automatic retry." }), 20000);
       if (signal?.aborted) return abort();
@@ -248,17 +264,15 @@ function installOrchestrator(options) {
         if (payload.id && payload.generation) currentTarget({ id: payload.id, generation: payload.generation, signal });
         if (signal?.aborted) return abort();
         dispatched = true;
+        if (kind !== "inventory") inventoryReader.invalidate();
         main.webContents.send("orchestrator:ui-action", { id, kind, payload });
       } catch (error) { finish({ ok: false, status: dispatched ? "unknown" : "rejected", error: String(error?.message || error) }); }
     });
   }
   async function refreshInventory() {
     if (disposed) return;
-    const sequence = ++inventorySequence;
-    const result = await requestUi("inventory");
-    if (!disposed && result?.ok && sequence > appliedInventorySequence) { appliedInventorySequence = sequence; directory.updateUi(result.sessions || result.items || [], result.projectPaths || []); }
-    await relay.refresh();
-    await delivery.observe();
+    await inventoryReader.refresh();
+    if (!disposed) void delivery.observe().catch(error => relay.recordDiagnostic({ event: "orchestrator_error", stage: "delivery", error }));
   }
   function publishSoon() {
     if (disposed || publicationTimer) return;
@@ -311,8 +325,14 @@ function installOrchestrator(options) {
     const kind = action.kind;
     const check = () => { if (disposed || action.signal?.aborted) throw new Error("Cancelled."); };
     const checkedHost = (send, payload, type) => { check(); currentTarget(action); return hostAction(send, payload, type, action.signal); };
-    const createdTarget = result => {
+    const createdTarget = async result => {
       const session = result?.ok && result.id ? directory.get(result.id) : null;
+      if (result?.ok && result.id && Number.isFinite(result.launchToken) &&
+          !session?.fusion && !session?.openFusion && !["fusion", "openfusion"].includes(session?.kind || action.kindOfSession)) {
+        return waitForSessionLaunch({ result, getSession: id => directory.get(id), refresh: refreshInventory,
+          signal: AbortSignal.any([launchLifetime.signal, ...(action.signal ? [action.signal] : [])]),
+          timeoutMs: options.launchTimeoutMs ?? 20000 });
+      }
       return session && (result.launchToken === undefined || session.launchToken === result.launchToken)
         ? { ...result, target: { id: session.id, generation: session.generation, launchToken: session.launchToken } } : result;
     };
@@ -414,7 +434,16 @@ function installOrchestrator(options) {
         return checkedHost(sendFusion, { id: s.id, generation: s.generation, text: action.text, actionId: action.actionId }, "input");
       }
       if (s.kind === "openfusion") return checkedHost(sendOpenFusion, { id: s.id, generation: s.generation, text: action.text, mode: s.mode || "auto", actionId: action.actionId }, "input");
-      if (action.operator === true) return terminalInput.handle({ ...action, target: { id: s.id, generation: s.generation }, submit: true });
+      if (action.operator === true) {
+        const prompt = { ...action, target: { id: s.id, generation: s.generation }, submit: true, promptSubmission: true,
+          promptObservation: action.promptObservation ?? { agentPid: s.agentPid, turnId: s.turnId, turnStartedAt: s.turnStartedAt } };
+        if (relay.getState().requests.some(request => request.sessionId === s.id && request.generation === s.generation && request.state === 'pending')) return { ok: false, status: 'blocked', delivery: 'not-dispatched', error: 'Answer the pending terminal request before submitting a new prompt.' };
+        const result = await terminalInput.handle(prompt);
+        const latest = directory.get(s.id);
+        const pendingInteraction = relay.getState().requests.some(request => request.sessionId === s.id && request.generation === s.generation && request.state === 'pending');
+        if (require('./orchestratorBusyInput.cjs').canQueueBusyPrompt(prompt, latest && { ...latest, pendingInteraction }, result)) return delivery.submit({ ...action, target: prompt.target });
+        return result;
+      }
       return delivery.submit({ ...action, target: { id: s.id, generation: s.generation } });
     }
     throw new Error(`Unsupported action: ${kind}`);
@@ -448,18 +477,50 @@ function installOrchestrator(options) {
   });
   voice = (options.voiceFactory || createVoiceController)({ orchestrator: relay, getKey: () => relay.getKey(), getSettings: () => relay.getSettings(), fetch: options.fetch,
     modelPath: app.isPackaged ? path.join(process.resourcesPath, "voice") : path.join(__dirname, "..", "vendor", "voice"),
-    emit: state => broadcast("voice:state", { ...state, captureToken, indicatorVisible }), onAudio: chunk => surface.send("voice:audio", chunk) });
+    emit: state => broadcast("voice:state", { ...state, captureToken, captureRecovering, indicatorVisible }), onAudio: chunk => surface.send("voice:audio", chunk) });
 
   const snapshot = () => { const state = relay.getState(); return { ...state, ready: state.ready && voiceReady, voiceReady }; };
-  const voiceSnapshot = () => ({ ...voice.getState(), captureToken, indicatorVisible });
+  const voiceSnapshot = () => ({ ...voice.getState(), captureToken, captureRecovering, indicatorVisible });
   function showIndicator() { indicatorVisible = true; broadcast("voice:state", voiceSnapshot()); return { ok: true }; }
   function hideIndicator() { indicatorVisible = false; broadcast("voice:state", voiceSnapshot()); return { ok: true }; }
   const publish = () => broadcast("orchestrator:state", snapshot());
   function finishCapture(result) { for (const waiter of captureWaiters) waiter.finish(result); }
-  function invalidateCapture() {
+  function invalidateCapture({ recovering = false } = {}) {
+    clearTimeout(captureHeartbeatTimer); captureHeartbeatTimer = null;
+    clearTimeout(captureRecoveryTimer); captureRecoveryTimer = null;
+    captureRecovering = recovering;
     captureToken++; capturedSamples = 0;
     for (const pending of captureFlushes.values()) pending.finish({ ok: false, status: 'cancelled', error: 'Microphone capture changed.' });
-    voice?.configure({ captureToken });
+    voice?.configure({ captureToken, captureRecovery: recovering });
+    if (voice && !disposed) broadcast('voice:state', voiceSnapshot());
+  }
+  function watchCaptureFrames() {
+    clearTimeout(captureHeartbeatTimer); captureHeartbeatTimer = null;
+    if (disposed || !captureReady || captureRecovering || !relay.getState().enabled || !voice.getState().listening) return;
+    const token = captureToken;
+    captureHeartbeatTimer = setTimeout(() => { captureHeartbeatTimer = null; void recoverCapture(token); }, options.captureHeartbeatTimeoutMs ?? 6000);
+    captureHeartbeatTimer.unref?.();
+  }
+  async function recoverCapture(token) {
+    if (disposed || token !== captureToken || !relay.getState().enabled || !voice.getState().listening) return { ok: false, status: 'stale' };
+    if (captureRecovering) return { ok: true, status: 'recovering' };
+    const now = Date.now();
+    while (captureRestarts.length && now - captureRestarts[0] >= 60000) captureRestarts.shift();
+    if (captureRestarts.length >= 3) {
+      const error = 'Microphone audio keeps stopping. Check the selected microphone, then turn voice on to retry.';
+      await microphoneFailure(error); return { ok: false, error };
+    }
+    captureRestarts.push(now);
+    captureReady = false; invalidateCapture({ recovering: true });
+    const current = captureToken;
+    captureRecoveryTimer = setTimeout(() => {
+      captureRecoveryTimer = null;
+      if (!disposed && current === captureToken && captureRecovering && relay.getState().enabled && voice.getState().listening) {
+        void microphoneFailure('Microphone could not restart. Check the selected microphone, then turn voice on to retry.');
+      }
+    }, options.captureReadyTimeoutMs ?? 15000);
+    captureRecoveryTimer.unref?.();
+    return { ok: true, status: 'recovering', captureToken: current };
   }
   function flushCapture() {
     if (!captureReady || !voice.getState().listening) return Promise.resolve({ ok: false, status: 'cancelled', error: 'Microphone is not recording.' });
@@ -472,6 +533,7 @@ function installOrchestrator(options) {
     });
   }
   async function microphoneFailure(error) {
+    if (disposed) return;
     activation++; captureReady = false;
     invalidateCapture();
     finishCapture({ ok: false, error });
@@ -519,10 +581,13 @@ function installOrchestrator(options) {
     return { ...result, ...audio, ready: result.ready && audio.ok };
   }
   async function setEnabled(enabled, { interactive = true } = {}) {
+    // A deliberate new activation after failure starts a fresh recovery budget.
+    // Reasserting enabled during a live/recovering capture must not bypass it.
+    if (enabled && interactive && !voice.getState().listening) captureRestarts.length = 0;
     const token = ++activation;
     permissionActivation?.abort();
     permissionActivation = null;
-    if (!enabled) { invalidateCapture(); captureReady = false; finishCapture({ ok: false, status: "cancelled", error: "Voice activation was cancelled." }); voice.cancelSpeech(); await voice.setListening(false); hideIndicator(); return relay.setEnabled(false); }
+    if (!enabled) { captureRestarts.length = 0; invalidateCapture(); captureReady = false; finishCapture({ ok: false, status: "cancelled", error: "Voice activation was cancelled." }); voice.cancelSpeech(); await voice.setListening(false); hideIndicator(); return relay.setEnabled(false); }
     const consent = permissionActivation = new AbortController();
     const permission = await microphonePermission.ensure({ interactive, signal: AbortSignal.any([consent.signal, permissionLifetime.signal]) });
     if (permissionActivation === consent) permissionActivation = null;
@@ -538,7 +603,7 @@ function installOrchestrator(options) {
       showIndicator(); await surface.ensureReady();
       if (disposed || token !== activation) return { ok: false, status: 'cancelled' };
       const listening = await startListening(token);
-      if (!listening.ok) { if (token === activation) { await voice.setListening(false); await relay.setEnabled(false); } return listening; }
+      if (!listening.ok) { if (token === activation) { captureReady = false; invalidateCapture(); await voice.setListening(false); await relay.setEnabled(false); } return listening; }
       await refreshInventory();
       return { ok: true, voiceReady: true, listening: true };
     } catch (error) {
@@ -619,6 +684,10 @@ function installOrchestrator(options) {
       return p.openMicrophoneSettings ? microphonePermission.openSettings({ signal: permissionLifetime.signal }) : microphonePermission.ensure({ signal: permissionLifetime.signal });
     }
     if (p.rendererReady) return surface.markReady(event.sender);
+    if (p.captureStalled) {
+      if (!surface.isSender(event.sender)) return { ok: false, status: 'stale' };
+      return recoverCapture(p.captureToken);
+    }
     if (p.captureFlushed) {
       const pending = captureFlushes.get(p.flushId);
       if (!pending || !surface.isSender(event.sender) || p.captureToken !== captureToken || pending.token !== captureToken) return { ok: false, status: 'stale' };
@@ -629,10 +698,13 @@ function installOrchestrator(options) {
       pending.finish({ ok: true, sampleEnd: p.sampleEnd }); return { ok: true };
     }
     if (p.microphoneReady || p.microphoneError) {
-      if (!surface.isSender(event.sender) || p.captureToken !== captureToken) return { ok: false, status: "stale" };
+      if (disposed || !surface.isSender(event.sender) || p.captureToken !== captureToken || !relay.getState().enabled || !voice.getState().listening) return { ok: false, status: "stale" };
       if (p.microphoneError) { await microphoneFailure(String(p.microphoneError).slice(0, 200)); return { ok: false, error: voice.getState().error }; }
-      if (!voice.getState().listening) return { ok: false, status: "stale" };
-      captureReady = true; finishCapture({ ok: true }); return { ok: true };
+      if (captureReady) return { ok: true };
+      captureReady = true; captureRecovering = false;
+      clearTimeout(captureRecoveryTimer); captureRecoveryTimer = null;
+      finishCapture({ ok: true }); watchCaptureFrames();
+      broadcast('voice:state', voiceSnapshot()); return { ok: true };
     }
     if (p.hideOverlay) return hideIndicator();
     if (p.menu) return showMenu();
@@ -663,10 +735,10 @@ function installOrchestrator(options) {
   guarded("voice:send-audio", p => voice.sendAudio(p));
   guarded("voice:cancel-speech", () => voice.cancelSpeech());
   ipcMain.on("voice:frames", (event, p) => {
-    if (!surface.isSender(event.sender) || !relay.getState().enabled || !voice.getState().listening || p?.captureToken !== captureToken) return;
+    if (disposed || !surface.isSender(event.sender) || !relay.getState().enabled || !voice.getState().listening || p?.captureToken !== captureToken) return;
     if (!Array.isArray(p.samples) || !Number.isSafeInteger(p.sampleStart) || p.sampleStart < capturedSamples) return;
     const result = voice.frames(p);
-    if (result?.ok) capturedSamples = p.sampleStart + p.samples.length;
+    if (result?.ok) { capturedSamples = p.sampleStart + p.samples.length; if (p.samples.length) watchCaptureFrames(); }
   });
   ipcMain.on("orchestrator:ui-result", (event, p) => { if (allowed(event, true)) pendingUi.get(p.id)?.(p.result); });
   inventoryTimer = setInterval(() => { if (relay.getState().enabled) void refreshInventory(); }, 4000); inventoryTimer.unref?.();
@@ -716,6 +788,8 @@ function installOrchestrator(options) {
   function dispose() {
     if (disposed) return disposal || Promise.resolve(); disposed = true; activation++; clearInterval(inventoryTimer); clearTimeout(publicationTimer);
     permissionLifetime.abort(); permissionActivation?.abort(); permissionActivation = null;
+    launchLifetime.abort();
+    clearTimeout(captureHeartbeatTimer); clearTimeout(captureRecoveryTimer); captureRecovering = false;
     delivery.dispose(); terminalInput.dispose(); history.dispose(); voice.dispose(); disposal = relay.dispose(); observations.dispose(); completions.clear(); directory.clear();
     finishCapture({ ok: false, error: "Application closed." });
     for (const pending of captureFlushes.values()) pending.finish({ ok: false, status: 'cancelled', error: 'Application closed.' });

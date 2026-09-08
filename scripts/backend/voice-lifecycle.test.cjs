@@ -66,6 +66,7 @@ async function fixture(t, options = {}) {
     app, BrowserWindow, screen, ipcMain, getMainWindow: () => main,
     captureReadyTimeoutMs: options.captureReadyTimeoutMs,
     captureFlushTimeoutMs: options.captureFlushTimeoutMs,
+    captureHeartbeatTimeoutMs: options.captureHeartbeatTimeoutMs,
     shell: {}, safeStorage: { isEncryptionAvailable: () => false },
     microphonePermission: options.microphonePermission || { isGranted: () => true, ensure: async () => ({ ok: true }), openSettings: async () => ({ ok: true }) },
     getRuntime: () => ({ listSnapshots: () => [] }), sendPty: () => false, sendFusion: () => false, sendOpenFusion: () => false,
@@ -110,8 +111,146 @@ async function fixture(t, options = {}) {
     const pending = invoke('orchestrator:enabled', { enabled: true });
     await renderer(); await capture(); return pending;
   }
-  return { invoke, renderer, capture, enable, overlay, BrowserWindow, controller, calls, previews, main, ipcMain };
+  return { invoke, renderer, capture, enable, overlay, BrowserWindow, controller, calls, previews, main, ipcMain, integration };
 }
+
+test('stalled capture recreates automatically and rejects duplicate, stale, and unauthorized reports', async t => {
+  const f = await fixture(t); await f.enable();
+  const original = await f.invoke('voice:get-state'), sender = f.overlay().webContents;
+  const stall = { captureStalled: true, captureToken: original.captureToken };
+  assert.equal((await f.invoke('voice:configure', stall)).status, 'stale');
+  const restarted = await f.invoke('voice:configure', stall, sender);
+  assert.equal(restarted.status, 'recovering'); assert.notEqual(restarted.captureToken, original.captureToken);
+  const recovering = await f.invoke('voice:get-state');
+  assert.equal(recovering.captureRecovering, true); assert.equal(recovering.listening, true);
+  assert.equal((await f.invoke('orchestrator:get-state')).enabled, true);
+  assert.ok(f.overlay().sent.some(event => event.channel === 'voice:state' && event.payload.captureToken === restarted.captureToken && event.payload.captureRecovering));
+  assert.equal((await f.invoke('voice:configure', stall, sender)).status, 'stale');
+  assert.equal((await f.invoke('voice:configure', { ...stall, captureToken: restarted.captureToken }, sender)).status, 'recovering');
+  assert.equal((await f.capture({ microphoneReady: true }, original.captureToken)).status, 'stale');
+  await f.capture();
+  assert.equal((await f.invoke('voice:get-state')).captureRecovering, false);
+  assert.equal((await f.invoke('voice:get-state')).captureToken, restarted.captureToken);
+});
+
+test('main PCM watchdog counts silence as healthy and duplicate readiness cannot postpone a stall', async t => {
+  const f = await fixture(t, { captureHeartbeatTimeoutMs: 60 });
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  await f.enable();
+  const { captureToken } = await f.invoke('voice:get-state'), sender = f.overlay().webContents;
+  for (let index = 0; index < 4; index++) {
+    t.mock.timers.tick(40);
+    f.ipcMain.emit('voice:frames', { sender }, { captureToken, sampleStart: index * 320, sampleRate: 16000, samples: Array(320).fill(0) });
+    assert.equal((await f.invoke('voice:get-state')).captureToken, captureToken);
+  }
+  t.mock.timers.tick(40);
+  await f.capture(); // Repeated ready is not PCM activity.
+  f.ipcMain.emit('voice:frames', { sender }, { captureToken: captureToken - 1, sampleStart: 1280, sampleRate: 16000, samples: Array(320).fill(0) });
+  t.mock.timers.tick(21);
+  const state = await f.invoke('voice:get-state');
+  assert.equal(state.captureToken, captureToken + 1); assert.equal(state.captureRecovering, true);
+  await f.capture(); assert.equal((await f.invoke('voice:get-state')).captureRecovering, false);
+});
+
+test('capture recovery cancels a partial recording and pending flush without upload', async t => {
+  let uploads = 0;
+  const f = await fixture(t, { controllerOptions: { fetch: async () => { uploads++; throw Error('Unexpected upload'); } } });
+  await f.enable();
+  const { captureToken } = await f.invoke('voice:get-state'), sender = f.overlay().webContents;
+  await f.invoke('voice:configure', { pushToTalk: 'start', holdId: 'stalled-hold' });
+  f.ipcMain.emit('voice:frames', { sender }, { captureToken, sampleStart: 0, sampleRate: 16000, samples: Array(1600).fill(0.1) });
+  let flush;
+  f.overlay().onSend = (channel, payload) => { if (channel === 'voice:flush') flush = payload; };
+  const release = f.invoke('voice:configure', { pushToTalk: 'stop', holdId: 'stalled-hold' });
+  await until(() => flush, 'stalled flush');
+  await f.capture({ captureStalled: true });
+  assert.equal((await release).status, 'cancelled');
+  assert.notEqual(f.controller.getState().phase, 'recording');
+  assert.equal((await f.invoke('voice:configure', { captureFlushed: true, flushId: flush.id, captureToken, sampleEnd: 1600 }, sender)).status, 'stale');
+  await f.capture(); assert.equal(uploads, 0);
+});
+
+test('initial capture stall preserves activation until the replacement is ready', async t => {
+  const f = await fixture(t); let settled = false;
+  const pending = f.invoke('orchestrator:enabled', { enabled: true }).then(result => { settled = true; return result; });
+  await f.renderer(); await until(() => f.controller.getState().listening, 'initial capture');
+  await f.capture({ captureStalled: true }); assert.equal(settled, false);
+  assert.equal((await f.invoke('voice:get-state')).captureRecovering, true);
+  await f.capture(); assert.equal((await pending).ok, true);
+});
+
+test('recovery restart budget survives readiness acknowledgments and stops after three attempts', async t => {
+  const f = await fixture(t); await f.enable();
+  for (let index = 0; index < 3; index++) {
+    assert.equal((await f.capture({ captureStalled: true })).status, 'recovering');
+    await f.capture(); await f.capture();
+    assert.equal((await f.invoke('orchestrator:enabled', { enabled: true })).ok, true);
+  }
+  const failed = await f.capture({ captureStalled: true });
+  assert.equal(failed.ok, false); assert.match(failed.error, /keeps stopping/);
+  const state = await f.invoke('voice:get-state');
+  assert.equal(state.listening, false); assert.equal(state.captureRecovering, false);
+  assert.equal((await f.invoke('orchestrator:get-state')).enabled, false);
+  await f.enable(); assert.equal((await f.capture({ captureStalled: true })).status, 'recovering');
+});
+
+test('restart history expires after sixty seconds of healthy PCM', async t => {
+  const f = await fixture(t, { captureHeartbeatTimeoutMs: 60000 });
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  await f.enable();
+  for (let index = 0; index < 3; index++) { await f.capture({ captureStalled: true }); await f.capture(); }
+  const { captureToken } = await f.invoke('voice:get-state'), sender = f.overlay().webContents;
+  t.mock.timers.tick(30000);
+  f.ipcMain.emit('voice:frames', { sender }, { captureToken, sampleStart: 0, sampleRate: 16000, samples: Array(320).fill(0) });
+  t.mock.timers.tick(30001);
+  assert.equal((await f.capture({ captureStalled: true })).status, 'recovering');
+});
+
+test('settings change retires pending recovery and its late callbacks', async t => {
+  const f = await fixture(t, { captureReadyTimeoutMs: 100, captureHeartbeatTimeoutMs: 60 });
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  await f.enable(); await f.capture({ captureStalled: true });
+  const oldToken = (await f.invoke('voice:get-state')).captureToken, sender = f.overlay().webContents;
+  const changed = f.invoke('orchestrator:configure', { language: 'fr' });
+  let current;
+  for (let index = 0; index < 100; index++) {
+    const state = await f.invoke('voice:get-state');
+    if (state.listening && state.captureToken !== oldToken) { current = state.captureToken; break; }
+    await tick();
+  }
+  assert.notEqual(current, undefined, 'settings capture request');
+  assert.notEqual(current, oldToken);
+  assert.equal((await f.invoke('voice:configure', { captureStalled: true, captureToken: oldToken }, sender)).status, 'stale');
+  assert.equal((await f.invoke('voice:configure', { microphoneReady: true, captureToken: oldToken }, sender)).status, 'stale');
+  await f.capture(); assert.equal((await changed).ok, true);
+  for (let index = 0; index < 3; index++) {
+    t.mock.timers.tick(40);
+    f.ipcMain.emit('voice:frames', { sender }, { captureToken: current, sampleStart: index * 320, sampleRate: 16000, samples: Array(320).fill(0) });
+  }
+  assert.equal((await f.invoke('voice:get-state')).captureToken, current);
+  assert.equal((await f.invoke('voice:get-state')).listening, true);
+});
+
+test('recovery readiness timeout fails clearly and muted or closed callbacks cannot reopen capture', async t => {
+  const f = await fixture(t, { captureReadyTimeoutMs: 100, captureHeartbeatTimeoutMs: 60 });
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  await f.enable(); await f.capture({ captureStalled: true });
+  t.mock.timers.tick(101); await tick();
+  assert.equal(f.controller.getState().listening, false); assert.match(f.controller.getState().error, /could not restart/);
+  await f.enable(); await f.capture({ captureStalled: true });
+  const mutedToken = (await f.invoke('voice:get-state')).captureToken;
+  await f.invoke('orchestrator:enabled', { enabled: false });
+  const afterMute = await f.invoke('voice:get-state'), sender = f.overlay().webContents;
+  t.mock.timers.tick(1000);
+  assert.equal((await f.invoke('voice:configure', { captureStalled: true, captureToken: mutedToken }, sender)).status, 'stale');
+  assert.equal((await f.invoke('voice:configure', { microphoneReady: true, captureToken: afterMute.captureToken }, sender)).status, 'stale');
+  assert.equal((await f.invoke('voice:get-state')).captureToken, afterMute.captureToken);
+  await f.enable(); f.overlay().destroy();
+  const afterClose = await f.invoke('voice:get-state'); t.mock.timers.tick(1000);
+  assert.equal(afterClose.listening, false); assert.equal((await f.invoke('voice:get-state')).captureToken, afterClose.captureToken);
+  await f.integration.dispose();
+  assert.equal((await f.invoke('voice:configure', { captureStalled: true, captureToken: afterClose.captureToken }, sender)).ok, false);
+});
 
 test('audio renderer stays hidden and cannot take focus; native close preserves audio', async t => {
   const { BrowserWindow, screen } = windows(); let closed = 0;

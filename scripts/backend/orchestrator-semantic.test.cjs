@@ -114,7 +114,8 @@ test('opaque provider reasoning survives prose repair and tool exchanges only wi
     assert.doesNotMatch(JSON.stringify(body), privateMarker);
     return reply('You’re welcome.');
   });
-  await f.relay.flushDiagnostics();
+  // Stop new snapshots and flush every store before inspecting persisted data.
+  await f.relay.dispose();
   const files = fs.readdirSync(f.root, { recursive: true }).map(file => path.join(f.root, file)).filter(file => fs.statSync(file).isFile());
   assert.ok(files.some(file => file.endsWith('orchestrator-errors.jsonl')), 'Check persisted diagnostics as well as state.');
   for (const file of files) assert.doesNotMatch(fs.readFileSync(file, 'utf8'), privateMarker, file);

@@ -54,7 +54,7 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
     const startedAt = now();
     const record = {
       closed: false, preparing: true, startedAt, lookupInFlight: false, coarseDepth: 0, coarseBackground: false,
-      identityHints: new Map(), pendingEvents: [], retiredTurnIds: new Set(), nextLookupAt: 0, lookupFailures: 0,
+      identityHints: new Map(), pendingEvents: [], retiredTurnIds: new Set(), resolvedQuestionToolIds: new Set(), nextLookupAt: 0, lookupFailures: 0,
       nativeActive: false, pendingPriorTurnId: undefined,
       transcriptPath: undefined, explicitRef: payload.threadRef,
       claudeHome: payload.providerProfileId ? "custom" : undefined,
@@ -120,6 +120,16 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
     record.snapshot.pendingInputAt = undefined;
     record.pendingPriorTurnId = undefined;
   }
+  function settleQuestion(record, toolId) {
+    record.resolvedQuestionToolIds.add(toolId);
+    if (record.resolvedQuestionToolIds.size > 256) record.resolvedQuestionToolIds.delete(record.resolvedQuestionToolIds.values().next().value);
+  }
+  function clearActiveTools(record) {
+    if (record.snapshot.provider === "claude") {
+      for (const tool of record.snapshot.activeTools) if (tool.name === "AskUserQuestion") settleQuestion(record, tool.id);
+    }
+    record.snapshot.activeTools = [];
+  }
   function recordInput(payload) {
     if (!matches(payload)) return null;
     const record = get(payload.id);
@@ -131,10 +141,11 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
     // Enter during proven ongoing work is steering/menu input, except when it
     // follows an explicit interrupt request and begins a new submission intent.
     if (submit && record.nativeActive && s.turnState === "running" && s.pendingInput !== "interrupt") return null;
-    const approvalReply = submit && s.turnState === "waiting" && s.attention?.reason === "approval";
+    const waitingReply = submit && s.turnState === "waiting" &&
+      (s.attention?.reason === "approval" || (s.provider === "claude" && s.attention?.reason === "question"));
     const intent = submit ? "submit" : "interrupt";
     if (s.pendingInput === intent) return null;
-    record.pendingPriorTurnId = approvalReply ? undefined : s.turnId;
+    record.pendingPriorTurnId = waitingReply ? undefined : s.turnId;
     s.pendingInput = intent;
     s.pendingInputAt = now();
     s.observation = "provisional";
@@ -155,6 +166,18 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
     const s = record.snapshot;
     if (event.launchToken !== undefined && Number(event.launchToken) !== s.launchToken) return null;
     if (event.type === "data") return null;
+    if (s.provider === "claude") {
+      // An idle notification is a reminder about an available response, never
+      // proof of an unanswered question. Previous hooks discarded its type and
+      // emitted a generic question, so require the explicit question tool too.
+      // Reject before identity/observation updates: even a pending submit or a
+      // provisional Stop must survive the reminder without becoming blocked.
+      const question = event.type === "agent-attention" && event.attention?.state === "waiting" && event.attention.reason === "question";
+      if (event.notificationType === "idle_prompt" || (question && event.toolName !== "AskUserQuestion")) return null;
+      if (event.toolName === "AskUserQuestion" && event.toolId && !isChild(record, event) &&
+          record.resolvedQuestionToolIds.has(event.toolId) &&
+          (question || (event.type === "agent-activity" && event.phase === "start"))) return null;
+    }
     const observed = event.type.startsWith("agent-");
     const explicitlyChild = Boolean(event.parentThreadId || event.transcriptKind === "subagent");
     if (observed) {
@@ -185,15 +208,28 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
     if (event.transcriptPath && !child && event.rootVerified === true &&
         event.providerThreadId === s.conversation?.id) record.transcriptPath = event.transcriptPath;
     const eventAt = event.observedAt || now();
+    const pendingQuestion = s.provider === "claude" && s.turnState === "waiting"
+      ? s.activeTools.find(tool => tool.name === "AskUserQuestion") : undefined;
     switch (event.type) {
       case "created":
         record.preparing = false;
         s.processState = "running";
+        s.launchState = event.launchPending ? "pending" : "ready";
+        if (Number.isSafeInteger(event.cols) && event.cols > 0) s.cols = event.cols;
+        if (Number.isSafeInteger(event.rows) && event.rows > 0) s.rows = event.rows;
         break;
+      case "launch-ready": s.launchState = "ready"; break;
       case "snapshot":
         record.preparing = false;
         s.processState = event.isRunning ? "running" : "exited";
+        if (event.launchPending !== undefined) s.launchState = event.launchPending ? "pending" : "ready";
         if (event.terminalTitle !== undefined) s.terminalTitle = cleanTitle(event.terminalTitle);
+        if (Number.isSafeInteger(event.cols) && event.cols > 0) s.cols = event.cols;
+        if (Number.isSafeInteger(event.rows) && event.rows > 0) s.rows = event.rows;
+        break;
+      case "resize":
+        if (Number.isSafeInteger(event.cols) && event.cols > 0) s.cols = event.cols;
+        if (Number.isSafeInteger(event.rows) && event.rows > 0) s.rows = event.rows;
         break;
       case "title": s.terminalTitle = cleanTitle(event.title); break;
       case "error":
@@ -241,12 +277,17 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
         if (event.turnStart === false && ["completed", "failed", "interrupted"].includes(s.turnState)) break;
         if (event.providerTurnId && event.providerTurnId === s.turnId &&
             ["completed", "failed", "interrupted"].includes(s.turnState)) break;
+        // Parallel or delayed tool callbacks do not answer an open question.
+        // Its matching stop removes it from activeTools before the observer's
+        // running callback arrives. A real new user turn can still supersede it.
+        if (event.turnStart === false && pendingQuestion) break;
         const newTurn = !s.turnStartedAt ||
           (event.providerTurnId && s.turnId !== event.providerTurnId) ||
+          (event.turnStart !== false && pendingQuestion) ||
           (event.turnStart !== false && ["completed", "failed", "interrupted", "idle"].includes(s.turnState));
         if (newTurn) {
           if (s.turnId && event.providerTurnId !== s.turnId) record.retiredTurnIds.add(s.turnId);
-          s.activeTools = [];
+          clearActiveTools(record);
           s.lastTool = undefined;
           s.attention = undefined;
           s.turnStartedAt = eventAt;
@@ -304,7 +345,7 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
           s.turnState = "response";
           s.observation = "provisional";
           s.turnEndedAt = eventAt;
-          s.activeTools = [];
+          clearActiveTools(record);
           s.attention = undefined;
           break;
         }
@@ -315,7 +356,7 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
         s.observation = "observed";
         s.attention = { id: randomUUID(), state: attention.state,
           reason: attention.reason, updatedAt: timestamp(attention.updatedAt, now()) };
-        if (s.turnState !== "waiting") { s.activeTools = []; s.turnEndedAt = eventAt; }
+        if (s.turnState !== "waiting") { clearActiveTools(record); s.turnEndedAt = eventAt; }
         break;
       }
       case "agent-activity": {
@@ -328,7 +369,14 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
           s.turnEndedAt = undefined;
           s.attention = undefined;
         }
-        if (!child && s.pendingInput &&
+        if (!child && s.provider === "claude" && event.toolName === "AskUserQuestion" && event.toolId && event.phase === "stop") {
+          // Hook callbacks can arrive out of order. Once this question ended,
+          // its delayed start cannot re-open an already answered dialog.
+          settleQuestion(record, event.toolId);
+        }
+        const resolvesQuestion = event.phase === "stop" && event.toolName === "AskUserQuestion" &&
+          (event.toolId || event.toolName) === pendingQuestion?.id;
+        if (!child && s.pendingInput && (!pendingQuestion || resolvesQuestion) &&
             !(s.pendingInput === "submit" && event.providerTurnId && event.providerTurnId === record.pendingPriorTurnId)) {
           const newObservedTurn = s.pendingInput === "submit" && ["completed", "failed", "interrupted", "idle", "response"].includes(s.turnState);
           if (newObservedTurn && !event.providerTurnId) {

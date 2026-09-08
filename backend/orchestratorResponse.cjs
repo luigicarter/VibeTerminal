@@ -8,6 +8,12 @@ function formatDirectOutcomes(outcomes, sessions = [], grants = []) {
     const target = sessions.find(item => item.id === id) || grant?.targets?.find(item => item.id === id);
     const name = target?.name || target?.conversationTitle || 'the terminal';
     const status = outcome.status;
+    if (outcome.kind === 'watch_terminal') {
+      if (status === 'watching') return `I'm watching ${name}. I'll report status changes and ${grant?.args?.watchUntil === 'ready' ? 'when it is ready' : 'what the agent reports when this task ends'}.`;
+      if (status === 'ready') return `${name} is ready.`;
+      if (status === 'already-completed') return `${name}'s current agent turn has already ended. I'll check the available result.`;
+      return `I couldn't start a reliable watch for ${name}.${outcome.error || outcome.reason ? ` ${outcome.error || outcome.reason}` : ''}`;
+    }
     if (['unknown', 'unconfirmed'].includes(status)) return `I couldn't confirm whether ${name} received the request. I haven't sent it again.`;
     if (outcome.ok === false || ['blocked', 'rejected', 'cancelled'].includes(status)) {
       const detail = outcome.error || outcome.reason;
@@ -18,6 +24,11 @@ function formatDirectOutcomes(outcomes, sessions = [], grants = []) {
     if (outcome.kind === 'send_prompt') {
       if (['written', 'submitted', 'delivered', 'sent', 'acknowledged'].includes(status)) return `Sent the prompt to ${name}.`;
       return `The prompt request for ${name} was accepted; delivery isn't confirmed yet.`;
+    }
+    if (outcome.kind === 'create_session') {
+      return outcome.status === 'created' && outcome.processState === 'running'
+        ? `Opened ${name}.${outcome.draftStaged ? ' The prompt is saved as an unsent draft.' : ''}`
+        : 'The terminal was requested; startup is not confirmed yet.';
     }
     if (outcome.kind === 'interrupt') return status === 'stopped' ? `${name} stopped.` : `Requested a stop in ${name}.`;
     if (outcome.kind === 'focus_session') return `Switched to ${name}.`;
