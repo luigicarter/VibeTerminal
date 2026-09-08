@@ -12,13 +12,17 @@ function grokHome(options = {}) { return options.home || process.env.GROK_HOME |
 async function safePath(root, file, directory) {
   const relative = path.relative(root, file);
   if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error('Outside Grok store');
+  // Windows TEMP may use an ancestor's 8.3 name (for example RUNNER~1).
+  // Resolve that prefix while still checking the root and every descendant
+  // with lstat below; symlinks inside the store remain forbidden.
+  const expected = path.join(await fs.realpath(root), relative);
   let current = root;
   for (const part of ['', ...relative.split(path.sep).filter(Boolean)]) {
     if (part) current = path.join(current, part);
     const stat = await fs.lstat(current);
     if (stat.isSymbolicLink() || (current !== file || directory ? !stat.isDirectory() : !stat.isFile())) throw new Error('Unsafe Grok store path');
   }
-  if (!samePath(await fs.realpath(file), file)) throw new Error('Relocated Grok store path');
+  if (!samePath(await fs.realpath(file), expected)) throw new Error('Relocated Grok store path');
 }
 async function readBounded(root, file, max = 262144) {
   await safePath(root, file, false);

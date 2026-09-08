@@ -26,13 +26,16 @@ async function readKimiTaskActivity({ home, sessionDir }) {
     const root = path.resolve(home);
     const session = path.resolve(sessionDir);
     if (!within(root, session) || session === root) return unavailable("outside-store");
+    // Pin the canonical ancestor prefix once: Windows TEMP can contain 8.3
+    // aliases. checked() still rejects a linked root or linked descendants.
+    const canonicalRoot = await fs.realpath(root);
     async function checked(target, directory) {
       checkTime();
       if (!within(root, target)) throw new Error("outside-store");
       const stat = await fs.lstat(target);
       if (stat.isSymbolicLink() || (directory ? !stat.isDirectory() : !stat.isFile())) throw new Error("unsafe-path");
       const actual = await fs.realpath(target);
-      if (path.relative(root, actual) !== path.relative(root, target)) throw new Error("unsafe-path");
+      if (path.relative(path.join(canonicalRoot, path.relative(root, target)), actual) !== "") throw new Error("unsafe-path");
       return stat;
     }
     await checked(root, true);

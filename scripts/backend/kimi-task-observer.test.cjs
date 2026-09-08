@@ -45,6 +45,23 @@ test("missing layout is unavailable; an existing compatible main agent can be em
   await fs.rmdir(path.join(f.sessionDir, "agents", "main", "tasks"));
   assert.equal((await readKimiTaskActivity(f)).active, null);
 });
+
+test("an ancestor alias permits ordinary task stores but a linked store root is rejected", async t => {
+  const f = await fixture(t);
+  await writeTask(f, "main", "agent-12345678");
+  const container = await fs.mkdtemp(path.join(os.tmpdir(), "vibe-kimi-alias-"));
+  t.after(() => fs.rm(container, { recursive: true, force: true }));
+  const alias = path.join(container, "alias");
+  await fs.symlink(path.dirname(f.home), alias, process.platform === "win32" ? "junction" : "dir");
+  const home = path.join(alias, path.basename(f.home));
+  const result = await readKimiTaskActivity({ home, sessionDir: path.join(home, "sessions", "test") });
+  assert.equal(result.availability, "available");
+  assert.equal(result.active, true);
+  if (process.platform === "win32") assert.equal((await readKimiTaskActivity({ home: home.toUpperCase(), sessionDir: path.join(home, "sessions", "test").toUpperCase() })).active, true);
+  const linkedRoot = path.join(container, "linked-root");
+  await fs.symlink(f.home, linkedRoot, process.platform === "win32" ? "junction" : "dir");
+  assert.equal((await readKimiTaskActivity({ home: linkedRoot, sessionDir: path.join(linkedRoot, "sessions", "test") })).availability, "unavailable");
+});
 test("truncated, malformed, oversized and invalid status records never imply idle", async (t) => {
   const f = await fixture(t);
   const file = await writeTask(f, "main", "agent-12345678");

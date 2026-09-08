@@ -41,6 +41,24 @@ test('Grok lists named/preview roots, confirms exact identity, rejects guessing 
   assert.equal((await lookupGrokThread({ cwd: f.cwd, confirmId: '../escape' }, f)).status, 'missing');
   assert.equal((await lookupGrokThread({ cwd: f.cwd, after: Date.now() }, f)).status, 'pending');
 });
+
+test('a canonicalized ancestor alias permits ordinary stores but not symlinked store roots', async t => {
+  const f = await fixture(t);
+  const actual = path.join(f.home, 'actual'), alias = path.join(f.home, 'alias');
+  await fs.mkdir(actual);
+  await fs.symlink(actual, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  const store = { ...f, home: path.join(actual, 'store') };
+  const directory = await session(store);
+  await fs.writeFile(path.join(directory, 'updates.jsonl'), jsonl([update('user_message_chunk', 'Question'), update('agent_message_chunk', 'Answer')]));
+  const aliasHome = path.join(alias, 'store');
+  const result = await lookupGrokThread({ cwd: f.cwd, confirmId: ID }, { home: aliasHome });
+  assert.equal(result.rootVerified, true);
+  assert.deepEqual((await readGrokConversation({ cwd: f.cwd, id: ID }, { home: aliasHome })).messages.map(item => item.text), ['Question', 'Answer']);
+  if (process.platform === 'win32') assert.equal((await lookupGrokThread({ cwd: f.cwd, confirmId: ID }, { home: aliasHome.toUpperCase() })).rootVerified, true);
+  const linkedRoot = path.join(f.home, 'linked-root');
+  await fs.symlink(store.home, linkedRoot, process.platform === 'win32' ? 'junction' : 'dir');
+  assert.equal((await lookupGrokThread({ cwd: f.cwd, confirmId: ID }, { home: linkedRoot })).rootVerified, false);
+});
 test('native required Summary fields cannot be omitted or mistyped to establish ownership', async t => {
   const f = await fixture(t);
   for (const key of ['info', 'session_summary', 'created_at', 'updated_at', 'num_messages', 'current_model_id']) {
