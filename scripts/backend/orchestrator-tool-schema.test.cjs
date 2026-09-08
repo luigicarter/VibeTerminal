@@ -6,7 +6,7 @@ const { fitMessages } = require('../../backend/orchestratorBudget.cjs');
 const { normalizeIntent, authorizeIntentAction } = require('../../backend/orchestratorIntent.cjs');
 
 // Supply shared property definitions separately, just as the workspace tool does.
-const names = 'kind grantId targetId stepId observationToken text observationSequence inputRevision editInput keys mouse inputPurpose submit requestId revision answerText answerTexts decision outcome view cwd query provider offset limit beforeSequence maxChars reference cursor root parent name kindOfSession path preferenceId responseTurn'.split(' ');
+const names = 'kind grantId targetId stepId observationToken text observationSequence inputRevision editInput keys mouse inputPurpose submit requestId revision answerText answerTexts decision outcome view cwd query provider offset limit beforeSequence maxChars reference cursor root parent name kindOfSession path preferenceId speechText responseTurn'.split(' ');
 const kinds = 'navigate list_roots list_sessions read_session list_conversations read_conversation search_conversation resume_conversation search_files create_project focus_session stage_draft send_prompt interrupt restart close create_session add_project list_setups read_setup launch_setup save_setup list_preferences remember_preference forget_preference ask_user respond list_work answer_question permission terminal_interact finish_terminal'.split(' ');
 const flat = { properties: Object.fromEntries(names.map(name => [name, { type: 'string', description: name }])) };
 flat.properties.kind.enum = kinds;
@@ -56,7 +56,7 @@ test('native evidence is explicit without requiring operator arguments on legacy
 
 test('read paging, saved-title clarification and response fields stay scoped to their actual handlers', () => {
   assert.deepEqual(Object.keys(branch('ask_user').properties), ['kind', 'text', 'reference', 'grantId']);
-  assert.deepEqual(Object.keys(branch('respond').properties), ['kind', 'text', 'responseTurn']);
+  assert.deepEqual(Object.keys(branch('respond').properties), ['kind', 'text', 'speechText', 'responseTurn']);
   assert.deepEqual(branch('respond').required, ['kind', 'text', 'responseTurn']);
   assert.deepEqual(Object.keys(branch('resume_conversation').properties), ['kind', 'grantId', 'provider', 'cwd', 'reference']);
   assert.deepEqual(Object.keys(branch('read_conversation').properties), ['kind', 'reference', 'cursor', 'maxChars', 'limit']);

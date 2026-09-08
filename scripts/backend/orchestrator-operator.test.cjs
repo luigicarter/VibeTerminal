@@ -47,11 +47,12 @@ async function fixture(t, kind = 'codex') {
   const assertFinishText = result => {
     const lastActions = f.lastResponse?.choices?.[0]?.message?.tool_calls?.map(call => JSON.parse(call.function.arguments)) || [];
     for (const action of lastActions.filter(action => action.kind === 'finish_terminal' && action.outcome === 'completed')) {
-      if (result.ok) assert.ok(result.text.includes(action.text), 'The result must preserve the actual completed finish text without another model rewrite.');
+      const receipt = result.actions?.find(item => item.kind === 'finish_terminal' && item.stepId === action.stepId);
+      if (result.ok) assert.ok(receipt && result.text.includes(receipt.text), 'The result must preserve the application-owned finish receipt without another model rewrite.');
     }
   };
   f.run = async (steps, extra = {}) => {
-    f.plan = { goal: 'Operate Work to complete the user task.', actions: [{ kind: 'operate_terminal', targetIds: ['pane'], text: 'Review the latest changes; answer setup questions as needed.', answerMode: 'delegated', permissionMode: 'none', ...extra }] };
+    f.plan = { goal: 'Operate Work to complete the user task.', ...(f.access && { access: f.access }), actions: [{ kind: 'operate_terminal', targetIds: ['pane'], text: 'Review the latest changes; answer setup questions as needed.', answerMode: 'delegated', permissionMode: 'none', ...extra }] };
     f.steps.push(...steps);
     const result = await f.relay.send({ text: extra.answerMode === 'supplied' ? 'Use Work to review the latest changes. Answer database PostgreSQL and checks Unit and Smoke.' : 'Use Work to review the latest changes and handle setup questions for me.', origin: 'text' });
     if (f.scriptError) throw f.scriptError;
@@ -78,7 +79,7 @@ test('fresh Codex reads unknown state, sends a composed task, then verifies with
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(f.reads, 2);
   assert.equal(f.bodies.length, 4, 'Read, send, read, finish use four execution fetches instead of five with a redundant final reply.');
-  assert.match(result.text, /Verified the requested operation/);
+  assert.match(result.text, /Input was sent.*haven't confirmed that the task started/);
   assert.deepEqual(f.effects.map(action => action.kind), ['send_prompt']);
   assert.equal(f.effects[0].text, 'Review the latest changes. Report concrete defects.');
   assert.ok(f.effects[0].requestId, 'Delivery must be attributed to the application request.');
@@ -86,6 +87,7 @@ test('fresh Codex reads unknown state, sends a composed task, then verifies with
 
 test('two targets require both post-action finishes and combine their receipts without a final fetch', async t => {
   const f = await fixture(t);
+  f.access = 'read-only';
   f.sessions.push({ ...f.sessions[0], id: 'second', name: 'Second', generation: 'g2' });
   const result = await f.run([
     read(), body => operation(body, 'send_prompt', { text: 'Review Work.' }), read(),
@@ -93,12 +95,13 @@ test('two targets require both post-action finishes and combine their receipts w
     body => { assert.equal(latest(body).status, 'interaction-complete'); return read('second'); },
     body => operation(body, 'send_prompt', { targetId: 'second', text: 'Review Second.' }), read('second'),
     body => operation(body, 'finish_terminal', { targetId: 'second', text: 'Second review started.', outcome: 'completed' })
-  ], { targetIds: ['pane', 'second'], selection: 'all', text: 'Start reviews in both Work and Second and verify submission.' });
+  ], { targetIds: ['pane', 'second'], selection: 'all', text: 'Start read-only reviews in both Work and Second without editing files and verify submission.' });
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(f.bodies.length, 8, 'Both read-send-read-finish sequences need eight fetches; a ninth reply rewrite is redundant.');
   assert.equal(f.reads, 4);
   assert.deepEqual(f.effects.map(action => action.target.id), ['pane', 'second']);
-  assert.match(result.text, /Work review started/); assert.match(result.text, /Second review started/);
+  assert.match(result.text, /Input was sent to Work; I haven't confirmed that the task started/);
+  assert.match(result.text, /Input was sent to Second; I haven't confirmed that the task started/);
   assert.match(result.text, /result.*pending/i);
 });
 

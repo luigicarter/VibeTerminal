@@ -29,9 +29,34 @@ The runtime separates shell lifetime, agent invocation lifetime, foreground turn
 
 Submit/interrupt keystrokes are provisional input intent (“awaiting activity” / “interrupt requested”), cleared by provider evidence. They never manufacture a turn start or cancellation. Completion-only Codex configurations can report successive completed turns even when the optional lifecycle observer has not been trusted; no start time is invented for those turns.
 
+Native automated text/paste submissions separate the text from the final Enter
+by 200 ms. Codex 0.153.4 on Windows was observed leaving both plain and bracketed
+paste unsubmitted when Enter arrived in the same write. The split is one reserved
+transport action, not a retry: it holds the input lease and rechecks the terminal,
+generation, recipient, input revision, geometry and cancellation before Enter.
+Human input during the gap prevents the delayed Enter. Cancellation or failure
+after text may have arrived remains an unknown partial write; the app does not
+replay the prompt or claim the editor's contents are known. Plain shell and
+key-only input keep their existing handling. A `written` receipt still proves
+only transport acceptance.
+
 An unknown root ID is confirmed using actual provider metadata before queued lifecycle events are applied. A conservative resume result (`found` on an unreadable store) is not identity proof: confirm results separately carry `rootVerified`. Discovery rejects children, incomplete candidate scans, competing same-folder launches, and conversations already owned by another pane in the same provider home. It retries beyond the previous 90-second deadline, shares lookup reads, and backs off errors.
 
+If an authenticated, unparented verified root conflicts with an already bound
+native conversation, the generation becomes ambiguous. The old reference remains
+available for history, while current turn/completion proof and automated input
+eligibility are retired. Delayed callbacks or metadata cannot establish which
+root the TUI selected; restart the pane to obtain a fresh generation. Explicit
+child/subagent events retain their separate handling, and manual terminal input
+remains available. This detects uncertainty around native `/new`; it does not
+implement automatic selected-root migration. See the
+[consolidated cohesion review](orchestrator-cohesion-review.md).
+
 ## Titles and activity
+
+The [terminal status support matrix](terminal-status-support.md) covers every
+integrated pane, its native evidence source, and remaining observation limits.
+Run `npm run test:terminal-status` for the combined status regressions.
 
 The pane title prefers a provider conversation name or preview, then the live terminal title, then the pane label. The tooltip includes a differing live terminal title. OSC 0/2 titles are parsed incrementally in the PTY host and retained while a pane is hidden. UTF-8 host framing uses a streaming decoder.
 
@@ -41,7 +66,7 @@ Click the status chip to inspect current/latest observed tools, child work, elap
 
 Claude's `idle_prompt` is an idle reminder after a response, not evidence of a question ([native hook semantics](https://code.claude.com/docs/en/hooks#notification)). Generated settings omit that notification. The telemetry adapter preserves notification type and ignores known idle reminders; the runtime also rejects the metadata-free question events emitted by older hooks. This applies during startup, provisional responses, active work, and pending submissions, without changing an existing real wait or restarting elapsed time.
 
-Claude permission notifications still produce approval attention. The single wildcard tool observer recognizes `AskUserQuestion` starts as explicit question attention, and tool success/failure resumes the same turn. Unrelated tool callbacks cannot dismiss an open question or consume its pending reply. Resolved or superseded question tool IDs fence delayed duplicate callbacks. Hook metadata carries identities and notification type, without question or answer text. An ordinary final response, including optional follow-up prose, remains “response available”; the monitor does not infer required input from its wording or elapsed silence.
+Claude uses native `PermissionRequest` for approval attention and `StopFailure` for failed responses. The single wildcard tool observer recognizes `AskUserQuestion` starts as explicit question attention, and tool success/failure resumes the same turn. Unrelated tool callbacks cannot dismiss an open question or consume its pending reply. Resolved or superseded question tool IDs fence delayed duplicate callbacks. Hook metadata carries identities and notification type, without question or answer text. An ordinary final response, including optional follow-up prose, remains “response available”; the monitor does not infer required input from its wording or elapsed silence.
 
 `shared/providerCapabilities.json` defines the retained standalone providers, launch commands, thread support, and adapter capabilities. These capabilities describe the adapter, not proof that a particular installed CLI has emitted usable telemetry. Missing native fields remain coarse. Aider is removed; saved Aider panes migrate to paused plain terminals, preserving folders, names, and tile membership without running the old command.
 
@@ -73,7 +98,11 @@ Codex panes use a steady bar cursor, including while unfocused. `frontend/termin
 
 `terminal.getRuntimeSnapshots()` returns retained snapshots; `terminal.onRuntime(callback)` subscribes to full snapshot updates. Subscribe before requesting snapshots and compare generation/revision before applying them. The screen byte stream remains on `terminal.onEvent`. Input/resize/kill accept generation/launch-token scope. Snapshot fields include process/turn state, conversation and terminal title, observation health, active/last tools, child activity, attention identity, and elapsed timestamps.
 
-Live runtime snapshots are not persisted into workspace configuration. Confirmed conversation references/names are persisted for deliberate resume. Reopening the app retains the existing fresh-conversation behavior; layout restoration does not automatically resume the previous chat.
+Live runtime snapshots are not persisted into workspace configuration. Conversation references/names are saved so reopening the app, including a restart after an update, resumes each agent pane left started at exit using its exact current conversation ID. Paused panes stay paused; closing a pane removes it from restoration. Manual New/Restart actions retain their existing behavior. An unknown current ID starts fresh, without guessing from another pane or an older `resumeRef`.
+
+The launch coordinator confirms saved standalone IDs before creating the process. An explicitly missing conversation falls back to a fresh launch with a notice (Claude keeps its preassigned UUID; other providers clear the obsolete ID). An unavailable or inconclusive lookup still attempts the exact saved ID. Cancellation during confirmation prevents a late launch. Fusion and Open Fusion use their existing resume/transcript rehydration paths; App-level host events retain chat identity even while the pane is unmounted.
+
+`node scripts/qa/session-resume-smoke.cjs` checks a real hidden Electron close/reopen with isolated app data and fixture start/confirmation IPC. It covers every threaded provider, both Fusion planner families, Open Fusion, distinct chats sharing a folder, and paused panes. It checks resume commands and chat IDs without launching paid provider turns or certifying every installed CLI version. Run `npm run build` first. Focused regressions also include `node --test scripts/frontend/chat-session-persistence.test.cjs`.
 
 Focused commands:
 

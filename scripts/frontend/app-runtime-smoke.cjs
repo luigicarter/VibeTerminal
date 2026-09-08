@@ -45,6 +45,21 @@ function project(patch = {}) {
 assert.equal(project().attention.unread, true);
 context.runtimeAcknowledgements.pane = "wait";
 assert.equal(project().attention.unread, false);
+for (const staleChild of [
+  { id: "stale", observation: "provisional" },
+  { id: "background:stale" }
+]) {
+  const stale = { ...staleChild, attention: { id: "old-child-wait", state: "waiting", reason: "approval", updatedAt: 1 } };
+  const live = { id: "live", observation: "observed", attention: { id: "live-child-wait", state: "waiting", reason: "question", updatedAt: 2 } };
+  const patch = { children: [stale, live], activeTools: [], activityObserved: true,
+    backgroundObservation: { availability: "unavailable" } };
+  context.runtimeAcknowledgements.pane = live.attention.id;
+  assert.equal(project(patch).attention.unread, false, "acknowledgement must follow the live child, never retained stale attention");
+  assert.equal(project(patch).attention.reason, "question");
+  context.runtimeAcknowledgements.pane = "wait";
+  assert.equal(project({ ...patch, children: [stale] }).attention.unread, false, "a waiting root keeps its own attention when its child is unverified");
+  assert.equal(project({ ...patch, children: [stale], turnState: "completed" }).attention, undefined);
+}
 for (const patch of [{ turnState: "running" }, { pendingInput: "submit" }, { pendingInput: "interrupt" }, { processState: "exited" }, { agentProcessState: "exited" }, { telemetryHealth: "unavailable" }]) {
   assert.equal(project(patch).attention, undefined, "obsolete approval must disappear");
 }
@@ -182,13 +197,15 @@ for (const reason of ["approval", "question"]) {
   h.check("working", 0);
   h.backend.dispose();
 }
-// Child question metadata must never claim the parent pane needs an answer.
+// A child question needs user attention without changing the root-turn proof.
 {
   const h = claudeFixture();
   h.event("agent-running", { turnStart: true });
   h.event("agent-attention", { providerThreadId: "child", parentThreadId: "claude-root", toolName: "AskUserQuestion",
     attention: { state: "waiting", reason: "question" } });
-  h.check("working", 0);
+  h.check("needs input", 1);
+  assert.equal(h.snapshot().turnState, "running", "child question preserves the root state");
+  assert.equal(h.projected().subagentDepth, undefined, "blocked child is counted as attention rather than working");
   h.backend.dispose();
 }
 for (const answered of [false, true]) {

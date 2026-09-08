@@ -11,6 +11,7 @@ export type AgentKind =
   | "kimi-custom"
   // Qwen Code CLI (global npm install, launched as `qwen` from PATH).
   | "qwen"
+  | "grok"
   // Selection-only kind for the ribbon: a Fusion launch creates a real
   // `kind: "claude"` session with `fusion: true`, so all claude behavior
   // (telemetry, resume, working-state) applies unchanged. No session is ever
@@ -26,7 +27,7 @@ export type AgentKind =
   // pane-scoped OpenCode config.
   | "openfusion";
 
-export type AgentThreadProvider = "codex" | "claude" | "opencode" | "cursor" | "gemini" | "kimi" | "kimi-custom" | "qwen";
+export type AgentThreadProvider = "codex" | "claude" | "opencode" | "cursor" | "gemini" | "kimi" | "kimi-custom" | "qwen" | "grok";
 
 // A saved Claude provider profile (Settings → Claude providers). Sanitized in
 // the main process: `hasKey` only, key material never reaches the renderer.

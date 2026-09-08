@@ -284,6 +284,7 @@ async function assertFusionChatHostClaudeFastLive() {
   let stderr = "";
   let finished = false;
   const controlFile = path.join(tempDir, "claude-control.jsonl");
+  let startSent = false;
   const startsFile = path.join(tempDir, "claude-starts.txt");
 
   function cleanup() {
@@ -330,7 +331,8 @@ async function assertFusionChatHostClaudeFastLive() {
     });
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString("utf8");
-      if (!stdout.includes('"ready"')) return;
+      if (finished || startSent || !stdout.includes('"ready"')) return;
+      startSent = true;
       child.stdin.write(
         `${JSON.stringify({
           type: "start",
@@ -345,6 +347,7 @@ async function assertFusionChatHostClaudeFastLive() {
         })}\n`
       );
       setTimeout(() => {
+        if (finished) return;
         child.stdin.write(
           `${JSON.stringify({
             type: "settings",

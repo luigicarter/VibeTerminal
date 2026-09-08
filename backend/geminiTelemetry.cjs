@@ -128,7 +128,7 @@ process.stdin.on("end", () => {
     case "SessionEnd": event = { type: "agent.session", phase: "end", reason: hook.reason }; break;
     case "BeforeAgent": event = { type: "agent.running", detail: "turn-start" }; break;
     case "BeforeModel": event = { type: "agent.running", detail: "tool" }; break;
-    case "BeforeTool": case "AfterTool": event = { type: "agent.activity", phase: hook.hook_event_name === "BeforeTool" ? "start" : "stop", toolName: hook.tool_name }; break;
+    case "BeforeTool": case "AfterTool": event = { type: "agent.activity", kind: "tool", phase: hook.hook_event_name === "BeforeTool" ? "start" : "stop", toolName: hook.tool_name }; break;
     case "Notification": if (hook.notification_type === "ToolPermission") event = { type: "agent.waiting", detail: "approval" }; break;
     // Other AfterAgent hooks may still retry after this observer returns.
     case "AfterAgent": event = { type: "agent.response", provisional: true, retry: hook.stop_hook_active === true }; break;

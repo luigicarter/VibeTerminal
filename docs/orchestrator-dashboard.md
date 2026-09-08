@@ -42,7 +42,12 @@ The dashboard uses the backend session directory for native generation, process
 state and live status. Native status uses the same runtime projection as terminal
 panes, including pending input, child activity, and observation health. Renderer
 status labels are accepted only for the exact generation and revision. Paused placeholders and confirmed dead processes
-are excluded; missing observations remain Unknown. Titles follow authoritative
+are excluded; missing observations remain Unknown. Each bubble's primary label
+is its project name, falling back to the working-folder name when no named
+project is available. A session with neither shows **Unknown project**. Provider
+and status remain visible underneath. Hover titles and accessible labels include
+the project, full working-directory path, and session title, so projects with the
+same folder name can be distinguished. Session titles follow authoritative
 conversation/name metadata before older stored transcript references.
 
 `backend/orchestratorActivity.cjs` owns ephemeral request scopes. Targets enter a
@@ -97,8 +102,9 @@ The local bounded recency map records pane selection, throttled keyboard input,
 and explicit prompt/answer operations. Agent output and passive reads do not
 refresh it. Ordering is frozen for a visit; new sessions append and reopening
 can rerank by recency. Text remains unscaled during target expansion; the overall
-field fit can scale it down. Full session names and status remain available through
-accessible labels and hover titles, including when many bubbles are small.
+field fit can scale it down. Full project names, paths, session names, and status
+remain available through accessible labels and hover titles, including when many
+bubbles are small.
 
 The terminal workspace remains mounted and keeps its original dimensions under
 the dashboard. It is hidden and inert, and hidden panes do not count as visible
@@ -139,6 +145,14 @@ four-second inventory poll covers both enabled mode and the open dashboard while
 disabled. There was no evidence of a missing polling loop.
 
 ## Verification
+
+The project-label update passed `npm run build`, the frontend dashboard smoke,
+and 34 isolated Electron check groups in
+`.tmp/orchestrator-dashboard-smoke/1788830300022-45688/`. Checks cover visible
+project names for generic session titles, workspace-name precedence, full paths
+and session details in hover/accessibility text, and long project labels within
+the existing layout. The parent inspected normal and narrow screenshots. These
+are source/build checks, not a packaged release update.
 
 The free-roaming revision passed `npm run build`, the frontend dashboard smoke,
 and 32 isolated Electron check groups in

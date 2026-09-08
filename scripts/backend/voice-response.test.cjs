@@ -121,11 +121,14 @@ test('a busy relay accepts another voice request and speaks its eventual result'
   const result = await f.controller.sendAudio({ audioBase64 });
   assert.equal(result.ok, true); assert.equal(result.status, 'queued');
   assert.equal(f.controller.getState().phase, 'listening');
-  f.fail(undefined);
+  f.fail(() => json({ choices: [{ message: { tool_calls: [{ id: 'voice-reply', type: 'function', function: { name: 'workspace',
+    arguments: JSON.stringify({ kind: 'respond', text: 'The second voice request is ready.', speechText: 'Your voice request is ready.', responseTurn: 'complete' }) } }] } }] }));
   release(json({ choices: [{ message: { content: 'Done.' } }] })); await pending;
   assert.equal((await f.settled(result.requestId)).status, 'finished');
   assert.equal(f.calls.filter(call => call.url.endsWith('/chat/completions')).length, 2);
   assert.equal(f.calls.filter(call => call.url.endsWith('/speech')).length, 1);
+  assert.equal(f.calls.find(call => call.url.endsWith('/speech')).body.input, 'Your voice request is ready.');
+  assert.ok(f.relay.getState().messages.some(message => message.requestId === result.requestId && message.text === 'The second voice request is ready.'));
 });
 
 test('brain upstream error callback produces one local spoken explanation per explicit voice attempt', async t => {

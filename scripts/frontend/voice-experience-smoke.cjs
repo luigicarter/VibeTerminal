@@ -127,6 +127,10 @@ async function flush() { for (let i = 0; i < 12; i++) await Promise.resolve(); }
   assert.equal(captures, 1); assert.equal(players, 1);
   stateListener({ phase: 'listening', listening: true, indicatorVisible: true, handsFreeStatus: 'ready' }); tree = indicator.render();
   assert.match(text(tree), /Say Hey Vibe/);
+  stateListener({ phase: 'speaking', listening: true, indicatorVisible: true, handsFreeStatus: 'ready', wakeInterruptReady: true }); tree = indicator.render();
+  assert.match(text(tree), /Speaking.*Hey Vibe.*interrupt/);
+  stateListener({ phase: 'speaking', listening: true, indicatorVisible: true, handsFreeStatus: 'ready', wakeInterruptReady: false }); tree = indicator.render();
+  assert.match(text(tree), /Speaking.*Space to interrupt/); assert.doesNotMatch(text(tree), /Hey Vibe/);
   stateListener({ phase: 'awaiting-answer', listening: true, indicatorVisible: true, handsFreeStatus: 'ready' }); tree = indicator.render();
   assert.match(text(tree), /Listening for your answer.*never mind/);
   stateListener({ phase: 'awaiting-answer', listening: true, indicatorVisible: true, handsFreeStatus: 'unavailable' }); tree = indicator.render();

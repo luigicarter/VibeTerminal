@@ -43,7 +43,7 @@
     "command": "opencode",
     "lifecycle": "coarse",
     "finalCompletion": "coarse",
-    "childTracking": "unsupported",
+    "childTracking": "structured",
     "titleSource": "generated",
     "threaded": true
   },
@@ -51,7 +51,7 @@
     "command": "kimi",
     "lifecycle": "coarse",
     "finalCompletion": "coarse",
-    "childTracking": "unsupported",
+    "childTracking": "coarse",
     "titleSource": "named",
     "threaded": true
   },
@@ -59,7 +59,15 @@
     "command": "kimi-custom",
     "lifecycle": "coarse",
     "finalCompletion": "coarse",
-    "childTracking": "unsupported",
+    "childTracking": "coarse",
+    "titleSource": "named",
+    "threaded": true
+  },
+  "grok": {
+    "command": "grok",
+    "lifecycle": "structured",
+    "finalCompletion": "coarse",
+    "childTracking": "coarse",
     "titleSource": "named",
     "threaded": true
   },
@@ -67,7 +75,7 @@
     "command": "qwen",
     "lifecycle": "coarse",
     "finalCompletion": "coarse",
-    "childTracking": "unsupported",
+    "childTracking": "structured",
     "titleSource": "preview",
     "threaded": true
   }

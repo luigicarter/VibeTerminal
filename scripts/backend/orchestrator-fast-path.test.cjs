@@ -22,7 +22,7 @@ test('consumed operator finishes reuse attribution and retain pending result qua
   const f = finished();
   assert.equal(completedOperatorResponse(f), 'Submitted the review.');
   assert.match(completedOperatorResponse({ ...f, pendingResultTargets: ['a'] }), /result is still pending/);
-  assert.match(completedOperatorResponse({ ...f, deliveryWaits: [{ targetId: 'a', deliveryStatus: 'queued' }] }), /has not been sent/);
+  assert.match(completedOperatorResponse({ ...f, deliveryWaits: [{ targetId: 'a', generation: 'g1', deliveryStatus: 'queued' }] }), /has not been sent/);
   f.outcomes.unshift({ kind: 'send_prompt', grantId: 'grant', targetId: 'a', ok: true, status: 'queued' });
   assert.doesNotMatch(completedOperatorResponse({ ...f, deliveryWaits: [{ targetId: 'a', deliveryStatus: 'written', delivered: true }] }), /has not been sent/);
   f.plan.grants[0].targets.push({ id: 'b', generation: 'g2' });
@@ -30,6 +30,15 @@ test('consumed operator finishes reuse attribution and retain pending result qua
   f.sessions.push({ id: 'b', generation: 'g2', name: 'Project B' });
   f.outcomes.push({ kind: 'finish_terminal', grantId: 'grant', targetId: 'b', ok: true, status: 'interaction-complete', text: 'Read the result.' });
   assert.equal(completedOperatorResponse(f), 'Project A: Submitted the review.\n\nProject B: Read the result.');
+});
+test('operator summaries cannot certify written input or input for a replaced generation', () => {
+  const f = finished();
+  f.outcomes[0].text = 'The agent accepted the task and is running.';
+  for (const generation of ['g1', 'old', undefined]) {
+    const text = completedOperatorResponse({ ...f, deliveryWaits: [{ targetId: 'a', generation, deliveryStatus: 'written', delivered: true }] });
+    assert.doesNotMatch(text, /accepted|is running/);
+    assert.match(text, generation === 'g1' ? /haven't confirmed that the task started/ : /changed.*unverified/);
+  }
 });
 test('partial, failed, uncertain, mixed and newly blocked work retain the executor', () => {
   const f = finished();
@@ -49,7 +58,8 @@ test('partial, failed, uncertain, mixed and newly blocked work retain the execut
 test('direct creation wording distinguishes started, unconfirmed and failed launches', () => {
   const sessions = [{ id: 'a', name: 'Codex' }];
   const format = result => formatDirectOutcomes([{ kind: 'create_session', id: 'a', ...result }], sessions);
-  assert.equal(format({ ok: true, status: 'created', processState: 'running' }), 'Opened Codex.');
+  assert.equal(format({ ok: true, status: 'created', processState: 'running', name: 'Codex', cwd: '/project' }), 'Opened Codex in project.');
+  assert.equal(format({ ok: true, status: 'created', processState: 'running' }), 'Opened the terminal.');
   assert.match(format({ ok: true, status: 'starting' }), /not confirmed/);
   assert.match(format({ ok: false, status: 'launch-failed', error: 'Missing executable' }), /Missing executable/);
 });

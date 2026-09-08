@@ -374,7 +374,7 @@ function postTelemetry(callbackUrl, token, payload) {
       process.platform === "win32"
     );
     assert(
-      lifecycleOverrides.length === 4 &&
+      lifecycleOverrides.length === 6 &&
         lifecycleOverrides.every(
           (entry) =>
             (entry.includes('type = "command"') ||
@@ -445,8 +445,8 @@ function postTelemetry(callbackUrl, token, payload) {
     );
     assert(
       Array.isArray(claudeSettings?.hooks?.Stop) &&
-        Array.isArray(claudeSettings?.hooks?.Notification),
-      "claude settings should declare Stop and Notification hooks"
+        Array.isArray(claudeSettings?.hooks?.PermissionRequest),
+      "Claude settings should declare Stop and PermissionRequest hooks"
     );
     assert(
       Array.isArray(claudeSettings?.hooks?.UserPromptSubmit) &&
@@ -557,7 +557,7 @@ function postTelemetry(callbackUrl, token, payload) {
     const childEvents = events.slice(eventsBeforeChildHook);
     assert(
       childEvents.length === 1 &&
-        childEvents[0].type === "agent-subagent" &&
+        childEvents[0].type === "agent-activity" &&
         childEvents[0].id === "pane-one" &&
         childEvents[0].phase === "stop",
       "Codex lifecycle observer should narrow explicit subagent payloads to the delegation bracket"
@@ -584,7 +584,7 @@ function postTelemetry(callbackUrl, token, payload) {
     const childStartEvents = events.slice(eventsBeforeChildStart);
     assert(
       childStartEvents.length === 1 &&
-        childStartEvents[0].type === "agent-subagent" &&
+        childStartEvents[0].type === "agent-activity" &&
         childStartEvents[0].phase === "start",
       "a subagent PreToolUse payload should open the delegation bracket"
     );
@@ -600,8 +600,8 @@ function postTelemetry(callbackUrl, token, payload) {
       { env: { ...process.env, ...instrumentation.env } }
     );
     assert(
-      events.length === eventsBeforeChildOther,
-      "non-tool subagent payloads should still be dropped entirely"
+      events.length === eventsBeforeChildOther + 1 && events.at(-1).transcriptKind === "subagent",
+      "child approval should remain explicitly child scoped"
     );
     assert(
       typeof instrumentation.env.VIBE_TERMINAL_LAUNCH_NONCE === "string" &&
@@ -1517,7 +1517,7 @@ function postTelemetry(callbackUrl, token, payload) {
       "an unknown agent.subagent.* type should be dropped silently"
     );
 
-    // The claude permission Notification hook tags its wait "approval" so the
+    // The Claude native PermissionRequest hook tags its wait "approval" so the
     // renderer can flip waiting->running on the user's answer keystroke.
     await runNotify("pane-approval", ["agent.waiting", "approval"]);
     assert(
@@ -1756,22 +1756,21 @@ function postTelemetry(callbackUrl, token, payload) {
       ),
       "cursor stop status=error should map to a failed attention event"
     );
-    // A user-aborted turn is not "done": it is the user's turn, i.e. waiting.
+    // An aborted turn is not evidence of a pending user question.
     assert(
       events.some(
         (event) =>
-          event.type === "agent-attention" &&
+          event.type === "agent-response" &&
           event.id === "pane-cursor-abort" &&
-          event.provider === "cursor" &&
-          event.attention.state === "waiting"
+          event.provider === "cursor"
       ),
-      "cursor stop status=aborted should map to a waiting attention event"
+      "cursor stop status=aborted should remain provisional without inventing input"
     );
 
     // The status->type mapping helper backs the stop behaviour.
     assert(
       cursorTypeFromStatus("completed") === "agent.completed" &&
-        cursorTypeFromStatus("aborted") === "agent.waiting" &&
+        cursorTypeFromStatus("aborted") === "agent.response" &&
         cursorTypeFromStatus(undefined) === "agent.response" &&
         cursorTypeFromStatus("error") === "agent.failed",
       "cursorTypeFromStatus should require explicit completed status; unknown stays provisional"
@@ -1912,54 +1911,11 @@ function postTelemetry(callbackUrl, token, payload) {
       "stripCursorHooks should drop our entries from all arrays and keep user content"
     );
 
-    // The opencode plugin source maps the documented opencode events, and infers
-    // turn-start "working" from the message stream (throttled by a busy latch).
     const pluginSource = openCodePluginSource();
-    assert(
-      pluginSource.includes("session.idle") &&
-        pluginSource.includes("permission.asked") &&
-        pluginSource.includes("session.error"),
-      "opencode plugin should map opencode lifecycle events"
-    );
-    assert(
-      pluginSource.includes("agent.running") &&
-        pluginSource.includes('startsWith("message.")') &&
-        pluginSource.includes("busy"),
-      "opencode plugin should infer agent.running from the throttled message stream"
-    );
-    // The busy latch must drop on EVERY mapped event, not only idle/error: the
-    // approval that resumes a permission-paused turn has no event of its own,
-    // so only the next message.* burst can re-assert "working" — and it can't
-    // while the latch is still up. Version must bump with any source change or
-    // installed copies never update.
-    assert(
-      pluginSource.includes("vibeterminal-notify-6") &&
-        !pluginSource.includes("vibeterminal-notify-3") &&
-        !pluginSource.includes("vibeterminal-notify-2") &&
-        pluginSource.includes("busy.delete(") &&
-        !pluginSource.includes(
-          'if (event.type === "session.idle" || event.type === "session.error") {'
-        ),
-      "opencode plugin should drop the busy latch on every mapped event (permission prompts included)"
-    );
-    assert(
-      pluginSource.includes(
-        'send(type, type === "agent.waiting" ? "approval" : undefined)'
-      ),
-      "opencode permission waits should be tagged as approvals"
-    );
-    // Child sessions (task-tool subagents, e.g. the Open Fusion executor) going
-    // idle/erroring must not read as the pane's turn ending: they are tracked by
-    // the parentID on session.created/updated info and filtered from the
-    // idle/error mapping (fail-open: unknown payload shapes filter nothing).
-    // Permission asks are never filtered.
-    assert(
-      pluginSource.includes("childSessions") &&
-        pluginSource.includes("info.parentID") &&
-        pluginSource.includes("childSessions.has(eventSessionId(event))") &&
-        !pluginSource.includes('"permission.asked" ||'),
-      "opencode plugin should ignore child-session idle/error but never filter permission asks"
-    );
+    assert(pluginSource.includes("session.status") && pluginSource.includes("permission.asked") && pluginSource.includes("session.error"),
+      "OpenCode plugin observes native lifecycle and input events");
+    assert(pluginSource.includes("parentThreadId") && pluginSource.includes("agent.subagent.stopped"),
+      "OpenCode child lifecycle retains parent scope");
 
     // The claude settings builder targets the notify program on both platforms.
     const winCmd = JSON.parse(
@@ -1973,7 +1929,7 @@ function postTelemetry(callbackUrl, token, payload) {
     );
     const posixCmd = JSON.parse(
       buildClaudeSettingsJson("/x/notify.sh", false)
-    ).hooks.Notification[0].hooks[0].command;
+    ).hooks.PermissionRequest[0].hooks[0].command;
     assert(
       posixCmd.includes("/x/notify.sh") && posixCmd.includes("agent.waiting"),
       `posix claude hook should invoke the notify wrapper; got ${posixCmd}`
@@ -2001,12 +1957,11 @@ function postTelemetry(callbackUrl, token, payload) {
     }
     // Ordinary idle notifications do not mean a question needs answering.
     assert(
-      claudeHooks.Notification.length === 1 &&
-        claudeHooks.Notification[0].matcher === "permission_prompt" &&
-        claudeHooks.Notification[0].hooks[0].command.includes(
+      claudeHooks.Notification === undefined &&
+        claudeHooks.PermissionRequest[0].hooks[0].command.includes(
           "'agent.waiting' 'approval'"
         ),
-      "claude Notification hooks should report permissions without treating idle as a question"
+      "Claude native permission hook must avoid delayed notifications"
     );
     const winToolCmd = JSON.parse(
       buildClaudeSettingsJson("C:\\x\\notify.ps1", true)
@@ -2015,37 +1970,11 @@ function postTelemetry(callbackUrl, token, payload) {
       winToolCmd.includes("agent.running tool"),
       `windows claude tool hook should pass the tool detail; got ${winToolCmd}`
     );
-    // The delegation bracket. claude's matcher selects on tool name, so `Task`
-    // is a discriminated subagent signal that keeps the notify transport
-    // argv-only (the hook JSON on stdin is never read).
-    assert(
-      claudeHooks.PreToolUse.length === 2 &&
-        claudeHooks.PreToolUse[1].matcher === "Task" &&
-        claudeHooks.PreToolUse[1].hooks[0].command.includes(
-          "'agent.subagent.started'"
-        ) &&
-        claudeHooks.PostToolUse.length === 2 &&
-        claudeHooks.PostToolUse[1].matcher === "Task" &&
-        claudeHooks.PostToolUse[1].hooks[0].command.includes(
-          "'agent.subagent.stopped'"
-        ),
-      "claude should bracket Task delegations via the tool-name matcher"
-    );
-    // Deliberately NOT SubagentStop as the closer: it is not 1:1 with a Task
-    // call (a blocking Stop-hook continuation can re-fire it), which would
-    // unbalance the renderer's delegation counter.
-    assert(
-      !JSON.stringify(claudeHooks).includes("SubagentStop"),
-      "claude settings must not close the bracket on SubagentStop"
-    );
-    const winTaskCmd = JSON.parse(
-      buildClaudeSettingsJson("C:\\x\\notify.ps1", true)
-    ).hooks.PreToolUse[1].hooks[0].command;
-    assert(
-      winTaskCmd.includes("agent.subagent.started") &&
-        !/agent\.subagent\.started\s+\S/.test(winTaskCmd),
-      `windows claude Task hook should pass the bracket type with no detail; got ${winTaskCmd}`
-    );
+    assert(claudeHooks.PreToolUse.length === 1 && claudeHooks.PostToolUse.length === 1,
+      "Claude tool callbacks must not manufacture child lifetimes");
+    assert(claudeHooks.SubagentStart[0].hooks[0].command.includes("agent.subagent.started") &&
+      claudeHooks.SubagentStop[0].hooks[0].command.includes("agent.subagent.stopped"),
+      "Claude observes native child lifecycles");
     // The kimi hook blocks carry the claude event set as config.toml TOML
     // ([[hooks]] tables), marker-tagged so merge/strip only ever touches
     // vibeTerminal's own entries.
@@ -2186,7 +2115,7 @@ function postTelemetry(callbackUrl, token, payload) {
     const qwenWinGroups = qwenHookGroups("C:\\x\\notify.ps1", true);
     const qwenEvents = Object.keys(qwenWinGroups);
     assert(
-      qwenEvents.length === 8 &&
+      qwenEvents.length === 9 &&
         qwenEvents.every((event) =>
           qwenWinGroups[event].every((group) =>
             group.hooks.every((hook) => hook.name === "vibeterminal-notify")

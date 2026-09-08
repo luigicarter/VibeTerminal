@@ -31,7 +31,7 @@ function commandClauses(text) {
   while ((match = separators.exec(masked))) { const current = stripPlease(masked.slice(start)); if (/^(send|tell|ask|prompt|relay|forward|instruct|draft|stage|prepare|remember|forget)\b/i.test(current) || /\bwith (?:the )?prompt\b/i.test(masked.slice(start, match.index)) || /^(tell|ask) (it|them)\b/i.test(masked.slice(separators.lastIndex))) break; result.push({ text: stripPlease(text.slice(start, match.index)), syntax: stripPlease(masked.slice(start, match.index)) }); start = separators.lastIndex; }
   result.push({ text: stripPlease(text.slice(start)), syntax: stripPlease(masked.slice(start)) }); return result;
 }
-const aliases = kind => { const value = String(kind || '').toLowerCase(); return value === 'openfusion' ? ['openfusion', 'open fusion'] : value === 'claude' ? ['claude', 'claude code'] : [value]; };
+const aliases = kind => { const value = String(kind || '').toLowerCase(); return value === 'openfusion' ? ['openfusion', 'open fusion'] : value === 'claude' ? ['claude', 'claude code'] : value === 'grok' ? ['grok', 'grok build'] : [value]; };
 function prefixLength(text, label) {
   if (!label) return 0; const normalized = text.toLowerCase(), wanted = label.toLowerCase();
   for (const candidate of [wanted, `"${wanted}"`, `'${wanted}'`]) if (normalized.startsWith(candidate) && (!normalized[candidate.length] || /[\s:,.!?]/.test(normalized[candidate.length]))) return candidate.length;
@@ -280,7 +280,7 @@ function identifySessionGroup(intent, sessions) {
   const query = stripPoliteness(intent.text).match(/^(?:how many|list|show(?: me)?|what are|which are)\s+(?:(?:all(?: of)?|the|my)\s+)*((?:[\w-]+\s+){0,2})(terminals?|sessions?|agents?)\b([\s\S]*)$/i);
   if (!query) return null;
   const descriptor = query[1].trim().toLowerCase();
-  const providerNames = [...new Set(['codex', 'claude', 'gemini', 'kimi', 'qwen', 'fusion', 'openfusion', 'shell', ...sessions.flatMap(s => [s.kind, s.provider])].filter(Boolean))];
+  const providerNames = [...new Set([...Object.keys(require('../shared/providerCapabilities.json')), 'fusion', 'openfusion', 'shell', ...sessions.flatMap(s => [s.kind, s.provider])].filter(Boolean))];
   const provider = providerNames.find(name => aliases(name).includes(descriptor));
   if (descriptor && !provider && !['vyp', 'vibe'].includes(descriptor)) return null;
   let suffix = query[3].trim().replace(/^(?:do I have|are there|are open)\b/i, '').trim().replace(/^[?.!]\s*/, '').replace(/[?.!]+$/, '').trim();

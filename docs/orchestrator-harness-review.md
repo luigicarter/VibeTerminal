@@ -1,5 +1,8 @@
 # Orchestrator harness: operating model and edge-case review
 
+For the current cross-layer implementation audit and combined acceptance check,
+see the [Orchestrator cohesion review](orchestrator-cohesion-review.md).
+
 **Historical design review.** The literal-relay authority and five-round/model-tool
 limits below describe the earlier harness. The current [semantic command and
 terminal-control layer](orchestrator-controls.md) supersedes those parts: the Brain
@@ -21,6 +24,39 @@ tested live.
 The later [progressive context and local error audio review](orchestrator-context-and-audio.md)
 adds local transcript search/paging, enforced model-input budgets and offline
 error speech.
+
+## Terminal creation paths and titles
+
+The renderer passes the requested project `cwd` through terminal creation. The
+main process validates and stores that directory on the launch generation, and
+the PTY host spawns the shell executable with `cwd` as a separate argument.
+PowerShell can publish its executable path (for example,
+`C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe`) as an OSC terminal
+title. `runtimeDisplayTitle` promotes that title to the renderer's display name,
+which the harness session directory also receives. It is a label, not the
+working directory.
+
+Previously, the direct creation reply interpolated that name as `Opened …` and
+omitted the actual directory; the creation tool result also lacked `cwd`. A
+successful launch now returns `cwd` and `name` from the confirmed generation and
+launch token, discarding provisional renderer metadata. Direct replies include
+the confirmed directory and use a generic terminal label for path-like names.
+Missing metadata can fall back only to the same acknowledged launch, never a
+replacement pane generation or the requested grant path. Model instructions
+also distinguish directory fields from titles. Confirmed creation `cwd` survives
+receipt persistence and follow-up context so “Where did you open it?” retains
+the evidence.
+
+This directory records where the shell launched; it does not track subsequent
+`cd` commands or profile scripts changing directories. Native titles and pane
+display behavior remain intact. Failed or unconfirmed startup still cannot
+produce an “Opened” success reply.
+
+Regression coverage is in the launch, launch-integration, response, fast-path,
+and conversation-store tests under `scripts/backend/`. The background-launch
+Electron smoke also checks a direct creation reply and evaluates PowerShell's
+`Get-Location` against the receipt using isolated test user data. Its model and
+provider responses are scripted; it does not verify live cloud interpretation.
 
 ## What the model receives
 

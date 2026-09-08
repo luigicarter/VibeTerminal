@@ -279,7 +279,8 @@ export function isTurnTelemetryKind(kind: AgentKind) {
     kind === "cursor" ||
     kind === "kimi" ||
     kind === "kimi-custom" ||
-    kind === "qwen"
+    kind === "qwen" ||
+    kind === "grok"
   );
 }
 
@@ -488,7 +489,8 @@ export function shouldUseTerminalEventAttention(session: AgentSession) {
     session.kind === "cursor" ||
     session.kind === "kimi" ||
     session.kind === "kimi-custom" ||
-    session.kind === "qwen"
+    session.kind === "qwen" ||
+    session.kind === "grok"
   );
 }
 

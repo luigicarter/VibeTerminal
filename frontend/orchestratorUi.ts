@@ -54,6 +54,9 @@ export interface RelayTask {
     updatedAt: number;
     error?: string;
     waitingReason?: string;
+    workItemId?: string;
+    workItemIds?: string[];
+    assignment?: { decision: "create" | "reuse"; reason?: string; workItemId?: string };
 }
 export interface RelayState {
     enabled: boolean;

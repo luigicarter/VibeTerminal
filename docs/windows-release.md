@@ -4,10 +4,10 @@ vibeTerminal ships to Windows users as an Electron Builder NSIS installer hosted
 
 ## Current Public Release
 
-The current Windows release is `v0.1.101`:
+The current Windows release is `v0.1.102`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.101`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.101/vibeTerminal-Setup-0.1.101.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.102`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.102/vibeTerminal-Setup-0.1.102.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -57,10 +57,11 @@ The compiled `dist/` renderer is still included because it is the UI Electron di
 
 ## Local Build
 
-Version `0.1.101` adds request-owned progress and result reports, terminal readiness
-watches, reliable background terminal startup, and voice streaming and recovery.
-It also improves busy-terminal follow-ups and protects agent processes during
-terminal editing. Readiness remains separate from verified task results. See the
+Version `0.1.102` adds automatic task-to-conversation routing, Grok Build support,
+and more reliable provider status and session restoration. It also repairs chat
+startup/restart races, dependency and cancellation handling, native history
+discovery, and voice interruption and playback ownership. Readiness remains
+separate from verified task results. See the
 [terminal-control contract](orchestrator-controls.md), [voice turns](orchestrator-tasks.md),
 and [work history](orchestrator-dashboard.md) for behavior and verification.
 Installed applications apply updates through the user's Update/Restart action;

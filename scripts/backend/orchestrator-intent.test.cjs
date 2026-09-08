@@ -14,6 +14,34 @@ const compile = (actions, extra = {}, additional = {}) => normalizeIntent({ goal
 const send = extra => ({ kind: 'send_prompt', targetIds: ['a'], text: 'Review the last changes; do not edit files.', ...extra });
 const question = extra => ({ id: 'q1', sessionId: 'a', generation: 'launch-a', revision: 3, state: 'pending', kind: 'question', questions: [{ id: 'scope', question: 'Which scope?', options: [{ label: 'Unit' }, { label: 'Smoke' }] }], ...extra });
 
+test('current task status needs no submitted reply reference or request id', () => {
+  const plan = normalizeIntent({ goal: 'Check the current task.', actions: [], responseKind: 'task-status', statusTargetIds: ['a'] }, context());
+  assert.deepEqual(plan.statusTargets, [{ id: 'a', generation: 'launch-a', name: undefined }]);
+  assert.equal(plan.statusRequestId, undefined);
+  assert.equal(plan.access, 'read-only');
+  assert.deepEqual(plan.grants, []);
+});
+
+test('task status is semantically routed to frozen targets without effect authority', () => {
+  const raw = { goal: 'Check whether the task started.', actions: [], responseKind: 'task-status', statusTargetIds: ['a'], statusRequestId: 'earlier' };
+  const ctx = context({ tasks: [{ requestId: 'earlier' }] });
+  const plan = normalizeIntent(raw, ctx);
+  ctx.sessions[0].generation = 'replacement'; raw.statusTargetIds.push('b');
+  assert.deepEqual(plan.statusTargets, [{ id: 'a', generation: 'launch-a', name: undefined }]);
+  assert(Object.isFrozen(plan.statusTargets[0]));
+  assert.equal(plan.access, 'read-only');
+  assert.equal(projectIntent(plan).responseKind, 'task-status');
+  assert.equal(projectIntent(plan).statusRequestId, 'earlier');
+  assert.deepEqual(projectIntent(plan).statusTargets, plan.statusTargets);
+  assert.throws(() => authorizeIntentAction({ kind: 'send_prompt', targetId: 'a' }, plan, sessions), /matching user command grant/);
+  assert.equal(compile([]).responseKind, undefined, 'Ordinary reads remain model responses');
+  for (const patch of [{ responseKind: 'anything' }, { responseKind: undefined }, { statusTargetIds: [] }, { statusTargetIds: ['a', 'a'] },
+    { statusTargetIds: ['missing'] }, { statusRequestId: 'missing' }, { actions: [send()] }]) {
+    assert.throws(() => normalizeIntent({ ...raw, statusTargetIds: ['a'], ...patch }, context({ tasks: [{ requestId: 'earlier' }] })));
+  }
+  assert.deepEqual(INTENT_TOOL.function.parameters.properties.responseKind.enum, ['task-status']);
+});
+
 test('compiler contract supports workspace effects and excludes external applications and reads', () => {
   assert.equal(INTENT_TOOL.function.name, 'interpret_workspace');
   assert.deepEqual(INTENT_TOOL.function.parameters.properties.actions.items.anyOf.map(schema => schema.properties.kind.enum[0]), INTENT_KINDS);

@@ -4,6 +4,28 @@ The Orchestrator keeps one conversation and tracks each submitted request separa
 Text and voice requests are accepted while other work runs. Each message, question
 and delivery receipt stays associated with its request and terminal.
 
+## Automatic terminal assignment
+
+Users can give a task and let the Brain choose its worker. `delegate_task` binds
+the objective and project before a read-only routing stage inspects candidate
+conversations. Related work returns to its work item's owner, including while
+busy; independent work uses a separate conversation. A new worker is created
+without staged prompt text, checked for actual readiness, then receives a frozen
+operator grant and one normal observed submission. Creation is never task delivery.
+
+Related requests share a pending creation reservation. Automatic tasks wait for
+conflicting managed work in the same canonical worktree without holding terminal
+control lanes. Busy continuations retain their independent result-attribution
+requirements. Clarification and deferred steps retain the original work item and
+native conversation identity; a changed conversation cannot receive their input.
+Known slow creation can recover the exact original launch without creating a
+duplicate. Unknown prompt delivery remains non-replayable.
+
+Task details show whether routing selected a new or existing agent and why.
+Bounded work-item history is reference data and never restores live execution
+authority. See [the routing implementation and investigation](orchestrator-routing-deep-dive.md)
+for capability, persistence, context-budget and verification boundaries.
+
 ## Ordering and context
 
 The Brain resolves requests in submission order. Two execution model calls may run
@@ -25,6 +47,12 @@ task completion. `send_prompt` and operator `terminal_interact` submissions mark
 the wait at submission; interaction-only menu answers create no task-result wait.
 Deferred review-then-fix work needs actual attributed result evidence, not merely
 a finished operator scope.
+Submitted-task acknowledgements and semantic task-status lookups use the scheduler's
+request/terminal/turn evidence. A successful input write with no attributed start
+says that input was sent and the start remains unconfirmed. A live agent process,
+an older completed turn, terminal prose and a model-authored `finish_terminal`
+summary cannot promote that submission to running. Attributed completion says the
+agent turn ended; it does not independently verify the requested changes.
 Plain shells release scheduling lanes after ordered transport handling because their
 completion cannot be observed reliably; they still cannot satisfy result dependencies.
 
@@ -162,6 +190,18 @@ spoken outcome and issue reports through the existing speech controller. Input
 questions retain their existing revision-bound interaction speech, avoiding a
 generic blocker announcement after the user has answered. Chat reports do not
 wait for earlier speech playback to finish.
+
+If a prompt and a later Enter create separate delivery waits for the same
+attributed turn, they produce one lifecycle notification per request, terminal,
+generation and turn. Execution waits stay independent. Unattributed delivery
+warnings, distinct failure reasons, new input-blocking episodes and different
+turns remain distinguishable.
+
+Overlapping voice requests watching the same attributed turn retain their own chat
+history, but share one automatic spoken completion and one spoken result summary.
+A new turn can announce again. Cancelled, silent or failed speech does not consume
+the announcement for another still-active request; distinct failure explanations
+remain separate.
 
 Turn-end events are reconciled immediately so a newer terminal turn cannot hide
 the earlier completion between inventory refreshes. These event snapshots do not

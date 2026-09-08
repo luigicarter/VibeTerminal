@@ -9,7 +9,7 @@ function hookMetadata(input) {
     toolId: ["tool_use_id", "toolUseId", "tool_call_id", "call_id"],
     toolName: ["tool_name", "toolName"],
     taskId: ["agent_id", "subagent_id", "task_id"],
-    taskLabel: ["agent_type", "subagent_type", "task_name"],
+    taskLabel: ["agent_type", "subagent_type", "task_name", "agent_name", "agentName"],
     parentThreadId: ["parent_session_id", "parentSessionId", "parent_conversation_id"],
     transcriptPath: ["transcript_path", "transcriptPath"],
     notificationType: ["notification_type", "notificationType"],
@@ -26,6 +26,14 @@ function hookMetadata(input) {
   const name = hook.hook_event_name || hook.hookEventName || hook.event;
   if (["PreToolUse", "BeforeTool"].includes(name)) output.phase = "start";
   if (["PostToolUse", "PostToolUseFailure", "AfterTool"].includes(name)) output.phase = "stop";
+  if (output.phase) output.kind = "tool";
+  if (["SubagentStart", "SubagentStop"].includes(name)) {
+    output.lifecycle = "native";
+    output.provisional = name === "SubagentStop";
+  } else if (["PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest", "Notification", "UserPromptSubmit", "Stop", "StopFailure"].includes(name) &&
+      (typeof hook.agent_id === "string" && hook.agent_id || typeof hook.subagent_id === "string" && hook.subagent_id)) {
+    output.transcriptKind = "subagent";
+  }
   if (hook.isSidechain === true || hook.is_sidechain === true || hook.subagent === true || output.parentThreadId) output.rootVerified = false;
   return output;
 }
@@ -78,7 +86,7 @@ function powershellHookMetadata() {
   return [
     "try {",
     "  $hook = $raw | ConvertFrom-Json",
-    "  $fields = @{ providerThreadId = @('session_id','sessionId','conversation_id'); providerTurnId = @('turn_id','turnId','generation_id'); toolId = @('tool_use_id','toolUseId','tool_call_id','call_id'); toolName = @('tool_name','toolName'); taskId = @('agent_id','subagent_id','task_id'); taskLabel = @('agent_type','subagent_type','task_name'); parentThreadId = @('parent_session_id','parentSessionId','parent_conversation_id'); transcriptPath = @('transcript_path','transcriptPath'); notificationType = @('notification_type','notificationType'); cwd = @('cwd') }",
+    "  $fields = @{ providerThreadId = @('session_id','sessionId','conversation_id'); providerTurnId = @('turn_id','turnId','generation_id'); toolId = @('tool_use_id','toolUseId','tool_call_id','call_id'); toolName = @('tool_name','toolName'); taskId = @('agent_id','subagent_id','task_id'); taskLabel = @('agent_type','subagent_type','task_name','agent_name','agentName'); parentThreadId = @('parent_session_id','parentSessionId','parent_conversation_id'); transcriptPath = @('transcript_path','transcriptPath'); notificationType = @('notification_type','notificationType'); cwd = @('cwd') }",
     "  foreach ($field in $fields.Keys) {",
     "    foreach ($key in $fields[$field]) {",
     "      $value = $hook.$key",
@@ -87,8 +95,10 @@ function powershellHookMetadata() {
     "  }",
     "  if (-not $payload['taskLabel'] -and @('Task','Agent') -contains $payload['toolName'] -and $hook.tool_input.description -is [string]) { $payload['taskLabel'] = $hook.tool_input.description.Substring(0, [Math]::Min(256, $hook.tool_input.description.Length)) }",
     "  $hookName = $hook.hook_event_name; if (-not $hookName) { $hookName = $hook.hookEventName }; if (-not $hookName) { $hookName = $hook.event }",
-    "  if (@('PreToolUse','BeforeTool') -contains $hookName) { $payload['phase'] = 'start' }",
-    "  if (@('PostToolUse','PostToolUseFailure','AfterTool') -contains $hookName) { $payload['phase'] = 'stop' }",
+    "  if (@('PreToolUse','BeforeTool') -contains $hookName) { $payload['phase'] = 'start'; $payload['kind'] = 'tool' }",
+    "  if (@('PostToolUse','PostToolUseFailure','AfterTool') -contains $hookName) { $payload['phase'] = 'stop'; $payload['kind'] = 'tool' }",
+    "  if (@('SubagentStart','SubagentStop') -contains $hookName) { $payload['lifecycle'] = 'native'; $payload['provisional'] = $hookName -eq 'SubagentStop' }",
+    "  elseif (@('PreToolUse','PostToolUse','PostToolUseFailure','PermissionRequest','Notification','UserPromptSubmit','Stop','StopFailure') -contains $hookName -and (($hook.agent_id -is [string] -and $hook.agent_id) -or ($hook.subagent_id -is [string] -and $hook.subagent_id))) { $payload['transcriptKind'] = 'subagent' }",
     "  if ($hook.isSidechain -eq $true -or $hook.is_sidechain -eq $true -or $hook.subagent -eq $true -or $payload['parentThreadId']) { $payload['rootVerified'] = $false }",
     "} catch {}"
   ];

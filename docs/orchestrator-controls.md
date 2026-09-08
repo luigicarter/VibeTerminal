@@ -8,10 +8,49 @@ choices unless the user asks for more. Direct actions use named, factual outcome
 instead of raw labels such as “Action written”; drafts, queues, accepted input,
 requested interruption and observed completion remain distinct.
 
+Terminal creation acknowledgments use a human terminal/provider label and the
+confirmed project folder's name, such as “Opened Codex in vibeTerminal.” Shell
+executable titles and full drive paths are excluded from creation replies in both
+direct and model-driven execution. The full confirmed directory remains available
+in action evidence for an explicit location question.
+
+Submission replies and operator finish receipts use the request's own delivery
+and turn evidence. A written prompt does not prove that the agent accepted or
+started it. Running wording requires an attributed current turn; a replacement
+terminal or an older active turn cannot certify the request. The final publication
+check also covers model-written replies and late queued-delivery rejection.
+
 Spoken replies retain the exact request they follow, including its question and
 bounded exchange context when unrelated work has moved it outside recent history.
 This context helps resolve follow-ups; it does not revive completed grants or turn
 assistant suggestions into authority. Topic changes remain new instructions.
+Delivery corrections retain the original request and terminal generation through
+later status answers. A validator-rejected attempt to replay an already submitted
+task can recover as a read-only delivery check; it cannot recreate consumed grants
+or resend uncertain input. An unfinished, unconsumed operator objective retains
+its existing recovery authority and constraints.
+Regression verification for these fixes passed 1,061 Orchestrator/voice tests
+and the production renderer build. Scripted text/voice cases reproduce the two
+historical correction-validation failures and verify a single prompt dispatch.
+These checks cover source behavior; the installed application and live provider
+interpretation were not exercised by this run.
+
+Read-only result explanations can recover earlier invalid-tool or stale-history
+attempts after retrieving usable content. Reads of another identified terminal,
+unavailable observations and failed actions remain failures. Failed terminal
+observations do not issue usable observation tokens. Draft status retains the
+delivery reason and tells the user where to review and submit it.
+
+Additional September 7 checks reproduced the installed paste/submission failure
+with a disposable native Codex process and confirmed four successful source
+submission cases (interaction/input, raw/bracketed paste). Hidden Electron checks
+passed background creation, project-name acknowledgments, immediate shell input,
+remount and restart. Configured-model checks passed safe input clearing and a
+review request against disposable adapters; the review was checked independently
+because selecting it immediately after the draft-edit fixture leaves that fixture
+in draft mode. Physical voice capture and deployment to the installed application
+remain outside these checks.
+
 Structured choices accept explicit natural replies such as “the second one” and
 “go with option two” without another clarification. Qualified or ambiguous answers
 still go through the Orchestrator, and permission decisions retain their explicit
@@ -72,6 +111,12 @@ Named key casing is normalized before authorization without expanding the key
 vocabulary. See [the terminal exit review](orchestrator-exit-review.md) for the
 recorded incident, evidence limits and regression coverage.
 
+For a task without an explicit terminal, `delegate_task` authorizes bounded
+assignment in a known project. Read-only discovery selects a suitable conversation
+or configured new agent before an application-only transition creates the frozen
+`operate_terminal` grant. Exact target, random/all selection and ordinary controls
+retain their existing contracts. See [automatic assignment](orchestrator-routing-deep-dive.md).
+
 The selected Brain returns an `interpret_workspace` plan. Invalid tool envelopes,
 JSON or plans receive one repair attempt against the original context and strict
 validator. Repeated failure cannot authorize effects. Current user instructions
@@ -86,6 +131,13 @@ observe-act-verify loop, allowing task-relevant prompts and intermediate control
 The executor reports a verified outcome with `finish_terminal`; saying “done” or
 repeating the objective is not evidence that effects occurred. Finishing control
 of a terminal does not itself establish completion of a delegated coding task.
+For submitted tasks, the app formats finish receipts and replies from attributed
+task evidence rather than accepting the model's status claims. Read-only task-status
+questions bind their targets during semantic interpretation and use the same
+evidence; output explanations and history summaries retain their normal read flow.
+Completed task acknowledgements do not open listening merely because a model adds
+an unsolicited follow-up in `respond`. Necessary clarification uses `ask_user`;
+explicit voice dismissal and non-task conversational questions retain their controls.
 
 Each effect requires a fresh, single-use `observationToken` from `read_session`
 and a new `stepId`. Native controls also bind the observed screen sequence and

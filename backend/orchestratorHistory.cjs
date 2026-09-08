@@ -5,8 +5,9 @@ const crypto = require('crypto');
 const host = require('./agentThreadHost.cjs');
 const { createConversationReader } = require('./conversationReader.cjs');
 const { locateCodexRollout, parseCodexSessionMeta } = require('./agentThreads.cjs');
+const { readGrokConversation } = require('./grokThreads.cjs');
 
-const PROVIDERS = new Set(['codex', 'claude', 'cursor', 'gemini', 'kimi', 'kimi-custom', 'qwen', 'opencode', 'openfusion', 'fusion', 'claude-custom']);
+const PROVIDERS = new Set(['codex', 'claude', 'cursor', 'gemini', 'grok', 'kimi', 'kimi-custom', 'qwen', 'opencode', 'openfusion', 'fusion', 'claude-custom']);
 const SAFE_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,199}$/;
 const MAX_BYTES = 2 * 1024 * 1024;
 function rootThread(thread) { return thread && !thread.parentID && !thread.parentId && !thread.parent_id && !thread.parentSessionId && !thread.parent_session_id && !thread.parent_thread_id && !thread.isSidechain && thread.kind !== 'subagent'; }
@@ -221,7 +222,16 @@ function createOrchestratorHistory(options = {}) {
     const identity = await resolve(input.reference);
     const provider = payload(identity).provider;
     const source = { binding: JSON.stringify([identity, payload(identity), homes, options.getStoreBinding?.()]), decode: values => messagesFrom(values, provider) };
-    if (provider === 'opencode') {
+    let nativeDetails = {};
+    if (provider === 'grok') {
+      let result;
+      try { result = await readGrokConversation(identity, { home: homes.grok }); }
+      catch (error) { return { status: 'unavailable', identity, message: error.message || 'Native Grok transcript is unavailable.' }; }
+      source.messages = result.messages;
+      source.binding += `:${result.source}:${result.version}`;
+      nativeDetails = { nativeSource: result.source, historyCompleteness: result.limited ? 'current-context-only' : 'complete',
+        ...(result.limited ? { limited: true, truncated: true, limitation: 'Only the current native context survives; the authoritative updates log is absent.' } : {}) };
+    } else if (provider === 'opencode') {
       if (!options.readOpenCodeTranscript) return { status: 'unsupported', identity, message: 'Transcript reading is unavailable for this OpenCode store; the conversation can still be reopened.' };
       const result = await options.readOpenCodeTranscript(identity);
       if (!result || result.status === 'unsupported') return { status: 'unsupported', identity, message: result?.message || 'Transcript unavailable.' };
@@ -231,7 +241,7 @@ function createOrchestratorHistory(options = {}) {
       try { source.file = await nativeFile(identity); } catch { /* inaccessible store */ }
       if (!source.file) return { status: 'unavailable', identity, message: 'Native transcript is unavailable; no transcript archive is kept.' };
     }
-    return { status: 'found', identity, ...reader[operation](input, source), untrustedContent: true };
+    return { status: 'found', identity, ...reader[operation](input, source), ...nativeDetails, untrustedContent: true };
   }
   const read = input => transcript(input, 'read');
   const search = input => transcript(input, 'search');

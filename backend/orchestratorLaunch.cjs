@@ -3,7 +3,7 @@
 // A renderer acknowledgment proves that a pane exists, not that its process
 // exists. Wait for the requested launch, without retrying or changing targets.
 function waitForSessionLaunch({ result, getSession, refresh = async () => {}, signal, timeoutMs = 20000, pollMs = 100 }) {
-  const { target: _provisionalTarget, ...created } = result;
+  const { target: _provisionalTarget, cwd: _provisionalCwd, name: _provisionalName, ...created } = result;
   return new Promise(resolve => {
     let settled = false, polling;
     const finish = value => {
@@ -36,7 +36,10 @@ function waitForSessionLaunch({ result, getSession, refresh = async () => {}, si
             return finish({ ok: false, status: "launch-failed", generation, error: session.binding?.message || "The terminal stopped before startup completed." });
           }
           if (session.processState === "running" && session.launchState !== "pending") {
-            return finish({ ok: true, status: "created", processState: "running", target: { id: session.id, generation, launchToken: result.launchToken } });
+            return finish({ ok: true, status: "created", processState: "running",
+              ...(typeof session.cwd === "string" && session.cwd.trim() ? { cwd: session.cwd } : {}),
+              ...(typeof session.name === "string" && session.name.trim() ? { name: session.name } : {}),
+              target: { id: session.id, generation, launchToken: result.launchToken } });
           }
         }
       } catch (error) {

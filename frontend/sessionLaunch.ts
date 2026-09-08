@@ -191,6 +191,13 @@ export function buildLaunchCommand(
     return session.command.trim() || "kimi-custom";
   }
 
+  if (session.kind === "grok") {
+    const ref = resumeArg(session);
+    return mode === "resume" && ref
+      ? `grok --resume ${commandArg(ref, platform)}`
+      : session.command.trim() || "grok";
+  }
+
   if (session.kind === "qwen") {
     if (mode === "resume") {
       const ref = resumeArg(session);

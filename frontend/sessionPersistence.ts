@@ -1,4 +1,20 @@
-import type { AgentSession } from "./types";
+import type { AgentSession, AgentThreadProvider } from "./types";
+
+// Chat hosts can report their session after the user switches projects and the
+// pane unmounts. Keep that identity in workspace state, independent of its view.
+export function rememberChatThread(
+  session: AgentSession,
+  provider: AgentThreadProvider,
+  id: string
+): AgentSession {
+  if (!session.started || typeof id !== "string" || !id.trim()) return session;
+  const previous = session.threadRef;
+  if (previous?.provider === provider && previous.id === id) return session;
+  return {
+    ...session,
+    threadRef: { provider, id, createdAt: session.createdAt, updatedAt: Date.now() }
+  };
+}
 
 // Run before kind validation, so removing a launcher never deletes saved tiles.
 export function migrateRemovedAgent(value: unknown): unknown {

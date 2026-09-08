@@ -4,6 +4,10 @@ vibeTerminal is an Electron + React desktop workspace for running local terminal
 
 ## Docs Index
 
+- `docs/orchestrator-cohesion-review.md` - Consolidated harness audits and latest Grok/status/resume review: lifecycle, repaired input/scheduling/history/voice gaps, native identity limits and combined acceptance. `docs/orchestrator-cohesion-second-pass.md` retains historical second-pass evidence.
+
+- `docs/orchestrator-routing-deep-dive.md` - Automatic task assignment implementation and historical investigation: task-to-conversation ownership, reuse/create decisions, verified creation and submission, scheduling, context efficiency, and acceptance criteria.
+
 - `docs/orchestrator-tasks.md` - Request-owned conversations, immediate queueing, independent execution, result dependencies, dynamic targets, cancellation, saved history, and voice clarification routing.
 
 - `docs/orchestrator-controls.md` - Current semantic Orchestrator contract: natural user goals, scoped per-terminal commands, unfinished work, supplied answers, native text/key controls, private diagnostics, and verification boundaries.
@@ -24,6 +28,8 @@ vibeTerminal is an Electron + React desktop workspace for running local terminal
 - `docs/backend.md` - Electron main process, PTY host, and agent thread discovery files.
 - `docs/preload.md` - Context bridge and IPC surface exposed to the renderer.
 - `docs/terminal-runtime.md` - Standalone terminal identity, titles, progress, generation-scoped lifecycle, Gemini adapter, and board placement/sizing behavior.
+- `docs/terminal-status-support.md` - Provider status evidence, child/background observation, provisional completion limits and shared display behavior.
+- `docs/grok-build.md` - Grok Build launch, native hooks, status, conversation discovery/history, and installed-version verification.
 - `docs/scripts.md` - Development, smoke test, and screenshot helper scripts.
 - `docs/windows-release.md` - Windows installer, GitHub Releases deployment, update behavior, and signing status.
 - `docs/fusion-terminal.md` - Shipped two-model Fusion architecture (Opus orchestrator + embedded per-pane Codex executor, the adapter, approval/verifier loop).

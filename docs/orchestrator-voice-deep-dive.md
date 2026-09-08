@@ -34,18 +34,19 @@ run found an obsolete provisional-pane launch expectation from concurrent launch
 work; its fixture now waits for the matching running process, and the final broad
 run passed. No production launch behavior was changed by this voice work.
 
-These refinements do not enable wake-word interruption during playback, measure
-audible output or update an already-running installed application. The broader
-architecture and remaining limits below still apply.
+That checkpoint did not enable wake-word interruption during playback. A later
+source update adds short spoken summaries and wake interruption during TTS
+preparation/playback, as described in sections 6–7. It does not measure audible
+output or update an already-running installed application.
 
-The voice interface has working capture, local inference, cloud transcription, assistant execution, and audio playback components. This wider audit found defects where those components exchanged control, beyond the initial recording fixes. Final review corrected the reproduced handover, short-speech and stale-feedback defects in 0.1.96. Half-duplex operation, sequential cloud latency and microphone/assistant coupling remain product limitations; physical microphone quality still needs direct measurement.
+The voice interface has working capture, local inference, cloud transcription, assistant execution, and audio playback components. This wider audit found defects where those components exchanged control, beyond the initial recording fixes. Final review corrected the reproduced handover, short-speech and stale-feedback defects in 0.1.96. Wake detection still pauses during transcription and assistant work; sequential cloud latency and microphone/assistant coupling remain product limitations. Physical microphone quality still needs direct measurement.
 
 The most consequential findings at the start of the audit were:
 
 1. Switching from an automatic recording to a short Space hold and back preserved an old silence timer and sent the recording too soon. Fixed before release.
 2. A short, uncertain utterance remained recording through 40 seconds of silence. It now receives a bounded retry outcome.
 3. Space silently failed with stale initial state or discarded capture errors. Both paths now have regression coverage and corrected state handling.
-4. Saying “Hey Vibe” during transcription, assistant work, or playback is intentionally ignored.
+4. Saying “Hey Vibe” during transcription, assistant work, or playback was ignored. The current source accepts it during speech preparation/playback when hands-free detection is enabled and ready.
 5. Even successful requests pass through several sequential cloud operations before sound starts.
 6. “Mute microphone” also disables the text Orchestrator. A microphone failure can take the text assistant down with it.
 
@@ -169,7 +170,9 @@ Sources: [recording and inference decisions](../backend/voiceController.cjs#L120
 
 ## 6. Why repeating “Hey Vibe” sometimes does nothing
 
-The current system is half-duplex: it takes turns listening for a new command and processing or speaking the previous one.
+Wake detection now remains active during speech preparation and playback when
+hands-free voice is enabled. Transcription and assistant work still pause wake
+detection.
 
 | Phase | Wake phrase accepted? | Space accepted? | Main microphone action |
 | --- | --- | --- | --- |
@@ -179,9 +182,14 @@ The current system is half-duplex: it takes turns listening for a new command an
 | Awaiting an agent answer | Uses speech detection without another wake | Yes | Hold to answer |
 | Transcribing | No | No | Stop request |
 | Thinking | No | No | Stop request |
-| Speaking | No | Yes; interrupts playback | Hold to interrupt and talk |
+| Preparing speech / speaking | Yes, with hands-free voice enabled and ready; interrupts speech | Yes; interrupts playback | Hold to interrupt and talk |
 
-“Hey Vibe” cannot currently interrupt a response or a slow cloud request. This is intentional behavior, and it plausibly contributes to the feeling that activation is unreliable. It is different from a keyword detector failing while idle.
+“Hey Vibe” interrupts a spoken response or its pending TTS request, cancels old
+queued speech, and captures the new command. It retains a current question's
+answer identity without cancelling terminal work. A slow transcription or Brain
+request still uses the Stop request control. The microphone requests echo
+cancellation, but real loudspeaker/microphone recognition remains a physical
+verification boundary.
 
 Space is a **window keyboard listener**, not a system-wide hotkey. It is ignored while typing inside a terminal pane, input, textarea, select or editable field. The idle label still says “hold Space” even in those contexts. Losing window focus during a sufficiently long manual hold sends the recording.
 
@@ -206,11 +214,24 @@ The production error at **2026-09-07 00:05:40 UTC** occurred at this interpretat
 
 Version 0.1.96 supplies a clearer argument-shape contract and allows one repair attempt using the original authorized context. The strict validator remains in place. Repeated failure still stops the request. This improves recovery; it does not prove the selected provider will always follow the contract.
 
-After a final text response, speech generation sends up to 4,000 characters, with Markdown normalized for speech, to Kokoro. The app currently supports its ten configured English voice presets. The speech model is not freely interchangeable through the generic model text field.
+Ordinary spoken replies and completion reports use a separate natural TL;DR,
+with its level of detail chosen by the model rather than fixed sentence, word,
+or character caps. Written replies stay intact. The model normally supplies
+`speechText` alongside its written reply in the same response. A missing summary
+gets one tool-free summary attempt; automatic completion reports reuse their
+existing summary call. Empty or failed summaries produce a brief fallback
+instead of reading raw agent output. Clarifications and permission
+questions preserve their wording. Kokoro receives the selected text with
+Markdown normalized; the app supports its ten configured English voice presets.
 
-The TTS response is downloaded completely, validated and decoded, and then emitted to the hidden renderer as ordered PCM chunks. The renderer schedules playback and acknowledges completion. The source phase named `speaking` begins before the TTS request, so that label can appear while no sound is yet available.
+PCM speech is validated and progressively emitted to the hidden renderer as
+ordered chunks. WAV containers remain fully buffered for validation. The renderer
+schedules playback and acknowledges completion. The `speaking` phase begins
+before the TTS request, so it can appear before sound is available; wake
+interruption works during that preparation too.
 
-OpenRouter documents raw audio responses and PCM output suitable for progressive playback. The app's complete-download behavior is its present implementation choice, rather than a requirement that all PCM must wait until the response ends. [OpenRouter TTS contract](https://openrouter.ai/docs/guides/overview/multimodal/tts).
+The controller cancels the active request and playback identity on interruption.
+Late provider, inference, and playback callbacks are fenced from the new capture.
 
 Sources: [transcription and dispatch](../backend/voiceController.cjs#L294), [interpretation and repair](../backend/orchestrator.cjs#L147), [strict grants](../backend/orchestratorIntent.cjs#L97), [executor loop](../backend/orchestrator.cjs#L441), [speech download/playback](../backend/voiceController.cjs#L376).
 
@@ -250,7 +271,12 @@ This is one test, not a latency distribution. The harness measured response head
 
 There is no single end-to-end interaction deadline. Repairs, reasoning-budget retries and additional workspace-tool rounds can extend a turn. Cancellation must therefore be obvious and dependable.
 
-The highest-value latency change is first to measure full stage boundaries and actual renderer playback start. Progressive TTS is a promising next change, but it needs tests for metadata, chunk alignment, cancellation, partial responses and errors after playback has begun. Reducing or combining Brain calls requires retaining the existing authorization boundary.
+The current source measures stage boundaries and renderer playback start, and
+streams validated PCM before EOF. These timings do not measure physical speaker
+audibility. An ordinary reply missing its spoken-summary field needs one
+additional TL;DR call before TTS; replies with that field, app-generated status
+messages, and automatic result reports avoid the extra call.
+Reducing or combining Brain calls must retain the authorization boundary.
 
 Evidence: [previous live result](../.tmp/voice-live-validation/1788740715547/result.json), [native report](../output/voice-handsfree/native-smoke.json), [request timeout](../backend/orchestrator.cjs#L125), [speech buffering](../backend/voiceController.cjs#L417).
 

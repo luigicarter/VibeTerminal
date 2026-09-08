@@ -50,7 +50,10 @@ globalThis.fetch=async(url,options={})=>{
  if(!body.tools)return answer({content:'NO_CHANGE'});
  if(body.tools.some(tool=>tool.function?.name==='interpret_workspace')){
   const context=JSON.parse(body.messages.find(message=>message.role==='user').content);
-  return answer({tool_calls:[{id:'fixture-intent',type:'function',function:{name:'interpret_workspace',arguments:JSON.stringify(interpretTestIntent(context))}}]});
+  context.roots.projects=context.roots.projects.map(project=>typeof project==='string'?{path:project,name:path.basename(project)}:project);
+  const intent=interpretTestIntent(context),plan=JSON.parse(fs.readFileSync(${JSON.stringify(planFile)},'utf8'));
+  if(plan.directCreation && intent.actions.every(action=>action.kind==='create_session'))intent.executionMode='direct';
+  return answer({tool_calls:[{id:'fixture-intent',type:'function',function:{name:'interpret_workspace',arguments:JSON.stringify(intent)}}]});
  }
  const plan=JSON.parse(fs.readFileSync(${JSON.stringify(planFile)},'utf8'));
  const completed=body.messages.filter(m=>m.role==='tool').length;
@@ -60,10 +63,10 @@ globalThis.fetch=async(url,options={})=>{
 require(${JSON.stringify(path.join(root, "backend/main.cjs"))});
 `);
 let child, cdp;
-const plan = actions => fs.writeFileSync(planFile, JSON.stringify({ actions }));
+const plan = (actions, extra = {}) => fs.writeFileSync(planFile, JSON.stringify({ actions, ...extra }));
 async function dispatch(action) { return cdp.eval(`window.vibe.orchestrator.dispatch(${JSON.stringify(action)})`); }
 async function command(text) { return cdp.eval(`window.vibe.orchestrator.send(${JSON.stringify({ text, origin: "text" })})`); }
-function toolsFrom(reply, expectedOk = true) { assert.equal(reply.ok, expectedOk, JSON.stringify(reply)); return JSON.parse(reply.text); }
+function toolsFrom(reply, expectedOk = true) { assert.equal(reply.ok, expectedOk, JSON.stringify(reply)); return reply.actions || []; }
 (async () => { try {
   assert.equal(process.platform, "win32", "This hidden Electron/PTY harness targets Windows.");
   const port = await new Promise(resolve => { const s = net.createServer(); s.listen(0, "127.0.0.1", () => { const port = s.address().port; s.close(() => resolve(port)); }); });
@@ -94,6 +97,7 @@ function toolsFrom(reply, expectedOk = true) { assert.equal(reply.ok, expectedOk
     const live = await inventory(receipt.id);
     assert(live?.terminalPid > 0, `Creation must await a real PTY: ${JSON.stringify(live)}`);
     assert.equal(live.generation, receipt.target.generation);
+    assert.equal(receipt.cwd, cwd, "creation must report the confirmed workspace directory");
     return { receipt, live };
   }
   const a = await project("Visible A"), b = await project("Background B");
@@ -109,12 +113,22 @@ function toolsFrom(reply, expectedOk = true) { assert.equal(reply.ok, expectedOk
   await until(() => launchCount(multi) === 1, "inactive Multi launcher");
   record("inactive-multi-launch-without-mount", multiSession);
 
-  const shell = await create(a, "terminal");
-  const payload = "Write-Output ('BACKGROUND_' + 'COMMAND_OK')";
+  plan([], { directCreation: true });
+  const opened = await command("Create terminal in Visible A");
+  assert.equal(opened.ok, true, JSON.stringify(opened));
+  assert.equal(opened.actions?.length, 1, JSON.stringify(opened));
+  assert.equal(opened.actions[0].cwd, a);
+  assert(opened.text.includes(' in Visible A.'), opened.text);
+  assert.doesNotMatch(opened.text, /powershell\.exe|System32|[a-z]:[\\/]/i);
+  const shell = { receipt: opened.actions[0] };
+  record("direct-shell-reply-reports-project-directory", opened);
+  // Compare inside PowerShell so terminal line wrapping cannot split the path.
+  const payload = `Write-Output ('BACKGROUND_' + 'COMMAND_OK'); Write-Output ('WORKSPACE_' + 'CWD_MATCH=' + ((Get-Location).Path -eq '${a.replace(/'/g, "''")}'))`;
   plan([{ kind: "send_prompt", targetId: shell.receipt.id, text: payload }]);
   const sent = toolsFrom(await command(`Send ${shell.receipt.id}: ${payload}`));
   assert.equal(sent[0].ok, true, JSON.stringify(sent)); assert.equal(sent[0].status, "written");
-  await until(async () => { const r = await dispatch({ kind: "read_session", target: shell.receipt.target }); return r.observation?.text.includes("BACKGROUND_COMMAND_OK"); }, "immediate create then command output");
+  const cwdObservation = await until(async () => { const r = await dispatch({ kind: "read_session", target: shell.receipt.target }); return r.observation?.text.includes("BACKGROUND_COMMAND_OK") && r.observation.text.includes("WORKSPACE_CWD_MATCH=True") && r; }, "immediate create then command output and actual PowerShell cwd");
+  record("powershell-working-directory-matches-creation-receipt", { cwd: shell.receipt.cwd, observed: cwdObservation.observation.text });
   record("create-then-send", { created: shell.receipt, sent });
   await until(() => mounted(shell.receipt.id), "visible shell pane");
   const selector = `[data-pane-id="${shell.receipt.id}"] button[aria-label="Maximize pane"]`;

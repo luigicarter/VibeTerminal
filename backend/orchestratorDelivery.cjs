@@ -4,16 +4,17 @@
 // silence or terminal output. Transport acceptance does not prove consumption.
 function createOrchestratorDelivery({ getSession, write, reserveInput = () => {}, onBeforeWrite = () => {}, onUpdate = () => {}, now = Date.now, maxWaitMs = 120000, maxQueued = 50, maxConcurrentDeliveries = 4 } = {}) {
   const queued = new Map(), results = new Map(), locks = new Map();
-  const inFlight = new Set(), pendingSubmissions = new Set();
+  const inFlight = new Set(), pendingSubmissions = new Set(), activeWrites = new Set();
   const configuredCapacity = Number(maxConcurrentDeliveries);
   const capacity = Number.isFinite(configuredCapacity) ? Math.max(1, Math.floor(configuredCapacity) || 4) : 4;
   let disposed = false, scanning = false;
   const schedulePump = () => { if (!disposed) queueMicrotask(() => { void pump().catch(() => {}); }); };
   const key = s => JSON.stringify([s.id, s.generation]);
   const stamp = s => JSON.stringify([s.turnId, s.turnStartedAt, s.turnEndedAt]);
-  const receipt = (a, status, ok, extra = {}) => ({ actionId: a.actionId, id: a.target?.id || a.id || a.targetId, generation: a.target?.generation || a.generation, ok, status, ...extra });
+  const receipt = (a, status, ok, extra = {}) => ({ actionId: a.actionId, id: a.target?.id || a.id || a.targetId, generation: a.target?.generation ?? a.generation, ok, status, ...extra });
   function classify(s, a) {
-    if (!s || s.generation !== (a.target?.generation || a.generation)) return "stale-generation";
+    if (!s || s.generation !== (a.target?.generation ?? a.generation)) return "stale-generation";
+    if (!require("./orchestratorLaunchers.cjs").routingBindingMatches(a.routingBinding, s)) return "conversation-changed";
     if (s.started === false || ["exited", "failed"].includes(s.processState) || s.status === "paused" || String(s.generation).startsWith("paused:")) return "not-running";
     if (s.launchState === "pending") return "unverified";
     if (s.provider === "terminal") return s.processState === "running" ? "ready" : "not-running";
@@ -36,6 +37,7 @@ function createOrchestratorDelivery({ getSession, write, reserveInput = () => {}
   async function deliver(a, s, entry) {
     if (disposed || a.signal?.aborted) return receipt(a, "cancelled", false);
     const latest = getSession(s.id);
+    if (classify(latest, a) === "conversation-changed") return blockedDelivery(a, "conversation-changed");
     if (classify(latest, a) !== "ready" || blocked(latest) || inFlight.has(key(latest)) || inFlight.size >= capacity) return null;
     const targetKey = key(latest);
     inFlight.add(targetKey);
@@ -43,6 +45,8 @@ function createOrchestratorDelivery({ getSession, write, reserveInput = () => {}
     const lock = { stamp: stamp(latest), sawBusy: false, inFlight: true };
     if (agent) locks.set(key(latest), lock);
     let rollback, attempted = false;
+    const transport = new AbortController();
+    activeWrites.add(transport);
     const deliveryBaseline = { submittedAt: now(), kind: latest.provider === "terminal" ? "terminal" : latest.provider, turnId: latest.turnId, turnState: latest.turnState };
     try {
       rollback = reserveInput({ id: latest.id, generation: latest.generation, data: a.text + "\r" });
@@ -59,11 +63,16 @@ function createOrchestratorDelivery({ getSession, write, reserveInput = () => {}
         if (typeof rollback === 'function') rollback();
         return receipt(a, 'cancelled', false, { delivery: 'not-dispatched' });
       }
+      if (!require("./orchestratorLaunchers.cjs").routingBindingMatches(a.routingBinding, getSession(latest.id))) {
+        locks.delete(key(latest));
+        if (typeof rollback === "function") rollback();
+        return blockedDelivery(a, "conversation-changed");
+      }
       // From this boundary cancellation cannot retract the transport call.
       // Keep the entry until its actual acknowledgment (or unknown) arrives.
       if (entry) entry.dispatched = true;
       attempted = true;
-      let result = await write({ id: latest.id, generation: latest.generation, actionId: a.actionId, kind: "input", data: a.text + "\r", promptText: a.text,
+      let result = await write({ id: latest.id, generation: latest.generation, actionId: a.actionId, requestId: a.requestId, signal: AbortSignal.any([transport.signal, ...(a.signal ? [a.signal] : [])]), kind: "input", data: a.text + "\r", promptText: a.text,
         ...(agent ? { expectedAgentPid: latest.agentPid, recipientEvidence: { generation: latest.generation, pid: latest.agentPid, state: "idle", observedAt: now() } } : {}) });
       // A failed write acknowledgment cannot prove that zero bytes reached the
       // PTY. Preserve the reservation and dedup lock unless transport says so.
@@ -88,6 +97,7 @@ function createOrchestratorDelivery({ getSession, write, reserveInput = () => {}
       }
       return receipt(a, "unknown", false, { error: String(error?.message || error), deliveryBaseline, inputDisposition: 'submitted-when-ready' });
     } finally {
+      activeWrites.delete(transport);
       inFlight.delete(targetKey);
       schedulePump();
     }
@@ -114,9 +124,9 @@ function createOrchestratorDelivery({ getSession, write, reserveInput = () => {}
       if (disposed || a.signal?.aborted) return receipt(a, "cancelled", false);
       if (typeof a.text !== "string" || !a.text.trim() || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/.test(a.text)) return receipt(a, "invalid-action", false, { error: "Prompt contains unsupported control characters or is empty." });
       const s = getSession(a.target?.id || a.id || a.targetId), state = classify(s, a);
-      if (["stale-generation", "not-running"].includes(state)) return receipt(a, state, false, { delivery: "not-dispatched" });
+      if (["stale-generation", "not-running", "conversation-changed"].includes(state)) return receipt(a, state, false, { delivery: "not-dispatched" });
       if (["waiting", "unverified"].includes(state)) return blockedDelivery(a, state === "waiting" ? "Answer the pending request before sending." : "Agent input readiness is not observed. Read the terminal before operating its current screen.");
-      const earlier = [...queued.values()].some(e => (e.action.target?.id || e.action.id || e.action.targetId) === s.id && (e.action.target?.generation || e.action.generation) === s.generation);
+      const earlier = [...queued.values()].some(e => (e.action.target?.id || e.action.id || e.action.targetId) === s.id && (e.action.target?.generation ?? e.action.generation) === s.generation);
       if (state === "busy" || blocked(s) || earlier || inFlight.has(key(s)) || inFlight.size >= capacity) return enqueue(a);
       return await deliver(a, s) || enqueue(a);
     }).finally(() => pendingSubmissions.delete(a.actionId));
@@ -132,14 +142,14 @@ function createOrchestratorDelivery({ getSession, write, reserveInput = () => {}
       for (const entry of [...queued.values()]) {
         const a = entry.action;
         if (!queued.has(a.actionId)) continue;
-        const targetKey = key({ id: a.target?.id || a.id || a.targetId, generation: a.target?.generation || a.generation });
+        const targetKey = key({ id: a.target?.id || a.id || a.targetId, generation: a.target?.generation ?? a.generation });
         const earlier = preceding.has(targetKey);
         preceding.add(targetKey);
         // In-flight work owns its actual acknowledgment even after abort,
         // expiry or a generation change; never classify it as an unsent entry.
         if (entry.inFlight) continue;
         const s = getSession(a.target?.id || a.id || a.targetId), state = classify(s, a);
-        if (a.signal?.aborted || ["stale-generation", "not-running"].includes(state)) { finish(entry, receipt(a, a.signal?.aborted ? "cancelled" : state, false, { delivery: "not-dispatched" })); continue; }
+        if (a.signal?.aborted || ["stale-generation", "not-running", "conversation-changed"].includes(state)) { finish(entry, receipt(a, a.signal?.aborted ? "cancelled" : state, false, { delivery: "not-dispatched" })); continue; }
         // Observed long-running work is a valid reason to keep an accepted
         // prompt queued. Bound lost readiness, not the duration of agent work.
         if (state === "busy" && s.observation === "observed" && (['running', 'busy', 'starting'].includes(s.turnState) || s.childActivity)) entry.expiresAt = now() + maxWaitMs;
@@ -159,8 +169,8 @@ function createOrchestratorDelivery({ getSession, write, reserveInput = () => {}
     // can start newly eligible targets while any acknowledgment is pending.
     await Promise.all(admitted);
   }
-  function cancel(reason = "Cancelled before delivery.") { for (const entry of [...queued.values()]) { entry.cancelRequested = true; if (!entry.dispatched) finish(entry, receipt(entry.action, "cancelled", false, { error: reason })); } }
-  function forget(id, generation) { for (const entry of [...queued.values()]) if (!entry.dispatched && (entry.action.target?.id || entry.action.id || entry.action.targetId) === id && (entry.action.target?.generation || entry.action.generation) === generation) finish(entry, receipt(entry.action, "stale-generation", false)); locks.delete(key({ id, generation })); }
+  function cancel(reason = "Cancelled before delivery.") { for (const transport of activeWrites) transport.abort(); for (const entry of [...queued.values()]) { entry.cancelRequested = true; if (!entry.dispatched) finish(entry, receipt(entry.action, "cancelled", false, { error: reason })); } }
+  function forget(id, generation) { for (const entry of [...queued.values()]) if (!entry.dispatched && (entry.action.target?.id || entry.action.id || entry.action.targetId) === id && (entry.action.target?.generation ?? entry.action.generation) === generation) finish(entry, receipt(entry.action, "stale-generation", false)); locks.delete(key({ id, generation })); }
   return { submit, pump, observe: pump, cancel, forget, dispose() { disposed = true; cancel("Application closed."); for (const entry of [...queued.values()]) finish(entry, receipt(entry.action, "unknown", false, { error: "Application closed before delivery acknowledgment." })); locks.clear(); results.clear(); } };
 }
 module.exports = { createOrchestratorDelivery };

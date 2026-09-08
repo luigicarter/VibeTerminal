@@ -21,7 +21,7 @@ const fields = {
   create_session: ['grantId', 'cwd', 'kindOfSession', 'text'], add_project: ['grantId', 'path'],
   list_setups: [], read_setup: ['name'], launch_setup: ['grantId', 'name'], save_setup: ['grantId', 'name'],
   list_preferences: [], remember_preference: ['grantId', 'text'], forget_preference: ['grantId', 'preferenceId'],
-  ask_user: ['text', 'reference', 'grantId'], respond: ['text', 'responseTurn'],
+  ask_user: ['text', 'reference', 'grantId'], respond: ['text', 'speechText', 'responseTurn'],
   list_work: ['cwd', 'query', 'offset', 'limit'],
   answer_question: [...observed, 'requestId', 'revision', 'answerText', 'answerTexts'],
   permission: [...observed, 'requestId', 'revision', 'answerText', 'answerTexts', 'decision'],
@@ -59,7 +59,9 @@ const readKinds = ['list_roots', 'list_sessions', 'read_session', 'list_conversa
 const operatorKinds = ['send_prompt', 'terminal_interact', 'answer_question', 'permission', 'interrupt', 'focus_session', 'finish_terminal'];
 function scopedWorkspaceTool(tool, grants = []) {
   const allowed = new Set([...readKinds, 'respond', 'ask_user']);
-  for (const grant of grants) for (const kind of grant.kind === 'operate_terminal' ? operatorKinds : [grant.kind]) allowed.add(kind);
+  // An unresolved delegated task permits routing reads only. Application code
+  // binds it first; neither arbitrary creation nor terminal input is exposed.
+  for (const grant of grants) for (const kind of grant.kind === 'delegate_task' ? [] : grant.kind === 'operate_terminal' ? operatorKinds : [grant.kind]) allowed.add(kind);
   const branches = tool.function.parameters.anyOf.filter(branch => allowed.has(branch.properties.kind.enum[0]));
   // Shared definitions live once at the root. Each branch still closes its own
   // field whitelist, so an input revision cannot sneak into finish_terminal.

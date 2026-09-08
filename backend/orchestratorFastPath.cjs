@@ -1,5 +1,6 @@
 'use strict';
 const path = require('node:path');
+const { formatTaskWait } = require('./orchestratorTaskStatus.cjs');
 const launchers = new Set([...Object.keys(require('../shared/providerCapabilities.json')), 'claude-custom']);
 const directKinds = new Set(['send_prompt', 'stage_draft', 'focus_session', 'navigate', 'interrupt', 'watch_terminal']);
 
@@ -29,10 +30,15 @@ function completedOperatorResponse({ plan, progress, outcomes, sessions, getOper
       const finish = outcomes.filter(item => item.kind === 'finish_terminal' && item.grantId === grant.id && item.targetId === target.id).at(-1);
       if (!finish?.ok || finish.status !== 'interaction-complete' || !finish.text?.trim()) return;
       completed.add(JSON.stringify([grant.id, target.id]));
-      let text = finish.text.trim();
+      // Keep stale-generation evidence in the response: dropping it would let
+      // an untrusted finish summary certify work in a replacement terminal.
+      const waits = deliveryWaits.filter(wait => wait.targetId === target.id);
+      // Finishing the control loop does not prove the delegated task started.
+      // Preserve free-form summaries only for operations with no submitted task.
+      let text = waits.length ? [...new Set(waits.map(wait => formatTaskWait(wait, session)))].join(' ') : finish.text.trim();
       const queued = deliveryWaits.some(wait => wait.targetId === target.id && wait.deliveryStatus === 'queued' && !wait.delivered && !wait.done);
-      if (queued) text += ' The prompt is queued and has not been sent yet.';
-      else if (pendingResultTargets.includes(target.id)) text += ' The agent result is still pending.';
+      if (!waits.length && queued) text += ' The prompt is queued and has not been sent yet.';
+      else if (!waits.length && pendingResultTargets.includes(target.id)) text += ' The agent result is still pending.';
       summaries.push({ name: session.name || session.conversationTitle || target.id, text });
     }
   }

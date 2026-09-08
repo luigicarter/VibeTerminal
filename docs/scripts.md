@@ -2,12 +2,19 @@
 
 The `scripts/` folder is split by purpose so app launch, backend validation, and visual QA do not sit in one flat bucket.
 
+`npm run check:orchestrator` runs the combined harness acceptance check: backend,
+voice, Grok, status and host-readiness regressions; runtime/telemetry/metadata/host-parser
+smokes; production build; renderer/persistence/capture/mic-stop checks; and hidden
+Electron/preload/PTY, task-UI and two-process session-resume smokes. See the
+[cohesion review](orchestrator-cohesion-review.md) for scope and evidence boundaries.
+
 ## App Scripts
 
 - `scripts/app/dev.cjs` - Starts the Vite frontend, waits for `http://127.0.0.1:5173`, then launches Electron pointed at that dev server. Also cleans up the renderer process when Electron exits.
 
 ## Backend Scripts
 
+- `scripts/backend/chat-main-launch-lifecycle.test.cjs` - Runs the actual main-process Fusion/Open Fusion IPC handlers with deferred file preparation to verify stop/supersession/shutdown fencing, cleanup ordering and independent panes.
 - `scripts/backend/terminal-runtime-smoke.cjs` - Runtime generation, cancellation, root proof, ownership, progress/attention, OSC titles, UTF-8 framing, and actual main/PTY handler regressions.
 - `scripts/backend/agent-generation-telemetry-smoke.cjs` - Authenticated generation, paired invocation start/exit, passive native JSON metadata, Gemini overlays, and isolated actual PowerShell/Node hook transports.
 - `scripts/backend/metadata-discovery-smoke.cjs` - Saved/renamed titles, explicit root proof, child exclusion, and Gemini JSON/JSONL ownership.
@@ -20,7 +27,9 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `scripts/backend/agent-telemetry-smoke.cjs` - Creates temporary fake provider commands; validates per-pane shim PATH injection, callback token plus per-launch nonce rejection, passive Codex lifecycle config, Codex thread/turn payload parsing, lifecycle attention events, kimi/kimi-custom config.toml hook merge/strip, qwen settings.json hook merge/strip (malformed files untouched), OpenCode plugin refresh, and stale owned shim cleanup.
 - `scripts/backend/code-changes-smoke.cjs` - Validates Git status parsing and non-repository workspace handling for code-change tracking.
 - `scripts/backend/launch-cwd-smoke.cjs` - Validates terminal/Fusion launch cwd resolution rejects missing or file paths without creating them.
-- `scripts/backend/cli-probe-smoke.cjs` - Validates the launch-time PATH scan: PATHEXT expansion finds a fixture binary, an absent command reports unavailable, an unreadable PATH entry is skipped instead of failing the scan, the probe stays inside its launch budget, and the never-probed kinds (terminal, kimi-custom, fusion, openfusion) stay out of the command map.
+- `scripts/backend/cli-probe-smoke.cjs` - Validates the launch-time PATH scan: PATHEXT expansion finds a fixture binary, an absent command reports unavailable, an unreadable PATH entry is skipped instead of failing the scan, the probe stays inside its launch budget, and non-PATH kinds (terminal, kimi-custom, fusion, openfusion) stay out of the command map. `cli-probe-bundled.test.cjs` separately verifies bundled Kimi readiness and automatic-launch eligibility.
+- `scripts/backend/orchestrator-cohesion-integration.test.cjs` - Exercises automatic creation through the real integration adapter, delegated binding, observation decoding and terminal submission acknowledgment. Provider/model responses are deterministic fixtures.
+- `scripts/backend/orchestrator-failed-dependency-integration.test.cjs` - Covers fast completion/failure, dependency gating, explicit work-item lifecycle and persisted status.
 - `scripts/backend/update-smoke.cjs` - Validates packaged update policy, silent Windows update apply behavior, and matching user-facing docs.
 - `scripts/backend/fusion-launch-smoke.cjs` - Validates Fusion per-pane prompt/MCP file generation and confirms the adapter receives the embedded Codex binary path.
 - `scripts/backend/fusion-adapter-smoke.cjs` - Validates the Fusion adapter MCP surface exposed to Claude.
@@ -48,6 +57,8 @@ The `scripts/` folder is split by purpose so app launch, backend validation, and
 - `scripts/frontend/terminal-output-smoke.cjs` - Transpiles and executes the real `frontend/terminalOutput.ts` + `frontend/terminalWheel.ts`: DEC 2026 synchronized-output frame coalescing (split frames land as one write, split markers reassemble, lookalike tails release, deadline/overflow fall back to passthrough, flush vs reset semantics), the SGR mouse-encoding tracker, wheel line accumulation across pixel/line/page delta modes with the report cap, SGR wheel report bytes — plus grep-locks on the TerminalPane wiring (coalesced data path, snapshot resets, exit flushes, custom wheel handler fall-throughs).
 
 ## QA Scripts
+
+- `scripts/qa/orchestrator-native-submission.cjs --codex C:/path/to/codex.exe` - Opt-in check of native prompt submission through the real PTY host with an isolated home/workspace and a localhost provider that returns no model output. Exercises ordinary and operator input, raw and bracketed paste, and records transport writes, receipts and local requests under a unique `.tmp/orchestrator-native-submission-*` folder.
 
 - `scripts/qa/terminal-board-smoke.cjs` - Build first; then exercise isolated Electron DOM/CDP and real PTYs for gap placement, preview/drop equality, Shift-swapping, measured PTY size, hidden OSC titles, scroll coordinates, and horizontal overflow. Writes screenshots/results under `.tmp/terminal-board-smoke/`.
 

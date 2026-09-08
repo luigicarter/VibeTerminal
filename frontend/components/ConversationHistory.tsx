@@ -218,7 +218,7 @@ export function ConversationHistory({ folders }: { folders: { path: string; name
   }
   return <div className="conversation-history" style={{ padding: 12, overflow: "auto", width: "100%" }}>
     <form className="conversation-history-search" onSubmit={event => { event.preventDefault(); void search(); }} style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-      <select aria-label="History provider" value={provider} onChange={event => setProvider(event.target.value)}><option value="">All providers</option>{["claude", "claude-custom", "fusion", "codex", "opencode", "openfusion", "cursor", "gemini", "kimi", "kimi-custom", "qwen"].map(value => <option key={value}>{value}</option>)}</select>
+      <select aria-label="History provider" value={provider} onChange={event => setProvider(event.target.value)}><option value="">All providers</option>{["claude", "claude-custom", "fusion", "codex", "opencode", "openfusion", "cursor", "gemini", "kimi", "kimi-custom", "qwen", "grok"].map(value => <option key={value} value={value}>{value === "grok" ? "Grok Build" : value}</option>)}</select>
       <select aria-label="History project" value={cwd} onChange={event => setCwd(event.target.value)}><option value="">All workspace folders</option>{folders.map(folder => <option key={folder.path} value={folder.path}>{folder.name}</option>)}</select>
       <input aria-label="Search saved conversations" placeholder="Search saved conversations…" value={query} onChange={event => setQuery(event.target.value)} style={{ flex: 1, minWidth: 160 }}/><button disabled={busy}>{busy ? "Searching…" : "Search"}</button>
     </form>

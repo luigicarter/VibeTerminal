@@ -28,6 +28,18 @@ test('literal inputs reject controls, excess bytes and unknown or excessive keys
   for (const [i, patch] of [{ text: 'x\x1b[A' }, { text: '😀'.repeat(25001) }, { keys: ['ctrl-unknown'] }, { keys: Array(17).fill('up') }, { submit: 'yes' }, { observationSequence: -1 }].entries()) assert.equal((await h.input.handle(h.action(String(i), patch))).status, 'invalid-action');
   assert.equal(h.writes.length, 0);
 });
+
+for (const phase of ['before-read', 'during-read', 'before-write']) test(`routed native controls fence conversation identity ${phase}`, async () => {
+  const h = fixture({
+    readSession: async () => { if (phase === 'during-read') h.session.conversationId = 'replacement'; return h.observation; },
+    onBeforeWrite: () => { if (phase === 'before-write') h.session.conversationId = 'replacement'; },
+  });
+  Object.assign(h.session, { cwd: 'C:/repo', conversationId: phase === 'before-read' ? 'replacement' : 'original' });
+  if (phase === 'before-write') h.session.turnState = 'idle';
+  const routingBinding = { target: { id: 'p', generation: 'g' }, nativeIdentity: { provider: 'codex', home: 'global', workspace: 'C:/repo', id: 'original' } };
+  const result = await h.input.handle(h.action('routed', { routingBinding, promptSubmission: phase === 'before-write' }));
+  assert.equal(result.status, 'conversation-changed'); assert.equal(result.delivery, 'not-dispatched'); assert.equal(h.writes.length, 0);
+});
 test('helper rejects duplicate or nonfinal submission keys without writing', async () => {
   const h = fixture();
   for (const [index, patch] of [{ keys: ['enter'], submit: true }, { keys: ['enter', 'enter'] }, { keys: ['enter', 'down'] }].entries()) {
@@ -50,21 +62,31 @@ test('completed dedup history stays bounded without a lifetime action limit; dis
   h.input.dispose(); assert.equal((await h.input.handle(h.action('closed'))).status, 'cancelled'); assert.equal(h.writes.length, 1002);
 });
 function host() {
-  const events = [], terminals = []; let dead = false;
-  const context = vm.createContext({ require: name => name === 'node-pty' ? { spawn() { const terminal = { pid: 42, writes: [], onData(fn) { this.data = fn; }, onExit() {}, resize() {}, kill() {}, write(data) { this.writes.push(data); if (this.fail) throw Error('transport uncertain'); } }; terminals.push(terminal); return terminal; } } : name === 'readline' ? { createInterface: () => ({ on() {} }) } : name === '../shared/terminalControls.cjs' ? require('../../shared/terminalControls.cjs') : require(name), process: { platform: 'win32', env: {}, stdin: {}, cwd: () => process.cwd(), stdout: { write: line => events.push(JSON.parse(line)) }, kill() { if (dead) throw Error('gone'); } }, setTimeout() {} });
+  const events = [], terminals = []; let dead = false, clock = 0, nextTimer = 0;
+  const timers = new Map();
+  const advance = ms => {
+    const end = clock + ms;
+    while (true) {
+      const due = [...timers].filter(([, timer]) => timer.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+      if (!due) break;
+      timers.delete(due[0]); clock = due[1].at; due[1].fn();
+    }
+    clock = end; return events.at(-1);
+  };
+  const context = vm.createContext({ require: name => name === 'node-pty' ? { spawn() { const terminal = { pid: 42, writes: [], onData(fn) { this.data = fn; }, onExit(fn) { this.exit = fn; }, resize() {}, kill() {}, write(data) { this.writes.push(data); if (this.fail) throw Error('transport uncertain'); } }; terminals.push(terminal); return terminal; } } : name === 'readline' ? { createInterface: () => ({ on() {} }) } : name === '../shared/terminalControls.cjs' ? require('../../shared/terminalControls.cjs') : require(name), process: { platform: 'win32', env: {}, stdin: {}, cwd: () => process.cwd(), stdout: { write: line => events.push(JSON.parse(line)) }, kill() { if (dead) throw Error('gone'); } }, Date: class extends Date { static now() { return Date.now() + clock; } }, setTimeout(fn, ms) { const id = ++nextTimer; timers.set(id, { fn, at: clock + ms }); return id; }, clearTimeout(id) { timers.delete(id); } });
   vm.runInContext(fs.readFileSync(path.resolve(__dirname, '../../backend/ptyHost.cjs'), 'utf8'), context);
   context.handleMessage({ type: 'create', payload: { id: 'p', generation: 'g', launchToken: 1 } });
   const send = (actionId, fields = {}) => {
     const geometry = events.filter(e => e.cols && e.rows).at(-1);
-    const payload = { kind: 'interaction', id: 'p', generation: 'g', actionId, expectedAgentPid: 42, interactionEvidence: { id: 'p', generation: 'g', pid: 42, sequence: events.filter(e => e.type === 'data').at(-1)?.sequence || 0, observedAt: Date.now() }, keys: ['down'], ...fields };
+    const payload = { kind: 'interaction', id: 'p', generation: 'g', actionId, expectedAgentPid: 42, interactionEvidence: { id: 'p', generation: 'g', pid: 42, sequence: events.filter(e => e.type === 'data').at(-1)?.sequence || 0, observedAt: Date.now() + clock }, keys: ['down'], ...fields };
     if (payload.interactionEvidence) payload.interactionEvidence = { cols: geometry.cols, rows: geometry.rows, ...payload.interactionEvidence };
     context.handleMessage({ type: 'action', payload }); return events.at(-1);
   };
-  return { send, context, terminal: terminals[0], events, dead: () => { dead = true; }, manual: data => context.handleMessage({ type: 'input', payload: { id: 'p', generation: 'g', data } }) };
+  return { send, context, advance, now: () => Date.now() + clock, terminal: terminals[0], events, dead: () => { dead = true; }, manual: data => context.handleMessage({ type: 'input', payload: { id: 'p', generation: 'g', data } }) };
 }
 test('PTY encodes named keys, bracketed literal text and requested submission only', () => {
   const h = host(); assert.equal(h.send('one').status, 'written'); assert.equal(h.terminal.writes.at(-1), '\x1b[B');
-  h.terminal.data('\x1b[?1h\x1b[?2004h'); assert.equal(h.send('two', { text: 'answer', keys: ['up', 'enter'] }).status, 'written'); assert.equal(h.terminal.writes.at(-1), '\x1b[200~answer\x1b[201~\x1bOA\r');
+  h.terminal.data('\x1b[?1h\x1b[?2004h'); h.send('two', { text: 'answer', keys: ['up', 'enter'] }); assert.equal(h.terminal.writes.at(-1), '\x1b[200~answer\x1b[201~\x1bOA'); assert.equal(h.advance(199).type, 'input-state'); assert.equal(h.advance(1).status, 'written'); assert.equal(h.terminal.writes.at(-1), '\r');
   assert.equal(h.send('three', { text: 'draft', keys: [] }).status, 'written'); assert.equal(h.terminal.writes.at(-1), '\x1b[200~draft\x1b[201~');
   assert.equal(h.send('four', { keys: [], submit: true }).status, 'written'); assert.equal(h.terminal.writes.at(-1), '\r');
 });
@@ -133,8 +155,9 @@ test('PTY input revisions fence manual races, repeat navigation, ownership and e
 test('PTY multiline needs paste mode; uncertain actions consume revision and never replay', () => {
   const h = host(); assert.equal(h.send('unsafe', { text: 'one\ntwo', keys: [] }).status, 'invalid-action');
   h.terminal.data('\x1b[?2004h');
-  assert.equal(h.send('safe', { text: 'one\r\ntwo\t\u{1f600}', keys: [], submit: true }).ok, true);
-  assert.equal(h.terminal.writes.at(-1), '\x1b[200~one\ntwo\t\u{1f600}\x1b[201~\r');
+  h.send('safe', { text: 'one\r\ntwo\t\u{1f600}', keys: [], submit: true });
+  assert.equal(h.terminal.writes.at(-1), '\x1b[200~one\ntwo\t\u{1f600}\x1b[201~');
+  assert.equal(h.advance(200).status, 'written'); assert.equal(h.terminal.writes.at(-1), '\r');
   h.terminal.fail = true;
   const fields = { operator: true, requestId: 'r', text: 'draft', keys: [], interactionEvidence: { id: 'p', generation: 'g', pid: 42, sequence: 1, observedAt: Date.now(), inputRevision: 1 } };
   assert.equal(h.send('uncertain', fields).status, 'unknown');
@@ -220,4 +243,89 @@ test('PTY rejects a resize with identical output and input revisions before any 
   assert.equal(result.status, 'stale-observation'); assert.match(result.error, /geometry/);
   assert.equal(h.terminal.writes.length, 0);
   assert.equal(h.send('fresh-size', { operator: true, requestId: 'owner', interactionEvidence: { ...evidence, cols: 120, rows: 40 } }).status, 'written');
+});
+
+
+test('native text submission holds dedup and pane ownership until one delayed Enter', () => {
+  for (const bracketed of [false, true]) {
+    const h = host(); if (bracketed) h.terminal.data('\x1b[?2004h');
+    const fields = { text: 'new task', keys: [], submit: true, requestId: 'owner' };
+    h.send('split', fields); h.send('split', fields);
+    assert.equal(h.terminal.writes.length, 1);
+    assert.equal(h.events.filter(e => e.type === 'action-result' && e.actionId === 'split').length, 0);
+    assert.equal(h.events.at(-1).ownerRequestId, 'owner');
+    assert.equal(h.events.at(-1).interactionInputPending, true);
+    assert.equal(h.send('other', { keys: ['enter'], requestId: 'owner' }).status, 'interaction-busy');
+    h.advance(199); assert.equal(h.terminal.writes.length, 1);
+    assert.equal(h.advance(1).status, 'written');
+    assert.deepEqual(h.terminal.writes, [bracketed ? '\x1b[200~new task\x1b[201~' : 'new task', '\r']);
+    h.send('split', fields); h.advance(1000); assert.equal(h.terminal.writes.length, 2);
+    assert.equal(h.events.filter(e => e.type === 'input-state').at(-1).interactionInputPending, false);
+  }
+});
+
+for (const race of ['typing', 'manual-submit', 'cancel', 'deadline', 'exit', 'dead-recipient', 'replacement', 'resize', 'submit-write-fails']) {
+  test(`native staged text never auto-submits or retries after ${race}`, () => {
+    const h = host();
+    const fields = { text: 'task', keys: [], submit: true, requestId: 'owner', ...(race === 'deadline' ? { deadlineAt: h.now() + 100 } : {}) };
+    h.send('split', fields);
+    switch (race) {
+      case 'typing': h.manual('human'); break;
+      case 'manual-submit': h.manual('\r'); break;
+      case 'cancel': h.context.handleMessage({ type: 'action-cancel', payload: { id: 'p', generation: 'g', actionId: 'split' } }); break;
+      case 'exit': h.terminal.exit({ exitCode: 0 }); break;
+      case 'dead-recipient': h.dead(); break;
+      case 'replacement': h.context.handleMessage({ type: 'create', payload: { id: 'p', generation: 'new', launchToken: 2 } }); break;
+      case 'resize': h.context.handleMessage({ type: 'resize', payload: { id: 'p', generation: 'g', cols: 120, rows: 40 } }); break;
+      case 'submit-write-fails': h.terminal.fail = true; break;
+    }
+    h.advance(200);
+    const result = h.events.filter(e => e.type === 'action-result' && e.actionId === 'split').at(-1);
+    assert.equal(result.status, 'unknown'); assert.equal(result.submission, 'unconfirmed'); assert.equal(result.partialWrite, true);
+    assert.notEqual(result.delivery, 'not-dispatched');
+    assert.deepEqual(h.terminal.writes, ['task', ...(['manual-submit', 'submit-write-fails'].includes(race) ? ['\r'] : race === 'typing' ? ['human'] : [])]);
+    const count = h.terminal.writes.length; h.send('split', fields); h.advance(1000); assert.equal(h.terminal.writes.length, count);
+    if (['cancel', 'deadline', 'dead-recipient', 'resize', 'submit-write-fails'].includes(race)) {
+      const state = h.events.filter(e => e.type === 'input-state').at(-1);
+      assert.equal(state.ownerRequestId, 'owner'); assert.equal(state.interactionInputPending, true);
+    }
+  });
+}
+
+test('native first-write failure retains draft ownership and never schedules final Enter', () => {
+  const h = host(); h.terminal.fail = true;
+  const result = h.send('split', { text: 'task', keys: [], submit: true, requestId: 'owner' });
+  assert.equal(result.status, 'unknown'); assert.equal(result.partialWrite, true);
+  h.advance(1000); assert.deepEqual(h.terminal.writes, ['task']);
+  assert.equal(h.events.filter(e => e.type === 'input-state').at(-1).ownerRequestId, 'owner');
+});
+
+test('explicit stop cancels staged native Enter and terminal replies do not cancel submission', () => {
+  for (const kind of ['interrupt', 'kill']) {
+    const h = host(); h.send('split', { text: 'task', keys: [], submit: true });
+    h.context.handleMessage({ type: 'action', payload: { id: 'p', generation: 'g', actionId: 'stop', kind } });
+    assert.equal(h.events.at(-1).ok, true); h.advance(1000);
+    assert.deepEqual(h.terminal.writes, ['task', ...(kind === 'interrupt' ? ['\x03'] : [])]);
+    assert.equal(h.events.find(e => e.type === 'action-result' && e.actionId === 'split').status, 'unknown');
+  }
+  const h = host(); h.send('split', { text: 'task', keys: [], submit: true }); h.manual('\x1b[I');
+  assert.equal(h.advance(200).status, 'written'); assert.deepEqual(h.terminal.writes, ['task', '\x1b[I', '\r']);
+});
+
+test('plain shell text and key-only submissions keep their immediate native behavior', () => {
+  const h = host();
+  assert.equal(h.send('shell', { text: 'echo hello', keys: [], submit: true, interactionEvidence: { id: 'p', generation: 'g', pid: 42, sequence: 0, observedAt: h.now(), shell: true } }).status, 'written');
+  assert.equal(h.send('key', { keys: ['enter'] }).status, 'written');
+  assert.deepEqual(h.terminal.writes, ['echo hello\r', '\r']); h.advance(1000); assert.equal(h.terminal.writes.length, 2);
+});
+
+test('terminal helper propagates action abort and disposal through in-flight writes', async () => {
+  for (const mode of ['abort', 'dispose']) {
+    const controller = new AbortController(); let signal;
+    const h = fixture({ write: payload => { signal = payload.signal; return new Promise(resolve => signal.addEventListener('abort', () => resolve({ ok: false, status: 'unknown', partialWrite: true, submission: 'unconfirmed' }), { once: true })); } });
+    const pending = h.input.handle(h.action('split', { text: 'task', keys: [], submit: true, signal: controller.signal }));
+    await new Promise(setImmediate); assert.equal(signal.aborted, false);
+    if (mode === 'abort') controller.abort(); else h.input.dispose();
+    assert.equal(signal.aborted, true); const result = await pending; assert.equal(result.status, 'unknown'); assert.equal(result.partialWrite, true);
+  }
 });

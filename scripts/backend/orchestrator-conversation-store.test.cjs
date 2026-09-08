@@ -51,6 +51,12 @@ test('structured historical associations survive restart without executable stat
   assert.deepEqual(task.targets, [{ id: 'pane', generation: 3, cwd: 'C:/repo', name: '[redacted]' }]); assert.deepEqual(task.question, { id: 'q', requestId: 't', text: '[redacted]?' }); assert.deepEqual(task.outcome, { status: 'sent', text: '[redacted]', targetId: 'pane' });
   const raw = fs.readFileSync(file, 'utf8'); for (const forbidden of ['private-token', 'authorizedCommands', 'grants', 'controller', 'actions', 'permission']) assert.equal(raw.includes(forbidden), false);
 });
+test('confirmed creation cwd survives receipt persistence with ordinary redaction', async t => {
+  const { store, now } = fixture(t);
+  await store.save({ receipts: [{ id: 'r', kind: 'create_session', status: 'created', text: 'Action acknowledged.', at: now,
+    cwd: 'C:/projects/private-token', name: 'C:/Windows/System32/powershell.exe', grant: { kind: 'create_session' } }] });
+  assert.deepEqual(store.load().receipts, [{ id: 'r', kind: 'create_session', status: 'created', text: 'Action acknowledged.', at: now, cwd: 'C:/projects/[redacted]' }]);
+});
 test('clear fences an already writing snapshot and later saves remain usable', async t => {
   const { store, now, file } = fixture(t); const original = fs.promises.writeFile;
   let started; const entered = new Promise(resolve => { started = resolve; }); let release; const gate = new Promise(resolve => { release = resolve; });

@@ -1,12 +1,45 @@
 'use strict';
 
+function displayLabel(value) {
+  if (typeof value !== 'string') return undefined;
+  const label = value.trim();
+  // Shell titles may contain quotes or a command around the executable path.
+  if (!label || /[\\/\r\n]|[a-z]:|\.(?:exe|com|bat|cmd|ps1)\b/i.test(label) ||
+      /^(?:powershell|pwsh|cmd|bash|zsh|sh)(?:\s|$)/i.test(label)) return undefined;
+  return label;
+}
+
+function projectLabel(value) {
+  if (typeof value !== 'string') return undefined;
+  const cwd = value.trim().replace(/^(["'])(.*)\1$/, '$2').replace(/[\\/]+$/, '');
+  const leaf = cwd.split(/[\\/]/).pop();
+  return leaf && leaf !== '.' && leaf !== '..' ? displayLabel(leaf) : undefined;
+}
+
+function creationDescription(outcome, sessions) {
+  // A pane id survives restart. Only the acknowledged launch can supply any
+  // metadata missing from the receipt; neither grant arguments nor titles prove cwd.
+  const identity = outcome.target;
+  const session = identity?.id && identity.generation !== undefined
+    ? sessions.find(item => item.id === identity.id && item.generation === identity.generation &&
+      (identity.launchToken === undefined || item.launchToken === identity.launchToken)) : undefined;
+  const providers = { codex: 'Codex', claude: 'Claude', 'claude-custom': 'Claude',
+    gemini: 'Gemini', cursor: 'Cursor', kimi: 'Kimi', 'kimi-custom': 'Kimi',
+    qwen: 'Qwen', grok: 'Grok Build', opencode: 'OpenCode', fusion: 'Fusion', openfusion: 'Open Fusion' };
+  const name = displayLabel(outcome.name) || displayLabel(session?.name) ||
+    displayLabel(session?.conversationTitle) || providers[session?.kind] || 'the terminal';
+  const project = projectLabel(outcome.cwd ?? session?.cwd);
+  return `${name}${project && project !== name ? ` in ${project}` : ''}`;
+}
+
 // Direct execution has no model-written reply. Describe only receipt evidence.
 function formatDirectOutcomes(outcomes, sessions = [], grants = []) {
   return outcomes.map(outcome => {
     const grant = grants.find(item => item.id === outcome.grantId);
     const id = outcome.targetId || outcome.id;
     const target = sessions.find(item => item.id === id) || grant?.targets?.find(item => item.id === id);
-    const name = target?.name || target?.conversationTitle || 'the terminal';
+    const name = outcome.kind === 'create_session' ? 'the terminal'
+      : target?.name || target?.conversationTitle || 'the terminal';
     const status = outcome.status;
     if (outcome.kind === 'watch_terminal') {
       if (status === 'watching') return `I'm watching ${name}. I'll report status changes and ${grant?.args?.watchUntil === 'ready' ? 'when it is ready' : 'what the agent reports when this task ends'}.`;
@@ -27,7 +60,7 @@ function formatDirectOutcomes(outcomes, sessions = [], grants = []) {
     }
     if (outcome.kind === 'create_session') {
       return outcome.status === 'created' && outcome.processState === 'running'
-        ? `Opened ${name}.${outcome.draftStaged ? ' The prompt is saved as an unsent draft.' : ''}`
+        ? `Opened ${creationDescription(outcome, sessions)}.${outcome.draftStaged ? ' The prompt is saved as an unsent draft.' : ''}`
         : 'The terminal was requested; startup is not confirmed yet.';
     }
     if (outcome.kind === 'interrupt') return status === 'stopped' ? `${name} stopped.` : `Requested a stop in ${name}.`;

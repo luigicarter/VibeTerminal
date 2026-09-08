@@ -1,6 +1,6 @@
 export type VoiceState = {
   indicatorVisible?: boolean; captureToken?: number; phase: string; muted: boolean; listening: boolean; ready: boolean;
-  handsFreeStatus?: 'off' | 'loading' | 'ready' | 'recovering' | 'unavailable'; handsFreeError?: string | null; captureRecovering?: boolean;
+  handsFreeStatus?: 'off' | 'loading' | 'ready' | 'recovering' | 'unavailable'; handsFreeError?: string | null; captureRecovering?: boolean; wakeInterruptReady?: boolean;
   recordingSource?: 'ptt' | 'wake' | 'answer'; recordingId?: number; finishHint?: boolean;
   error?: string | null; transcript?: string; reply?: string; replyId?: string; microphoneId?: string;
   request?: { id: string; sessionId?: string; kind?: string; detail?: string; currentQuestion?: number; questions?: { id?: string; question: string; options?: { label: string }[] }[] };

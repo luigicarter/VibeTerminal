@@ -51,6 +51,45 @@ test('watch requires observed readiness and excludes stopped stale idle sessions
  const h=fixture(); h.tasks.watch(h.job,h.action,session); h.tasks.reconcile([{...session,turnId:'newer'}]); assert.equal(h.job.waits[0].attributionAmbiguous,true); assert.equal(h.job.waits[0].turnId,'t'); assert.equal(h.job.waits[0].done,false);
 });
 
+test('native startup metadata cannot finish readiness before the launched process is ready', t => {
+ const { createTerminalRuntime } = require('../../backend/terminalRuntime.cjs');
+ const runtime = createTerminalRuntime(); t.after(() => runtime.dispose());
+ const directory = createSessionDirectory({ getRuntime: () => runtime });
+ directory.updateUi([{ id: 's', kind: 'codex', cwd: process.cwd(), started: true, launchToken: 1 }]);
+ const launch = runtime.beginLaunch({ id: 's', provider: 'codex', cwd: process.cwd(), launchToken: 1 });
+ const emit = (type, extra = {}) => runtime.ingest({ id: 's', generation: launch.generation, type, ...extra });
+ emit('agent-session', { phase: 'start', rootVerified: true, providerThreadId: 'native' });
+ assert.equal(directory.get('s').turnState, 'idle'); assert.equal(directory.get('s').observation, 'observed');
+ const f = fixture('ready'); f.action.watchTarget.generation = launch.generation;
+ assert.equal(f.tasks.watch(f.job, f.action, directory.get('s')).status, 'watching');
+ emit('created', { pid: 42 }); f.tasks.reconcile(directory.list());
+ assert.equal(directory.get('s').processState, 'running'); assert.equal(directory.get('s').agentProcessState, 'unknown');
+ assert.equal(f.job.waits[0].done, false, 'Running PTY alone cannot prove agent readiness');
+ emit('agent-process', { phase: 'start', processId: 'root', pid: 43 });
+ f.tasks.reconcile(directory.list()); assert.equal(f.job.waits[0].observedState, 'ready');
+});
+
+for (const patch of [{ launchState: 'pending' }, { processState: 'starting' }, { agentProcessState: 'starting' }, { processState: 'unknown' }, { agentProcessState: 'unknown' }, { status: 'starting' }, { engineReady: false }])
+ test(`readiness waits through explicit startup evidence ${JSON.stringify(patch)}`, () => {
+  const f = fixture('ready');
+  assert.equal(f.tasks.watch(f.job, f.action, { ...session, turnState: 'idle', ...patch }).status, 'watching');
+  f.tasks.reconcile([{ ...session, turnState: 'idle', processState: 'running', agentProcessState: 'running', launchState: 'ready', engineReady: true, status: 'idle' }]);
+  assert.equal(f.job.waits[0].observedState, 'ready');
+ });
+
+test('plain shell readiness does not require an agent process and legacy absent fields remain supported', () => {
+ for (const live of [...['unknown', 'exited', 'failed'].map(agentProcessState => ({ ...session, kind: 'terminal', provider: 'terminal', processState: 'running', agentProcessState, turnState: 'idle' })), { ...session, turnState: 'idle' }]) {
+  const f = fixture('ready'); assert.equal(f.tasks.watch(f.job, f.action, live).status, 'ready');
+ }
+});
+
+for (const kind of ['codex', 'fusion', 'openfusion']) for (const patch of [{ processState: 'failed' }, { agentProcessState: 'exited' }, { status: 'failed' }, { status: 'exited' }])
+ test(`${kind} failed startup cannot report an idle pane ready ${JSON.stringify(patch)}`, () => {
+  const f = fixture('ready');
+  const result = f.tasks.watch(f.job, f.action, { ...session, kind, turnState: 'idle', ...patch });
+  assert.equal(result.status, 'blocked'); assert.equal(f.job.waits[0].failed, true);
+ });
+
 for (const kind of ['fusion', 'openfusion']) for (const registerAfterFollowup of [false, true]) {
  test(`${kind} readiness watch registered ${registerAfterFollowup ? 'after' : 'before'} a followup finishes without attributing its result`,()=>{
   let time = 100;

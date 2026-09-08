@@ -2,9 +2,11 @@
 const { isBusyPromptSubmission } = require('./orchestratorBusyInput.cjs');
 const { validateTerminalControls } = require('../shared/terminalControls.cjs');
 const { projectInputAuthority, sameInputAuthority } = require('./orchestratorInputAuthority.cjs');
+const { routingBindingMatches } = require('./orchestratorLaunchers.cjs');
 function createTerminalInput({ getSession, readSession, write, onBeforeWrite = () => {}, now = Date.now }) {
   const results = new Map(), locks = new Set();
   let disposed = false;
+  const lifetime = new AbortController();
   function handle(action) {
     const id = action?.target?.id, generation = action?.target?.generation;
     const result = (status, error) => ({ ok: false, status, error, id, generation, actionId: action?.actionId, ...(status !== 'unknown' ? { delivery: 'not-dispatched' } : {}) });
@@ -34,6 +36,7 @@ function createTerminalInput({ getSession, readSession, write, onBeforeWrite = (
         const shell = before?.provider === 'terminal' || before?.kind === 'terminal';
         const pid = shell ? before?.pid || before?.terminalPid : before?.agentPid;
         if (!before || before.generation !== generation) return result('stale-generation', 'The terminal generation changed.');
+        if (!routingBindingMatches(action.routingBinding, before)) return result('conversation-changed', 'The assigned conversation changed before input.');
         if (before.launchState === 'pending') return result('launch-pending', 'Wait for the terminal launcher before interacting.');
         if (['fusion', 'openfusion'].includes(before.kind) || before.processState !== 'running' || (!shell && before.agentProcessState !== 'running')) return result('not-running', 'A live native terminal is required.');
         const busyPrompt = isBusyPromptSubmission(action, before);
@@ -60,8 +63,9 @@ function createTerminalInput({ getSession, readSession, write, onBeforeWrite = (
         const deliveryMetadata = deliveryBaseline ? { deliveryBaseline, inputDisposition: busyPrompt ? 'submitted-while-running' : 'submitted-when-ready' } : {};
         if (deliveryBaseline) onBeforeWrite({ actionId: action.actionId, id, generation, status: 'unconfirmed', ok: true, ...deliveryMetadata });
         if (disposed || action.signal?.aborted) return result('cancelled', 'Cancelled before terminal input.');
+        if (!routingBindingMatches(action.routingBinding, getSession(id))) return result('conversation-changed', 'The assigned conversation changed while observing input.');
         try {
-          let response = await write({ kind: 'interaction', id, generation, actionId: action.actionId, signal: action.signal,
+          let response = await write({ kind: 'interaction', id, generation, actionId: action.actionId, signal: AbortSignal.any([lifetime.signal, ...(action.signal ? [action.signal] : [])]),
             text: controls.text, keys: action.keys, submit: action.submit, mouse: action.mouse, expectedAgentPid: pid,
             requestId: action.requestId, operator: action.operator, editInput: action.editInput,
             interactionEvidence: { id, generation, pid, sequence: observation.sequence, revision: latest.revision, observedAt: now(), shell,
@@ -77,6 +81,6 @@ function createTerminalInput({ getSession, readSession, write, onBeforeWrite = (
     void work.then(() => { entry.done = true; }, () => { entry.done = true; });
     return work;
   }
-  return { handle, dispose() { disposed = true; results.clear(); } };
+  return { handle, dispose() { disposed = true; lifetime.abort(); results.clear(); } };
 }
 module.exports = { createTerminalInput };

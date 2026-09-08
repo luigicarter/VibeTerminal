@@ -185,6 +185,15 @@ function runMetadataHook(file, args, env, input) {
       }
 
       if (provider === "claude") {
+        for (const [type, hook_event_name] of [["agent.failed", "StopFailure"], ["agent.waiting", "PermissionRequest"]]) {
+          await runMetadataHook(file, [type, "approval"], instrument.env, {
+            hook_event_name, session_id: "native-thread", agent_id: "child-1", error: "SECRET FAILURE"
+          });
+          assert.equal(events.at(-1).transcriptKind, "subagent");
+          assert.equal(events.at(-1).taskId, "child-1");
+          assert.equal(events.at(-1).attention.state, type === "agent.failed" ? "failed" : "waiting");
+          assert.equal(JSON.stringify(events.at(-1)).includes("SECRET"), false);
+        }
         // Simulate the old generated idle hook, including the native payload.
         start = events.length;
         await runMetadataHook(file, ["agent.waiting", "question"], instrument.env, {
@@ -289,10 +298,10 @@ function runMetadataHook(file, args, env, input) {
     await plugin.event({ event: { type: "message.updated", properties: { info: { sessionID: "child-session" } } } });
     await plugin.event({ event: { type: "session.idle", properties: { sessionID: "child-session" } } });
     assert.equal(captured.length, beforeChild);
-    await plugin.event({ event: { type: "message.updated", properties: { info: { sessionID: "root-session" } } } });
+    await plugin.event({ event: { type: "session.status", properties: { sessionID: "root-session", status: { type: "busy" } } } });
     assert.equal(captured.at(-1).type, "agent.running");
     assert.equal(captured.at(-1).providerThreadId, "root-session");
-    await plugin.event({ event: { type: "message.updated", properties: { info: { sessionID: "second-root" } } } });
+    await plugin.event({ event: { type: "session.status", properties: { sessionID: "second-root", status: { type: "busy" } } } });
     assert.equal(captured.at(-1).providerThreadId, "second-root");
   } finally {
     global.fetch = savedFetch;

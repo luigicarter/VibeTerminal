@@ -117,7 +117,7 @@ let child, sentinel, cdp, overlayCdp;
 const plan = actions => fs.writeFileSync(planFile, JSON.stringify({ actions }));
 async function dispatch(action) { return cdp.eval(`window.vibe.orchestrator.dispatch(${JSON.stringify(action)})`); }
 async function command(text) { return cdp.eval(`window.vibe.orchestrator.send(${JSON.stringify({ text, origin: "text" })})`); }
-function toolsFrom(reply, expectedOk = true) { assert.equal(reply.ok, expectedOk, JSON.stringify(reply)); return JSON.parse(reply.text); }
+function toolsFrom(reply, expectedOk = true) { assert.equal(reply.ok, expectedOk, JSON.stringify(reply)); return reply.actions?.length ? reply.actions : JSON.parse(reply.text); }
 (async () => { try {
   assert.equal(process.platform, "win32", "This foreground/PTY harness targets Windows.");
   const port = await new Promise(resolve => { const s = net.createServer(); s.listen(0, "127.0.0.1", () => { const port = s.address().port; s.close(() => resolve(port)); }); });

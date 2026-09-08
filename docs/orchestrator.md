@@ -283,8 +283,12 @@ A wake-only transcript returns to listening with a visible no-command message;
 it is not sent to the assistant.
 
 There is no MP3/file-save workflow. Audio chunks are ordered, bounded, and
-cancelled by playback identity. Holding Space during a reply interrupts it and
-records instead. Voice is turn-based; a stop-speaking control is available. An
+cancelled by playback identity. Ordinary replies and results use a natural spoken
+TL;DR, with the model choosing the necessary detail and no fixed prose-length
+caps; the full written response stays available.
+Holding Space during a reply interrupts it and records instead. With hands-free
+voice enabled, **Hey Vibe** also interrupts speech and captures the next command,
+without stopping terminal work. A stop-speaking control is available. An
 agent question opens a 15-second answer window. When hands-free inference is
 available, speech starts answer capture without repeating the wake phrase;
 Space remains available for manual answers. The answer timer pauses when speech

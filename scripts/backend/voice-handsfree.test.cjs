@@ -206,10 +206,10 @@ test('late startup cannot reopen muted capture and startup failure remains retry
   assert.equal(failed.controller.getState().handsFreeStatus, 'recovering'); const attempts = failed.starts;
   await failed.controller.configure({ refreshHandsFree: true }); assert.equal(failed.starts, attempts + 1);
 });
-test('playback suppresses wake frames and pending request resolution cancels an automatic answer', async t => {
+test('playback detects current wake frames, fences old ones and resolution cancels an automatic answer', async t => {
   const f = fixture({ text: 'yes', manualPlayback: true }); t.after(() => f.controller.dispose()); await f.activate(); f.capture(); const old = f.packets.at(-1);
   const speaking = f.controller.speak({ text: 'Here is the result', origin: 'voice' }); await tick(); assert.equal(f.controller.getState().phase, 'speaking');
-  const count = f.packets.length; f.capture(); assert.equal(f.packets.length, count); f.classify(old, true, true); assert.equal(f.controller.getState().phase, 'speaking');
+  const count = f.packets.length; f.capture(); assert.equal(f.packets.length, count + 1); assert.equal(f.packets.at(-1).mode, 'wake'); f.classify(old, true, true); assert.equal(f.controller.getState().phase, 'speaking');
   f.controller.configure({ playbackDone: f.controller.getState().replyId });
   await speaking;
   const interaction = { id: 'request', sessionId: 'pane', generation: 4, revision: 2, state: 'pending', kind: 'question', questions: [{ id: 'confirm', question: 'Continue?', options: [{ label: 'Yes' }] }] };

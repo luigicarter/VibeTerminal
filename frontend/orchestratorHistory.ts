@@ -52,7 +52,7 @@ export function conversationNeedsResume(session: AgentSession, runtime?: Termina
 }
 export function conversationLaunch(input: SavedConversation): { kind: AgentKind; patch: Partial<AgentSession> } {
   const conversation = normalizeSavedConversation(input);
-  if (!conversation.id || !conversation.cwd || !["claude", "codex", "opencode", "cursor", "gemini", "kimi", "kimi-custom", "qwen"].includes(conversation.provider)) throw new Error("Saved conversation identity is incomplete.");
+  if (!conversation.id || !conversation.cwd || !["claude", "codex", "opencode", "cursor", "gemini", "kimi", "kimi-custom", "qwen", "grok"].includes(conversation.provider)) throw new Error("Saved conversation identity is incomplete.");
   if (conversation.claudeHome === "custom" && !conversation.providerProfileId) throw new Error("This saved chat's custom provider is unknown. Open it from a pane configured for the original provider.");
   if (conversation.fusion && !["claude", "codex"].includes(conversation.provider)) throw new Error("Unsupported Fusion planner identity.");
   if (conversation.openFusion && conversation.provider !== "opencode") throw new Error("Unsupported Open Fusion identity.");

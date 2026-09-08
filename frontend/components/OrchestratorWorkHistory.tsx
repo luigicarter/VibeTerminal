@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { filterWorkHistory, workProjects, type WorkRecord } from "./orchestratorWorkHistoryModel";
 import "./orchestratorWorkHistory.css";
 
-const providerNames: Record<string, string> = { codex: "Codex", claude: "Claude", gemini: "Gemini", opencode: "OpenCode", fusion: "Fusion", openfusion: "Open Fusion", cursor: "Cursor", kimi: "Kimi", qwen: "Qwen" };
+const providerNames: Record<string, string> = { codex: "Codex", claude: "Claude", gemini: "Gemini", opencode: "OpenCode", fusion: "Fusion", openfusion: "Open Fusion", cursor: "Cursor", kimi: "Kimi", qwen: "Qwen", grok: "Grok Build" };
 const statusNames = { completed: "Turn completed", failed: "Failed", interrupted: "Interrupted" };
 
 export function OrchestratorWorkHistory({ records, sessions, onOpenSession }: {

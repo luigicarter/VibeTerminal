@@ -4,22 +4,48 @@
 // Attribution is owned by the scheduler; current session state alone is not proof.
 const reported = new WeakMap();
 const ended = new Set(['completed', 'complete', 'finished', 'succeeded', 'failed', 'cancelled', 'interrupted']);
+const waitingStates = new Set(['waiting', 'waiting-for-input', 'needs-answer', 'awaiting-input']);
+const runningStates = new Set(['running', 'busy', 'starting']);
+const turnKey = wait => !wait.attributionAmbiguous && wait.turnId && wait.targetId && wait.generation != null
+  ? JSON.stringify([wait.targetId, wait.generation, wait.turnId]) : null;
 function collectTaskReports(job, sessions = [], { now = Date.now } = {}) {
   if (!job || (!job.executionDone && !job.reportingReady) || job.restored || job.task?.status === 'cancelled' || job.controller?.signal.aborted) return [];
   let state = reported.get(job);
-  if (!state) { state = { waits: new WeakMap(), final: false }; reported.set(job, state); }
+  if (!state) { state = { waits: new WeakMap(), turns: new Map(), final: false }; reported.set(job, state); }
+  // Reset episodes once per turn, not per delivery: a stale sibling wait must
+  // not clear the notification emitted by another wait in the same collection.
+  const active = new Map();
+  for (const wait of job.waits || []) {
+    const key = turnKey(wait);
+    if (!key) continue;
+    if (!state.turns.has(key)) state.turns.set(key, new Set());
+    if (!active.has(key)) active.set(key, new Set());
+    active.get(key).add(wait.observedState);
+  }
+  for (const [key, states] of active) {
+    const seen = state.turns.get(key);
+    if (![...states].some(value => waitingStates.has(value))) seen.delete('waiting');
+    if (![...states].some(value => runningStates.has(value))) seen.delete('watch-running');
+  }
   const reports = [];
   for (const wait of job.waits || []) {
     let seen = state.waits.get(wait);
     if (!seen) { seen = new Set(); state.waits.set(wait, seen); }
-    const waiting = ['waiting', 'waiting-for-input', 'needs-answer', 'awaiting-input'].includes(wait.observedState);
+    const waiting = waitingStates.has(wait.observedState);
     if (!waiting) seen.delete('waiting');
     if (wait.source === 'watch' && !['running', 'busy', 'starting'].includes(wait.observedState)) seen.delete('running');
     const target = job.task?.targets?.find(target => target.id === wait.targetId && target.generation === wait.generation)
       || sessions.find(session => session.id === wait.targetId && session.generation === wait.generation);
     const name = String(target?.name || 'Terminal').replace(/[\r\n\t]+/g, ' ').slice(0, 120);
     const add = (key, status, text) => {
-      if (seen.has(key)) return;
+      const attributed = turnKey(wait);
+      const shared = attributed && ['running', 'waiting', 'ended'].includes(key) ? state.turns.get(attributed) : null;
+      // Delivery failures with different explanations remain independently visible.
+      const event = key === 'ended' ? `${key}:${status}:${text}` : key === 'running' && wait.source === 'watch' ? 'watch-running' : key;
+      if (shared) {
+        if (shared.has(event)) return;
+        shared.add(event);
+      } else if (seen.has(key)) return;
       seen.add(key);
       reports.push({ text: `${name}: ${text}`, status, targetId: wait.targetId, generation: wait.generation,
         ...(wait.turnId && { turnId: wait.turnId }), ...(wait.actionId && { actionId: wait.actionId }), ...(wait.inputDisposition && { inputDisposition: wait.inputDisposition }), ...(wait.source === 'watch' && { source: 'watch' }) });
@@ -75,7 +101,8 @@ function collectTaskReports(job, sessions = [], { now = Date.now } = {}) {
     }
   }
   const waits = job.waits || [];
-  if (!state.final && waits.length > 1 && waits.every(wait => wait.done && ended.has(wait.observedState))) {
+  const distinctTurns = new Set(waits.map(wait => turnKey(wait) || wait));
+  if (!state.final && distinctTurns.size > 1 && waits.every(wait => wait.done && ended.has(wait.observedState))) {
     const last = reports.at(-1);
     if (last) { last.text += ' All requested terminal turns have ended.'; state.final = true; }
   }

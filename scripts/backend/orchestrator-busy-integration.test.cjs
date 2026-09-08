@@ -129,3 +129,32 @@ for (const shifted of [false, true]) test(`core protects ${shifted ? 'the actual
   assert.equal(app.getState().tasks.find(task => task.requestId === result.requestId).status, 'waiting-results');
   assert.ok(!app.getState().messages.some(message => message.requestId === result.requestId && message.status === 'completed'));
 });
+
+
+for (const changed of [false, true]) for (const operator of [false, true]) test(`explicit ${operator ? 'operator' : 'IPC'} queue ${changed ? 'rejects a replacement native conversation' : 'delivers once to its original native conversation'}`, async t => {
+  const f = await fixture(t, 'claude');
+  f.snapshot.conversation = { id: 'conversation-A', provider: 'claude' };
+  const result = await f.invoke('dispatch', { kind: 'send_prompt', target: { id: 'p', generation: 'g' }, text: 'Continue conversation A only.',
+    ...(operator && { operator: true, requestId: 'request', observationSequence: 1, inputRevision: 0 }) });
+  assert.equal(result.status, 'queued', JSON.stringify(result));
+  assert.equal(f.sent.length, 0);
+  Object.assign(f.snapshot, { conversation: { id: changed ? 'conversation-B' : 'conversation-A', provider: 'claude' }, turnState: 'completed', turnId: 'ending-turn', turnEndedAt: Date.now(), childActivity: false });
+  await f.integration.refreshInventory();
+  assert.equal(f.sent.length, changed ? 0 : 1);
+  if (!changed) assert.equal(f.sent[0].payload.promptText, 'Continue conversation A only.');
+  else {
+    assert.ok(f.integration.getState().receipts.some(item => item.status === 'conversation-changed'), JSON.stringify(f.integration.getState().receipts));
+  }
+  await f.integration.refreshInventory();
+  assert.equal(f.sent.length, changed ? 0 : 1, 'Repeated readiness cannot replay the prompt');
+});
+
+test('an explicit send preserves a stronger supplied conversation binding when the current baseline has no native ID', async t => {
+  const f = await fixture(t, 'claude');
+  const binding = { target: { id: 'p', generation: 'g', launchToken: 1 }, nativeIdentity: { provider: 'claude', home: 'global', workspace: f.root, id: 'conversation-A' } };
+  const result = await f.invoke('dispatch', { kind: 'send_prompt', target: { id: 'p', generation: 'g' }, text: 'Only A.', routingBinding: binding });
+  assert.equal(result.ok, false);
+  assert.equal(result.delivery, 'not-dispatched');
+  assert.equal(result.reason, 'conversation-changed');
+  assert.equal(f.sent.length, 0);
+});

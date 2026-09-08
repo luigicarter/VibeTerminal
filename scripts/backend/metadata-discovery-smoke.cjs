@@ -136,7 +136,7 @@ async function main() {
     else process.env.QWEN_HOME=previousQwenHome;
   }
   const caps=require("../../shared/providerCapabilities.json");
-  assert.deepEqual(Object.keys(caps).sort(),["terminal","codex","claude","cursor","gemini","opencode","kimi","kimi-custom","qwen"].sort());
+  assert.deepEqual(Object.keys(caps).sort(),["terminal","codex","claude","cursor","gemini","grok","opencode","kimi","kimi-custom","qwen"].sort());
   assert.equal(caps.gemini.finalCompletion,"coarse");
   console.log("Metadata discovery smoke passed: saved/live titles, root exclusion, Gemini formats/ownership/resume, capability registry.");
 }

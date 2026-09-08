@@ -14,7 +14,7 @@ runtime._compile(ts.transpileModule(fs.readFileSync(runtimePath, "utf8"), { comp
 const originalRequire = helper.require.bind(helper);
 helper.require = id => id === "../terminalRuntime" ? runtime.exports : originalRequire(id);
 helper._compile(compiled, sourcePath);
-const { dashboardLayout, dashboardScale, dashboardSessionVisible, dashboardStatus, dashboardSessionMetadata, dashboardTargeted, dashboardSessionTitle, dashboardProvider, dashboardSessionOrder, dashboardRecency } = helper.exports;
+const { dashboardLayout, dashboardScale, dashboardSessionVisible, dashboardStatus, dashboardSessionMetadata, dashboardTargeted, dashboardSessionTitle, dashboardProjectName, dashboardProvider, dashboardSessionOrder, dashboardRecency } = helper.exports;
 
 // All possible simultaneous enlargements and drift must fit on one page.
 for (const viewport of [0, 132, 180, 212, 260, 272, 320, 600, 1000, 1600]) {
@@ -77,6 +77,17 @@ const longTitle = "Conversation title ".repeat(120);
 assert.equal(dashboardSessionTitle({ ...session, conversationTitle: longTitle }), longTitle.trim(), "Full accessible title is preserved; CSS ellipsis handles display");
 assert.equal(dashboardSessionTitle({ ...session, threadRef: { title: "Stale" } }), "API", "A stale thread title cannot replace the current name");
 assert.equal(dashboardSessionTitle({ ...session, name: " ", projectName: "Project" }), "Project");
+for (const name of ["Vibe terminal", "Claude code", "Fix authentication"]) {
+  assert.equal(dashboardProjectName({ ...session, name, conversationTitle: "Review pull request" }), "API", "The project takes precedence over generic and custom session titles");
+}
+assert.equal(dashboardProjectName({ ...session, projectName: "  Customer portal  " }), "Customer portal", "Explicit workspace names take precedence over directory names");
+for (const [cwd, expected] of [["C:\\Projects\\API\\", "API"], ["/home/user/portal/", "portal"], ["C:\\", "C:\\"], ["/", "/"], ["\\\\server\\share\\portal\\", "portal"]]) {
+  assert.equal(dashboardProjectName({ ...session, projectName: " ", cwd }), expected);
+}
+for (const cwd of ["", " ", ".", ".."]) {
+  assert.equal(dashboardProjectName({ ...session, name: "Claude code", conversationTitle: "Vibe terminal", cwd }), "Unknown project", "Session titles must not fabricate a project identity");
+}
+assert.equal(dashboardProjectName({ ...session, cwd: "", projectName: "Known workspace" }), "Known workspace");
 assert.equal(dashboardProvider({ ...session, openFusion: true }), "Open Fusion");
 assert.ok(dashboardScale(true, true) > dashboardScale(false, true));
 assert.ok(dashboardScale(false, false) > dashboardScale(false, true));

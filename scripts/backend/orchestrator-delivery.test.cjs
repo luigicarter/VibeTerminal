@@ -19,6 +19,45 @@ test("long-idle agent uses background transport and action IDs deduplicate", asy
   assert.equal(h.writes[0].promptText, "hello");
   assert.equal(h.drafts.length, 0);
 });
+
+test('numeric zero generation dispatch and receipts preserve nested target identity', async () => {
+  const h = harness(); h.s.generation = 0;
+  const action = h.action('zero', { target: { id: 'p', generation: 0 }, generation: 'stale-fallback' });
+  const delivered = await h.delivery.submit(action);
+  assert.equal(delivered.status, 'written');
+  assert.equal(delivered.generation, 0);
+  assert.equal(h.writes[0].generation, 0);
+  assert.equal((await h.delivery.submit(action)).generation, 0);
+  assert.equal(h.writes.length, 1);
+});
+
+test('forget retires queued zero-generation delivery without writing to its replacement', async () => {
+  const h = harness(); Object.assign(h.s, { generation: 0, turnState: 'running' });
+  const action = h.action('zero-queued', { target: { id: 'p', generation: 0 } });
+  assert.equal((await h.delivery.submit(action)).status, 'queued');
+  h.delivery.forget('p', 0);
+  assert.equal(h.updates.length, 1);
+  assert.equal(h.updates[0].status, 'stale-generation');
+  assert.equal(h.updates[0].generation, 0);
+  Object.assign(h.s, { generation: 1, turnState: 'idle' });
+  await h.delivery.pump();
+  assert.equal(h.writes.length, 0);
+  assert.equal((await h.delivery.submit(action)).status, 'stale-generation');
+});
+
+for (const cancel of [false, true]) test(`zero-generation queued delivery ${cancel ? 'cancels' : 'dispatches'} once when readiness changes`, async () => {
+  const h = harness(); Object.assign(h.s, { generation: 0, turnState: 'running' });
+  const controller = new AbortController();
+  const action = h.action('zero-queued', { target: { id: 'p', generation: 0 }, signal: controller.signal });
+  assert.equal((await h.delivery.submit(action)).status, 'queued');
+  if (cancel) controller.abort();
+  Object.assign(h.s, { turnState: 'completed', turnId: 'ready' });
+  await h.delivery.pump(); await h.delivery.pump();
+  assert.equal(h.writes.length, cancel ? 0 : 1);
+  assert.equal(h.updates.length, 1);
+  assert.equal(h.updates[0].generation, 0);
+  assert.equal(h.updates[0].status, cancel ? 'cancelled' : 'written');
+});
 test("busy queues, observes readiness, and prevents another send on old idle evidence", async () => {
   const h = harness(); h.s.turnState = "running";
   assert.equal((await h.delivery.submit(h.action("a"))).status, "queued");
@@ -217,22 +256,25 @@ test("submitted text reserves runtime input and rollback cannot clear a later ob
   runtime.dispose();
 });
 test("PTY multiline framing follows split bracketed-paste mode and deduplicates writes", () => {
-  const events = [], terminals = [];
-  const context = vm.createContext({ require: name => name === "node-pty" ? { spawn() { const t = { pid: 42, writes: [], onData(fn) { this.data = fn; }, onExit() {}, resize() {}, kill() {}, write(data) { this.writes.push(data); } }; terminals.push(t); return t; } } : name === "readline" ? { createInterface: () => ({ on() {} }) } : name === '../shared/terminalControls.cjs' ? require('../../shared/terminalControls.cjs') : require(name), process: { platform: "win32", env: {}, stdin: {}, cwd: () => process.cwd(), stdout: { write: line => events.push(JSON.parse(line)) }, kill() {} }, setTimeout() {} });
+  const events = [], terminals = [], timers = new Map(); let timerId = 0;
+  const flushSubmit = () => { for (const [id, timer] of [...timers]) { timers.delete(id); assert.equal(timer.ms, 200); timer.fn(); } return events.at(-1); };
+  const context = vm.createContext({ require: name => name === "node-pty" ? { spawn() { const t = { pid: 42, writes: [], onData(fn) { this.data = fn; }, onExit() {}, resize() {}, kill() {}, write(data) { this.writes.push(data); } }; terminals.push(t); return t; } } : name === "readline" ? { createInterface: () => ({ on() {} }) } : name === '../shared/terminalControls.cjs' ? require('../../shared/terminalControls.cjs') : require(name), process: { platform: "win32", env: {}, stdin: {}, cwd: () => process.cwd(), stdout: { write: line => events.push(JSON.parse(line)) }, kill() {} }, setTimeout(fn, ms) { const id = ++timerId; timers.set(id, { fn, ms }); return id; }, clearTimeout(id) { timers.delete(id); } });
   vm.runInContext(fs.readFileSync(path.resolve(__dirname, "../../backend/ptyHost.cjs"), "utf8"), context);
   context.handleMessage({ type: "create", payload: { id: "p", generation: "g", launchToken: 1 } });
   const send = (actionId, promptText = "one\ntwo") => { context.handleMessage({ type: "action", payload: { id: "p", generation: "g", actionId, kind: "input", data: promptText + "\r", promptText, expectedAgentPid: 42, recipientEvidence: { generation: "g", pid: 42, state: "idle", observedAt: Date.now() } } }); return events.at(-1); };
   assert.equal(send("a").status, "needs-staging");
   for (const chunk of ["\x1b", "[", "?20", "04h"]) terminals[0].data(chunk);
-  assert.equal(send("b").status, "written"); send("b");
-  assert.deepEqual(terminals[0].writes, ["\x1b[200~one\ntwo\x1b[201~\r"]);
+  send("b"); send("b");
+  assert.deepEqual(terminals[0].writes, ["\x1b[200~one\ntwo\x1b[201~"]);
+  assert.equal(flushSubmit().status, "written"); send("b");
+  assert.deepEqual(terminals[0].writes, ["\x1b[200~one\ntwo\x1b[201~", "\r"]);
   terminals[0].data("\x1b[?2004l");
   assert.equal(send("c").status, "needs-staging");
   assert.equal(send("d", "hello\x03").status, "invalid-action");
   const manual = data => context.handleMessage({ type: "input", payload: { id: "p", generation: "g", data } });
   for (const [index, report] of ["\x1b[O", "\x1b[I", "\x1b[12;80R", "\x1b[?12;80R", "\x1b[?1;2c", "\x1b[>0;276;0c", "\x1b[0n"].entries()) {
     manual(report);
-    assert.equal(send(`report${index}`, "background prompt").status, "written");
+    send(`report${index}`, "background prompt"); assert.equal(flushSubmit().status, "written");
   }
   manual("unfinished user text");
   manual("\x1b[O"); manual("\x1b[1;1R"); manual("\x1b[?1;2c");
@@ -242,9 +284,24 @@ test("PTY multiline framing follows split bracketed-paste mode and deduplicates 
   assert.equal(terminals[0].writes.length, count);
   assert(terminals[0].writes.includes("unfinished user text"));
   manual("\r");
-  assert.equal(send("f", "another prompt").status, "written");
+  send("f", "another prompt"); assert.equal(flushSubmit().status, "written");
   manual("\x1b[A");
   assert.equal(send("g", "another prompt").status, "input-buffer-occupied");
   manual("\x03");
-  assert.equal(send("h", "another prompt").status, "written");
+  send("h", "another prompt"); assert.equal(flushSubmit().status, "written");
+});
+
+
+test('delivery abort, cancel and disposal reach an in-flight native submission without rollback', async () => {
+  for (const mode of ['abort', 'cancel', 'dispose']) {
+    const controller = new AbortController(); let signal, rollbacks = 0;
+    const h = harness({ reserveInput: () => () => { rollbacks++; }, write: payload => {
+      signal = payload.signal;
+      return new Promise(resolve => signal.addEventListener('abort', () => resolve({ ok: false, status: 'unknown', partialWrite: true, submission: 'unconfirmed' }), { once: true }));
+    } });
+    const pending = h.delivery.submit(h.action('split', { signal: controller.signal }));
+    await new Promise(setImmediate); assert.equal(signal.aborted, false);
+    if (mode === 'abort') controller.abort(); else h.delivery[mode]();
+    const result = await pending; assert.equal(signal.aborted, true); assert.equal(result.status, 'unknown'); assert.equal(result.partialWrite, true); assert.equal(rollbacks, 0);
+  }
 });

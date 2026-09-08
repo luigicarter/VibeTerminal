@@ -12,7 +12,12 @@ function sessionSummary(s) {
     turnId: s.turnId, turnState: s.turnState, turnStartedAt: s.turnStartedAt, turnEndedAt: s.turnEndedAt, pendingInput: s.pendingInput,
     status: s.status, observation: s.observation, lastActivityAt: s.lastActivityAt,
     home: s.openFusion || s.kind === 'openfusion' ? 'openfusion' : s.providerProfileId ? 'custom' : 'global',
-    conversationId: native?.id
+    conversationId: s.conversationId || native?.id,
+    model: typeof s.model === "string" ? s.model.slice(0, 240) : undefined,
+    providerProfileId: s.providerProfileId,
+    readiness: require("./orchestratorLaunchers.cjs").sessionReady(s) ? "ready" : s.status === "starting" || s.launchState === "pending" ? "starting" : "unverified",
+    capabilities: { native: !["fusion", "openfusion"].includes(s.kind), structured: ["fusion", "openfusion"].includes(s.kind), codingAgent: s.kind !== "terminal" },
+    processState: s.processState, agentProcessState: s.agentProcessState, launchState: s.launchState
   };
 }
 

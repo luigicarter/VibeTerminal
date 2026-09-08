@@ -5,7 +5,7 @@ const MAX_BYTES = 10 * 1024 * 1024;
 const MAX_AGE = 30 * 24 * 60 * 60 * 1000;
 const fields = {
   messages: ['id', 'role', 'text', 'at', 'requestId', 'taskId', 'replyToId', 'questionId', 'origin'],
-  receipts: ['id', 'kind', 'targetId', 'generation', 'status', 'text', 'at', 'requestId', 'taskId'],
+  receipts: ['id', 'kind', 'targetId', 'generation', 'cwd', 'status', 'text', 'at', 'requestId', 'taskId'],
   tasks: ['id', 'requestId', 'text', 'instruction', 'originalInstruction', 'status', 'phase', 'at', 'createdAt', 'updatedAt', 'targetId', 'generation', 'projectId', 'cwd', 'terminalId', 'question', 'questionId', 'result', 'error', 'replyToId', 'replyToRequestId', 'sequence', 'label', 'summary', 'outcome', 'origin'],
 };
 const empty = () => ({ messages: [], receipts: [], tasks: [] });
@@ -40,6 +40,17 @@ function createConversationStore({ userDataPath, getSecrets = () => [], now = Da
       const item = pick(source, fields[kind]);
       if (kind === 'messages' && source.question && typeof source.question === 'object') item.question = pick(source.question, ['id', 'requestId', 'text']);
       if (kind === 'tasks') {
+        // Routing describes a past decision; it cannot restore execution authority.
+        const routingText = (value, limit) => typeof value === 'string' ? clean(value).slice(0, limit) : undefined;
+        if (typeof source.workItemId === 'string') item.workItemId = routingText(source.workItemId, 500);
+        if (Array.isArray(source.workItemIds)) item.workItemIds = source.workItemIds.filter(value => typeof value === 'string').slice(0, 100).map(value => routingText(value, 500));
+        if (source.assignment && ['create', 'reuse'].includes(source.assignment.decision)) {
+          item.assignment = { decision: source.assignment.decision };
+          for (const [key, limit] of [['reason', 2000], ['workItemId', 500]]) {
+            const value = routingText(source.assignment[key], limit);
+            if (value !== undefined) item.assignment[key] = value;
+          }
+        }
         // Associations are historical context only. Never persist dispatch plans,
         // grants, controller state, or executable action/permission objects.
         for (const key of ['targetIds', 'dependsOn']) if (Array.isArray(source[key])) item[key] = source[key].filter(value => typeof value === 'string').slice(0, 100).map(value => clean(value.slice(0, 500)));

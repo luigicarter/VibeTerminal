@@ -53,7 +53,7 @@ assert.equal(runtimeElapsed({...state,turnState:'completed',turnStartedAt:30000,
 for (const pendingInput of ['submit', 'interrupt']) {
   for (const turnState of ['completed', 'running', 'waiting']) {
     const pending = {...state,provider:'codex',turnState,pendingInput,turnStartedAt:1000,children:[{id:'child'}],childActivity:true};
-    assert.equal(runtimeSessionStatus(pending), 'idle');
+    assert.equal(runtimeSessionStatus(pending), 'running', 'known live children survive a pending root input');
     assert.equal(runtimeStatusLabel(pending), pendingInput === 'submit' ? 'awaiting activity' : 'interrupt requested');
     assert.equal(runtimeElapsed(pending,66000), undefined);
     assert.equal(runtimeSessionStatus({...pending,pendingInput:undefined}), turnState === 'waiting' ? 'waiting' : 'running');
@@ -63,6 +63,16 @@ for (const pendingInput of ['submit', 'interrupt']) {
   }
 }
 const pane = fs.readFileSync(path.resolve(__dirname,'../../frontend/components/TerminalPane.tsx'),'utf8');
+const retainedBackground = {...state, provider:'kimi', turnState:'completed', activeTools:[], activityObserved:true,
+  children:[{id:'background:task'}], childActivity:true,
+  backgroundObservation:{source:'kimi-task-metadata',availability:'unavailable',observedAt:1}};
+assert.equal(runtimeSessionStatus(retainedBackground), 'idle', 'unverified background work must not drive the sidebar spinner');
+assert.equal(runtimeStatusLabel(retainedBackground), 'activity unverified');
+assert.equal(retainedBackground.children.length, 1, 'unavailability retains the diagnostic task');
+assert.equal(runtimeStatusLabel({...retainedBackground,turnState:'running'}), 'working');
+assert.equal(runtimeStatusLabel({...retainedBackground,turnState:'waiting'}), 'needs input');
+assert.equal(runtimeStatusLabel({...retainedBackground,pendingInput:'submit'}), 'awaiting activity');
+assert.equal(runtimeStatusLabel({...retainedBackground,processState:'exited'}), 'exited');
 assert.match(pane, /function setStatus\(status: SessionStatus\) \{\s*if \(ownsRuntime\(\)\) return;/);
 assert.match(pane, /function markActiveFromOutput\(\) \{\s*if \(ownsRuntime\(\)\) return;/);
 assert.match(pane, /function scheduleThreadLookup\([^\n]+\) \{\s*if \(ownsRuntime\(\)\) return;/);

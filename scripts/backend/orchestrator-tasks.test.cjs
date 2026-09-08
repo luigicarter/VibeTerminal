@@ -7,6 +7,22 @@ const path = require('node:path');
 const { createOrchestrator } = require('../../backend/orchestrator.cjs');
 const { createTaskScheduler } = require('../../backend/orchestratorTasks.cjs');
 
+test('numeric zero generations retain task identity through repeated tracking and completion', () => {
+  for (const identity of [{ generation: 0 }, { result: { target: { generation: 0 } } }, { result: { generation: 0 } }]) {
+    const tasks = createTaskScheduler();
+    const job = tasks.create({ text: 'Work', origin: 'text' });
+    const action = { kind: 'send_prompt', actionId: 'ours', targetId: 's', ...(identity.generation === 0 && { generation: 0 }) };
+    tasks.track(job, action, { ok: true, status: 'queued', ...identity.result });
+    assert.equal(job.waits[0].generation, 0);
+    tasks.track(job, { kind: 'send_prompt', actionId: 'ours', targetId: 's' }, { ok: true, status: 'written', turnId: 'our-turn' });
+    assert.equal(job.waits[0].generation, 0);
+    job.executionDone = true; tasks.update(job, { status: 'waiting-results' });
+    tasks.reconcile([{ id: 's', generation: 0, turnId: 'our-turn', turnState: 'completed' }]);
+    assert.equal(job.task.status, 'finished');
+    assert.equal(job.waits[0].failed, false);
+  }
+});
+
 test('partial completion preserves sibling waits and current inventory readiness', async () => {
   const tasks = createTaskScheduler();
   const job = tasks.create({ text: 'Both tasks', origin: 'text' });
@@ -32,7 +48,7 @@ test('cached completed identity never borrows the newer turn state, and ambiguit
   const job = tasks.create({ text: 'Work', origin: 'text' });
   tasks.track(job, { kind: 'send_prompt', actionId: 'ours', targetId: 's', generation: 'g' }, { ok: true, status: 'unknown', turnId: 'our-turn' }, { kind: 'codex', turnState: 'idle' });
   job.executionDone = true; tasks.update(job, { status: 'waiting-results' });
-  const session = { id: 's', generation: 'g', turnId: 'newer', completedTurnId: 'our-turn', completedActionId: 'ours', actionId: 'human' };
+  const session = { id: 's', generation: 'g', kind: 'codex', turnId: 'newer', completedTurnId: 'our-turn', completedActionId: 'ours', actionId: 'human' };
   for (const turnState of ['running', 'failed', 'completed']) {
     tasks.reconcile([{ ...session, turnState }]);
     assert.equal(job.waits[0].done, false); assert.equal(job.waits[0].observedState, undefined);
@@ -52,7 +68,7 @@ test('queued delivery cannot attribute an intervening turn using the original id
     const job = tasks.create({ text: 'Queued work', origin: 'text' });
     tasks.track(job, { kind: 'send_prompt', actionId: 'ours', targetId: 's', generation: 'g' }, { ok: true, status: 'queued' }, { kind: 'codex', turnId: 'old', turnState: 'idle', submittedAt: 100 });
     job.executionDone = true; tasks.update(job, { status: 'waiting-results' });
-    const human = { id: 's', generation: 'g', turnId: 'human', completedTurnId: 'human', completedActionId: 'human-action', turnState: 'completed', turnStartedAt: 101 };
+    const human = { id: 's', generation: 'g', kind: 'codex', turnId: 'human', completedTurnId: 'human', completedActionId: 'human-action', turnState: 'completed', turnStartedAt: 101 };
     tasks.reconcile([human]);
     tasks.delivery({ actionId: 'ours', ok: true, status: 'written', ...(freshBaseline && { deliveryBaseline: { kind: 'codex', submittedAt: 102, turnId: 'human', turnState: 'completed' } }) });
     tasks.reconcile([human]);
@@ -182,7 +198,7 @@ test('staged transport never satisfies a result dependency', async t => {
   const f = await fixture(t); f.dispatch = () => ({ ok: true, status: 'staged', reason: 'Agent input readiness is not observed.' });
   const first = await f.app.send({ text: 'Review', targetId: 's0', origin: 'text' });
   assert.equal(f.app.getState().tasks.find(task => task.id === first.requestId).status, 'paused');
-  assert.match(first.text, /hasn't been sent.*Agent input readiness is not observed.*Open the terminal/s);
+  assert.match(first.text, /has not been sent.*Agent input readiness is not observed.*Open the terminal/s);
   f.plan = () => ({ goal: 'Fix', dependsOnRequestIds: [first.requestId], actions: [] });
   const dependent = f.app.enqueue({ text: 'Fix results', origin: 'text' });
   await until(() => f.app.getState().tasks.find(task => task.id === dependent.requestId)?.status === 'paused'); assert.equal(f.executorCalls, 0);
@@ -287,10 +303,10 @@ test('native task submission waits for its provider result, including Enter afte
     job.executionDone = true; tasks.update(job, { status: 'waiting-results' });
     const dependent = tasks.create({ text: 'Fix findings', origin: 'text' }); dependent.task.dependsOn = [job.task.requestId];
     let ready = false; const waiting = tasks.ready(dependent).then(() => { ready = true; });
-    tasks.reconcile([{ id: 's', generation: 'g', turnId: 'old', turnState: 'completed', turnStartedAt: 90 }]); await tick(); assert.equal(ready, false);
-    tasks.reconcile([{ id: 's', generation: 'g', turnId: 'new', turnState: 'running', turnStartedAt: 101 }]);
+    tasks.reconcile([{ id: 's', generation: 'g', kind: 'codex', turnId: 'old', turnState: 'completed', turnStartedAt: 90 }]); await tick(); assert.equal(ready, false);
+    tasks.reconcile([{ id: 's', generation: 'g', kind: 'codex', turnId: 'new', turnState: 'running', turnStartedAt: 101 }]);
     assert.equal(job.waits[0].turnId, 'new'); assert.equal(job.task.status, 'waiting-results');
-    tasks.reconcile([{ id: 's', generation: 'g', turnId: 'new', turnState: 'completed', turnStartedAt: 101 }]); await waiting;
+    tasks.reconcile([{ id: 's', generation: 'g', kind: 'codex', turnId: 'new', turnState: 'completed', turnStartedAt: 101 }]); await waiting;
     assert.equal(ready, true); assert.equal(job.task.status, 'finished');
   }
 });

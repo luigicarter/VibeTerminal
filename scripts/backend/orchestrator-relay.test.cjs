@@ -28,6 +28,48 @@ test('secure per-user settings persist, transcripts and activation do not', asyn
   const second = createOrchestrator({ interpretIntent: interpretTestIntent, userDataPath: f.dir, secureStorage }); t.after(() => second.dispose()); assert.equal(second.getState().enabled, false); assert.equal(second.getState().messages.length, 0); assert.equal(second.getKey(), key);
 });
 
+test('read requests retain zero generation fences and exclude old zero-generation interactions', async t => {
+  const reads = [];
+  const f = fixture(t, { readSession: async target => { reads.push(target); return { ok: true, ...target, text: 'Current output' }; } });
+  await f.ready();
+  for (const identity of [{ generation: 0 }, { target: { id: 'a', generation: 0 }, generation: 1 }]) {
+    const result = await f.instance.dispatch({ kind: 'read_session', targetId: 'a', ...identity });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /source session changed/);
+  }
+  assert.equal(reads.length, 0);
+  f.instance.ingestInteraction({ id: 'old', sessionId: 'a', generation: 0, kind: 'question', questions: [{ question: 'Old question?' }] });
+  const current = await f.instance.dispatch({ kind: 'read_session', targetId: 'a', generation: 1 });
+  assert.equal(current.ok, true);
+  assert.deepEqual(current.pendingInteractions, []);
+  f.sessions[0].generation = 0;
+  assert.equal((await f.instance.dispatch({ kind: 'read_session', targetId: 'a', generation: 0 })).ok, true);
+});
+
+test('monitor includes the observed zero-generation session', async t => {
+  const reads = [];
+  const f = fixture(t, { readSession: async target => { reads.push(target); return { ok: false, status: 'unavailable' }; } });
+  f.sessions[0].generation = 0;
+  await f.ready(); await f.instance.configure({ monitoringEnabled: true });
+  await f.instance.refresh({ monitor: true });
+  assert.equal(reads.length, 1);
+  assert.equal(reads[0].generation, 0);
+});
+
+for (const mode of ['matching', 'replacement', 'delayed', 'delayed-replacement']) test(`creation continuity preserves zero-generation identity: ${mode}`, async t => {
+  const contexts = []; let f;
+  f = fixture(t, { interpretIntent: context => { contexts.push(context); return { goal: 'Hello', actions: [] }; },
+    dispatchAction: async () => {
+      if (!mode.startsWith('delayed')) f.sessions.push({ id: 'new', generation: mode === 'replacement' ? 1 : 0, launchToken: 2, kind: 'codex' });
+      return { ok: true, status: 'created', id: 'new', launchToken: 2, target: { id: 'new', generation: 0, launchToken: 2 } };
+    } });
+  await f.ready();
+  assert.equal((await f.instance.dispatch({ kind: 'create_session', kindOfSession: 'codex', cwd: f.dir })).ok, true);
+  if (mode.startsWith('delayed')) { f.sessions.push({ id: 'new', generation: mode === 'delayed-replacement' ? 1 : 0, launchToken: 2, kind: 'codex' }); await f.instance.refresh(); }
+  await f.instance.send({ text: 'Hello', origin: 'text' });
+  assert.deepEqual(contexts.at(-1).conversationTarget, mode.includes('replacement') ? null : { id: 'new', generation: 0 });
+});
+
 test('monitoring requires opt-in and filters unavailable and blank observations', async t => {
   const reads = [];
   const f = fixture(t, { readSession: async ({ id }) => { reads.push(id); return id === 'a' ? { ok: false, status: 'unavailable', error: 'No live decoder for this generation.' } : { ok: true, text: '  ' }; } });
@@ -58,7 +100,7 @@ test('tool rejection records receipt and returns action failure alongside answer
 test('model tools cannot open external applications but direct workspace actions remain available', async t => {
   const f = fixture(t); await f.ready();
   for (const kind of ['open_file', 'open_folder']) {
-    f.responses(tool({ kind, path: f.dir }), reply('Use Workspace tools to open that.'));
+    f.responses(tool({ kind, path: f.dir }), tool({ kind: 'respond', text: 'Use Workspace tools to open that.', speechText: 'Use Workspace tools to open that.', responseTurn: 'complete' }));
     const result = await f.instance.send({ text: `Open ${f.dir}`, origin: 'voice' });
     assert.equal(result.ok, false); assert.match(result.actions[0].error, /Workspace tools/);
     assert.equal(f.actions.length, 0);
@@ -93,7 +135,7 @@ test('speech failure preserves successful text and delivered action without repl
     const f = fixture(t, { onSpeak: async () => { if (throws) throw new Error('Playback failed.'); return { ok: false, error: 'Playback failed.' }; } });
     await f.ready(); f.responses(tool({ kind: 'send_prompt', targetId: 'a' }), reply('Delivered.'));
     const result = await f.instance.send({ text: 'I want you to tell Worker A to fix the bug', origin: 'voice' });
-    assert.equal(result.ok, true); assert.equal(result.text, 'Delivered.'); assert.equal(result.speech.ok, false);
+    assert.equal(result.ok, true); assert.match(result.text, /task is running in Worker A.*result is still pending/s); assert.equal(result.speech.ok, false);
     assert.equal(result.actions[0].status, 'delivered'); assert.equal(f.actions.length, 1); assert.equal(f.instance.getState().receipts.length, 1);
   }
 });
@@ -320,7 +362,7 @@ test('spoken project names remain context for a later Codex request in that proj
   const f = fixture(t, { getRoots: () => ({ projects: [project] }) });
   Object.assign(f.sessions[0], { cwd: project.path, projectName: project.name });
   f.sessions.push({ id: 'other', name: 'Other Codex', generation: 1, kind: 'codex', cwd: 'C:\\other', projectName: 'Other' });
-  await f.ready(); f.responses(reply('Two agents in that project.'));
+  await f.ready(); f.responses(tool({ kind: 'respond', text: 'Two agents in that project.', speechText: 'Two agents in that project.', responseTurn: 'complete' }));
   await f.instance.send({ text: 'I meant Vibe Terminal, the project.', origin: 'voice' });
   const initial = JSON.parse(JSON.parse(f.requests.at(-1).options.body).messages[1].content);
   assert.deepEqual(initial.projectContext, project); assert.equal(f.actions.length, 0);
@@ -374,12 +416,13 @@ test('a rejected request that never carried the reasoning parameter is not retri
 });
 test('a reasoning model that spends its budget thinking gets exactly one wider retry', async t => {
   const f = await reasoningFixture(t); const before = f.requests.length;
-  f.responses({ choices: [{ finish_reason: 'length', message: { content: '', reasoning: 'still thinking' } }] }, reply('Answered on the second attempt.'));
+  f.responses({ choices: [{ finish_reason: 'length', message: { content: '', reasoning: 'still thinking' } }] }, tool({ kind: 'respond', text: 'Answered on the second attempt.', speechText: 'Answered on the second attempt.', responseTurn: 'complete' }));
   const result = await f.instance.send({ text: 'Status', origin: 'voice' });
   assert.equal(result.ok, true); assert.equal(result.text, 'Answered on the second attempt.');
   const bodies = completions(f, before); assert.equal(bodies.length, 2);
   assert.equal(bodies[1].max_tokens, bodies[0].max_tokens * 2);
   assert.equal(f.speech.length, 1); assert.equal(f.speech[0].text, 'Answered on the second attempt.');
+  assert.equal(f.speech[0].speechText, 'Answered on the second attempt.');
 });
 test('the wider retry is spent once per user turn and never for a model without reasoning', async t => {
   const f = fixture(t); await f.ready(); const before = f.requests.length;

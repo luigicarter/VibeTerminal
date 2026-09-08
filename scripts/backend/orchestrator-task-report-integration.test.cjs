@@ -5,6 +5,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createOrchestrator } = require('../../backend/orchestrator.cjs');
+const { createTaskScheduler } = require('../../backend/orchestratorTasks.cjs');
+const { collectTaskReports } = require('../../backend/orchestratorTaskReports.cjs');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 async function until(predicate) {
   for (let i = 0; i < 300; i++) { if (predicate()) return; await tick(); }
@@ -49,6 +51,29 @@ async function fixture(t) {
   return f;
 }
 
+test('scheduler prompt plus Enter retain both waits but notify once for their attributed turn', () => {
+  const tasks = createTaskScheduler({ now: () => 100 });
+  const job = tasks.create({ text: 'Review changes', origin: 'text' });
+  const baseline = { kind: 'codex', turnId: 'old', turnState: 'idle', submittedAt: 100 };
+  tasks.track(job, { kind: 'send_prompt', actionId: 'prompt', targetId: 'a', generation: 'g' }, { ok: true, status: 'written' }, baseline);
+  tasks.track(job, { kind: 'terminal_interact', operator: true, inputPurpose: 'task', actionId: 'enter', targetId: 'a', generation: 'g', keys: ['enter'] }, { ok: true, status: 'written' }, baseline);
+  job.executionDone = true;
+  tasks.update(job, { status: 'waiting-results' });
+  const session = { id: 'a', name: 'Agent a', generation: 'g', kind: 'codex', turnId: 'new', turnState: 'running', turnStartedAt: 101 };
+  tasks.reconcile([session]);
+  assert.equal(job.waits.length, 2, 'execution waits remain independent');
+  assert.deepEqual(job.waits.map(wait => wait.turnId), ['new', 'new']);
+  assert.equal(collectTaskReports(job, [session]).length, 1);
+  tasks.reconcile([session]);
+  assert.deepEqual(collectTaskReports(job, [session]), []);
+  session.turnState = 'completed';
+  tasks.reconcile([session]);
+  const reports = collectTaskReports(job, [session]);
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].status, 'completed');
+  assert.equal(job.task.status, 'finished');
+});
+
 test('completion reports and speech remain request-owned with monitoring off and another prompt queued', async t => {
   const f = await fixture(t);
   const first = await f.app.send({ text: 'Review A', targetId: 'a', origin: 'voice' });
@@ -67,6 +92,67 @@ test('completion reports and speech remain request-owned with monitoring off and
   await f.app.refresh(); await tick();
   assert.equal(f.reports(first.requestId).filter(report => report.status === 'completed').length, 1);
   assert.equal(f.models.length, 0, 'outcome reporting requires no model request');
+});
+
+test('overlapping voice submission and watch keep both completion chats but speak each turn once', async t => {
+  const f = await fixture(t);
+  f.sessions[0].observation = 'observed';
+  const submissionPlan = f.plan;
+  const first = await f.app.send({ text: 'Review A', targetId: 'a', origin: 'voice' });
+  f.plan = () => ({ goal: 'Watch A', executionMode: 'direct', actions: [{ kind: 'watch_terminal', targetIds: ['a'] }] });
+  const watcher = await f.app.send({ text: 'Tell me when A finishes', targetId: 'a', origin: 'voice' });
+  assert.equal(watcher.ok, true, JSON.stringify(watcher));
+  assert.equal(f.effects.length, 1, 'watching does not dispatch another prompt');
+  await f.finish('a');
+  for (const request of [first, watcher]) {
+    const reports = f.reports(request.requestId).filter(report => report.status === 'completed');
+    assert.equal(reports.length, 1);
+    assert.match(reports[0].text, /requested outcome is not independently verified/);
+  }
+  assert.equal(f.speech.filter(event => event.kind === 'task-report').length, 1);
+  await f.app.refresh(); await tick();
+  assert.equal(f.speech.filter(event => event.kind === 'task-report').length, 1);
+
+  f.plan = submissionPlan;
+  const next = await f.app.send({ text: 'Review A again', targetId: 'a', origin: 'voice' });
+  await f.finish('a');
+  const spoken = f.speech.filter(event => event.kind === 'task-report');
+  assert.equal(spoken.length, 2);
+  assert.equal(spoken[1].requestId, next.requestId);
+});
+
+test('text completion does not consume the automatic voice report for a matching watch', async t => {
+  const f = await fixture(t);
+  f.sessions[0].observation = 'observed';
+  const first = await f.app.send({ text: 'Review A', targetId: 'a', origin: 'text' });
+  f.plan = () => ({ goal: 'Watch A', executionMode: 'direct', actions: [{ kind: 'watch_terminal', targetIds: ['a'] }] });
+  const watcher = await f.app.send({ text: 'Tell me when A finishes', targetId: 'a', origin: 'voice' });
+  assert.equal(watcher.ok, true, JSON.stringify(watcher));
+  await f.finish('a');
+  assert.equal(f.reports(first.requestId).filter(report => report.status === 'completed').length, 1);
+  assert.equal(f.reports(watcher.requestId).filter(report => report.status === 'completed').length, 1);
+  const spoken = f.speech.filter(event => event.kind === 'task-report');
+  assert.equal(spoken.length, 1);
+  assert.equal(spoken[0].requestId, watcher.requestId);
+});
+
+test('overlapping voice requests retain result detail chats but speak matching result evidence once', async t => {
+  const f = await fixture(t);
+  f.sessions[0].observation = 'observed';
+  const first = await f.app.send({ text: 'Review A', targetId: 'a', origin: 'voice' });
+  f.plan = () => ({ goal: 'Watch A', executionMode: 'direct', actions: [{ kind: 'watch_terminal', targetIds: ['a'] }] });
+  const watcher = await f.app.send({ text: 'Tell me what A did', targetId: 'a', origin: 'voice' });
+  assert.equal(watcher.ok, true, JSON.stringify(watcher));
+  f.respond = () => reply('The agent reported correcting validation and passing twelve tests.');
+  const session = f.sessions[0];
+  Object.assign(session, { turnState: 'completed', completedTurnId: session.turnId, completedActionId: session.actionId, turnEndedAt: Date.now() });
+  f.app.observeWork([session], { turnId: session.turnId, status: 'completed', at: session.turnEndedAt, source: 'chat-events', text: 'Corrected validation. Twelve tests passed.' });
+  const resultDetails = () => f.app.getState().messages.filter(message => message.origin === 'task-detail' && /correcting validation/.test(message.text));
+  await until(() => resultDetails().length === 2);
+  await tick();
+  assert.deepEqual(new Set(resultDetails().map(message => message.requestId)), new Set([first.requestId, watcher.requestId]));
+  assert.equal(f.speech.filter(event => event.kind === 'task-result').length, 1);
+  assert.equal(f.speech.filter(event => event.kind === 'task-report').length, 1);
 });
 
 test('one target failure is reported immediately while its sibling is still running', async t => {

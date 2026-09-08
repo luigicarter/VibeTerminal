@@ -72,10 +72,21 @@ export function dashboardSessionTitle(session: RelaySession): string {
   return session.conversationTitle?.trim() || session.name.trim() || session.threadRef?.title?.trim() || session.projectName?.trim() || session.cwd.split(/[\\/]/).filter(Boolean).pop() || "Untitled session";
 }
 
+/** Project identity comes from workspace metadata, never a provider or conversation title. */
+export function dashboardProjectName(session: RelaySession): string {
+  const projectName = session.projectName?.trim();
+  if (projectName) return projectName;
+  const cwd = session.cwd.trim();
+  if (!cwd || cwd === "." || cwd === "..") return "Unknown project";
+  // Preserve roots (C:\\ or /) instead of displaying a blank or misleading label.
+  if (/^[a-z]:[\\/]*$/i.test(cwd) || /^[\\/]+$/.test(cwd)) return cwd;
+  return cwd.split(/[\\/]/).filter(Boolean).pop() || "Unknown project";
+}
+
 export function dashboardProvider(session: RelaySession): string {
   if (session.openFusion) return "Open Fusion";
   if (session.fusion) return "Fusion";
-  const labels: Record<string, string> = { terminal: "Shell", codex: "Codex", claude: "Claude", cursor: "Cursor", gemini: "Gemini", opencode: "OpenCode", kimi: "Kimi", "kimi-custom": "Kimi Custom", qwen: "Qwen", fusion: "Fusion", openfusion: "Open Fusion", "claude-custom": "Open Claude Code" };
+  const labels: Record<string, string> = { terminal: "Shell", codex: "Codex", claude: "Claude", cursor: "Cursor", gemini: "Gemini", opencode: "OpenCode", kimi: "Kimi", "kimi-custom": "Kimi Custom", qwen: "Qwen", grok: "Grok Build", fusion: "Fusion", openfusion: "Open Fusion", "claude-custom": "Open Claude Code" };
   return labels[session.kind] || session.kind || "Agent";
 }
 

@@ -8,7 +8,6 @@ const initial: VoiceState = { phase: 'off', muted: true, listening: false, ready
 // Main-window controls only. Capture and playback belong to the hidden audio renderer.
 export default function VoiceIndicator() {
   const api = (window.vibe as unknown as { voice?: VoiceApi }).voice;
-  const orchestrator = (window.vibe as unknown as { orchestrator: { cancel(): Promise<unknown> } }).orchestrator;
   const [state, setState] = useState<VoiceState>(initial), [localError, setLocalError] = useState(''), [hidden, setHidden] = useState(document.hidden);
   const actionScope = useRef({ phase: initial.phase, recordingId: initial.recordingId, recordingSource: initial.recordingSource, revision: 0 });
   useEffect(() => {
@@ -38,6 +37,8 @@ export default function VoiceIndicator() {
     state.handsFreeStatus === 'recovering' && ['listening', 'awaiting-answer'].includes(state.phase) ? 'Restarting hands-free voice… hold Space to talk' :
     error || (state.finishHint ? 'Still listening… click Send when finished' :
     automatic ? 'Listening… speak naturally, or click Send' :
+    state.phase === 'speaking' && state.wakeInterruptReady ? 'Speaking · say Hey Vibe or hold Space to interrupt' :
+    state.phase === 'speaking' ? 'Speaking · hold Space to interrupt' :
     state.phase === 'awaiting-answer' && state.handsFreeStatus === 'ready' ? 'Listening for your answer · say “never mind” to dismiss' :
     state.phase === 'awaiting-answer' && state.handsFreeStatus === 'loading' ? 'Getting ready to listen… or hold Space to answer' :
     state.phase === 'awaiting-answer' && state.handsFreeStatus === 'unavailable' ? 'Automatic listening unavailable · hold Space to answer' :
@@ -75,13 +76,13 @@ export default function VoiceIndicator() {
     pointerHeld.current = true;
     if (!api || !hold) return;
     if (automatic) { pointerRecording.current = automaticIdentity(); return; }
-    if (working) return act(async () => { await orchestrator.cancel(); return api.cancelSpeech(); });
+    if (working) return act(() => api.cancelSpeech());
     await act(async () => {
       if (!state.listening) { const result = await api.setListening(true); if (!result.ok) return result; }
       if (pointerHeld.current) hold.start();
     });
   }
-  const action = working ? 'Stop current request' : automatic ? 'Send recording' : state.listening ? 'Hold to talk' : 'Enable microphone and hold to talk';
+  const action = working ? 'Stop current voice turn' : automatic ? 'Send recording' : state.listening ? 'Hold to talk' : 'Enable microphone and hold to talk';
   if (!api || !state.indicatorVisible) return null;
   return <div className={`voice-indicator voice-${visual}${hidden ? ' voice-hidden' : ''}`} onContextMenu={event => { event.preventDefault(); void act(() => api.configure({ menu: true })); }}>
     <button className="voice-mic" aria-label={`${status}. ${action}`} title={`${status}\n${action} · Right-click for options`} onPointerDown={event => { if (event.button !== 0) return; event.preventDefault(); void press(); }} onPointerUp={event => { if (event.button === 0) releasePointer(true); }} onPointerLeave={() => releasePointer()} onPointerCancel={() => releasePointer()} onKeyDown={event => { if (event.key === ' ') event.preventDefault(); if (event.key === 'Enter' && automatic && !event.repeat) sendAutomatic(automaticIdentity()); }}>{automatic ? <Send size={26} strokeWidth={1.7}/> : busy || state.listening ? <Mic size={29} strokeWidth={1.7}/> : <MicOff size={27} strokeWidth={1.7}/>}</button>

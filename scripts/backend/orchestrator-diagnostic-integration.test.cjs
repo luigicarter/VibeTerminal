@@ -47,7 +47,8 @@ test('unbound selection rejection keeps private diagnostics and a bounded later 
   await f.instance.send({ text: 'Bye. Can you prompt one of them to do a review? on the last changes.', origin: 'text' });
   f.responses.push(tool({ kind: 'send_prompt', targetId: 'vyp-1', text: 'PRIVATE_PROMPT_SENTINEL' }), reply('I could not send that request.'));
   const failed = await f.instance.send({ text: "They're empty right now, so just pick a random one.", origin: 'text' });
-  assert.equal(failed.ok, false); assert.equal(failed.text, 'I could not send that request.'); assert.equal(f.actions.length, 0);
+  assert.equal(failed.ok, false); assert.equal(failed.text, "I couldn't complete the request for Codex 1."); assert.equal(f.actions.length, 0);
+  assert.doesNotMatch(failed.text, /grant|PRIVATE_PROMPT_SENTINEL/);
   const [entry] = await f.read();
   assert.equal(entry.error.message, 'This effect needs one matching user command grant.');
   assert.equal(entry.event, 'action_error'); assert.equal(entry.actionKind, 'send_prompt'); assert.equal(entry.targetId, 'vyp-1'); assert.equal(entry.generation, 3);
@@ -120,11 +121,13 @@ test('voice diagnostics reach the same private file without entering relay messa
 });
 
 test('spoken replies carry the same diagnostic request ID as the failed action', async t => {
-  let spoken;
-  const f = fixture(t, { onSpeak: async event => { spoken = event; return { ok: true }; } }); await f.ready();
+  const spoken = [];
+  const f = fixture(t, { onSpeak: async event => { spoken.push(event); return { ok: true }; } }); await f.ready();
   f.responses.push(tool({ kind: 'send_prompt', targetId: 'vyp-1' }), reply('Unable to send.'));
-  await f.instance.send({ text: 'pick a random one', origin: 'voice' });
-  const [entry] = await f.read(); assert.equal(spoken.requestId, entry.requestId); assert.equal(spoken.text, 'Unable to send.');
+  const result = await f.instance.send({ text: 'pick a random one', origin: 'voice' });
+  const [entry] = await f.read(); assert.equal(spoken.length, 1); assert.equal(spoken[0].requestId, entry.requestId);
+  assert.equal(spoken[0].text, result.text); assert.equal(result.text, "I couldn't complete the request for Codex 1.");
+  assert.equal(f.actions.length, 0);
 });
 
 test('cancelled requests stay out of error logs and an unwritable log cannot prevent a response', async t => {
@@ -136,6 +139,8 @@ test('cancelled requests stay out of error logs and an unwritable log cannot pre
   fs.rmSync(path.join(f.root, 'logs'), { recursive: true, force: true });
   fs.writeFileSync(path.join(f.root, 'logs'), 'This fixture prevents directory creation.');
   f.responses.push(tool({ kind: 'send_prompt', targetId: 'vyp-1' }), reply('Unable to send.'));
-  assert.equal((await f.instance.send({ text: 'pick a random one', origin: 'text' })).text, 'Unable to send.');
+  const result = await f.instance.send({ text: 'pick a random one', origin: 'text' });
+  assert.equal(result.ok, false); assert.equal(result.text, "I couldn't complete the request for Codex 1.");
+  assert.equal(f.actions.length, 0);
   await assert.doesNotReject(f.instance.flushDiagnostics()); assert.equal(fs.existsSync(f.filename), false);
 });

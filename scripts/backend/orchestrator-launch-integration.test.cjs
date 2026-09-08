@@ -3,6 +3,8 @@ const test = require("node:test"), assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
 const { installOrchestrator } = require("../../backend/orchestratorIntegration.cjs");
+const { createOrchestrator } = require("../../backend/orchestrator.cjs");
+const shellTitle = String.raw`C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe`;
 
 async function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "vibe-launch-integration-"));
@@ -18,7 +20,8 @@ async function fixture(t) {
     let result;
     if (action.kind === "inventory") result = { ok: true, sessions, projectPaths: [root] };
     else if (action.kind === "create_session") {
-      sessions.push({ id: "pane", launchToken: 1, started: true, kind: "terminal", cwd: root });
+      // Renderer inventory uses the OSC display title as the session name.
+      sessions.push({ id: "pane", launchToken: 1, started: true, kind: "terminal", name: shellTitle, cwd: root });
       result = { ok: true, id: "pane", launchToken: 1, status: "starting" }; created();
     } else throw Error(`Unexpected UI action ${action.kind}`);
     queueMicrotask(() => ipc.emit("orchestrator:ui-result", { sender: main.webContents }, { id: action.id, result }));
@@ -32,7 +35,7 @@ async function fixture(t) {
     assert(path.resolve(root).startsWith(path.join(os.tmpdir(), "vibe-launch-integration-")));
     fs.rmSync(root, { recursive: true, force: true });
   });
-  return { integration, admitted, snapshots, uiActions,
+  return { root, integration, admitted, snapshots, uiActions,
     create: () => ipc.handlers.get("orchestrator:dispatch")({ sender: main.webContents }, { kind: "create_session", kindOfSession: "terminal", cwd: root }),
     runtime: { id: "pane", generation: "actual-generation", launchToken: 1, provider: "terminal", cwd: root, turnState: "idle", revision: 1 } };
 }
@@ -50,7 +53,51 @@ test("public creation waits for both process and launcher, never acknowledging a
   const result = await pending;
   assert.equal(result.ok, true); assert.equal(result.processState, "running");
   assert.equal(result.target.generation, f.runtime.generation);
+  assert.equal(result.cwd, f.root, "the launch receipt reports the workspace, not the shell title");
   assert.equal(f.uiActions.filter(kind => kind === "create_session").length, 1);
+});
+
+for (const executionMode of ["direct", "reason"]) test(`${executionMode} harness creation reports the confirmed workspace despite PowerShell title`, async t => {
+  const f = await fixture(t), requests = [];
+  let creating = true;
+  const relay = createOrchestrator({ userDataPath: path.join(f.root, "relay"), secureStorage: { isEncryptionAvailable: () => false },
+    getSessions: () => f.integration.directory.list(), getRoots: () => ({ documents: f.root, projects: [f.root] }),
+    interpretIntent: async () => creating
+      ? { goal: "Open a terminal in the project.", executionMode, actions: [{ kind: "create_session", kindOfSession: "terminal", cwd: f.root }] }
+      : { goal: "Report where the terminal was opened.", actions: [] },
+    dispatchAction: async action => { assert.equal(action.kind, "create_session"); assert.equal(action.cwd, f.root); return f.create(); },
+    fetch: async (url, options) => {
+      const respond = message => new Response(JSON.stringify({ choices: [{ finish_reason: message.tool_calls ? "tool_calls" : "stop", message }] }));
+      if (url.endsWith("/key")) return new Response(JSON.stringify({ data: {} }));
+      if (url.endsWith("/models")) return new Response(JSON.stringify({ data: [{ id: "fixture", context_length: 128000, supported_parameters: ["tools"] }] }));
+      assert(url.endsWith("/chat/completions"));
+      const body = JSON.parse(options.body); requests.push(body);
+      const context = JSON.parse(body.messages.find(message => message.role === "user").content);
+      const receipt = body.messages.filter(message => message.role === "tool").map(message => JSON.parse(message.content)).at(-1);
+      if (creating && !receipt) return respond({ tool_calls: [{ id: "create", type: "function", function: { name: "workspace", arguments: JSON.stringify({ kind: "create_session", grantId: context.authorizedCommands.grants[0].id }) } }] });
+      const evidence = creating ? receipt : context.latestAction;
+      assert.equal(evidence.cwd, f.root, "both the creation tool and follow-up context retain the observed cwd");
+      return respond({ content: creating ? `Opened ${shellTitle} in ${evidence.cwd}.` : `Opened the terminal in ${evidence.cwd}.` });
+    } });
+  t.after(() => relay.dispose());
+  assert.equal((await relay.configure({ apiKey: "fixture-only", model: "fixture", sessionOnly: true })).ok, true);
+  assert.equal((await relay.setEnabled(true)).ok, true);
+  const pending = relay.send({ text: "Open a terminal in the project", origin: "text" });
+  await f.admitted;
+  f.snapshots.push({ ...f.runtime, terminalTitle: shellTitle, processState: "running", launchState: "ready" });
+  const result = await pending;
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.text, `Opened the terminal in ${path.basename(f.root)}.`);
+  assert.doesNotMatch(result.text, /powershell\.exe|System32|[a-z]:[\\/]/i);
+  assert.equal(result.actions[0].cwd, f.root);
+  assert.equal(requests.length, executionMode === "direct" ? 0 : 2);
+  assert.equal(relay.getState().receipts.find(item => item.kind === "create_session").cwd, f.root);
+  creating = false;
+  const followup = await relay.send({ text: "Where did you open it?", origin: "text" });
+  assert.equal(followup.ok, true, JSON.stringify(followup));
+  assert.equal(followup.text, `Opened the terminal in ${f.root}.`);
+  assert.equal(f.uiActions.filter(kind => kind === "create_session").length, 1);
+  await relay.dispose();
 });
 
 test("public creation reports launch failure while retaining the created pane identity", async t => {

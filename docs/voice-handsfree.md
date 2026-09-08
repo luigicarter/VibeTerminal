@@ -5,11 +5,14 @@ It defaults off. Space push-to-talk remains available with its existing terminal
 and text-field guards. There is no enrollment, training, or additional account.
 Transcription and spoken replies still use the existing OpenRouter configuration.
 
-Wake detection runs while idle, including when the workspace is in the background.
-It pauses during recording, transcription, assistant work, and playback. Space can
-interrupt playback. When a spoken question finishes, voice listens for the answer
+Wake detection runs while idle and while preparing or playing a spoken reply,
+including when the workspace is in the background. Say **Hey Vibe** to stop the
+reply and give your next command. This also discards queued speech from before
+the interruption, without cancelling terminal work. Detection pauses during
+recording, transcription, and assistant work. Space also interrupts playback.
+When a spoken question finishes, voice listens for the answer
 automatically and retains the question's request or pane/generation/revision identity.
-Holding Space while a question is still being generated or spoken also retains
+Saying Hey Vibe or holding Space while a question is being generated or spoken retains
 that answer route, including earlier answers on a multi-question form. A short
 tap returns to its answer window; replaced questions cannot receive stale answers.
 The model explicitly marks whether its response needs a reply; punctuation does not
@@ -67,6 +70,13 @@ The single audio renderer sends 16 kHz mono PCM in 20 ms packets carrying a capt
 token and sample position. A worklet flush/acknowledgment includes the final partial
 packet before a manual release can submit. Old capture frames, duplicate packets,
 and obsolete flush acknowledgments are rejected.
+
+During playback, the microphone keeps its existing echo cancellation, noise
+suppression, and automatic gain control. A current keyword detection interrupts
+speech; ordinary speech activity alone does not. The two-second capture buffer
+preserves the wake phrase and command onset across cancellation. Stale detector,
+speech-provider, and playback callbacks cannot replace the new recording.
+Speaker echo and real-room recognition still require physical microphone checks.
 
 The controller owns recording and dispatch. Wake, answer, and manual recordings have
 separate ownership. A hold adopts an automatic recording; a short tap restores it
@@ -145,6 +155,9 @@ that started, or a provider/interpretation failure after capture.
 - `npm run smoke:voice:workflow` (after `npm run smoke:voice:native` creates
   fixtures): real helpers plus controller with a two-second wake-to-command gap,
   a mid-command pause, and a wake-only attempt.
+- `node scripts/qa/voice-wake-interruption-smoke.cjs`: real local models recognize
+  a synthetic wake during speech preparation and streaming, cancel old speech,
+  and capture/dispatch the subsequent command through mocked cloud endpoints.
 
 Synthetic fixtures do not establish physical-microphone accuracy or minimum CPU
 requirements. Model files are much smaller than the helpers' total runtime memory.

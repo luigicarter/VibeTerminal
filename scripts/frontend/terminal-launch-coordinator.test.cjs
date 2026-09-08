@@ -24,14 +24,15 @@ const session = (id, patch = {}) => ({
   id, name: id, kind: "terminal", command: "echo launched", cwd: "C:/repo",
   started: true, launchToken: 1, nextLaunchMode: "new", ...patch
 });
-function harness(create) {
+function harness(create, options = {}) {
   let sessions = [];
   const calls = [], errors = [];
   const coordinator = createTerminalLaunchCoordinator({
     platform: "win32",
     create: payload => { calls.push(payload); return create ? create(payload) : Promise.resolve({ ok: true }); },
     isCurrent: candidate => sessions.some(current => current.id === candidate.id && current.started && current.launchToken === candidate.launchToken),
-    onError: (candidate, message) => errors.push({ id: candidate.id, message })
+    onError: (candidate, message) => errors.push({ id: candidate.id, message }),
+    ...options
   });
   return { coordinator, calls, errors, reconcile(next) { sessions = next; coordinator.reconcile(next); } };
 }
@@ -124,4 +125,117 @@ test("IPC rejection is handled and cancelled backend launches stay silent", asyn
   cancelled.reconcile([session("cancelled")]);
   await flush();
   assert.deepEqual(cancelled.errors, []);
+});
+
+const resumedSession = (kind, patch = {}) => session(kind, {
+  kind, command: kind === "cursor" ? "cursor-agent" : kind,
+  nextLaunchMode: "resume", threadRef: { provider: kind, id: `${kind}-saved`, createdAt: 1, updatedAt: 1 },
+  ...patch
+});
+
+test("confirmation preserves exact saved IDs for every threaded provider", async () => {
+  const lookups = [];
+  const h = harness(undefined, { confirmThread: async payload => {
+    lookups.push(payload);
+    return { status: "found", threadRef: { provider: payload.provider, id: payload.confirmId } };
+  } });
+  const commands = {
+    codex: "codex resume codex-saved", claude: "claude --resume claude-saved",
+    opencode: "opencode --session opencode-saved --auto", cursor: "cursor-agent --resume cursor-saved",
+    gemini: "gemini --resume gemini-saved", kimi: "kimi --session kimi-saved",
+    "kimi-custom": "kimi-custom --session kimi-custom-saved", qwen: "qwen --resume qwen-saved",
+    grok: "grok --resume grok-saved"
+  };
+  const providers = Object.entries(require("../../shared/providerCapabilities.json"))
+    .filter(([, capability]) => capability.threaded).map(([kind]) => kind);
+  assert.deepEqual(Object.keys(commands).sort(), providers.sort(), "every threaded provider needs an exact resume expectation");
+  h.reconcile(Object.keys(commands).map(kind => resumedSession(kind,
+    kind === "claude" ? { providerProfileId: "custom-profile" } : {})));
+  await flush();
+  assert.deepEqual(h.calls.map(call => call.command), Object.values(commands));
+  assert.equal(lookups.length, providers.length);
+  for (const lookup of lookups) {
+    assert.equal(lookup.confirmId, `${lookup.provider}-saved`);
+    assert.equal(lookup.cwd, "C:/repo");
+    assert.equal(lookup.claudeHome, lookup.provider === "claude" ? "custom" : undefined);
+  }
+});
+
+test("missing sessions start fresh and notify persistence without retaining non-Claude identity", async () => {
+  const fallbacks = [];
+  const h = harness(undefined, {
+    confirmThread: async () => ({ status: "missing" }),
+    onFreshLaunchFallback: (original, fresh) => fallbacks.push({ original, fresh })
+  });
+  const kinds = ["claude", "codex", "opencode", "cursor", "gemini", "kimi", "kimi-custom", "qwen", "grok"];
+  h.reconcile(kinds.map(kind => resumedSession(kind)));
+  await flush();
+  assert.equal(fallbacks.length, kinds.length);
+  assert.equal(h.calls[0].command, "claude --session-id claude-saved");
+  assert.equal(h.calls[0].threadRef.id, "claude-saved");
+  for (let index = 0; index < kinds.length; index++) {
+    assert.equal(fallbacks[index].fresh.nextLaunchMode, "new");
+    assert.equal(fallbacks[index].original.nextLaunchMode, "resume");
+    assert.equal(fallbacks[index].fresh.threadLookupStatus, "pending");
+    if (index) {
+      assert.equal(h.calls[index].threadRef, undefined);
+      assert(!h.calls[index].command.includes("-saved"));
+      assert.equal(fallbacks[index].fresh.threadRef, undefined);
+    }
+  }
+});
+
+test("uncertain or unavailable confirmation still attempts the saved conversation", async () => {
+  for (const status of ["failed", "pending", "ambiguous", "throw"]) {
+    const h = harness(undefined, {
+      confirmThread: async () => { if (status === "throw") throw new Error("offline"); return { status }; },
+      onFreshLaunchFallback: () => assert.fail("Uncertain lookup must not discard history")
+    });
+    h.reconcile([resumedSession("codex")]);
+    await flush();
+    assert.equal(h.calls[0].command, "codex resume codex-saved");
+    assert.equal(h.calls[0].threadRef.id, "codex-saved");
+  }
+});
+
+test("close, restart, pause and unmount cancel in-flight confirmation before state changes or create", async () => {
+  for (const action of ["close", "restart", "pause", "unmount"]) {
+    const pending = [], fallbacks = [];
+    const h = harness(undefined, {
+      confirmThread: () => new Promise(resolve => pending.push(resolve)),
+      onFreshLaunchFallback: (...args) => fallbacks.push(args)
+    });
+    const original = resumedSession("codex");
+    h.reconcile([original]);
+    await flush();
+    if (action === "close") h.reconcile([]);
+    if (action === "restart") h.reconcile([{ ...original, launchToken: 2 }]);
+    if (action === "pause") h.reconcile([{ ...original, started: false }]);
+    if (action === "unmount") h.coordinator.suspend();
+    await flush();
+    pending[0]({ status: "missing" });
+    await flush();
+    assert.deepEqual(h.calls, []);
+    assert.deepEqual(fallbacks, []);
+    if (action === "restart") {
+      pending[1]({ status: "found", threadRef: original.threadRef });
+      await flush();
+      assert.equal(h.calls.length, 1);
+      assert.equal(h.calls[0].launchToken, 2);
+    }
+  }
+});
+
+test("fresh launches skip confirmation and cancellation in fallback prevents process creation", async () => {
+  const fresh = harness(undefined, { confirmThread: () => assert.fail("Fresh launch needs no lookup") });
+  fresh.reconcile([session("shell"), resumedSession("claude", { nextLaunchMode: "new" })]);
+  await flush();
+  assert.equal(fresh.calls.length, 2);
+  const cancelled = harness(undefined, {
+    confirmThread: async () => ({ status: "missing" }),
+    onFreshLaunchFallback: original => cancelled.coordinator.cancel(original.id, original.launchToken)
+  });
+  cancelled.reconcile([resumedSession("codex")]);
+  await flush();
+  assert.deepEqual(cancelled.calls, []);
 });

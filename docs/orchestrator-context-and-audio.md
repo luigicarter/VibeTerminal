@@ -1,9 +1,24 @@
 # Progressive context and local error audio
 
-Speech uses the assistant's response text, with Markdown converted to spoken
-prose. UI task labels and request excerpts are never prepended to speech, even
+Ordinary spoken replies and agent result reports use a separate, natural TL;DR.
+The model chooses the detail needed to explain the outcome, checks, and blockers;
+there are no fixed sentence, word, or character caps on the spoken summary.
+Full written replies remain in the conversation. The normal voice response
+includes both written text and `speechText` in the same model call. If the model
+omits the spoken summary, one tool-free summary attempt supplies it. App-generated
+status replies and automatic result summaries reuse their existing text without
+another model call. Empty or failed summaries produce a brief unavailable-summary
+message; raw result excerpts remain available only in writing.
+Clarification and permission questions retain their wording and answer identity.
+Markdown is converted to spoken prose. UI task labels and request excerpts are
+never prepended to speech, even
 when other requests are paused or awaiting answers. Responses can name a terminal
 or project explicitly when the listener needs that context.
+
+With hands-free voice enabled and its detector ready, **Hey Vibe** interrupts
+speech preparation or playback and starts capture for the next command. It
+cancels obsolete queued speech, preserves a current question's answer route,
+and does not cancel terminal work. Space remains available for interruption.
 
 The model budget limits a copy of the material sent to the LLM. It does not
 rewrite native conversations, shorten loaded History UI pages, or reduce the
@@ -119,6 +134,23 @@ monitoring until successful explicit validation; other failures back off. Model
 configuration, speech, and microphone readiness are separate checks.
 
 ## Verification
+
+The initial spoken-summary and wake-interruption change passed 977 backend/Orchestrator/
+voice tests, the renderer build, frontend voice smoke, capture checks and PCM
+player tests. Parent review inspected the code, assertions, and native-model
+report at `.tmp/voice-wake-interruption/1788832362775-53756/report.json`.
+Both speech preparation and streaming cases recognized the synthetic wake,
+cancelled speech on that detection, and captured one subsequent command.
+Cloud endpoints and playback were mocked; physical microphone, loudspeaker echo,
+and live-provider behavior were not tested. These changes are in source and the
+local build; this work did not update the installed release.
+
+The follow-up removing prose-length caps passed 1,090 backend/Orchestrator/voice
+tests. It verifies model-chosen summaries beyond the former limits, intact TTS
+input beyond 4,000 characters, same-response summaries without an extra model
+call, and current delivery evidence replacing an unsupported spoken claim.
+The final log is `.tmp/voice-summary-no-cap/1788834202388/backend-tests-final.log`.
+Wake interruption and request cancellation regressions remain included.
 
 `npm run bench:orchestrator:latency -- --baseline <snapshot-root> --delay-ms 50`
 compares an optional source snapshot with the current code using scripted

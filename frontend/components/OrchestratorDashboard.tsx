@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Sparkles } from "lucide-react";
 import type { RelaySession } from "../orchestratorUi";
-import { DASHBOARD_STATUS_LABELS, dashboardLayout, dashboardProvider, dashboardRecency, dashboardScale, dashboardSessionOrder, dashboardSessionTitle, dashboardSessionVisible, dashboardStatus, dashboardTargeted, type DashboardStatus, type DashboardTarget } from "./orchestratorDashboardLayout";
+import { DASHBOARD_STATUS_LABELS, dashboardLayout, dashboardProjectName, dashboardProvider, dashboardRecency, dashboardScale, dashboardSessionOrder, dashboardSessionTitle, dashboardSessionVisible, dashboardStatus, dashboardTargeted, type DashboardStatus, type DashboardTarget } from "./orchestratorDashboardLayout";
 import { createBubbleMotion, stepBubbleMotion, type BubbleMotion } from "./orchestratorBubbleMotion";
 import "./orchestratorDashboard.css";
 import { OrchestratorWorkHistory } from "./OrchestratorWorkHistory";
@@ -133,15 +133,17 @@ export function OrchestratorDashboard({ sessions, workHistory = [], activeTarget
             const active = dashboardTargeted(session, targets);
             const status = dashboardStatus(session);
             const title = dashboardSessionTitle(session);
+            const project = dashboardProjectName(session);
+            const identity = [project, title !== project ? title : "", session.cwd.trim()].filter(Boolean).join("\n");
             const provider = dashboardProvider(session);
             const scale = dashboardScale(active, targetedCount > 0, session.id);
             const label = DASHBOARD_STATUS_LABELS[status];
             const recency = dashboardRecency(session, renderedAt, active);
             return <div key={session.id} className="orchestrator-dashboard-cell" data-dashboard-session-id={session.id} data-generation={session.generation} data-status={status} data-targeted={active} data-bubble-scale={scale} data-recent={recency.recent} style={{ "--recency-opacity": recency.opacity } as CSSProperties}>
               <div className="orchestrator-dashboard-drift">
-              <button type="button" className="orchestrator-dashboard-bubble" onClick={() => onOpenSession(session.id)} aria-label={`Open ${title}, ${provider}, ${label}${active ? ", Vibe handling" : ""}${recency.recent ? ", Recently used" : ""}`} title={`${title}\n${provider} · ${label}\n${session.cwd}${recency.recent ? "\nRecently used" : ""}${session.statusLabel ? `\n${session.statusLabel}` : ""}`} style={{ "--bubble-scale": scale, "--label-width": `${Math.max(116, layout.diameter * scale * 0.73)}px` } as CSSProperties}>
+              <button type="button" className="orchestrator-dashboard-bubble" onClick={() => onOpenSession(session.id)} aria-label={`Open ${identity.replace(/\n/g, ", ")}, ${provider}, ${label}${active ? ", Vibe handling" : ""}${recency.recent ? ", Recently used" : ""}`} title={`${identity}\n${provider} · ${label}${recency.recent ? "\nRecently used" : ""}${session.statusLabel ? `\n${session.statusLabel}` : ""}`} style={{ "--bubble-scale": scale, "--label-width": `${Math.max(116, layout.diameter * scale * 0.73)}px` } as CSSProperties}>
                 <span className="orchestrator-dashboard-sphere" aria-hidden="true"><span className="orchestrator-dashboard-sphere-surface"><span className="orchestrator-dashboard-glass" /><span className="orchestrator-dashboard-rim" /><span className="orchestrator-dashboard-halo" /></span></span>
-                <span className="orchestrator-dashboard-label"><strong>{title}</strong><span className="orchestrator-dashboard-provider">{provider}</span><span className="orchestrator-dashboard-status"><i />{label}</span></span>
+                <span className="orchestrator-dashboard-label"><strong>{project}</strong><span className="orchestrator-dashboard-provider">{provider}</span><span className="orchestrator-dashboard-status"><i />{label}</span></span>
               </button>
               <span className="orchestrator-dashboard-target" aria-hidden="true"><Sparkles size={13} />Vibe here</span>
               </div>

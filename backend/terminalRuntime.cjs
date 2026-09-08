@@ -15,6 +15,10 @@ function timestamp(value, fallback) {
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
+function isQuestionTool(provider, name) {
+  return provider === "claude" ? name === "AskUserQuestion" :
+    provider === "grok" && ["ask_user_question", "AskUserQuestion"].includes(name);
+}
 
 // Owns observations independently of mounted renderer panes. No inference from
 // terminal output, keystrokes, elapsed silence, or a clean shell/CLI exit.
@@ -24,9 +28,14 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
   const metadataReads = new Map();
 
   function publish(record) {
+    if (record.rootIdentityConflict) {
+      record.snapshot.binding = { status: "ambiguous", message: "Another native root conversation was observed. Restart this pane to verify the current conversation." };
+      record.snapshot.observation = "unavailable";
+    }
     record.snapshot.revision += 1;
     record.snapshot.updatedAt = now();
-    record.snapshot.childActivity = record.snapshot.children.length > 0 || record.coarseDepth > 0 || record.coarseBackground;
+    record.snapshot.coarseChildObservation = record.coarseDepth > 0 ? "observed" : record.coarseProvisional ? "provisional" : undefined;
+    record.snapshot.childActivity = record.snapshot.children.length > 0 || record.coarseDepth > 0 || record.coarseProvisional || record.coarseBackground;
     const snapshot = structuredClone(record.snapshot);
     emit(snapshot);
     return snapshot;
@@ -53,16 +62,16 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
     const generation = randomUUID();
     const startedAt = now();
     const record = {
-      closed: false, preparing: true, startedAt, lookupInFlight: false, coarseDepth: 0, coarseBackground: false,
+      closed: false, preparing: true, startedAt, lookupInFlight: false, coarseDepth: 0, coarseProvisional: false, coarseBackground: false,
       identityHints: new Map(), pendingEvents: [], retiredTurnIds: new Set(), resolvedQuestionToolIds: new Set(), nextLookupAt: 0, lookupFailures: 0,
-      nativeActive: false, pendingPriorTurnId: undefined,
+      nativeActive: false, pendingPriorTurnId: undefined, settledToolIds: new Set(), childStops: new Map(),
       transcriptPath: undefined, explicitRef: payload.threadRef,
       claudeHome: payload.providerProfileId ? "custom" : undefined,
       snapshot: {
         id: payload.id, generation, launchToken, revision: 0, provider, cwd: payload.cwd,
         processState: "starting", agentProcessState: "unknown", turnState: "unknown",
         observation: "unavailable", telemetryHealth: provider === "terminal" ? "unavailable" : "pending", updatedAt: startedAt,
-        activeTools: [], children: [], childActivity: false,
+        activeTools: [], children: [], childActivity: false, activityObserved: false,
         binding: { status: provider === "terminal" ? "unavailable" : "pending" },
         capabilities: capabilities(provider)
       }
@@ -84,7 +93,7 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
       record.snapshot.id !== exceptId && record.snapshot.provider === provider && record.claudeHome === home && record.snapshot.conversation?.id === id);
   }
   function bind(record, ref, authoritative = false, liveTitle = false) {
-    if (!ref?.id) return false;
+    if (!ref?.id || record.rootIdentityConflict) return false;
     const s = record.snapshot;
     // Root binding is stable. Child metadata and cwd-recency results cannot
     // replace it. A conversation belongs to one open pane in its provider home.
@@ -120,21 +129,104 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
     record.snapshot.pendingInputAt = undefined;
     record.pendingPriorTurnId = undefined;
   }
+  function childId(record, event) {
+    return event.taskId || (event.providerThreadId !== record.snapshot.conversation?.id ? event.providerThreadId : undefined) || event.toolId;
+  }
+  function observeChild(record, event, eventAt) {
+    const id = childId(record, event);
+    if (!id) return undefined;
+    if (event.observedAt && record.childStops.get(id) > event.observedAt) return undefined;
+    let entry = record.snapshot.children.find(item => item.id === id);
+    if (event.observedAt && entry?.observedAt > event.observedAt) return undefined;
+    if (!entry) {
+      entry = { id, label: cleanTitle(event.taskLabel), startedAt: eventAt };
+      record.snapshot.children.push(entry);
+    }
+    entry.observation = "observed";
+    entry.observedAt = eventAt;
+    if (event.providerThreadId && event.providerThreadId !== record.snapshot.conversation?.id) {
+      entry.providerThreadId = event.providerThreadId;
+      if (event.providerTurnId) entry.providerTurnId = event.providerTurnId;
+    }
+    record.snapshot.activityObserved = true;
+    return entry;
+  }
+  function childEndIsStale(record, event, eventAt) {
+    const id = childId(record, event);
+    const entry = record.snapshot.children.find(item => item.id === id);
+    return !id || record.childStops.get(id) > eventAt || entry?.observedAt > eventAt ||
+      Boolean(event.providerThreadId && event.providerThreadId !== record.snapshot.conversation?.id &&
+        event.providerTurnId && entry?.providerTurnId && event.providerTurnId !== entry.providerTurnId);
+  }
+  function provisionalChildResponse(record, event, eventAt) {
+    if (childEndIsStale(record, event, eventAt)) return;
+    const entry = observeChild(record, event, eventAt);
+    if (entry) {
+      // A Stop hook can still be blocked by another hook. Keep unresolved proof
+      // without claiming the child is currently running or awaiting approval.
+      entry.observation = "provisional";
+      entry.attention = undefined;
+    }
+  }
+  function authoritativeChildEnd(record, event) {
+    const entry = record.snapshot.children.find(item => item.id === childId(record, event));
+    return event.provisional !== true && record.snapshot.capabilities?.finalCompletion === "authoritative" &&
+      Boolean(event.providerThreadId && event.providerThreadId !== record.snapshot.conversation?.id && event.providerTurnId) &&
+      (!entry?.providerThreadId || entry.providerThreadId === event.providerThreadId);
+  }
+  function endChild(record, event, eventAt) {
+    const id = childId(record, event);
+    if (childEndIsStale(record, event, eventAt)) return;
+    record.snapshot.children = record.snapshot.children.filter(item => item.id !== id);
+    record.childStops.set(id, eventAt);
+    if (record.childStops.size > 512) record.childStops.delete(record.childStops.keys().next().value);
+  }
+  function staleTurn(record, event) {
+    const s = record.snapshot;
+    return Boolean(event.providerTurnId && (record.retiredTurnIds.has(event.providerTurnId) ||
+      (s.turnId && event.providerTurnId !== s.turnId))) ||
+      Boolean(event.observedAt && ((s.pendingInputAt && event.observedAt < s.pendingInputAt) ||
+        (s.turnStartedAt && event.observedAt < s.turnStartedAt)));
+  }
+  function backgroundUnavailable(record) {
+    if (record.snapshot.backgroundObservation) record.snapshot.backgroundObservation = {
+      ...record.snapshot.backgroundObservation, availability: "unavailable", observedAt: now()
+    };
+  }
   function settleQuestion(record, toolId) {
     record.resolvedQuestionToolIds.add(toolId);
     if (record.resolvedQuestionToolIds.size > 256) record.resolvedQuestionToolIds.delete(record.resolvedQuestionToolIds.values().next().value);
   }
   function clearActiveTools(record) {
-    if (record.snapshot.provider === "claude") {
-      for (const tool of record.snapshot.activeTools) if (tool.name === "AskUserQuestion") settleQuestion(record, tool.id);
-    }
+    for (const tool of record.snapshot.activeTools) record.settledToolIds.add(tool.id);
+    while (record.settledToolIds.size > 512) record.settledToolIds.delete(record.settledToolIds.values().next().value);
+    for (const tool of record.snapshot.activeTools) if (isQuestionTool(record.snapshot.provider, tool.name)) settleQuestion(record, tool.id);
     record.snapshot.activeTools = [];
+  }
+  function invalidateRootObservation(record) {
+    record.rootIdentityConflict = true;
+    const s = record.snapshot;
+    // Parentless metadata proves another root exists, not which root this TUI
+    // selected. Keep the old reference for history, but retire its live proof.
+    clearInput(record);
+    clearActiveTools(record);
+    for (const key of ["turnId", "turnStartedAt", "turnEndedAt", "attention", "lastTool"]) s[key] = undefined;
+    s.turnState = "unknown";
+    s.children = [];
+    s.activityObserved = false;
+    record.nativeActive = false;
+    record.coarseDepth = 0;
+    record.coarseProvisional = false;
+    record.coarseBackground = false;
+    record.transcriptPath = undefined;
+    record.identityHints.clear();
+    record.pendingEvents = [];
   }
   function recordInput(payload) {
     if (!matches(payload)) return null;
     const record = get(payload.id);
     const s = record.snapshot;
-    if (s.provider === "terminal" || s.processState !== "running") return null;
+    if (record.rootIdentityConflict || s.provider === "terminal" || s.processState !== "running") return null;
     const submit = typeof payload.data === "string" && /(?:\r\n|\r|\n)$/.test(payload.data) && !/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/.test(payload.data);
     const interrupt = payload.data === "\x1b" || payload.data === "\x03";
     if (!submit && !(interrupt && record.nativeActive && s.turnState === "running")) return null;
@@ -142,7 +234,7 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
     // follows an explicit interrupt request and begins a new submission intent.
     if (submit && record.nativeActive && s.turnState === "running" && s.pendingInput !== "interrupt") return null;
     const waitingReply = submit && s.turnState === "waiting" &&
-      (s.attention?.reason === "approval" || (s.provider === "claude" && s.attention?.reason === "question"));
+      (s.attention?.reason === "approval" || (["claude", "grok"].includes(s.provider) && s.attention?.reason === "question"));
     const intent = submit ? "submit" : "interrupt";
     if (s.pendingInput === intent) return null;
     record.pendingPriorTurnId = waitingReply ? undefined : s.turnId;
@@ -174,14 +266,23 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
       // provisional Stop must survive the reminder without becoming blocked.
       const question = event.type === "agent-attention" && event.attention?.state === "waiting" && event.attention.reason === "question";
       if (event.notificationType === "idle_prompt" || (question && event.toolName !== "AskUserQuestion")) return null;
-      if (event.toolName === "AskUserQuestion" && event.toolId && !isChild(record, event) &&
-          record.resolvedQuestionToolIds.has(event.toolId) &&
-          (question || (event.type === "agent-activity" && event.phase === "start"))) return null;
     }
+    if (isQuestionTool(s.provider, event.toolName) && event.toolId && !isChild(record, event) &&
+        record.resolvedQuestionToolIds.has(event.toolId) &&
+        ((event.type === "agent-attention" && event.attention?.state === "waiting") ||
+          (event.type === "agent-activity" && event.phase === "start"))) return null;
     const observed = event.type.startsWith("agent-");
     const explicitlyChild = Boolean(event.parentThreadId || event.transcriptKind === "subagent");
     if (observed) {
       s.telemetryHealth = "available";
+      if (!record.rootIdentityConflict && event.rootVerified === true && !explicitlyChild &&
+          event.providerThreadId && s.conversation?.id && event.providerThreadId !== s.conversation.id &&
+          ["agent-session", "agent-running", "agent-attention", "agent-response", "agent-activity"].includes(event.type)) {
+        invalidateRootObservation(record);
+      }
+      // Neither a delayed old-root callback nor fresh metadata proves selection.
+      // Only a new launch generation can restore native conversation authority.
+      if (record.rootIdentityConflict && event.type !== "agent-process") return publish(record);
       if (event.providerThreadId && !s.conversation?.id && !explicitlyChild && event.rootVerified !== false &&
           ["agent-session", "agent-running", "agent-attention", "agent-response", "agent-activity", "agent-subagent"].includes(event.type)) {
         if (event.rootVerified === true) {
@@ -208,8 +309,8 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
     if (event.transcriptPath && !child && event.rootVerified === true &&
         event.providerThreadId === s.conversation?.id) record.transcriptPath = event.transcriptPath;
     const eventAt = event.observedAt || now();
-    const pendingQuestion = s.provider === "claude" && s.turnState === "waiting"
-      ? s.activeTools.find(tool => tool.name === "AskUserQuestion") : undefined;
+    const pendingQuestion = s.turnState === "waiting"
+      ? s.activeTools.find(tool => isQuestionTool(s.provider, tool.name)) : undefined;
     switch (event.type) {
       case "created":
         record.preparing = false;
@@ -257,6 +358,7 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
         break;
       }
       case "agent-session":
+        if (child && event.phase === "end") endChild(record, event, eventAt);
         if (!child && event.title && event.providerThreadId) bind(record,
           { id: event.providerThreadId, title: event.title, titleSource: event.titleSource, updatedAt: eventAt }, true, true);
         if (!child && event.phase === "start" && s.turnState === "unknown") {
@@ -266,11 +368,19 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
         break;
       case "agent-running":
         if (child) {
-          const id = event.taskId || event.providerThreadId;
-          if (id && !s.children.some((entry) => entry.id === id)) s.children.push({ id, label: event.taskLabel, startedAt: eventAt });
+          const entry = observeChild(record, event, eventAt);
+          if (entry && (event.turnStart !== false || !entry.attention?.toolId || event.toolId === entry.attention.toolId)) entry.attention = undefined;
           break;
         }
         if (event.providerTurnId && record.retiredTurnIds.has(event.providerTurnId)) break;
+        if (event.turnStart === false && event.phase === "start" && event.toolId && record.settledToolIds.has(event.toolId)) break;
+        if (event.turnStart === false && event.phase === "stop" && s.turnState === "response" && !record.nativeActive) break;
+        // Hook processes can deliver a start after newer activity or a stop.
+        // A previously unseen turn id is not authority to rewind native time.
+        if (event.observedAt &&
+            ((s.turnStartedAt && event.observedAt < s.turnStartedAt) ||
+              (s.turnEndedAt && event.observedAt < s.turnEndedAt) ||
+              (s.pendingInputAt && event.observedAt < s.pendingInputAt))) break;
         if (event.turnStart === false && s.pendingInput === "submit" && record.pendingPriorTurnId &&
             event.providerTurnId === record.pendingPriorTurnId) break;
         if (event.turnStart === false && event.providerTurnId && s.turnId && event.providerTurnId !== s.turnId) break;
@@ -284,10 +394,11 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
         const newTurn = !s.turnStartedAt ||
           (event.providerTurnId && s.turnId !== event.providerTurnId) ||
           (event.turnStart !== false && pendingQuestion) ||
-          (event.turnStart !== false && ["completed", "failed", "interrupted", "idle"].includes(s.turnState));
+          (event.turnStart !== false && ["completed", "failed", "interrupted", "idle", "response"].includes(s.turnState));
         if (newTurn) {
           if (s.turnId && event.providerTurnId !== s.turnId) record.retiredTurnIds.add(s.turnId);
           clearActiveTools(record);
+          record.settledToolIds.clear();
           s.lastTool = undefined;
           s.attention = undefined;
           s.turnStartedAt = eventAt;
@@ -301,17 +412,34 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
         s.observation = "observed";
         break;
       case "agent-response":
-        if (!child) { clearInput(record); s.turnState = "response"; s.observation = "provisional"; s.turnEndedAt = eventAt; }
+        if (child) { provisionalChildResponse(record, event, eventAt); break; }
+        if (staleTurn(record, event)) break;
+        if (["completed", "failed", "interrupted"].includes(s.turnState)) break;
+        if (s.turnState === "response" && !record.nativeActive) break;
+        clearInput(record);
+        clearActiveTools(record);
+        record.nativeActive = false;
+        s.attention = undefined;
+        s.turnState = "response";
+        s.observation = "provisional";
+        s.turnEndedAt = eventAt;
         break;
       case "agent-attention": {
         if (child) {
-          if (event.attention?.state !== "waiting") {
-            s.children = s.children.filter((entry) => entry.id !== (event.taskId || event.providerThreadId));
+          if (event.attention?.state === "waiting") {
+            const entry = observeChild(record, event, eventAt);
+            if (entry && (!entry.attention || entry.attention.reason !== event.attention.reason)) entry.attention = {
+              id: randomUUID(), state: "waiting", reason: event.attention.reason, toolId: event.toolId, updatedAt: eventAt
+            };
+          } else if (event.attention) {
+            if (authoritativeChildEnd(record, event)) endChild(record, event, eventAt);
+            else provisionalChildResponse(record, event, eventAt);
           }
           break;
         }
         if (!event.attention) break;
         if (event.providerTurnId && record.retiredTurnIds.has(event.providerTurnId)) break;
+        if (event.observedAt && s.turnStartedAt && event.observedAt < s.turnStartedAt) break;
         if (s.pendingInput === "submit" && event.observedAt && event.observedAt < s.pendingInputAt) break;
         if (s.pendingInput === "submit" && record.pendingPriorTurnId && event.providerTurnId === record.pendingPriorTurnId) break;
         if (event.providerTurnId && s.turnId && event.providerTurnId !== s.turnId) {
@@ -336,12 +464,17 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
         if (s.attention && s.attention.state === attention.state &&
             s.attention.reason === attention.reason &&
             (!event.providerTurnId || event.providerTurnId === s.turnId)) break;
+        const provisionalCompletion = attention.state === "completed" &&
+          (s.capabilities?.finalCompletion !== "authoritative" || !event.providerThreadId || !event.providerTurnId);
+        // Duplicate coarse idle/Stop events cannot acknowledge a newer submit.
+        // Wait for fresh activity or identified completion before clearing it.
+        if (provisionalCompletion && s.turnState === "response" && !record.nativeActive) break;
         clearInput(record);
-        if (attention.state === "completed" &&
-            (s.capabilities?.finalCompletion !== "authoritative" || !event.providerThreadId || !event.providerTurnId)) {
+        if (provisionalCompletion) {
           // A coarse Stop can describe a child or an intermediate response, even
           // when it shares the root session id. Never cache it as final work
           // that would become completed merely because child activity closes.
+          record.nativeActive = false;
           s.turnState = "response";
           s.observation = "provisional";
           s.turnEndedAt = eventAt;
@@ -360,6 +493,21 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
         break;
       }
       case "agent-activity": {
+        if (child) {
+          // A tool returning does not mean its agent stopped. Keep the native
+          // child identity through parallel tools, thinking and background work.
+          if (event.phase === "start") observeChild(record, event, eventAt);
+          const entry = s.children.find(item => item.id === childId(record, event));
+          if (entry?.attention && event.phase === "stop" && event.toolId === entry.attention.toolId) entry.attention = undefined;
+          break;
+        }
+        // Tool callbacks are emitted before their running companion. Fence
+        // both paths so a delayed return cannot acknowledge the next prompt.
+        if (event.observedAt && ((s.turnStartedAt && event.observedAt < s.turnStartedAt) ||
+            (s.pendingInputAt && event.observedAt < s.pendingInputAt))) break;
+        if (event.phase === "stop" && !record.nativeActive &&
+            ["response", "completed", "failed", "interrupted"].includes(s.turnState)) break;
+        if (event.toolId && event.phase === "start" && record.settledToolIds.has(event.toolId)) break;
         if (!child && event.providerTurnId && record.retiredTurnIds.has(event.providerTurnId)) break;
         if (!child && event.providerTurnId && s.turnId && event.providerTurnId !== s.turnId) {
           if (event.phase !== "start" || s.pendingInput !== "submit") break;
@@ -369,12 +517,12 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
           s.turnEndedAt = undefined;
           s.attention = undefined;
         }
-        if (!child && s.provider === "claude" && event.toolName === "AskUserQuestion" && event.toolId && event.phase === "stop") {
+        if (!child && isQuestionTool(s.provider, event.toolName) && event.toolId && event.phase === "stop") {
           // Hook callbacks can arrive out of order. Once this question ended,
           // its delayed start cannot re-open an already answered dialog.
           settleQuestion(record, event.toolId);
         }
-        const resolvesQuestion = event.phase === "stop" && event.toolName === "AskUserQuestion" &&
+        const resolvesQuestion = event.phase === "stop" && isQuestionTool(s.provider, event.toolName) &&
           (event.toolId || event.toolName) === pendingQuestion?.id;
         if (!child && s.pendingInput && (!pendingQuestion || resolvesQuestion) &&
             !(s.pendingInput === "submit" && event.providerTurnId && event.providerTurnId === record.pendingPriorTurnId)) {
@@ -391,7 +539,12 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
           s.turnEndedAt = undefined;
           if (!s.turnStartedAt) s.turnStartedAt = eventAt;
         }
-        const isTask = Boolean(event.taskId || child || event.kind === "task" || event.kind === "subagent" || /^(task|agent)$/i.test(event.toolName || ""));
+        if (event.toolId && event.phase === "stop") {
+          record.settledToolIds.add(event.toolId);
+          if (record.settledToolIds.size > 512) record.settledToolIds.delete(record.settledToolIds.values().next().value);
+        }
+        s.activityObserved = true;
+        const isTask = event.kind !== "tool" && Boolean(event.taskId || event.kind === "task" || event.kind === "subagent" || /^(task|agent)$/i.test(event.toolName || ""));
         const stableId = event.taskId || event.toolId || (child ? event.providerThreadId : undefined);
         if (isTask && !stableId) {
           record.coarseDepth = Math.max(0, Math.min(10000, record.coarseDepth + (event.phase === "start" ? 1 : -1)));
@@ -411,19 +564,50 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
       case "agent-subagent": {
         // Typed activity and legacy brackets share the same id, so their
         // duplicate start/stop delivery remains idempotent.
-        const id = event.taskId || event.toolId || (child ? event.providerThreadId : undefined);
+        // A tool hook's agent_id identifies its issuer, not the child launched
+        // by that tool. Keep fallback brackets separate from native lifetimes.
+        const toolBracket = event.kind === "tool" && event.lifecycle !== "native";
+        const id = toolBracket ? (event.toolId ? `tool:${event.toolId}` : undefined) :
+          event.taskId || event.toolId || (child ? event.providerThreadId : undefined);
         if (!id) {
           record.coarseDepth = Math.max(0, Math.min(10000, record.coarseDepth + (event.phase === "start" ? 1 : -1)));
+          if (event.phase === "stop" && (event.provisional === true || event.lifecycle === "native")) record.coarseProvisional = true;
+          s.activityObserved = true;
           break;
         }
         if (event.phase === "start") {
-          if (!s.children.some((entry) => entry.id === id)) s.children.push({ id, label: event.taskLabel, startedAt: now() });
-        } else s.children = s.children.filter((entry) => entry.id !== id);
+          if (event.observedAt && record.childStops.get(id) > event.observedAt) break;
+          observeChild(record, { ...event, taskId: id }, eventAt);
+        } else if (event.provisional === true || event.lifecycle === "native") {
+          provisionalChildResponse(record, { ...event, taskId: id }, eventAt);
+        } else endChild(record, { ...event, taskId: id }, eventAt);
         break;
       }
       case "agent-background-activity": {
         const activity = event.backgroundActivity;
         if (!activity) break;
+        if (activity.source === "kimi-task-metadata") {
+          // A failed or partial read is not evidence that detached work ended.
+          // Only a terminal native task record can settle an observed task.
+          const items = Array.isArray(activity.items) ? activity.items : [];
+          const missing = s.children.some(entry => entry.id.startsWith("background:") &&
+            !items.some(item => `background:${item.id}` === entry.id));
+          s.backgroundObservation = { source: activity.source,
+            availability: activity.availability === "available" && !missing ? "available" : "unavailable", observedAt: eventAt };
+          if (activity.availability !== "available") break;
+          for (const item of items) {
+            if (!item.id) continue;
+            const id = `background:${item.id}`;
+            const previous = s.children.find(entry => entry.id === id);
+            s.children = s.children.filter(entry => entry.id !== id);
+            if (item.status === "running") s.children.push({ id,
+              label: item.kind === "process" ? "Background command" : item.kind === "question" ? "Background question" : "Background agent",
+              startedAt: timestamp(item.startedAt, previous?.startedAt || eventAt) });
+          }
+          s.activityObserved = true;
+          break;
+        }
+        s.activityObserved = true;
         s.children = s.children.filter((entry) => !entry.id.startsWith("background:"));
         record.coarseBackground = false;
         if (activity.active) {
@@ -478,7 +662,7 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
   }
   async function refreshRecord(record) {
     const s = record.snapshot;
-    if (!lookup || record.closed || record.cancelled || record.rejected || record.lookupInFlight || s.provider === "terminal" || now() < record.nextLookupAt) return;
+    if (!lookup || record.rootIdentityConflict || record.closed || record.cancelled || record.rejected || record.lookupInFlight || s.provider === "terminal" || now() < record.nextLookupAt) return;
     record.lookupInFlight = true;
     record.nextLookupAt = now() + 8000;
     const generation = s.generation;
@@ -492,7 +676,7 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
         for (const [hintId, transcriptPath] of record.identityHints) {
           const confirmed = await readMetadata({ provider: s.provider, cwd: s.cwd, claudeHome: record.claudeHome,
             confirmId: hintId, transcriptPath });
-          if (!current(s.id, generation) || s.conversation?.id !== knownId) return;
+          if (!current(s.id, generation) || record.rootIdentityConflict || s.conversation?.id !== knownId) return;
           if (confirmed?.status === "found" && confirmed.threadRef?.id === hintId &&
               confirmed.rootVerified === true && !confirmed.threadRef.parentThreadId &&
               !owned(s.provider, hintId, s.id, record.claudeHome)) {
@@ -511,7 +695,7 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
       result = await readMetadata({ provider: s.provider, cwd: normalizedPath(s.cwd), claudeHome: record.claudeHome,
         ...(knownId ? { confirmId: knownId, transcriptPath: record.transcriptPath } :
           { list: true, after: groupStart, excludeIds: [] }) });
-      if (!current(s.id, generation)) return;
+      if (!current(s.id, generation) || record.rootIdentityConflict) return;
       // Authoritative identity may have arrived while this lookup was in flight.
       // Never apply an old unbound lookup over that newly established root.
       if (s.conversation?.id !== knownId) return;
@@ -520,7 +704,15 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
         record.nextLookupAt = now() + Math.min(60000, 8000 * 2 ** Math.min(record.lookupFailures, 3));
       } else record.lookupFailures = 0;
       if (knownId) {
-        if (result?.status === "found" && result.threadRef?.id === knownId) bind(record, result.threadRef, true);
+        if (["kimi", "kimi-custom"].includes(s.provider) &&
+            !(result?.status === "found" && result.rootVerified === true && result.threadRef?.id === knownId && result.nativeBackgroundActivity)) backgroundUnavailable(record);
+        if (result?.status === "found" && result.threadRef?.id === knownId) {
+          bind(record, result.threadRef, true);
+          if (result.rootVerified === true && result.nativeBackgroundActivity && ["kimi", "kimi-custom"].includes(s.provider)) {
+            ingest({ id: s.id, generation, type: "agent-background-activity", providerThreadId: knownId,
+              rootVerified: true, backgroundActivity: result.nativeBackgroundActivity });
+          }
+        }
       } else {
         const candidates = (result?.threads || (result?.threadRef ? [result.threadRef] : []))
           .filter((ref) => ref.id && !excluded.includes(ref.id) &&
@@ -545,6 +737,7 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
       record.lookupFailures += 1;
       record.nextLookupAt = now() + Math.min(60000, 8000 * 2 ** Math.min(record.lookupFailures, 3));
       if (current(s.id, generation) && s.conversation?.id === knownId) {
+        backgroundUnavailable(record);
         s.binding = { status: knownId ? "found" : "unavailable", message: error.message };
         publish(record);
       }

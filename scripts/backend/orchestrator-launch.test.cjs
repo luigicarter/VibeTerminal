@@ -4,6 +4,16 @@ const { waitForSessionLaunch } = require("../../backend/orchestratorLaunch.cjs")
 const result = { ok: true, id: "pane", launchToken: 2, status: "starting", draftStaged: true };
 const live = { id: "pane", launchToken: 2, generation: "g2", started: true, processState: "running" };
 
+test("creation metadata comes from the confirmed launch, never the initial UI receipt", async () => {
+  const initial = { ...result, cwd: "/unconfirmed", name: "Unconfirmed" };
+  const value = await waitForSessionLaunch({ result: initial, getSession: () => ({ ...live, cwd: "/project", name: "Codex" }) });
+  assert.equal(value.cwd, "/project"); assert.equal(value.name, "Codex");
+  const missing = await waitForSessionLaunch({ result: initial, getSession: () => live });
+  assert.equal(missing.cwd, undefined); assert.equal(missing.name, undefined);
+  const failed = await waitForSessionLaunch({ result: initial, getSession: () => ({ ...live, processState: "failed" }) });
+  assert.equal(failed.cwd, undefined); assert.equal(failed.name, undefined);
+});
+
 test("creation waits through missing, old and preparing snapshots, then binds the real generation", async () => {
   const snapshots = [undefined, { ...live, launchToken: 1, generation: "g1" },
     { ...live, generation: "paused:pane:2", status: "paused", processState: undefined },

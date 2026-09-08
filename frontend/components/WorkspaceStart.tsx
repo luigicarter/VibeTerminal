@@ -14,7 +14,8 @@ const descriptions: Record<AgentKind, string> = {
   opencode: "OpenCode agent",
   kimi: "Kimi Code",
   "kimi-custom": "Custom Kimi setup",
-  qwen: "Qwen Code"
+  qwen: "Qwen Code",
+  grok: "xAI coding agent"
 };
 
 export function WorkspaceStart({ profiles, mode, projectName, projectPath, canLaunch, isMissing, onLaunch, onNewProject, onOpenProject, onMultiMode }: {

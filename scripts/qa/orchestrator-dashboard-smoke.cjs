@@ -23,13 +23,13 @@ class Cdp {
 }
 const entry = path.join(output, 'main.cjs');
 fs.writeFileSync(entry, `
-const fs=require('node:fs');
+const fs=require('node:fs'),path=require('node:path');
 const control=()=>JSON.parse(fs.readFileSync(${JSON.stringify(controlFile)},'utf8'));
 globalThis.fetch=async url=>{throw Error('Fixture blocked network: '+url)};
 const modulePath=${JSON.stringify(path.join(root, 'backend/orchestrator.cjs'))};
 const mod=require(modulePath),factory=mod.createOrchestrator;
 mod.createOrchestrator=options=>factory({...options,
- getSessions:async()=>{const c=control();const actual=await options.getSessions();return [...actual,...Array.from({length:c.count},(_,i)=>({id:'fixture-'+i,name:['API','UI','Tests','Docs','Build'][i]||('Long session '+i+' '+ 'description '.repeat(18)),kind:['codex','claude','gemini','opencode','qwen'][i%5],cwd:${JSON.stringify(output)},generation:'fixture-generation-'+i,started:true,status:['working','done','waiting','idle','error'][i%5],...(c.revisions['fixture-'+i]||{})}))];},
+ getSessions:async()=>{const c=control();const actual=await options.getSessions();return [...actual,...Array.from({length:c.count},(_,i)=>({id:'fixture-'+i,name:['Vibe terminal','Claude code','Gemini','OpenCode','Qwen'][i%5],kind:['codex','claude','gemini','opencode','qwen'][i%5],projectName:i===1?'Website':undefined,cwd:path.join(${JSON.stringify(output)},['API','storefront','Tests','Docs','Build'][i]||('Long project '+i+' '+ 'description '.repeat(18))),generation:'fixture-generation-'+i,started:true,status:['working','done','waiting','idle','error'][i%5],...(c.revisions['fixture-'+i]||{})}))];},
  readSession:async payload=>{while(control().hold.includes(payload.id))await new Promise(r=>setTimeout(r,20));const s=control().revisions[payload.id];return payload.id.startsWith('fixture-')?{ok:true,text:'Fixture observation',generation:payload.generation,...(s?.turnId&&s?.turnState==='completed'?{completedResult:{turnId:s.turnId,status:'completed',at:s.turnEndedAt,text:'Updated API route validation and added focused tests. Agent reports all checks passed.',source:'terminal-screen'}}:{})}:options.readSession(payload);}
 });
 require(${JSON.stringify(path.join(root, 'backend/main.cjs'))});
@@ -51,7 +51,7 @@ async function motionChecks() {
       if(t-start<4000)requestAnimationFrame(frame);else resolve(tracks.map(p=>({id:p.id,width:p.width,frames:p.x.length,travelX:Math.max(...p.x)-Math.min(...p.x),travelY:Math.max(...p.y)-Math.min(...p.y)})));}
     requestAnimationFrame(frame);
   })`);
-  assert(motion.length >= 3 && motion.every(p=>p.frames>30));
+  assert(motion.length >= 3 && motion.every(p=>p.frames>30), `Insufficient compositor frames: ${JSON.stringify(motion)}`);
   assert(motion.every(p=>Math.hypot(p.travelX,p.travelY)>=10), `Every visible bubble should noticeably move within four seconds: ${JSON.stringify(motion)}`);
   assert(motion.every(p=>p.width>0&&p.width<=200), 'Resting bubbles should scale down to fit');
   assert(Math.max(...motion.map(p=>p.width))-Math.min(...motion.map(p=>p.width))>=Math.max(...motion.map(p=>p.width))*.08, 'Resting sizes should visibly vary');
@@ -98,6 +98,11 @@ function smooth(values, low, high, label) { assert(values.some(v=>v.scale>low+.0
   const log=fs.createWriteStream(path.join(output,'electron.log'));child.stdout.pipe(log);child.stderr.pipe(log);
   const page=await until(async()=>{const p=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();return p.find(p=>p.type==='page'&&p.url.startsWith('file:')&&!p.url.includes('surface='));},'main renderer',30000);
   cdp=new Cdp(page.webSocketDebuggerUrl);await cdp.open();await cdp.send('Page.enable');
+  // Exercise foreground visibility without opening an OS window. This does not
+  // guarantee foreground compositor cadence: motion checks stay strict below.
+  if (process.env.VIBE_SCREENSHOT_HIDDEN === '1') {
+    await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true });
+  }
   await cdp.send('Emulation.setDeviceMetricsOverride',{width:1500,height:1100,deviceScaleFactor:1,mobile:false});
   await until(()=>cdp.eval(`Boolean(window.vibe?.terminal && document.querySelector('.orchestrator-nav-button'))`),'dashboard build');
   const seededAt=Date.now()-60000;
@@ -108,6 +113,18 @@ function smooth(values, low, high, label) { assert(values.some(v=>v.scale>low+.0
   // Observe the saved 70% board layout after initial measurement/transition,
   // before comparing it with the covered workspace.
   await until(()=>cdp.eval(`(()=>{const p=document.querySelector('[data-session-id="real-shell"]').getBoundingClientRect(),b=document.querySelector('.terminal-board').getBoundingClientRect();return p.width/b.width<.8&&p.width/b.width>.6})()`),'initial fluid pane layout');
+  await cdp.eval(`new Promise((resolve,reject)=>{
+    const timeout=setTimeout(()=>reject(Error('Pane layout did not settle within 20 seconds')),20000);
+    let previous='',stableSince=performance.now();
+    function frame(now){
+      const pane=document.querySelector('[data-session-id="real-shell"]');
+      const rect=pane.getBoundingClientRect(),width=parseFloat(getComputedStyle(pane).width);
+      const geometry=JSON.stringify([rect.x,rect.y,rect.width,rect.height,width]);
+      if(geometry!==previous){previous=geometry;stableSince=now;}
+      if(now-stableSince>=350){clearTimeout(timeout);resolve();}else requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  })`);
   const before=await cdp.eval(`(async()=>{window.__main=document.querySelector('main.workspace');window.__term=document.querySelector('[data-session-id="real-shell"] .xterm');window.__pane=document.querySelector('[data-session-id="real-shell"]');return {runtime:await window.vibe.terminal.getRuntimeSnapshots(),pane:window.__pane.getBoundingClientRect().toJSON(),main:window.__main.getBoundingClientRect().toJSON(),layout:localStorage.getItem('vibe-terminal:workspaces:v2')}})()`);
   const ptyBefore=fs.readFileSync(ptyLog,'utf8');
   assert(await cdp.eval(`Boolean(document.querySelector('.orchestrator-nav-button').compareDocumentPosition(document.querySelector('[aria-label="Multi mode"]'))&Node.DOCUMENT_POSITION_FOLLOWING)`));
@@ -116,6 +133,17 @@ function smooth(values, low, high, label) { assert(values.some(v=>v.scale>low+.0
   const after=await cdp.eval(`(async()=>({sameMain:window.__main===document.querySelector('main.workspace'),sameTerm:window.__term===document.querySelector('[data-session-id="real-shell"] .xterm'),samePane:window.__pane===document.querySelector('[data-session-id="real-shell"]'),inert:window.__main.inert,hidden:window.__main.getAttribute('aria-hidden'),visibility:getComputedStyle(window.__main).visibility,pane:window.__pane.getBoundingClientRect().toJSON(),main:window.__main.getBoundingClientRect().toJSON(),runtime:await window.vibe.terminal.getRuntimeSnapshots(),layout:localStorage.getItem('vibe-terminal:workspaces:v2')}))()`);
   assert(after.sameMain&&after.sameTerm&&after.samePane&&after.inert);assert.equal(after.hidden,'true');assert.equal(after.visibility,'hidden');assert.deepEqual(after.pane,before.pane);assert.deepEqual(after.main,before.main);assert.equal(after.layout,before.layout);assert.equal(after.runtime[0].generation,before.runtime[0].generation);assert.equal(fs.readFileSync(ptyLog,'utf8'),ptyBefore);record('cover-preserves-main-xterm-generation-layout-and-PTY-size',{before,after});
   await cdp.eval(`window.__cells=[...document.querySelectorAll('[data-dashboard-session-id]')];window.__bubbles=window.__cells.map(e=>e.querySelector('button'));void 0`);
+  const projectLabels=await cdp.eval(`[...document.querySelectorAll('[data-dashboard-session-id]')].map(e=>({id:e.dataset.dashboardSessionId,project:e.querySelector('strong').textContent,provider:e.querySelector('.orchestrator-dashboard-provider').textContent,title:e.querySelector('button').title,accessible:e.querySelector('button').getAttribute('aria-label')}))`);
+  for(const [id,project,folder,sessionName] of [['real-shell','Dashboard QA',output],['fixture-0','API',path.join(output,'API'),'Vibe terminal'],['fixture-1','Website',path.join(output,'storefront'),'Claude code'],['fixture-2','Tests',path.join(output,'Tests'),'Gemini'],['fixture-3','Docs',path.join(output,'Docs'),'OpenCode'],['fixture-4','Build',path.join(output,'Build'),'Qwen']]) {
+    const bubble=projectLabels.find(item=>item.id===id);
+    assert.equal(bubble.project,project,`${id}: project must be the visible primary label`);
+    assert(bubble.provider,`${id}: provider remains visible`);
+    for(const text of [project,folder,sessionName].filter(Boolean)) {
+      assert(bubble.title.includes(text),`${id}: hover identity missing ${text}`);
+      assert(bubble.accessible.includes(text),`${id}: accessible identity missing ${text}`);
+    }
+  }
+  record('project-labels-with-session-and-full-path-details',projectLabels);
   const initialRecency=await cdp.eval(`JSON.parse(localStorage.getItem('vibe-terminal.session-recency.v1'))`);const order=await cdp.eval(`window.__cells.map(e=>e.dataset.dashboardSessionId)`);assert(order.indexOf('fixture-2')<order.indexOf('fixture-0'));record('seeded-recency-orders-otherwise-unused-sessions',{initialRecency,order});await geometry('wide-zero-targets');await shot('normal');
   await motionChecks();
   const colors=await cdp.eval(`[...document.querySelectorAll('.orchestrator-dashboard-cell')].filter(e=>e.dataset.dashboardSessionId.startsWith('fixture-')).map(e=>({status:e.dataset.status,color:getComputedStyle(e).getPropertyValue('--status-color').trim(),fill:getComputedStyle(e.querySelector('.orchestrator-dashboard-rim')).backgroundImage,border:getComputedStyle(e.querySelector('.orchestrator-dashboard-rim')).borderTopWidth}))`);

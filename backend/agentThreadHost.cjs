@@ -4,6 +4,8 @@ const path = require("path");
 const readline = require("readline");
 const { spawn } = require("child_process");
 const { lookupGeminiThread } = require("./geminiThreads.cjs");
+const { lookupGrokThread } = require("./grokThreads.cjs");
+const { readKimiTaskActivity } = require("./kimiTaskObserver.cjs");
 const {
   findCodexThread,
   listCodexThreads,
@@ -1082,7 +1084,7 @@ function confirmKimiThread(cwd, id, options = {}) {
   }
 
   const state = readKimiSessionState(entry.sessionDir, cwd);
-  return {
+  const confirmed = {
     status: "found",
     rootVerified: Boolean(state && state.rootVerified && isSamePath(entry.workDir, cwd) && isWithinStore(entry.sessionDir, home)),
     threadRef: state
@@ -1096,6 +1098,13 @@ function confirmKimiThread(cwd, id, options = {}) {
         }
       : placeholderKimiRef(target, provider)
   };
+  // Existing direct confirmation callers remain synchronous; only host polling
+  // requests the bounded asynchronous native metadata observation.
+  if (options.includeActivity && confirmed.rootVerified) {
+    return readKimiTaskActivity({ home, sessionDir: entry.sessionDir })
+      .then((nativeBackgroundActivity) => ({ ...confirmed, nativeBackgroundActivity }));
+  }
+  return confirmed;
 }
 
 // kimi-custom (the vendored custom fork) reuses the kimi parsers against its
@@ -1344,6 +1353,7 @@ async function findLatestAgentThread(payload) {
   }
 
   if (payload.provider === "gemini") return lookupGeminiThread(payload);
+  if (payload.provider === "grok") return lookupGrokThread(payload);
 
   if (payload.provider === "codex") {
     // Confirm whether a specific rollout id is still resumable so the launcher
@@ -1421,7 +1431,7 @@ async function findLatestAgentThread(payload) {
     // Confirm whether a specific session id is still resumable so the launcher
     // can self-heal instead of running a doomed `kimi-custom --session <id>`.
     if (payload.confirmId) {
-      return confirmKimiCustomThread(cwd, payload.confirmId);
+      return confirmKimiThread(cwd, payload.confirmId, { home: kimiCustomHome(), provider: "kimi-custom", includeActivity: true });
     }
 
     // History listing for the resume picker: every session for this folder,
@@ -1437,7 +1447,7 @@ async function findLatestAgentThread(payload) {
     // Confirm whether a specific session id is still resumable so the launcher
     // can self-heal instead of running a doomed `kimi --session <id>`.
     if (payload.confirmId) {
-      return confirmKimiThread(cwd, payload.confirmId);
+      return confirmKimiThread(cwd, payload.confirmId, { includeActivity: true });
     }
 
     // History listing for the resume picker: every session for this folder,

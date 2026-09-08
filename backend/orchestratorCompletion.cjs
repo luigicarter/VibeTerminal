@@ -5,7 +5,7 @@
 function createCompletionEvidence({ getSession, readObservation, maxEntries = 200 } = {}) {
   const results = new Map(), pending = new Map();
   const keyFor = session => JSON.stringify([session.id, session.generation, session.turnId]);
-  const eligible = session => session?.turnId && session.observation === 'observed' && session.turnState === 'completed' && !session.pendingInput && Number.isFinite(session.turnStartedAt) && Number.isFinite(session.turnEndedAt);
+  const eligible = session => session?.turnId && session.observation === 'observed' && session.turnState === 'completed' && !session.pendingInput && !session.childActivity && Number.isFinite(session.turnStartedAt) && Number.isFinite(session.turnEndedAt);
   function capture(session) {
     if (!eligible(session)) return Promise.resolve();
     const key = keyFor(session);

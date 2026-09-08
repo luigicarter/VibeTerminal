@@ -13,6 +13,8 @@ try {
 
 const sessions = new Map();
 const checkedResults = new Map();
+const pendingActions = new Map();
+const NATIVE_SUBMIT_DELAY_MS = 200;
 const MAX_SESSION_BUFFER_CHARS = 400_000;
 
 function emit(event) {
@@ -135,11 +137,15 @@ function inputChanged(session) {
   session.inputRevision += 1;
   emit({ type: 'input-state', id: session.id, generation: session.generation, ...inputState(session) });
 }
+function cancelSessionSubmission(session) {
+  for (const entry of [...pendingActions.values()]) if (entry.session === session) entry.cancel();
+}
 function noteManualInput(session, data) {
   if (typeof data !== "string" || !data) return;
   // xterm emits these replies through onData without a user editing anything.
   // Match whole packets only; navigation/paste and mixed packets stay dirty.
   if (/^\x1b\[(?:[IO]|\??\d+;\d+R|[?>][0-9]+(?:;[0-9]+)*c|[03]n)$/.test(data)) return;
+  cancelSessionSubmission(session);
   session.interactionInputPending = false;
   session.ownerRequestId = null;
   session.heldMouseButton = null;
@@ -222,6 +228,7 @@ function createSession(payload) {
     // session (terminal null) supersedes the same way — replaying its dead
     // snapshot would swallow the relaunch entirely.
     if (incomingToken > existingToken) {
+      cancelSessionSubmission(existingSession);
       existingSession?.terminal?.kill();
       sessions.delete(payload.id);
     } else {
@@ -333,6 +340,7 @@ function createSession(payload) {
         return;
       }
 
+      cancelSessionSubmission(session);
       session.terminal = null;
       session.exitCode = exitCode;
       session.signal = signal;
@@ -378,6 +386,11 @@ function createSession(payload) {
 
 function handleMessage(message) {
   switch (message.type) {
+    case "action-cancel": {
+      const payload = message.payload || {};
+      pendingActions.get(JSON.stringify([payload.id, payload.generation, payload.actionId]))?.cancel();
+      break;
+    }
     case "action":
       handleAction(message.payload || message, true);
       break;
@@ -434,6 +447,7 @@ function handleMessage(message) {
       if (message.payload.actionId) { handleAction({ ...message.payload, kind: "kill" }, false); break; }
       const session = sessions.get(message.payload.id);
       if (matchesSession(session, message.payload)) {
+        cancelSessionSubmission(session);
         if (session.terminal) {
           session.terminal.kill();
         }
@@ -443,7 +457,7 @@ function handleMessage(message) {
     }
 
     case "shutdown":
-      sessions.forEach((session) => session.terminal?.kill());
+      sessions.forEach((session) => { cancelSessionSubmission(session); session.terminal?.kill(); });
       sessions.clear();
       process.exit(0);
       break;
@@ -456,11 +470,45 @@ function handleMessage(message) {
   }
 }
 
+// Keep the draft and the one final Enter inside one reserved host action. Native
+// composers can treat Enter in the paste write as pasted content. A short gap
+// lets their input parser finish; it does not prove that the agent starts work.
+function stageNativeSubmission(payload, session, data, submitData, resultKey, result) {
+  const terminal = session.terminal, revision = session.inputRevision;
+  const owner = session.ownerRequestId, cols = session.cols, rows = session.rows;
+  const deadlineAt = payload.deadlineAt ?? Date.now() + 15000;
+  let timer, finished = false;
+  const finish = (ok, error) => {
+    if (finished) return;
+    finished = true; clearTimeout(timer); pendingActions.delete(resultKey);
+    if (ok) {
+      session.manualInputPending = false; session.interactionInputPending = false; session.ownerRequestId = null;
+      emit({ type: 'input-state', id: session.id, generation: session.generation, ...inputState(session) });
+      result(true, 'written');
+    } else result(false, 'unknown', error, { submission: 'unconfirmed', partialWrite: true });
+  };
+  const cancel = () => finish(false, 'Submission cancelled after text may have reached the terminal. Text may remain in the composer; no automatic Enter or retry.');
+  pendingActions.set(resultKey, { id: payload.id, session, cancel });
+  try { terminal.write(data); }
+  catch (error) { finish(false, error.message); return; }
+  timer = setTimeout(() => {
+    if (finished) return;
+    if (Date.now() >= deadlineAt || sessions.get(payload.id) !== session || !matchesSession(session, payload) || session.terminal !== terminal ||
+        session.inputRevision !== revision || session.ownerRequestId !== owner || !session.interactionInputPending ||
+        session.manualInputPending || session.cols !== cols || session.rows !== rows || session.launchPending) return cancel();
+    try { process.kill(payload.expectedAgentPid, 0); }
+    catch { return finish(false, 'The native recipient exited after text was staged. Text may remain in the composer; submission is unconfirmed.'); }
+    try { terminal.write(submitData); finish(true); }
+    catch (error) { finish(false, error.message); }
+  }, NATIVE_SUBMIT_DELAY_MS);
+}
+
 function handleAction(payload, strict) {
   const resultKey = JSON.stringify([payload.id, payload.generation, payload.actionId]);
+  if (pendingActions.has(resultKey)) return; // The original action owns the pending acknowledgment.
   if (payload.actionId && checkedResults.has(resultKey)) { emit(checkedResults.get(resultKey)); return; }
-  const result = (ok, status, error) => {
-    const event = { type: "action-result", actionId: payload.actionId, id: payload.id, generation: payload.generation, ok, status, ...(status === "written" ? { delivery: "pty-transport-only" } : !ok && !['unknown', 'write-failed'].includes(status) ? { delivery: 'not-dispatched' } : {}), ...(error ? { error } : {}) };
+  const result = (ok, status, error, extra = {}) => {
+    const event = { type: "action-result", actionId: payload.actionId, id: payload.id, generation: payload.generation, ok, status, ...(status === "written" ? { delivery: "pty-transport-only" } : !ok && !['unknown', 'write-failed'].includes(status) ? { delivery: 'not-dispatched' } : {}), ...(error ? { error } : {}), ...extra };
     if (payload.actionId) { checkedResults.set(resultKey, event); if (checkedResults.size > 1000) checkedResults.delete(checkedResults.keys().next().value); }
     emit(event);
   };
@@ -469,6 +517,9 @@ function handleAction(payload, strict) {
   const session = sessions.get(payload.id);
   if (!matchesSession(session, payload)) return result(false, "stale-generation", "The terminal generation is no longer current.");
   if (!session.terminal) return result(false, "not-running", "The terminal has exited.");
+  if (["interrupt", "kill"].includes(payload.kind)) cancelSessionSubmission(session);
+  if ([...pendingActions.values()].some(entry => entry.id === payload.id)) return result(false, "interaction-busy", "Another terminal submission is in flight.");
+  if (payload.deadlineAt !== undefined && (!Number.isFinite(payload.deadlineAt) || Date.now() >= payload.deadlineAt)) return result(false, "cancelled", "Cancelled before terminal input deadline.");
   if (session.launchPending && ["input", "interaction"].includes(payload.kind)) return result(false, "launch-pending", "The terminal launcher has not been submitted yet. Wait for startup before sending input.");
   if (payload.kind === "input" && typeof payload.data !== "string") return result(false, "invalid-action", "Input must be a string.");
   try {
@@ -501,6 +552,9 @@ function handleAction(payload, strict) {
         session.heldMouseButton = payload.mouse.button; session.mouseOwnerRequestId = payload.requestId || null;
       }
       inputChanged(session);
+      if (encoded.text && submitted && !evidence.shell) {
+        return stageNativeSubmission(payload, session, encoded.data.slice(0, -1), encoded.data.slice(-1), resultKey, result);
+      }
       session.terminal.write(encoded.data);
       if (payload.mouse && ['up', 'click'].includes(payload.mouse.action) && payload.mouse.button === session.heldMouseButton) {
         session.heldMouseButton = null; session.mouseOwnerRequestId = null;
@@ -542,8 +596,16 @@ function handleAction(payload, strict) {
     }
     if (payload.kind === "interrupt") noteManualInput(session, "\x03");
     else if (payload.promptText === undefined) noteManualInput(session, data);
-    if (payload.promptText !== undefined) inputChanged(session);
+    if (payload.promptText !== undefined) {
+      session.interactionInputPending = true; session.ownerRequestId = payload.requestId || null;
+      inputChanged(session);
+      if (payload.expectedAgentPid !== undefined) return stageNativeSubmission(payload, session, data.slice(0, -1), data.slice(-1), resultKey, result);
+    }
     session.terminal.write(payload.kind === "interrupt" ? "\x03" : data);
+    if (payload.promptText !== undefined) {
+      session.interactionInputPending = false; session.ownerRequestId = null;
+      emit({ type: 'input-state', id: session.id, generation: session.generation, ...inputState(session) });
+    }
     return result(true, "written"); // Transport acceptance, never agent completion.
   } catch (error) {
     return result(false, payload.kind === "interaction" ? "unknown" : "write-failed", error.message);

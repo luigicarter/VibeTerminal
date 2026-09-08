@@ -27,6 +27,7 @@ const { probeInstalledClis } = require("./cliProbe.cjs");
 const { resolveLaunchCwd } = require("./launchCwd.cjs");
 const providerProfiles = require("./providerProfiles.cjs");
 const claudeCustomHome = require("./claudeCustomHome.cjs");
+const chatLaunchPreparation = require("./chatLaunchPreparation.cjs").createChatLaunchPreparation();
 
 const isScreenshotMode =
   process.env.VIBE_SCREENSHOT_MODE === "1" || Boolean(process.env.VIBE_SCREENSHOT_PATH);
@@ -1897,7 +1898,7 @@ function createMainWindow() {
 let installedClisPromise = null;
 
 function refreshInstalledClis() {
-  installedClisPromise = probeInstalledClis().catch((error) => ({
+  installedClisPromise = probeInstalledClis(undefined, { kimiCustomDir: resolveKimiCustomDir() }).catch((error) => ({
     probedAt: Date.now(),
     durationMs: 0,
     timedOut: false,
@@ -1938,6 +1939,7 @@ app.whenReady().then(() => {
 });
 
 app.on("window-all-closed", () => {
+  chatLaunchPreparation.cancelAll();
   orchestratorIntegration?.dispose();
   terminalRuntime?.dispose();
   terminalRuntime = null;
@@ -2202,7 +2204,8 @@ ipcMain.handle("agent-thread:list", (_event, payload) => {
     payload?.provider === "codex" ||
     payload?.provider === "kimi" ||
     payload?.provider === "kimi-custom" ||
-    payload?.provider === "qwen"
+    payload?.provider === "qwen" ||
+    payload?.provider === "grok"
   ) {
     return findLatestAgentThread({ ...payload, list: true });
   }
@@ -2508,6 +2511,7 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
   if (!launchCwd.ok) {
     return { ok: false, error: launchCwd.message };
   }
+  return chatLaunchPreparation.run(id, async isCurrent => {
   try {
     const plannerFamily = normalizeFusionFamily(payload.plannerFamily, "claude");
     const executorFamily = normalizeFusionFamily(payload.executorFamily, "codex");
@@ -2597,6 +2601,7 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
       buildSupervisorDir: getBuildSupervisorDir(),
       providerEnv
     });
+    if (!isCurrent()) return { ok: false, cancelled: true, status: "cancelled" };
     if (!files) {
       return { ok: false, error: "could not prepare Fusion files" };
     }
@@ -2633,6 +2638,7 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
   } catch (error) {
     return { ok: false, error: error.message };
   }
+  });
 });
 
 ipcMain.handle("fusion-model-catalog:list", async (_event, payload) => {
@@ -2842,11 +2848,12 @@ ipcMain.handle("fusion-chat:build-cancel", (_event, payload) => {
 
 ipcMain.handle("fusion-chat:stop", (_event, payload) => {
   if (payload?.id) {
-    getAgentTelemetry()
-      .stopFusionSession(payload.id)
-      .catch(() => {});
+    const telemetry = getAgentTelemetry();
+    void chatLaunchPreparation.cancel(payload.id, async () => {
+      try { await telemetry.stopFusionSession(payload.id); }
+      finally { telemetry.releaseSession(payload.id); }
+    }).catch(() => {});
     sendToFusionChatHost({ type: "stop", payload: { id: payload.id } });
-    getAgentTelemetry().releaseSession(payload.id);
   }
   return true;
 });
@@ -2902,6 +2909,7 @@ ipcMain.handle("openfusion-chat:start", async (_event, payload) => {
   if (!launchCwd.ok) {
     return { ok: false, error: launchCwd.message };
   }
+  return chatLaunchPreparation.run(id, async isCurrent => {
   try {
     startOpenFusionChatHost();
     const telemetry = getAgentTelemetry();
@@ -2916,6 +2924,7 @@ ipcMain.handle("openfusion-chat:start", async (_event, payload) => {
       ),
       cwd: launchCwd.cwd
     });
+    if (!isCurrent()) return { ok: false, cancelled: true, status: "cancelled" };
     if (!files) {
       return { ok: false, error: "could not prepare Open Fusion config" };
     }
@@ -2948,6 +2957,7 @@ ipcMain.handle("openfusion-chat:start", async (_event, payload) => {
   } catch (error) {
     return { ok: false, error: error.message };
   }
+  });
 });
 
 ipcMain.handle("openfusion-chat:save-models", async (_event, payload) => {
@@ -3225,8 +3235,9 @@ ipcMain.handle("openfusion-chat:background-cancel", (_event, payload) => {
 
 ipcMain.handle("openfusion-chat:stop", (_event, payload) => {
   if (payload?.id) {
+    const telemetry = getAgentTelemetry();
+    void chatLaunchPreparation.cancel(payload.id, () => telemetry.releaseSession(payload.id)).catch(() => {});
     sendToOpenFusionChatHost({ type: "stop", payload: { id: payload.id } });
-    getAgentTelemetry().releaseSession(payload.id);
   }
   return true;
 });

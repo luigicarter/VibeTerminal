@@ -58,4 +58,12 @@ test('controller sends plain speech while retaining displayed Markdown and redac
   assert.equal(message.text, '**Ready**. Run `npm test`. fixture-secret');
   assert.equal((await controller.speak({ preview: true, text: '---\n***' })).ok, true);
   assert.equal(calls.length, 1, 'formatting-only replies do not request empty speech');
+  const detailed = { preview: true, text: '# Full result\n' + 'Implementation detail. '.repeat(160), speechText: 'The agent reports the fix is complete. All seven checks passed.' };
+  assert.equal((await controller.speak(detailed)).ok, true);
+  assert.equal(calls[1].input, detailed.speechText, 'TTS uses the separate summary instead of the full result');
+  assert.equal(detailed.text, '# Full result\n' + 'Implementation detail. '.repeat(160), 'written source stays intact');
+  const modelSummary = 'The agent reports a relevant finding with its verification details. '.repeat(75) + 'The final blocker still needs attention.';
+  assert.ok(modelSummary.length > 4000);
+  assert.equal((await controller.speak({ preview: true, text: detailed.text, speechText: modelSummary })).ok, true);
+  assert.equal(calls[2].input, modelSummary, 'model-chosen speech is not clipped by a presentation character cap');
 });

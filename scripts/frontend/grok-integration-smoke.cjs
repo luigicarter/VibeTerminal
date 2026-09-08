@@ -1,0 +1,55 @@
+'use strict';
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const Module = require('node:module');
+const vm = require('node:vm');
+const ts = require('typescript');
+const root = path.resolve(__dirname, '../..');
+function load(relative) {
+  const file = path.join(root, relative);
+  const mod = new Module(file, module);
+  mod.filename = file;
+  mod.paths = Module._nodeModulePaths(path.dirname(file));
+  mod._compile(ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, file);
+  return mod.exports;
+}
+const launch = load('frontend/sessionLaunch.ts');
+const history = load('frontend/orchestratorHistory.ts');
+const attention = load('frontend/attention.ts');
+const persistence = load('frontend/sessionPersistence.ts');
+const capabilities = require('../../shared/providerCapabilities.json');
+const source = fs.readFileSync(path.join(root, 'frontend/App.tsx'), 'utf8');
+const ast = ts.createSourceFile('App.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+const declarations = [];
+for (const statement of ast.statements) {
+  if (ts.isVariableStatement(statement) && statement.declarationList.declarations.some(d => d.name.getText(ast) === 'agentProfiles')) declarations.push(statement.getText(ast));
+  if (ts.isFunctionDeclaration(statement) && ['getProfile', 'isAgentKind', 'isStoredSession'].includes(statement.name?.text)) declarations.push(statement.getText(ast));
+}
+assert.equal(declarations.length, 4);
+const context = { providerCapabilities: capabilities, isRecord: value => Boolean(value && typeof value === 'object' && !Array.isArray(value)) };
+vm.createContext(context);
+vm.runInContext(ts.transpileModule(declarations.join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
+const profile = context.getProfile('grok');
+assert.equal(profile.kind, 'grok');
+assert.equal(profile.label, 'Grok Build');
+assert.equal(profile.command, 'grok');
+assert.equal(context.isAgentKind('grok'), true);
+assert.equal(launch.isThreadedAgentKind('grok'), true);
+assert.equal(launch.createThreadRef('grok').provider, 'grok');
+assert.equal(launch.createThreadRef('grok').id, undefined, 'fresh native identity is discovered rather than invented');
+const session = { id: 'grok-pane', kind: 'grok', name: 'Grok Build 1', cwd: 'C:/project', command: 'grok', launchToken: 1, started: true, status: 'running' };
+assert.equal(context.isStoredSession(session), true, 'persisted Grok panes survive App provider validation');
+assert.equal(persistence.serializeSession(session).kind, 'grok');
+assert.equal(persistence.serializeSession(session).status, 'idle');
+assert.equal(launch.buildLaunchCommand(session), 'grok');
+const saved = history.conversationLaunch({ reference: 'saved', provider: 'grok', id: 'native-session', cwd: session.cwd, title: 'Fix the build' });
+assert.equal(saved.kind, 'grok');
+assert.equal(saved.patch.threadRef.provider, 'grok');
+assert.equal(launch.buildLaunchCommand({ ...session, ...saved.patch }), 'grok --resume native-session');
+assert.equal(launch.defaultLaunchMode('grok', 2, true), 'resume');
+assert.equal(launch.buildLaunchCommand({ ...session, ...saved.patch }, { mode: 'new' }), 'grok');
+assert.equal(launch.buildLaunchCommand({ ...session, nextLaunchMode: 'resume', threadRef: { id: "name'; Write-Output bad" } }, { platform: 'win32' }), "grok --resume 'name''; Write-Output bad'");
+assert.equal(attention.isTurnTelemetryKind('grok'), true);
+assert.equal(attention.shouldUseTerminalEventAttention(session), false, 'shell exit must not invent a successful Grok turn');
+console.log('Grok frontend integration: launch, resume, history, persistence, profile and telemetry ownership passed');

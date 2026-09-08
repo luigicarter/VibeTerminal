@@ -1188,7 +1188,7 @@ function runHost() {
 
   function emitSessionEvent(id, state, event) {
     if (!isCurrentChatState(sessions, id, state)) return;
-    observeInteractionEvent(id, state, event, emit);
+    if (!event.replay) observeInteractionEvent(id, state, event, emit);
     state.history.push(cloneEvent(event));
     if (state.history.length > MAX_HISTORY_EVENTS) {
       state.history.splice(0, state.history.length - MAX_HISTORY_EVENTS);
@@ -2106,6 +2106,7 @@ function runHost() {
     if (resumeId) {
       try {
         const existing = await request(state, "GET", `/session/${encodeURIComponent(resumeId)}`);
+        if (!isCurrentChatState(sessions, id, state) || !state.child || state.child.killed) return;
         if (existing && existing.id === resumeId) {
           state.sessionId = resumeId;
           state.normalizer = createOpenCodeEventNormalizer(resumeId);
@@ -2113,12 +2114,14 @@ function runHost() {
           connectEvents(id, state);
           emitSessionEvent(id, state, { type: "session", sessionId: resumeId, resumed: true });
           const messages = await request(state, "GET", `/session/${encodeURIComponent(resumeId)}/message`);
+          if (!isCurrentChatState(sessions, id, state) || !state.child || state.child.killed) return;
           for (const event of rehydrateMessages(messages, resumeId)) {
-            emitSessionEvent(id, state, event);
+            emitSessionEvent(id, state, { ...event, replay: true });
           }
           // Close any bubble the renderer opened while replaying the restored
           // transcript (rehydrated turns are always complete).
-          emitSessionEvent(id, state, { type: "result", subtype: "restored" });
+          emitSessionEvent(id, state, { type: "result", subtype: "restored", replay: true });
+          emitSessionEvent(id, state, { type: "engine-ready" });
           return;
         }
       } catch {
@@ -2132,7 +2135,7 @@ function runHost() {
     // the resume picker drowned in identical-titled empty chats. The
     // engine-ready ping keeps the renderer's provider-catalog prefetch (which
     // used to ride the session event).
-    emitSessionEvent(id, state, { type: "engine-ready" });
+    if (isCurrentChatState(sessions, id, state) && state.child && !state.child.killed) emitSessionEvent(id, state, { type: "engine-ready" });
   }
 
   // Create the pane's session on demand — at the FIRST user input — titled
@@ -2140,6 +2143,10 @@ function runHost() {
   // explicit title, so the create-time title is what the resume picker shows
   // forever). Serialized behind a promise so rapid sends cannot double-create.
   function ensureSession(id, state, firstPromptText) {
+    // Port discovery precedes the asynchronous resume lookup. Never create a
+    // fresh root while that lookup can still adopt the saved conversation.
+    if (state.establishPromise) return state.establishPromise.then(() => ensureSession(id, state, firstPromptText));
+    if (sessions.get(id) !== state || !state.child || state.child.killed) return Promise.reject(new Error("Session changed while sending"));
     if (state.sessionId) return Promise.resolve();
     if (!state.sessionPromise) {
       const title =
@@ -2150,7 +2157,7 @@ function runHost() {
         if (!created || !created.id) {
           throw new Error("OpenCode did not return a session id");
         }
-        if (sessions.get(id) !== state) return;
+        if (sessions.get(id) !== state || !state.child || state.child.killed) throw new Error("Session changed while sending");
         state.sessionId = String(created.id);
         state.normalizer = createOpenCodeEventNormalizer(state.sessionId);
         state.gate = createOpenFusionGateTracker({ cwd: state.cwd });
@@ -2168,6 +2175,8 @@ function runHost() {
   function start(payload) {
     const { id, cwd, env, resumeId } = payload || {};
     if (!id) return;
+    const current = sessions.get(id);
+    if (current && payload.generation !== undefined && payload.generation !== current.generation) stop({ id });
     if (sessions.has(id)) {
       const existingState = sessions.get(id);
       if (existingState?.child) {
@@ -2264,7 +2273,7 @@ function runHost() {
       if (!match) return;
       state.port = Number(match[1]);
       clearTimeout(portTimer);
-      establishSession(id, state, typeof resumeId === "string" && resumeId.trim() ? resumeId.trim() : "").catch(
+      state.establishPromise = establishSession(id, state, typeof resumeId === "string" && resumeId.trim() ? resumeId.trim() : "").catch(
         (error) => {
           if (sessions.get(id) !== state) return;
           emitSessionEvent(id, state, {
@@ -2272,7 +2281,7 @@ function runHost() {
             message: `Could not open an OpenCode session: ${error.message}`
           });
         }
-      );
+      ).finally(() => { state.establishPromise = null; });
     });
     child.stderr.on("data", (chunk) => {
       if (sessions.get(id) !== state) return;
@@ -2297,6 +2306,12 @@ function runHost() {
       } catch {
         // ignore
       }
+      emitSessionEvent(id, state, { type: "closed", code });
+    });
+    child.on("close", (code) => {
+      if (sessions.get(id) !== state || state.child !== child) return;
+      state.child = null;
+      clearTimeout(portTimer);
       emitSessionEvent(id, state, { type: "closed", code });
     });
   }

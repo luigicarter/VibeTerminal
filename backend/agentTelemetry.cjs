@@ -5,6 +5,7 @@ const os = require("os");
 const path = require("path");
 const url = require("url");
 const { prepareGeminiTelemetry } = require("./geminiTelemetry.cjs");
+const { prepareGrokTelemetry } = require("./grokTelemetry.cjs");
 const { hookMetadata, readHookInput, powershellReadHookInput, powershellHookMetadata } = require("./providerHookMetadata.cjs");
 
 const SHIM_BASE_DIR =
@@ -13,7 +14,7 @@ const SHIM_BASE_DIR =
 const OWNER_MARKER = ".vibe-agent-shims.json";
 const MAX_EVENT_BYTES = 64 * 1024;
 const MAX_SESSION_ID_BYTES = 512;
-const PROVIDERS = ["codex", "claude", "opencode", "cursor-agent", "kimi", "kimi-custom", "qwen", "gemini"];
+const PROVIDERS = ["codex", "claude", "opencode", "cursor-agent", "kimi", "kimi-custom", "qwen", "gemini", "grok"];
 const OPEN_FUSION_MODEL_ID_PATTERN = /^[A-Za-z0-9._:/@+-]+$/;
 // Open Fusion deliberately ships with NO default models: assuming a vendor pair
 // on pane open fails the moment the app-owned credential store is empty, and it
@@ -1993,18 +1994,18 @@ const CODEX_LIFECYCLE_EVENTS = [
   "UserPromptSubmit",
   "PermissionRequest",
   "PreToolUse",
-  "PostToolUse"
+  "PostToolUse",
+  "SubagentStart",
+  "SubagentStop"
 ];
 
 // App-owned observer used by invocation-local Codex hooks. It consumes the hook
 // JSON from stdin and never writes stdout, so it cannot change a prompt, tool,
 // or approval decision. Turn-scoped subagent hooks intentionally carry the
 // parent session id and therefore still describe activity in the root turn.
-// Explicitly subagent-tagged payloads never produce running/waiting; they are
-// narrowed to the delegation bracket (agent.subagent.*) so that a parent
-// completion landing while a child tool call is open is not attributed to the
-// root turn. Codex's normal hook trust review still applies; vibeTerminal never
-// bypasses it.
+// Native child hooks describe child lifetime. Child tool and permission events
+// carry explicit child scope so they cannot end or restart the parent turn.
+// Codex's normal hook trust review still applies; vibeTerminal never bypasses it.
 function codexLifecycleHookSource() {
   return String.raw`const http = require("http");
 
@@ -2031,12 +2032,15 @@ process.stdin.on("end", () => {
   let type = "";
   let detail = "";
   const isSubagent = Boolean(hook.subagent || hook.agent_id || hook.agent_type);
-  if (isSubagent) {
+  const nativeChild = hook.hook_event_name === "SubagentStart" || hook.hook_event_name === "SubagentStop";
+  if (nativeChild) {
+    type = hook.hook_event_name === "SubagentStart" ? "agent.subagent.started" : "agent.subagent.stopped";
+  } else if (isSubagent) {
     // Subagent payloads still NEVER report running/waiting and never touch a
     // Codex decision — they may only say that a child was live, so a parent
     // completion landing in that window is not attributed to the root turn.
-    if (hook.hook_event_name === "PreToolUse") type = "agent.subagent.started";
-    else if (hook.hook_event_name === "PostToolUse") type = "agent.subagent.stopped";
+    if (hook.hook_event_name === "PreToolUse" || hook.hook_event_name === "PostToolUse") type = "agent.activity";
+    else if (hook.hook_event_name === "PermissionRequest") { type = "agent.waiting"; detail = "approval"; }
     else process.exit(0);
   } else {
     switch (hook.hook_event_name) {
@@ -2067,6 +2071,10 @@ process.stdin.on("end", () => {
     providerThreadId: typeof hook.session_id === "string" ? hook.session_id : undefined,
     providerTurnId: typeof hook.turn_id === "string" ? hook.turn_id : undefined,
     phase: hook.hook_event_name === "PreToolUse" ? "start" : hook.hook_event_name === "PostToolUse" ? "stop" : undefined,
+    kind: nativeChild ? undefined : "tool",
+    lifecycle: nativeChild ? "native" : undefined,
+    transcriptKind: isSubagent && !nativeChild ? "subagent" : undefined,
+    provisional: nativeChild && hook.hook_event_name === "SubagentStop" ? true : undefined,
     toolId: hook.tool_use_id || hook.tool_call_id || hook.tool_id,
     toolName: typeof hook.tool_name === "string" ? hook.tool_name : undefined,
     taskId: typeof hook.agent_id === "string" ? hook.agent_id : undefined,
@@ -2232,7 +2240,7 @@ function cursorTypeFromStatus(status) {
     return "agent.failed";
   }
   if (normalized === "aborted") {
-    return "agent.waiting";
+    return "agent.response";
   }
   return normalized === "completed" ? "agent.completed" : "agent.response";
 }
@@ -2255,7 +2263,7 @@ function windowsCursorNotifyPs1Source() {
     "} else {",
     "  $status = ''",
     "  try { $status = [string]((($raw | ConvertFrom-Json)).status) } catch { $status = '' }",
-    "  $type = if ($status -eq 'error') { 'agent.failed' } elseif ($status -eq 'aborted') { 'agent.waiting' } elseif ($status -eq 'completed') { 'agent.completed' } else { 'agent.response' }",
+    "  $type = if ($status -eq 'error') { 'agent.failed' } elseif ($status -eq 'aborted') { 'agent.response' } elseif ($status -eq 'completed') { 'agent.completed' } else { 'agent.response' }",
     "}",
     `if (${knownTypeGuard}) { exit 0 }`,
     "try {",
@@ -2324,7 +2332,7 @@ function finish() {
       status === "error"
         ? "agent.failed"
         : status === "aborted"
-          ? "agent.waiting"
+          ? "agent.response"
           : status === "completed" ? "agent.completed" : "agent.response";
   }
   if (!KNOWN_TYPES.has(type)) {
@@ -2887,36 +2895,26 @@ function buildClaudeSettingsJson(scriptPath, isWin) {
       // done/failed latch — the hooks POST from independent short-lived
       // processes with no ordering guarantee, so a tool hook that lands AFTER
       // the turn's Stop must not resurrect a completed pane's spinner.
-      // The second entry on each is the DELEGATION BRACKET: claude's matcher
-      // selects on tool name, so `Task` gives us a discriminated subagent
-      // signal without reading the hook JSON from stdin (the notify program is
-      // argv-only by design). Deliberately NOT SubagentStop as the closer: it
-      // is not 1:1 with a Task call (a blocking Stop-hook continuation can
-      // re-fire it), which would unbalance the counter. PostToolUse pairs 1:1
-      // with PreToolUse and still fires when the subagent errored.
+      // Tool brackets track tool lifetime; native subagent hooks separately
+      // observe detached children by stable identity. Stop remains provisional.
       PreToolUse: [
-        { matcher: "*", hooks: [hook("agent.running", "tool")] },
-        { matcher: "Task", hooks: [hook("agent.subagent.started")] }
+        { matcher: "*", hooks: [hook("agent.running", "tool")] }
       ],
       PostToolUse: [
-        { matcher: "*", hooks: [hook("agent.running", "tool")] },
-        { matcher: "Task", hooks: [hook("agent.subagent.stopped")] }
+        { matcher: "*", hooks: [hook("agent.running", "tool")] }
       ],
       PostToolUseFailure: [
         { matcher: "*", hooks: [hook("agent.running", "tool")] }
       ],
+      SubagentStart: [{ matcher: "*", hooks: [hook("agent.subagent.started")] }],
+      SubagentStop: [{ matcher: "*", hooks: [hook("agent.subagent.stopped")] }],
       Stop: [{ matcher: "*", hooks: [hook("agent.completed")] }],
-      // Only an actual permission notification requires user input. idle_prompt
-      // fires after ordinary completed turns, without a question to answer.
+      StopFailure: [{ matcher: "*", hooks: [hook("agent.failed")] }],
+      // Observe the actual permission dialog, not delayed notifications.
       // AskUserQuestion is recognized from the wildcard tool hook's metadata.
       // The reply can resume work before PostToolUse arrives; the terminal
       // runtime also tracks submitted replies to the active input request.
-      Notification: [
-        {
-          matcher: "permission_prompt",
-          hooks: [hook("agent.waiting", "approval")]
-        }
-      ]
+      PermissionRequest: [{ matcher: "*", hooks: [hook("agent.waiting", "approval")] }]
     }
   };
 
@@ -3096,6 +3094,7 @@ function qwenHookGroups(notifyProgramPath, isWin) {
     UserPromptSubmit: group("agent.running"),
     PreToolUse: group("agent.running", "tool"),
     PostToolUse: group("agent.running", "tool"),
+    PostToolUseFailure: group("agent.running", "tool"),
     PermissionRequest: group("agent.waiting", "approval"),
     Stop: group("agent.completed"),
     StopFailure: group("agent.failed"),
@@ -3177,120 +3176,85 @@ function mergeQwenHooks(settings, hookGroups) {
 
 // Version identifies the hook protocol; installation compares the entire source
 // so an interrupted development update cannot retain an outdated observer.
-const OPENCODE_PLUGIN_VERSION = "vibeterminal-notify-6";
+const OPENCODE_PLUGIN_VERSION = "vibeterminal-notify-9";
 
 // opencode cannot take a per-invocation hook, so we install one small plugin in
 // the user's opencode config. It is guarded: it only POSTs when the
 // VIBE_TERMINAL_* env vars are present, so a plain `opencode` run does nothing.
 //
-// Turn START (`agent.running`, the sidebar "working" spinner) is inferred from
-// message-stream events: while the assistant is generating, opencode emits a
-// burst of `message.*` events, so the FIRST one after idle reports "working" and
-// the rest are throttled by the per-turn `busy` latch (reset on every mapped
-// event: idle/error end the turn, permission prompts pause it).
-//
-// Child sessions (task-tool subagents, e.g. the Open Fusion executor) also emit
-// `session.idle`/`session.error`, and a child finishing is NOT the pane's turn
-// ending — the root session is still driving. Children are recognized by the
-// `parentID` their session.created/updated info carries (payload shapes
-// verified against opencode 1.17.11: session.idle={sessionID},
-// session.created/updated={sessionID,info}, permission.*={...sessionID});
-// unknown shapes leave the child set empty, so this fails OPEN to the old
-// behavior. Permission asks are never filtered — the user answers them in this
-// TUI whichever session raised them.
-// NOTE: the exact `message.*` event names are LIVE-VERIFY pending; if they differ
-// in a given opencode version the spinner simply won't show (no false positive),
-// while done/waiting still flow from session.idle/permission events.
+// Native session.status starts activity. Message replay and metadata never do.
+// Session metadata supplies parentID; unknown sessions are explicitly unverified.
+// Child busy/idle events observe child activity without ending the root turn.
+// Permission asks retain their originating child identity.
 function openCodePluginSource() {
-  return [
-    `// vibeterminal-notify (${OPENCODE_PLUGIN_VERSION}) - auto-generated by vibeTerminal.`,
-    "// Safe no-op outside vibeTerminal: only POSTs when VIBE_TERMINAL_* env vars are set.",
-    "export const VibeTerminalNotify = async () => {",
-    "  const busy = new Set();",
-    "  const childSessions = new Set();",
-    "  const eventSessionId = (event) => {",
-    "    const props = event.properties;",
-    '    if (!props || typeof props !== "object") return undefined;',
-    '    if (typeof props.sessionID === "string") return props.sessionID;',
-    '    if (props.info && typeof props.info.sessionID === "string") return props.info.sessionID;',
-    "    return undefined;",
-    "  };",
-    "  return {",
-    "    event: async ({ event }) => {",
-    "      const url = process.env.VIBE_TERMINAL_CALLBACK_URL;",
-    "      const token = process.env.VIBE_TERMINAL_TELEMETRY_TOKEN;",
-    "      const sessionId = process.env.VIBE_TERMINAL_SESSION_ID;",
-    "      const launchNonce = process.env.VIBE_TERMINAL_LAUNCH_NONCE;",
-    '      if (!url || !token || !sessionId || !launchNonce || !event || typeof event.type !== "string") {',
-    "        return;",
-    "      }",
-    "      const send = async (type, detail, metadata = {}) => {",
-    "        try {",
-    "          await fetch(url, {",
-    '            method: "POST",',
-    "            signal: AbortSignal.timeout(1000),",
-    "            headers: {",
-    '              "content-type": "application/json",',
-    '              "x-vibe-telemetry-token": token',
-    "            },",
-    "            // JSON.stringify drops an undefined detail.",
-    '            body: JSON.stringify({ type, detail, sessionId, launchNonce, provider: "opencode", timestamp: Date.now(), providerThreadId: eventSessionId(event), ...metadata })',
-    "          });",
-    "        } catch (_error) {",
-    "          // Telemetry is best-effort; ignore delivery failures.",
-    "        }",
-    "      };",
-    "      // Track task-tool child sessions from the parentID their info carries.",
-    '      if (event.type === "session.created" || event.type === "session.updated") {',
-    "        const info = event.properties && event.properties.info;",
-    '        if (info && typeof info.id === "string" && info.parentID) {',
-    "          childSessions.add(info.id);",
-    "        }",
-    '        if (info && typeof info.id === "string") {',
-    '          await send("agent.session", undefined, { phase: "update", providerThreadId: info.id, parentThreadId: info.parentID, rootVerified: !info.parentID, title: info.title, titleSource: "generated", cwd: info.directory });',
-    "        }",
-    "        return;",
-    "      }",
-    '      if (event.type.startsWith("message.")) {',
-    "        const providerSession = eventSessionId(event);",
-    "        if (childSessions.has(providerSession)) return;",
-    '        const busyKey = providerSession || "unknown";',
-    "        if (!busy.has(busyKey)) {",
-    "          busy.add(busyKey);",
-    '          await send("agent.running");',
-    "        }",
-    "        return;",
-    "      }",
-    "      const map = {",
-    '        "session.idle": "agent.completed",',
-    '        "permission.asked": "agent.waiting",',
-    '        "permission.updated": "agent.waiting",',
-    '        "session.error": "agent.failed"',
-    "      };",
-    "      const type = map[event.type];",
-    "      if (!type) {",
-    "        return;",
-    "      }",
-    "      // A child session going idle/erroring is not the pane's turn ending",
-    "      // (the root session is still driving) - it must not flash done/failed",
-    "      // or drop the busy latch mid-delegation. Permission asks always pass.",
-    "      if (",
-    '        (event.type === "session.idle" || event.type === "session.error") &&',
-    "        childSessions.has(eventSessionId(event))",
-    "      ) {",
-    "        return;",
-    "      }",
-    "      // Every mapped event ends the current working stretch: idle/error end",
-    "      // the turn, and a permission prompt pauses it with NO event of its own",
-    "      // for the approval that resumes it - dropping the latch here lets the",
-    "      // next message.* burst re-assert agent.running after the user approves.",
-    '      busy.delete(eventSessionId(event) || "unknown");',
-    '      await send(type, type === "agent.waiting" ? "approval" : undefined);',
-    "    }",
-    "  };",
-    "};",
-    ""
-  ].join("\n");
+  return String.raw`// vibeterminal-notify (${OPENCODE_PLUGIN_VERSION}) - auto-generated by vibeTerminal.
+export const VibeTerminalNotify = async () => {
+  const busy = new Set();
+  const paused = new Set();
+  const sessions = new Map();
+  const eventSessionId = event => event.properties?.sessionID || event.properties?.info?.sessionID;
+  return { event: async ({ event }) => {
+    const env = process.env;
+    const url = env.VIBE_TERMINAL_CALLBACK_URL;
+    const token = env.VIBE_TERMINAL_TELEMETRY_TOKEN;
+    const sessionId = env.VIBE_TERMINAL_SESSION_ID;
+    const launchNonce = env.VIBE_TERMINAL_LAUNCH_NONCE;
+    if (!url || !token || !sessionId || !launchNonce || !event) return;
+    const id = eventSessionId(event);
+    const parentID = sessions.get(id);
+    const child = Boolean(parentID);
+    const scope = child ? { parentThreadId: parentID, taskId: id, transcriptKind: 'subagent' }
+      : sessions.has(id) ? {} : { rootVerified: false };
+    const send = async (type, detail, metadata = {}) => {
+      try {
+        await fetch(url, { method: 'POST', signal: AbortSignal.timeout(1000),
+          headers: { 'content-type': 'application/json', 'x-vibe-telemetry-token': token },
+          body: JSON.stringify({ type, detail, sessionId, launchNonce, provider: 'opencode', timestamp: Date.now(), providerThreadId: id, ...scope, ...metadata }) });
+      } catch {}
+    };
+    if (event.type === 'session.created' || event.type === 'session.updated') {
+      const info = event.properties?.info;
+      if (info && typeof info.id === 'string') {
+        // Explicit root/parent metadata is required before attributing status.
+        sessions.set(info.id, info.parentID || null);
+        await send('agent.session', undefined, { phase: 'update', providerThreadId: info.id,
+          parentThreadId: info.parentID, rootVerified: !info.parentID, title: info.title,
+          titleSource: 'generated', cwd: info.directory });
+      }
+      return;
+    }
+    const status = event.type === 'session.status' ? event.properties?.status?.type : undefined;
+    if (status === 'busy' || status === 'retry') {
+      if (!busy.has(id)) {
+        const resuming = paused.has(id);
+        busy.add(id); paused.delete(id);
+        await send(child && !resuming ? 'agent.subagent.started' : 'agent.running', resuming ? 'tool' : undefined,
+          child && !resuming ? { lifecycle: 'native' } : {});
+      }
+      return;
+    }
+    if (event.type.startsWith('message.')) {
+      // History replay, message edits, and metadata are not evidence of a turn.
+      if (event.type === 'message.part.delta' && (busy.has(id) || paused.has(id))) {
+        const resuming = paused.has(id);
+        busy.add(id); paused.delete(id);
+        await send(child && !resuming ? 'agent.subagent.started' : 'agent.running', 'tool', child && !resuming ? { lifecycle: 'native' } : {});
+      }
+      return;
+    }
+    const map = { 'session.idle': 'agent.completed', 'session.error': 'agent.failed',
+      'permission.asked': 'agent.waiting', 'permission.updated': 'agent.waiting' };
+    const type = status === 'idle' ? 'agent.completed' : map[event.type];
+    if (!type || !id) return;
+    const wasActive = busy.has(id) || paused.has(id);
+    busy.delete(id);
+    if (type === 'agent.waiting') paused.add(id); else paused.delete(id);
+    if (child && type !== 'agent.waiting') {
+      if (wasActive) await send('agent.subagent.stopped', undefined, { lifecycle: 'native', provisional: true });
+    } else await send(type, type === 'agent.waiting' ? 'approval' : undefined);
+  }};
+};
+`;
 }
 
 function installOpenCodePlugin(homeDir, env = process.env) {
@@ -3330,6 +3294,9 @@ function installOpenCodePlugin(homeDir, env = process.env) {
 }
 
 function mapTelemetryToAttention(event) {
+  if (event.type === "agent.cancelled") {
+    return { state: "failed", reason: "interrupted", source: "provider", updatedAt: Date.now() };
+  }
   if (event.type === "agent.process.exited") {
     const hasSignal = Boolean(event.signal);
     const exitCode =
@@ -3393,6 +3360,7 @@ function createAgentTelemetryManager(options = {}) {
   const token = options.token || crypto.randomBytes(32).toString("hex");
   const nodePath = options.nodePath || process.execPath;
   const runDir = path.join(baseDir, runId);
+  const grokHookCleanups = new Map();
   const runnerPath = path.join(runDir, "shim-runner.cjs");
   const isWin = process.platform === "win32";
   const notifyHookPath = path.join(runDir, "notify-hook.cjs");
@@ -3536,12 +3504,14 @@ function createAgentTelemetryManager(options = {}) {
             // Generation is authenticated by the server-owned nonce. Never accept
             // a generation claimed in a child payload, or resurrect a released run.
             const eventMetadata = { generation: activeSession.generation };
-            const textMetadata = ["providerThreadId", "providerTurnId", "toolId", "toolName", "taskId", "taskLabel", "parentThreadId", "transcriptPath", "cwd", "notificationType"];
+            const textMetadata = ["providerThreadId", "providerTurnId", "toolId", "toolName", "taskId", "taskLabel", "parentThreadId", "transcriptPath", "cwd", "notificationType", "kind", "lifecycle"];
             for (const key of textMetadata) {
               if (activeSession.generation === undefined && event.provider !== "codex") continue;
               if (typeof event[key] === "string" && event[key].length <= 4096) eventMetadata[key] = event[key];
             }
             if (event.rootVerified !== undefined) eventMetadata.rootVerified = event.rootVerified === true;
+            if (event.provisional === true) eventMetadata.provisional = true;
+            if (Number.isFinite(event.timestamp) && event.timestamp > 0 && event.timestamp <= Date.now() + 5000) eventMetadata.observedAt = event.timestamp;
             if (typeof event.transcriptKind === "string") eventMetadata.transcriptKind = event.transcriptKind;
             const emitEvent = (value) => emit({
               ...value,
@@ -3709,13 +3679,8 @@ function createAgentTelemetryManager(options = {}) {
               event.type === "agent.subagent.started" ||
               event.type === "agent.subagent.stopped"
             ) {
-              // Delegation bracket: the pane's agent handed work to a subagent
-              // (start) or that subagent finished (stop). Not an attention
-              // signal and not a turn start — it rides its own event so the
-              // renderer can hold "working" across a turn boundary and refuse
-              // to settle on a completion it cannot attribute. It deliberately
-              // carries no ids: no provider matcher can supply one, and the
-              // notify transport stays argv-only.
+              // Native lifecycle events carry stable child identity when available.
+              // Legacy tool brackets remain coarse observations.
               emitEvent({
                 id: event.sessionId,
                 type: "agent-subagent",
@@ -3745,7 +3710,8 @@ function createAgentTelemetryManager(options = {}) {
                   typeof event.providerTurnId === "string"
                     ? event.providerTurnId
                     : undefined,
-                turnStart: event.detail !== "tool"
+                turnStart: event.detail !== "tool",
+                phase: event.phase === "start" || event.phase === "stop" ? event.phase : undefined
               });
             } else {
               const attention = mapTelemetryToAttention(event);
@@ -3838,7 +3804,17 @@ function createAgentTelemetryManager(options = {}) {
       }
     };
 
-    if (options.provider === "gemini") {
+    if (options.provider === "grok") {
+      const grok = prepareGrokTelemetry({ baseDir, ownerId: runId, nodePath, env: options.env || process.env });
+      if (grok.cleanup) grokHookCleanups.set(grok.hookPath, grok.cleanup);
+      Object.assign(instrumentation.env, grok.env);
+      instrumentation.capabilities = grok.capabilities;
+      if (grok.binaryDir) {
+        const grokPath = [grok.binaryDir, originalPath].filter(Boolean).join(path.delimiter);
+        instrumentation.env[key] = [shimDir, grokPath].join(path.delimiter);
+        instrumentation.env.VIBE_TERMINAL_ORIGINAL_PATH = grokPath;
+      }
+    } else if (options.provider === "gemini") {
       const gemini = prepareGeminiTelemetry({ sessionDir, nodePath, env: options.env || process.env });
       Object.assign(instrumentation.env, gemini.env);
       instrumentation.capabilities = gemini.capabilities;
@@ -4588,6 +4564,8 @@ function createAgentTelemetryManager(options = {}) {
   }
 
   function cleanup() {
+    for (const cleanupGrok of grokHookCleanups.values()) cleanupGrok();
+    grokHookCleanups.clear();
     for (const sessionId of Array.from(sessions.keys())) {
       releaseSession(sessionId);
     }

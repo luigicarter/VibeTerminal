@@ -4,14 +4,47 @@ const { randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 
+// Display activity is distinct from the raw turn evidence used by task proofs.
+// Keep this projection aligned with frontend/terminalRuntime.ts (parity tested).
+function nativeSessionStatus(s) {
+  if (s.processState === "failed") return "failed";
+  if (s.processState === "exited") return "exited";
+  if (s.processState === "starting" || s.launchState === "pending") return "starting";
+  if (s.provider !== "terminal") {
+    if (s.agentProcessState === "failed") return "failed";
+    if (s.agentProcessState === "exited") return "exited";
+  }
+  const childUnverified = child => child.observation === "provisional" ||
+    (s.backgroundObservation?.availability === "unavailable" && child.id.startsWith("background:"));
+  const retainedChildrenOnly = (s.children?.some(childUnverified) || s.coarseChildObservation === "provisional") &&
+    s.coarseChildObservation !== "observed" && (s.children || []).every(childUnverified);
+  const liveChildren = !retainedChildrenOnly && (s.children?.length > 0 || s.childActivity);
+  const childObserved = liveChildren && (s.activityObserved === true || (s.observation === "observed" && s.telemetryHealth !== "unavailable"));
+  if (childObserved && s.children?.some(child => !childUnverified(child) && child.attention?.state === "waiting")) return "waiting";
+  if (s.pendingInput) return s.pendingInput === "interrupt" ? "interrupt requested" : "awaiting activity";
+  if (s.provider === "terminal") return "terminal open";
+  const rootActive = s.telemetryHealth !== "unavailable" && s.observation !== "unavailable" && ["running", "waiting"].includes(s.turnState);
+  if (retainedChildrenOnly && !rootActive && !s.activeTools?.length) return "activity unverified";
+  if (s.telemetryHealth === "unavailable" || s.observation === "unavailable") {
+    if (!s.activityObserved) return "unobserved";
+    return liveChildren || s.activeTools?.length > 0 ? "running" : "unobserved";
+  }
+  if (s.turnState === "waiting") return "waiting";
+  if (s.activityObserved && s.activeTools?.length > 0) return "running";
+  if (liveChildren) return "running";
+  if (s.turnState === "completed") return s.observation === "observed" ? "completed" : "response";
+  return s.turnState || "unknown";
+}
+
 // This facade composes existing engine owners. It never assigns work or makes
 // approval decisions. Its new command channel always captures a generation.
 function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
   const ui = new Map(), chats = new Map(), activity = new Map(), bodies = new Map(), interactions = new Map();
   const completedResults = new Map();
-  let projectPaths = [];
+  let projectPaths = [], launchers = [];
   let contentSequence = 0;
-  function updateUi(items, roots = []) {
+  function updateUi(items, roots = [], catalog = []) {
+    launchers = require("./orchestratorLaunchers.cjs").launcherCatalog(catalog);
     projectPaths = roots.filter(p => typeof p === "string");
     ui.clear();
     for (const s of Array.isArray(items) ? items : []) if (s?.id) ui.set(s.id, {
@@ -29,11 +62,22 @@ function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
       const old = chats.get(p.id);
       // Main's start route is invoked by pane mounts too. An unchanged live
       // configuration is an attach; explicit stop/close retires the owner.
-      const signature = JSON.stringify([p.cwd, p.plannerFamily, p.plannerModel, p.executorModel, p.resumeId, p.model]);
-      if (!old || old.signature !== signature || old.closed) {
+      // Open Fusion's Brain model is a live per-turn setting. Its picker does
+      // not restart the server, so a subsequent mount must retain its owner.
+      const plannerModel = kind === "openfusion" ? undefined : p.plannerModel;
+      const signature = JSON.stringify([kind, p.cwd, p.plannerFamily, plannerModel, p.executorModel, p.resumeId, p.model]);
+      const configurationSignature = JSON.stringify([kind, p.cwd, p.plannerFamily, plannerModel, p.executorModel, p.model]);
+      // Fresh chats learn their native ID after start. A later pane mount sends
+      // that ID as resumeId, but the host reattaches to its existing generation.
+      const attachesCurrentConversation = old?.configurationSignature === configurationSignature &&
+        typeof p.resumeId === "string" && p.resumeId && p.resumeId === old.conversationId;
+      if (!old || old.signature !== signature && !attachesCurrentConversation || old.closed) {
+        const plannerFamily = kind === "fusion" ? p.plannerFamily || ui.get(p.id)?.fusionPlannerFamily || "claude" : undefined;
         chats.set(p.id, { id: p.id, kind, cwd: p.cwd, generation: randomUUID(), revision: 1,
           status: "starting", observation: "observed", model: p.plannerModel || p.model,
-          mode: p.mode || p.runMode || "auto", signature, lastActivityAt: now(), closed: false,
+          ...(plannerFamily && { plannerProvider: plannerFamily, fusionPlannerFamily: plannerFamily }),
+          ...(typeof p.resumeId === "string" && p.resumeId && { conversationId: p.resumeId }),
+          mode: p.mode || p.runMode || "auto", signature, configurationSignature, lastActivityAt: now(), closed: false,
           turnState: "unknown", turnSequence: 0, turnActive: false });
         bodies.delete(p.id);
         interactions.delete(p.id);
@@ -41,6 +85,8 @@ function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
     }
     const c = chats.get(p.id);
     if (c) {
+      if (kind === "openfusion" && message.type === "start") c.model = p.plannerModel || c.model;
+      if (kind === "openfusion" && message.type === "planner-model") c.model = p.model;
       message = { ...message, payload: { ...p, generation: message.type === "start" ? c.generation : (p.generation || c.generation) } };
       if (message.type === "mode") c.mode = p.mode;
       if (["input", "steer"].includes(message.type)) {
@@ -53,6 +99,11 @@ function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
       if (message.type === "stop") { c.closed = true; c.status = "exited"; bodies.delete(p.id); interactions.delete(p.id); chats.delete(p.id); }
     }
     return message;
+  }
+  function canRestartChat(kind, event) {
+    const retained = chats.get(event?.id);
+    return kind === "fusion" && event?.type === "engine-restarting" && !event.replay &&
+      retained?.kind === "fusion" && retained.closed === true && event.generation === retained.generation;
   }
   function ingest(kind, event) {
     if (!event?.id || event.replay) return;
@@ -73,7 +124,42 @@ function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
     }
     const c = chats.get(event.id);
     if (!c || (event.generation && event.generation !== c.generation)) return;
+    // Fusion can recover a cleanly exited planner for the next user input or
+    // background report. Only its explicit, generation-bound restart may
+    // revive the retained owner; late output/readiness from an exit cannot.
+    if (c.closed) {
+      if (!canRestartChat(kind, event)) return;
+      for (const key of ['turnId', 'turnStartedAt', 'turnEndedAt', 'completedTurnId', 'completedActionId', 'activeActionId', 'pendingActionId', 'completionAttribution', 'turnText', 'lastTool', 'checkEvidence']) delete c[key];
+      c.closed = false; c.engineReady = false; c.status = "starting";
+      c.turnState = "unknown"; c.turnActive = false; c.pendingInput = false; c.interruptSettled = false;
+      c.detachedTaskIds = []; c.backgroundActivity = undefined;
+      interactions.delete(c.id);
+    }
+    // The engine's generation-bound identity is authoritative immediately;
+    // renderer inventory updates can arrive later or carry the previous thread.
+    if (event.type === "session" && event.generation === c.generation && typeof event.sessionId === "string" && event.sessionId) {
+      const previousId = c.conversationId || ui.get(c.id)?.threadRef?.id;
+      if (previousId && previousId !== event.sessionId) {
+        // Current turn evidence belongs to the old native conversation. Keep
+        // its immutable result cache and transcript, but never relabel those
+        // fields as activity or completion in the replacement conversation.
+        for (const key of ['turnId', 'turnStartedAt', 'turnEndedAt', 'completedTurnId', 'completedActionId', 'activeActionId', 'pendingActionId', 'completionAttribution', 'turnText', 'lastTool', 'checkEvidence']) delete c[key];
+        c.turnActive = false; c.pendingInput = false; c.interruptSettled = false; c.turnState = 'unknown'; c.status = 'unknown';
+        c.detachedTaskIds = []; c.backgroundActivity = undefined;
+        interactions.delete(c.id);
+      }
+      c.conversationId = event.sessionId;
+    }
     c.revision++; c.lastActivityAt = t;
+    if (event.type === "background-task" && typeof event.taskId === "string" && event.taskId) {
+      const tasks = new Set(c.detachedTaskIds || []);
+      if (event.phase === "started") tasks.add(event.taskId);
+      if (event.phase === "settled") tasks.delete(event.taskId);
+      c.detachedTaskIds = [...tasks];
+    }
+    if (event.type === "background-activity" && event.backgroundActivity) {
+      c.backgroundActivity = structuredClone(event.backgroundActivity);
+    }
     if (event.type === "action-result" && event.ok === false) {
       if (c.pendingActionId === event.actionId) { c.pendingActionId = undefined; c.pendingInput = false; }
       if (c.activeActionId === event.actionId) c.activeActionId = undefined;
@@ -87,12 +173,13 @@ function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
     }
     if (["permission-resolved", "question-resolved", "interaction-resolved"].includes(event.type)) {
       pending.delete(String(event.requestId || event.interaction?.id || event.type.replace("-resolved", "")));
-      if (!pending.size && c.status === "waiting") c.status = "idle";
+      if (!pending.size && c.status === "waiting") { c.status = "idle"; c.turnState = "idle"; }
     }
-    if (event.type === "engine-ready" && c.status === "starting") { c.status = "idle"; c.turnState = "idle"; }
+    if (event.type === "engine-ready") { c.engineReady = true; if (c.status === "starting") { c.status = "idle"; c.turnState = "idle"; } }
     // The hosts emit assistant-text/thinking; streamed work must not hide an
     // unresolved question or permission from another concurrent operation.
     if (["turn-start", "tool-call", "delta", "text-delta", "assistant-text", "thinking"].includes(event.type)) {
+      c.interruptSettled = false;
       if (!c.turnActive) {
         c.turnActive = true; c.turnSequence++;
         c.turnId = event.turnId || event.providerTurnId || `${c.generation}:${c.turnSequence}`;
@@ -105,17 +192,25 @@ function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
     // Hosts retain interaction ownership through a planner result/error. Only
     // explicit resolution or interruption retires those outstanding requests.
     if (event.type === "interrupted") interactions.delete(event.id);
-    if (event.type === "interrupted") c.status = "interrupted";
-    if (event.type === "result") c.status = event.subtype === "error" ? "failed" : pending.size ? "waiting" : "completed";
-    if (event.type === "result" && event.gate) c.checkEvidence = { ...event.gate, observedAt: t };
+    if (event.type === "interrupted") { c.status = "interrupted"; c.interruptSettled = true; }
+    const failedResult = event.type === "result" && (event.isError === true || event.subtype === "error");
+    // Hosts replay a restoration settle and may send a final result after an
+    // interrupt. Neither is a new successful completion of the foreground turn.
+    const passiveResult = event.type === "result" && (event.subtype === "restored" || (c.interruptSettled && (kind === "openfusion" || !failedResult)));
+    if (event.type === "result" && !passiveResult) c.status = failedResult ? "failed" : pending.size ? "waiting" : "completed";
+    if (event.type === "result" && event.subtype === "restored" && !c.turnActive) { c.status = "idle"; c.turnState = "idle"; }
+    if (event.type === "result" && !passiveResult && event.gate) c.checkEvidence = { ...event.gate, observedAt: t };
     if (event.type === "error") c.status = "failed";
     if (["permission", "question", "interaction-request"].includes(event.type)) c.turnState = "waiting";
-    if (["result", "error", "interrupted"].includes(event.type) && c.status !== "waiting") {
+    if (["result", "error", "interrupted"].includes(event.type) && !passiveResult && c.status !== "waiting") {
       c.turnState = c.status; c.turnEndedAt = t;
       c.completedTurnId = c.turnId; c.completedActionId = c.activeActionId;
       c.turnActive = false; c.pendingInput = false;
     }
-    if (event.type === "closed") { c.status = "exited"; c.closed = true; bodies.delete(event.id); interactions.delete(event.id); chats.delete(event.id); }
+    if (event.type === "closed") {
+      c.status = "exited"; c.closed = true; c.engineReady = false; interactions.delete(event.id);
+      if (kind !== "fusion") { bodies.delete(event.id); chats.delete(event.id); }
+    }
     if (event.type === "tool-call") c.lastTool = { name: event.name || event.toolName, at: t };
     const text = event.delta || event.text || (event.type === "error" ? event.message : "");
     if (typeof text === "string" && text) {
@@ -125,10 +220,14 @@ function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
       if (b.text.length > 200000) { b.text = b.text.slice(-200000); b.truncated = true; }
       b.sequence = ++contentSequence; b.at = t; bodies.set(event.id, b);
     }
-    if (["result", "error", "interrupted"].includes(event.type) && c.turnEndedAt && c.turnId) {
+    if (["result", "error", "interrupted"].includes(event.type) && !passiveResult && c.turnEndedAt && c.turnId) {
       completedResults.set(JSON.stringify([c.id, c.generation, c.turnId]), { turnId: c.turnId, actionId: c.completedActionId, status: c.turnState, at: c.turnEndedAt, text: c.turnText || "", source: "chat-events" });
       while (completedResults.size > 200) completedResults.delete(completedResults.keys().next().value);
     }
+  }
+  function chatActivity(c) {
+    const childActivity = Boolean(c.detachedTaskIds?.length || c.backgroundActivity?.active);
+    return { childActivity, status: c.status === "waiting" ? "waiting" : childActivity ? "running" : c.status };
   }
   function list() {
     const out = [];
@@ -138,13 +237,15 @@ function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
         name: s.conversation?.title || u.name || s.terminalTitle || s.provider,
         conversationTitle: s.conversation?.title,
         aliases: [...new Set([u.name, u.threadRef?.title, s.conversation?.title].filter(value => typeof value === "string" && value.trim()))],
-        status: s.pendingInput ? "awaiting activity" : s.turnState,
+        status: nativeSessionStatus(s),
         lastActivityAt: a?.generation === s.generation ? a.lastActivityAt : undefined,
         lastOutputAt: a?.generation === s.generation ? a.lastOutputAt : undefined,
         agentPid: a?.generation === s.generation ? a.pid : undefined,
         terminalPid: a?.generation === s.generation ? a.terminalPid : undefined });
     }
-    for (const c of chats.values()) if (!c.closed) { const u = ui.get(c.id); out.push({ ...u, ...c, name: u?.threadRef?.title || u?.name || c.kind, conversationTitle: u?.threadRef?.title,
+    for (const c of chats.values()) if (!c.closed) { const u = ui.get(c.id);
+      out.push({ ...u, ...c, ...chatActivity(c),
+      name: u?.threadRef?.title || u?.name || c.kind, conversationTitle: u?.threadRef?.title,
       aliases: [...new Set([u?.name, u?.threadRef?.title].filter(value => typeof value === "string" && value.trim()))] }); }
     for (const u of ui.values()) if (!out.some(s => s.id === u.id)) out.push({ ...u,
       generation: `paused:${u.id}:${u.launchToken || 0}`, revision: 0, observation: "unavailable", status: "paused" });
@@ -158,10 +259,10 @@ function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
     const limit = Math.max(100, Math.min(32000, Number(target.maxChars) || 16000));
     return { id: s.id, generation: s.generation, source: "chat-events", sequence: b?.sequence || 0,
       observedAt: b?.at, text: b?.text.slice(-limit) || "", truncated: Boolean(b?.truncated || b?.text.length > limit),
-      complete: false, status: s.status, turnId: s.turnId, turnState: s.turnState,
+      complete: false, ...chatActivity(s), turnId: s.turnId, turnState: s.turnState,
       completedResult: structuredClone(completedResults.get(JSON.stringify([s.id, s.generation, target.completedTurnId || s.completedTurnId]))) };
   }
-  return { updateUi, outgoing, ingest, list, readChat, projectPaths: () => projectPaths, get: id => list().find(s => s.id === id),
+  return { updateUi, outgoing, ingest, list, readChat, canRestartChat, projectPaths: () => projectPaths, launchers: () => structuredClone(launchers), get: id => list().find(s => s.id === id),
     forget: (id, generation) => { if (activity.get(id)?.generation === generation) activity.delete(id); if (chats.get(id)?.generation === generation) { chats.delete(id); bodies.delete(id); interactions.delete(id); } for (const key of completedResults.keys()) { const identity = JSON.parse(key); if (identity[0] === id && identity[1] === generation) completedResults.delete(key); } },
     clear: () => { ui.clear(); chats.clear(); activity.clear(); bodies.clear(); interactions.clear(); completedResults.clear(); } };
 }
@@ -190,7 +291,7 @@ function installOrchestrator(options) {
   const setups = createWorkspaceSetupStore({ userDataPath: app.getPath("userData") });
   const pendingUi = new Map(), pendingHost = new Map();
   const inventoryReader = createInventoryRefresh({ read: () => requestUi("inventory"),
-    apply: result => { if (!disposed) directory.updateUi(result.sessions || result.items || [], result.projectPaths || []); },
+    apply: result => { if (!disposed) directory.updateUi(result.sessions || result.items || [], result.projectPaths || [], result.launchers || []); },
     after: async () => { if (!disposed) await relay.refresh(); } });
   const history = createOrchestratorHistoryProcess({ getConfig: () => {
     const current = directory.list();
@@ -198,19 +299,23 @@ function installOrchestrator(options) {
     const scopes = current.filter(s => s.kind !== "terminal").map(s => ({ provider: s.kind, cwd: s.cwd,
       claudeHome: s.providerProfileId ? "custom" : "global", providerProfileId: s.providerProfileId, ownedThreadIds: [s.threadRef?.id, s.resumeRef?.id].filter(Boolean),
       plannerProvider: s.fusionPlannerFamily || "claude", fusion: s.kind === "fusion", openFusion: s.kind === "openfusion" }));
-    for (const cwd of roots) for (const provider of ["codex", "claude", "claude-custom", "cursor", "gemini", "kimi", "kimi-custom", "qwen", "opencode", "openfusion", "fusion"]) scopes.push({ provider, cwd });
+    for (const cwd of roots) for (const provider of ["codex", "claude", "claude-custom", "cursor", "gemini", "kimi", "kimi-custom", "qwen", "grok", "opencode", "openfusion", "fusion"]) scopes.push({ provider, cwd });
     return { ...options.getHistoryConfig?.(), scopes };
   } });
   const delivery = createOrchestratorDelivery({
     getSession: inputSession,
-    write: payload => hostAction(sendPty, payload),
+    write: ({ signal, ...payload }) => hostAction(sendPty, payload, 'action', signal),
     reserveInput: payload => { const runtime = getRuntime(), reservation = runtime.recordInput?.(payload); return reservation ? () => runtime.releaseInput?.(reservation) : undefined; },
     onUpdate: result => relay.recordDelivery(result),
     onBeforeWrite: metadata => relay.prepareDelivery(metadata)
   });
+  const routedInputBindings = new Map();
   const terminalInput = createTerminalInput({ getSession: inputSession, readSession: target => observations.read(target),
     onBeforeWrite: metadata => relay.prepareDelivery(metadata),
-    write: ({ signal, ...payload }) => hostAction(sendPty, payload, 'action', signal) });
+    write: ({ signal, ...payload }) => {
+      if (!require("./orchestratorLaunchers.cjs").routingBindingMatches(routedInputBindings.get(payload.actionId), directory.get(payload.id))) return { ok: false, status: "blocked", delivery: "not-dispatched", error: "The routed conversation changed before dispatch." };
+      return hostAction(sendPty, payload, 'action', signal);
+    } });
   let disposed = false, inventoryTimer = null, publicationTimer = null, voice, activation = 0;
   function inputSession(id) {
     const session = directory.get(id);
@@ -284,11 +389,28 @@ function installOrchestrator(options) {
     if (pendingHost.has(actionId)) return Promise.resolve({ ok: false, status: "rejected", error: "This action ID already has a pending host acknowledgment." });
     const engine = send === sendPty ? "terminal" : send === sendFusion ? "fusion" : "openfusion";
     return new Promise(resolve => {
-      const finish = r => { clearTimeout(timer); if (pendingHost.get(actionId)?.finish === finish) pendingHost.delete(actionId); resolve(r); };
-      const timer = setTimeout(() => finish({ ok: false, status: "unknown", error: "Delivery unconfirmed. The action was not retried." }), 15000);
-      pendingHost.set(actionId, { finish, engine, id: payload.id, generation: payload.generation });
-      try { if (!send({ type, payload: { ...payload, actionId } })) finish({ ok: false, status: "rejected", error: "Agent host is unavailable." }); }
-      catch (error) { finish({ ok: false, status: "unknown", error: String(error?.message || error) }); }
+      let settled = false;
+      const finish = r => {
+        if (settled) return;
+        settled = true; clearTimeout(timer); signal?.removeEventListener('abort', abort);
+        if (pendingHost.get(actionId)?.finish === finish) pendingHost.delete(actionId);
+        resolve(r);
+      };
+      const cancel = error => {
+        if (settled) return;
+        // Cancel only this host action, never the agent turn or another request.
+        if (engine === 'terminal') {
+          try { send({ type: 'action-cancel', payload: { id: payload.id, generation: payload.generation, actionId } }); } catch { /* Deadline also fences a delayed host submit. */ }
+        }
+        finish({ ok: false, status: 'unknown', error });
+      };
+      const abort = () => cancel('Terminal input was cancelled after dispatch. The outcome is unconfirmed; no automatic retry.');
+      const deadlineAt = Date.now() + 15000;
+      const timer = setTimeout(() => cancel("Delivery unconfirmed. The action was not retried."), 15000);
+      pendingHost.set(actionId, { finish, cancel, engine, id: payload.id, generation: payload.generation });
+      if (engine === 'terminal') signal?.addEventListener('abort', abort, { once: true });
+      try { if (!send({ type, payload: { ...payload, actionId, ...(engine === 'terminal' ? { deadlineAt } : {}) } })) finish({ ok: false, status: "rejected", delivery: 'not-dispatched', error: "Agent host is unavailable." }); }
+      catch (error) { cancel(String(error?.message || error)); }
     });
   }
   function currentTarget(action) {
@@ -315,17 +437,32 @@ function installOrchestrator(options) {
   async function answerExisting(kind, payload) {
     const s = directory.get(payload.id);
     if (!s || s.kind !== kind || (payload.generation && payload.generation !== s.generation)) return { ok: false, error: "This session has changed." };
-    const base = { ...payload, id: s.id, generation: s.generation, actionId: payload.actionId || randomUUID() };
-    if (kind === "openfusion") return hostAction(sendOpenFusion, base, payload.kind === "permission" ? "permission" : payload.kind === "progress" ? "question-progress" : "question");
+    const request = relay.getState().requests.find(item => item.id === payload.requestId && item.sessionId === s.id && item.generation === s.generation && item.state === "pending" && (payload.revision === undefined || payload.revision === item.revision));
+    if (!request) return { ok: false, error: "This interaction is no longer current." };
+    const binding = { target: { id: s.id, generation: s.generation }, nativeIdentity: require("./orchestratorRouting.cjs").sessionIdentity(s) };
+    const base = { ...payload, id: s.id, generation: s.generation, revision: request.revision, actionId: payload.actionId || randomUUID() };
+    const sendCurrent = (send, value, type) => {
+      if (!require("./orchestratorLaunchers.cjs").routingBindingMatches(binding, directory.get(s.id)) || !relay.getState().requests.some(item => item.id === request.id && item.sessionId === s.id && item.generation === s.generation && item.revision === request.revision && item.state === "pending")) return { ok: false, status: "blocked", delivery: "not-dispatched", error: "This interaction is no longer current." };
+      return hostAction(send, value, type);
+    };
+    if (kind === "openfusion") return sendCurrent(sendOpenFusion, base, payload.kind === "permission" ? "permission" : payload.kind === "progress" ? "question-progress" : "question");
     const control = getTelemetry().getFusionSessionControl(s.id);
     if (!control?.controlUrl) return { ok: false, error: "Fusion answer bridge unavailable." };
-    return hostAction(sendFusion, { ...base, ...control }, "answer-question");
+    return sendCurrent(sendFusion, { ...base, ...control }, "answer-question");
   }
   async function dispatchAction(action) {
     const kind = action.kind;
+    let effectBinding = action.routingBinding;
     const check = () => { if (disposed || action.signal?.aborted) throw new Error("Cancelled."); };
-    const checkedHost = (send, payload, type) => { check(); currentTarget(action); return hostAction(send, payload, type, action.signal); };
+    const checkedHost = (send, payload, type) => {
+      check();
+      const current = currentTarget(action);
+      if (!require("./orchestratorLaunchers.cjs").routingBindingMatches(effectBinding, current)) return { ok: false, status: "blocked", delivery: "not-dispatched", reason: "conversation-changed", error: "The conversation changed before host input." };
+      if (["answer_question", "permission"].includes(kind) && !relay.getState().requests.some(request => request.id === action.requestId && request.sessionId === current.id && request.generation === current.generation && request.revision === action.revision && request.state === "pending")) return { ok: false, status: "blocked", delivery: "not-dispatched", error: "This interaction is no longer current." };
+      return hostAction(send, payload, type, action.signal);
+    };
     const createdTarget = async result => {
+      if (action.waitForReady && result?.ok && result.id) return require("./orchestratorLaunchers.cjs").waitForRoutingReady({ result, getSession: id => directory.get(id), refresh: refreshInventory, signal: AbortSignal.any([launchLifetime.signal, ...(action.signal ? [action.signal] : [])]), timeoutMs: options.launchTimeoutMs ?? 20000 });
       const session = result?.ok && result.id ? directory.get(result.id) : null;
       if (result?.ok && result.id && Number.isFinite(result.launchToken) &&
           !session?.fusion && !session?.openFusion && !["fusion", "openfusion"].includes(session?.kind || action.kindOfSession)) {
@@ -389,6 +526,7 @@ function installOrchestrator(options) {
       return error ? { ok: false, error } : { ok: true, status: "opened", path: resolved, text: "Opened in the default application." };
     }
     const s = await currentTarget(action);
+    if (!effectBinding && ["fusion", "openfusion"].includes(s.kind)) effectBinding = { target: { id: s.id, generation: s.generation }, nativeIdentity: require("./orchestratorRouting.cjs").sessionIdentity(s) };
     if (kind === 'terminal_interact') return terminalInput.handle(action);
     if (["focus_session", "stage_draft", "get_draft", "stage_handoff", "restart", "close"].includes(kind)) {
       const { signal, ...payload } = action;
@@ -423,11 +561,18 @@ function installOrchestrator(options) {
       return checkedHost(sendPty, { id: s.id, generation: s.generation, actionId: action.actionId, kind: "interrupt" });
     }
     if (kind === "send_prompt") {
+      if (!require("./orchestratorLaunchers.cjs").routingBindingMatches(action.routingBinding, s)) return { ok: false, status: "blocked", delivery: "not-dispatched", reason: "conversation-changed", error: "The routed conversation changed before dispatch." };
       if (typeof action.text !== "string" || !action.text.trim()) throw new Error("A prompt is required.");
       if (s.kind === "fusion") {
         if (s.status === "running") {
           check(); currentTarget(action); const route = await getTelemetry().steerFusionSession(s.id, action.text);
-          await currentTarget(action);
+          const current = directory.get(s.id);
+          if (!current || current.generation !== s.generation || !require("./orchestratorLaunchers.cjs").routingBindingMatches(effectBinding, current)) {
+            // Telemetry may already have steered the original conversation.
+            // Only an explicit skipped result proves no earlier effect; never
+            // fall back to sending this prompt to the replacement conversation.
+            return { ok: false, status: route?.status === "skipped" ? "blocked" : "unknown", ...(route?.status === "skipped" && { delivery: "not-dispatched" }), reason: "conversation-changed", error: route?.status === "skipped" ? "The conversation changed while steering. No prompt was sent." : "The conversation changed while steering. No follow-up was sent to the replacement; earlier steering may already have been applied." };
+          }
           if (!route || !["routing", "steered", "skipped"].includes(route.status)) return { ok: false, status: "unknown", error: "Steering delivery is unconfirmed; no duplicate prompt was sent." };
           return checkedHost(sendFusion, { id: s.id, generation: s.generation, text: action.text, routed: ["routing", "steered"].includes(route.status), actionId: action.actionId }, "steer");
         }
@@ -438,7 +583,9 @@ function installOrchestrator(options) {
         const prompt = { ...action, target: { id: s.id, generation: s.generation }, submit: true, promptSubmission: true,
           promptObservation: action.promptObservation ?? { agentPid: s.agentPid, turnId: s.turnId, turnStartedAt: s.turnStartedAt } };
         if (relay.getState().requests.some(request => request.sessionId === s.id && request.generation === s.generation && request.state === 'pending')) return { ok: false, status: 'blocked', delivery: 'not-dispatched', error: 'Answer the pending terminal request before submitting a new prompt.' };
-        const result = await terminalInput.handle(prompt);
+        if (action.routingBinding) routedInputBindings.set(action.actionId, action.routingBinding);
+        let result;
+        try { result = await terminalInput.handle(prompt); } finally { routedInputBindings.delete(action.actionId); }
         const latest = directory.get(s.id);
         const pendingInteraction = relay.getState().requests.some(request => request.sessionId === s.id && request.generation === s.generation && request.state === 'pending');
         if (require('./orchestratorBusyInput.cjs').canQueueBusyPrompt(prompt, latest && { ...latest, pendingInteraction }, result)) return delivery.submit({ ...action, target: prompt.target });
@@ -451,6 +598,7 @@ function installOrchestrator(options) {
   const relay = createOrchestrator({ userDataPath: app.getPath("userData"), secureStorage: safeStorage, fetch: options.fetch, interpretIntent: options.interpretIntent,
     resolveWorkspaceIdentity: createWorkspaceIdentity(),
     getSessions: () => directory.list(),
+    getLaunchers: () => directory.launchers(),
     readSession: async target => {
       const session = directory.get(target.id);
       if (["fusion", "openfusion"].includes(session?.kind)) return directory.readChat(target);
@@ -465,7 +613,10 @@ function installOrchestrator(options) {
     getRoots: () => ({ documents: app.getPath("documents"), projects: [...new Set([...directory.projectPaths(), ...directory.list().map(s => s.cwd)].filter(Boolean))] }),
     onCancel: input => { if (!input?.requestId) delivery.cancel(); voice?.cancelSpeech(input); },
     onUpstreamError: info => voice?.announceError(info),
-    onChange: state => broadcast("orchestrator:state", { ...state, ready: state.ready && voiceReady, voiceReady }),
+    onChange: state => {
+      voice?.reconcileTaskQuestions?.();
+      broadcast("orchestrator:state", { ...state, ready: state.ready && voiceReady, voiceReady });
+    },
     onSpeak: event => {
       if (event.origin === "interaction") {
         const request = relay.getState().requests.find(r => r.id === event.requestId && r.sessionId === event.sessionId && r.generation === event.generation && r.revision === event.revision && r.state === "pending");
@@ -754,9 +905,26 @@ function installOrchestrator(options) {
     // output/process events cannot replace the current pane's PID or activity.
     if (event?.type === "action-result") { const pending = pendingHost.get(event.actionId);
       if (pending && pending.engine === kind && pending.id === event.id && pending.generation === event.generation) pending.finish({ ...event, status: event.status || "acknowledged" }); }
-    if (current && event.generation && current.generation !== event.generation) return false;
+    // Closed Fusion owners are retained privately while inventory exposes a
+    // paused fallback. Only the matching owner's explicit restart may cross
+    // that display-generation boundary; stop/replacement removes the right.
+    const restartingChat = directory.canRestartChat(kind, event);
+    if (event?.type === "engine-restarting" && !restartingChat) return false;
+    if (current && event.generation && current.generation !== event.generation && !restartingChat) return false;
     directory.ingest(kind, event);
     const ended = directory.get(event.id);
+    if (["fusion", "openfusion"].includes(kind) && event.type === "session" && !event.replay && current && event.generation === current.generation) {
+      const previousId = current.conversationId || current.conversation?.id || current.threadRef?.id;
+      if (previousId && ended?.conversationId && previousId !== ended.conversationId) {
+        // These requests were pending in the old native context. Retire their
+        // exact revisions together with any spoken/listening interaction so
+        // they cannot block or answer work in the replacement conversation.
+        for (const request of relay.getState().requests) if (request.sessionId === current.id && request.generation === current.generation && request.state === "pending") {
+          const scope = { id: request.id, sessionId: current.id, generation: current.generation, revision: request.revision };
+          if (relay.resolveInteraction(scope).ok) voice.resolveInteraction?.(scope);
+        }
+      }
+    }
     if (ended) relay.observeWork?.([ended]);
     if (kind === "terminal") void observations.ingest(event).then(async () => {
       const session = directory.get(event.id);
@@ -795,7 +963,7 @@ function installOrchestrator(options) {
     for (const pending of captureFlushes.values()) pending.finish({ ok: false, status: 'cancelled', error: 'Application closed.' });
     surface.dispose();
     for (const finish of pendingUi.values()) finish({ ok: false, status: "cancelled", error: "Application closed." });
-    for (const pending of pendingHost.values()) pending.finish({ ok: false, status: "unknown", error: "Application closed before acknowledgment." });
+    for (const pending of [...pendingHost.values()]) pending.cancel("Application closed before acknowledgment.");
     return disposal;
   }
   app.once("before-quit", event => {

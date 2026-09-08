@@ -70,8 +70,8 @@ import {
 import TerminalPane from "./components/TerminalPane";
 import { createTerminalLaunchCoordinator } from "./terminalLaunchCoordinator";
 import { WorkspaceStart } from "./components/WorkspaceStart";
-import { runtimeDisplayTitle, runtimeSessionStatus, runtimeStatusLabel, type TerminalRuntimeSnapshot } from "./terminalRuntime";
-import { migrateRemovedAgent, serializeSession } from "./sessionPersistence";
+import { runtimeActiveChildCount, runtimeChildAttention, runtimeDisplayTitle, runtimeSessionStatus, runtimeStatusLabel, type TerminalRuntimeSnapshot } from "./terminalRuntime";
+import { migrateRemovedAgent, rememberChatThread, serializeSession } from "./sessionPersistence";
 import { findAvailablePlacement, type GeometryItem } from "./components/tiledBoardGeometry";
 import FusionChatPane from "./components/FusionChatPane";
 import {
@@ -336,6 +336,12 @@ const agentProfiles: AgentProfile[] = [
     label: "Qwen",
     command: providerCapabilities["qwen"].command,
     accent: "#6d7cff"
+  },
+  {
+    kind: "grok",
+    label: "Grok Build",
+    command: providerCapabilities["grok"].command,
+    accent: "#d8e2ef"
   }
 ];
 
@@ -775,11 +781,14 @@ function placeSession(sessions: AgentSession[], metrics: PlacementMetrics): Layo
 }
 
 function visibleRuntimeAttention(runtime: TerminalRuntimeSnapshot) {
-  if (runtime.pendingInput || runtime.processState !== "running" || runtime.agentProcessState === "exited" || runtime.agentProcessState === "failed" ||
+  if (runtime.processState !== "running" || runtime.launchState === "pending" || runtime.agentProcessState === "exited" || runtime.agentProcessState === "failed") return undefined;
+  const childAttention = runtimeChildAttention(runtime);
+  if (childAttention && runtimeSessionStatus(runtime) === "waiting") return childAttention;
+  if (runtime.pendingInput ||
       runtime.observation !== "observed" || runtime.telemetryHealth !== "available") return false;
   const state = runtime.attention?.state;
-  if (runtime.turnState === "completed") return state === "completed" && !runtime.childActivity && runtime.children.length === 0;
-  return (runtime.turnState === "waiting" && state === "waiting") || (runtime.turnState === "failed" && state === "failed");
+  if (runtime.turnState === "completed") return state === "completed" && !runtime.childActivity && runtime.children.length === 0 ? runtime.attention : undefined;
+  return (runtime.turnState === "waiting" && state === "waiting") || (runtime.turnState === "failed" && state === "failed") ? runtime.attention : undefined;
 }
 
 function createSession(
@@ -891,8 +900,7 @@ function restoreSession(session: AgentSession): AgentSession {
   // open, so restore the host intent whenever the pane itself was started.
   // Threaded agent kinds set status "done"/"failed" from per-turn telemetry
   // while their process is still alive, so a finished TURN must not read as a
-  // finished PROCESS: they always restore as a fresh launch (the old chat is
-  // stashed in resumeRef either way). Only non-threaded panes treat done/failed
+  // finished PROCESS: they restore the saved conversation. Only non-threaded panes treat done/failed
   // as "the process exited; stay paused".
   const shouldAutoStart =
     session.started === true &&
@@ -900,19 +908,9 @@ function restoreSession(session: AgentSession): AgentSession {
       isThreadedAgentKind(restoredKind) ||
       (previousStatus !== "done" && previousStatus !== "failed"));
 
-  // Reopening the app restores each pane as a FRESH terminal, never an
-  // auto-resumed chat. The previously running thread is preserved as `resumeRef`
-  // so the user can deliberately resume it from the pane (the Resume button),
-  // while the pane itself launches a brand-new session. This deliberately
-  // decouples "restore my workspace/layout" from "resume my conversation",
-  // which used to be welded together. Applies to all threaded agents:
-  // - claude needs a freshly minted id here — relaunching `--session-id <old>`
-  //   would collide with the existing transcript — so createThreadRef hands out
-  //   a new uuid for the fresh chat.
-  // - codex/opencode get no id (createThreadRef returns it undefined) and so
-  //   launch their plain command, letting discovery bind the new session.
-  // The most recent resumable thread wins; if the pane had no thread yet we keep
-  // whatever resumeRef was already stored.
+  // Restore this pane's current conversation by its exact saved ID. resumeRef
+  // belongs to an older chat (including after New/duplicate), so never choose it
+  // automatically when the current pane has no discovered conversation yet.
   const activeThreadRef = isFusion
     ? hasClaudeThreadId(session.threadRef)
       ? session.threadRef
@@ -925,12 +923,22 @@ function restoreSession(session: AgentSession): AgentSession {
     : resumableThreadRefForKind(restoredKind, session.resumeRef);
   // Stored refs from older builds carry the pane's placeholder label as their
   // title; strip it so the harvested (generated) title can replace it.
-  const resumeRef = sanitizeThreadRefTitle(
-    activeThreadRef?.id ? activeThreadRef : storedResumeRef
-  );
+  const savedCurrentThreadRef = activeThreadRef &&
+    typeof activeThreadRef.id === "string" && activeThreadRef.id.trim() &&
+    (!isFusion || activeThreadRef.provider === normalizedFusionSessionFields(session).fusionPlannerFamily)
+      ? sanitizeThreadRefTitle(activeThreadRef)
+      : undefined;
+  const currentThreadRef = shouldAutoStart ? savedCurrentThreadRef : undefined;
+  // Paused panes retain the existing fresh Start behavior. Their last chat is
+  // still available through the deliberate Resume action.
+  const resumeRef = !shouldAutoStart && savedCurrentThreadRef
+    ? savedCurrentThreadRef
+    : storedResumeRef && typeof storedResumeRef.id === "string" && storedResumeRef.id.trim()
+      ? sanitizeThreadRefTitle(storedResumeRef)
+      : undefined;
 
   // Attention describes a moment inside the OLD process, which restore always
-  // replaces with a fresh terminal (see the launch note above). A stale
+  // replaces with a new process, even when resuming the same chat. A stale
   // "waiting" is the damaging one: it claims an approval/question prompt is on
   // screen for a pane that has not even started, so every project that ever
   // parked a pane at its idle prompt reads as "blocked" on the next launch.
@@ -956,8 +964,8 @@ function restoreSession(session: AgentSession): AgentSession {
     createdAt,
     started: shouldAutoStart,
     launchToken,
-    nextLaunchMode: normalizeLaunchMode("new"),
-    threadRef: isFusion ? undefined : createThreadRef(restoredKind),
+    nextLaunchMode: normalizeLaunchMode(currentThreadRef ? "resume" : "new"),
+    threadRef: currentThreadRef ?? (isFusion ? undefined : createThreadRef(restoredKind)),
     resumeRef,
     ...(isFusion ? normalizedFusionSessionFields(session) : {}),
     fusionRunMode: isFusion
@@ -1404,16 +1412,16 @@ export default function App() {
     if (!runtime || runtime.launchToken !== session.launchToken) {
       return { ...session, status: session.started ? "starting" : "idle", attention: undefined, subagentDepth: undefined };
     }
-    const attention = runtime.attention;
+    const attention = visibleRuntimeAttention(runtime) || undefined;
     const reason = attention?.reason;
     return {
       ...session,
       status: runtimeSessionStatus(runtime),
       threadRef: runtime.conversation?.id ? runtime.conversation as AgentThreadRef : session.threadRef,
       subagentDepth: runtimeSessionStatus(runtime) === "running"
-        ? runtime.children.length || (runtime.childActivity ? 1 : undefined)
+        ? runtimeActiveChildCount(runtime)
         : undefined,
-      attention: attention && visibleRuntimeAttention(runtime)
+      attention: attention
         ? {
             state: attention.state,
             reason: reason === "approval" || reason === "question" || reason === "done" || reason === "exit" || reason === "error" ? reason : undefined,
@@ -1496,6 +1504,21 @@ export default function App() {
   const [terminalLaunchCoordinator] = useState(() => createTerminalLaunchCoordinator({
     platform: window.vibe?.platform,
     create: payload => window.vibe?.terminal.create(payload) ?? Promise.resolve(false),
+    confirmThread: payload => window.vibe?.agentThreads.findLatest(payload) ?? Promise.reject(new Error("Thread discovery unavailable")),
+    onFreshLaunchFallback: (session, freshSession) => {
+      updateAnySession(session.id, current => {
+        if (!current.started || current.launchToken !== session.launchToken) return current;
+        return {
+          ...current,
+          nextLaunchMode: freshSession.nextLaunchMode,
+          threadRef: freshSession.threadRef,
+          threadLookupStartedAt: freshSession.threadLookupStartedAt,
+          threadLookupStatus: freshSession.threadLookupStatus,
+          threadLookupMessage: freshSession.threadLookupMessage
+        };
+      });
+      setShellMessage(`${session.name}: The saved chat is no longer available. Starting a fresh chat.`);
+    },
     isCurrent: session => {
       const current = sessionsByIdRef.current.get(session.id);
       return Boolean(current?.started && current.launchToken === session.launchToken &&
@@ -1862,8 +1885,9 @@ export default function App() {
       const next = { ...runtimeSnapshotsRef.current, [snapshot.id]: snapshot };
       runtimeSnapshotsRef.current = next;
       setRuntimeSnapshots(next);
-      if (snapshot.attention && visibleRuntimeAttention(snapshot) && (replay || attentionSelectionRef.current.selectedSessionId === snapshot.id)) {
-        const attentionId = snapshot.attention.id;
+      const attention = visibleRuntimeAttention(snapshot);
+      if (attention && (replay || attentionSelectionRef.current.selectedSessionId === snapshot.id)) {
+        const attentionId = attention.id;
         setRuntimeAcknowledgements((current) => current[snapshot.id] === attentionId ? current : { ...current, [snapshot.id]: attentionId });
       }
       const conversation = snapshot.conversation;
@@ -2571,7 +2595,7 @@ export default function App() {
 
   function clearSessionAttention(sessionId: string) {
     const runtime = runtimeSnapshotsRef.current[sessionId];
-    const attentionId = runtime && visibleRuntimeAttention(runtime) ? runtime.attention?.id : undefined;
+    const attentionId = runtime ? (visibleRuntimeAttention(runtime) || undefined)?.id : undefined;
     if (attentionId) setRuntimeAcknowledgements((current) => ({ ...current, [sessionId]: attentionId }));
     updateAnySession(sessionId, clearUnreadAttention);
   }
@@ -2977,6 +3001,13 @@ export default function App() {
       return;
     }
 
+    if (event.type === "session") {
+      updateAnySession(event.id, session => session.fusion
+        ? rememberChatThread(session, normalizedFusionSessionFields(session).fusionPlannerFamily, event.sessionId)
+        : session);
+      return;
+    }
+
     if (event.type === "turn-start") {
       updateAnySession(event.id, (session) => {
         if (!session.fusion) {
@@ -3253,6 +3284,13 @@ export default function App() {
     // Same replay contract as applyFusionChatLifecycle: a reattach replay
     // carries no new status/attention information — skip it.
     if (event.replay) {
+      return;
+    }
+
+    if (event.type === "session") {
+      updateAnySession(event.id, session => session.openFusion
+        ? rememberChatThread(session, "opencode", event.sessionId)
+        : session);
       return;
     }
 
@@ -4659,8 +4697,25 @@ export default function App() {
           return { ok: true, status: "navigated", view, ...(project ? { projectId: project.id, cwd: project.path } : {}) };
       }
       if (kind === "open_settings") { setSettingsOpen(true); return { ok: true }; }
-      if (kind === "inventory")
-          return { ok: true, projectPaths: workspaces.map(workspace=>workspace.path), sessions: relaySessions.map(session => ({ ...session, projectId: workspaces.find(p => p.sessions.some(s => s.id === session.id))?.id })) };
+      if (kind === "inventory") {
+          const fusion = lastFusionSettings(), openFusion = lastOpenFusionModels();
+          let configuredProfiles = providerList;
+          if (configuredProfiles === null) {
+              try { configuredProfiles = (await window.vibe?.claudeProviders?.list?.())?.profiles ?? null; }
+              catch { /* Unavailable configuration remains unknown to routing. */ }
+          }
+          const launchers = agentProfiles.map(profile => {
+              const probeKinds = profile.kind === "fusion" ? [fusion.plannerFamily, fusion.executorFamily] : [profile.kind === "openfusion" ? "opencode" : profile.kind === "claude-custom" ? "claude" : profile.kind];
+              const probes = probeKinds.map(probe => installedClis?.clis?.[probe]);
+              const available = profile.kind === "terminal" ? true : probes.some(probe => probe?.available === false) ? false : probes.every(probe => probe?.available === true) ? true : "unknown";
+              const configured = profile.kind === "openfusion" ? Boolean(openFusion.plannerModel && openFusion.executorModel) : profile.kind === "claude-custom" ? configuredProfiles === null ? "unknown" : Boolean(configuredProfiles.length) : available === true ? true : "unknown";
+              return { kind: profile.kind, label: profile.label, available, configured,
+                  reason: available === "unknown" ? "CLI availability has not been confirmed." : available === false ? "Required CLI is unavailable." : configured === false ? "Configure this launcher in Settings first." : undefined,
+                  ...(profile.kind === "fusion" ? { model: fusion.plannerModel, plannerModel: fusion.plannerModel, executorModel: fusion.executorModel } : {}),
+                  ...(profile.kind === "openfusion" ? { model: openFusion.plannerModel, ...openFusion } : {}) };
+          });
+          return { ok: true, launchers, projectPaths: workspaces.map(workspace=>workspace.path), sessions: relaySessions.map(session => ({ ...session, projectId: workspaces.find(p => p.sessions.some(s => s.id === session.id))?.id })) };
+      }
       if (kind === "focus_session")
           return { ok: focusRelaySession(String(payload.id)) };
       if (kind === "add_project") {

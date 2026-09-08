@@ -107,6 +107,7 @@ export function OrchestratorPanel({ state, sessions, selectedId, onFocus, onSett
             {["paused", "failed"].includes(task.status) && <button type="button" onClick={() => void taskAction(() => relayApi()!.retry({ requestId: task.requestId }))}>{task.status === "paused" ? "Resume" : "Retry"}</button>}
             {task.status === "needs-answer" && task.question && <button type="button" onClick={() => { setReply({ requestId: task.requestId, questionId: task.question!.id, text: task.question!.text }); composerRef.current?.focus(); }}>Reply</button>}
             {task.waitingReason && <small className="relay-task-waiting">{task.waitingReason}</small>}
+            {task.assignment && <small className="relay-task-routing">{task.assignment.decision === "create" ? "New agent" : "Existing agent"}{task.assignment.reason ? ` · ${task.assignment.reason}` : ""}</small>}
             {task.error && <small className="relay-error">{task.error}</small>}
         </div>;
     }

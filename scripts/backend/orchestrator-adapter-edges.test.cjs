@@ -66,7 +66,8 @@ test("host acknowledgment must match engine, session, generation and action ID",
 
 test("pending host action ID collision does not replace its original waiter", async t => {
   const h = harness(t); const start = h.integration.outgoing("openfusion", { type: "start", payload: { id: "chat", cwd: h.root } });
-  const payload = { id: "chat", generation: start.payload.generation, actionId: "same", kind: "permission" };
+  h.integration.incoming("openfusion", { id: "chat", generation: start.payload.generation, type: "interaction-request", requestId: "permission", kind: "permission", revision: 1 });
+  const payload = { id: "chat", generation: start.payload.generation, actionId: "same", kind: "permission", requestId: "permission", revision: 1, reply: "once" };
   const first = h.integration.answerExisting("openfusion", payload);
   const duplicate = await h.integration.answerExisting("openfusion", payload);
   assert.equal(duplicate.ok, false); assert.match(duplicate.error, /pending/); assert.equal(h.sent.length, 1);

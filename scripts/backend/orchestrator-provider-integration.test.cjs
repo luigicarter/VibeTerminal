@@ -12,7 +12,7 @@ function harness(t, provider, state = "idle") {
   const app = new EventEmitter(); app.getPath = () => root; app.isPackaged = false;
   const main = { isDestroyed: () => false, webContents: new EventEmitter() };
   const sent = [], uiActions = [], steers = [];
-  let integration, steerResult = { status: "steered" };
+  let integration, steerResult = { status: "steered" }, controlHook = () => ({ controlUrl: "http://127.0.0.1:1234", token: "fixture-control" });
   const chat = ["fusion", "openfusion"].includes(provider);
   const snapshot = { id: "pane", generation: "generation-1", provider, cwd: root, processState: "running", agentProcessState: "running", turnState: state, turnId: "turn-1", revision: 1 };
   main.webContents.send = (channel, p) => {
@@ -28,7 +28,7 @@ function harness(t, provider, state = "idle") {
   };
   integration = installOrchestrator({ interpretIntent: interpretTestIntent, app, BrowserWindow: { getAllWindows: () => [main] }, ipcMain: ipc, screen: {}, shell: {}, safeStorage: { isEncryptionAvailable: () => false }, getMainWindow: () => main,
     getRuntime: () => ({ listSnapshots: () => chat ? [] : [snapshot] }), sendPty: sender("terminal"), sendFusion: sender("fusion"), sendOpenFusion: sender("openfusion"),
-    getTelemetry: () => ({ steerFusionSession: async (id, text) => { steers.push({ id, text }); return steerResult; } }), getChanges: () => ({}) });
+    getTelemetry: () => ({ getFusionSessionControl: () => controlHook(), steerFusionSession: async (id, text) => { steers.push({ id, text }); return steerResult; } }), getChanges: () => ({}) });
   if (chat) {
     snapshot.generation = integration.outgoing(provider, { type: "start", payload: { id: "pane", cwd: root, mode: "plan" } }).payload.generation;
     integration.incoming(provider, { id: "pane", generation: snapshot.generation, type: state === "running" ? "turn-start" : "result" });
@@ -37,7 +37,7 @@ function harness(t, provider, state = "idle") {
   }
   const invoke = (name, p = {}) => ipc.handlers.get(`orchestrator:${name}`)({ sender: main.webContents }, p);
   t.after(async () => { await integration.dispose(); const resolved = path.resolve(root); assert(resolved.startsWith(path.join(os.tmpdir(), "vibe-provider-integration-"))); fs.rmSync(resolved, { recursive: true, force: true }); });
-  return { integration, sent, steers, uiActions, snapshot, invoke, setSteer: value => { steerResult = value; },
+  return { integration, sent, steers, uiActions, snapshot, invoke, setSteer: value => { steerResult = value; }, setControlHook: fn => { controlHook = fn; },
     send: (text = "Exact payload; keep every qualifier") => invoke("dispatch", { kind: "send_prompt", target: { id: "pane", generation: snapshot.generation }, text }) };
 }
 
@@ -120,3 +120,94 @@ for (const provider of ["claude", "codex", "cursor", "gemini", "kimi", "kimi-cus
     const pending = await h.send(); assert.equal(pending.ok, false); assert.match(pending.error, /pending interaction/); assert.equal(h.sent.length, 0);
   });
 }
+
+
+for (const routeStatus of ['skipped', 'routing', 'steered']) test(`Fusion native switch during ${routeStatus} telemetry cannot send a follow-up to the replacement`, async t => {
+  const h = harness(t, 'fusion', 'running');
+  await h.integration.refreshInventory();
+  const generation = h.snapshot.generation;
+  h.integration.incoming('fusion', { id: 'pane', generation, type: 'session', sessionId: 'conversation-A' });
+  let finish;
+  h.setSteer(new Promise(resolve => { finish = resolve; }));
+  const pending = h.send('Follow up in A only.');
+  for (let attempt = 0; attempt < 300 && !h.steers.length; attempt++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.steers.length, 1);
+  h.integration.incoming('fusion', { id: 'pane', generation, type: 'session', sessionId: 'conversation-B' });
+  finish({ status: routeStatus });
+  const result = await pending;
+  assert.equal(result.ok, false);
+  assert.equal(result.status, routeStatus === 'skipped' ? 'blocked' : 'unknown');
+  assert.equal(result.delivery, routeStatus === 'skipped' ? 'not-dispatched' : undefined);
+  assert.equal(h.sent.length, 0, 'No fallback or host steer may target B');
+});
+
+for (const provider of ['fusion', 'openfusion']) for (const kind of ['question', 'permission']) test(`${provider} native switch retires the exact old ${kind} and its voice context`, async t => {
+  const voiceModule = require('../../backend/voiceController.cjs');
+  const createVoice = voiceModule.createVoiceController;
+  const resolved = [];
+  t.mock.method(voiceModule, 'createVoiceController', options => {
+    const controller = createVoice(options), resolve = controller.resolveInteraction;
+    controller.resolveInteraction = scope => { resolved.push(scope); return resolve(scope); };
+    return controller;
+  });
+  const h = harness(t, provider);
+  await h.integration.refreshInventory();
+  const generation = h.snapshot.generation;
+  const event = (type, extra = {}) => h.integration.incoming(provider, { id: 'pane', generation, type, ...extra });
+  event('session', { sessionId: 'conversation-A' });
+  event('interaction-request', { requestId: 'old-request', interaction: { id: 'old-request', sessionId: 'pane', generation, revision: 3, kind,
+    ...(kind === 'question' ? { questions: [{ id: 'q', question: 'Choose?', options: [{ label: 'Yes' }] }] } : { detail: 'Allow old operation?' }) } });
+  const request = () => h.integration.getState().requests.find(item => item.id === 'old-request');
+  for (const extra of [{ generation: 'stale-generation' }, { replay: true }, { generation: undefined }]) {
+    event('session', { sessionId: 'conversation-B', ...extra });
+    assert.equal(request().state, 'pending');
+    assert.equal(resolved.length, 0);
+  }
+  event('session', { sessionId: 'conversation-B' });
+  assert.equal(request().state, 'resolved');
+  assert.deepEqual(resolved, [{ id: 'old-request', sessionId: 'pane', generation, revision: 3 }]);
+  assert.equal((await h.send('New work in B.')).ok, true);
+  assert.equal(h.sent.length, 1);
+  event('interaction-request', { requestId: 'old-request', interaction: { ...request(), revision: 4, state: 'pending' } });
+  event('session', { sessionId: 'conversation-B' });
+  assert.equal(request().state, 'pending', 'Idempotent current identity cannot retire a newer question revision');
+  assert.equal(resolved.length, 1);
+});
+
+
+for (const viaGui of [false, true]) for (const change of ['native', 'revision']) test(`${viaGui ? 'GUI' : 'orchestrator'} structured answer rechecks ${change} at host effect`, async t => {
+  const h = harness(t, 'fusion');
+  await h.integration.refreshInventory();
+  const generation = h.snapshot.generation;
+  const emit = (type, extra = {}) => h.integration.incoming('fusion', { id: 'pane', generation, type, ...extra });
+  emit('session', { sessionId: 'A' });
+  const request = { id: 'q', sessionId: 'pane', generation, revision: 1, kind: 'question', questions: [{ id: 'choice', question: 'Choose?' }] };
+  emit('interaction-request', { requestId: 'q', interaction: request });
+  h.setControlHook(() => {
+    if (change === 'native') emit('session', { sessionId: 'B' });
+    else emit('interaction-request', { requestId: 'q', interaction: { ...request, revision: 2 } });
+    return { controlUrl: 'http://127.0.0.1:1234', token: 'fixture-control' };
+  });
+  const payload = { id: 'pane', target: { id: 'pane', generation }, requestId: 'q', revision: 1, answers: { choice: ['Yes'] } };
+  const result = viaGui ? await h.integration.answerExisting('fusion', payload) : await h.invoke('dispatch', { ...payload, kind: 'answer_question' });
+  assert.equal(result.ok, false);
+  assert.equal(h.sent.length, 0);
+});
+
+for (const provider of ['fusion', 'openfusion']) for (const kind of ['question', 'permission']) for (const decision of kind === 'permission' ? ['once', 'reject'] : ['answer']) test(`current ${provider} GUI ${kind}/${decision} preserves supplied answers and permission decisions`, async t => {
+  const h = harness(t, provider);
+  await h.integration.refreshInventory();
+  const generation = h.snapshot.generation;
+  h.integration.incoming(provider, { id: 'pane', generation, type: 'session', sessionId: 'A' });
+  h.integration.incoming(provider, { id: 'pane', generation, type: 'interaction-request', requestId: 'current', interaction: { id: 'current', sessionId: 'pane', generation, revision: 2, kind, questions: [{ id: 'q', question: 'Choose?' }] } });
+  const answers = provider === 'openfusion' ? [['Yes']] : { q: ['Yes'] };
+  const result = await h.integration.answerExisting(provider, { id: 'pane', requestId: 'current', revision: 2, kind, ...(kind === 'question' ? { answers } : { reply: decision }) });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.sent[0].payload.revision, 2);
+  if (kind === 'question') assert.deepEqual(h.sent[0].payload.answers, answers);
+  else assert.equal(h.sent[0].payload.reply, decision);
+  h.integration.incoming(provider, { id: 'pane', generation, type: 'session', sessionId: 'B' });
+  assert.equal((await h.integration.answerExisting(provider, { id: 'pane', requestId: 'current', revision: 2, kind, answers })).ok, false);
+  assert.equal(h.sent.length, 1);
+});

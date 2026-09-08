@@ -30,7 +30,7 @@ const path = require("path");
 
 // Agent kind -> the command its launch line actually invokes. Deliberately
 // excludes: "terminal" (no CLI), "kimi-custom" (vendored binary shipped with
-// the app, always present), and "fusion"/"openfusion" (selection-only kinds
+// the app, probed separately), and "fusion"/"openfusion" (selection-only kinds
 // that launch real claude/opencode sessions, so they are covered by those two).
 const PROBED_AGENT_COMMANDS = Object.freeze(Object.fromEntries(
   Object.entries(require("../shared/providerCapabilities.json"))
@@ -77,6 +77,8 @@ function extraSearchDirectories() {
 
   const relative = [
     path.join(home, ".local", "bin"),
+    ...(process.env.GROK_BIN_DIR ? [process.env.GROK_BIN_DIR] : []),
+    path.join(home, ".grok", "bin"),
     path.join(home, ".bun", "bin"),
     path.join(home, ".deno", "bin"),
     path.join(home, ".cargo", "bin")
@@ -145,7 +147,7 @@ function readDirectory(directory, timeoutMs) {
  *   directoriesScanned: number, clis: Record<string, {command: string,
  *   available: boolean, path: string | null}>}>}
  */
-async function probeInstalledClis(commands = PROBED_AGENT_COMMANDS) {
+async function probeInstalledClis(commands = PROBED_AGENT_COMMANDS, options = {}) {
   const startedAt = process.hrtime.bigint();
   const directories = searchDirectories();
 
@@ -184,6 +186,14 @@ async function probeInstalledClis(commands = PROBED_AGENT_COMMANDS) {
     }
 
     clis[kind] = { command, available: Boolean(found), path: found };
+  }
+
+  // The bundled fork is launched from app resources rather than the global PATH.
+  // An explicitly missing bundle must remain unavailable in automatic routing.
+  if (Object.hasOwn(options, "kimiCustomDir")) {
+    const entrypoint = options.kimiCustomDir ? path.join(options.kimiCustomDir, "dist", "main.mjs") : null;
+    const available = Boolean(entrypoint && fs.existsSync(entrypoint));
+    clis["kimi-custom"] = { command: "kimi-custom", available, path: available ? entrypoint : null };
   }
 
   return {

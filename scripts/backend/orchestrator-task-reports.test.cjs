@@ -174,3 +174,93 @@ test('watched shell uncertainty never claims input was sent', () => {
   assert.match(report.text, /watching this plain shell/);
   assert.doesNotMatch(report.text, /was sent/);
 });
+
+test('prompt and Enter waits attributed to one turn report once across polls', () => {
+  const f = fixture();
+  const first = f.job.waits[0];
+  Object.assign(first, { turnId: 'turn', observedState: 'running', actionId: 'prompt' });
+  f.job.waits.push({ ...first, actionId: 'enter' });
+  assert.equal(f.collect().length, 1);
+  assert.deepEqual(f.collect(), []);
+  f.job.waits.push({ ...first, actionId: 'late-enter' });
+  assert.deepEqual(f.collect(), []);
+  for (const wait of f.job.waits) Object.assign(wait, { done: true, observedState: 'completed' });
+  const reports = f.collect();
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].status, 'completed');
+  assert.doesNotMatch(reports[0].text, /All requested/);
+  assert.deepEqual(f.collect(), []);
+});
+
+test('turn report identities preserve distinct requests, generations, terminals and turns', () => {
+  const f = fixture();
+  Object.assign(f.job.waits[0], { turnId: 'turn', observedState: 'running' });
+  for (const patch of [{ turnId: 'next' }, { generation: 'next' }, { targetId: 'other' }]) {
+    f.job.waits.push({ ...f.job.waits[0], ...patch });
+  }
+  assert.equal(f.collect().length, 4);
+  assert.deepEqual(f.collect(), []);
+  assert.equal(collectTaskReports({ ...f.job }, f.sessions).length, 4);
+});
+
+test('separate unattributed queued and uncertain deliveries retain their own reports', () => {
+  for (const patch of [{ delivered: false, deliveryStatus: 'queued' }, { deliveryStatus: 'unknown' }]) {
+    const f = fixture();
+    Object.assign(f.job.waits[0], patch);
+    f.job.waits.push({ ...f.job.waits[0] });
+    assert.equal(f.collect().length, 2);
+    assert.deepEqual(f.collect(), []);
+    for (const wait of f.job.waits) Object.assign(wait, { delivered: true, turnId: 'turn', observedState: 'running' });
+    for (const wait of f.job.waits) wait.deliveryStatus = 'sent';
+    assert.equal(f.collect().length, 1);
+  }
+});
+
+test('duplicate attributed waits retain new blocker episodes and watcher resumptions', () => {
+  for (const source of [undefined, 'watch']) {
+    const f = fixture();
+    Object.assign(f.job.waits[0], { source, turnId: 'turn', observedState: 'running' });
+    f.job.waits.push({ ...f.job.waits[0] });
+    assert.equal(f.collect().length, 1);
+    f.job.waits[0].observedState = 'waiting';
+    assert.equal(f.collect()[0].status, 'needs-answer');
+    assert.deepEqual(f.collect(), [], 'stale running sibling must not reset waiting episode');
+    f.job.waits[1].observedState = 'waiting';
+    assert.deepEqual(f.collect(), []);
+    for (const wait of f.job.waits) wait.observedState = 'running';
+    assert.equal(f.collect().length, source === 'watch' ? 1 : 0);
+    for (const wait of f.job.waits) wait.observedState = 'waiting';
+    assert.equal(f.collect().length, 1);
+    assert.deepEqual(f.collect(), []);
+  }
+});
+
+test('duplicate attributed failures deduplicate but different failure reasons remain visible', () => {
+  const f = fixture();
+  Object.assign(f.job.waits[0], { turnId: 'turn', observedState: 'failed', done: true, failed: true, error: 'Provider failed' });
+  f.job.waits.push({ ...f.job.waits[0] });
+  assert.equal(f.collect().length, 1);
+  f.job.waits.push({ ...f.job.waits[0], error: 'Delivery failed' });
+  assert.equal(f.collect().length, 1);
+  assert.deepEqual(f.collect(), []);
+});
+
+test('completed turn stays silent through replacement and late waits while a new turn reports', () => {
+  const f = fixture();
+  Object.assign(f.job.waits[0], { turnId: 'finished-turn', observedState: 'completed', done: true });
+  const first = f.collect();
+  assert.equal(first.length, 1);
+  assert.match(first[0].text, /requested outcome is not independently verified/);
+
+  f.job.waits = f.job.waits.map(wait => ({ ...wait }));
+  f.job.waits.push({ ...f.job.waits[0], source: 'watch', actionId: 'late-watch' });
+  assert.deepEqual(f.collect(), []);
+  assert.deepEqual(f.collect(), []);
+
+  f.job.waits.push({ ...f.job.waits[0], turnId: 'next-turn', actionId: 'new-prompt' });
+  const next = f.collect();
+  assert.equal(next.length, 1);
+  assert.equal(next[0].turnId, 'next-turn');
+  assert.match(next[0].text, /requested outcome is not independently verified/);
+  assert.deepEqual(f.collect(), []);
+});

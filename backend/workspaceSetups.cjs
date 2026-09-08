@@ -2,7 +2,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const fields = ['name','kind','command','fusion','fusionPlannerFamily','fusionPlannerModel','fusionPlannerEffort','fusionPlannerFast','fusionExecutorFamily','fusionExecutorModel','fusionExecutorEffort','fusionExecutorFast','fusionRunMode','fusionModel','fusionCodexModel','fusionClaudeEffort','fusionCodexEffort','fusionEffort','openFusion','openFusionPlannerModel','openFusionExecutorModel','openFusionRunMode','providerProfileId','providerModelOverride'];
-const kinds = new Set(['terminal','codex','claude','cursor','gemini','opencode','kimi','kimi-custom','qwen']);
+const kinds = new Set(Object.keys(require('../shared/providerCapabilities.json')));
 const absolute = value => typeof value === 'string' && !value.includes('\0') && (path.win32.isAbsolute(value) || path.posix.isAbsolute(value));
 const canonical = value => value.replace(/\\/g,'/').replace(/\/$/,'').toLowerCase();
 function sanitizeSetup(raw) {

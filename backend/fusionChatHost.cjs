@@ -840,6 +840,7 @@ function runHost() {
 
   function emitSessionEvent(id, state, event) {
     if (!isCurrentChatState(sessions, id, state)) return;
+    if (event.type === "session" && typeof event.sessionId === "string" && event.sessionId) state.nativeSessionId = event.sessionId;
     observeInteractionEvent(id, state, event, emit);
     const settle = applyPlannerTurnSettleState(state, event);
     event = settle.event;
@@ -1140,7 +1141,8 @@ function runHost() {
     if (!state || state.child || state.lastExitCode !== 0 || !state.launchPayload) {
       return null;
     }
-    const payload = { ...clonePayload(state.launchPayload), id };
+    const payload = { ...clonePayload(state.launchPayload), id,
+      resumeId: state.nativeSessionId || state.launchPayload.resumeId };
     const options = {
       history: cloneHistory(state.history),
       gate: state.gate,
@@ -1154,6 +1156,7 @@ function runHost() {
       pendingWakes: state.pendingWakes
     };
     clearPlannerResultBackstop(state);
+    emitSessionEvent(id, state, { type: "engine-restarting" });
     sessions.delete(id);
     start(payload, options);
     const nextState = sessions.get(id);
@@ -1162,6 +1165,8 @@ function runHost() {
 
   function start(payload, options = {}) {
     const { id, cwd } = payload;
+    const current = sessions.get(id);
+    if (current && payload.generation !== undefined && payload.generation !== current.launchPayload?.generation) stop({ id });
     if (sessions.has(id)) {
       const existingState = sessions.get(id);
       if (existingState?.child) {
@@ -1187,12 +1192,17 @@ function runHost() {
     }
 
     const launch = buildClaudeSpawn(payload);
-    const child = spawn(launch.command, launch.args, {
+    let child;
+    try { child = spawn(launch.command, launch.args, {
       cwd: cwd || undefined,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       env: launch.env
-    });
+    }); } catch (error) {
+      emitDirectSessionEvent(id, { type: "error", message: error.message }, { generation: payload.generation });
+      emitDirectSessionEvent(id, { type: "closed", code: -1 }, { generation: payload.generation });
+      return;
+    }
 
     const normalizer = createStreamNormalizer();
     const state = {
@@ -1235,6 +1245,13 @@ function runHost() {
       }
     }
 
+    child.once("spawn", () => {
+      // Claude's stream-json protocol accepts input on this pipe before it
+      // emits its first session/init event (which can require a user turn).
+      if (isCurrentChatState(sessions, id, state) && state.child === child && !child.killed && child.stdin?.writable) {
+        emitSessionEvent(id, state, { type: "engine-ready" });
+      }
+    });
     child.stdout.on("data", (chunk) => {
       if (sessions.get(id) !== state) {
         return;
@@ -1269,6 +1286,13 @@ function runHost() {
       if (sessions.get(id) !== state) {
         return;
       }
+      markPlannerClosed(state, code);
+      emitSessionEvent(id, state, { type: "closed", code });
+    });
+    // Spawn failures emit error + close, without exit. Retire that unusable
+    // child too, otherwise the next start only replays its failure forever.
+    child.on("close", (code) => {
+      if (sessions.get(id) !== state || state.child !== child) return;
       markPlannerClosed(state, code);
       emitSessionEvent(id, state, { type: "closed", code });
     });
@@ -1341,12 +1365,30 @@ function runHost() {
         message: `Fusion planner failed to start: ${error.message}`
       });
       state.lastExitCode = 1;
+      emitSessionEvent(id, state, { type: "closed", code: 1 });
       return state;
     }
     state.brain = brain;
     state.child = brain.child;
+    void brain.ready.then(() => {
+      if (isCurrentChatState(sessions, id, state) && state.child === brain.child && !brain.child.killed) {
+        emitSessionEvent(id, state, { type: "engine-ready" });
+      }
+    }).catch(() => {
+      // Failed RPC initialization cannot recover on this child. Retire it so
+      // a retry starts a new brain instead of replaying a permanently failed boot.
+      if (sessions.get(id) !== state || state.child !== brain.child) return;
+      killChild(state.child);
+      markPlannerClosed(state, 1);
+      emitSessionEvent(id, state, { type: "closed", code: 1 });
+    }); // The brain already reports the initialization error.
     brain.child.on("exit", (code) => {
-      if (sessions.get(id) !== state) return;
+      if (sessions.get(id) !== state || state.child !== brain.child) return;
+      markPlannerClosed(state, code);
+      emitSessionEvent(id, state, { type: "closed", code });
+    });
+    brain.child.on("close", (code) => {
+      if (sessions.get(id) !== state || state.child !== brain.child) return;
       markPlannerClosed(state, code);
       emitSessionEvent(id, state, { type: "closed", code });
     });

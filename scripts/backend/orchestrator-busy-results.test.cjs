@@ -14,7 +14,7 @@ function fixture() {
 test('busy receipt and current-turn action tags cannot complete followup from preexisting work', () => {
   const f = fixture();
   assert.equal(f.job.waits[0].turnId, undefined);
-  const session = { id: 'a', generation: 'g', turnId: 'old', completedTurnId: 'old', actionId: 'followup', completedActionId: 'followup' };
+  const session = { id: 'a', generation: 'g', kind: 'codex', turnId: 'old', completedTurnId: 'old', actionId: 'followup', completedActionId: 'followup' };
   for (const turnState of ['running', 'completed', 'failed']) {
     f.scheduler.reconcile([{ ...session, turnState }]);
     assert.equal(f.job.waits[0].done, false); assert.equal(f.job.waits[0].observedState, undefined);
@@ -23,7 +23,7 @@ test('busy receipt and current-turn action tags cannot complete followup from pr
 });
 test('later explicit new-turn action attribution permits progress and final result', () => {
   const f = fixture();
-  const session = { id: 'a', generation: 'g', turnId: 'new', actionId: 'followup', turnState: 'running', turnStartedAt: 110 };
+  const session = { id: 'a', generation: 'g', kind: 'codex', turnId: 'new', actionId: 'followup', turnState: 'running', turnStartedAt: 110 };
   f.scheduler.reconcile([session]);
   assert.equal(f.job.waits[0].turnId, 'new'); assert.equal(f.job.waits[0].observedState, 'running');
   f.scheduler.reconcile([{ ...session, turnState: 'completed', completedTurnId: 'new', completedActionId: 'followup', turnEndedAt: 200 }]);
@@ -31,7 +31,7 @@ test('later explicit new-turn action attribution permits progress and final resu
 });
 test('unrelated subsequent turn without action evidence never establishes incorporation', () => {
   const f = fixture();
-  f.scheduler.reconcile([{ id: 'a', generation: 'g', turnId: 'human', turnState: 'completed', turnStartedAt: 110 }]);
+  f.scheduler.reconcile([{ id: 'a', generation: 'g', kind: 'codex', turnId: 'human', turnState: 'completed', turnStartedAt: 110 }]);
   assert.equal(f.job.waits[0].done, false);
 });
 test('asynchronous busy receipt uses actual dispatch baseline instead of queue snapshot', () => {
@@ -54,15 +54,15 @@ test('busy report is explicit and deduplicated without a misleading no-start tim
 test('pre-ack busy protection clears on actual queue and later idle dispatch uses new baseline', () => {
   const f = fixture();
   f.job.waits[0].deliveryStatus = 'unconfirmed';
-  f.scheduler.reconcile([{ id: 'a', generation: 'g', turnId: 'old', turnState: 'completed', actionId: 'followup' }]);
+  f.scheduler.reconcile([{ id: 'a', generation: 'g', kind: 'codex', turnId: 'old', turnState: 'completed', actionId: 'followup' }]);
   assert.equal(f.job.waits[0].done, false);
   f.scheduler.delivery({ actionId: 'followup', ok: true, status: 'queued' });
   assert.equal(f.job.waits[0].inputDisposition, undefined); assert.equal(f.job.waits[0].delivered, false);
   f.scheduler.delivery({ actionId: 'followup', ok: true, status: 'written', inputDisposition: 'submitted-when-ready', deliveryBaseline: { kind: 'codex', turnState: 'idle', turnId: 'old', submittedAt: 200 } });
   assert.equal(f.job.waits[0].inputDisposition, 'submitted-when-ready'); assert.equal(f.job.waits[0].baselineIdle, true);
-  f.scheduler.reconcile([{ id: 'a', generation: 'g', turnId: 'fresh', turnStartedAt: 201, turnState: 'running' }]);
+  f.scheduler.reconcile([{ id: 'a', generation: 'g', kind: 'codex', turnId: 'fresh', turnStartedAt: 201, turnState: 'running' }]);
   assert.equal(f.job.waits[0].turnId, 'fresh');
-  f.scheduler.reconcile([{ id: 'a', generation: 'g', turnId: 'fresh', turnStartedAt: 201, turnState: 'completed' }]);
+  f.scheduler.reconcile([{ id: 'a', generation: 'g', kind: 'codex', turnId: 'fresh', turnStartedAt: 201, turnState: 'completed' }]);
   assert.equal(f.job.task.status, 'finished');
 });
 test('actual staged receipt clears provisional busy submission wording', () => {

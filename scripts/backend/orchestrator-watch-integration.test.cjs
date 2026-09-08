@@ -92,13 +92,30 @@ test('validated cached results still summarize after the ending-snapshot cache h
 test('model failure preserves completion and falls back to an attributed structured excerpt', async t => {
   const f = await fixture(t);
   f.reply = body => { if (body.messages[0].content.startsWith('Summarize')) throw new Error('Fixture model unavailable.'); return 'NO_UPDATE'; };
-  const response = await f.app.send({ text: 'Watch a.', targetId: 'a', origin: 'text' });
+  const response = await f.app.send({ text: 'Watch a.', targetId: 'a', origin: 'voice' });
   f.end('a', 'Changed the parser; 7 checks passed. watch-fixture-secret');
   await until(() => f.details(response.requestId).some(item => /Agent output excerpt/.test(item.text)));
   assert.match(f.details(response.requestId).at(-1).text, /7 checks passed/);
   assert.ok(!JSON.stringify(f.app.getState()).includes('watch-fixture-secret'));
   assert.ok(!JSON.stringify(f.modelCalls).includes('watch-fixture-secret'));
   assert.equal(f.effects.length, 0);
+  await until(() => f.spoken.some(item => item.kind === 'task-result'));
+  assert.doesNotMatch(f.spoken.find(item => item.kind === 'task-result').speechText, /excerpt|7 checks/);
+  assert.match(f.spoken.find(item => item.kind === 'task-result').speechText, /reliable spoken summary is unavailable/);
+});
+
+test('automatic model summary keeps model-chosen detail beyond former caps without a second call', async t => {
+  const f = await fixture(t);
+  const verbose = 'The agent described the outcome and outstanding checks. '.repeat(90).trim();
+  f.reply = body => body.messages[0].content.startsWith('Summarize') ? verbose : 'NO_UPDATE';
+  const response = await f.app.send({ text: 'Watch a.', targetId: 'a', origin: 'voice' });
+  f.end('a');
+  await until(() => f.spoken.some(item => item.kind === 'task-result'));
+  const spoken = f.spoken.find(item => item.kind === 'task-result');
+  assert.ok(spoken.text.includes(verbose.trim()));
+  assert.equal(spoken.speechText, `Agent a: ${verbose}`);
+  assert.ok(f.details(response.requestId).some(item => item.text.includes(verbose.trim())));
+  assert.equal(f.modelCalls.filter(body => body.messages[0].content.startsWith('Summarize')).length, 1);
 });
 
 test('a pending summary is cancelled even after the watched task finished', async t => {

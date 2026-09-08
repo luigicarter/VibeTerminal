@@ -31,7 +31,7 @@ async function runtimeChecks() {
   assert.equal(runtime.getSnapshot("a").turnState, "completed");
   assert.equal(runtime.getSnapshot("a").turnEndedAt, now);
   assert.equal(runtime.getSnapshot("a").childActivity, true, "root completion does not erase child evidence");
-  event("agent-running", { providerThreadId: "child", providerTurnId: "child-turn" });
+  event("agent-running", { providerThreadId: "child", providerTurnId: "child-turn", parentThreadId: "root" });
   assert.equal(runtime.getSnapshot("a").turnState, "completed");
   event("agent-running", { providerThreadId: "root", providerTurnId: "turn2", turnStart: true });
   event("agent-running", { providerThreadId: "root", providerTurnId: "turn1", turnStart: false });
