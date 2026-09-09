@@ -17,7 +17,7 @@ the first prompt with `turnState: unknown`, sequence zero and an empty screen.
 New Orchestrator-created launches are tracked separately from existing sessions.
 Initial task submission or staging for recognized providers waits within the
 original action's deduplication and pane lock. Read-only polling observes the
-current decoder, with an independent 20-second deadline and cancellation. It
+current decoder, with an independent 60-second production deadline and cancellation. It
 does not send test characters, start another model request, or recreate the pane.
 
 `orchestratorPromptReadiness.cjs` recognizes loaded Codex input, the standard
@@ -35,6 +35,16 @@ revision are retained through the wait. Output may advance; human input cannot b
 overwritten. The final transport still checks recipient and screen/input evidence.
 Cancellation, timeout or changed identity before writing is explicitly unsent;
 uncertain writes remain uncertain and are never automatically replayed.
+
+The September 9 conversation audit found a prompt that became ready only after
+the former 20-second deadline and then encountered repeated screen-fence failures.
+For initial operator submissions, a proven-unsent `stale-observation` rejection
+can now receive at most two fresh transport attempts. The original input revision,
+recipient, launch, routing binding and task owner stay fixed; each attempt must
+observe the empty composer again. Input changes, cancellation, changed recipients
+and uncertain delivery stop recovery. Timeout errors include the last bounded
+readiness reason. The original live screen was not retained, so the exact cause
+of that initial delay remains unknown.
 
 Ordinary startup controls remain available. Explicitly authorized edits or
 submission of an existing draft use the existing ownership checks. Existing

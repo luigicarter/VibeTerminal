@@ -66,6 +66,25 @@ test('directory totals survive forced context pressure while its page shrinks', 
   }
 });
 
+test('production intent trims historical work items before losing the feature described in a follow-up', () => {
+  const { INTENT_SYSTEM, INTENT_TOOL } = require('../../backend/orchestratorIntent.cjs');
+  const instruction = 'Open a new coding terminal in this project and ask it to implement that change.';
+  const recentUserMessages = [{ id: 'feature-request', text: 'Play a listening cue when the wake phrase is recognized. Keep the existing completion cue.' }];
+  const replyWorkItem = { id: 'selected-work', objective: 'Keep the exact selected objective and constraints.', binding: { target: { id: 'worker', generation: 'original' } } };
+  const payload = { instruction, requestId: 'current', recentUserMessages,
+    recentConversation: [{ role: 'user', requestId: 'feature-request', text: recentUserMessages[0].text }],
+    replyWorkItem, replyContext: { requestId: 'feature-request', instruction: recentUserMessages[0].text },
+    workItems: Array.from({ length: 20 }, (_, i) => ({ id: `old-${i}`, objective: 'Old task. '.repeat(70), summary: 'Historical result. '.repeat(25) })) };
+  const messages = [{ role: 'system', content: INTENT_SYSTEM }, { role: 'user', content: JSON.stringify(payload) }];
+  const original = JSON.stringify(messages);
+  const fitted = fitMessages({ messages, tools: [INTENT_TOOL], contextLength: 128000 });
+  const actual = JSON.parse(fitted[1].content);
+  assert.ok(size({ messages: fitted, tools: [INTENT_TOOL] }) <= 48000);
+  assert.ok(actual.workItems.length < payload.workItems.length);
+  for (const key of ['instruction', 'requestId', 'recentUserMessages', 'recentConversation', 'replyWorkItem', 'replyContext']) assert.deepEqual(actual[key], payload[key]);
+  assert.equal(JSON.stringify(messages), original, 'Compaction changes only the model projection, never saved history');
+});
+
 test('tool compaction retains protocol pairing and authoritative receipts', () => {
   const messages = [{ role: 'system', content: 'POLICY' }, { role: 'user', content: 'current exact request' }];
   for (let i = 0; i < 5; i++) {

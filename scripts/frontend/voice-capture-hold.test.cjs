@@ -142,7 +142,8 @@ function load(name, globals = {}) {
       } : name.endsWith('/microphone') ? { VoiceMicrophone: class {
         stop() { stops++; }
         start(_frame, _device, onError, onStall) { reportError = onError; reportStall = onStall; return new Promise(resolve => { finishStart = resolve; }); }
-      } } : { PcmPlayer: class { push() {} dispose() {} } },
+      } } : name.endsWith('/listeningCue') ? { ListeningCue: class { update() {} dispose() {} } }
+        : { PcmPlayer: class { push() {} dispose() {} } },
     });
     overlayExports.default();
     if (action === 'stall') reportStall('no packets');

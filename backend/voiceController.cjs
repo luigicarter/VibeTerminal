@@ -59,7 +59,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
   const enabled = () => !disposed && orchestrator?.getState?.().enabled !== false;
   const checkSpending = () => { const limit = getSettings().spendingLimit; const usage = orchestrator?.getState?.().usage || {}; if (limit != null && Object.values(usage).reduce((total, cost) => total + (Number(cost) || 0), 0) >= limit) throw Error('Session spending limit reached.'); };
   const idlePhase = () => state.listening ? 'listening' : 'off';
-  const failureCategory = (error, operation) => error === 'Session spending limit reached.' ? 'spending-limit' : error === 'A relay request is already running.' ? 'busy' : operation;
+  const failureCategory = (error, operation) => error === 'Session spending limit reached.' ? 'spending-limit' : error === 'A relay request is already running.' ? 'busy' : String(error).startsWith('Local context limit:') ? 'context-limit' : operation;
   // Diagnostics are best-effort and never receive recorded or spoken content.
   function diagnostic(stage, error, details = {}, key) {
     try {
@@ -323,7 +323,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     const operation = ['transcription', 'speech', 'orchestration'].includes(info.operation) ? info.operation : 'orchestration';
     const stage = operation === 'speech' ? 'The answer is ready, but speech playback failed.' : operation === 'transcription' ? 'I could not transcribe that.' : 'I could not complete that request.';
     // Reconstruct the bounded classifier message so provider bodies and keys cannot enter UI state.
-    const local = ['not-understood', 'transcription', 'orchestration', 'speech', 'busy', 'spending-limit', 'answer'].includes(info.category);
+    const local = ['not-understood', 'transcription', 'orchestration', 'context-limit', 'speech', 'busy', 'spending-limit', 'answer'].includes(info.category);
     const safeDetail = local ? ERROR_AUDIO_TEXT[info.category] : new OpenRouterError(info.category, info.status).message;
     const message = (local ? safeDetail : `${stage} ${safeDetail}`).slice(0, 400);
     update({ error: message, errorOperation: operation });

@@ -13,6 +13,14 @@ function fixture(t, fetcher, autoDone = true) {
   return { controller, calls, audio, state, advance: () => { time += 60001; } };
 }
 const failure = (status, error = {}) => ({ ok: false, status, json: async () => ({ error: { code: status, ...error } }) });
+test('context overflow speaks the local cause without a network request or generic provider error', async t => {
+  const f = fixture(t, () => { throw Error('No network expected'); }); await f.controller.setListening(true);
+  const result = await f.controller.announceError({ category: 'context-limit', origin: 'voice', operation: 'orchestration' });
+  assert.equal(result.status, 'announced'); assert.equal(result.category, 'context-limit');
+  assert.match(f.controller.getState().error, /Lina's context budget/);
+  assert.match(f.controller.getState().error, /model call was not sent/);
+  assert.ok(f.audio.some(chunk => chunk.local && chunk.data.length)); assert.equal(f.calls.length, 0);
+});
 test('transcription credit failure plays bundled PCM with no request to speech endpoint', async t => {
   const f = fixture(t, () => failure(402)); await f.controller.setListening(true);
   const result = await f.controller.sendAudio({ audioBase64: wavFromSamples(Array(1600).fill(.1)).toString('base64') });

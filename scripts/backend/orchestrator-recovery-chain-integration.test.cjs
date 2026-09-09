@@ -428,7 +428,7 @@ test('verified delegated submission ends a polling model loop while native resul
   const result = await f.run(objective, { assignmentMode: 'new', kindOfSession: 'codex' });
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(modelCalls, 3, 'Do not ask the model again after the fresh post-submission read');
-  assert.equal(f.reads.length, 2, 'Application finalization must not synthesize another read');
+  assert.equal(f.reads.length, 3, 'The application supplies a post-send read even if the model also requests one');
   assert.equal(counts(f).creates.length, 1); assert.equal(counts(f).sends.length, 1);
   assert.equal(result.actions.filter(action => action.kind === 'finish_terminal' && action.status === 'interaction-complete').length, 1);
   assert.equal(f.task(result).status, 'waiting-results');
@@ -469,7 +469,7 @@ test('top-loop delegated completion preserves a separate failed close and suppre
   const result = await f.relay.send({ text: 'Close spare and open a new Codex to investigate startup without editing.', origin: 'voice' });
   assert.equal(result.ok, false, JSON.stringify(result));
   assert.equal(modelCalls, 4, 'The separate failure does not require another ceremonial model finish');
-  assert.equal(f.reads.length, 2); assert.equal(counts(f).creates.length, 1); assert.equal(counts(f).sends.length, 1);
+  assert.equal(f.reads.length, 3); assert.equal(counts(f).creates.length, 1); assert.equal(counts(f).sends.length, 1);
   assert.equal(f.task(result).status, 'failed');
   assert.match(result.text, /Closed 0 of 1 terminals/); assert.match(result.text, /unconfirmed/);
   assert.equal(result.actions.filter(action => action.kind === 'finish_terminal' && action.status === 'interaction-complete').length, 1);

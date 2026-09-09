@@ -13,6 +13,7 @@ const ERROR_AUDIO_TEXT = Object.freeze({
   'not-understood': "I didn't catch that. Hold Space and try again.",
   transcription: "I couldn't turn that recording into text. Please check Orchestrator settings and try again.",
   orchestration: "I couldn't complete that request. Please check the error in the workspace before trying again.",
+  'context-limit': "That request exceeded Lina's context budget. The model call was not sent. Check the task status before retrying.",
   speech: "I couldn't play the spoken reply. Please read the response or error in the workspace.",
   busy: "I'm still working on your previous request. Please wait for my reply, or cancel it first.",
   'spending-limit': 'The session spending limit has been reached. Please check Orchestrator settings.',

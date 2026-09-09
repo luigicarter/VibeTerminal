@@ -105,9 +105,15 @@ async function flush() { for (let i = 0; i < 12; i++) await Promise.resolve(); }
   voice.frames = frame => events.push({ frame });
   voice.onFlush = cb => { flushListener = cb; return () => { flushListener = undefined; }; };
   const audioMocks = { './voice/microphone': { VoiceMicrophone: class { constructor() { captures++; } stop() {} async start(cb) { frameCallback = cb; } async flush() { frameCallback([0.25], 320); return 321; } } }, './voice/pcmPlayer': { PcmPlayer: class { constructor() { players++; } stop() { stopped++; } dispose() {} push() { pushed++; } } } };
+  const cueUpdates = [];
+  audioMocks['./voice/listeningCue'] = { ListeningCue: class { update(next, initial) { cueUpdates.push({ next, initial }); } dispose() {} } };
   const overlay = harness('VoiceOverlay.tsx', audioMocks);
   assert.equal(overlay.render(), null); assert.deepEqual(events.slice(0, 3), ['state-listener', 'audio-listener', { rendererReady: true }]);
   stateListener({ phase: 'listening', listening: true, captureToken: 7 }); resolveInitial({ phase: 'off', listening: false }); await flush(); assert.equal(overlay.render(), null);
+  assert.equal(cueUpdates.length, 1, 'Late initial state cannot reset live cue tracking');
+  stateListener({ phase: 'recording', listening: true, captureToken: 7, recordingId: 1 });
+  stateListener({ phase: 'listening', listening: true, captureToken: 7 });
+  assert.deepEqual(cueUpdates.map(item => item.next.phase), ['listening', 'recording', 'listening'], 'Cue sees transitions even before React renders');
   await flush(); assert.ok(events.some(event => event?.microphoneReady === true && event.captureToken === 7));
   flushListener({ id: 'wrong', captureToken: 6 }); await flush();
   assert.equal(events.some(event => event?.captureFlushed), false);

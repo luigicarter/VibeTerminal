@@ -1,6 +1,6 @@
 {
   "name": "vibe-terminal",
-  "version": "0.1.105",
+  "version": "0.1.106",
   "private": true,
   "description": "A tiled local workspace for running multiple coding agents side by side.",
   "author": "Lina Terminal contributors",
@@ -98,7 +98,7 @@
     "smoke:electron:workspace-controls": "node scripts/qa/workspace-controls-smoke.cjs",
     "smoke:electron:context-history": "node scripts/qa/context-history-smoke.cjs",
     "smoke:frontend:conversation-pages": "node scripts/frontend/conversation-pages-smoke.cjs",
-    "smoke:frontend:voice-experience": "node scripts/frontend/voice-experience-smoke.cjs",
+    "smoke:frontend:voice-experience": "node --test scripts/frontend/voice-listening-cue.test.cjs && node scripts/frontend/voice-experience-smoke.cjs",
     "test:voice:capture": "node scripts/frontend/voice-capture-hold.test.cjs",
     "smoke:voice:native": "node scripts/qa/voice-native-smoke.cjs",
     "smoke:voice:workflow": "node scripts/qa/voice-workflow-smoke.cjs",

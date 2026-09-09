@@ -92,6 +92,15 @@
       "format": "s16le",
       "sha256": "2c02f5f3db819723244d42c762845524e1daac5c79383a20b9616b54d8337afc"
     },
+    "context-limit": {
+      "file": "context-limit.wav",
+      "text": "That request exceeded Lina's context budget. The model call was not sent. Check the task status before retrying.",
+      "voice": "Microsoft Zira Desktop",
+      "sampleRate": 24000,
+      "channels": 1,
+      "format": "s16le",
+      "sha256": "66f29016107e08a4d966b06ebf029e5cc80f9076c0251873e3281e1de30d4665"
+    },
     "speech": {
       "file": "speech.wav",
       "text": "I couldn't play the spoken reply. Please read the response or error in the workspace.",

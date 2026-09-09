@@ -97,7 +97,7 @@ function waitForNativePromptReady({ action, getSession, readSession, signal, tim
   const rootPid = session => shell ? session?.pid || session?.terminalPid : session?.agentPid;
   let pid = rootPid(initial), inputRevision = action.inputRevision;
   return new Promise(resolve => {
-    let settled = false, polling;
+    let settled = false, polling, readinessReason;
     const finish = value => {
       if (settled) return;
       settled = true; clearTimeout(deadline); clearTimeout(polling);
@@ -106,7 +106,7 @@ function waitForNativePromptReady({ action, getSession, readSession, signal, tim
     };
     const fail = (status, error, reason) => finish({ ok: false, status, error, ...(reason && { reason }), delivery: 'not-dispatched' });
     const abort = () => fail('cancelled', 'Cancelled while waiting for the native input composer. No prompt was sent.');
-    const deadline = setTimeout(() => fail('launch-timeout', 'The native input composer was not ready before the startup deadline. No prompt was sent.'), timeoutMs);
+    const deadline = setTimeout(() => fail('launch-timeout', `The native input composer was not ready before the startup deadline. No prompt was sent.${readinessReason ? ` ${readinessReason}` : ''}`), timeoutMs);
     if (signal?.aborted) return abort();
     if (action.target.launchToken !== undefined && action.target.launchToken !== initial?.launchToken) return fail('stale-generation', 'The requested launch changed before the startup wait.');
     signal?.addEventListener('abort', abort, { once: true });
@@ -134,6 +134,7 @@ function waitForNativePromptReady({ action, getSession, readSession, signal, tim
           if (observation.inputRevision !== inputRevision) return fail('stale-observation', 'Terminal input changed during startup; the prompt was not sent.', 'input-revision-changed');
         }
         const readiness = assessNativePromptReadiness(session, observation);
+        readinessReason = readiness.reason;
         if (['blocked', 'unsupported'].includes(readiness.status)) return fail('input-surface-unverified', readiness.reason);
         if (readiness.ready && session.launchState !== 'pending' && session.processState === 'running' &&
             (shell || session.agentProcessState === 'running') && Number.isSafeInteger(pid) && pid > 0 && session.binding?.status !== 'ambiguous') {

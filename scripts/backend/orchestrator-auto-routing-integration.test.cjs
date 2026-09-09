@@ -284,6 +284,18 @@ test('an explicitly submitted managed task holds its workspace against independe
   assert.equal(f.effects.filter(a => a.kind === 'send_prompt').length, 2);
 });
 
+test('a routed submission is observed and finalized even when the model never requests its post-send read', async t => {
+  const f = await fixture(t);
+  f.executor = ({ phase }) => phase >= 2 ? { kind: 'respond', text: 'I sent it.', responseTurn: 'complete' } : undefined;
+  const result = await f.run('Implement distinct listening and completion cues.');
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(f.effects.filter(action => action.kind === 'send_prompt').length, 1);
+  assert.ok(f.reads.length >= 2, 'Application observes the terminal after dispatch');
+  assert.equal([...f.phases.values()][0], 3, 'The model reviews the application observation once, without needing another read or finish');
+  assert.ok(result.actions.some(action => action.kind === 'finish_terminal' && action.status === 'interaction-complete'));
+  assert.notEqual(f.task(result).status, 'failed');
+});
+
 test('continuing an unsent queued task transfers its original request and submits only once', { timeout: 3000 }, async t => {
   const f = await fixture(t);
   await f.run('Earlier project work.');

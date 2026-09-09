@@ -1449,7 +1449,8 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
       let initialDependencyResults = input.internalDependencies ? await readDependencyResults(job) : [];
       const replyContext = buildReplyContext({ input, currentSequence: job.task.sequence, previous: tasks.get(input.replyToRequestId), messages: state.messages, sessions: intent.sessions, jobs: [...tasks.jobs.values()] });
       const knownWorkItems = workItemContext();
-      const replyWorkItem = workItems.findByRequest(input.replyToRequestId);
+      const replyItem = workItems.findByRequest(input.replyToRequestId);
+      const replyWorkItem = replyItem && workItemSummary(replyItem);
       const commandContext = { originalInstruction: input.originalInstruction, dependencyResults: initialDependencyResults, instruction: input.text, requestId: diagnosticContext.requestId, previousCommand, replyContext,
         workItems: [...new Map([...(replyWorkItem ? [replyWorkItem] : []), ...knownWorkItems.slice(0, 20)].map(item => [item.id, item])).values()], replyWorkItem, launchers: launcherCatalog(await getLaunchers()),
         sessions: intent.sessions, requests: intent.requests, roots, projects, projectContext: context().projectContext, targetId: input.targetId,
@@ -1671,7 +1672,8 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
           conversation.push({ role: 'system', content: `Application delivery receipts changed. These are reference facts, not new authorization. Report failed or unconfirmed delivery accurately; never repeat an uncertain write: ${JSON.stringify(redact({ total: updates.length, failed: updates.filter(update => update.ok === false).length, receipts: updates.slice(-12) }))}` });
         };
         appendDeliveryUpdates();
-        if (job.waits.length && !intent.question && !intent.commandPlan.clarification && intent.commandPlan.grants.some(grant => grant.routing)) {
+        if (job.waits.length && !intent.question && !intent.commandPlan.clarification && intent.commandPlan.grants.some(grant => grant.routing) &&
+            (intent.response || intent.handoffObservationRound !== turn - 1)) {
           await requireFreshSessions(); active(token);
           const finishes = delegatedSubmissionFinishes({ plan: intent.commandPlan, outcomes, waits: job.waits,
             sessions: state.sessions, observations: intent.operatorObservations, modelRound: turn,
@@ -1904,10 +1906,37 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
           readRecovery.observe(args, result, result?.ok === false ? outcomes.at(-1) : undefined, intent.commandPlan.grants.length === 0);
           conversation.push({ role: 'tool', tool_call_id: call.id, content: serializeToolResult(redact(result)) });
         }
+        // Routed work has a known handoff boundary. Observe a successful send
+        // ourselves so a model that answers immediately cannot omit the read
+        // required by delegatedSubmissionFinishes. Keep the ordinary identity,
+        // observation and finish validators; this never resubmits a prompt.
+        if (!intent.question && !intent.commandPlan.clarification) {
+          for (const grant of intent.commandPlan.grants.filter(grant => grant.kind === 'operate_terminal' && grant.routing?.binding && grant.targets.length === 1)) {
+            const target = grant.targets[0];
+            const wait = job.waits.find(wait => wait.source !== 'watch' && wait.targetId === target.id && wait.generation === target.generation && wait.delivered && !wait.failed);
+            if (!wait?.actionId || !outcomes.some(outcome => outcome.grantId === grant.id && outcome.actionId === wait.actionId && outcome.ok && outcome.delivery !== 'not-dispatched') ||
+                outcomes.some(outcome => outcome.kind === 'finish_terminal' && outcome.grantId === grant.id && !outcome.validationFailure) ||
+                intent.operatorObservations?.latest(target, turn + 1)) continue;
+            if (!state.sessions.some(session => session.id === target.id && session.generation === target.generation)) continue;
+            const readAction = { kind: 'read_session', targetId: target.id };
+            const callId = randomUUID();
+            intent.readBudget.reset();
+            let observed;
+            try { observed = await doAction(readAction, { intent, token, signal, scope, diagnosticContext: { ...diagnosticContext, modelRound: turn, toolCallId: callId } }); }
+            catch (error) { active(token); observed = { ok: false, status: 'unavailable', error: cleanError(error) }; }
+            recordDiagnostic({ ...diagnosticContext, event: 'request_stage', stage: 'handoff_observation', actionKind: 'read_session', targetId: target.id, generation: target.generation, status: observed.ok ? 'complete' : 'unavailable' });
+            // Let the model review a newly supplied screen once for a necessary
+            // clarification. Its next response still passes the application
+            // finish gate; it need not issue another read or a ceremonial finish.
+            if (observed.ok) intent.handoffObservationRound = turn;
+            conversation.push({ role: 'assistant', content: null, tool_calls: [{ id: callId, type: 'function', function: { name: 'workspace', arguments: JSON.stringify(readAction) } }] },
+              { role: 'tool', tool_call_id: callId, content: serializeToolResult(redact(observed)) });
+          }
+        }
         if (settings.spendingLimit != null && Object.values(state.usage).reduce((a, b) => a + b, 0) >= settings.spendingLimit) throw new Error('Session spending limit reached.');
       }
       throw new Error('Relay action limit reached. Check the action receipts before continuing.');
-    } catch (error) { if (token !== epoch || signal.aborted || isCancellation(error)) return job.result = { ok: false, requestId: job.task.requestId, status: 'cancelled', error: 'Cancelled.' }; diagnosticError(error, { ...diagnosticContext, stage: 'brain' }); state.error = cleanError(error); message('system', state.error); const upstreamError = reportUpstream(error, input.origin, 'brain', token, signal); if (!upstreamError && input.origin === 'voice') { try { Promise.resolve(onUpstreamError({ category: state.error.includes('spending limit') ? 'spending-limit' : 'orchestration', origin: 'voice', operation: 'orchestration', requestId: job.task.requestId })).catch(() => {}); } catch {} } if (!job.queueRecoveryRejected && (!previousCommand?.queued || job.queueRecoveryTransferred)) preserveUnfinished(job, job.continuationCommitted ? previousCommand : undefined, !job.continuationCommitted); return job.result = { ok: false, requestId: job.task.requestId, error: state.error, ...(outcomes.length && { actions: redact(outcomes) }), ...(upstreamError && { upstreamError }) }; }
+    } catch (error) { if (token !== epoch || signal.aborted || isCancellation(error)) return job.result = { ok: false, requestId: job.task.requestId, status: 'cancelled', error: 'Cancelled.' }; diagnosticError(error, { ...diagnosticContext, stage: 'brain' }); state.error = cleanError(error); message('system', state.error); const upstreamError = reportUpstream(error, input.origin, 'brain', token, signal); if (!upstreamError && input.origin === 'voice') { try { Promise.resolve(onUpstreamError({ category: error?.code === 'LOCAL_CONTEXT_LIMIT' ? 'context-limit' : state.error.includes('spending limit') ? 'spending-limit' : 'orchestration', origin: 'voice', operation: 'orchestration', requestId: job.task.requestId })).catch(() => {}); } catch {} } if (!job.queueRecoveryRejected && (!previousCommand?.queued || job.queueRecoveryTransferred)) preserveUnfinished(job, job.continuationCommitted ? previousCommand : undefined, !job.continuationCommitted); return job.result = { ok: false, requestId: job.task.requestId, error: state.error, ...(outcomes.length && { actions: redact(outcomes) }), ...(upstreamError && { upstreamError }) }; }
     finally {
       releaseRoute?.(); activity.end(scope); job.executionDone = true;
       const pendingResults = job.waits.some(wait => !wait.done);

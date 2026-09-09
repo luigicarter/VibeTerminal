@@ -5,6 +5,13 @@ focused. Optional [hands-free voice](voice-handsfree.md) adds “Hey Lina” and
 automatic completion. See the [voice deep dive](orchestrator-voice-deep-dive.md)
 for architecture, version boundaries, and remaining reliability findings.
 
+A short, rising two-note cue plays when a Space or mouse hold starts recording,
+when “Hey Lina” activates capture, or when an automatic answer window is ready.
+Switching between automatic capture and a hold does not repeat the cue.
+The existing soft bell followed by “done” marks completion of an Orchestrator
+instruction. Standby has no listening cue; mute, cancellation and microphone
+recovery stop any pending listening sound.
+
 ## Gestures
 
 - Space is ignored inside a terminal pane (`[data-pane-id]`), input, textarea,
@@ -37,6 +44,10 @@ owns mouse controls. Each uses its own instance of `pressToTalk` from
 `frontend/voice/pushToTalk.ts`; unique hold IDs fence overlapping gestures.
 The hidden `VoiceOverlay` owns the microphone and playback, independently of
 whether the indicator is visible.
+`frontend/voice/listeningCue.ts` observes live state transitions in that single
+audio renderer. Its local PCM cue has a separate player so it cannot acknowledge
+spoken replies or change answer routing. No speech service request is needed
+for the listening sound.
 
 `configure({ pushToTalk: 'start' | 'stop' | 'cancel', holdId })` carries manual
 input. `configure({ finishRecording: recordingId })` finishes the identified

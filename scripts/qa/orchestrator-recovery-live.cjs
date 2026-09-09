@@ -18,7 +18,7 @@ if (fs.existsSync(localState)) {
 }
 const requestedBudget = Number(process.env.VIBE_RECOVERY_LIVE_BUDGET || .20);
 const budget = Number.isFinite(requestedBudget) && requestedBudget > 0 ? Math.min(requestedBudget, .25) : .20;
-const caseNames = ['project-close-all', 'explicit-close-subset', 'bound-new-codex', 'natural-failed-route-recovery', 'ambiguous-web-terminal-clause', 'creation-purpose-guard', 'ambiguous-creation-purpose-guard'];
+const caseNames = ['project-close-all', 'explicit-close-subset', 'bound-new-codex', 'natural-failed-route-recovery', 'ambiguous-web-terminal-clause', 'creation-purpose-guard', 'ambiguous-creation-purpose-guard', 'feature-description-history', 'feature-followup-history', 'fullscreen-history'];
 const caseArgs = process.argv.slice(2).filter(arg => arg.startsWith('--case='));
 const selectedCase = caseArgs[0]?.slice('--case='.length);
 const report = { boundary: 'Configured live model; synthetic project, pane inventory and effects only. The recovery case scripts only its initial intent and initial routing failure; its retry interpretation, routing and execution use the configured live model. The two purpose-guard cases script only their initial unintended draft proposal; purpose review and subsequent repair/execution use the live model. Other cases use the live model from their initial intent. No installed conversation/history, native terminals or microphone used.', initialFailureScripted: false, initialProposalScripted: false, budget, maxCallsPerCase: 24, selectedCase: selectedCase === undefined ? 'all' : caseNames.includes(selectedCase) ? selectedCase : 'invalid', cases: [], startedAt: new Date().toISOString() };
@@ -132,7 +132,8 @@ async function main() {
         const purposeReview = body.messages?.some(message => message.role === 'system' && typeof message.content === 'string'
           && message.content.startsWith('Check the purpose of proposed new-terminal drafts before any action.')) === true;
         if (purposeReview) row.purposeReview = true;
-        row.calls.push({ stage: metadataName(body.tools?.[0]?.function?.name || 'model'), status: 'started', toolErrors, purposeReview });
+        row.calls.push({ stage: metadataName(body.tools?.[0]?.function?.name || 'model'), status: 'started', toolErrors, purposeReview,
+          inputBytes: Buffer.byteLength(JSON.stringify({ messages: body.messages, tools: body.tools || [] })) });
       }
       const record = completion ? row.calls.at(-1) : null, start = Date.now();
       try {
@@ -157,9 +158,26 @@ async function main() {
       } catch (error) { if (record) { record.status = 'transport-failed'; record.errorReason = reasonCode(error); record.elapsedMs = Date.now() - start; spent += reservation; } throw error; }
       finally { reserved -= reservation; }
     };
+    if (name.endsWith('-history')) {
+      const profile = path.join(root, 'profile'), at = Date.now() - 10000;
+      fs.mkdirSync(profile, { recursive: true });
+      fs.writeFileSync(path.join(profile, 'orchestrator-work-items.json'), JSON.stringify({ version: 1,
+        items: Array.from({ length: 20 }, (_, i) => ({ id: `old-work-${i}`, cwd, title: `Historical task ${i}`,
+          objective: 'Review an older unrelated layout task. '.repeat(18), summary: 'Historical task result. '.repeat(20),
+          createdAt: at, updatedAt: at + i, requestIds: [`old-request-${i}`], status: 'completed' })) }));
+      const history = name === 'feature-followup-history' ? [
+        ['user', 'Open a new Codex terminal in Recovery QA. I want a different ding when Lina starts listening and the current ding when the task is complete.'],
+        ['assistant', 'Do you mean changing audio settings or describing desired behavior for the future?'],
+        ['user', 'Desired behavior for the future. The prompt should say: when Hey Lina starts listening, play a distinct listening cue. Keep the existing completion cue.'],
+        ['assistant', 'I cannot change those settings myself. Would you like help drafting a feature request?'],
+      ] : [];
+      fs.writeFileSync(path.join(profile, 'orchestrator-conversation.json'), JSON.stringify({ receipts: [], tasks: [],
+        messages: history.map(([role, text], i) => ({ id: `history-${i}`, role, text, at: at + i, requestId: `exchange-${Math.floor(i / 2)}`, origin: 'text' })) }));
+    }
     relay = createOrchestrator({ userDataPath: path.join(root, 'profile'), fetch: request,
       getRoots: () => ({ documents: root, projects: [{ id: 'recovery-project', name: 'Recovery QA', path: cwd }] }),
-      getSessions: () => structuredClone(sessions), getLaunchers: () => [{ kind: 'codex', label: 'Codex', available: true, configured: true }],
+      getSessions: () => structuredClone(sessions), getLaunchers: () => [{ kind: 'codex', label: 'Codex', available: true, configured: true },
+        ...(name === 'fullscreen-history' ? [{ kind: 'claude', label: 'Claude Code', available: true, configured: true }] : [])],
       routeTask: async (context, { read }) => {
         row.routeCalls++;
         if (induceFailure) { induceFailure = false; throw new RoutingError('synthetic-route-failure'); }
@@ -185,8 +203,8 @@ async function main() {
           if (action.cwd !== undefined && !sameProject(action.cwd)) fail('history-outside-fixture');
           return { ok: true, conversations: [], total: 0, hasMore: false };
         }
-        if (action.kind === 'create_session') { assert(sameProject(action.cwd), 'creation must stay within the same known Windows project'); assert.equal(action.kindOfSession, 'codex'); assert.equal(action.text, undefined); assert.equal(action.prompt, undefined);
-          row.effects.create++; const current = pane(`created-${row.effects.create}`); sessions.push(current);
+        if (action.kind === 'create_session') { assert(sameProject(action.cwd), 'creation must stay within the same known Windows project'); assert.equal(action.kindOfSession, name === 'fullscreen-history' ? 'claude' : 'codex'); assert.equal(action.text, undefined); assert.equal(action.prompt, undefined);
+          row.effects.create++; const current = pane(`created-${row.effects.create}`, { kind: action.kindOfSession, provider: action.kindOfSession }); sessions.push(current);
           return { ok: true, status: 'created', id: current.id, launchToken: current.launchToken, processState: 'running', target: { id: current.id, generation: current.generation, launchToken: current.launchToken } }; }
         const current = sessions.find(item => item.id === action.targetId && item.generation === action.generation); if (!current) fail('effect-outside-fixture');
         if (action.kind === 'focus_session') return { ok: true, status: 'focused' };
@@ -302,6 +320,18 @@ async function main() {
     assert.match(question, /web|which available terminal|terminal.*mean/i); assert.equal(task.status, 'needs-answer');
     assert.equal(f.row.effects.create, 0); assert.equal(f.row.effects.send, 0); assert.equal(f.row.effects.close, 0);
     f.row.clausePreserved = true;
+  });
+  for (const name of ['feature-description-history', 'feature-followup-history', 'fullscreen-history']) await scenario(name, 0, async f => {
+    const text = name === 'feature-description-history'
+      ? 'Open a new Codex terminal in Recovery QA. I want a different ding when Hey Lina starts listening and the current ding when a task is completed. Have Codex implement this behavior.'
+      : name === 'feature-followup-history'
+        ? 'I know you cannot change it yourself. Put a new Codex terminal in Recovery QA and prompt Codex to make this change.'
+        : 'Open a new Claude Code terminal in Recovery QA and have it fix full-screen terminals. They currently fill the pane horizontally but not vertically. Make them fill the entire pane.';
+    const result = await f.send(text);
+    assert.equal(result.ok, true); assert.equal(f.row.effects.create, 1); assert.equal(f.row.effects.send, 1);
+    assert.ok(f.row.calls.every(call => call.inputBytes <= 48000));
+    if (name === 'fullscreen-history') { assert.match(f.sends[0].text, /vertical/i); assert.match(f.sends[0].text, /full.?screen|entire pane/i); }
+    else { assert.match(f.sends[0].text, /listen/i); assert.match(f.sends[0].text, /complet/i); }
   });
   report.passed = report.cases.every(item => item.passed);
 }

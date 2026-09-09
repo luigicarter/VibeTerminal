@@ -1,21 +1,23 @@
 import { useEffect, useMemo, useState } from 'react';
 import { VoiceMicrophone } from './voice/microphone';
 import { PcmPlayer } from './voice/pcmPlayer';
+import { ListeningCue } from './voice/listeningCue';
 import type { VoiceApi, VoiceState } from './voice/types';
 const initial: VoiceState = { phase: 'off', muted: true, listening: false, ready: false };
 export default function VoiceOverlay() {
   const api = (window.vibe as unknown as { voice: VoiceApi }).voice;
   const [state, setState] = useState<VoiceState>(initial);
   const microphone = useMemo(() => new VoiceMicrophone(), []);
+  const listeningCue = useMemo(() => new ListeningCue(), []);
   const player = useMemo(() => new PcmPlayer(id => { void api.configure({ playbackDone: id }); }, (message, id) => { void api.configure({ playbackError: message, playbackReplyId: id }); }, id => { void api.configure({ playbackStarted: id }); }), [api]);
   useEffect(() => {
     let alive = true, received = false;
-    const stateOff = api.onState(next => { received = true; if (alive) setState(next); });
+    const stateOff = api.onState(next => { received = true; if (alive) { listeningCue.update(next); setState(next); } });
     const audioOff = api.onAudio(chunk => player.push(chunk));
     void api.configure({ rendererReady: true }).catch(() => { /* Integration reports renderer readiness failures. */ });
-    void api.getState().then(next => { if (alive && !received) setState(next); }).catch(() => { /* Integration reports renderer readiness failures. */ });
-    return () => { alive = false; stateOff(); audioOff(); microphone.stop(); player.dispose(); };
-  }, [api, microphone, player]);
+    void api.getState().then(next => { if (alive && !received) { listeningCue.update(next, true); setState(next); } }).catch(() => { /* Integration reports renderer readiness failures. */ });
+    return () => { alive = false; stateOff(); audioOff(); microphone.stop(); player.dispose(); listeningCue.dispose(); };
+  }, [api, microphone, player, listeningCue]);
   useEffect(() => {
     if (!state.listening) { microphone.stop(); return; }
     let alive = true, failed = false;

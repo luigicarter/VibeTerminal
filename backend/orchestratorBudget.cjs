@@ -73,7 +73,9 @@ function createReadBudget({ maxBytes = 12000, perReadBytes = 4000 } = {}) {
 
 // Directory totals are small identity metadata, not disposable context. Keep
 // them even when the directory page itself must shrink for a smaller model.
-const CONTEXT_KEYS = new Set(['tasks', 'pendingCommands', 'recentConversation', 'recentActions', 'recentUserMessages', 'roots', 'preferences', 'observations', 'observedReads', 'readBookmarks', 'sessions']);
+// Retire historical routing candidates before the recent exchange that explains
+// a follow-up. replyWorkItem/replyContext and executable authority stay protected.
+const CONTEXT_KEYS = new Set(['tasks', 'workItems', 'recentActions', 'preferences', 'observations', 'observedReads', 'readBookmarks', 'roots', 'sessions', 'pendingCommands', 'recentConversation', 'recentUserMessages']);
 function compactTool(content) {
   let value;
   try { value = JSON.parse(content); } catch { return JSON.stringify({ truncated: true, contextNote: 'Earlier tool output omitted for context. Never repeat an effect because its receipt was shortened.' }); }
@@ -166,7 +168,7 @@ function fitMessages({ messages, tools = [], contextLength, outputTokens = 1200,
   // If the newest page alone cannot fit, reject locally rather than silently
   // consume its cursor without showing the model its body. The caller can ask
   // for a smaller source page or choose a larger context model.
-  const error = new Error(`Local context limit: protected instructions, tool schemas, receipts and the newest source page require ${size()} UTF-8 bytes; this model allows ${budget}. Choose a model with a larger context window or request a smaller source page. The original user instruction is unchanged.`);
+  const error = new Error(`Local context limit: this request needs ${size()} UTF-8 bytes after trimming older context; Lina's input budget is ${budget}. The current model call was not sent. The original user instruction is unchanged; check existing task delivery before retrying.`);
   error.code = 'LOCAL_CONTEXT_LIMIT';
   throw error;
 }

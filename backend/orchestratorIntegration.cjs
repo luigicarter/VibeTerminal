@@ -328,7 +328,7 @@ function installOrchestrator(options) {
   const idleInputActions = new Set();
   const queuedInputAttempts = require('./orchestratorQueuedInputAttempts.cjs').createQueuedInputAttempts();
   const terminalInput = createTerminalInput({ getSession: inputSession, readSession: target => observations.read(target),
-    startupTimeoutMs: options.launchTimeoutMs ?? 20000, startupPollMs: options.startupPollMs ?? 100,
+    startupTimeoutMs: options.startupTimeoutMs ?? options.launchTimeoutMs ?? 60000, startupPollMs: options.startupPollMs ?? 100,
     onBeforeWrite: metadata => relay.prepareDelivery(queuedInputAttempts.correlate(metadata)),
     write: ({ signal, ...payload }) => {
       if (!require("./orchestratorLaunchers.cjs").routingBindingMatches(routedInputBindings.get(payload.actionId), directory.get(payload.id))) return { ok: false, status: "blocked", delivery: "not-dispatched", error: "The routed conversation changed before dispatch." };
@@ -666,7 +666,27 @@ function installOrchestrator(options) {
         if (action.routingBinding) routedInputBindings.set(action.actionId, action.routingBinding);
         if (action.targetAvailability === 'idle') idleInputActions.add(action.actionId);
         let result;
-        try { result = await terminalInput.handle(prompt); } finally { routedInputBindings.delete(action.actionId); idleInputActions.delete(action.actionId); }
+        const startup = terminalInput.needsStartupReadiness(s) && action.operator === true &&
+          !action.editInput && Number.isSafeInteger(action.inputRevision);
+        try {
+          result = await terminalInput.handle(prompt);
+          // A startup repaint can win the race between decoded readiness and
+          // the PTY's exact screen fence. Retry only a proven-unsent rejection,
+          // retaining the original input revision, PID and routing authority.
+          // Fresh transport IDs are correlated back to this one task owner.
+          for (let retry = 0; startup && retry < 2 && result?.ok === false && result.delivery === 'not-dispatched' &&
+              result.status === 'stale-observation' && result.reason !== 'input-revision-changed' && !action.signal?.aborted; retry++) {
+            const current = inputSession(s.id);
+            if (!current || current.generation !== s.generation || current.launchToken !== s.launchToken || current.agentPid !== s.agentPid ||
+                !require('./orchestratorLaunchers.cjs').routingBindingMatches(action.routingBinding, current) || !terminalInput.needsStartupReadiness(current)) break;
+            const attemptId = randomUUID();
+            queuedInputAttempts.remember(attemptId, prompt);
+            if (action.routingBinding) routedInputBindings.set(attemptId, action.routingBinding);
+            if (action.targetAvailability === 'idle') idleInputActions.add(attemptId);
+            try { result = queuedInputAttempts.correlate(await terminalInput.handle({ ...prompt, actionId: attemptId })); }
+            finally { routedInputBindings.delete(attemptId); idleInputActions.delete(attemptId); queuedInputAttempts.complete(attemptId); }
+          }
+        } finally { routedInputBindings.delete(action.actionId); idleInputActions.delete(action.actionId); }
         const latest = directory.get(s.id);
         const pendingInteraction = relay.getState().requests.some(request => request.sessionId === s.id && request.generation === s.generation && request.state === 'pending');
         if (require('./orchestratorBusyInput.cjs').canQueueBusyPrompt(prompt, latest && { ...latest, pendingInteraction }, result)) return delivery.submit({ ...action, target: prompt.target });
