@@ -103,7 +103,7 @@ At the start of this audit, the installed executable reported **0.1.94**. Its ke
 | Earliest confident automatic commitment | 200 ms classified quiet | 1,200 ms classified quiet |
 | Low-confidence result followed by silence | Can wait until recording limit | Sends after 3 seconds quiet with at least 250 ms speech; shorter uncertain speech gets a retry without transcription upload |
 | Automatic recording control | Hold/release Space or mouse | Also offers identity-bound click-to-send |
-| Main microphone status | Primarily tooltip/accessibility text | Visible text above microphone |
+| Main microphone status | Primarily tooltip/accessibility text | Color-only indicator with screen-reader status; floating text removed September 9 at user request |
 | Invalid assistant interpretation | Request fails | Explicit format guidance and one repair attempt |
 | Voice diagnostics | Timing values discarded by sanitizer | Bounded timing, confidence and automatic-recording events retained |
 

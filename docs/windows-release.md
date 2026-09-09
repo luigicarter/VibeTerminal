@@ -4,10 +4,10 @@ Lina Terminal ships to Windows users as an Electron Builder NSIS installer hoste
 
 ## Current Public Release
 
-The current Windows release is `v0.1.107`:
+The current Windows release is `v0.1.108`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.107`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.107/LinaTerminal-Setup-0.1.107.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.108`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.108/LinaTerminal-Setup-0.1.108.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -66,12 +66,11 @@ The compiled `dist/` renderer is still included because it is the UI Electron di
 
 ## Local Build
 
-Version `0.1.107` fixes Orchestrator history context overflow, preserves feature
-requests through clarifications, and verifies routed task handoffs. Native startup
-can recover proven-unsent screen races while preserving input ownership. Context
-errors receive a specific offline voice alert, and recording starts play a distinct
-listening cue. See the [conversation error audit](orchestrator-conversation-errors-2026-09-09.md)
-for evidence and verification boundaries.
+Version `0.1.108` removes the microphone's floating status bubble and status
+tooltip. Mic colors communicate standby, recording, work, playback, mute, and
+attention states, including microphone and hands-free recovery. Status details
+remain available to screen readers. See [voice push-to-talk](voice-push-to-talk.md)
+for the color meanings and controls.
 Installed applications apply updates through the user's Update/Restart action;
 publication does not restart an active workspace.
 

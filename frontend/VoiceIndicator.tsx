@@ -46,7 +46,9 @@ export default function VoiceIndicator() {
     state.phase === 'listening' && state.handsFreeStatus === 'ready' ? 'Say Hey Lina or hold Space to talk' :
     state.phase === 'listening' && state.handsFreeStatus === 'unavailable' ? `${state.handsFreeError || 'Hands-free voice unavailable.'} Hold Space to talk` :
     phases[state.phase] || state.phase);
-  const visual = error ? 'error' : !state.listening && !busy ? 'muted' : working ? 'thinking' : busy ? state.phase === 'speaking' ? 'speaking' : 'recording' : 'listening';
+  const needsAttention = error || ['error', 'microphone-error'].includes(state.phase) || state.captureRecovering ||
+    (['listening', 'awaiting-answer'].includes(state.phase) && ['loading', 'recovering', 'unavailable'].includes(state.handsFreeStatus || ''));
+  const visual = needsAttention ? 'error' : !state.listening && !busy ? 'muted' : working ? 'thinking' : busy ? state.phase === 'speaking' ? 'speaking' : 'recording' : 'listening';
   // Manual gesture failures arrive in authoritative voice state for both mouse and Space.
   const hold = useMemo(() => api && pressToTalk(api), [api]);
   async function act(run: () => Promise<{ ok?: boolean; error?: string } | unknown>) {
@@ -85,7 +87,7 @@ export default function VoiceIndicator() {
   const action = working ? 'Stop current voice turn' : automatic ? 'Send recording' : state.listening ? 'Hold to talk' : 'Enable microphone and hold to talk';
   if (!api || !state.indicatorVisible) return null;
   return <div className={`voice-indicator voice-${visual}${hidden ? ' voice-hidden' : ''}`} onContextMenu={event => { event.preventDefault(); void act(() => api.configure({ menu: true })); }}>
-    <button className="voice-mic" aria-label={`${status}. ${action}`} title={`${status}\n${action} · Right-click for options`} onPointerDown={event => { if (event.button !== 0) return; event.preventDefault(); void press(); }} onPointerUp={event => { if (event.button === 0) releasePointer(true); }} onPointerLeave={() => releasePointer()} onPointerCancel={() => releasePointer()} onKeyDown={event => { if (event.key === ' ') event.preventDefault(); if (event.key === 'Enter' && automatic && !event.repeat) sendAutomatic(automaticIdentity()); }}>{automatic ? <Send size={26} strokeWidth={1.7}/> : busy || state.listening ? <Mic size={29} strokeWidth={1.7}/> : <MicOff size={27} strokeWidth={1.7}/>}</button>
+    <button className="voice-mic" aria-label={`${status}. ${action}`} onPointerDown={event => { if (event.button !== 0) return; event.preventDefault(); void press(); }} onPointerUp={event => { if (event.button === 0) releasePointer(true); }} onPointerLeave={() => releasePointer()} onPointerCancel={() => releasePointer()} onKeyDown={event => { if (event.key === ' ') event.preventDefault(); if (event.key === 'Enter' && automatic && !event.repeat) sendAutomatic(automaticIdentity()); }}>{automatic ? <Send size={26} strokeWidth={1.7}/> : busy || state.listening ? <Mic size={29} strokeWidth={1.7}/> : <MicOff size={27} strokeWidth={1.7}/>}</button>
     <button className="voice-mini voice-mute" aria-label={state.listening ? 'Mute microphone' : 'Enable microphone'} title={state.listening ? 'Mute microphone' : 'Enable microphone'} onClick={() => void act(() => api.setListening(!state.listening))}>{state.listening ? <MicOff size={12}/> : <Mic size={12}/>}</button>
     <button className="voice-mini voice-hide" aria-label="Dismiss voice conversation" title="Dismiss voice conversation; return to standby" onClick={() => void act(() => api.configure({ dismiss: true }))}><X size={13}/></button>
     <span className="voice-status" role={error ? 'alert' : 'status'}>{status}</span>

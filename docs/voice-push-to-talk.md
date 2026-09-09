@@ -12,6 +12,13 @@ The existing soft bell followed by “done” marks completion of an Orchestrato
 instruction. Standby has no listening cue; mute, cancellation and microphone
 recovery stop any pending listening sound.
 
+The microphone shows status through its color: teal for standby, blue for
+recording or awaiting an answer, purple for transcription or assistant work,
+green for playback, gray for muted, and amber for errors or microphone/hands-free
+startup, recovery, or unavailability. Status text remains available to screen
+readers, with no floating status bubble or microphone tooltip. Hovering still
+reveals the mute and dismiss controls; right-click opens voice options.
+
 ## Gestures
 
 - Space is ignored inside a terminal pane (`[data-pane-id]`), input, textarea,

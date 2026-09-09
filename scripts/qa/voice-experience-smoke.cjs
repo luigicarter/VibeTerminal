@@ -218,10 +218,13 @@ async function screenshot(client, name) { if (hidden) { result.skippedScreenshot
   assert.equal((await cdp.eval('window.vibe.orchestrator.configure({handsFreeEnabled:true})')).ok, true);
   await until(async () => (await cdp.eval('window.vibe.voice.getState()')).handsFreeStatus === 'ready', 'native hands-free helpers ready', 20000);
   const automatic = await until(() => voice.eval(`window.__qaVoiceStates.find(s=>s.recordingSource==='wake')`), 'native wake starts recording from fake microphone', 30000);
-  const status = await cdp.eval(`(()=>{const e=document.querySelector('.voice-status');const r=e.getBoundingClientRect();const style=getComputedStyle(e);return {text:e.textContent,width:r.width,height:r.height,visible:style.clipPath==='none'&&style.visibility!=='hidden',inside:r.x>=0&&r.y>=0&&r.right<=innerWidth&&r.bottom<=innerHeight};})()`);
-  assert(status.visible && status.inside && status.width > 100 && status.height > 20, JSON.stringify(status));
-  await screenshot(cdp, 'automatic-recording-status.png');
-  record('visible-automatic-recording-status', status);
+  const status = await cdp.eval(`(()=>{const e=document.querySelector('.voice-status');const r=e.getBoundingClientRect();const style=getComputedStyle(e);const mic=document.querySelector('.voice-mic');return {text:e.textContent,width:r.width,height:r.height,clipPath:style.clipPath,role:e.getAttribute('role'),label:mic.getAttribute('aria-label'),tooltip:mic.getAttribute('title')};})()`);
+  assert.equal(status.clipPath, 'inset(50%)');
+  assert.equal(status.width, 1); assert.equal(status.height, 1);
+  assert.equal(status.role, 'status'); assert(status.text && status.label.includes(status.text));
+  assert.equal(status.tooltip, null);
+  await screenshot(cdp, 'automatic-recording-indicator.png');
+  record('color-only-microphone-with-accessible-status', status);
   const automaticTranscript = await until(() => voice.eval(`window.__qaVoiceStates.find(s=>s.transcript==='open the project and run the tests')`), 'automatic completion and wake-prefix removal', 30000);
   const automaticUpload = events().find(e => e.transcription === 'Hey Lina open the project and run the tests');
   assert(automaticUpload?.peak > 600, 'Wake recording must contain microphone audio');
