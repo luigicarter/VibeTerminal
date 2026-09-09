@@ -118,14 +118,18 @@ function toolsFrom(reply, expectedOk = true) { assert.equal(reply.ok, expectedOk
   assert.equal(opened.ok, true, JSON.stringify(opened));
   assert.equal(opened.actions?.length, 1, JSON.stringify(opened));
   assert.equal(opened.actions[0].cwd, a);
-  assert(opened.text.includes(' in Visible A.'), opened.text);
+  assert.equal(opened.actions[0].status, 'created');
+  assert.equal(opened.actions[0].processState, 'running');
+  assert(opened.actions[0].target?.generation, 'Creation must identify the actual running generation');
   assert.doesNotMatch(opened.text, /powershell\.exe|System32|[a-z]:[\\/]/i);
   const shell = { receipt: opened.actions[0] };
-  record("direct-shell-reply-reports-project-directory", opened);
+  record("direct-shell-creation-receipt-reports-project-directory", opened);
   // Compare inside PowerShell so terminal line wrapping cannot split the path.
   const payload = `Write-Output ('BACKGROUND_' + 'COMMAND_OK'); Write-Output ('WORKSPACE_' + 'CWD_MATCH=' + ((Get-Location).Path -eq '${a.replace(/'/g, "''")}'))`;
   plan([{ kind: "send_prompt", targetId: shell.receipt.id, text: payload }]);
-  const sent = toolsFrom(await command(`Send ${shell.receipt.id}: ${payload}`));
+  const firstCommand = await command(`Send ${shell.receipt.id}: ${payload}`);
+  if (!firstCommand.ok) record('first-command-input-observation', await dispatch({ kind: 'read_session', target: shell.receipt.target }));
+  const sent = toolsFrom(firstCommand);
   assert.equal(sent[0].ok, true, JSON.stringify(sent)); assert.equal(sent[0].status, "written");
   const cwdObservation = await until(async () => { const r = await dispatch({ kind: "read_session", target: shell.receipt.target }); return r.observation?.text.includes("BACKGROUND_COMMAND_OK") && r.observation.text.includes("WORKSPACE_CWD_MATCH=True") && r; }, "immediate create then command output and actual PowerShell cwd");
   record("powershell-working-directory-matches-creation-receipt", { cwd: shell.receipt.cwd, observed: cwdObservation.observation.text });

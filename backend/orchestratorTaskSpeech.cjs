@@ -6,6 +6,11 @@ function createTaskSpeech(onSpeak) {
   const spoken = new Map();
   return async function speak({ job, report, event, epoch, isActive }) {
     if (!onSpeak || !isActive() || event.signal?.aborted) return;
+    // A terminal can finish while its request still has queued work or a
+    // followup. Keep routine completion reports and result recaps in chat even
+    // before the whole-command acknowledgment is eligible. That separate path
+    // owns the single ding and "done"; failures still use this speech queue.
+    if (['completed', 'ready'].includes(report.status)) return { ok: true, status: 'silent' };
     const wait = job.waits?.find(item => item.targetId === report.targetId && item.generation === report.generation
       && item.turnId === report.turnId && (!report.actionId || item.actionId === report.actionId));
     const attributed = wait?.done && !wait.attributionAmbiguous && report.targetId && report.generation != null && report.turnId;

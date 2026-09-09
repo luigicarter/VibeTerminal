@@ -2131,7 +2131,7 @@ function runHost() {
     }
     // Fresh pane: session creation is DEFERRED to the first input, which
     // titles the session from that prompt. Creating one here minted a ghost
-    // "vibeTerminal Open Fusion" session on every pane start and app boot —
+    // "Lina Terminal Open Fusion" session on every pane start and app boot —
     // the resume picker drowned in identical-titled empty chats. The
     // engine-ready ping keeps the renderer's provider-catalog prefetch (which
     // used to ride the session event).
@@ -2151,7 +2151,7 @@ function runHost() {
     if (!state.sessionPromise) {
       const title =
         String(firstPromptText || "").replace(/\s+/g, " ").trim().slice(0, 80) ||
-        "vibeTerminal Open Fusion";
+        "Lina Terminal Open Fusion";
       state.sessionPromise = (async () => {
         const created = await request(state, "POST", "/session", { title });
         if (!created || !created.id) {

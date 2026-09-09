@@ -9,9 +9,9 @@ function isObservedBusyPrompt(action, session) {
   return Boolean(purePrompt(action) && healthy(session,action) && !['terminal','shell','fusion','openfusion'].includes(session.kind) && session.observation === 'observed' && ['running','busy'].includes(session.turnState) && session.turnId && !session.pendingInput && !session.manualInputPending && !session.interactionInputPending && !session.heldMouseButton);
 }
 function isBusyPromptSubmission(action, session) {
-  return isObservedBusyPrompt(action, session) && (session.provider || session.kind) === 'codex';
+  return action?.targetAvailability !== 'idle' && isObservedBusyPrompt(action, session) && (session.provider || session.kind) === 'codex';
 }
 function canQueueBusyPrompt(action, session, result) {
-  return Boolean(purePrompt(action) && healthy(session,action) && result?.delivery === 'not-dispatched' && result.reason !== 'input-revision-changed' && ['recipient-unavailable','stale-observation','interaction-busy','busy'].includes(result.status) && (['running','busy'].includes(session.turnState) || session.childActivity || session.pendingInput));
+  return Boolean(action?.targetAvailability !== 'idle' && purePrompt(action) && healthy(session,action) && result?.delivery === 'not-dispatched' && result.reason !== 'input-revision-changed' && ['recipient-unavailable','stale-observation','interaction-busy','busy'].includes(result.status) && (['running','busy'].includes(session.turnState) || session.childActivity || session.pendingInput));
 }
 module.exports = { isObservedBusyPrompt, isBusyPromptSubmission, canQueueBusyPrompt };

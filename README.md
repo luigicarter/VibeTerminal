@@ -1,6 +1,6 @@
-# vibeTerminal
+# Lina Terminal
 
-vibeTerminal is a Windows desktop app for keeping local terminals and coding
+Lina Terminal is a Windows desktop app for keeping local terminals and coding
 agents in one organized workspace.
 
 Open a project folder, add the terminal or agent panes you need, and arrange
@@ -12,10 +12,13 @@ to which task.
 
 | Platform | Download | Notes |
 | --- | --- | --- |
-| Windows x64 | [vibeTerminal-Setup-0.1.103.exe](https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.103/vibeTerminal-Setup-0.1.103.exe) | Standard Windows installer. |
+| Windows x64 | [LinaTerminal-Setup-0.1.104.exe](https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.104/LinaTerminal-Setup-0.1.104.exe) | Standard Windows installer. |
 | All releases | [GitHub Releases](https://github.com/luigicarter/VibeTerminal/releases) | Older versions and release assets. |
 
-Install the app, then launch `vibeTerminal` from the Start Menu or desktop
+Lina Terminal was previously named vibeTerminal. Existing settings and workspaces
+carry over, and the wake phrase is now **Hey Lina**.
+
+Install the app, then launch `Lina Terminal` from the Start Menu or desktop
 shortcut. No separate developer setup is required to use the installed app.
 
 ## What You Can Do
@@ -28,7 +31,7 @@ features are included in the release download linked above.
 
 - Run multiple local terminal panes in one desktop window.
 - Open Orchestrator for live session status and a searchable project/global work-history table.
-- Answer Vibe's questions without repeating Hey Vibe; say “never mind” to dismiss the voice exchange.
+- Answer Lina's questions without repeating Hey Lina; say “never mind” to dismiss the voice exchange.
 - Open project folders and keep each folder's sessions grouped together.
 - Use Multi mode for a free board of terminals and agents from different
   folders.
@@ -44,7 +47,7 @@ features are included in the release download linked above.
 
 ## Quick Start
 
-1. Install and open vibeTerminal.
+1. Install and open Lina Terminal.
 2. Click `Add project` and choose a project folder, or use `New project`.
 3. Choose `Terminal` on the start screen to open a regular shell in that folder.
 4. Use `New session` or a launcher card, such as `Codex` or `Claude`, to start that agent in
@@ -94,18 +97,18 @@ Other CLIs can be run from a regular terminal pane.
 
 ## Updates
 
-vibeTerminal checks for updates when it starts. You can also click `Check for
+Lina Terminal checks for updates when it starts. You can also click `Check for
 update` in the top bar.
 
-When an update is available, vibeTerminal shows a small overlay. Click `Update`
+When an update is available, Lina Terminal shows a small overlay. Click `Update`
 to download it, then click `Restart` when your sessions are in a good place. The
 app does not auto-download, auto-restart, or interrupt running terminals.
 On Windows, the update installer runs silently during that restart and then
-relaunches vibeTerminal.
+relaunches Lina Terminal.
 
 ## Notes
 
-- Closing a folder in the sidebar only removes it from vibeTerminal and closes
+- Closing a folder in the sidebar only removes it from Lina Terminal and closes
   its panes. It does not delete your project files.
 - The Git summary only appears for folders that are Git repositories.
 - Windows may show a SmartScreen warning for early unsigned builds.

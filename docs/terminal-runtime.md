@@ -2,6 +2,21 @@
 
 Standalone panes use a main-process runtime service. The renderer subscribes to retained snapshots, so switching workspaces or rebuilding xterm does not reset conversation discovery, status, or titles. Fusion and Open Fusion retain their chat-host lifecycle transports; all panes share the board geometry repairs.
 
+## Wheel scrolling
+
+Normal terminal history remains scrollable with the wheel after moving the
+scrollbar, including when a TUI has enabled mouse reporting. Shift-wheel selects
+local history from the live tail, and exited panes keep their history scrollable.
+Running TUIs at the live tail and alternate-screen applications retain their
+native mouse or cursor-key scrolling. Upward local scrolling disables following
+immediately; reaching the bottom enables it again, so delayed viewport events
+cannot leave an obsolete follow-tail flag for the next resize.
+
+`npm run smoke:electron:terminal-scroll` checks these paths with the actual pane
+handlers and xterm in isolated offscreen Electron. It includes pixel, line,
+page and fractional trackpad deltas, delayed scroll delivery, and preserved
+native input. Physical mouse/trackpad hardware is not covered by this fixture.
+
 ## Identity and lifecycle
 
 Each pane launch has a backend-issued generation and renderer launch token. PTY events, authenticated callbacks, asynchronous metadata results, and cleanup are checked against that generation. Concurrent creates share preparation; reattachment reuses the live launch. Closing cancels pending preparation, and restart rotates instrumentation. Invalid folders, missing executables, and rejected duplicate conversation ownership produce observable failures.
@@ -15,6 +30,23 @@ and its launcher command has been submitted. Failed, superseded, cancelled and
 timed-out starts keep the created pane identity and are never automatically
 recreated. Agent input retains its separate observed-readiness checks, and a
 staged draft remains unsent. Checked input cannot overtake the launcher command.
+
+For newly created Orchestrator launches, initial Codex, Claude/Claude-custom and
+standard PowerShell task input has an additional composer wait. A shell PTY and
+an agent wrapper can both be running before the native input field exists. The
+wait reads the current decoded screen and cursor visibility; blank screens,
+Codex's `model: loading`, disabled input and startup onboarding cannot receive a
+task prompt. Unknown lifecycle metadata alone does not block a recognized ready
+composer. The original action remains pending for up to 20 seconds, without a
+fixed startup sleep or a second submission.
+
+The wait retains the exact launch, generation, recipient, native conversation and
+input revision. Cancellation, closure, restart, manual typing and the deadline
+end it with no input dispatched. Existing sessions, explicitly authorized draft
+edits, busy follow-ups and structured chat hosts keep their existing controls.
+Other native provider layouts and customized shell prompts are not certified by
+these composer recognizers; unsupported provider kinds retain their previous
+semantic operator path. See [startup prompt verification](orchestrator-startup-prompts.md).
 
 Standalone operator input freezes recipient, lifecycle, turn, pending
 question/permission, ownership and geometry evidence instead of the general

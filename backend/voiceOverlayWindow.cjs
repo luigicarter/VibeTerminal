@@ -26,7 +26,7 @@ function createVoiceOverlayWindow({ BrowserWindow, screen, canCapture = () => fa
       y: Math.round(area.y + area.height - height - Math.min(20, area.height - height)),
       frame: false, transparent: true, backgroundColor: '#00000000', hasShadow: false,
       alwaysOnTop: false, focusable: false, skipTaskbar: true, show: false, resizable: false, maximizable: false,
-      title: 'vibeTerminal voice audio', webPreferences: {
+      title: 'Lina Terminal voice audio', webPreferences: {
         preload: path.join(__dirname, '..', 'preload', 'voicePreload.cjs'),
         nodeIntegration: false, contextIsolation: true, sandbox: true,
         backgroundThrottling: false, autoplayPolicy: 'no-user-gesture-required', partition: 'voice-overlay',

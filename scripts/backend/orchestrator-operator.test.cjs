@@ -48,7 +48,7 @@ async function fixture(t, kind = 'codex') {
     const lastActions = f.lastResponse?.choices?.[0]?.message?.tool_calls?.map(call => JSON.parse(call.function.arguments)) || [];
     for (const action of lastActions.filter(action => action.kind === 'finish_terminal' && action.outcome === 'completed')) {
       const receipt = result.actions?.find(item => item.kind === 'finish_terminal' && item.stepId === action.stepId);
-      if (result.ok) assert.ok(receipt && result.text.includes(receipt.text), 'The result must preserve the application-owned finish receipt without another model rewrite.');
+      if (result.ok) assert.ok(receipt && (result.text === 'done' || result.text.includes(receipt.text)), 'The result acknowledges completion or preserves delivery issues, with the full finish receipt retained.');
     }
   };
   f.run = async (steps, extra = {}) => {
@@ -79,7 +79,7 @@ test('fresh Codex reads unknown state, sends a composed task, then verifies with
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(f.reads, 2);
   assert.equal(f.bodies.length, 4, 'Read, send, read, finish use four execution fetches instead of five with a redundant final reply.');
-  assert.match(result.text, /Input was sent.*haven't confirmed that the task started/);
+  assert.equal(result.text, 'done');
   assert.deepEqual(f.effects.map(action => action.kind), ['send_prompt']);
   assert.equal(f.effects[0].text, 'Review the latest changes. Report concrete defects.');
   assert.ok(f.effects[0].requestId, 'Delivery must be attributed to the application request.');
@@ -100,9 +100,8 @@ test('two targets require both post-action finishes and combine their receipts w
   assert.equal(f.bodies.length, 8, 'Both read-send-read-finish sequences need eight fetches; a ninth reply rewrite is redundant.');
   assert.equal(f.reads, 4);
   assert.deepEqual(f.effects.map(action => action.target.id), ['pane', 'second']);
-  assert.match(result.text, /Input was sent to Work; I haven't confirmed that the task started/);
-  assert.match(result.text, /Input was sent to Second; I haven't confirmed that the task started/);
-  assert.match(result.text, /result.*pending/i);
+  assert.equal(result.text, 'done');
+  assert.equal(result.actions.filter(action => action.status === 'interaction-complete').length, 2);
 });
 
 for (const kind of ['codex', 'openfusion']) test(`${kind} can finish from a post-action read while runtime telemetry advances`, async t => {

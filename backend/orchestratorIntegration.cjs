@@ -305,17 +305,48 @@ function installOrchestrator(options) {
   const delivery = createOrchestratorDelivery({
     getSession: inputSession,
     write: ({ signal, ...payload }) => hostAction(sendPty, payload, 'action', signal),
+    writeBusyPrompt: promoteQueuedPrompt,
     reserveInput: payload => { const runtime = getRuntime(), reservation = runtime.recordInput?.(payload); return reservation ? () => runtime.releaseInput?.(reservation) : undefined; },
     onUpdate: result => relay.recordDelivery(result),
     onBeforeWrite: metadata => relay.prepareDelivery(metadata)
   });
   const routedInputBindings = new Map();
+  const idleInputActions = new Set();
+  const queuedInputAttempts = require('./orchestratorQueuedInputAttempts.cjs').createQueuedInputAttempts();
   const terminalInput = createTerminalInput({ getSession: inputSession, readSession: target => observations.read(target),
-    onBeforeWrite: metadata => relay.prepareDelivery(metadata),
+    startupTimeoutMs: options.launchTimeoutMs ?? 20000, startupPollMs: options.startupPollMs ?? 100,
+    onBeforeWrite: metadata => relay.prepareDelivery(queuedInputAttempts.correlate(metadata)),
     write: ({ signal, ...payload }) => {
       if (!require("./orchestratorLaunchers.cjs").routingBindingMatches(routedInputBindings.get(payload.actionId), directory.get(payload.id))) return { ok: false, status: "blocked", delivery: "not-dispatched", error: "The routed conversation changed before dispatch." };
+      if (idleInputActions.has(payload.actionId) && !require('./orchestratorTargetAvailability.cjs').isIdleTarget(inputSession(payload.id))) return unavailableIdleTarget();
       return hostAction(sendPty, payload, 'action', signal);
     } });
+  function unavailableIdleTarget() {
+    return { ok: false, status: 'target-unavailable', delivery: 'not-dispatched', error: 'The selected terminal is no longer idle. Select an available terminal again.' };
+  }
+  async function promoteQueuedPrompt(action) {
+    const target = { id: action.target?.id || action.id || action.targetId, generation: action.target?.generation ?? action.generation };
+    const observation = await observations.read(target);
+    const session = inputSession(target.id);
+    const prompt = { ...action, target, submit: true, promptSubmission: true };
+    if (action.signal?.aborted) return { ok: false, status: 'cancelled', delivery: 'not-dispatched' };
+    if (action.targetAvailability === 'idle' || !observation?.ok || observation.id !== target.id || observation.generation !== target.generation ||
+        !require('./orchestratorBusyInput.cjs').isBusyPromptSubmission(prompt, session)) return { ok: false, status: 'blocked', delivery: 'not-dispatched', error: 'The queued prompt no longer has a verified busy input recipient.' };
+    if (observation.manualInputPending || observation.interactionInputPending) return { ok: false, status: 'input-buffer-occupied', delivery: 'not-dispatched', error: 'The terminal contains staged input. The queued prompt was not sent.' };
+    // Both terminal-input and PTY transports retain proven-unsent action IDs.
+    // Use one fresh attempt, retaining the original queued delivery owner for
+    // prewrite/result attribution and delayed native events.
+    const actionId = randomUUID();
+    queuedInputAttempts.remember(actionId, { ...action, target });
+    if (action.routingBinding) routedInputBindings.set(actionId, action.routingBinding);
+    try {
+      const result = await terminalInput.handle({ ...prompt, actionId, observationSequence: observation.sequence, inputRevision: observation.inputRevision,
+        promptObservation: { agentPid: session.agentPid, turnId: session.turnId, turnStartedAt: session.turnStartedAt } });
+      return queuedInputAttempts.correlate(result);
+    } finally {
+      routedInputBindings.delete(actionId); queuedInputAttempts.complete(actionId);
+    }
+  }
   let disposed = false, inventoryTimer = null, publicationTimer = null, voice, activation = 0;
   function inputSession(id) {
     const session = directory.get(id);
@@ -458,10 +489,13 @@ function installOrchestrator(options) {
       check();
       const current = currentTarget(action);
       if (!require("./orchestratorLaunchers.cjs").routingBindingMatches(effectBinding, current)) return { ok: false, status: "blocked", delivery: "not-dispatched", reason: "conversation-changed", error: "The conversation changed before host input." };
+      if (kind === 'send_prompt' && action.targetAvailability === 'idle' && !require('./orchestratorTargetAvailability.cjs').isIdleTarget(inputSession(current.id))) return unavailableIdleTarget();
       if (["answer_question", "permission"].includes(kind) && !relay.getState().requests.some(request => request.id === action.requestId && request.sessionId === current.id && request.generation === current.generation && request.revision === action.revision && request.state === "pending")) return { ok: false, status: "blocked", delivery: "not-dispatched", error: "This interaction is no longer current." };
       return hostAction(send, payload, type, action.signal);
     };
     const createdTarget = async result => {
+      if (result?.ok && result.id) terminalInput.trackStartup({ id: result.id, launchToken: result.launchToken,
+        ...(result.target?.generation && !String(result.target.generation).startsWith('paused:') ? { generation: result.target.generation } : {}) });
       if (action.waitForReady && result?.ok && result.id) return require("./orchestratorLaunchers.cjs").waitForRoutingReady({ result, getSession: id => directory.get(id), refresh: refreshInventory, signal: AbortSignal.any([launchLifetime.signal, ...(action.signal ? [action.signal] : [])]), timeoutMs: options.launchTimeoutMs ?? 20000 });
       const session = result?.ok && result.id ? directory.get(result.id) : null;
       if (result?.ok && result.id && Number.isFinite(result.launchToken) &&
@@ -562,6 +596,7 @@ function installOrchestrator(options) {
     }
     if (kind === "send_prompt") {
       if (!require("./orchestratorLaunchers.cjs").routingBindingMatches(action.routingBinding, s)) return { ok: false, status: "blocked", delivery: "not-dispatched", reason: "conversation-changed", error: "The routed conversation changed before dispatch." };
+      if (action.targetAvailability === 'idle' && !require('./orchestratorTargetAvailability.cjs').isIdleTarget(inputSession(s.id))) return unavailableIdleTarget();
       if (typeof action.text !== "string" || !action.text.trim()) throw new Error("A prompt is required.");
       if (s.kind === "fusion") {
         if (s.status === "running") {
@@ -579,13 +614,14 @@ function installOrchestrator(options) {
         return checkedHost(sendFusion, { id: s.id, generation: s.generation, text: action.text, actionId: action.actionId }, "input");
       }
       if (s.kind === "openfusion") return checkedHost(sendOpenFusion, { id: s.id, generation: s.generation, text: action.text, mode: s.mode || "auto", actionId: action.actionId }, "input");
-      if (action.operator === true) {
+      if (action.operator === true || terminalInput.needsStartupReadiness(s)) {
         const prompt = { ...action, target: { id: s.id, generation: s.generation }, submit: true, promptSubmission: true,
           promptObservation: action.promptObservation ?? { agentPid: s.agentPid, turnId: s.turnId, turnStartedAt: s.turnStartedAt } };
         if (relay.getState().requests.some(request => request.sessionId === s.id && request.generation === s.generation && request.state === 'pending')) return { ok: false, status: 'blocked', delivery: 'not-dispatched', error: 'Answer the pending terminal request before submitting a new prompt.' };
         if (action.routingBinding) routedInputBindings.set(action.actionId, action.routingBinding);
+        if (action.targetAvailability === 'idle') idleInputActions.add(action.actionId);
         let result;
-        try { result = await terminalInput.handle(prompt); } finally { routedInputBindings.delete(action.actionId); }
+        try { result = await terminalInput.handle(prompt); } finally { routedInputBindings.delete(action.actionId); idleInputActions.delete(action.actionId); }
         const latest = directory.get(s.id);
         const pendingInteraction = relay.getState().requests.some(request => request.sessionId === s.id && request.generation === s.generation && request.state === 'pending');
         if (require('./orchestratorBusyInput.cjs').canQueueBusyPrompt(prompt, latest && { ...latest, pendingInteraction }, result)) return delivery.submit({ ...action, target: prompt.target });
@@ -801,7 +837,7 @@ function installOrchestrator(options) {
   function showMenu() {
     if (!Menu) return { ok: false, error: 'Voice menu unavailable.' };
     const items = [
-      { label: voice.getState().listening ? 'Turn off voice' : relay.getSettings().handsFreeEnabled ? 'Turn on voice (Hey Vibe or Space)' : 'Turn on voice (hold Space to talk)', click: () => { void setEnabled(!voice.getState().listening); } },
+      { label: voice.getState().listening ? 'Turn off voice' : relay.getSettings().handsFreeEnabled ? 'Turn on voice (Hey Lina or Space)' : 'Turn on voice (hold Space to talk)', click: () => { void setEnabled(!voice.getState().listening); } },
       { label: 'Hide microphone · keep listening', click: () => hideIndicator() },
       { type: 'separator' },
       { label: 'Voice settings', click: () => { const window = getMainWindow(); if (window?.isMinimized()) window.restore(); window?.show(); void requestUi('open_settings'); } },
@@ -905,6 +941,7 @@ function installOrchestrator(options) {
     // output/process events cannot replace the current pane's PID or activity.
     if (event?.type === "action-result") { const pending = pendingHost.get(event.actionId);
       if (pending && pending.engine === kind && pending.id === event.id && pending.generation === event.generation) pending.finish({ ...event, status: event.status || "acknowledged" }); }
+    if (kind === 'terminal') event = queuedInputAttempts.correlate(event);
     // Closed Fusion owners are retained privately while inventory exposes a
     // paused fallback. Only the matching owner's explicit restart may cross
     // that display-generation boundary; stop/replacement removes the right.
@@ -945,6 +982,7 @@ function installOrchestrator(options) {
     return true;
   }
   function forgetTerminal(id, generation) {
+    queuedInputAttempts.forget(id, generation);
     delivery.forget(id, generation); observations.forget(id, generation); completions.forget(id, generation); directory.forget(id, generation);
     for (const request of relay.getState().requests) if (request.sessionId === id && request.generation === generation && request.state === "pending") {
       const scope = { id: request.id, sessionId: id, generation, revision: request.revision };
@@ -964,6 +1002,7 @@ function installOrchestrator(options) {
     surface.dispose();
     for (const finish of pendingUi.values()) finish({ ok: false, status: "cancelled", error: "Application closed." });
     for (const pending of [...pendingHost.values()]) pending.cancel("Application closed before acknowledgment.");
+    queuedInputAttempts.clear();
     return disposal;
   }
   app.once("before-quit", event => {

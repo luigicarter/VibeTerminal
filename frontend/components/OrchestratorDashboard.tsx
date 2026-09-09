@@ -117,8 +117,8 @@ export function OrchestratorDashboard({ sessions, workHistory = [], activeTarget
   return <section className="orchestrator-dashboard" hidden={!visible} aria-label="Orchestrator dashboard" data-visible={visible} data-motion={liveVisible && documentVisible}>
     <header className="orchestrator-dashboard-header">
       <div><h1>Orchestrator</h1><p>{live.length} live {live.length === 1 ? "session" : "sessions"}</p></div>
-      <div className="orchestrator-dashboard-scope" title="Sessions addressed by Vibe during the current request" aria-live="polite">
-        <Sparkles size={16} aria-hidden="true" /> {targetedCount ? `Vibe handling ${targetedCount} ${targetedCount === 1 ? "session" : "sessions"}` : busy ? "Vibe is thinking" : enabled ? "Vibe is ready" : "Orchestrator is off"}
+      <div className="orchestrator-dashboard-scope" title="Sessions addressed by Lina during the current request" aria-live="polite">
+        <Sparkles size={16} aria-hidden="true" /> {targetedCount ? `Lina handling ${targetedCount} ${targetedCount === 1 ? "session" : "sessions"}` : busy ? "Lina is thinking" : enabled ? "Lina is ready" : "Orchestrator is off"}
       </div>
     </header>
     <nav className="orchestrator-dashboard-tabs" aria-label="Dashboard view">
@@ -141,11 +141,11 @@ export function OrchestratorDashboard({ sessions, workHistory = [], activeTarget
             const recency = dashboardRecency(session, renderedAt, active);
             return <div key={session.id} className="orchestrator-dashboard-cell" data-dashboard-session-id={session.id} data-generation={session.generation} data-status={status} data-targeted={active} data-bubble-scale={scale} data-recent={recency.recent} style={{ "--recency-opacity": recency.opacity } as CSSProperties}>
               <div className="orchestrator-dashboard-drift">
-              <button type="button" className="orchestrator-dashboard-bubble" onClick={() => onOpenSession(session.id)} aria-label={`Open ${identity.replace(/\n/g, ", ")}, ${provider}, ${label}${active ? ", Vibe handling" : ""}${recency.recent ? ", Recently used" : ""}`} title={`${identity}\n${provider} · ${label}${recency.recent ? "\nRecently used" : ""}${session.statusLabel ? `\n${session.statusLabel}` : ""}`} style={{ "--bubble-scale": scale, "--label-width": `${Math.max(116, layout.diameter * scale * 0.73)}px` } as CSSProperties}>
+              <button type="button" className="orchestrator-dashboard-bubble" onClick={() => onOpenSession(session.id)} aria-label={`Open ${identity.replace(/\n/g, ", ")}, ${provider}, ${label}${active ? ", Lina handling" : ""}${recency.recent ? ", Recently used" : ""}`} title={`${identity}\n${provider} · ${label}${recency.recent ? "\nRecently used" : ""}${session.statusLabel ? `\n${session.statusLabel}` : ""}`} style={{ "--bubble-scale": scale, "--label-width": `${Math.max(116, layout.diameter * scale * 0.73)}px` } as CSSProperties}>
                 <span className="orchestrator-dashboard-sphere" aria-hidden="true"><span className="orchestrator-dashboard-sphere-surface"><span className="orchestrator-dashboard-glass" /><span className="orchestrator-dashboard-rim" /><span className="orchestrator-dashboard-halo" /></span></span>
                 <span className="orchestrator-dashboard-label"><strong>{project}</strong><span className="orchestrator-dashboard-provider">{provider}</span><span className="orchestrator-dashboard-status"><i />{label}</span></span>
               </button>
-              <span className="orchestrator-dashboard-target" aria-hidden="true"><Sparkles size={13} />Vibe here</span>
+              <span className="orchestrator-dashboard-target" aria-hidden="true"><Sparkles size={13} />Lina here</span>
               </div>
             </div>;
           })}

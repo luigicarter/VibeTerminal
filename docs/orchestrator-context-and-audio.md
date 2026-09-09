@@ -1,6 +1,24 @@
 # Progressive context and local error audio
 
-Ordinary spoken replies and agent result reports use a separate, natural TL;DR.
+Completed commands reply with `done`. Voice commands play a short, soft local
+ding followed by the selected voice saying `done`, without a summary-generation
+call. This acknowledgment requires confirmed completion of every requested
+orchestrator action: delivering a prompt counts as completing the send command,
+while the terminal's work continues to have its own tracked result. Queued or
+unconfirmed delivery, blocked or failed actions, and questions retain their
+explanations. Queued commands acknowledge once all their actions are confirmed.
+The conversation view omits routine terminal completion and missing-result
+notices, including exact legacy notices from saved history. Actual results for
+the same terminal generation and turn appear once, with their associated request
+numbers. Request-owned records stay intact for context and persistence; report
+categories and terminal-turn identity survive restart. Failures, unconfirmed
+delivery, questions and ordinary answers remain visible. The whole-command
+acknowledgment alone owns the ding and `done`; failures and questions can still
+interrupt.
+Action receipts retain the full execution evidence. The cue shares
+the speech queue, playback identity, mute and interruption controls.
+
+Other spoken replies and agent result reports use a separate, natural TL;DR.
 The model chooses the detail needed to explain the outcome, checks, and blockers;
 there are no fixed sentence, word, or character caps on the spoken summary.
 Full written replies remain in the conversation. The normal voice response
@@ -15,7 +33,7 @@ never prepended to speech, even
 when other requests are paused or awaiting answers. Responses can name a terminal
 or project explicitly when the listener needs that context.
 
-With hands-free voice enabled and its detector ready, **Hey Vibe** interrupts
+With hands-free voice enabled and its detector ready, **Hey Lina** interrupts
 speech preparation or playback and starts capture for the next command. It
 cancels obsolete queued speech, preserves a current question's answer route,
 and does not cancel terminal work. Space remains available for interruption.

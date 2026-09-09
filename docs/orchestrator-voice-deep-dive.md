@@ -4,6 +4,48 @@ Audit date: September 6–7, 2026. Scope: installed 0.1.94, the 0.1.96 implement
 
 ## Assessment
 
+### September 8: Lina rename and local candidate verification
+
+The renamed wake phrase initially failed 11/138 positive and 6/42 negative
+synthetic cases. Keeping 32 keyword paths and explicit non-activating Lisa/Linda
+alternatives repaired those cases. A held-out name sweep still found Nina/Rita
+confusions, so candidates now receive an unrestricted local recognition pass
+using the same bundled acoustic model and checksum-pinned BPE/hotword text.
+
+The verifier retains four seconds of audio and tries at most three views: the
+latest two speech onsets with 200 ms pre-roll, then the complete retained window.
+This avoids the framing error that changed a real Zira greeting from `HELINA`
+to `PALEONA` when 300 ms leading silence was added. It accepts only narrow Lina
+greeting spellings with recent token times, never arbitrary transcript aliases.
+Its 16-path decoder uses name bias 1 for normal audio and 2 when the existing
+peak-0.15 normalization amplifies quiet audio, with gain capped at 8×. A fixed
+strong bias admitted false names at normal volume; a fixed weak bias missed
+the quiet noisy fixture. The measured level-based rule separates the retained
+corpus without adding names to the rejection vocabulary.
+
+The fixed corpus passes 138 positives, 114 negatives, 48 valid wakes following
+rejected names, four spaced phrases and four old-wake replay cases. Native
+token times must fall within real audio, within 800 ms of the candidate and
+after the previous accepted wake; stale text alone cannot authorize a wake.
+Keyword/VAD and completion remain separate local helpers, and verification
+adds no cloud call, new acoustic model, or future-audio wait. Final native,
+matrix and workflow reports are under `output/voice-handsfree`; these results
+do not establish real-microphone accuracy or older-PC performance. Extremely
+quiet, widely spaced greetings may still produce no first-stage candidate.
+
+The final source matrix measured a 192 ms maximum packet and 0.055 maximum
+real-time factor across positive, negative, recovery, replay and spaced cases
+on a Ryzen 9 9950X. Startup measured 2.59 seconds with 162 MB process RSS after
+one idle second. Independent yielding memory-soak evidence in
+`.tmp/r11-wake-soak/soak-1788925258244.json` covered 1,200 clips: about 178 MB RSS
+after initialization, a 276 MB sampled peak and 206 MB at completion, with
+natural garbage-collection drops and no forced collection; its maximum packet
+was 225 ms. Its continuous wake-only sequence, which did not reset after accepted
+wakes, produced quiet-speech misses after loud prior audio;
+the matching accepted-wake reset sequence passed 8/8 positives and 8/8 negatives,
+and isolated normal Rita followed by quiet Lina passed 2/2. That artificial
+continuous sequence is not a claim about the controller's recording lifecycle.
+
 ### Subsequent source improvements: wake sensitivity and conversation continuity
 
 The expanded local keyword matrix reproduced eight quiet-speech misses across
@@ -46,7 +88,7 @@ The most consequential findings at the start of the audit were:
 1. Switching from an automatic recording to a short Space hold and back preserved an old silence timer and sent the recording too soon. Fixed before release.
 2. A short, uncertain utterance remained recording through 40 seconds of silence. It now receives a bounded retry outcome.
 3. Space silently failed with stale initial state or discarded capture errors. Both paths now have regression coverage and corrected state handling.
-4. Saying “Hey Vibe” during transcription, assistant work, or playback was ignored. The current source accepts it during speech preparation/playback when hands-free detection is enabled and ready.
+4. Saying “Hey Lina” during transcription, assistant work, or playback was ignored. The current source accepts it during speech preparation/playback when hands-free detection is enabled and ready.
 5. Even successful requests pass through several sequential cloud operations before sound starts.
 6. “Mute microphone” also disables the text Orchestrator. A microphone failure can take the text assistant down with it.
 
@@ -168,7 +210,7 @@ A short command spoken entirely before wake detection finishes can remain in the
 
 Sources: [recording and inference decisions](../backend/voiceController.cjs#L120), [manual handover](../backend/voiceController.cjs#L246), [audio recording](../backend/voiceAudio.cjs).
 
-## 6. Why repeating “Hey Vibe” sometimes does nothing
+## 6. Why repeating “Hey Lina” sometimes does nothing
 
 Wake detection now remains active during speech preparation and playback when
 hands-free voice is enabled. Transcription and assistant work still pause wake
@@ -184,7 +226,7 @@ detection.
 | Thinking | No | No | Stop request |
 | Preparing speech / speaking | Yes, with hands-free voice enabled and ready; interrupts speech | Yes; interrupts playback | Hold to interrupt and talk |
 
-“Hey Vibe” interrupts a spoken response or its pending TTS request, cancels old
+“Hey Lina” interrupts a spoken response or its pending TTS request, cancels old
 queued speech, and captures the new command. It retains a current question's
 answer identity without cancelling terminal work. A slow transcription or Brain
 request still uses the Stop request control. The microphone requests echo
@@ -214,7 +256,17 @@ The production error at **2026-09-07 00:05:40 UTC** occurred at this interpretat
 
 Version 0.1.96 supplies a clearer argument-shape contract and allows one repair attempt using the original authorized context. The strict validator remains in place. Repeated failure still stops the request. This improves recovery; it does not prove the selected provider will always follow the contract.
 
-Ordinary spoken replies and completion reports use a separate natural TL;DR,
+Confirmed orchestrator command completion now replies with `done`, with a short
+local ding before the selected voice speaks it. The cue uses the same ordered
+PCM playback, mute and interruption controls. Sending a prompt completes the
+send action; the agent's later result remains separately tracked. Queued or
+unconfirmed delivery, failed or blocked actions, and questions retain their
+explanations and never trigger the completion cue. Routine terminal completion
+and missing-result notices are omitted from the conversation view; shared result
+summaries appear once per identified terminal turn. Underlying request-owned
+records remain intact. Failures and questions still speak.
+
+Other spoken replies and agent completion reports use a separate natural TL;DR,
 with its level of detail chosen by the model rather than fixed sentence, word,
 or character caps. Written replies stay intact. The model normally supplies
 `speechText` alongside its written reply in the same response. A missing summary

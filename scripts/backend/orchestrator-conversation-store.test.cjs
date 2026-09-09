@@ -57,6 +57,25 @@ test('confirmed creation cwd survives receipt persistence with ordinary redactio
     cwd: 'C:/projects/private-token', name: 'C:/Windows/System32/powershell.exe', grant: { kind: 'create_session' } }] });
   assert.deepEqual(store.load().receipts, [{ id: 'r', kind: 'create_session', status: 'created', text: 'Action acknowledged.', at: now, cwd: 'C:/projects/[redacted]' }]);
 });
+test('automatic report identities survive restart without merging request-owned history or restoring authority', async t => {
+  const { store, now, file } = fixture(t);
+  const result = { role: 'system', origin: 'task-detail', reportKind: 'result', status: 'completed',
+    targetId: 'pane', generation: 4, turnId: 'turn-private-token', actionId: 'delivery', at: now,
+    text: 'The agent reported its result.' };
+  await store.save({ messages: [
+    { ...result, id: 'result-a', requestId: 'request-a', controller: { aborted: false }, grants: ['send_prompt'] },
+    { ...result, id: 'result-b', requestId: 'request-b' },
+    { ...result, id: 'missing', reportKind: 'result-unavailable', text: 'No details yet.' },
+    { id: 'done', requestId: 'request-a', role: 'assistant', origin: 'voice', text: 'done', completionCue: true, at: now },
+  ] });
+  const messages = store.load().messages;
+  assert.equal(messages.length, 4, 'the view can coalesce without deleting request-owned records');
+  assert.deepEqual(messages.slice(0, 2).map(({ id, requestId, ...message }) => message), [0, 1].map(() => ({ ...result, turnId: 'turn-[redacted]' })));
+  assert.equal(messages[2].reportKind, 'result-unavailable');
+  assert.equal(messages[3].completionCue, true);
+  const raw = fs.readFileSync(file, 'utf8');
+  for (const forbidden of ['private-token', 'controller', 'grants']) assert.equal(raw.includes(forbidden), false);
+});
 test('clear fences an already writing snapshot and later saves remain usable', async t => {
   const { store, now, file } = fixture(t); const original = fs.promises.writeFile;
   let started; const entered = new Promise(resolve => { started = resolve; }); let release; const gate = new Promise(resolve => { release = resolve; });

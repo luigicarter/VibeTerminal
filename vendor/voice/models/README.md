@@ -9,7 +9,12 @@ to verify the bundle or restore missing artifacts. Existing checksum failures ar
   Original model card: https://www.modelscope.cn/models/pkufool/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01
   The release archive is content-pinned; its URL alone is not immutable.
   `keywords.txt` was generated using SentencePiece and the archive's `bpe.model`
-  from uppercase `HEY VIBE`; it is not a trained custom model.
+  from uppercase `HEY LINA`, with competing `HEY LISA` and `HEY LINDA` paths
+  that cannot activate voice. It is not a trained custom model.
+  `bpe.vocab` exports each piece and score from the same pinned `bpe.model`;
+  `wake-hotwords.txt` supplies `HEY LINA` to unrestricted local candidate
+  verification. These text assets are checksum-pinned in the manifest; no
+  additional acoustic model, Python runtime, or cloud request is required.
 * Speech detector: snakers4/silero-vad commit
   `867c2aa692646a1f1de3e94a15c9dd9f614c0acb`, MIT (LICENSE-silero.txt).
 * Completion: pipecat-ai/smart-turn-v3, `smart-turn-v3.2-cpu.onnx`, Hugging Face

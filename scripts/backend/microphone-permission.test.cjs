@@ -23,7 +23,7 @@ test('first foreground allow persists once and survives module recreation', asyn
   const { state, permission, dependencies, consentPath } = fixture(t);
   assert.equal(permission.isGranted(), false);
   assert.equal((await permission.ensure()).ok, true);
-  assert.equal(state.calls[0].message, 'Allow vibeTerminal to use your microphone?');
+  assert.equal(state.calls[0].message, 'Allow Lina Terminal to use your microphone?');
   assert.equal(state.calls[0].cancelId, 1);
   assert.deepEqual(JSON.parse(fs.readFileSync(consentPath)), { version: 1, granted: true });
   assert.equal((await createMicrophonePermission(dependencies).ensure()).ok, true);

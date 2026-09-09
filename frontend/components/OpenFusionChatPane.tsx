@@ -3263,7 +3263,7 @@ export default function OpenFusionChatPane({
                   {authFlow.step.stage === "custom-url" &&
                     "OpenAI-compatible base URL (e.g. https://api.example.com/v1 or http://localhost:1234/v1)."}
                   {authFlow.step.stage === "custom-key" &&
-                    `API key for '${authFlow.name}' — stored by OpenCode's credential store, never by vibeTerminal. Keyless local servers can skip this.`}
+                    `API key for '${authFlow.name}' — stored by OpenCode's credential store, never by Lina Terminal. Keyless local servers can skip this.`}
                   {authFlow.step.stage === "custom-model-id" &&
                     "Model id exactly as the endpoint expects it (e.g. llama-3.3-70b-versatile). You can add more afterwards."}
                   {authFlow.step.stage === "custom-model-name" &&
@@ -3288,7 +3288,7 @@ export default function OpenFusionChatPane({
                       })
                       .join(", ")}`}
                   {authFlow.step.stage === "method" &&
-                    "Choose how to sign in. Credentials are stored by OpenCode's own credential store, never by vibeTerminal."}
+                    "Choose how to sign in. Credentials are stored by OpenCode's own credential store, never by Lina Terminal."}
                   {authFlow.step.stage === "prompts" &&
                     (authFlow.methods[authFlow.step.methodIndex]?.prompts?.[
                       authFlow.step.promptIndex
@@ -3297,7 +3297,7 @@ export default function OpenFusionChatPane({
                   {authFlow.step.stage === "key" &&
                     `${
                       authFlow.methods[authFlow.step.methodIndex]?.label || "API key"
-                    } for '${authFlow.providerId}' — stored by OpenCode's credential store, never by vibeTerminal.`}
+                    } for '${authFlow.providerId}' — stored by OpenCode's credential store, never by Lina Terminal.`}
                   {authFlow.step.stage === "oauth-start" && "Starting the sign-in flow…"}
                   {authFlow.step.stage === "oauth" &&
                     (authFlow.step.instructions ||
@@ -3696,7 +3696,7 @@ export default function OpenFusionChatPane({
                 </span>
                 <span className="fusion-decision-detail">
                   {onlyKeylessProviders
-                    ? "Open Fusion assumes nothing: connect a model provider (OpenRouter, Anthropic, OpenAI, …) — keys live in vibeTerminal's own store, never in your personal OpenCode setup. The free opencode zen models work without a key if you just pick models."
+                    ? "Open Fusion assumes nothing: connect a model provider (OpenRouter, Anthropic, OpenAI, …) — keys live in Lina Terminal's own store, never in your personal OpenCode setup. The free opencode zen models work without a key if you just pick models."
                     : !plannerModel && !executorModel
                       ? "Choose the Brain (planner) and Executor models for this pane."
                       : !plannerModel

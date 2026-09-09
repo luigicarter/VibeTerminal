@@ -1,9 +1,9 @@
 {
   "name": "vibe-terminal",
-  "version": "0.1.103",
+  "version": "0.1.104",
   "private": true,
   "description": "A tiled local workspace for running multiple coding agents side by side.",
-  "author": "vibeTerminal contributors",
+  "author": "Lina Terminal contributors",
   "homepage": "https://github.com/luigicarter/VibeTerminal#readme",
   "repository": {
     "type": "git",
@@ -52,6 +52,7 @@
     "smoke:frontend:app-runtime": "node scripts/frontend/app-runtime-smoke.cjs",
     "smoke:frontend:session-persistence": "node scripts/frontend/session-persistence-smoke.cjs",
     "smoke:electron:terminal-board": "node scripts/qa/terminal-board-smoke.cjs",
+    "smoke:electron:terminal-scroll": "node scripts/qa/terminal-scroll-smoke.cjs",
     "smoke:frontend:workspace": "node scripts/frontend/workspace-smoke.cjs",
     "smoke:frontend:session-launch": "node scripts/frontend/session-launch-smoke.cjs",
     "test:frontend:terminal-launch": "node --test scripts/frontend/terminal-launch-coordinator.test.cjs",
@@ -88,7 +89,7 @@
     "smoke:electron:orchestrator-tasks": "node scripts/qa/orchestrator-task-ui-smoke.cjs",
     "smoke:orchestrator:live-tasks": "node scripts/qa/orchestrator-live-tasks.cjs",
     "smoke:frontend:orchestrator-history": "node scripts/frontend/orchestrator-history-smoke.cjs",
-    "smoke:frontend:orchestrator-tasks": "node scripts/frontend/orchestrator-tasks-smoke.cjs",
+    "smoke:frontend:orchestrator-tasks": "node scripts/frontend/orchestrator-tasks-smoke.cjs && node --test scripts/frontend/orchestrator-messages.test.cjs",
     "smoke:frontend:conversation-live": "node scripts/frontend/conversation-live-smoke.cjs",
     "smoke:electron:history-live": "node scripts/qa/history-live-smoke.cjs",
     "smoke:frontend:workspace-dock": "node scripts/frontend/workspace-dock-smoke.cjs",
@@ -138,8 +139,9 @@
   },
   "build": {
     "appId": "com.vibeterminal.app",
-    "productName": "vibeTerminal",
-    "artifactName": "vibeTerminal-Setup-${version}.${ext}",
+    "productName": "Lina Terminal",
+    "executableName": "LinaTerminal",
+    "artifactName": "LinaTerminal-Setup-${version}.${ext}",
     "directories": {
       "output": "release"
     },
@@ -202,8 +204,8 @@
       "include": "build/installer.nsh",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "vibeTerminal",
-      "uninstallDisplayName": "vibeTerminal"
+      "shortcutName": "Lina Terminal",
+      "uninstallDisplayName": "Lina Terminal"
     },
     "publish": [
       {

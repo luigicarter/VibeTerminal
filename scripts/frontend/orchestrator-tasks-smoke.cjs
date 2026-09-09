@@ -70,5 +70,21 @@ const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve();
   button(tree, 'Cancel').props.onClick(); button(tree, 'Retry').props.onClick(); button(tree, 'Stop all').props.onClick(); await flush();
   assert.deepEqual(calls.slice(-3), [['cancel', { requestId: 'r1' }], ['retry', { requestId: 'r2' }], ['cancel', undefined]]);
   button(tree, 'Clear history').props.onClick(); await flush(); assert.deepEqual(calls.at(-1), ['clear']);
-  console.log('Orchestrator task composer race, reply association, and scoped actions passed');
+  const result = { role: 'system', origin: 'task-detail', reportKind: 'result', status: 'completed', targetId: 's1', generation: 'g', turnId: 'turn', at: 1 };
+  state.messages.push(
+    { ...result, id: 'result-1', requestId: 'r1', text: 'Pane 1: Initial result.' },
+    { ...result, id: 'result-2', requestId: 'r2', at: 2, text: 'Pane 1: Latest result.' },
+    { id: 'old-completion', role: 'system', origin: 'task', text: 'Pane 1: the agent turn completed. The requested outcome is not independently verified.' },
+    { id: 'old-missing', role: 'system', origin: 'task-detail', text: 'Pane 1: The agent turn ended, but no reliable result details are available yet.' },
+    { id: 'uncertain', role: 'system', origin: 'task', reportKind: 'lifecycle', status: 'unverified', text: 'Pane 1: delivery is unconfirmed.' },
+  );
+  const actionCount = calls.length;
+  tree = render();
+  const reports = nodes(tree).filter(node => node.props?.className === 'relay-message system');
+  assert.equal(reports.length, 2, 'shared results merge, routine legacy notices disappear, and genuine uncertainty remains');
+  assert.match(text(reports[0]), /#1, #2.*Latest result/);
+  assert.match(text(reports[1]), /delivery is unconfirmed/);
+  assert.equal(state.messages.length, 9, 'rendering preserves request-owned history');
+  assert.equal(calls.length, actionCount, 'cleaning the conversation cannot dispatch or cancel terminal work');
+  console.log('Orchestrator task composer race, reply association, scoped actions, and compact conversation passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

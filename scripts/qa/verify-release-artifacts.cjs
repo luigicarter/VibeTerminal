@@ -6,7 +6,7 @@ const { loadVoiceModels } = require('../../backend/voiceModels.cjs');
 const root = path.resolve(__dirname, '../..');
 const version = require('../../package.json').version;
 const release = path.join(root, 'release');
-const installerName = `vibeTerminal-Setup-${version}.exe`;
+const installerName = `LinaTerminal-Setup-${version}.exe`;
 const installer = path.join(release, installerName);
 const feed = yaml.load(fs.readFileSync(path.join(release, 'latest.yml'), 'utf8'));
 const bytes = fs.readFileSync(installer), sha512 = crypto.createHash('sha512').update(bytes).digest('base64');

@@ -57,12 +57,21 @@ function buildWorkspaceParameters(flat) {
 }
 const readKinds = ['list_roots', 'list_sessions', 'read_session', 'list_conversations', 'read_conversation', 'search_conversation', 'search_files', 'list_setups', 'read_setup', 'list_preferences', 'list_work'];
 const operatorKinds = ['send_prompt', 'terminal_interact', 'answer_question', 'permission', 'interrupt', 'focus_session', 'finish_terminal'];
+const inspectionKinds = ['terminal_interact', 'focus_session', 'finish_terminal'];
 function scopedWorkspaceTool(tool, grants = []) {
   const allowed = new Set([...readKinds, 'respond', 'ask_user']);
+  const operatorGrants = grants.filter(grant => grant.kind === 'operate_terminal');
+  const inspectionOnly = operatorGrants.length > 0 && operatorGrants.every(grant => grant.inspection === true);
   // An unresolved delegated task permits routing reads only. Application code
   // binds it first; neither arbitrary creation nor terminal input is exposed.
-  for (const grant of grants) for (const kind of grant.kind === 'delegate_task' ? [] : grant.kind === 'operate_terminal' ? operatorKinds : [grant.kind]) allowed.add(kind);
-  const branches = tool.function.parameters.anyOf.filter(branch => allowed.has(branch.properties.kind.enum[0]));
+  for (const grant of grants) for (const kind of grant.kind === 'delegate_task' ? [] : grant.kind === 'operate_terminal' ? grant.inspection === true ? inspectionKinds : operatorKinds : [grant.kind]) allowed.add(kind);
+  const branches = tool.function.parameters.anyOf.filter(branch => allowed.has(branch.properties.kind.enum[0])).map(branch => {
+    if (!inspectionOnly || branch.properties.kind.enum[0] !== 'terminal_interact') return branch;
+    const scoped = structuredClone(branch);
+    delete scoped.properties.editInput;
+    scoped.properties.inputPurpose = { ...scoped.properties.inputPurpose, enum: ['interaction'] };
+    return scoped;
+  });
   // Shared definitions live once at the root. Each branch still closes its own
   // field whitelist, so an input revision cannot sneak into finish_terminal.
   // Avoid $refs and preserve the ordinary object/anyOf provider contract.
@@ -76,6 +85,8 @@ function scopedWorkspaceTool(tool, grants = []) {
     }
   }
   properties.kind = { type: 'string', enum: branches.map(branch => branch.properties.kind.enum[0]) };
+  // These are model-facing limits; direct UI reads may request larger excerpts.
+  if (properties.maxChars) properties.maxChars.maximum = 4000;
   if (properties.observationSequence) properties.observationSequence.description = 'Native operator input: copy exactly observation.sequence from the latest read_session.';
   if (properties.inputRevision) properties.inputRevision.description = 'Native operator input: copy exactly observation.inputRevision from the same read_session.';
   return { ...tool, function: { ...tool.function,
@@ -83,7 +94,9 @@ function scopedWorkspaceTool(tool, grants = []) {
     parameters: { type: 'object', additionalProperties: false, required: ['kind'], properties,
       anyOf: branches.map(branch => ({ additionalProperties: false,
         ...(branch.required.length > 1 && { required: branch.required.filter(name => name !== 'kind') }),
-        properties: Object.fromEntries(Object.keys(branch.properties).map(name => [name, name === 'kind' ? { enum: [...branch.properties.kind.enum] } : {}])) })) }
+        properties: Object.fromEntries(Object.keys(branch.properties).map(name => [name, name === 'kind' ? { enum: [...branch.properties.kind.enum] }
+          : name === 'limit' && branch.properties.kind.enum[0] === 'list_work' ? { maximum: 10 }
+          : name === 'limit' && branch.properties.kind.enum[0] === 'search_conversation' ? { maximum: 8 } : {}])) })) }
   } };
 }
 module.exports = { buildWorkspaceParameters, scopedWorkspaceTool };

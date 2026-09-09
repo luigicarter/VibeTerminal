@@ -160,7 +160,7 @@ async function main() {
       }
       throw Error('The watched turn ended without a useful result summary.');
     } },
-    { name: 'greeting', text: 'Hey Vibe, how are you?', check: result => { assert.ok(result.text.length < 400); assert.doesNotMatch(result.text, /you (?:want|asked)|authorizedCommands|grantId/i); assert.equal(f.actions.length, 0); } },
+    { name: 'greeting', text: 'Hey Lina, how are you?', check: result => { assert.ok(result.text.length < 400); assert.doesNotMatch(result.text, /you (?:want|asked)|authorizedCommands|grantId/i); assert.equal(f.actions.length, 0); } },
     { name: 'history-shortlist', text: 'What recent saved conversations do I have?', check: result => { assert.match(result.text, /Mix 21/i); assert.ok(result.text.length < 1100, 'Voice history is too long'); assert.ok((result.text.match(/Fixture conversation/g) || []).length <= 2, 'Voice history dumped the directory'); } },
     { name: 'exact-history-resume', text: 'Resume conversation "Mix 21 last attempt"', check: () => assert.equal(f.actions.filter(action => action.kind === 'resume_conversation').length, 1) },
     { name: 'commit-review-revision-churn', text: 'Tell Atlas to review the last commit for bugs without editing anything.', check: result => { assert.equal(f.done, true); assert.equal(f.actions.filter(action => ['send_prompt', 'terminal_interact'].includes(action.kind)).length, 1); assert.ok(f.reads.some(read => read.afterActions === f.actions.length), 'Missing post-action verification'); assert.doesNotMatch(result.text, /^You (?:want|asked)/i); } },

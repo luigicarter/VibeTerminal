@@ -74,7 +74,7 @@ async function fixture(t, { separate = false, readOnly = false, explicitOrder, s
     explicitOrder === 'first' ? explicit(first) : first, explicitOrder === 'second' ? explicit(second) : second] });
   f.pending = f.relay.send({ text: 'Work on checkout and search separately.', origin: 'text' });
   f.sent = () => f.effects.filter(action => action.kind === 'send_prompt' || action.kind === 'terminal_interact' && action.inputPurpose === 'task');
-  f.parked = () => f.relay.getState().tasks.find(task => task.waitingReason?.includes('before submitting the next task'));
+  f.parked = () => f.relay.getState().tasks.find(task => task.status === 'queued' && task.waitingReason?.includes(' in workspace '));
   f.finishFirst = async () => { Object.assign(f.sessions.find(session => session.id === f.sent()[0].target.id), { turnState: 'completed', turnEndedAt: Date.now() }); await f.relay.refresh(); };
   return f;
 }

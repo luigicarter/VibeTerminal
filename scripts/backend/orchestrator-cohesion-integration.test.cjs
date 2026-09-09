@@ -28,7 +28,7 @@ test('automatic native task crosses real creation, binding, observation and oper
       snapshots.push({ ...target, provider: 'codex', cwd: root, processState: 'running', launchState: 'ready',
         agentProcessState: 'running', observation: 'observed', turnState: 'idle', revision: 1, cols: 80, rows: 24 });
       for (const event of [{ type: 'created', pid: 41, cols: 80, rows: 24, inputRevision: 0 },
-        { type: 'agent-process', phase: 'start', pid: 42 }, { type: 'data', sequence: 1, data: '> ' }]) {
+        { type: 'agent-process', phase: 'start', pid: 42 }, { type: 'data', sequence: 1, data: 'OpenAI Codex\r\nmodel: fixture\r\n\r\n› \x1b[?25h' }]) {
         integration.incoming('terminal', { id: target.id, generation: target.generation, ...event });
       }
       // Match the renderer receipt: no processState, native generation or target.

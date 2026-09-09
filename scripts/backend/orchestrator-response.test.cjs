@@ -63,7 +63,7 @@ test('interrupt acknowledgement never claims a verified stop', () => {
   assert.equal(formatDirectOutcomes([{ kind: 'navigate', ok: true, grantId: 'g' }], [], [{ id: 'g', args: { view: 'history' } }]), 'Opened History.');
 });
 
-test('direct focus uses the named outcome without an executor completion', async t => {
+test('direct focus acknowledges done without an executor completion', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-response-'));
   const effects = [];
   const app = createOrchestrator({ userDataPath: dir, secureStorage: { isEncryptionAvailable: () => false },
@@ -80,6 +80,6 @@ test('direct focus uses the named outcome without an executor completion', async
   assert.equal((await app.setEnabled(true)).ok, true);
   const result = await app.send({ text: 'Focus Codex', origin: 'text' });
   assert.equal(result.ok, true, JSON.stringify(result));
-  assert.equal(result.text, 'Switched to Codex.');
+  assert.equal(result.text, 'done');
   assert.deepEqual(effects.map(item => item.kind), ['focus_session']);
 });

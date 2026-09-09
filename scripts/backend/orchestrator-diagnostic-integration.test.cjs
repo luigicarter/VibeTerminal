@@ -10,7 +10,9 @@ function checkTiming(entry) {
   const base = ['time', 'event', 'stage', 'requestId', 'origin', 'model', 'elapsedMs'];
   const stages = {
     routing_started: [], routing_acquired: [], routing: ['status'], execution: ['status'], executor_reply: ['status'], final_text: ['status'],
-    model_started: ['modelCallId', 'category'], model_complete: ['modelCallId', 'category', 'status', 'totalMs', 'httpStatus'],
+    model_started: ['modelCallId', 'category', 'attempt', 'deadlineMs', 'toolChoice'],
+    model_headers: ['modelCallId', 'category', 'attempt', 'deadlineMs', 'toolChoice', 'headersMs', 'httpStatus'],
+    model_complete: ['modelCallId', 'category', 'status', 'totalMs', 'httpStatus', 'attempt', 'deadlineMs', 'toolChoice', 'headersMs', 'bodyMs', 'provider', 'generationId', 'promptTokens', 'completionTokens', 'reasoningTokens', 'reason', 'requestPhase'],
     tool_started: ['toolCallId', 'actionKind', 'targetId'], tool_complete: ['toolCallId', 'actionId', 'actionKind', 'targetId', 'generation', 'status', 'totalMs'],
     first_effect: ['actionKind', 'targetId', 'generation', 'status']
   };

@@ -71,11 +71,11 @@ for (const lateStatus of ['rejected', 'unknown']) test(`late queued delivery ${l
   assert.equal(f.app.getState().receipts.filter(receipt => receipt.status === lateStatus).length, 1);
 });
 
-test('clean completed operation preserves observed result without a final model round', async t => {
+test('clean completed operation acknowledges done without a final model round', async t => {
   const f = await fixture(t);
   const result = await f.app.send({ text: 'Use Fixture to review changes.', origin: 'text' });
   assert.equal(result.ok, true, JSON.stringify(result));
-  assert.match(result.text, /Input was sent.*haven't confirmed that the task started/);
+  assert.equal(result.text, 'done');
   assert.equal(f.executor.length, 4);
   assert.deepEqual(f.effects.map(effect => effect.kind), ['send_prompt']);
 });
@@ -84,7 +84,7 @@ test('same-batch respond listen cannot bypass submitted-task status synthesis or
   const f = await fixture(t, { explicitListen: true });
   const result = await f.app.send({ text: 'Use Fixture to review changes.', origin: 'text' });
   assert.equal(result.ok, true, JSON.stringify(result));
-  assert.match(result.text, /haven't confirmed that the task started/);
+  assert.equal(result.text, 'done');
   assert.equal(result.responseTurn, 'complete');
   assert.equal(f.app.getState().tasks.find(task => task.requestId === result.requestId).status, 'waiting-results');
   assert.equal(f.executor.length, 4);

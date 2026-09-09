@@ -102,7 +102,7 @@ test('sustained idle overflow discards stale wake results and resumes at newest 
   for (let i = 1; i <= 1010; i++) feed(i * 320);
   assert.equal(h.children[0].sent.length, 2); assert.equal(h.errors.length, 0);
   assert.equal(h.diagnostics.filter(d => d.reason === 'wake-backlog-discarded').length, 10);
-  h.children[0].emit('message', { type: 'frame', id: old.id, result: { wake: { keyword: 'HEY_VIBE' }, speech: true } });
+  h.children[0].emit('message', { type: 'frame', id: old.id, result: { wake: { keyword: 'HEY_LINA' }, speech: true } });
   assert.equal(h.frames.length, 0, 'discarded in-flight wake cannot activate a recording');
   let frame = h.children[0].sent.at(-1); assert.equal(frame.frame.sampleStart, 320320);
   h.children[0].emit('message', { type: 'frame', id: old.id, result: { wake: {} } });
@@ -188,11 +188,11 @@ test('keyword stream retains silence and resets only after detection or disconti
     createStream() { streams++; return { remaining: 0, acceptWaveform() { accepts++; this.remaining = 1; } }; }
     isReady(s) { return s.remaining > 0; }
     decode(s) { s.remaining--; }
-    getResult() { reads++; return detect ? { keyword: 'HEY VIBE', start_time: 2, timestamps: [0.1, 0.3] } : {}; }
+    getResult() { reads++; return detect ? { keyword: 'HEY_LINA', start_time: 2, timestamps: [0.1, 0.3] } : {}; }
     reset() { resets++; }
   }
   class Vad { reset() {} acceptWaveform() {} isDetected() { return false; } isEmpty() { return true; } }
-  const detector = createKeywordDetector({ paths: { keyword: {}, vad: {} }, sherpa: { KeywordSpotter, Vad } });
+  const detector = createKeywordDetector({ paths: { keyword: {}, vad: {} }, sherpa: { KeywordSpotter, Vad }, verifierFactory: () => ({ accept() {}, onset() {}, verify() { return true; }, reset() {}, dispose() {} }) });
   const frame = { samples: new Float32Array(320), sampleStart: 100, captureToken: 'a', streamId: 1, mode: 'wake' };
   detector.process(frame); detector.process({ ...frame, sampleStart: 420 });
   assert.equal(streams, 1); assert.equal(resets, 0); assert.equal(reads, 2); assert.equal(accepts, 2);
@@ -211,7 +211,7 @@ test('companion refresh requires a new speech onset after quiet and cooldown', (
     isReady() { return false; }
   }
   class Vad { reset() {} acceptWaveform() {} isDetected() { return speaking; } isEmpty() { return true; } }
-  const detector = createKeywordDetector({ paths: { keyword: {}, vad: {} }, sherpa: { KeywordSpotter, Vad } });
+  const detector = createKeywordDetector({ paths: { keyword: {}, vad: {} }, sherpa: { KeywordSpotter, Vad }, verifierFactory: () => ({ accept() {}, onset() {}, verify() { return true; }, reset() {}, dispose() {} }) });
   function feed(start, end, speech) { speaking = speech; for (let p = start; p < end; p += 320) detector.process({ samples: new Float32Array(320), sampleStart: p, mode: 'wake' }); }
   feed(0, 1600, false); assert.equal(count, 1);
   feed(1600, 1920, true); assert.equal(count, 2); assert.equal(accepted[1], 5120, 'first onset replays a full 300ms including left padding');

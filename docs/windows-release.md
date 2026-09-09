@@ -1,28 +1,37 @@
 # Windows Release
 
-vibeTerminal ships to Windows users as an Electron Builder NSIS installer hosted on GitHub Releases.
+Lina Terminal ships to Windows users as an Electron Builder NSIS installer hosted on GitHub Releases.
 
 ## Current Public Release
 
-The current Windows release is `v0.1.103`:
+The current Windows release is `v0.1.104`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.103`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.103/vibeTerminal-Setup-0.1.103.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.104`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.104/LinaTerminal-Setup-0.1.104.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
+
+Starting with v0.1.104, releases are branded **Lina Terminal**, produce
+`LinaTerminal-Setup-<version>.exe`, and use **Hey Lina**. Older release assets
+retain their original vibeTerminal names.
 
 ## User Install Path
 
 The installer is per-user by default and does not require admin elevation.
 
-- App install: `%LOCALAPPDATA%\Programs\vibeTerminal`
-- App executable: `%LOCALAPPDATA%\Programs\vibeTerminal\vibeTerminal.exe`
-- Electron user data: `%APPDATA%\vibeTerminal`
-- Agent shim runtime data: `%APPDATA%\vibeTerminal\agent-shims`
-- Open Fusion generated OpenCode config, commands, TUI plugin, and pane model state: `%APPDATA%\vibeTerminal\openfusion`
+- New app install: `%LOCALAPPDATA%\Programs\LinaTerminal` (updates can retain the previous install directory)
+- App executable: `LinaTerminal.exe` in the install directory
+- Electron user data: `%APPDATA%\vibe-terminal`
+- Agent shim runtime data: `%APPDATA%\vibe-terminal\agent-shims`
+- Open Fusion generated OpenCode config, commands, TUI plugin, and pane model state: `%APPDATA%\vibe-terminal\openfusion`
 
-The uninstall entry appears in Windows Settings under installed apps. Uninstall removes the app files and shortcuts, but user data is intentionally left in `%APPDATA%\vibeTerminal`.
+The package name (`vibe-terminal`), app ID (`com.vibeterminal.app`), storage keys,
+and GitHub update repository retain their existing identities for compatibility.
+The main process preserves Electron's existing user-data path before setting its
+display name. The Start Menu/desktop shortcuts and uninstall entry show **Lina Terminal**.
+
+The uninstall entry appears in Windows Settings under installed apps. Uninstall removes the app files and shortcuts, but user data is intentionally left in `%APPDATA%\vibe-terminal`.
 
 ## Installed Contents
 
@@ -57,10 +66,10 @@ The compiled `dist/` renderer is still included because it is the UI Electron di
 
 ## Local Build
 
-Version `0.1.103` adds automatic task-to-conversation routing, Grok Build support,
-and more reliable provider status and session restoration. It also repairs chat
-startup/restart races, dependency and cancellation handling, native history
-discovery, and voice interruption and playback ownership. Readiness remains
+Version `0.1.104` introduces the Lina Terminal name, improves queued prompt
+delivery and startup readiness, and adds provider-aware native terminal navigation
+and model options. It also repairs wheel scrolling and rejects incomplete model
+responses before dispatching commands. Readiness remains
 separate from verified task results. See the
 [terminal-control contract](orchestrator-controls.md), [voice turns](orchestrator-tasks.md),
 and [work history](orchestrator-dashboard.md) for behavior and verification.
@@ -101,8 +110,8 @@ npm run dist:win -- --publish never
 
 The installer artifacts are written to `release/`:
 
-- `release/vibeTerminal-Setup-<version>.exe`
-- `release/vibeTerminal-Setup-<version>.exe.blockmap`
+- `release/LinaTerminal-Setup-<version>.exe`
+- `release/LinaTerminal-Setup-<version>.exe.blockmap`
 - `release/latest.yml`
 - `release/win-unpacked/`
 
@@ -112,9 +121,9 @@ The installer artifacts are written to `release/`:
 
 After `npm run dist:win -- --publish never`, verify:
 
-1. `release/vibeTerminal-Setup-<version>.exe` exists.
+1. `release/LinaTerminal-Setup-<version>.exe` exists.
 2. `release/latest.yml` points at the installer for the same version.
-3. `release/win-unpacked/vibeTerminal.exe` launches.
+3. `release/win-unpacked/LinaTerminal.exe` launches.
 4. The complete embedded Codex payload exists under
    `release/win-unpacked/resources/codex-bin/win32-x64/`: `codex.exe`,
    `codex-code-mode-host.exe`, `codex-package.json`, `codex-path/rg.exe`, and

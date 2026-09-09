@@ -37,6 +37,21 @@ test('adapter string errors retain the exact reason and voice reply identity wit
   const records = f.read(); assert.equal(records[0].error.message, 'Agent host is unavailable.'); assert.equal(records[0].replyId, 'voice-reply-1'); assert.equal(records[0].generation, 'paused:2');
   assert.equal(records[1].error.message, 'Failed with [REDACTED]'); assert.equal(records[1].replyId, '[REDACTED]');
 });
+
+test('model transport diagnostics retain bounded timing and identity without response content', async t => {
+  const f = fixture(t, { getSecrets: () => ['configured-secret'] }), logger = f.open();
+  const metrics = { headersMs: 23, bodyMs: 104, deadlineMs: 45000, attempt: 1, promptTokens: 900, completionTokens: 80, reasoningTokens: 12 };
+  logger.record({ event: 'request_stage', stage: 'model_complete', ...metrics, provider: 'provider configured-secret', generationId: 'gen-1', toolChoice: 'auto', requestPhase: 'body', body: 'private body', reasoning: 'private reasoning', arguments: 'private arguments', cost: 42 });
+  logger.record({ provider: 'p'.repeat(300), generationId: 'Bearer private-token', toolChoice: { raw: 'private choice' }, requestPhase: 'private phase', headersMs: Infinity, bodyMs: -1, deadlineMs: '45000', attempt: NaN, promptTokens: 1e12, completionTokens: -1, reasoningTokens: null });
+  logger.record({ requestPhase: 'headers', toolChoice: 'named' });
+  await logger.flush(); const [valid, invalid, headers] = f.read();
+  for (const [field, value] of Object.entries(metrics)) assert.equal(valid[field], value, field);
+  assert.equal(valid.provider, 'provider [REDACTED]'); assert.equal(valid.generationId, 'gen-1'); assert.equal(valid.toolChoice, 'auto'); assert.equal(valid.requestPhase, 'body');
+  assert.equal(invalid.provider.length, 256); assert.equal(invalid.generationId, 'Bearer [REDACTED]'); assert.equal(invalid.promptTokens, 1e9);
+  for (const field of ['toolChoice', 'requestPhase', 'headersMs', 'bodyMs', 'deadlineMs', 'attempt', 'completionTokens', 'reasoningTokens']) assert.equal(invalid[field], undefined, field);
+  assert.equal(headers.requestPhase, 'headers'); assert.equal(headers.toolChoice, 'named');
+  assert.doesNotMatch(fs.readFileSync(f.filename, 'utf8'), /configured-secret|private|arguments|"cost"/);
+});
 test('configured secrets and common credential forms are redacted in every string field', async t => {
   let secret = 'configured-secret'; const f = fixture(t, { getSecrets: () => [secret] }); const logger = f.open();
   logger.record({ event: secret, model: 'Bearer another-secret', reason: 'api_key="key-value"', targetId: 'sk-or-v1-1234567890abcdef', error: { message: secret, stack: 'Authorization: Bearer token-value\naccess_token=access-value', code: secret } });

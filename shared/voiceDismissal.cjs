@@ -3,7 +3,7 @@
 function isVoiceDismissal(text) {
   const normalized = String(text || '').toLowerCase().replace(/[’‘]/g, "'")
     .replace(/[.,!?;:]/g, ' ').replace(/\s+/g, ' ').trim()
-    .replace(/^(?:hey\s+)?vibe\s+/, '').replace(/\s+(?:hey\s+)?vibe$/, '')
+    .replace(/^(?:hey\s+)?lina\s+/, '').replace(/\s+(?:hey\s+)?lina$/, '')
     .replace(/^please\s+/, '').replace(/\s+please$/, '');
   return /^(?:never\s?mind|that's all|that is all|stop listening|dismiss|go back to sleep)$/.test(normalized);
 }

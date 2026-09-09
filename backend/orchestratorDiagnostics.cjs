@@ -23,17 +23,18 @@ function createDiagnostics({ userDataPath, getSecrets = () => [], now = Date.now
       return text.slice(0, limit);
     };
     const result = { time: new Date(now()).toISOString() };
-    for (const key of ['event', 'stage', 'requestId', 'workItemId', 'decision', 'modelCallId', 'toolCallId', 'receiptId', 'replyId', 'actionId', 'origin', 'model', 'actionKind', 'targetId', 'generation', 'status', 'category', 'reason', 'endpoint']) {
+    for (const key of ['event', 'stage', 'requestId', 'workItemId', 'decision', 'modelCallId', 'toolCallId', 'receiptId', 'replyId', 'actionId', 'origin', 'model', 'actionKind', 'targetId', 'generation', 'status', 'category', 'reason', 'endpoint', 'provider', 'generationId', 'toolChoice']) {
       const value = redact(input?.[key], 256); if (value !== undefined) result[key] = value;
     }
     if (Number.isFinite(input?.generation)) result.generation = input.generation;
+    if (['headers', 'body'].includes(input?.requestPhase)) result.requestPhase = input.requestPhase;
     if (Array.isArray(input?.nativeKeys) && input.nativeKeys.length <= 16 && input.nativeKeys.every(key => typeof key === 'string' && namedControls.has(key))) result.nativeKeys = [...input.nativeKeys];
     if (['preserve', 'interrupt', 'exit'].includes(input?.lifecycleMode)) result.lifecycleMode = input.lifecycleMode;
     if (typeof input?.editInput === 'boolean') result.editInput = input.editInput;
     for (const key of ['processState', 'agentProcessState']) if (['starting', 'running', 'exited', 'failed', 'unknown'].includes(input?.[key])) result[key] = input[key];
-    // Keep voice timing evidence without recording microphone content. Unknown
+    // Keep voice and model timing evidence without recording their content. Unknown
     // fields still stay out of the log, and every numeric metric is bounded.
-    for (const key of ['processingMs', 'queuedSamples', 'droppedSamples', 'totalMs', 'preprocessingMs', 'inferenceMs', 'elapsedMs', 'inputBytes', 'silenceMs', 'voicedMs', 'recordingId', 'captureToken']) {
+    for (const key of ['processingMs', 'queuedSamples', 'droppedSamples', 'totalMs', 'preprocessingMs', 'inferenceMs', 'elapsedMs', 'inputBytes', 'silenceMs', 'voicedMs', 'recordingId', 'captureToken', 'headersMs', 'bodyMs', 'deadlineMs', 'attempt', 'promptTokens', 'completionTokens', 'reasoningTokens']) {
       if (Number.isFinite(input?.[key]) && input[key] >= 0) result[key] = Math.min(input[key], 1e9);
     }
     if (Number.isFinite(input?.probability) && input.probability >= 0 && input.probability <= 1) result.probability = input.probability;

@@ -24,6 +24,21 @@ export interface RelaySession extends Partial<Pick<AgentSession, typeof HISTORY_
     lastUsedAt?: number;
 }
 export interface RelayActiveTarget { id: string; generation: string; operations?: string[] }
+export interface RelayMessage {
+    id: string;
+    role: string;
+    text: string;
+    at: number;
+    origin?: string;
+    requestId?: string;
+    reportKind?: "lifecycle" | "result" | "progress" | "result-unavailable";
+    status?: string;
+    targetId?: string;
+    generation?: string | number;
+    turnId?: string;
+    actionId?: string;
+    completionCue?: boolean;
+}
 export interface RelayResult {
     ok: boolean;
     error?: string;
@@ -82,14 +97,7 @@ export interface RelayState {
         handsFreeEnabled?: boolean;
     };
     sessions: RelaySession[];
-    messages: {
-        id: string;
-        role: string;
-        text: string;
-        at: number;
-        origin?: string;
-        requestId?: string;
-    }[];
+    messages: RelayMessage[];
     receipts: {
         id: string;
         requestId?: string;

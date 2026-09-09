@@ -4,7 +4,8 @@ const { randomUUID } = require('crypto');
 const MAX_BYTES = 10 * 1024 * 1024;
 const MAX_AGE = 30 * 24 * 60 * 60 * 1000;
 const fields = {
-  messages: ['id', 'role', 'text', 'at', 'requestId', 'taskId', 'replyToId', 'questionId', 'origin'],
+  messages: ['id', 'role', 'text', 'at', 'requestId', 'taskId', 'replyToId', 'questionId', 'origin',
+    'reportKind', 'status', 'targetId', 'generation', 'turnId', 'actionId', 'completionCue'],
   receipts: ['id', 'kind', 'targetId', 'generation', 'cwd', 'status', 'text', 'at', 'requestId', 'taskId'],
   tasks: ['id', 'requestId', 'text', 'instruction', 'originalInstruction', 'status', 'phase', 'at', 'createdAt', 'updatedAt', 'targetId', 'generation', 'projectId', 'cwd', 'terminalId', 'question', 'questionId', 'result', 'error', 'replyToId', 'replyToRequestId', 'sequence', 'label', 'summary', 'outcome', 'origin'],
 };

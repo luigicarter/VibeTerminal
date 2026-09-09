@@ -4,11 +4,17 @@
 
 Vibe's response contract calls for a warm, direct voice, brief useful replies, and
 no parroting of the request. Voice history listings offer at most three relevant
-choices unless the user asks for more. Direct actions use named, factual outcomes
-instead of raw labels such as “Action written”; drafts, queues, accepted input,
-requested interruption and observed completion remain distinct.
+choices unless the user asks for more. Once every requested orchestrator action
+is confirmed complete, the reply is `done`; voice commands add a short ding
+before speaking that word. Queued or unconfirmed delivery, blocked or failed
+actions, questions, task-status requests, and terminal inspections keep their factual explanations.
+Sending a prompt completes the send command; the agent's work remains tracked
+separately. The conversation omits routine completion and missing-result notices
+and shows one result per identified terminal turn, retaining associated request
+numbers. Failures and questions remain visible and audible.
+Full action receipts preserve execution and verification details.
 
-Terminal creation acknowledgments use a human terminal/provider label and the
+Terminal creation details use a human terminal/provider label and the
 confirmed project folder's name, such as “Opened Codex in vibeTerminal.” Shell
 executable titles and full drive paths are excluded from creation replies in both
 direct and model-driven execution. The full confirmed directory remains available
@@ -217,6 +223,44 @@ Saved-history resumption retains its separate exact-identity contract. External
 applications, clipboard access and global keyboard injection are outside these
 terminal controls.
 
+### Inspecting native state and usage
+
+Requests such as “How much Codex usage do I have left?” or “Check Claude's usage
+limits” use `responseKind: terminal-inspection`. The interpreter grants scoped
+`operate_terminal` navigation on the identified native terminal when information
+must be revealed through its controls. Questions about existing output, history,
+or a tracked task's progress still use passive reads. Inspection may also use
+reads alone when the information is already visible or the pane is structured.
+
+Application-owned `terminalNavigationGuide` hints accompany fresh `read_session`
+results. Model directories omit repeated guides to preserve context; full session
+summaries can still include them. Codex starts with `/status` for configuration, token
+usage and available rate-limit windows. Its `/usage` menu can include browser and
+usage-reset actions, so it is not the default inspection path. Claude Code uses
+`/usage` for available plan limits/cost, `/status` for session configuration, and
+`/context` for context usage. These are version-dependent hints: the current
+screen and help determine available commands and menu navigation. Claude's
+[official command reference](https://code.claude.com/docs/en/commands) documents
+the commands; Codex behavior is grounded in the vendored CLI's slash dispatch and
+status-command tests. Explicit guides also cover Cursor, Gemini, OpenCode, Kimi,
+custom Kimi, Qwen and Grok Build, with their own help, status, usage and menu
+controls. See the [provider navigation reference](orchestrator-terminal-navigation.md)
+for commands, data meanings and source evidence. Plain shells and Fusion/OpenFusion
+do not inherit another CLI's slash commands.
+
+Inspection grants preserve the agent and existing input. Local validation excludes
+task submission, permission answers, interruption, editing existing input, and
+non-navigation effects; the model must restrict native commands and menu choices
+to the informational objective. A usage request does not authorize changing
+settings, signing in, buying credits or spending a reset. Busy composers, drafts,
+stale observations and uncertain writes retain the normal input guards. Read the
+result after navigation and report displayed values, distinguishing used from
+remaining, plan limits from context fullness, and each window/reset time. Missing
+data or a blocked terminal requires a concrete explanation before an external
+account-page fallback. The factual result survives completion formatting and
+voice output instead of becoming `done`; blocked continuations retain inspection
+scope.
+
 ## Files and verification
 
 - `backend/orchestratorIntent.cjs`: immutable objectives, delegation, frozen targets
@@ -227,12 +271,23 @@ terminal controls.
   `shared/terminalControls.cjs`: native input, modes, ownership and acknowledgments.
 - `backend/orchestratorIntegration.cjs`, `backend/terminalObservation.cjs`:
   structured/native adapters and current screen/input evidence.
+- `backend/orchestratorTerminalGuide.cjs`: provider-specific inspection hints and
+  the native observation/navigation/reporting policy.
 
 `npm run test:orchestrator` covers semantic compiler/executor fixtures, grants,
 provider bridges, native controls, task dependencies, history, diagnostics and
 voice lifecycle. Scripted responses verify protocol behavior rather than model
 judgment. The configured Brain passed four of four live disposable-adapter cases;
 those checks sent no actions to the user's terminals.
+
+The terminal-inspection regression suites cover Codex, Claude/custom Claude,
+native tabs and Escape, factual text/voice responses, unavailable quota, passive
+reads, stale observations, forbidden task input, and continuation scope.
+`node scripts/qa/orchestrator-terminal-inspection-live.cjs` checks the configured
+Brain and default interpreter with disposable synthetic terminals and a $0.25
+per-run spending ceiling. `--self-test` checks only the fixture, without network
+or credentials. These checks verify command selection and orchestration, not the
+installed vendors' physical menu rendering.
 
 `node scripts/qa/orchestrator-command-smoke.cjs --hidden` exercises isolated
 Electron/preload/PTY paths without a visible test window. Native helper fixtures

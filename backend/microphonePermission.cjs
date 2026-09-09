@@ -6,7 +6,7 @@ function createMicrophonePermission({ userDataPath, getMainWindow, dialog, syste
   let pending = null;
   const failure = (status, error) => ({ ok: false, status, error });
   const aborted = () => failure('cancelled', 'Microphone permission request cancelled.');
-  const required = () => failure('permission-required', 'Allow microphone access from the vibeTerminal window first.');
+  const required = () => failure('permission-required', 'Allow microphone access from the Lina Terminal window first.');
 
   function isGranted() {
     try {
@@ -46,8 +46,8 @@ function createMicrophonePermission({ userDataPath, getMainWindow, dialog, syste
       if (window) {
         const windows = platform === 'win32';
         const result = await dialog.showMessageBox(window, {
-          type: 'warning', title: 'vibeTerminal', message: 'Microphone access is blocked by your operating system.',
-          detail: windows ? 'Enable microphone access and allow desktop apps to access your microphone in Windows settings, then try again.' : 'Enable microphone access for vibeTerminal in your system privacy settings, then try again.',
+          type: 'warning', title: 'Lina Terminal', message: 'Microphone access is blocked by your operating system.',
+          detail: windows ? 'Enable microphone access and allow desktop apps to access your microphone in Windows settings, then try again.' : 'Enable microphone access for Lina Terminal in your system privacy settings, then try again.',
           buttons: windows ? ['Open Windows microphone settings', 'Cancel'] : ['OK'],
           defaultId: windows ? 1 : 0, cancelId: windows ? 1 : 0, signal,
         });
@@ -63,8 +63,8 @@ function createMicrophonePermission({ userDataPath, getMainWindow, dialog, syste
     const window = interactive && foregroundWindow();
     if (!window) return required();
     const result = await dialog.showMessageBox(window, {
-      type: 'question', title: 'vibeTerminal', message: 'Allow vibeTerminal to use your microphone?',
-      detail: 'While voice is enabled, vibeTerminal keeps your microphone open, including in the background, so you can hold Space to talk or say Hey Vibe when hands-free is enabled. What you record is sent to OpenRouter for transcription. vibeTerminal does not save recordings.\n\nThis gives vibeTerminal your consent; your operating system also controls microphone access.',
+      type: 'question', title: 'Lina Terminal', message: 'Allow Lina Terminal to use your microphone?',
+      detail: 'While voice is enabled, Lina Terminal keeps your microphone open, including in the background, so you can hold Space to talk or say Hey Lina when hands-free is enabled. What you record is sent to OpenRouter for transcription. Lina Terminal does not save recordings.\n\nThis gives Lina Terminal your consent; your operating system also controls microphone access.',
       buttons: ['Allow microphone', 'Not now'], defaultId: 1, cancelId: 1, signal,
     });
     if (signal?.aborted) return aborted();

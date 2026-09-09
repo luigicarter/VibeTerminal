@@ -59,6 +59,140 @@ test('unsupported busy composer queues the same prompt and later dispatches when
   assert.equal(f.sent[0].payload.recipientEvidence.state, 'idle');
 });
 
+test('an idle-only prompt observed while idle refuses later busy dispatch without writing or queueing', async t => {
+  const f = await fixture(t);
+  Object.assign(f.snapshot, { turnState: 'completed', childActivity: false });
+  const observed = await f.invoke('dispatch', { kind: 'read_session', target: { id: 'p', generation: 'g' } });
+  assert.equal(observed.ok, true);
+  Object.assign(f.snapshot, { turnState: 'running', childActivity: true });
+  const result = await f.invoke('dispatch', { kind: 'send_prompt', target: { id: 'p', generation: 'g' }, text: 'Only use an idle terminal.',
+    targetAvailability: 'idle', operator: true, requestId: 'idle-request', observationSequence: observed.sequence, inputRevision: observed.inputRevision });
+  assert.equal(result.ok, false); assert.equal(result.delivery, 'not-dispatched');
+  assert.notEqual(result.status, 'queued'); assert.equal(f.sent.length, 0);
+  Object.assign(f.snapshot, { turnState: 'completed', childActivity: false });
+  await f.integration.refreshInventory(); await tick(); await tick();
+  assert.equal(f.sent.length, 0, 'Later readiness cannot revive the refused send');
+});
+
+test('idle-only availability is rechecked inside the adapter after core admission', async t => {
+  const f = await fixture(t);
+  Object.assign(f.snapshot, { turnState: 'completed', childActivity: false });
+  const get = f.integration.directory.get;
+  let changed = false;
+  f.integration.directory.get = id => {
+    const session = get(id);
+    if (!changed && id === 'p') {
+      changed = true;
+      // Return the admitted idle snapshot, then publish a new busy snapshot.
+      Object.assign(f.snapshot, { turnState: 'running', childActivity: true });
+    }
+    return session;
+  };
+  const result = await f.invoke('dispatch', { kind: 'send_prompt', target: { id: 'p', generation: 'g' }, text: 'An idle terminal only.',
+    targetAvailability: 'idle', operator: true, requestId: 'idle-request', observationSequence: 1, inputRevision: 0 });
+  assert.equal(changed, true, 'The adapter observed the idle-to-busy transition');
+  assert.equal(result.ok, false); assert.equal(result.delivery, 'not-dispatched');
+  assert.notEqual(result.status, 'queued'); assert.equal(f.sent.length, 0);
+  f.integration.directory.get = get;
+  Object.assign(f.snapshot, { turnState: 'completed', childActivity: false });
+  await f.integration.refreshInventory(); await tick(); await tick(); assert.equal(f.sent.length, 0);
+});
+
+test('an idle-only operator prompt still submits once when native readiness remains idle', async t => {
+  const f = await fixture(t); Object.assign(f.snapshot, { turnState: 'completed', childActivity: false });
+  const result = await f.invoke('dispatch', { kind: 'send_prompt', target: { id: 'p', generation: 'g' }, text: 'Use this idle terminal.',
+    targetAvailability: 'idle', operator: true, requestId: 'idle-request', observationSequence: 1, inputRevision: 0 });
+  assert.equal(result.ok, true); assert.equal(result.inputDisposition, 'submitted-when-ready'); assert.equal(f.sent.length, 1);
+});
+
+test('a prompt queued behind pending Codex input promotes once when the busy root becomes observable', async t => {
+  const f = await fixture(t);
+  f.snapshot.pendingInput = true;
+  const queued = await f.send('Deliver this followup while Codex is working.');
+  assert.equal(queued.status, 'queued'); assert.equal(f.sent.length, 0);
+  assert.equal(typeof queued.actionId, 'string');
+  f.snapshot.pendingInput = false;
+  f.event({ type: 'input-state', inputRevision: 3 });
+  await f.integration.refreshInventory();
+  await until(() => f.integration.getState().receipts.some(receipt => receipt.status === 'written'));
+  assert.equal(f.sent.length, 1, 'The queued prompt must reach the supported busy composer before completion');
+  const payload = f.sent[0].payload;
+  assert.equal(payload.kind, 'interaction'); assert.equal(payload.submit, true);
+  assert.equal(payload.text, 'Deliver this followup while Codex is working.');
+  assert.equal(payload.requestId, 'request'); assert.equal(payload.interactionEvidence.inputRevision, 3);
+  assert.notEqual(payload.actionId, queued.actionId, 'A proven-unsent terminal-input cache entry cannot poison the fresh attempt');
+  const receipts = f.integration.getState().receipts;
+  const delivered = receipts.find(receipt => receipt.status === 'written');
+  assert.ok(delivered, JSON.stringify(f.integration.getState().receipts));
+  assert.equal(delivered.requestId, receipts.find(receipt => receipt.status === 'queued').requestId, 'Delivery retains the original request correlation');
+  await f.integration.refreshInventory();
+  Object.assign(f.snapshot, { turnState: 'completed', childActivity: false });
+  await f.integration.refreshInventory();
+  assert.equal(f.sent.length, 1, 'Observation and completion cannot replay a promoted prompt');
+});
+
+test('busy promotion uses a fresh host action ID after a proven-unsent native host rejection', async t => {
+  const f = await fixture(t);
+  f.hostResult = { ok: false, status: 'recipient-unavailable', delivery: 'not-dispatched' };
+  const queued = await f.send('Try the verified busy root when available.');
+  assert.equal(queued.status, 'queued'); assert.equal(f.sent.length, 1);
+  assert.equal(f.sent[0].payload.actionId, queued.actionId);
+  delete f.hostResult;
+  await f.integration.refreshInventory();
+  await until(() => f.integration.getState().receipts.some(receipt => receipt.status === 'written'));
+  assert.equal(f.sent.length, 2);
+  assert.notEqual(f.sent[1].payload.actionId, f.sent[0].payload.actionId, 'The host caches rejected IDs too');
+  const receipts = f.integration.getState().receipts;
+  assert.equal(receipts.find(receipt => receipt.status === 'written').requestId, receipts.find(receipt => receipt.status === 'queued').requestId);
+  await f.integration.refreshInventory(); assert.equal(f.sent.length, 2);
+});
+
+for (const hostResult of [
+  { ok: false, status: 'unknown' },
+  { ok: false, status: 'write-failed' },
+  { ok: false, status: 'input-buffer-occupied', delivery: 'not-dispatched' },
+  { ok: false, status: 'stale-observation', delivery: 'not-dispatched', error: 'The input revision changed before the host write.' },
+]) test(`queued busy promotion ${hostResult.status} is final and cannot replay at turn completion`, async t => {
+  const f = await fixture(t); f.snapshot.pendingInput = true;
+  assert.equal((await f.send('Preserve this exact followup.')).status, 'queued');
+  f.hostResult = hostResult; f.snapshot.pendingInput = false;
+  await f.integration.refreshInventory();
+  await until(() => f.integration.getState().receipts.some(receipt => receipt.status === (hostResult.status === 'write-failed' ? 'unknown' : hostResult.status)));
+  assert.equal(f.sent.length, 1);
+  assert.ok(f.integration.getState().receipts.some(receipt => receipt.status === (hostResult.status === 'write-failed' ? 'unknown' : hostResult.status)));
+  delete f.hostResult;
+  Object.assign(f.snapshot, { turnState: 'completed', childActivity: false });
+  await f.integration.refreshInventory(); await f.integration.refreshInventory();
+  assert.equal(f.sent.length, 1);
+});
+
+for (const mode of ['cancel', 'conversation', 'human-input']) test(`queued Codex promotion respects ${mode} before input`, async t => {
+  const f = await fixture(t); f.snapshot.pendingInput = true;
+  f.snapshot.conversation = { id: 'original', provider: 'codex' };
+  assert.equal((await f.send('Only send to this authorized composer.')).status, 'queued');
+  if (mode === 'cancel') await f.invoke('cancel');
+  if (mode === 'conversation') f.snapshot.conversation = { id: 'replacement', provider: 'codex' };
+  if (mode === 'human-input') f.snapshot.manualInputPending = true;
+  f.snapshot.pendingInput = false;
+  await f.integration.refreshInventory(); await f.integration.refreshInventory();
+  await tick(); await tick();
+  assert.equal(f.sent.length, 0);
+});
+
+for (const field of ['manualInputPending', 'interactionInputPending']) test(`fresh decoded ${field} blocks promotion even if native runtime has no draft metadata`, async t => {
+  const f = await fixture(t); f.snapshot.pendingInput = true;
+  assert.equal((await f.send('Keep existing input intact.')).status, 'queued');
+  f.event({ type: 'input-state', inputRevision: 1, [field]: true, ownerRequestId: 'another-request' });
+  f.snapshot.pendingInput = false;
+  await f.integration.refreshInventory();
+  await until(() => f.integration.getState().receipts.some(receipt => receipt.status === 'input-buffer-occupied'));
+  assert.equal(f.sent.length, 0);
+  f.event({ type: 'input-state', inputRevision: 2 });
+  Object.assign(f.snapshot, { turnState: 'completed', childActivity: false });
+  await f.integration.refreshInventory(); await tick(); await tick();
+  assert.equal(f.sent.length, 0, 'Clearing a draft cannot revive the rejected prompt');
+});
+
 test('cancellation removes a queued busy prompt without touching the running terminal', async t => {
   const f = await fixture(t, 'claude'); assert.equal((await f.send('A followup.')).status, 'queued');
   await f.invoke('cancel'); Object.assign(f.snapshot, { turnState: 'completed', childActivity: false }); f.event({ type: 'input-state', inputRevision: 0 }); await tick(); await tick();

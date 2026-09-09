@@ -58,6 +58,8 @@ Electron/preload/PTY, task-UI and two-process session-resume smokes. See the
 
 ## QA Scripts
 
+- `scripts/qa/terminal-scroll-smoke.cjs` - Runs the actual pane scroll handlers and xterm in isolated offscreen Electron. Verifies local wheel history, Shift-wheel, exited panes, delayed follow-tail state, and preserved native TUI scrolling. Included in release checks. `--baseline` compares the current harness against the committed pane source without modifying the working tree.
+
 - `scripts/qa/orchestrator-native-submission.cjs --codex C:/path/to/codex.exe` - Opt-in check of native prompt submission through the real PTY host with an isolated home/workspace and a localhost provider that returns no model output. Exercises ordinary and operator input, raw and bracketed paste, and records transport writes, receipts and local requests under a unique `.tmp/orchestrator-native-submission-*` folder.
 
 - `scripts/qa/terminal-board-smoke.cjs` - Build first; then exercise isolated Electron DOM/CDP and real PTYs for gap placement, preview/drop equality, Shift-swapping, measured PTY size, hidden OSC titles, scroll coordinates, and horizontal overflow. Writes screenshots/results under `.tmp/terminal-board-smoke/`.

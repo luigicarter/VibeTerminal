@@ -25,14 +25,14 @@ function classifyOpenRouterError(status, body) {
   else if (effectiveStatus === 429) category = 'rate-limit';
   else if (effectiveStatus >= 400 && effectiveStatus < 500) category = 'request';
   const error = new OpenRouterError(category, effectiveStatus);
-  const reasons = { 400: 'invalid-request', 403: 'forbidden', 404: 'model-or-endpoint-unavailable', 422: 'invalid-parameters' };
+  const reasons = { 400: 'invalid-request', 403: 'forbidden', 404: 'model-or-endpoint-unavailable', 408: 'upstream-timeout', 422: 'invalid-parameters' };
   if (reasons[effectiveStatus]) error.reason = reasons[effectiveStatus];
   return error;
 }
 const isCancellation = error => error?.name === 'AbortError';
 function classifyTransportError(error, { signal, timeoutSignal } = {}) {
   if (signal?.aborted) { const cancelled = new Error('Cancelled.'); cancelled.name = 'AbortError'; return cancelled; }
-  if (timeoutSignal?.aborted || error?.name === 'TimeoutError') return new OpenRouterError('timeout');
+  if (timeoutSignal?.aborted || error?.name === 'TimeoutError') { const timeout = new OpenRouterError('timeout'); timeout.reason = 'client-deadline'; return timeout; }
   if (isCancellation(error) || error instanceof OpenRouterError) return error;
   return new OpenRouterError('network');
 }

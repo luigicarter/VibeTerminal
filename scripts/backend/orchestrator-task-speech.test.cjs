@@ -8,7 +8,7 @@ function fixture(speak) {
   const calls = [];
   const announce = createTaskSpeech(event => { calls.push(event); return speak ? speak(event) : { ok: true }; });
   const args = (patch = {}) => {
-    const report = { targetId: 'pane', generation: 'g', turnId: 'turn', status: 'completed', text: 'Pane: the agent turn completed.', ...patch.report };
+    const report = { targetId: 'pane', generation: 'g', turnId: 'turn', status: 'failed', text: 'Pane: the agent turn failed.', ...patch.report };
     return { job: { waits: [{ ...report, done: true, ...patch.wait }] }, report,
       event: { kind: 'task-report', requestId: 'request', text: report.text, ...patch.event }, epoch: 1, isActive: () => true,
       ...Object.fromEntries(Object.entries(patch).filter(([key]) => !['report', 'wait', 'event'].includes(key))) };
@@ -33,11 +33,11 @@ test('aborted duplicate settles without waiting for or cancelling shared playbac
   assert.equal((await f.announce(f.args())).status, 'duplicate');
 });
 
-test('pending matching speech waits for delivery, then suppresses duplicate across request labels', async () => {
+test('pending failed result speech waits for delivery, then suppresses duplicate across request labels', async () => {
   let finish;
   const f = fixture(() => new Promise(resolve => { finish = resolve; }));
-  const first = f.announce(f.args());
-  const second = f.announce(f.args({ report: { text: 'Renamed pane: the agent turn completed. All requested terminal turns have ended.' }, event: { requestId: 'watch' } }));
+  const first = f.announce(f.args({ event: { kind: 'task-result' } }));
+  const second = f.announce(f.args({ report: { text: 'Renamed pane: the agent turn failed.' }, event: { kind: 'task-result', requestId: 'watch' } }));
   await tick();
   assert.equal(f.calls.length, 1);
   finish({ ok: true });
@@ -130,4 +130,15 @@ test('confirmed playback remains delivered when its request signal is subsequent
   await first;
   assert.equal((await second).status, 'duplicate');
   assert.equal(f.calls.length, 1);
+});
+
+test('routine completed and ready reports and results are silent regardless of command acknowledgment', async () => {
+  const f = fixture();
+  for (const status of ['completed', 'ready']) for (const kind of ['task-report', 'task-result']) {
+    await f.announce(f.args({ report: { status }, event: { kind }, wait: { attributionAmbiguous: true } }));
+    await f.announce(f.args({ report: { status }, event: { kind } }));
+  }
+  assert.equal(f.calls.length, 0);
+  await f.announce(f.args());
+  assert.equal(f.calls.length, 1, 'genuine failure reporting is still audible');
 });

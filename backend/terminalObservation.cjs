@@ -71,6 +71,19 @@ function createTerminalObservation({ maxHistoryBytes = 1024 * 1024, globalHistor
       if (pane && pane.generation === event.generation) return pane.pending;
       forget(event.id);
       pane = { generation: event.generation, terminal: new Terminal({ ...dimensions(event), scrollback: 0, allowProposedApi: true }), pending: Promise.resolve(), waiters: new Set(), sequence: 0, history: [], bytes: 0, truncated: false, outputAt: null, metadataAt: event.at || Date.now(), fromLaunch: true };
+      // Observe the same decoded stream as xterm, including split sequences.
+      // Return false so mode changes/reset still reach xterm's own handlers.
+      // A displayed prompt marker with a hidden cursor can be a disabled TUI.
+      pane.cursorVisible = true;
+      for (const [final, visible] of [['h', true], ['l', false]]) {
+        pane.terminal.parser.registerCsiHandler({ prefix: '?', final }, params => {
+          if (params.includes(25)) pane.cursorVisible = visible;
+          return false;
+        });
+      }
+      const resetCursor = () => { pane.cursorVisible = true; return false; };
+      pane.terminal.parser.registerCsiHandler({ intermediates: '!', final: 'p' }, resetCursor);
+      pane.terminal.parser.registerEscHandler({ final: 'c' }, resetCursor);
       panes.set(event.id, pane);
     }
     if (!pane || pane.generation !== event.generation) return Promise.resolve();
@@ -135,6 +148,14 @@ function createTerminalObservation({ maxHistoryBytes = 1024 * 1024, globalHistor
     const full = screen(pane);
     const text = maxChars ? Array.from(full).slice(-maxChars).join('') : '';
     const buffer = pane.terminal.buffer.active;
+    const cursorRow = buffer.baseY + buffer.cursorY;
+    let inputLineStart = cursorRow;
+    while (inputLineStart > buffer.viewportY && buffer.getLine(inputLineStart)?.isWrapped) inputLineStart--;
+    let inputLinePrefix = '';
+    for (let row = inputLineStart; row < cursorRow; row++) inputLinePrefix += buffer.getLine(row)?.translateToString(false, 0, pane.terminal.cols) || '';
+    const inputLine = buffer.getLine(cursorRow);
+    const cursorLine = { text: inputLinePrefix + (inputLine?.translateToString(true) || ''),
+      beforeCursor: inputLinePrefix + (inputLine?.translateToString(false, 0, buffer.cursorX) || ''), startRow: inputLineStart - buffer.viewportY };
     let remaining = maxChars;
     let historyClipped = false;
     const history = [];
@@ -146,8 +167,10 @@ function createTerminalObservation({ maxHistoryBytes = 1024 * 1024, globalHistor
       remaining -= Array.from(value).length;
       history.unshift({ sequence: sample.sequence, at: sample.at, text: value });
     }
-    return { ok: true, source: 'terminal-screen', historySource: 'display-samples', id, generation: pane.generation, text, history, sequence: pane.sequence, outputAt: pane.outputAt, metadataAt: pane.metadataAt, readAt: Date.now(), cursor: { x: buffer.cursorX, y: buffer.cursorY }, alternateScreen: buffer.type === 'alternate', cols: pane.terminal.cols, rows: pane.terminal.rows, fromLaunch: true, exited: !!pane.exited, truncated: pane.truncated || historyClipped || text.length < full.length || (since !== undefined && pane.history.length > 0 && since < pane.history[0].sequence - 1), historyBytes: pane.bytes,
+    return { ok: true, source: 'terminal-screen', historySource: 'display-samples', id, generation: pane.generation, text, history, sequence: pane.sequence, outputAt: pane.outputAt, metadataAt: pane.metadataAt, readAt: Date.now(), cursor: { x: buffer.cursorX, y: buffer.cursorY }, cursorVisible: pane.cursorVisible, alternateScreen: buffer.type === 'alternate', cols: pane.terminal.cols, rows: pane.terminal.rows, fromLaunch: true, exited: !!pane.exited, truncated: pane.truncated || historyClipped || text.length < full.length || (since !== undefined && pane.history.length > 0 && since < pane.history[0].sequence - 1), historyBytes: pane.bytes,
       nextBeforeSequence: pane.history.length > 1 ? pane.history.at(-1).sequence : null,
+      screenTruncated: text.length < full.length,
+      cursorLine,
       inputRevision: pane.inputRevision, manualInputPending: pane.manualInputPending, interactionInputPending: pane.interactionInputPending, ownerRequestId: pane.ownerRequestId,
       hasEarlier: pane.history.length > 1, historyUnavailable: Boolean(pane.evictedThroughSequence) };
   }

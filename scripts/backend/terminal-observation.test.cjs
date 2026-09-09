@@ -5,6 +5,73 @@ const vm = require('node:vm');
 const path = require('node:path');
 const { createTerminalObservation } = require('../../backend/terminalObservation.cjs');
 
+test('cursor visibility follows decoded split and multi-parameter modes without consuming terminal behavior', async () => {
+  const observation = createTerminalObservation();
+  let sequence = 0;
+  const write = data => observation.ingest({ type: 'data', id: 'p', generation: 'g', sequence: ++sequence, data });
+  const read = () => observation.read({ id: 'p', generation: 'g' });
+  try {
+    await observation.ingest({ type: 'created', id: 'p', generation: 'g', cols: 30, rows: 6 });
+    assert.equal((await read()).cursorVisible, true);
+    await write('main\x1b[?1049;2');
+    assert.equal((await read()).cursorVisible, true);
+    await write('5l');
+    assert.equal((await read()).cursorVisible, false);
+    await write('\x1b[?1049;25h› ');
+    const alternate = await read();
+    assert.equal(alternate.cursorVisible, true);
+    assert.equal(alternate.alternateScreen, true);
+    assert.equal(alternate.text, '›');
+    assert.deepEqual(alternate.cursor, { x: 2, y: 0 });
+    await write('\x1b[?25l\x1b[2J\x1b[H› ');
+    assert.equal((await read()).cursorVisible, false);
+    await write('\x1b[25h'); // Standard mode 25 is not DEC cursor visibility.
+    assert.equal((await read()).cursorVisible, false);
+    await write('\x1b[?1049;25l');
+    const main = await read();
+    assert.equal(main.cursorVisible, false);
+    assert.equal(main.alternateScreen, false);
+    assert.equal(main.text, 'main');
+    await write('\x1b[?25');
+    assert.equal((await read()).cursorVisible, false);
+    await write('h');
+    assert.equal((await read()).cursorVisible, true);
+  } finally { observation.dispose(); }
+});
+
+test('cursor resets remain generation scoped and ignore replay or stale output', async () => {
+  const observation = createTerminalObservation();
+  let sequence = 0;
+  const write = data => observation.ingest({ type: 'data', id: 'p', generation: 'g', sequence: ++sequence, data });
+  const read = () => observation.read({ id: 'p', generation: 'g' });
+  try {
+    await observation.ingest({ type: 'created', id: 'p', generation: 'g', cols: 30, rows: 6 });
+    await write('original\x1b[?25l');
+    await observation.ingest({ type: 'snapshot', id: 'p', generation: 'g', data: '\x1b[?25h' });
+    await observation.ingest({ type: 'data', id: 'p', generation: 'old', sequence: 500, data: '\x1b[?25h' });
+    await observation.ingest({ type: 'data', id: 'p', generation: 'g', sequence: 1, data: '\x1b[?25h' });
+    assert.equal((await read()).cursorVisible, false);
+    await write('\x1b[!');
+    assert.equal((await read()).cursorVisible, false);
+    await write('p');
+    assert.equal((await read()).cursorVisible, true);
+    assert.equal((await read()).text, 'original');
+    await write('\x1b[?25l\x1b');
+    assert.equal((await read()).cursorVisible, false);
+    await write('c');
+    const reset = await read();
+    assert.equal(reset.cursorVisible, true);
+    assert.equal(reset.text, '');
+    assert.deepEqual(reset.cursor, { x: 0, y: 0 });
+    await write('\x1b[?25l'); // Parser observers survive RIS.
+    assert.equal((await read()).cursorVisible, false);
+    await observation.ingest({ type: 'created', id: 'p', generation: 'replacement' });
+    await write('\x1b[?25l');
+    assert.equal((await read()).ok, false);
+    assert.equal((await observation.read({ id: 'p', generation: 'replacement' })).cursorVisible, true);
+  } finally { observation.dispose(); }
+});
+
 test('live input revisions update independently of output and reject stale identity or revision', async () => {
   const observation = createTerminalObservation();
   try {

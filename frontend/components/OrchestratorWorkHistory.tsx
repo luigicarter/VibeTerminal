@@ -24,7 +24,7 @@ export function OrchestratorWorkHistory({ records, sessions, onOpenSession }: {
       <label>Search<input type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder="Find work, terminal, or result" /></label>
       <span aria-live="polite">{rows.length} {rows.length === 1 ? "record" : "records"}</span>
     </div>
-    <p className="orchestrator-work-note">Ask Vibe “What’s been done?” or choose a project here. Records stay after a terminal closes.</p>
+    <p className="orchestrator-work-note">Ask Lina “What’s been done?” or choose a project here. Records stay after a terminal closes.</p>
     <div className="orchestrator-work-scroll">
       <table>
         <thead><tr><th scope="col">Work / terminal</th><th scope="col">Project</th><th scope="col">Status</th><th scope="col">Finished</th><th scope="col">Result evidence</th></tr></thead>

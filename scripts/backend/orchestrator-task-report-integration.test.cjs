@@ -51,6 +51,26 @@ async function fixture(t) {
   return f;
 }
 
+test('partial multi-target watch completion stays silent until the whole command can acknowledge done', async t => {
+  const f = await fixture(t);
+  for (const session of f.sessions) Object.assign(session, { observation: 'observed', turnState: 'running', turnId: `turn-${session.id}`, turnStartedAt: Date.now() - 100 });
+  f.plan = () => ({ goal: 'Watch both', executionMode: 'direct', actions: [{ kind: 'watch_terminal', targetIds: ['a', 'b'], selection: 'all' }] });
+  const request = await f.app.send({ text: 'Tell me when both agents finish', origin: 'voice' });
+  assert.equal(request.ok, true, JSON.stringify(request));
+  assert.equal(f.effects.length, 0);
+  await f.finish('a');
+  assert.equal(f.reports(request.requestId).filter(report => report.status === 'completed').length, 1);
+  assert.equal(f.speech.filter(event => event.completionCue).length, 0, 'the second watch is still running');
+  assert.equal(f.speech.filter(event => ['task-report', 'task-result'].includes(event.kind)).length, 0, 'a partial success must not narrate a generic completion disclaimer');
+  await f.finish('b');
+  assert.equal(f.reports(request.requestId).filter(report => report.status === 'completed').length, 2);
+  assert.equal(f.speech.filter(event => event.completionCue).length, 1);
+  assert.equal(f.speech.find(event => event.completionCue).speechText, 'done');
+  await f.app.refresh(); await tick();
+  assert.equal(f.speech.filter(event => event.completionCue).length, 1);
+  assert.equal(f.speech.filter(event => ['task-report', 'task-result'].includes(event.kind)).length, 0);
+});
+
 test('scheduler prompt plus Enter retain both waits but notify once for their attributed turn', () => {
   const tasks = createTaskScheduler({ now: () => 100 });
   const job = tasks.create({ text: 'Review changes', origin: 'text' });
@@ -74,7 +94,7 @@ test('scheduler prompt plus Enter retain both waits but notify once for their at
   assert.equal(job.task.status, 'finished');
 });
 
-test('completion reports and speech remain request-owned with monitoring off and another prompt queued', async t => {
+test('written completion reports remain request-owned without repeating command acknowledgment speech', async t => {
   const f = await fixture(t);
   const first = await f.app.send({ text: 'Review A', targetId: 'a', origin: 'voice' });
   const second = f.app.enqueue({ text: 'Next A', targetId: 'a', origin: 'text' });
@@ -84,17 +104,17 @@ test('completion reports and speech remain request-owned with monitoring off and
   await f.app.configure({ spendingLimit: 0 });
   await f.finish('a');
   assert.equal(f.reports(first.requestId).filter(report => report.status === 'completed').length, 1);
-  const spoken = f.speech.filter(event => event.kind === 'task-report');
+  const spoken = f.speech.filter(event => event.completionCue);
   assert.equal(spoken.length, 1);
   assert.equal(spoken[0].requestId, first.requestId);
   assert.equal(spoken[0].responseTurn, 'complete');
-  assert.match(spoken[0].text, /turn completed.*not independently verified/);
+  assert.equal(spoken[0].text, 'done');
   await f.app.refresh(); await tick();
   assert.equal(f.reports(first.requestId).filter(report => report.status === 'completed').length, 1);
   assert.equal(f.models.length, 0, 'outcome reporting requires no model request');
 });
 
-test('overlapping voice submission and watch keep both completion chats but speak each turn once', async t => {
+test('overlapping submission and watch keep completion chats and acknowledge each command once', async t => {
   const f = await fixture(t);
   f.sessions[0].observation = 'observed';
   const submissionPlan = f.plan;
@@ -109,19 +129,19 @@ test('overlapping voice submission and watch keep both completion chats but spea
     assert.equal(reports.length, 1);
     assert.match(reports[0].text, /requested outcome is not independently verified/);
   }
-  assert.equal(f.speech.filter(event => event.kind === 'task-report').length, 1);
+  assert.equal(f.speech.filter(event => event.kind === 'task-report').length, 0);
   await f.app.refresh(); await tick();
-  assert.equal(f.speech.filter(event => event.kind === 'task-report').length, 1);
+  assert.equal(f.speech.filter(event => event.kind === 'task-report').length, 0);
 
   f.plan = submissionPlan;
   const next = await f.app.send({ text: 'Review A again', targetId: 'a', origin: 'voice' });
   await f.finish('a');
-  const spoken = f.speech.filter(event => event.kind === 'task-report');
-  assert.equal(spoken.length, 2);
-  assert.equal(spoken[1].requestId, next.requestId);
+  const spoken = f.speech.filter(event => event.completionCue);
+  assert.equal(spoken.length, 3);
+  assert.equal(spoken[2].requestId, next.requestId);
 });
 
-test('text completion does not consume the automatic voice report for a matching watch', async t => {
+test('text completion does not consume the voice acknowledgment for a matching watch', async t => {
   const f = await fixture(t);
   f.sessions[0].observation = 'observed';
   const first = await f.app.send({ text: 'Review A', targetId: 'a', origin: 'text' });
@@ -131,12 +151,12 @@ test('text completion does not consume the automatic voice report for a matching
   await f.finish('a');
   assert.equal(f.reports(first.requestId).filter(report => report.status === 'completed').length, 1);
   assert.equal(f.reports(watcher.requestId).filter(report => report.status === 'completed').length, 1);
-  const spoken = f.speech.filter(event => event.kind === 'task-report');
+  const spoken = f.speech.filter(event => event.completionCue);
   assert.equal(spoken.length, 1);
   assert.equal(spoken[0].requestId, watcher.requestId);
 });
 
-test('overlapping voice requests retain result detail chats but speak matching result evidence once', async t => {
+test('overlapping voice requests retain written result details without routine result narration', async t => {
   const f = await fixture(t);
   f.sessions[0].observation = 'observed';
   const first = await f.app.send({ text: 'Review A', targetId: 'a', origin: 'voice' });
@@ -151,8 +171,9 @@ test('overlapping voice requests retain result detail chats but speak matching r
   await until(() => resultDetails().length === 2);
   await tick();
   assert.deepEqual(new Set(resultDetails().map(message => message.requestId)), new Set([first.requestId, watcher.requestId]));
-  assert.equal(f.speech.filter(event => event.kind === 'task-result').length, 1);
-  assert.equal(f.speech.filter(event => event.kind === 'task-report').length, 1);
+  assert.equal(f.speech.filter(event => event.kind === 'task-result').length, 0);
+  assert.equal(f.speech.filter(event => event.kind === 'task-report').length, 0);
+  assert.equal(f.speech.filter(event => event.completionCue).length, 2);
 });
 
 test('one target failure is reported immediately while its sibling is still running', async t => {
@@ -163,6 +184,7 @@ test('one target failure is reported immediately while its sibling is still runn
   await f.finish('a', 'failed');
   assert.equal(f.app.getState().tasks.find(task => task.requestId === request.requestId).status, 'waiting-results');
   assert.equal(f.reports(request.requestId).filter(report => report.status === 'failed').length, 1);
+  assert(f.speech.some(event => event.kind === 'task-report' && /ended with an error/.test(event.text)), 'a genuine failure still needs an audible report');
   assert.ok(!JSON.stringify(f.app.getState()).includes('fixture-secret'));
   assert.ok(!JSON.stringify(f.speech).includes('fixture-secret'));
   await f.finish('b');

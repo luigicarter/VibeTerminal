@@ -51,7 +51,7 @@ async function run(mode, audio, commandEnd) {
     fetch: async (url, init) => {
       if (url.endsWith('/transcriptions')) {
         uploads.push({ atMs: position / 16, samples: (Buffer.from(JSON.parse(init.body).input_audio.data, 'base64').length - 44) / 2 });
-        return new Response(JSON.stringify({ text: 'Hey Vibe, open the project and run the tests' }));
+        return new Response(JSON.stringify({ text: 'Hey Lina, open the project and run the tests' }));
       }
       assert(url.endsWith('/speech'), 'All cloud calls must be mocked here.');
       if (mode === 'preparation') return new Promise((resolve, reject) => {

@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const GROUPS = {
-  keyword: { encoder: 'encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx', decoder: 'decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx', joiner: 'joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx', tokens: 'tokens.txt', keywords: 'keywords.txt' },
+  keyword: { encoder: 'encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx', decoder: 'decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx', joiner: 'joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx', tokens: 'tokens.txt', keywords: 'keywords.txt', bpeVocab: 'bpe.vocab', hotwords: 'wake-hotwords.txt' },
   vad: { model: 'silero_vad.onnx' }, turn: { model: 'smart-turn-v3.2-cpu.onnx' },
 };
 function loadVoiceModels(root, { groups } = {}) {

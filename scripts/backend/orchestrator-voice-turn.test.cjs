@@ -198,11 +198,11 @@ test('respond complete cannot bypass an unfinished terminal grant and must conti
   };
   const result = await f.app.send({ text: 'Send echo ready to Project Alpha', origin: 'voice' });
   assert.equal(result.ok, true); assert.equal(f.effects.length, 1); assert.equal(f.effects[0].text, 'echo ready');
-  assert.equal(f.calls.length, 3); assert.equal(f.spoken.length, 2); assert.equal(f.spoken[0].text, result.text);
-  assert.match(result.text, /Input was sent to Project Alpha; task completion cannot be verified automatically/);
+  assert.equal(f.calls.length, 3); assert.equal(f.spoken.length, 1); assert.equal(f.spoken[0].text, result.text);
+  assert.equal(result.text, 'done');
+  assert.equal(f.spoken[0].completionCue, true);
   assert.equal(f.spoken[0].speechText, result.text, 'current delivery evidence replaces an unsupported model speech summary');
-  assert.equal(f.spoken[1].kind, 'task-report'); assert.equal(f.spoken[1].requestId, result.requestId);
-  assert.match(f.spoken[1].text, /plain shell.*Completion is unverified/);
+  assert(f.app.getState().messages.some(message => message.origin === 'task' && /plain shell.*Completion is unverified/.test(message.text || message.content)));
 });
 
 test('a rejected response cannot make a later complete bypass unfinished authorized work', async t => {

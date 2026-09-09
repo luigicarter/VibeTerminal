@@ -72,6 +72,19 @@ unfinished work. Saved history does not imply unlimited active model memory.
 
 ## Delivery, cancellation and recovery
 
+An explicit free-terminal request retains an idle-only candidate group through
+selection and admission. Availability is checked again before host input; it
+cannot silently become a busy follow-up or queued send. A supported queued Codex
+operator prompt can instead advance through fresh busy-composer observation when
+the request permits busy delivery. Rejected and uncertain writes never replay.
+
+Scheduler queue messages identify the owning request and workspace, including
+unverified-result blockers. A continuation of a completely unstarted queued task
+transfers its full pending authority and retires the original queue entry before
+execution; failed or raced recovery cannot leave a second copy. Conflicting
+project work still waits for attributable results. See the
+[queued-prompt investigation and fixes](orchestrator-queued-prompts-investigation.md).
+
 An already-working terminal can receive a followup prompt. For an observed Codex
 root composer, `send_prompt` submits the text while the existing turn continues,
 including during logical background/subagent activity. It rechecks the original
@@ -133,7 +146,7 @@ new listing, and stale paging cursors must restart at a valid page.
 ## Voice and saved history
 
 Submitting voice input releases the microphone while the task runs. Further requests
-can use Space or Hey Vibe. Replies are spoken one at a time and defer to active
+can use Space or Hey Lina. Replies are spoken one at a time and defer to active
 recording. The model uses `respond` with explicit `responseTurn` metadata: `listen`
 opens a request-owned question and listens for an answer for fifteen seconds;
 `complete` returns to standby; `dismiss` ends the voice exchange. `ask_user` also
@@ -186,7 +199,14 @@ reports for observed agent activity, input blockers, completion, interruption an
 failure. Each terminal reports independently, so one failed terminal is reported
 while sibling work continues. Repeated inventory refreshes do not repeat the same
 report; a new input blockage can report again. Voice-origin requests also queue
-spoken outcome and issue reports through the existing speech controller. Input
+spoken outcome and issue reports through the existing speech controller. Confirmed
+whole-command completion uses one ding and `done`. The conversation view omits
+routine completion and missing-result notices, and coalesces actual successful
+results for the same identified terminal turn across requests. Request-owned
+records remain intact; the visible result carries its associated request numbers.
+Failures, unconfirmed delivery and questions remain visible, and failures still
+speak, including before a multi-terminal or deferred command is fully complete.
+Queued commands acknowledge only after all requested actions are confirmed. Input
 questions retain their existing revision-bound interaction speech, avoiding a
 generic blocker announcement after the user has answered. Chat reports do not
 wait for earlier speech playback to finish.
@@ -198,7 +218,13 @@ warnings, distinct failure reasons, new input-blocking episodes and different
 turns remain distinguishable.
 
 Overlapping voice requests watching the same attributed turn retain their own chat
-history, but share one automatic spoken completion and one spoken result summary.
+history. Saved report categories and terminal-turn identity preserve the display
+projection after restart. Legacy stock completion/missing-result notices are
+hidden only for their known automatic message origin; arbitrary old messages and
+messages without enough identity are not merged. Routine completion and result
+speech is suppressed independently of
+the whole-command acknowledgment; matching failure reports and result summaries
+share speech per attributed turn.
 A new turn can announce again. Cancelled, silent or failed speech does not consume
 the announcement for another still-active request; distinct failure explanations
 remain separate.

@@ -91,7 +91,7 @@ function terminalEnvironment(instrumentationEnv = {}, stripEnv = []) {
     ...base,
     TERM: term,
     COLORTERM: process.env.COLORTERM || "truecolor",
-    TERM_PROGRAM: "vibeTerminal",
+    TERM_PROGRAM: "LinaTerminal",
     ...instrumentationEnv
   };
 }

@@ -117,7 +117,7 @@ async function fetchClaudeModelCatalog(options = {}) {
       authorization: `Bearer ${connection.apiKey || ""}`,
       "x-api-key": connection.apiKey || "",
       "anthropic-version": ANTHROPIC_VERSION,
-      "user-agent": "vibeTerminal Fusion"
+      "user-agent": "Lina Terminal Fusion"
     };
     idPattern = CUSTOM_MODEL_ID_PATTERN;
   } else {
@@ -129,7 +129,7 @@ async function fetchClaudeModelCatalog(options = {}) {
     headers = {
       authorization: `Bearer ${credential.accessToken}`,
       "anthropic-version": ANTHROPIC_VERSION,
-      "user-agent": "vibeTerminal Fusion"
+      "user-agent": "Lina Terminal Fusion"
     };
   }
 
@@ -173,7 +173,7 @@ async function testClaudeConnection(connection, timeoutMs = 15000) {
         authorization: `Bearer ${connection.apiKey || ""}`,
         "x-api-key": connection.apiKey || "",
         "anthropic-version": ANTHROPIC_VERSION,
-        "user-agent": "vibeTerminal Fusion"
+        "user-agent": "Lina Terminal Fusion"
       },
       timeoutMs
     );

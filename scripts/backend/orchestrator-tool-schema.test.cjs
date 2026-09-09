@@ -11,6 +11,9 @@ const kinds = 'navigate list_roots list_sessions read_session list_conversations
 const flat = { properties: Object.fromEntries(names.map(name => [name, { type: 'string', description: name }])) };
 flat.properties.kind.enum = kinds;
 flat.properties.keys = { type: 'array', maxItems: 16, items: { type: 'string' } };
+flat.properties.inputPurpose.enum = ['task', 'interaction'];
+flat.properties.limit = { type: 'integer', minimum: 1, maximum: 200 };
+flat.properties.maxChars = { type: 'integer', minimum: 1, maximum: 16000 };
 const schema = buildWorkspaceParameters(flat);
 const branch = kind => schema.anyOf.find(item => item.properties.kind.enum[0] === kind);
 
@@ -96,6 +99,54 @@ test('compact scopes retain root constraints and exact per-kind field boundaries
   }
   const finish = compact.anyOf.find(item => item.properties.kind.enum[0] === 'finish_terminal');
   assert.equal(Object.hasOwn(finish.properties, 'inputRevision'), false);
+});
+
+test('model excerpt and operation page limits match dispatch without narrowing unrelated lists', () => {
+  const compact = scopedWorkspaceTool(tool).function.parameters;
+  assert.equal(compact.properties.maxChars.maximum, 4000);
+  assert.equal(compact.properties.limit.maximum, 200);
+  const limitFor = kind => compact.anyOf.find(item => item.properties.kind.enum[0] === kind).properties.limit;
+  assert.deepEqual(limitFor('list_work'), { maximum: 10 });
+  assert.deepEqual(limitFor('search_conversation'), { maximum: 8 });
+  for (const kind of ['list_sessions', 'list_conversations', 'read_conversation', 'search_files']) assert.deepEqual(limitFor(kind), {});
+  assert.equal(branch('read_session').properties.maxChars.maximum, 16000, 'Global/direct schema remains unchanged.');
+  assert.equal(flat.properties.maxChars.maximum, 16000);
+});
+
+test('inspection scope exposes reads and only bounded terminal inspection controls', () => {
+  const compact = scopedWorkspaceTool(tool, [{ kind: 'operate_terminal', inspection: true }]).function.parameters;
+  const baseline = scopedWorkspaceTool(tool).function.parameters.properties.kind.enum;
+  assert.deepEqual(new Set(compact.properties.kind.enum.filter(kind => !baseline.includes(kind))), new Set(['terminal_interact', 'focus_session', 'finish_terminal']));
+  for (const kind of baseline) assert.ok(compact.properties.kind.enum.includes(kind));
+  for (const kind of ['send_prompt', 'permission', 'interrupt', 'answer_question']) {
+    assert.equal(compact.properties.kind.enum.includes(kind), false);
+    assert.equal(compact.anyOf.some(item => item.properties.kind.enum.includes(kind)), false);
+  }
+  assert.deepEqual(compact.properties.inputPurpose.enum, ['interaction']);
+  assert.equal(Object.hasOwn(compact.properties, 'editInput'), false);
+  const interaction = compact.anyOf.find(item => item.properties.kind.enum[0] === 'terminal_interact');
+  assert.equal(Object.hasOwn(interaction.properties, 'editInput'), false);
+  assert.ok(Object.hasOwn(interaction.properties, 'inputPurpose'));
+  assert.ok(interaction.required.includes('observationSequence'));
+  assert.equal(interaction.additionalProperties, false);
+  assert.deepEqual(compact.properties.keys, flat.properties.keys);
+  assert.deepEqual(branch('terminal_interact').properties.inputPurpose.enum, ['task', 'interaction']);
+  assert.ok(Object.hasOwn(branch('terminal_interact').properties, 'editInput'));
+});
+
+test('multiple inspection grants remain scoped while mixed operator grants retain their normal union', () => {
+  const inspect = { kind: 'operate_terminal', inspection: true };
+  const only = scopedWorkspaceTool(tool, [inspect, { ...inspect }]).function.parameters;
+  assert.deepEqual(only.properties.inputPurpose.enum, ['interaction']);
+  assert.equal(Object.hasOwn(only.properties, 'editInput'), false);
+  const normal = scopedWorkspaceTool(tool, [{ kind: 'operate_terminal' }]);
+  for (const grants of [[inspect, { kind: 'operate_terminal' }], [{ kind: 'operate_terminal', inspection: false }, inspect]]) {
+    assert.deepEqual(scopedWorkspaceTool(tool, grants), normal);
+  }
+  const mixedEffect = scopedWorkspaceTool(tool, [inspect, { kind: 'close' }]).function.parameters;
+  assert.ok(mixedEffect.properties.kind.enum.includes('close'));
+  assert.deepEqual(mixedEffect.properties.inputPurpose.enum, ['interaction']);
+  assert.equal(Object.hasOwn(mixedEffect.properties, 'editInput'), false);
 });
 
 test('schema compaction fits a constrained request without changing immutable-input rejection', () => {

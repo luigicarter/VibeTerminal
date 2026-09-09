@@ -126,11 +126,11 @@ async function flush() { for (let i = 0; i < 12; i++) await Promise.resolve(); }
   assert.deepEqual(events.slice(beforeIndicator), ['state-listener'], 'Main indicator must not own audio or issue rendererReady');
   assert.equal(captures, 1); assert.equal(players, 1);
   stateListener({ phase: 'listening', listening: true, indicatorVisible: true, handsFreeStatus: 'ready' }); tree = indicator.render();
-  assert.match(text(tree), /Say Hey Vibe/);
+  assert.match(text(tree), /Say Hey Lina/);
   stateListener({ phase: 'speaking', listening: true, indicatorVisible: true, handsFreeStatus: 'ready', wakeInterruptReady: true }); tree = indicator.render();
-  assert.match(text(tree), /Speaking.*Hey Vibe.*interrupt/);
+  assert.match(text(tree), /Speaking.*Hey Lina.*interrupt/);
   stateListener({ phase: 'speaking', listening: true, indicatorVisible: true, handsFreeStatus: 'ready', wakeInterruptReady: false }); tree = indicator.render();
-  assert.match(text(tree), /Speaking.*Space to interrupt/); assert.doesNotMatch(text(tree), /Hey Vibe/);
+  assert.match(text(tree), /Speaking.*Space to interrupt/); assert.doesNotMatch(text(tree), /Hey Lina/);
   stateListener({ phase: 'awaiting-answer', listening: true, indicatorVisible: true, handsFreeStatus: 'ready' }); tree = indicator.render();
   assert.match(text(tree), /Listening for your answer.*never mind/);
   stateListener({ phase: 'awaiting-answer', listening: true, indicatorVisible: true, handsFreeStatus: 'unavailable' }); tree = indicator.render();

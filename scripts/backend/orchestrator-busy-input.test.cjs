@@ -43,6 +43,14 @@ test('original busy prompt observation rejects changed turn before adapter and r
  const result=await h.input.handle(h.action);assert.equal(result.delivery,'not-dispatched');assert.equal(h.writes.length,0);assert.equal(canQueueBusyPrompt(h.action,h.session,result),true);
  const same=fixture({turnStartedAt:1});same.action.promptObservation={agentPid:42,turnId:'t',turnStartedAt:1};assert.equal((await same.input.handle(same.action)).status,'written');
 });
+
+test('idle-only intent cannot become a native busy submission or its queued fallback', async () => {
+  const h = fixture(); h.action.targetAvailability = 'idle';
+  assert.equal(isBusyPromptSubmission(h.action, h.session), false);
+  assert.equal(canQueueBusyPrompt(h.action, h.session, { ok: false, status: 'recipient-unavailable', delivery: 'not-dispatched' }), false);
+  const result = await h.input.handle(h.action);
+  assert.equal(result.delivery, 'not-dispatched'); assert.equal(h.writes.length, 0);
+});
 test('actual prompt baseline is installed synchronously before write can publish terminal events',async()=>{
  const h=fixture({turnStartedAt:1});const calls=[];
  const input=createTerminalInput({getSession:()=>h.session,readSession:async()=>({ok:true,id:'s',generation:'g',sequence:2,inputRevision:0,cols:100,rows:28}),onBeforeWrite:metadata=>{calls.push(['prepare',metadata]);},write:async()=>{assert.equal(calls.length,1);assert.equal(calls[0][1].deliveryBaseline.turnId,'t');calls.push(['write']);return {ok:true,status:'written'};},now:()=>100});

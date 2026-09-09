@@ -3,7 +3,7 @@ const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
 const { createTerminalInput } = require('../../backend/orchestratorTerminalInput.cjs');
 function fixture(overrides = {}) {
-  const session = { id: 'p', generation: 'g', revision: 1, provider: 'codex', kind: 'codex', processState: 'running', agentProcessState: 'running', agentPid: 42, turnState: 'waiting' };
+  const session = { id: 'p', generation: 'g', revision: 1, provider: 'codex', kind: 'codex', processState: 'running', agentProcessState: 'running', agentPid: 42, turnState: 'waiting', turnId: 'established-turn' };
   const observation = { ok: true, id: 'p', generation: 'g', sequence: 7, cols: 100, rows: 28 }; const writes = [];
   const input = createTerminalInput({ getSession: () => session, readSession: async () => observation, write: async payload => { writes.push(payload); return { ok: true, status: 'written', delivery: 'pty-transport-only' }; }, now: () => 1000, ...overrides });
   return { input, session, observation, writes, action: (actionId, rest = {}) => ({ target: { id: 'p', generation: 'g' }, actionId, observationSequence: 7, keys: ['down'], ...rest }) };

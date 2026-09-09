@@ -2,7 +2,7 @@
 
 // In-memory command delivery only. Readiness is observed, never inferred from
 // silence or terminal output. Transport acceptance does not prove consumption.
-function createOrchestratorDelivery({ getSession, write, reserveInput = () => {}, onBeforeWrite = () => {}, onUpdate = () => {}, now = Date.now, maxWaitMs = 120000, maxQueued = 50, maxConcurrentDeliveries = 4 } = {}) {
+function createOrchestratorDelivery({ getSession, write, writeBusyPrompt, reserveInput = () => {}, onBeforeWrite = () => {}, onUpdate = () => {}, now = Date.now, maxWaitMs = 120000, maxQueued = 50, maxConcurrentDeliveries = 4 } = {}) {
   const queued = new Map(), results = new Map(), locks = new Map();
   const inFlight = new Set(), pendingSubmissions = new Set(), activeWrites = new Set();
   const configuredCapacity = Number(maxConcurrentDeliveries);
@@ -34,11 +34,17 @@ function createOrchestratorDelivery({ getSession, write, reserveInput = () => {}
   function blockedDelivery(a, reason) {
     return receipt(a, "blocked", false, { reason, error: reason, delivery: "not-dispatched" });
   }
+  function busyEligible(a, s) {
+    return typeof writeBusyPrompt === 'function' && a.targetAvailability !== 'idle' &&
+      require('./orchestratorBusyInput.cjs').isBusyPromptSubmission({ ...a, submit: true, promptSubmission: true }, s);
+  }
   async function deliver(a, s, entry) {
     if (disposed || a.signal?.aborted) return receipt(a, "cancelled", false);
     const latest = getSession(s.id);
     if (classify(latest, a) === "conversation-changed") return blockedDelivery(a, "conversation-changed");
-    if (classify(latest, a) !== "ready" || blocked(latest) || inFlight.has(key(latest)) || inFlight.size >= capacity) return null;
+    const state = classify(latest, a);
+    const busy = Boolean(entry && state === 'busy' && busyEligible(a, latest));
+    if ((state !== 'ready' && !busy) || blocked(latest) || inFlight.has(key(latest)) || inFlight.size >= capacity) return null;
     const targetKey = key(latest);
     inFlight.add(targetKey);
     const agent = latest.provider !== "terminal";
@@ -49,6 +55,19 @@ function createOrchestratorDelivery({ getSession, write, reserveInput = () => {}
     activeWrites.add(transport);
     const deliveryBaseline = { submittedAt: now(), kind: latest.provider === "terminal" ? "terminal" : latest.provider, turnId: latest.turnId, turnState: latest.turnState };
     try {
+      if (busy) {
+        // The native adapter owns observation, input leases and dispatch
+        // attribution. Never use the idle writer or reserve its raw input.
+        if (entry) entry.dispatched = true;
+        attempted = true;
+        let result = await writeBusyPrompt({ ...a, signal: AbortSignal.any([transport.signal, ...(a.signal ? [a.signal] : [])]) });
+        if (!result || result.delivery !== 'not-dispatched' && ['write-failed', 'unconfirmed', 'uncertain'].includes(result.status)) result = { ...result, ok: false, status: 'unknown' };
+        lock.inFlight = false;
+        if (result.delivery === 'not-dispatched') locks.delete(targetKey);
+        // Even a proven-unsent rejection ends this promotion. A later read or
+        // turn completion must not silently retry a rejected/uncertain attempt.
+        return receipt(a, result.status || 'unknown', Boolean(result.ok), { ...result, actionId: a.actionId });
+      }
       rollback = reserveInput({ id: latest.id, generation: latest.generation, data: a.text + "\r" });
       if (disposed || a.signal?.aborted || (entry && queued.get(a.actionId) !== entry)) {
         locks.delete(key(latest));
@@ -95,7 +114,7 @@ function createOrchestratorDelivery({ getSession, write, reserveInput = () => {}
         try { if (typeof rollback === 'function') rollback(); } catch { /* No transport was attempted. */ }
         return receipt(a, 'rejected', false, { error: String(error?.message || error), delivery: 'not-dispatched' });
       }
-      return receipt(a, "unknown", false, { error: String(error?.message || error), deliveryBaseline, inputDisposition: 'submitted-when-ready' });
+      return receipt(a, "unknown", false, { error: String(error?.message || error), deliveryBaseline, inputDisposition: busy ? 'submitted-while-running' : 'submitted-when-ready' });
     } finally {
       activeWrites.delete(transport);
       inFlight.delete(targetKey);
@@ -104,6 +123,7 @@ function createOrchestratorDelivery({ getSession, write, reserveInput = () => {}
   }
   function enqueue(a) {
     if (disposed || a.signal?.aborted) return receipt(a, "cancelled", false);
+    if (a.targetAvailability === 'idle') return blockedDelivery(a, 'The selected terminal is no longer available for immediate input. Select an idle terminal again.');
     if (queued.size >= maxQueued) return blockedDelivery(a, "Delivery queue is full. Wait for pending work, then try again.");
     const entry = { action: a, expiresAt: now() + maxWaitMs };
     entry.abort = () => { entry.cancelRequested = true; if (!entry.dispatched) finish(entry, receipt(a, "cancelled", false)); };
@@ -155,7 +175,7 @@ function createOrchestratorDelivery({ getSession, write, reserveInput = () => {}
         if (state === "busy" && s.observation === "observed" && (['running', 'busy', 'starting'].includes(s.turnState) || s.childActivity)) entry.expiresAt = now() + maxWaitMs;
         const observedReady = state === 'ready' && s.observation === 'observed' && !blocked(s);
         if ((now() >= entry.expiresAt && !observedReady) || ["waiting", "unverified"].includes(state)) { finish(entry, blockedDelivery(a, "Delivery readiness was not confirmed. Read the terminal before trying again.")); continue; }
-        if (state === "busy") { blocked(s); continue; }
+        if (state === "busy" && !busyEligible(a, s)) { blocked(s); continue; }
         if (earlier || blocked(s) || inFlight.has(targetKey) || inFlight.size >= capacity) continue;
         entry.inFlight = true;
         const work = deliver(a, s, entry).then(result => { if (result) finish(entry, result); }).finally(() => {

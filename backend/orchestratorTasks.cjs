@@ -122,9 +122,9 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
   // Operators serialize their control loops, but must be able to answer or
   // interrupt work a previous loop already dispatched. Result dependencies
   // remain a separate prerequisite below; ordinary sends retain their leases.
-  function conflict(a, b) {
+  function conflictingLane(a, b) {
     if (b.executionDone && b.waits.length && b.waits.every(wait => wait.nativeShell) && a.task.targetIds.length === 1 && b.task.targetIds.length === 1 && a.task.targetIds[0] === b.task.targetIds[0]) return false;
-    return a.lanes.some(lane => !(lane.operator && lane.key.startsWith('terminal:') && b.executionDone) && occupiedLanes(b).some(other => {
+    return a.lanes.find(lane => !(lane.operator && lane.key.startsWith('terminal:') && b.executionDone) && occupiedLanes(b).some(other => {
       if (lane.key !== other.key || (lane.readOnly && other.readOnly)) return false;
       if (lane.workItemId && lane.key.startsWith('workspace:')) {
         if (lane.workItemId === other.workItemId && (b.executionDone || b.parkedForSubmission)) return false;
@@ -135,28 +135,89 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
       return true;
     }));
   }
+  const requestName = job => `request "${job.task.label || job.task.text || 'Earlier work'}"`;
+  function targetName(id, owner) {
+    const target = currentSessions.find(session => session.id === id) || owner?.task.targets?.find(target => target.id === id);
+    return target?.name || id;
+  }
+  function ownerReason(owner, lane) {
+    const occupied = occupiedLanes(owner).filter(other => other.key === lane.key);
+    const ids = [...new Set(occupied.flatMap(other => other.targetIds || owner.task.targetIds))];
+    const waits = owner.waits.filter(wait => ids.includes(wait.targetId) && hasWorkspaceOccupancy(wait, { includeQueued: true }));
+    const location = lane.key.startsWith('workspace:') ? `workspace ${lane.key.slice('workspace:'.length)}` : 'terminal control';
+    const targets = ids.length ? ` on ${ids.map(id => targetName(id, owner)).join(', ')}` : '';
+    const state = waits.some(wait => wait.backgroundPending) ? 'background work is still active'
+      : waits.some(wait => !wait.delivered) ? 'its prompt is still awaiting delivery'
+        : waits.some(wait => wait.attributionAmbiguous) ? 'its result cannot yet be attributed to that request'
+          : waits.some(wait => ['running', 'busy', 'starting'].includes(currentSessions.find(session => session.id === wait.targetId)?.turnState)) ? 'work is still active'
+            : waits.length ? 'its result remains unverified'
+              : owner.admitted ? 'its control loop is still active' : 'it is ahead in the queue';
+    return `Waiting for ${requestName(owner)}${targets} in ${location}: ${state}.`;
+  }
+  function blockingReason(job, { dependenciesOnly = false } = {}) {
+    for (const id of job.task.dependsOn) {
+      const prior = jobs.get(id);
+      if (!prior || prior.task.status !== 'finished') return prior
+        ? `Waiting for prerequisite ${requestName(prior)}: ${prior.task.status === 'waiting-results' ? 'its result remains unverified' : prior.task.status}.`
+        : 'Waiting for a prerequisite request: its result is unavailable.';
+    }
+    if (dependenciesOnly) return undefined;
+    // Prefer the owning request over a generic busy-target message when both
+    // gates apply. Neither gate's admission semantics change.
+    for (const prior of jobs.values()) {
+      if (prior === job || !(prior.task.sequence < job.task.sequence || prior.admitted)
+        || !((!terminalStates.has(prior.task.status) && prior.task.status !== 'needs-answer') || prior.waits.some(wait => hasWorkspaceOccupancy(wait)))) continue;
+      const lane = conflictingLane(job, prior);
+      if (lane) return ownerReason(prior, lane);
+    }
+    for (const lane of job.lanes.filter(lane => lane.key.startsWith('terminal:') && !lane.operator)) {
+      const session = currentSessions.find(session => lane.targetIds?.includes(session.id));
+      if (session && (['running', 'busy', 'starting'].includes(session.turnState) || session.turnActive === true || session.childActivity) && session.kind !== 'terminal')
+        return `Waiting for ${targetName(session.id, job)}: ${session.childActivity ? 'background work is still active' : 'the terminal is still active'}.`;
+    }
+    return undefined;
+  }
+  function setWaitingReason(job, waitingReason) {
+    if (job.task.waitingReason !== waitingReason) update(job, { waitingReason });
+  }
   async function ready(job, { dependenciesOnly = false, resumeSubmission = false } = {}) {
     const signal = job.controller.signal;
     await new Promise((resolve, reject) => {
-      const finish = error => { listeners.delete(check); signal.removeEventListener('abort', abort); error ? reject(error) : resolve(); };
+      let settled = false, checking = false, recheckScheduled = false;
+      const finish = error => { settled = true; listeners.delete(check); signal.removeEventListener('abort', abort); error ? reject(error) : resolve(); };
       const abort = () => finish(new Error('Cancelled.'));
       const check = () => {
+        if (settled) return;
+        if (checking) {
+          // Publishing a blocker can synchronously publish its completion.
+          // Coalesce nested notifications without losing that wakeup or
+          // recursively re-entering admission while this check is unfinished.
+          if (!recheckScheduled) {
+            recheckScheduled = true;
+            queueMicrotask(() => { recheckScheduled = false; check(); });
+          }
+          return;
+        }
+        checking = true;
+        try {
         if (signal.aborted) return abort();
         for (const id of job.task.dependsOn) {
           const prior = jobs.get(id);
           if (!prior || ['failed', 'cancelled', 'paused'].includes(prior.task.status)) { finish(new Error('A prerequisite did not finish successfully.')); update(job, { status: 'paused', error: 'A prerequisite did not finish successfully. Submit a new instruction to continue.' }); return; }
-          if (prior.task.status !== 'finished') return;
+          if (prior.task.status !== 'finished') { setWaitingReason(job, blockingReason(job, { dependenciesOnly })); return; }
         }
         // Routing may need to wait before creating a worker. This prerequisite
         // gate must not acquire execution lanes or mark the job admitted.
-        if (dependenciesOnly) { finish(); return; }
-        for (const lane of job.lanes.filter(lane => lane.key.startsWith('terminal:') && !lane.operator)) { const session = currentSessions.find(session => lane.targetIds?.includes(session.id)); if (session && (['running', 'busy', 'starting'].includes(session.turnState) || session.turnActive === true || session.childActivity) && session.kind !== 'terminal') return; }
+        if (dependenciesOnly) { finish(); setWaitingReason(job, undefined); return; }
         // A later control request may have passed this job while it waited for
         // workspace ownership. Its active loop still owns the terminal lane.
-        for (const prior of jobs.values()) if (prior !== job && (prior.task.sequence < job.task.sequence || prior.admitted) && ((!terminalStates.has(prior.task.status) && prior.task.status !== 'needs-answer') || prior.waits.some(wait => hasWorkspaceOccupancy(wait))) && conflict(job, prior)) return;
+        const reason = blockingReason(job);
+        if (reason) { setWaitingReason(job, reason); return; }
         if (resumeSubmission) job.parkedForSubmission = false;
         job.admitted = true;
         finish();
+        setWaitingReason(job, undefined);
+        } finally { checking = false; }
       };
       listeners.add(check); signal.addEventListener('abort', abort, { once: true }); check();
     });
@@ -166,18 +227,23 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
     // An explicit target may not own a work item until its first authorized
     // submission. Compare its prospective workspace without minting ownership.
     if (!lanes.length && workspaceKey) lanes.push({ key: workspaceKey, workItemId, readOnly, targetIds: [targetId] });
-    const conflicts = () => lanes.some(lane => job.lanes.some(other => other.key === lane.key && other.workItemId && other.workItemId !== workItemId
+    const conflicts = () => job.lanes.find(other => lanes.some(lane => other.key === lane.key && other.workItemId && other.workItemId !== workItemId
       && !(lane.readOnly && other.readOnly) && job.waits.some(wait => hasWorkspaceOccupancy(wait, { includeQueued: true })
         && other.targetIds?.includes(wait.targetId))));
     if (!lanes.length || !conflicts()) return false;
     const signal = job.controller.signal;
     job.parkedForSubmission = true;
-    update(job, { status: 'queued', waitingReason: 'Waiting for earlier work in this workspace before submitting the next task.' });
+    update(job, { status: 'queued', waitingReason: ownerReason({ ...job, lanes: [conflicts()] }, conflicts()) });
     try {
       await new Promise((resolve, reject) => {
         const finish = error => { listeners.delete(check); signal.removeEventListener('abort', abort); error ? reject(error) : resolve(); };
         const abort = () => finish(new Error('Cancelled.'));
-        const check = () => { if (signal.aborted) abort(); else if (!conflicts()) finish(); };
+        const check = () => {
+          if (signal.aborted) { abort(); return; }
+          const lane = conflicts();
+          if (!lane) finish();
+          else setWaitingReason(job, ownerReason({ ...job, lanes: [lane] }, lane));
+        };
         listeners.add(check); signal.addEventListener('abort', abort, { once: true }); check();
       });
       // Controls admitted while parked keep their lanes until their own loop
@@ -291,7 +357,10 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
           const processUnready = session.processState !== undefined && session.processState !== 'running'
             || !shell && session.agentProcessState !== undefined && session.agentProcessState !== 'running';
           const starting = session.launchState === 'pending' || session.status === 'starting' || session.engineReady === false;
-          const ready = !stopped && !starting && !processUnready && session.observation === 'observed' && ['idle', 'completed', 'complete', 'finished', 'succeeded'].includes(session.turnState) && !session.pendingInput && !session.childActivity && session.turnActive !== true;
+          // Interaction evidence can outlive or arrive separately from the
+          // foreground turn state. An idle/completed turn cannot clear it.
+          const needsInput = session.status === 'waiting' || session.pendingInteraction || ['question', 'approval'].includes(session.attention?.reason);
+          const ready = !stopped && !starting && !processUnready && !needsInput && session.observation === 'observed' && ['idle', 'completed', 'complete', 'finished', 'succeeded'].includes(session.turnState) && !session.pendingInput && !session.childActivity && session.turnActive !== true;
           if (ready || stopped || failedStates.has(session.turnState)) {
             wait.done = true; wait.failed = !ready;
             if (ready) {
@@ -369,6 +438,6 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
     for (const job of selected) if (!terminalStates.has(job.task.status)) { job.controller?.abort(); for (const wait of job.waits) if (wait.source === 'watch') { wait.done = true; wait.delivered = false; } Object.assign(job.task, { status: 'cancelled', updatedAt: now(), waitingReason: job.waits.some(wait => !wait.done && wait.delivered) ? 'Request cancelled; previously sent terminal work may still be running.' : undefined }); }
     changed(); return { ok: selected.length > 0 || !requestId, status: 'cancelled' };
   }
-  return { create, hasCapacity, update, ready, waitForDependencies: job => ready(job, { dependenciesOnly: true }), waitForAssignmentSubmission, track, watch, reconcile, delivery, cancel, jobs, get: id => jobs.get(id), snapshot: () => [...jobs.values()].map(project), busy: () => [...jobs.values()].some(job => ['queued', 'routing', 'running'].includes(job.task.status)), clear() { const protectedIds = liveRequestOwners(); for (const [id, job] of jobs) if (terminalStates.has(job.task.status) && !protectedIds.has(id) && !job.waits.some(wait => hasWorkspaceOccupancy(wait))) jobs.delete(id); changed(); } };
+  return { create, hasCapacity, update, blockingReason, ready, waitForDependencies: job => ready(job, { dependenciesOnly: true }), waitForAssignmentSubmission, track, watch, reconcile, delivery, cancel, jobs, get: id => jobs.get(id), snapshot: () => [...jobs.values()].map(project), busy: () => [...jobs.values()].some(job => ['queued', 'routing', 'running'].includes(job.task.status)), clear() { const protectedIds = liveRequestOwners(); for (const [id, job] of jobs) if (terminalStates.has(job.task.status) && !protectedIds.has(id) && !job.waits.some(wait => hasWorkspaceOccupancy(wait))) jobs.delete(id); changed(); } };
 }
 module.exports = { createTaskScheduler, createSemaphore, hasWorkspaceOccupancy };

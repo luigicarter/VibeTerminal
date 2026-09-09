@@ -90,7 +90,7 @@ async function screenshot(client, name) { if (hidden) { result.skippedScreenshot
   const speechWav = path.join(output, 'fake-microphone.wav');
   // Mid-command pauses must survive; the final pause gives completion a quiet
   // window before Chromium loops the fake microphone again.
-  const sentence = '<speak version="1.0" xml:lang="en-US">Push to talk works. Show me the workspace. Hey Vibe.<break time="500ms"/>Open the project<break time="600ms"/>and run the tests.<break time="4s"/></speak>';
+  const sentence = '<speak version="1.0" xml:lang="en-US">Push to talk works. Show me the workspace. Hey Lina.<break time="500ms"/>Open the project<break time="600ms"/>and run the tests.<break time="4s"/></speak>';
   const synthesis = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
     `$ErrorActionPreference='Stop';Add-Type -AssemblyName System.Speech;$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;$f=New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo(16000,[System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen,[System.Speech.AudioFormat.AudioChannel]::Mono);$s.SetOutputToWaveFile('${speechWav}',$f);$s.SpeakSsml('${sentence}');$s.Dispose()`],
     { windowsHide: true, encoding: 'utf8', timeout: 120000 });
@@ -119,7 +119,7 @@ async function screenshot(client, name) { if (hidden) { result.skippedScreenshot
   await fill('input[list="orchestrator-models"]', 'fixture/relay');
   await click('.assistant-enable input');
   const consentDialog=await until(()=>events().find(e=>e.consentDialog)?.consentDialog,'first-use microphone consent dialog');
-  assert.equal(consentDialog.title,'vibeTerminal');assert.match(consentDialog.message,/Allow vibeTerminal to use your microphone/);assert.deepEqual(consentDialog.buttons,['Allow microphone','Not now']);assert.equal(consentDialog.defaultId,1);assert.equal(consentDialog.cancelId,1);assert.equal(consentDialog.parentId,consentDialog.actualMainId);assert(consentDialog.parentId);
+  assert.equal(consentDialog.title,'Lina Terminal');assert.match(consentDialog.message,/Allow Lina Terminal to use your microphone/);assert.deepEqual(consentDialog.buttons,['Allow microphone','Not now']);assert.equal(consentDialog.defaultId,1);assert.equal(consentDialog.cancelId,1);assert.equal(consentDialog.parentId,consentDialog.actualMainId);assert(consentDialog.parentId);
   assert.match(consentDialog.detail,/OpenRouter/);assert.match(consentDialog.detail,/background/);assert.equal(events().some(e=>e.nativeOptions),false);assert.equal(events().some(e=>e.payload?.microphoneReady),false);assert.equal((await cdp.eval('window.vibe.voice.getState()')).listening,false);
   record('first-use-consent-blocks-window-and-capture',consentDialog);
   fs.writeFileSync(consentResponseFile,JSON.stringify({response:0}));
@@ -214,7 +214,7 @@ async function screenshot(client, name) { if (hidden) { result.skippedScreenshot
   await until(() => voice.eval(`window.__qaVoiceStates.find(s=>s.transcript==='push to talk works')`), 'push-to-talk transcript in state');
   record('space-hold-records-live-microphone-and-uploads-it', { ...held, phases: heldPhases });
   await until(async () => (await cdp.eval('window.vibe.voice.getState()')).phase === 'listening', 'manual reply finished');
-  fs.writeFileSync(transcriptionFile, JSON.stringify({ text: 'Hey Vibe open the project and run the tests' }));
+  fs.writeFileSync(transcriptionFile, JSON.stringify({ text: 'Hey Lina open the project and run the tests' }));
   assert.equal((await cdp.eval('window.vibe.orchestrator.configure({handsFreeEnabled:true})')).ok, true);
   await until(async () => (await cdp.eval('window.vibe.voice.getState()')).handsFreeStatus === 'ready', 'native hands-free helpers ready', 20000);
   const automatic = await until(() => voice.eval(`window.__qaVoiceStates.find(s=>s.recordingSource==='wake')`), 'native wake starts recording from fake microphone', 30000);
@@ -223,7 +223,7 @@ async function screenshot(client, name) { if (hidden) { result.skippedScreenshot
   await screenshot(cdp, 'automatic-recording-status.png');
   record('visible-automatic-recording-status', status);
   const automaticTranscript = await until(() => voice.eval(`window.__qaVoiceStates.find(s=>s.transcript==='open the project and run the tests')`), 'automatic completion and wake-prefix removal', 30000);
-  const automaticUpload = events().find(e => e.transcription === 'Hey Vibe open the project and run the tests');
+  const automaticUpload = events().find(e => e.transcription === 'Hey Lina open the project and run the tests');
   assert(automaticUpload?.peak > 600, 'Wake recording must contain microphone audio');
   record('native-wake-vad-completion-through-real-capture', { automatic, automaticTranscript, upload: automaticUpload });
   await until(async () => (await cdp.eval('window.vibe.voice.getState()')).phase === 'listening', 'automatic reply returns to wake listening');

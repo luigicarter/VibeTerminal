@@ -51,6 +51,20 @@ test('watch requires observed readiness and excludes stopped stale idle sessions
  const h=fixture(); h.tasks.watch(h.job,h.action,session); h.tasks.reconcile([{...session,turnId:'newer'}]); assert.equal(h.job.waits[0].attributionAmbiguous,true); assert.equal(h.job.waits[0].turnId,'t'); assert.equal(h.job.waits[0].done,false);
 });
 
+test('readiness cannot finish while an independently observed interaction still needs input', () => {
+ for (const kind of ['codex', 'fusion', 'openfusion']) {
+  for (const patch of [{ status: 'waiting' }, { pendingInteraction: true }, { attention: { reason: 'question' } }, { attention: { reason: 'approval' } }]) {
+   const f = fixture('ready');
+   const blocked = { ...session, kind, turnState: 'idle', ...patch };
+   assert.equal(f.tasks.watch(f.job, f.action, blocked).status, 'watching', `${kind}: ${JSON.stringify(patch)}`);
+   f.tasks.reconcile([{ ...blocked, turnState: 'completed' }]);
+   assert.equal(f.job.waits[0].done, false, 'a foreground completion does not resolve independent pending input');
+   f.tasks.reconcile([{ ...session, kind, turnState: 'idle', status: 'idle' }]);
+   assert.equal(f.job.waits[0].observedState, 'ready');
+  }
+ }
+});
+
 test('native startup metadata cannot finish readiness before the launched process is ready', t => {
  const { createTerminalRuntime } = require('../../backend/terminalRuntime.cjs');
  const runtime = createTerminalRuntime(); t.after(() => runtime.dispose());

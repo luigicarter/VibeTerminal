@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { loadVoiceModels } = require('../../backend/voiceModels.cjs');
-const names = ['encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx', 'decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx', 'joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx', 'tokens.txt', 'keywords.txt', 'silero_vad.onnx', 'smart-turn-v3.2-cpu.onnx', 'NOTICE.txt'];
+const names = ['encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx', 'decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx', 'joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx', 'tokens.txt', 'keywords.txt', 'bpe.vocab', 'wake-hotwords.txt', 'silero_vad.onnx', 'smart-turn-v3.2-cpu.onnx', 'NOTICE.txt'];
 function fixture(t) {
   const temporaryRoot = path.resolve(__dirname, '../../.tmp/handsfree-assets');
   fs.mkdirSync(temporaryRoot, { recursive: true });

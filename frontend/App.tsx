@@ -4810,7 +4810,7 @@ export default function App() {
             <img src={vibeTerminalLogo} alt="" aria-hidden="true" />
           </div>
           <div>
-            <h1>vibeTerminal</h1>
+            <h1>Lina Terminal</h1>
             <span>WORKSPACE / AGENTS</span>
           </div>
         </div>
@@ -5659,14 +5659,14 @@ export default function App() {
               install. The installer is already running and closes the app. */}
           {updateState.status === "switching" && (
             <p>
-              Installing vibeTerminal {updateVersion}. The app will close and
+              Installing Lina Terminal {updateVersion}. The app will close and
               reopen on that version.
             </p>
           )}
 
           {updateState.status === "available" && (
             <>
-              <p>vibeTerminal {updateVersion} is ready to download.</p>
+              <p>Lina Terminal {updateVersion} is ready to download.</p>
               <div className="update-overlay-actions">
                 <button onClick={dismissUpdateOverlay}>Later</button>
                 <button className="primary" onClick={downloadUpdate}>
@@ -5679,7 +5679,7 @@ export default function App() {
 
           {updateState.status === "downloading" && (
             <>
-              <p>Downloading vibeTerminal {updateVersion}.</p>
+              <p>Downloading Lina Terminal {updateVersion}.</p>
               <div
                 className="update-progress"
                 aria-label={`Update download ${updatePercent}%`}

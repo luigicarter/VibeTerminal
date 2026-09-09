@@ -557,6 +557,24 @@ export default function TerminalPane({
     });
   }
 
+  function handleTerminalWheel(event: WheelEvent) {
+    const terminal = terminalRef.current;
+    const buffer = terminal?.buffer.active;
+    if (!terminal || !buffer || buffer.type !== "normal" || buffer.baseY === 0 ||
+        !Number.isFinite(event.deltaY) || event.deltaY >= 0) {
+      return;
+    }
+    const trackingMode = terminal.modes.mouseTrackingMode;
+    if (trackingMode === "none" || trackingMode === "x10" || event.shiftKey ||
+        terminalExitedRef.current || buffer.viewportY < buffer.baseY) {
+      // Chromium can deliver the viewport scroll AFTER the RAF used by
+      // syncFollowTail. Sampling there sees the old tail and the next resize
+      // or onScroll repair can undo the wheel. Record intent synchronously;
+      // onScroll re-arms following when the user reaches the bottom again.
+      followTailRef.current = false;
+    }
+  }
+
   function handleTerminalPointerDown() {
     terminalPointerRef.current = true;
   }
@@ -719,7 +737,7 @@ export default function TerminalPane({
     // handlers scroll the buffer, so the repair below can tell a gesture apart
     // from a stray scroll.
     const terminalHost = containerRef.current;
-    terminalHost.addEventListener("wheel", syncFollowTail, {
+    terminalHost.addEventListener("wheel", handleTerminalWheel, {
       capture: true,
       passive: true
     });
@@ -771,11 +789,34 @@ export default function TerminalPane({
     // the TUI sees a single small step and scrolling reads as stuck.
     // Synthesize one SGR report per scrolled line instead, at the same rate
     // xterm scrolls an untracked buffer. Anything unsupported (no tracking,
-    // x10 protocol, non-SGR encoding, shift-wheel) falls through to xterm's
-    // own handling unchanged.
+    // x10 protocol or non-SGR encoding) falls through to xterm's own handling,
+    // except when the user is navigating local history.
     const wheelAccumulator: WheelAccumulator = { partial: 0 };
     terminal.attachCustomWheelEventHandler((event) => {
       const trackingMode = terminal.modes.mouseTrackingMode;
+      const buffer = terminal.buffer.active;
+      // Once the scrollbar has moved into history, wheel gestures belong to
+      // that history too. At the live tail, a running TUI still owns its mouse
+      // events. Shift explicitly selects local history; xterm 5.5 otherwise
+      // discards Shift-wheel entirely, even when mouse reporting is disabled.
+      const localHistory = buffer.type === "normal" && buffer.baseY > 0 &&
+        (event.shiftKey || terminalExitedRef.current || buffer.viewportY < buffer.baseY);
+      if (localHistory && (event.shiftKey || (trackingMode !== "none" && trackingMode !== "x10"))) {
+        const screen = terminal.element?.querySelector(".xterm-screen");
+        const rowHeight = (screen?.getBoundingClientRect().height ?? 0) / Math.max(1, terminal.rows);
+        const fastModifier = terminal.options.fastScrollModifier ?? "alt";
+        const fastHeld = (fastModifier === "alt" && event.altKey) ||
+          (fastModifier === "ctrl" && event.ctrlKey);
+        const lines = computeWheelLines(wheelAccumulator, {
+          deltaY: event.deltaY * (terminal.options.scrollSensitivity ?? 1) *
+            (fastHeld ? terminal.options.fastScrollSensitivity ?? 5 : 1),
+          deltaMode: event.deltaMode
+        }, rowHeight, terminal.rows);
+        terminal.scrollLines(lines);
+        event.preventDefault();
+        event.stopPropagation();
+        return false;
+      }
       if (trackingMode === "none" || trackingMode === "x10") {
         return true;
       }
@@ -1083,7 +1124,7 @@ export default function TerminalPane({
 
     return () => {
       resizeObserver.disconnect();
-      terminalHost.removeEventListener("wheel", syncFollowTail, true);
+      terminalHost.removeEventListener("wheel", handleTerminalWheel, true);
       terminalHost.removeEventListener("keydown", syncFollowTail, true);
       terminalHost.removeEventListener(
         "pointerdown",

@@ -38,7 +38,7 @@ async function fixture(t) {
       assert.ok(queue.length, `Unexpected ${compiler ? 'compiler' : 'executor'} request`);
       (compiler ? f.compiler : f.executor).push(body);
       const step = queue.shift(), result = typeof step === 'function' ? await step(compiler ? metadata(body) : body) : step;
-      if (compiler) { if (f.rejectNamedChoice) assert.equal(body.tool_choice, 'auto'); else assert.equal(body.tool_choice.function.name, 'interpret_workspace'); }
+      if (compiler) assert.equal(body.tool_choice, 'auto');
       return new Response(JSON.stringify(compiler ? (result?.choices ? result : calls('interpret_workspace', result)) : result));
     } });
   t.after(async () => { await f.relay.dispose(); assert.ok(path.resolve(root).startsWith(path.join(os.tmpdir(), 'vibe-semantic-test-'))); fs.rmSync(root, { recursive: true, force: true }); });
@@ -49,15 +49,15 @@ async function fixture(t) {
   return f;
 }
 
-test('a provider rejecting named tool choice retries auto once and remembers compatibility without weakening validation', async t => {
+test('automatic tool choice avoids the incompatible named request from the first call without weakening validation', async t => {
   const f = await fixture(t); f.rejectNamedChoice = true;
   await f.run('Hello.', none, reply('Hello.'));
   await f.run('Hello again.', none, reply('Hello again.'));
-  assert.equal(f.namedRejections, 1); assert.equal(f.effects.length, 0);
+  assert.equal(f.namedRejections || 0, 0); assert.equal(f.effects.length, 0);
   const missingCall = reply('Plain prose cannot authorize an effect.');
   const rejected = await f.run('Please close Codex 1.', [missingCall, missingCall]);
   assert.equal(rejected.ok, false); assert.match(rejected.error, /could not interpret/); assert.equal(f.effects.length, 0);
-  assert.equal(f.namedRejections, 1);
+  assert.equal(f.namedRejections || 0, 0);
 });
 
 test('invalid interpretation is repaired once using original context, with both attempts charged', async t => {

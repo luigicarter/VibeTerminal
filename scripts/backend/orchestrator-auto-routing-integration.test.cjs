@@ -31,11 +31,11 @@ async function fixture(t) {
   f.relay = createOrchestrator({ userDataPath: root, secureStorage: { isEncryptionAvailable: () => false },
     getRoots: () => ({ documents: root, projects: f.projects }), getSessions: () => f.sessions,
     getLaunchers: () => f.launchers,
-    interpretIntent: context => {
+    interpretIntent: async context => {
       f.contexts.push(context);
       const plan = f.plans.shift();
       assert.ok(plan, 'Every user request has one explicitly scripted interpretation');
-      const interpreted = typeof plan === 'function' ? plan(context) : plan;
+      const interpreted = typeof plan === 'function' ? await plan(context) : plan;
       return interpreted.actions ? interpreted : { goal: context.instruction, actions: [interpreted] };
     },
     routeTask: async (context, api) => {
@@ -282,6 +282,65 @@ test('an explicitly submitted managed task holds its workspace against independe
   await f.relay.refresh();
   const result = await second; assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(f.effects.filter(a => a.kind === 'send_prompt').length, 2);
+});
+
+test('continuing an unsent queued task transfers its original request and submits only once', { timeout: 3000 }, async t => {
+  const f = await fixture(t);
+  await f.run('Earlier project work.');
+  const earlier = f.sessions[0], earlierSend = f.effects.find(action => action.kind === 'send_prompt');
+  const pending = f.run('Review the queued task; do not edit.');
+  await until(() => f.relay.getState().tasks.some(task => task.text === 'Review the queued task; do not edit.' && task.status === 'queued' && task.targetIds.length));
+  const original = f.relay.getState().tasks.find(task => task.text === 'Review the queued task; do not edit.');
+  const target = f.sessions[1];
+  f.plans.push(context => {
+    const queued = context.pendingCommands.find(command => command.requestId === original.requestId);
+    assert.equal(queued?.queued, true, 'The unsent original must be exposed as pending authority');
+    assert.equal(queued.grants[0].text, 'Review the queued task; do not edit.');
+    return { goal: 'Continue the original task.', continuationOf: original.requestId, actions: [
+      { kind: 'operate_terminal', sourceUserId: original.requestId, targetIds: [target.id] }
+    ] };
+  });
+  const resumed = f.relay.send({ text: 'Send that queued task.', origin: 'text', replyToRequestId: original.requestId });
+  await until(() => f.relay.getState().tasks.find(task => task.requestId === original.requestId).status === 'cancelled');
+  assert.equal(f.effects.filter(action => action.kind === 'send_prompt').length, 1, 'A project conflict still gates the transfer');
+  Object.assign(earlier, { turnId: 'earlier-done', actionId: earlierSend.actionId, turnState: 'completed', turnStartedAt: Date.now(), turnEndedAt: Date.now() });
+  await f.relay.refresh();
+  const result = await resumed;
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal((await pending).status, 'cancelled');
+  assert.equal(f.effects.filter(action => action.kind === 'create_session').length, 2);
+  const sent = f.effects.filter(action => action.kind === 'send_prompt' && action.targetId === target.id);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].text, 'Review the queued task; do not edit.');
+  await f.relay.refresh();
+  assert.equal(f.effects.filter(action => action.kind === 'send_prompt' && action.targetId === target.id).length, 1);
+});
+
+for (const race of [false, true]) test(`queued recovery ${race ? 'after original admission' : 'interpretation failure'} cannot retain a second delivery grant`, { timeout: 3000 }, async t => {
+  const f = await fixture(t);
+  await f.run('Earlier project work.');
+  const earlier = f.sessions[0], earlierSend = f.effects.find(action => action.kind === 'send_prompt');
+  const pending = f.run('The original queued task.');
+  await until(() => f.relay.getState().tasks.some(task => task.text === 'The original queued task.' && task.status === 'queued' && task.targetIds.length));
+  const original = f.relay.getState().tasks.find(task => task.text === 'The original queued task.');
+  const target = f.sessions[1];
+  const releaseEarlier = async () => {
+    Object.assign(earlier, { turnId: 'earlier-done', actionId: earlierSend.actionId, turnState: 'completed', turnStartedAt: Date.now(), turnEndedAt: Date.now() });
+    await f.relay.refresh();
+  };
+  f.plans.push(async context => {
+    assert(context.pendingCommands.some(command => command.requestId === original.requestId && command.queued));
+    if (!race) throw new Error('Fixture interpretation failure.');
+    await releaseEarlier();
+    await until(() => f.relay.getState().tasks.find(task => task.requestId === original.requestId).status !== 'queued');
+    return { goal: 'Continue original task.', continuationOf: original.requestId, actions: [{ kind: 'operate_terminal', sourceUserId: original.requestId, targetIds: [target.id] }] };
+  });
+  const recovered = await f.relay.send({ text: 'Send the original queued task.', origin: 'text', replyToRequestId: original.requestId });
+  assert.equal(recovered.ok, false);
+  assert.equal(f.relay.retry({ requestId: recovered.requestId }).ok, false, 'A rejected recovery must not retain duplicate authority');
+  if (!race) await releaseEarlier();
+  assert.equal((await pending).ok, true);
+  assert.equal(f.effects.filter(action => action.kind === 'send_prompt' && action.targetId === target.id).length, 1);
 });
 
 for (const controls of [...[' Enter ', ' CTRL-M ', 'Ctrl-J'].map(key => ({ keys: [key] })),

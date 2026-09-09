@@ -87,13 +87,17 @@ let offset=0;async function loop(){const lines=fs.readFileSync(queue,'utf8').tri
   await post({type:"agent.waiting",detail:"approval"});await until(async()=> (await snap())?.attention?.state==="waiting","approval wait");
   await post({type:"agent.running",detail:"tool"});await until(async()=>{const s=await snap();return s?.turnState==="running"&&!s.attention;},"approval cleared by resume");
   await post({type:"agent.activity",phase:"start",toolId:"tool-1",toolName:"Read fixture"});
-  await post({type:"agent.activity",phase:"start",taskId:"child-1",taskLabel:"First child"});
-  await post({type:"agent.activity",phase:"start",taskId:"child-2",taskLabel:"Second child"});
+  await post({type:"agent.subagent.started",lifecycle:"native",taskId:"child-1",taskLabel:"First child"});
+  await post({type:"agent.subagent.started",lifecycle:"native",taskId:"child-2",taskLabel:"Second child"});
   await until(async()=> (await snap())?.children.length===2,"exact two children");
   await post({type:"agent.completed"});await until(async()=> (await snap())?.turnState==="completed","root completion");
   assert(await cdp.eval(`document.querySelector('${selector("fake-codex")} button[aria-label="Terminal activity"]').textContent.toLowerCase().includes('working')`),"pending children keep activity working");
-  await post({type:"agent.activity",phase:"stop",taskId:"child-1"});await until(async()=> (await snap())?.children.length===1,"one child remains");
-  await post({type:"agent.activity",phase:"stop",taskId:"child-2"});await until(async()=>{const s=await snap();return s?.children.length===0&&s.turnState==="completed";},"final child completed");
+  // Native Stop is provisional; a tool return or root completion cannot prove
+  // detached children ended. Explicit child session end settles their identity.
+  await post({type:"agent.subagent.stopped",lifecycle:"native",provisional:true,taskId:"child-1"});
+  await until(async()=>{const s=await snap();return s?.children.length===2&&s.children.find(c=>c.id==='child-1')?.observation==='provisional';},"provisional child stop retains activity");
+  await post({type:"agent.session",phase:"end",transcriptKind:"subagent",taskId:"child-1"});await until(async()=> (await snap())?.children.length===1,"one child remains");
+  await post({type:"agent.session",phase:"end",transcriptKind:"subagent",taskId:"child-2"});await until(async()=>{const s=await snap();return s?.children.length===0&&s.turnState==="completed";},"final child completed");
   await until(()=>cdp.eval(`document.querySelector('${selector("fake-codex")} button[aria-label="Terminal activity"]').textContent.toLowerCase().includes('done')`),"done activity pill");
   assert(!await cdp.eval(`document.querySelector('${selector("fake-codex")} .terminal-pane').classList.contains('terminal-pane-attention')`),"visible selected completion does not leave stale attention glow");
   check("fake-codex-lifecycle",await snap());

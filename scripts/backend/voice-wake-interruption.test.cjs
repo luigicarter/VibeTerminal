@@ -16,7 +16,7 @@ function fixture(options = {}) {
     } }; },
     onAudio: chunk => audio.push(chunk),
     fetch: async (url, init) => {
-      if (url.endsWith('/transcriptions')) { uploads.push(JSON.parse(init.body)); return { ok: true, json: async () => ({ text: options.text || 'Hey Vibe, do the next thing' }) }; }
+      if (url.endsWith('/transcriptions')) { uploads.push(JSON.parse(init.body)); return { ok: true, json: async () => ({ text: options.text || 'Hey Lina, do the next thing' }) }; }
       speechCalls.push(init); return options.speech ? options.speech(init, speechCalls.length) : pcm();
     }
   });
@@ -25,7 +25,7 @@ function fixture(options = {}) {
     capture(ms = 100, value = .01) {
       controller.frames({ samples: Array(ms * 16).fill(value), sampleRate: 16000, captureToken: 1, sampleStart: position }); position += ms * 16; return packets.at(-1);
     },
-    classify(packet, { wake = false, speech = false } = {}) { callbacks.onFrame({ ...packet, samples: undefined, sampleEnd: packet.sampleStart + packet.samples.length, speech, ...(wake ? { wake: { keyword: 'HEY VIBE', startSample: packet.sampleStart } } : {}) }); },
+    classify(packet, { wake = false, speech = false } = {}) { callbacks.onFrame({ ...packet, samples: undefined, sampleEnd: packet.sampleStart + packet.samples.length, speech, ...(wake ? { wake: { keyword: 'HEY LINA', startSample: packet.sampleStart } } : {}) }); },
     wake() { const packet = this.capture(); this.classify(packet, { wake: true, speech: true }); return packet; },
     finish() { return controller.configure({ finishRecording: controller.getState().recordingId }); },
     async speak(message = {}) { const result = controller.speak({ origin: 'voice', text: 'The result is ready.', ...message }); await until(() => speechCalls.length); return { result }; }
@@ -72,7 +72,7 @@ test('a provider ignoring cancellation cannot block fresh speech or overwrite it
 });
 
 for (const kind of ['task', 'native', 'permission', 'followup']) test(`wake during ${kind} question preserves the answer route and strips the prefix`, async t => {
-  const f = fixture({ text: kind === 'permission' ? 'Hey Vibe, allow once' : 'Hey Vibe, yes' }); t.after(() => f.controller.dispose()); await f.activate();
+  const f = fixture({ text: kind === 'permission' ? 'Hey Lina, allow once' : 'Hey Lina, yes' }); t.after(() => f.controller.dispose()); await f.activate();
   let speech;
   if (kind === 'native' || kind === 'permission') {
     const interaction = { id: 'native-q', sessionId: 'pane', generation: 4, revision: 2, state: 'pending', kind: kind === 'permission' ? 'permission' : 'question', detail: 'Allow this?', questions: [{ id: 'confirm', question: 'Continue?', options: [{ label: 'Yes' }] }] };
@@ -90,7 +90,7 @@ for (const kind of ['task', 'native', 'permission', 'followup']) test(`wake duri
 });
 
 test('replaced question does not recover an obsolete answer identity', async t => {
-  const f = fixture({ text: 'Hey Vibe, show status' }); t.after(() => f.controller.dispose()); await f.activate();
+  const f = fixture({ text: 'Hey Lina, show status' }); t.after(() => f.controller.dispose()); await f.activate();
   const question = { id: 'old', requestId: 'r1', text: 'Continue?' }; f.relay.tasks = [{ requestId: 'r1', status: 'needs-answer', question }];
   const { result } = await f.speak({ question, requestId: 'r1' }); f.relay.tasks[0].question = { ...question, id: 'new' };
   f.wake(); f.finish(); await until(() => f.sent.length); assert.equal((await result).status, 'cancelled');
@@ -98,14 +98,14 @@ test('replaced question does not recover an obsolete answer identity', async t =
 });
 
 test('wake-only interruption keeps a pending question available for the next answer', async t => {
-  const f = fixture({ text: 'Hey Vibe!' }); t.after(() => f.controller.dispose()); await f.activate();
+  const f = fixture({ text: 'Hey Lina!' }); t.after(() => f.controller.dispose()); await f.activate();
   const question = { id: 'q1', requestId: 'r1', text: 'Continue?' }; f.relay.tasks = [{ requestId: 'r1', status: 'needs-answer', question }];
   const { result } = await f.speak({ question, requestId: 'r1' }); f.wake(); f.finish(); await until(() => f.controller.getState().phase === 'awaiting-answer');
   assert.equal((await result).status, 'cancelled'); assert.equal(f.sent.length, 0); assert.equal(f.dispatched.length, 0);
 });
 
 test('a question interrupted before its first TTS byte still routes the answer to that question', async t => {
-  const pending = deferred(), f = fixture({ text: 'Hey Vibe, choose the second option', speech: () => pending.promise });
+  const pending = deferred(), f = fixture({ text: 'Hey Lina, choose the second option', speech: () => pending.promise });
   t.after(() => f.controller.dispose()); await f.activate();
   const question = { id: 'q1', requestId: 'r1', text: 'Which option?' }; f.relay.tasks = [{ requestId: 'r1', status: 'needs-answer', question }];
   const { result } = await f.speak({ question, requestId: 'r1' });

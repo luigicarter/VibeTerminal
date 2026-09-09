@@ -1,14 +1,17 @@
 'use strict';
 
+const { terminalNavigationGuide } = require('./orchestratorTerminalGuide.cjs');
+
 // The relay has one conversation. Session directories contain identity/title
 // metadata; provider transcripts enter context only through explicit reads.
-function sessionSummary(s) {
+function sessionSummary(s, { includeNavigationGuide = true } = {}) {
   const native = s.conversation || s.threadRef;
   return {
     id: s.id, generation: s.generation, launchToken: s.launchToken,
     name: s.name, conversationTitle: s.conversationTitle || native?.title,
     aliases: [...new Set((s.aliases || []).filter(v => typeof v === 'string'))].slice(0, 5),
     kind: s.kind, provider: s.provider, cwd: s.cwd, projectName: s.projectName,
+    ...(includeNavigationGuide && { terminalNavigationGuide: terminalNavigationGuide(s) }),
     turnId: s.turnId, turnState: s.turnState, turnStartedAt: s.turnStartedAt, turnEndedAt: s.turnEndedAt, pendingInput: s.pendingInput,
     status: s.status, observation: s.observation, lastActivityAt: s.lastActivityAt,
     home: s.openFusion || s.kind === 'openfusion' ? 'openfusion' : s.providerProfileId ? 'custom' : 'global',
@@ -21,7 +24,7 @@ function sessionSummary(s) {
   };
 }
 
-function listSessionSummaries(sessions, { query = '', provider, cwd, offset = 0, limit = 50 } = {}) {
+function listSessionSummaries(sessions, { query = '', provider, cwd, offset = 0, limit = 50, includeNavigationGuide = true } = {}) {
   const needle = String(query).trim().toLowerCase();
   const selected = sessions.filter(s => {
     if (provider && ![s.provider, s.kind].includes(provider)) return false;
@@ -30,7 +33,9 @@ function listSessionSummaries(sessions, { query = '', provider, cwd, offset = 0,
   });
   const start = Math.max(0, Math.min(10000, Math.floor(Number(offset) || 0)));
   const size = Math.max(1, Math.min(200, Math.floor(Number(limit) || 50)));
-  return { ok: true, sessions: selected.slice(start, start + size).map(sessionSummary), total: selected.length,
+  // Model directories need identities and state; read_session supplies the full
+  // provider guide when inspecting a target. Other callers retain their guide.
+  return { ok: true, sessions: selected.slice(start, start + size).map(session => sessionSummary(session, { includeNavigationGuide })), total: selected.length,
     nextOffset: start + size < selected.length ? start + size : null, truncated: start + size < selected.length };
 }
 

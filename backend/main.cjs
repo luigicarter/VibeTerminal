@@ -13,6 +13,13 @@ const {
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+
+// Keep the existing profile when changing the display name: workspaces,
+// connected providers, and voice settings already live in this directory.
+const existingUserDataPath = app.getPath("userData");
+app.setName("Lina Terminal");
+app.setPath("userData", existingUserDataPath);
+
 const { spawn } = require("child_process");
 const { StringDecoder } = require("string_decoder");
 const { createTerminalRuntime } = require("./terminalRuntime.cjs");
@@ -677,7 +684,7 @@ function httpsGet(url, { json = false, redirects = 5 } = {}) {
       {
         headers: {
           // GitHub rejects API requests without a User-Agent.
-          "user-agent": "vibeTerminal",
+          "user-agent": "Lina Terminal",
           accept: json ? "application/vnd.github+json" : "*/*"
         },
         timeout: VERSION_INSTALLER_TIMEOUT_MS
@@ -821,7 +828,7 @@ async function installAppVersion(version) {
     fs.mkdirSync(downloadDir, { recursive: true });
     const installerPath = path.join(
       downloadDir,
-      release.assetName || `vibeTerminal-Setup-${target}.exe`
+      release.assetName || `LinaTerminal-Setup-${target}.exe`
     );
 
     const response = await httpsGet(release.downloadUrl);
@@ -943,7 +950,7 @@ async function checkForAppUpdates(options = {}) {
     if (updateState.status === "not-available") {
       return {
         ok: true,
-        message: "vibeTerminal is up to date."
+        message: "Lina Terminal is up to date."
       };
     }
 
@@ -1841,7 +1848,7 @@ function createMainWindow() {
     minHeight: 640,
     backgroundColor: "#111111",
     icon: getAppIconPath(),
-    title: "vibeTerminal",
+    title: "Lina Terminal",
     show: isScreenshotMode && !isHiddenScreenshot,
     autoHideMenuBar: false,
     webPreferences: {

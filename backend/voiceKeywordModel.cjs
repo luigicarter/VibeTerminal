@@ -1,17 +1,21 @@
 const { performance } = require('node:perf_hooks');
+const { createWakeVerifier } = require('./voiceWakeVerifier.cjs');
 
-function createKeywordDetector({ paths, sherpa = require('sherpa-onnx-node') }) {
+function createKeywordDetector({ paths, sherpa = require('sherpa-onnx-node'), verifierFactory = createWakeVerifier }) {
   let spotter = new sherpa.KeywordSpotter({
     featConfig: { sampleRate: 16000, featureDim: 80 },
     modelConfig: { transducer: { encoder: paths.keyword.encoder, decoder: paths.keyword.decoder, joiner: paths.keyword.joiner }, tokens: paths.keyword.tokens, numThreads: 1, provider: 'cpu', debug: false },
-    keywordsFile: paths.keyword.keywords, maxActivePaths: 4, numTrailingBlanks: 1, keywordsScore: 1, keywordsThreshold: 0.25
+    // Keep close-name alternatives in the beam so quiet/fast Lina speech is
+    // not pruned and Lisa/Linda can win without becoming wake activations.
+    keywordsFile: paths.keyword.keywords, maxActivePaths: 32, numTrailingBlanks: 1, keywordsScore: 1, keywordsThreshold: 0.25
   });
   let vad = new sherpa.Vad({ sileroVad: { model: paths.vad.model, threshold: 0.5, minSpeechDuration: 0.064, minSilenceDuration: 0.032, windowSize: 512, maxSpeechDuration: 60 }, sampleRate: 16000, numThreads: 1, provider: 'cpu', debug: false }, 65);
+  const verifier = verifierFactory({ paths, sherpa });
   let primary = null, companion = null, identity = null, origin = 0, expected = null, lastWake = -Infinity;
   let history = new Float32Array(0), lastSpeech = -Infinity, lastCompanion = -Infinity, companionGain = 1;
   function reset() {
     primary = null; companion = null; identity = null; expected = null; lastWake = -Infinity;
-    history = new Float32Array(0); lastSpeech = -Infinity; lastCompanion = -Infinity; companionGain = 1; vad?.reset();
+    history = new Float32Array(0); lastSpeech = -Infinity; lastCompanion = -Infinity; companionGain = 1; vad?.reset(); verifier.reset();
   }
   function process(frame) {
     if (!spotter || !vad) throw new Error('Keyword detector is disposed.');
@@ -22,10 +26,12 @@ function createKeywordDetector({ paths, sherpa = require('sherpa-onnx-node') }) 
       if (frame.mode === 'wake') primary = spotter.createStream();
     }
     expected = frame.sampleStart + frame.samples.length;
+    if (primary) verifier.accept(frame.samples, frame.sampleStart);
     vad.acceptWaveform(frame.samples);
     let speech = vad.isDetected();
     // Drain completed segments so native buffering stays bounded even for long sessions.
     while (!vad.isEmpty()) { speech = true; vad.pop(); }
+    if (primary && speech && frame.sampleStart - lastSpeech >= 3200) verifier.onset(frame.sampleStart);
     let wake;
     function decode(stream) {
       while (spotter.isReady(stream)) {
@@ -39,11 +45,17 @@ function createKeywordDetector({ paths, sherpa = require('sherpa-onnx-node') }) 
           // Upstream's internal silence resets restart token timestamps without
           // exposing a reset epoch. Use the detection sample as a conservative
           // upper bound; these positions must never be used to trim recordings.
-          if (expected - lastWake >= 12800) {
+          if (result.keyword === 'HEY_LINA' && expected - lastWake >= 12800 && verifier.verify({ afterSample: lastWake })) {
             wake = { keyword: result.keyword, startSample: Math.max(origin, expected - Math.round(Math.max(0, last - first) * 16000)), lastTokenSample: expected, timingApproximate: true };
             lastWake = expected;
           }
+          // Competing names consume their own match, never the wake cooldown.
+          // Reset them too so a later genuine wake starts with clean context.
           spotter.reset(stream);
+          // A completed competing name is a phrase boundary. Permit the next
+          // speech onset to replace its companion even within two seconds;
+          // the 200ms VAD quiet requirement below still applies.
+          if (result.keyword === 'REJECT_LISA' || result.keyword === 'REJECT_LINDA') lastCompanion = -Infinity;
         }
       }
     }
@@ -84,6 +96,6 @@ function createKeywordDetector({ paths, sherpa = require('sherpa-onnx-node') }) 
     }
     return { captureToken: frame.captureToken, streamId: frame.streamId, sampleStart: frame.sampleStart, sampleEnd: expected, speech, ...(wake ? { wake } : {}), processingMs: performance.now() - started };
   }
-  return { process, reset, dispose() { primary = null; companion = null; history = null; spotter = null; vad = null; } };
+  return { process, reset, dispose() { primary = null; companion = null; history = null; spotter = null; vad = null; verifier.dispose(); } };
 }
 module.exports = { createKeywordDetector };

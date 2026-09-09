@@ -99,7 +99,7 @@ async function main() {
     const recoveryMs = Date.now() - restartStarted;
     assert.equal(controller.getState().listening, true);
     const beforeStale = classifications.length;
-    initialKeyword.child.emit('message', { type: 'frame', id: oldRequest.id, result: { wake: { keyword: 'HEY_VIBE' }, speech: true } });
+    initialKeyword.child.emit('message', { type: 'frame', id: oldRequest.id, result: { wake: { keyword: 'HEY_LINA' }, speech: true } });
     initialKeyword.child.emit('error', Error('obsolete helper error'));
     assert.equal(classifications.length, beforeStale); assert.equal(controller.getState().phase, 'listening'); assert.equal(controller.getState().handsFreeStatus, 'ready');
     await recognizeWake();

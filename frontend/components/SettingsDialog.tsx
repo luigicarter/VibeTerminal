@@ -94,7 +94,7 @@ export function SettingsDialog({ hint, onClose }: SettingsDialogProps): JSX.Elem
   const refresh = useCallback(async () => {
     const api = claudeProvidersApi();
     if (!api) {
-      setListError("Claude provider management isn't available in this build of vibeTerminal.");
+      setListError("Claude provider management isn't available in this build of Lina Terminal.");
       setLoading(false);
       return;
     }

@@ -144,7 +144,7 @@ test('conversational followup expires quietly and targeted cancellation closes i
 });
 
 test('spoken dismissal preserves task question and does not submit an answer', async t => {
-  const f = await fixture(t, { text: 'Hey Vibe, never mind.' });
+  const f = await fixture(t, { text: 'Hey Lina, never mind.' });
   const question = { id: 'q1', requestId: 'r1', text: 'Which terminal?' };
   f.tasks.push({ requestId: 'r1', status: 'needs-answer', question });
   await f.voice.speak({ origin: 'voice', requestId: 'r1', text: question.text, question });

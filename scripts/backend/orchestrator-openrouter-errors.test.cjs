@@ -36,6 +36,23 @@ test('transport failures distinguish network, timeout and user cancellation', ()
   assert.equal(classifyTransportError(new Error('failed'), { signal: controller.signal }).name, 'AbortError');
   assert.equal(upstreamErrorInfo(classifyTransportError(new DOMException('cancel', 'AbortError'))), undefined);
 });
+
+test('client deadlines and upstream timeouts retain distinct safe reasons', async () => {
+  const deadline = new AbortController(); deadline.abort();
+  const local = classifyTransportError(new Error('SECRET raw transport error'), { timeoutSignal: deadline.signal });
+  assert.deepEqual(upstreamErrorInfo(local), { category: 'timeout', status: 0, message: 'The OpenRouter request timed out. Please try again.', reason: 'client-deadline' });
+  assert.equal(classifyTransportError(new DOMException('SECRET', 'TimeoutError')).reason, 'client-deadline');
+  for (const status of [200, 408]) {
+    await assert.rejects(readOpenRouterResponse(response(status, { error: { code: 408, message: 'SECRET provider body', metadata: { raw: 'SECRET', provider_name: 'SECRET' } } })), error => {
+      const info = upstreamErrorInfo(classifyTransportError(error));
+      assert.equal(info.category, 'timeout'); assert.equal(info.status, 408); assert.equal(info.reason, 'upstream-timeout');
+      assert.doesNotMatch(JSON.stringify(info), /SECRET|metadata|provider_name/); return true;
+    });
+  }
+  const cancelled = new AbortController(); cancelled.abort();
+  const result = classifyTransportError(local, { signal: cancelled.signal, timeoutSignal: deadline.signal });
+  assert.equal(result.name, 'AbortError'); assert.equal(upstreamErrorInfo(result), undefined);
+});
 function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-upstream-errors-')); const events = [];
   let fail, chat;

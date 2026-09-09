@@ -46,7 +46,7 @@ function openFusionPlannerPrompt() {
   return [
     "# Open Fusion Planner",
     "",
-    "You are the primary Planner/intelligence layer inside vibeTerminal Open Fusion.",
+    "You are the primary Planner/intelligence layer inside Lina Terminal Open Fusion.",
     "You are the human-facing agent. Stay in the loop as the observer and steerer.",
     "",
     "Responsibilities:",
@@ -194,7 +194,7 @@ function openFusionPlanPrompt() {
   return [
     "# Open Fusion Plan Mode",
     "",
-    "You are the Planner inside vibeTerminal Open Fusion, running in PLAN MODE.",
+    "You are the Planner inside Lina Terminal Open Fusion, running in PLAN MODE.",
     "The user wants a reviewed plan before any implementation happens.",
     "",
     "Responsibilities:",
@@ -246,7 +246,7 @@ function openFusionExecutorPrompt() {
   return [
     "# Open Fusion Executor",
     "",
-    "You are the executor subagent inside vibeTerminal Open Fusion.",
+    "You are the executor subagent inside Lina Terminal Open Fusion.",
     "The Planner delegates concrete work to you and owns the final completion decision.",
     "",
     "Responsibilities:",
@@ -338,7 +338,7 @@ function openFusionInvestigatorPrompt() {
   return [
     "# Open Fusion Investigator",
     "",
-    "You are the read-only investigator subagent inside vibeTerminal Open Fusion.",
+    "You are the read-only investigator subagent inside Lina Terminal Open Fusion.",
     "You do scouting passes so the Planner can make architecture, design, and delegation decisions.",
     "Your permissions are locked read-only: file edits, shell commands, and further delegation are denied.",
     "",
@@ -1567,7 +1567,7 @@ function windowsPowerShellShimSource(provider) {
     "Send-VibeEvent 'agent.process.started' @{}",
     "$Command = Resolve-RealCommand $Provider",
     "if (-not $Command) {",
-    "  $message = 'vibeTerminal: could not find real ' + $Provider + ' executable on the original PATH.'",
+    "  $message = 'Lina Terminal: could not find real ' + $Provider + ' executable on the original PATH.'",
     "  Send-VibeEvent 'agent.process.exited' @{ exitCode = 127; error = $message }",
     "  [Console]::Error.WriteLine($message)",
     "  exit 127",
@@ -1804,7 +1804,7 @@ function powershellCommand() {
       exitCode: 127,
       error: "Could not find real " + provider + " executable on the original PATH."
     });
-    process.stderr.write("vibeTerminal: could not find real " + provider + " executable on the original PATH.\n");
+    process.stderr.write("Lina Terminal: could not find real " + provider + " executable on the original PATH.\n");
     process.exit(127);
   }
 

@@ -52,16 +52,22 @@ function formatTaskStatus({ targets, jobs, sessions, requestId }) {
       beforeSequence = Math.min(beforeSequence, linked.task.sequence);
       linkedRequestId = linked.intent.commandPlan.statusRequestId || linked.input?.replyToRequestId;
     }
+    const pendingTarget = job => job.task.status === 'queued'
+      && job.task.targets?.some(item => item.id === target.id && item.generation === target.generation);
     const candidates = jobs.filter(job => job.task.sequence < beforeSequence && (!linkedRequestId || job.task.requestId === linkedRequestId))
-      .filter(job => job.waits?.some(wait => wait.targetId === target.id && wait.generation === target.generation))
+      .filter(job => job.waits?.some(wait => wait.targetId === target.id && wait.generation === target.generation) || pendingTarget(job))
       .sort((a, b) => b.task.sequence - a.task.sequence);
     // A later watch can refer to an old turn. It cannot certify that a newer
     // submitted prompt has started; prefer submission evidence unless linked.
-    const submission = candidates.find(job => job.waits.some(wait => wait.targetId === target.id && wait.generation === target.generation && wait.source !== 'watch'));
-    const outstandingSubmission = submission?.waits.some(wait => wait.targetId === target.id && wait.generation === target.generation && wait.source !== 'watch' && !wait.done);
+    const submission = candidates.find(job => pendingTarget(job) || job.waits?.some(wait => wait.targetId === target.id && wait.generation === target.generation && wait.source !== 'watch'));
+    const outstandingSubmission = submission && (pendingTarget(submission) || submission.waits?.some(wait => wait.targetId === target.id && wait.generation === target.generation && wait.source !== 'watch' && !wait.done));
     const chosen = !linkedRequestId && outstandingSubmission ? submission : candidates[0];
-    const matching = chosen?.waits.filter(wait => wait.targetId === target.id && wait.generation === target.generation) || [];
+    const matching = chosen?.waits?.filter(wait => wait.targetId === target.id && wait.generation === target.generation) || [];
     const wait = matching.filter(wait => wait.source !== 'watch').at(-1) || matching.at(-1);
+    if (!wait && chosen && pendingTarget(chosen)) {
+      if (!session) return `The terminal for ${name} changed; the queued request's delivery is unverified.`;
+      return `The request for ${name} is queued; no prompt delivery has been recorded.${chosen.task.waitingReason ? ` ${chosen.task.waitingReason}` : ''}`;
+    }
     return wait ? formatTaskWait(wait, session, name) : `I don't have a tracked task for ${name}${requestId ? ' in that request' : ''}; its task status is unverified.`;
   }).join('\n\n');
 }

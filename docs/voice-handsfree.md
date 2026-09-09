@@ -4,15 +4,16 @@ Enable **Hands-free voice** in Orchestrator settings and choose **Save changes**
 It defaults off. Space push-to-talk remains available with its existing terminal
 and text-field guards. There is no enrollment, training, or additional account.
 Transcription and spoken replies still use the existing OpenRouter configuration.
+The wake phrase is **Hey Lina**.
 
 Wake detection runs while idle and while preparing or playing a spoken reply,
-including when the workspace is in the background. Say **Hey Vibe** to stop the
+including when the workspace is in the background. Say **Hey Lina** to stop the
 reply and give your next command. This also discards queued speech from before
 the interruption, without cancelling terminal work. Detection pauses during
 recording, transcription, and assistant work. Space also interrupts playback.
 When a spoken question finishes, voice listens for the answer
 automatically and retains the question's request or pane/generation/revision identity.
-Saying Hey Vibe or holding Space while a question is being generated or spoken retains
+Saying Hey Lina or holding Space while a question is being generated or spoken retains
 that answer route, including earlier answers on a multi-question form. A short
 tap returns to its answer window; replaced questions cannot receive stale answers.
 The model explicitly marks whether its response needs a reply; punctuation does not
@@ -27,7 +28,7 @@ turn; qualified answers still go through the Orchestrator.
 
 Say **never mind**, **that's all**, **stop listening**, **dismiss**, or **go back to
 sleep** to dismiss the voice exchange, or click the indicator's **X**. These phrases
-must be the whole utterance (an optional Vibe/Hey Vibe and “please” are accepted).
+must be the whole utterance (an optional Lina/Hey Lina and “please” are accepted).
 They stop capture/playback and return to standby without submitting an answer,
 granting permission, cancelling terminal work, or changing the microphone preference.
 Pending questions remain in the conversation. Commands such as “dismiss the dialog”
@@ -38,7 +39,9 @@ still go to the Orchestrator. The indicator stays visible; its menu separately o
 
 - `sherpa-onnx-node` and its Windows native package are pinned to 1.13.7. The English
   GigaSpeech 3.3M 2024-01-01 int8 model recognizes the build-time BPE keyword
-  configuration `HEY VIBE`. The label is `HEY_VIBE`; labels cannot contain spaces.
+  configuration `HEY LINA`. Only the label `HEY_LINA` can activate voice;
+  competing Lisa/Linda paths reset without activating or consuming wake cooldown.
+  The keyword beam retains 32 paths to avoid pruning quiet, fast speech.
 - Silero identifies speech, including short answers. Smart Turn v3.2 CPU int8
   classifies completion after 200 ms of quiet, but sending waits for at least
   1.2 seconds of uninterrupted quiet. Its latest-eight-second input is
@@ -55,6 +58,18 @@ still go to the Orchestrator. The indicator stays visible; its menu separately o
   maximum 8×) to help quiet speech; later samples are clipped to the PCM range.
   Gain stays fixed until its next onset/reset. The primary stream, VAD input and
   keyword confidence threshold remain unchanged.
+- A candidate then passes through an unrestricted local recognizer using the
+  same bundled model. It retains at most four seconds of PCM, evaluates the
+  latest two VAD onsets with 200 ms pre-roll plus the full-window fallback,
+  and flushes with synthetic silence instead of waiting for future audio.
+  The verifier uses a 16-path beam and a pinned `HEY LINA` hotword. Its name
+  bias is 2 when audio needs amplification to target peak 0.15, otherwise 1;
+  gain remains bounded at 8×. Both fixed decoder configurations initialize in
+  the keyword helper. A recognized greeting must have a final name token within
+  the last 800 ms of real captured audio and after the previous accepted wake.
+  This prevents a stale greeting in retained history from approving another
+  candidate. Rejected candidates do not consume wake cooldown; resets, mode
+  changes, capture changes and disposal discard verifier history.
 - Native token timestamps lose their absolute origin after upstream resets. Reported
   positions are conservative approximations and are never used to trim recordings.
 
@@ -150,6 +165,8 @@ that started, or a provider/interpretation failure after capture.
   packet-boundary, and spaced-phrase regressions after native fixtures are generated.
   It includes David/Zira synthetic voices at three speaking rates, low-amplitude
   speech, deterministic background noise, near-phrase negatives and noise alone.
+  It also verifies a real wake immediately after Lisa/Linda and rejects new
+  near-name activations when an earlier valid wake remains in audio history.
 - `npm run smoke:electron:voice-experience`: Chromium fake microphone through real
   capture, native helpers, automatic completion, and scripted provider responses.
 - `npm run smoke:voice:workflow` (after `npm run smoke:voice:native` creates
@@ -159,9 +176,28 @@ that started, or a provider/interpretation failure after capture.
   a synthetic wake during speech preparation and streaming, cancel old speech,
   and capture/dispatch the subsequent command through mocked cloud endpoints.
 
+The September 8 Lina rename initially missed 11/138 positive cases and falsely
+activated on 6/42 negative clips. Wider keyword decoding and competing names
+repaired that original set; a broader independent name set then exposed the
+need for unrestricted candidate verification. The final fixed synthetic corpus
+passes 138 positive, 114 negative, 48 valid-after-negative, four spaced-phrase
+and four old-wake replay cases. Reports are under `output/voice-handsfree`.
+This is bounded regression coverage. Very quiet speech combined with a long
+pause inside the greeting can still produce no keyword candidate; physical
+microphone accuracy, room noise, echo and older-PC requirements are unmeasured.
+
 Synthetic fixtures do not establish physical-microphone accuracy or minimum CPU
 requirements. Model files are much smaller than the helpers' total runtime memory.
 Native reports under `output/voice-handsfree` identify the measured CPU and limits.
+
+On the Ryzen 9 9950X development machine, keyword/VAD plus both verifier
+configurations initialized in 2.59 seconds; that probe's process RSS was 162 MB
+after one second of silence. Across all final matrix categories, the largest
+packet took 192 ms and the largest real-time factor was 0.055. An independent
+1,200-clip memory soak that yielded between packets observed process RSS around
+178 MB at initialization, a 276 MB sampled peak and 206 MB at completion without
+forced garbage collection; its maximum packet was 225 ms. The synchronous matrix's higher end-of-run RSS is
+not a live-helper steady-state measurement.
 
 The [voice deep dive](orchestrator-voice-deep-dive.md) records local validation,
 installed/source version boundaries, repaired handover/short-speech behavior and

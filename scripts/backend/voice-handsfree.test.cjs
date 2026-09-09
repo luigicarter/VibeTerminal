@@ -13,12 +13,12 @@ function fixture(options = {}) {
   controller = createVoiceController({ getSettings: () => settings, getKey: () => 'test-key', now: options.now, recoveryTimers: options.recoveryTimers, inferenceFactory: value => { callbacks = value; return service; },
     orchestrator: { recordDiagnostic: event => diagnostics.push(event), getState: () => relayState, send: async input => { sent.push(input); return { ok: true }; }, dispatch: async input => { dispatched.push(input); return { ok: true }; } },
     onAudio: chunk => { if (chunk.done && !chunk.cancelled && !options.manualPlayback) setImmediate(() => controller.configure({ playbackDone: chunk.replyId })); },
-    fetch: async (url, init) => { if (url.endsWith('/transcriptions')) { uploads.push(JSON.parse(init.body)); return { ok: true, json: async () => ({ text: options.text ?? 'Hey Vibe, show my agents' }) }; } return { ok: true, headers: new Headers({ 'content-type': 'audio/pcm' }), body: (async function* () { yield Buffer.alloc(480); })() }; }
+    fetch: async (url, init) => { if (url.endsWith('/transcriptions')) { uploads.push(JSON.parse(init.body)); return { ok: true, json: async () => ({ text: options.text ?? 'Hey Lina, show my agents' }) }; } return { ok: true, headers: new Headers({ 'content-type': 'audio/pcm' }), body: (async function* () { yield Buffer.alloc(480); })() }; }
   });
   const f = { controller, settings, relayState, sent, dispatched, uploads, packets, analyses, diagnostics, get stopped() { return stopped; }, get starts() { return starts; }, get callbacks() { return callbacks; },
     async activate() { controller.configure({ captureToken: token }); await controller.setListening(true); await controller.configure({ refreshHandsFree: true }); },
     capture(ms = 100, value = 0) { const length = ms * 16; const result = controller.frames({ samples: Array(length).fill(value), sampleRate: 16000, captureToken: token, sampleStart: position }); position += length; return result; },
-    classify(packet, speech = false, wake = false) { callbacks.onFrame({ ...packet, samples: undefined, sampleEnd: packet.sampleStart + packet.samples.length, speech, ...(wake ? { wake: { keyword: 'HEY VIBE', startSample: packet.sampleStart, lastTokenSample: packet.sampleStart + packet.samples.length } } : {}) }); },
+    classify(packet, speech = false, wake = false) { callbacks.onFrame({ ...packet, samples: undefined, sampleEnd: packet.sampleStart + packet.samples.length, speech, ...(wake ? { wake: { keyword: 'HEY LINA', startSample: packet.sampleStart, lastTokenSample: packet.sampleStart + packet.samples.length } } : {}) }); },
     frame(ms = 100, speech = false, wake = false) { while (ms > 0) { const duration = Math.min(ms, 100); f.capture(duration, speech ? .001 : 0); f.classify(packets.at(-1), speech, wake); ms -= duration; } },
     changeCapture(next, captureRecovery = false) { token = next; position = 0; controller.configure({ captureToken: next, captureRecovery }); }
   };
@@ -41,7 +41,7 @@ test('neural speech bypasses RMS gate and wake plus immediate command preserves 
   assert.equal((wav.length - 44) / 2, 32000 + 20800, 'two seconds of history plus every live sample survive');
 });
 test('pre-wake silence does not consume grace and wake-only transcription is never relayed', async t => {
-  const f = fixture({ text: 'Hey Vibe!' }); t.after(() => f.controller.dispose()); await f.activate();
+  const f = fixture({ text: 'Hey Lina!' }); t.after(() => f.controller.dispose()); await f.activate();
   for (let i = 0; i < 20; i++) f.frame(); f.frame(100, true, true);
   for (let i = 0; i < 59; i++) f.frame();
   assert.equal(f.uploads.length, 0); assert.equal(f.controller.getState().phase, 'recording');
@@ -118,7 +118,7 @@ test('transient helper failure automatically restores wake with stale callbacks 
   await clock.retry(500);
   assert.equal(f.starts, 2); assert.equal(f.controller.getState().handsFreeStatus, 'ready');
   oldCallbacks.onError(Error('obsolete exit'));
-  oldCallbacks.onFrame({ ...oldPacket, sampleEnd: oldPacket.sampleStart + oldPacket.samples.length, wake: { keyword: 'HEY_VIBE' } });
+  oldCallbacks.onFrame({ ...oldPacket, sampleEnd: oldPacket.sampleStart + oldPacket.samples.length, wake: { keyword: 'HEY_LINA' } });
   assert.equal(f.controller.getState().phase, 'listening'); assert.equal(clock.tasks.size, 0);
   f.frame(100, true, true); assert.equal(f.controller.getState().recordingSource, 'wake');
 });
@@ -221,7 +221,7 @@ test('manual transcripts retain a spoken wake prefix, and capture supports arbit
   const f = fixture(); t.after(() => f.controller.dispose()); await f.activate();
   f.capture(13, .1); f.capture(37, .1); f.controller.configure({ pushToTalk: 'start', holdId: 1 }); f.capture(251, .1);
   f.controller.configure({ pushToTalk: 'stop', holdId: 1 }); await until(() => f.sent.length);
-  assert.equal(f.sent[0].text, 'Hey Vibe, show my agents'); assert.equal(Buffer.from(f.uploads[0].input_audio.data, 'base64').length, 44 + 301 * 16 * 2);
+  assert.equal(f.sent[0].text, 'Hey Lina, show my agents'); assert.equal(Buffer.from(f.uploads[0].input_audio.data, 'base64').length, 44 + 301 * 16 * 2);
 });
 test('adopted short tap and resumed speech cannot schedule concurrent completion', async t => {
   let settle;
@@ -266,7 +266,7 @@ test('speech queued at the answer deadline survives until VAD classifies it', as
   assert.equal(f.controller.getState().phase, 'awaiting-answer', 'short speech retries the current question with a fresh answer deadline'); assert.equal(f.uploads.length, 0);
 });
 test('a command wholly buffered before delayed wake detection survives the conservative six-second grace', async t => {
-  const f = fixture({ text: 'Hey Vibe, stop' }); t.after(() => f.controller.dispose()); await f.activate();
+  const f = fixture({ text: 'Hey Lina, stop' }); t.after(() => f.controller.dispose()); await f.activate();
   f.capture(300, .001); const wake = f.packets.at(-1); f.capture(300, .002); f.classify(wake, true, true);
   for (let i = 0; i < 59; i++) f.frame(); assert.equal(f.uploads.length, 0);
   f.frame(); await until(() => f.sent.length); assert.equal(f.sent[0].text, 'stop');
@@ -474,4 +474,22 @@ test('off and busy push-to-talk refusals publish authoritative voice feedback', 
   f.controller.configure({ pushToTalk: 'stop', holdId: 2 }); assert.equal(f.controller.getState().phase, 'transcribing');
   const busy = f.controller.configure({ pushToTalk: 'start', holdId: 3 }); assert.equal(busy.status, 'busy'); assert.equal(f.controller.getState().error, busy.error);
   await until(() => f.sent.length);
+});
+
+for (const [text, expected] of [
+  ['Hey Lina, show my agents', 'show my agents'],
+  ['HEY LENA! show my agents', 'HEY LENA! show my agents'],
+  ['Hey Linaria, show my agents', 'Hey Linaria, show my agents'],
+  ['Show Hey Lina in the terminal', 'Show Hey Lina in the terminal'],
+]) test(`wake transcript removes only a complete leading wake phrase: ${text}`, async t => {
+  const f = fixture({ text }); t.after(() => f.controller.dispose()); await f.activate();
+  f.frame(100, true, true); f.frame(100, true); f.frame(1200); await until(() => f.sent.length);
+  assert.equal(f.sent[0].text, expected);
+});
+
+test('Lina wake-only transcript is not dispatched', async t => {
+  const f = fixture({ text: 'Hey Lina!' }); t.after(() => f.controller.dispose()); await f.activate();
+  f.frame(100, true, true); f.frame(6000);
+  await until(() => f.uploads.length && f.controller.getState().phase === 'listening');
+  assert.equal(f.sent.length, 0);
 });

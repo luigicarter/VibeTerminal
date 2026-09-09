@@ -44,7 +44,7 @@ async function main() {
   assert.equal(process.platform, 'win32', 'Synthetic fixture generation requires Windows System.Speech');
   fs.mkdirSync(output, { recursive: true });
   const texts = {
-    wake: 'Hey Vibe.', immediate: 'Hey Vibe open the project and run the tests.',
+    wake: 'Hey Lina.', immediate: 'Hey Lina open the project and run the tests.',
     prefix: 'This is some ordinary conversation before the command.',
     negative: 'Open the project and run the tests. Save the file. Have a very nice day.',
     similar: 'Hey Mike. A high five. Stay alive. The lively environment.',

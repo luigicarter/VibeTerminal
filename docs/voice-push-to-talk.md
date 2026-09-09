@@ -1,7 +1,7 @@
 # Voice push-to-talk
 
 Hold **Space** to record and release to send while no terminal or text field is
-focused. Optional [hands-free voice](voice-handsfree.md) adds “Hey Vibe” and
+focused. Optional [hands-free voice](voice-handsfree.md) adds “Hey Lina” and
 automatic completion. See the [voice deep dive](orchestrator-voice-deep-dive.md)
 for architecture, version boundaries, and remaining reliability findings.
 

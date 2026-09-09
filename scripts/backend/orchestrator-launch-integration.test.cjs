@@ -87,7 +87,7 @@ for (const executionMode of ["direct", "reason"]) test(`${executionMode} harness
   f.snapshots.push({ ...f.runtime, terminalTitle: shellTitle, processState: "running", launchState: "ready" });
   const result = await pending;
   assert.equal(result.ok, true, JSON.stringify(result));
-  assert.equal(result.text, `Opened the terminal in ${path.basename(f.root)}.`);
+  assert.equal(result.text, 'done');
   assert.doesNotMatch(result.text, /powershell\.exe|System32|[a-z]:[\\/]/i);
   assert.equal(result.actions[0].cwd, f.root);
   assert.equal(requests.length, executionMode === "direct" ? 0 : 2);

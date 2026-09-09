@@ -113,10 +113,23 @@ test("session directory exposes bounded initial page and model query reaches a l
   // The input budget may shorten the 40-item cap when TEMP paths are longer.
   assert.ok(initial.sessions.length > 0 && initial.sessions.length <= 40);
   assert.equal(initial.sessions[0].id, "pane-0");
+  assert.equal(initial.sessions.some(session => Object.hasOwn(session, 'terminalNavigationGuide')), false);
   assert.equal(initial.sessions.some(session => session.id === "pane-63"), false);
   assert.deepEqual(initial.sessionDirectory, { total: 67, truncated: true });
   const listing = JSON.parse(f.requests[1].messages.at(-1).content); assert.equal(listing.sessions[0].id, "pane-63"); assert.equal(listing.total, 1);
+  assert.equal(Object.hasOwn(listing.sessions[0], 'terminalNavigationGuide'), false);
   const next = listSessionSummaries(f.sessions, { offset: 40, limit: 10 }); assert.equal(next.sessions[0].id, "pane-40"); assert.equal(next.nextOffset, 50);
+});
+
+test('compact model directories preserve identity and paging while deferring repeated provider guides to reads', () => {
+  const sessions = Array.from({ length: 40 }, (_, i) => ({ id: `pane-${i}`, generation: `g-${i}`, name: `Worker ${i}`, kind: 'codex', cwd: 'C:/project' }));
+  const full = listSessionSummaries(sessions, { limit: 40 });
+  const compact = listSessionSummaries(sessions, { limit: 40, includeNavigationGuide: false });
+  const expected = structuredClone(full);
+  for (const session of expected.sessions) delete session.terminalNavigationGuide;
+  assert.deepEqual(compact, expected);
+  assert.ok(Buffer.byteLength(JSON.stringify(full)) - Buffer.byteLength(JSON.stringify(compact)) > 11000);
+  assert.match(full.sessions[0].terminalNavigationGuide, /Codex native CLI/);
 });
 
 test("escaped long result remains valid bounded JSON preserving receipt fields", () => {

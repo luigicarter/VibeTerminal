@@ -37,13 +37,13 @@ export default function VoiceIndicator() {
     state.handsFreeStatus === 'recovering' && ['listening', 'awaiting-answer'].includes(state.phase) ? 'Restarting hands-free voice… hold Space to talk' :
     error || (state.finishHint ? 'Still listening… click Send when finished' :
     automatic ? 'Listening… speak naturally, or click Send' :
-    state.phase === 'speaking' && state.wakeInterruptReady ? 'Speaking · say Hey Vibe or hold Space to interrupt' :
+    state.phase === 'speaking' && state.wakeInterruptReady ? 'Speaking · say Hey Lina or hold Space to interrupt' :
     state.phase === 'speaking' ? 'Speaking · hold Space to interrupt' :
     state.phase === 'awaiting-answer' && state.handsFreeStatus === 'ready' ? 'Listening for your answer · say “never mind” to dismiss' :
     state.phase === 'awaiting-answer' && state.handsFreeStatus === 'loading' ? 'Getting ready to listen… or hold Space to answer' :
     state.phase === 'awaiting-answer' && state.handsFreeStatus === 'unavailable' ? 'Automatic listening unavailable · hold Space to answer' :
     state.phase === 'listening' && state.handsFreeStatus === 'loading' ? 'Starting hands-free voice... hold Space to talk' :
-    state.phase === 'listening' && state.handsFreeStatus === 'ready' ? 'Say Hey Vibe or hold Space to talk' :
+    state.phase === 'listening' && state.handsFreeStatus === 'ready' ? 'Say Hey Lina or hold Space to talk' :
     state.phase === 'listening' && state.handsFreeStatus === 'unavailable' ? `${state.handsFreeError || 'Hands-free voice unavailable.'} Hold Space to talk` :
     phases[state.phase] || state.phase);
   const visual = error ? 'error' : !state.listening && !busy ? 'muted' : working ? 'thinking' : busy ? state.phase === 'speaking' ? 'speaking' : 'recording' : 'listening';

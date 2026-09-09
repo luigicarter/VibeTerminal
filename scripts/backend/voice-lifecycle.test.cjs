@@ -302,7 +302,7 @@ async function automaticFixture(t, options = {}) {
   function feed(count = 1600, wake = false, classify = true) {
     f.ipcMain.emit('voice:frames', { sender }, { captureToken, sampleStart: position, sampleRate: 16000, samples: Array(count).fill(.1) });
     position += count;
-    if (classify) callbacks.onFrame({ ...packet, samples: undefined, sampleEnd: position, speech: true, ...(wake ? { wake: { keyword: 'HEY VIBE', startSample: packet.sampleStart, lastTokenSample: position } } : {}) });
+    if (classify) callbacks.onFrame({ ...packet, samples: undefined, sampleEnd: position, speech: true, ...(wake ? { wake: { keyword: 'HEY LINA', startSample: packet.sampleStart, lastTokenSample: position } } : {}) });
   }
   feed(1600, true); feed(); feed();
   assert.equal(f.controller.getState().recordingSource, 'wake');

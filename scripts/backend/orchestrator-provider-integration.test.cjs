@@ -42,7 +42,7 @@ function harness(t, provider, state = "idle") {
 }
 
 for (const provider of ['claude', 'codex', 'cursor', 'gemini', 'kimi', 'kimi-custom', 'qwen', 'opencode', 'terminal']) {
-  test(`${provider}: operator sends from an observed unknown startup screen without staging or declaring idle`, async t => {
+  test(`${provider}: operator sends from an established unknown-turn screen without staging or declaring idle`, async t => {
     const h = harness(t, provider, 'unknown'), generation = h.snapshot.generation;
     h.integration.incoming('terminal', { id: 'pane', generation, type: 'created', pid: 32123, cols: 80, rows: 24, inputRevision: 0 });
     h.integration.incoming('terminal', { id: 'pane', generation, type: 'data', data: 'Ask the agent anything', sequence: 1 });

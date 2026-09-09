@@ -4,6 +4,7 @@ const { RATE, wavFromSamples, createRecording, createSpeechAudioStream, shouldSp
 const { createLocalErrorAudio, ERROR_AUDIO_TEXT } = require('./localErrorAudio.cjs');
 const { matchAnswer, questionSpeech } = require('./voiceAnswers.cjs');
 const { spokenText } = require('./voiceText.cjs');
+const { createCompletionAudio } = require('./voiceCompletionAudio.cjs');
 const { isVoiceDismissal } = require('../shared/voiceDismissal.cjs');
 const { OpenRouterError, readOpenRouterResponse, classifyTransportError, upstreamErrorInfo } = require('./openRouterErrors.cjs');
 const { STT_MODEL, TTS_MODEL, TTS_VOICE, TTS_VOICES } = require('../shared/voiceConfig.cjs');
@@ -450,10 +451,10 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       if (typeof data.text !== 'string') throw new OpenRouterError('upstream', response.status);
       sttElapsedMs = Math.max(0, Math.round(monotonicNow() - sttStartedAt));
       const rawText = data.text.split(key).join('[REDACTED]').trim();
-      const text = recordingSource === 'wake' ? rawText.replace(/^\s*hey[\s,!.:;—-]+vibe\b[\s,!.:;—-]*/i, '').trim() : rawText;
+      const text = recordingSource === 'wake' ? rawText.replace(/^\s*hey[\s,!.:;—-]+lina\b[\s,!.:;—-]*/i, '').trim() : rawText;
       if (isVoiceDismissal(text)) return dismiss();
       if (recordingSource === 'wake' && !/[\p{L}\p{N}]/u.test(text)) {
-        update({ phase: answerContext && currentInteraction(answerContext) ? 'awaiting-answer' : idlePhase(), transcript: '', error: 'No command heard. Say Hey Vibe and your command, or hold Space.' });
+        update({ phase: answerContext && currentInteraction(answerContext) ? 'awaiting-answer' : idlePhase(), transcript: '', error: 'No command heard. Say Hey Lina and your command, or hold Space.' });
         return { ok: true, status: 'wake-only' };
       }
       if (!/[\p{L}\p{N}]/u.test(text)) {
@@ -562,7 +563,10 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       }
       // The full reply remains in the conversation and followup context;
       // generated result summaries are supplied separately for playback.
-      let text = String(message.speechText ?? message.text ?? '').trim();
+      const completionCue = message.completionCue === true && !message.preview && !message.question && !message.interaction
+        && message.kind !== 'interaction' && message.kind !== 'error' && !message.error
+        && message.responseTurn !== 'listen' && message.responseTurn !== 'dismiss';
+      let text = completionCue ? 'done' : String(message.speechText ?? message.text ?? '').trim();
       // Task labels can contain the user's command. Speak only the reply;
       // any necessary project attribution belongs in that reply itself.
       if (!text) return { ok: true };
@@ -585,7 +589,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       const abort = requestAbort = new AbortController();
       let speechStage = 'speech';
       const replyId = activeReply = randomUUID(); activeSpeechRequestId = message.requestId || null; activeInteraction = message.kind === 'interaction' ? identity : null;
-      let playbackFailure, audioFinished = false, firstByte = false;
+      let playbackFailure, audioFinished = false, firstByte = false, completionDurationMs = 0;
       const speechStartedAt = monotonicNow();
       const timingDetails = { replyId, ...(message.requestId && { requestId: message.requestId }) };
       playbackTiming = { replyId, startedAt: speechStartedAt, details: timingDetails, playbackAt: null, audioEmitted: false };
@@ -624,6 +628,12 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
           for (const { pcm, sampleRate, channels } of chunks) {
             if (queuedEpoch !== epoch || abort.signal.aborted) throw playbackFailure || Error('Speech cancelled.');
             if (playbackTiming?.replyId === replyId) playbackTiming.audioEmitted = true;
+            if (completionCue && !completionDurationMs && pcm.length) {
+              const cue = createCompletionAudio(sampleRate, channels);
+              completionDurationMs = cue.durationMs;
+              onAudio({ replyId, sequence: sequence++, data: Array.from(cue.pcm), sampleRate, channels, format: 's16le' });
+              if (queuedEpoch !== epoch || abort.signal.aborted) throw playbackFailure || Error('Speech cancelled.');
+            }
             onAudio({ replyId, sequence: sequence++, data: Array.from(pcm), sampleRate, channels, format: 's16le' });
             if (queuedEpoch !== epoch || abort.signal.aborted) throw playbackFailure || Error('Speech cancelled.');
           }
@@ -641,7 +651,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
         timingDiagnostic('tts_complete', speechStartedAt, timingDetails);
         speechStage = 'playback';
         audioFinished = true;
-        playbackTimer = setTimeout(() => playbackResolve?.({ error: 'Speech playback did not finish. Check your audio output.' }), durationMs + 5000);
+        playbackTimer = setTimeout(() => playbackResolve?.({ error: 'Speech playback did not finish. Check your audio output.' }), durationMs + completionDurationMs + 5000);
         onAudio({ replyId, sequence: sequence++, data: [], sampleRate, channels, format: 's16le', done: true });
         const generationId = response.headers?.get?.('x-generation-id');
         if (generationId) void request(`https://openrouter.ai/api/v1/generation?id=${encodeURIComponent(generationId)}`, { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(10000) }).then(r => r.ok ? r.json() : null).then(data => { if (!disposed) orchestrator.recordSpeechUsage?.('speech', data?.data?.total_cost); }).catch(() => {});
@@ -727,7 +737,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     if (patch.preview === true) {
       if (state.listening && !['listening', 'error'].includes(state.phase)) return { ok: false, error: 'Finish the current voice turn before checking the voice.' };
       cancelSpeech();
-      return speak({ preview: true, text: 'Hi, I’m Vibe. Hold the space bar when you need me, and I’ll help you with your workspace.' });
+      return speak({ preview: true, text: 'Hi, I’m Lina. Hold the space bar when you need me, and I’ll help you with your workspace.' });
     }
     if (patch.playbackDone && patch.playbackDone === activeReply) { clearTimeout(playbackTimer); playbackResolve?.(); }
     if (patch.microphoneError) { diagnostic('microphone', Error(String(patch.microphoneError))); update({ listening: false, muted: true }); cancelSpeech(); stopInference(); update({ phase: 'microphone-error', handsFreeStatus: 'off', error: String(patch.microphoneError).slice(0, 200) }); }

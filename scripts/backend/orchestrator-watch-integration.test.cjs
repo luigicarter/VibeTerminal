@@ -42,7 +42,7 @@ async function fixture(t) {
   return f;
 }
 
-test('watch existing work without sending anything, then report actual results with request-owned speech', async t => {
+test('watch existing work, retain written results and acknowledge completion with request-owned speech', async t => {
   const f = await fixture(t);
   const response = await f.app.send({ text: 'Watch Agent a and tell me when it finishes and what it did.', targetId: 'a', origin: 'voice' });
   assert.equal(response.ok, true, JSON.stringify(response)); assert.match(response.text, /watching Agent a/);
@@ -51,9 +51,12 @@ test('watch existing work without sending anything, then report actual results w
   f.end('a');
   await until(() => f.details(response.requestId).some(item => /12 tests/.test(item.text)));
   assert.equal(f.reports(response.requestId).filter(item => item.status === 'completed').length, 1);
+  assert.equal(f.reports(response.requestId).find(item => item.status === 'completed').reportKind, 'lifecycle');
+  assert.equal(f.details(response.requestId).find(item => /12 tests/.test(item.text)).reportKind, 'result');
   assert.equal(f.app.getState().tasks.find(item => item.requestId === response.requestId).status, 'finished');
-  await until(() => f.spoken.some(item => item.kind === 'task-result'));
-  assert.equal(f.spoken.find(item => item.kind === 'task-result').requestId, response.requestId);
+  await until(() => f.spoken.some(item => item.completionCue));
+  assert.equal(f.spoken.find(item => item.completionCue).requestId, response.requestId);
+  assert.equal(f.spoken.filter(item => item.kind === 'task-result').length, 0);
   assert.ok(f.modelCalls.every(body => body.tools === undefined), 'detail models have no action tools');
   await f.app.refresh(); await tick();
   assert.equal(f.details(response.requestId).filter(item => /12 tests/.test(item.text)).length, 1);
@@ -66,6 +69,7 @@ test('delayed result evidence enriches completion once and never reads a newer t
   const ended = { ...f.sessions[0], turnState: 'completed', turnEndedAt: Date.now() };
   f.app.observeWork([ended]);
   await until(() => f.details(response.requestId).some(item => /no reliable result details/.test(item.text)));
+  assert.equal(f.details(response.requestId).find(item => /no reliable result details/.test(item.text)).reportKind, 'result-unavailable');
   Object.assign(f.sessions[0], { turnId: 'new-human-turn', turnState: 'running' });
   await f.app.refresh();
   const result = { turnId: ended.turnId, at: ended.turnEndedAt, status: 'completed', source: 'chat-events', text: 'Fixed route validation. 12 tests passed. Deployment pending.' };
@@ -99,21 +103,19 @@ test('model failure preserves completion and falls back to an attributed structu
   assert.ok(!JSON.stringify(f.app.getState()).includes('watch-fixture-secret'));
   assert.ok(!JSON.stringify(f.modelCalls).includes('watch-fixture-secret'));
   assert.equal(f.effects.length, 0);
-  await until(() => f.spoken.some(item => item.kind === 'task-result'));
-  assert.doesNotMatch(f.spoken.find(item => item.kind === 'task-result').speechText, /excerpt|7 checks/);
-  assert.match(f.spoken.find(item => item.kind === 'task-result').speechText, /reliable spoken summary is unavailable/);
+  await until(() => f.spoken.some(item => item.completionCue));
+  assert.equal(f.spoken.find(item => item.completionCue).speechText, 'done');
+  assert.equal(f.spoken.filter(item => item.kind === 'task-result').length, 0);
 });
 
-test('automatic model summary keeps model-chosen detail beyond former caps without a second call', async t => {
+test('written model result keeps full detail without speaking a recap after completion', async t => {
   const f = await fixture(t);
   const verbose = 'The agent described the outcome and outstanding checks. '.repeat(90).trim();
   f.reply = body => body.messages[0].content.startsWith('Summarize') ? verbose : 'NO_UPDATE';
   const response = await f.app.send({ text: 'Watch a.', targetId: 'a', origin: 'voice' });
   f.end('a');
-  await until(() => f.spoken.some(item => item.kind === 'task-result'));
-  const spoken = f.spoken.find(item => item.kind === 'task-result');
-  assert.ok(spoken.text.includes(verbose.trim()));
-  assert.equal(spoken.speechText, `Agent a: ${verbose}`);
+  await until(() => f.details(response.requestId).some(item => item.text.includes(verbose.trim())));
+  assert.equal(f.spoken.filter(item => item.kind === 'task-result').length, 0);
   assert.ok(f.details(response.requestId).some(item => item.text.includes(verbose.trim())));
   assert.equal(f.modelCalls.filter(body => body.messages[0].content.startsWith('Summarize')).length, 1);
 });

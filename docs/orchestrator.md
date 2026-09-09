@@ -18,13 +18,13 @@ For the reading/voice follow-up, see [progressive context and local error audio]
 2. Enter an OpenRouter API key and the assistant model name.
 3. Turn on **Enable Orchestrator**. This saves and validates the current entries,
    opens the microphone, and shows a small glowing mic.
-   On first use, a native vibeTerminal dialog asks **Allow microphone / Not now**
+   On first use, a native Lina Terminal dialog asks **Allow microphone / Not now**
    before capture begins. Allow is remembered; Windows privacy controls still apply.
 4. **Hold the space bar** and speak your request, then release to send it. Space is
    ignored while a terminal pane or a text field has focus. The assistant goes back
    to waiting after its reply. Use the Orchestrator switch to turn it off.
    See [voice push-to-talk](voice-push-to-talk.md) for the full gesture.
-5. For activation without a key press, check **Hands-free voice – Hey Vibe** and
+5. For activation without a key press, check **Hands-free voice – Hey Lina** and
    choose **Save changes**. Wait for the runtime's ready message, then say the
    wake phrase followed by your request. See [hands-free voice](voice-handsfree.md).
 
@@ -36,7 +36,7 @@ spending limits, and opt-in activity reports. Keys use OS encryption; optional
 session-only storage is available in Advanced. The legacy speech selection
 is migrated to the supported voice configuration without replacing credentials.
 
-The mic is drawn only inside vibeTerminal and never over other applications. Its
+The mic is drawn only inside Lina Terminal and never over other applications. Its
 audio renderer stays permanently hidden and non-focusable. The mic's X dismisses
 the current voice exchange and returns to standby. The context menu can hide the
 indicator while capture continues. **Show microphone** in
@@ -44,7 +44,7 @@ the main toolbar restores it. Its context menu offers disable and settings. The
 main application must remain running; closing the application stops listening.
 Startup listening is off unless the user explicitly enables that preference.
 Startup cannot display a first-use consent dialog over another app. If consent
-has not been granted, enable voice from the foreground vibeTerminal window.
+has not been granted, enable voice from the foreground Lina Terminal window.
 If Windows blocks microphone access, the app offers **Open Windows microphone
 settings**. It opens the system privacy page only after that explicit click.
 The same permission gate applies when refreshing the microphone device list.
@@ -250,7 +250,7 @@ voice advances the same question request rather than repeating earlier answers.
 
 [Space push-to-talk](voice-push-to-talk.md) is the default: hold Space outside
 terminal panes and text fields to record, then release to send. Optional
-[hands-free voice](voice-handsfree.md) adds local “Hey Vibe” activation and automatic
+[hands-free voice](voice-handsfree.md) adds local “Hey Lina” activation and automatic
 completion after speech. During an automatic recording, the mic's Send button
 can finish it immediately. Both manual release and Send flush the final microphone
 packet before submission. A microphone that cannot start prevents activation and
@@ -283,11 +283,19 @@ A wake-only transcript returns to listening with a visible no-command message;
 it is not sent to the assistant.
 
 There is no MP3/file-save workflow. Audio chunks are ordered, bounded, and
-cancelled by playback identity. Ordinary replies and results use a natural spoken
+cancelled by playback identity. Confirmed command completion replies with `done`;
+voice commands play a short local ding before speaking it. Queued, unconfirmed,
+blocked or failed actions and questions keep their explanations. Prompt delivery
+completes the send command while the agent's result remains tracked separately.
+The conversation omits routine completion and missing-result notices and displays
+shared terminal results once with their associated request numbers. Failures,
+unconfirmed delivery and questions remain visible; failures and questions still
+receive spoken feedback.
+Other replies and results use a natural spoken
 TL;DR, with the model choosing the necessary detail and no fixed prose-length
 caps; the full written response stays available.
 Holding Space during a reply interrupts it and records instead. With hands-free
-voice enabled, **Hey Vibe** also interrupts speech and captures the next command,
+voice enabled, **Hey Lina** also interrupts speech and captures the next command,
 without stopping terminal work. A stop-speaking control is available. An
 agent question opens a 15-second answer window. When hands-free inference is
 available, speech starts answer capture without repeating the wake phrase;

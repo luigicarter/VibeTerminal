@@ -15,7 +15,7 @@ const check=(label,value)=>{result.checks.push({label,value});console.log(label,
 (async()=>{try{
   const port=await freePort();const env={...process.env,VIBE_SCREENSHOT_MODE:"1",VIBE_INTERNAL_SCREENSHOT:"0",VIBE_SCREENSHOT_USER_DATA:userData,VIBE_AGENT_SHIM_BASE_DIR:path.join(output,"shims"),CODEX_HOME:path.join(output,"codex"),CLAUDE_CONFIG_DIR:path.join(output,"claude"),XDG_CONFIG_HOME:path.join(output,"config"),XDG_DATA_HOME:path.join(output,"data")};delete env.ELECTRON_RUN_AS_NODE;delete env.VITE_DEV_SERVER_URL;
   if(hidden)env.VIBE_SCREENSHOT_HIDDEN='1';
-  const executable=packaged?path.join(packageDirectory||path.join(root,"release/win-unpacked"),"vibeTerminal.exe"):path.join(root,"node_modules/electron/dist/electron.exe");
+  const executable=packaged?path.join(packageDirectory||path.join(root,"release/win-unpacked"),"LinaTerminal.exe"):path.join(root,"node_modules/electron/dist/electron.exe");
   child=spawn(executable,[...(packaged?[]:["."]),`--remote-debugging-port=${port}`,'--disable-renderer-backgrounding','--disable-backgrounding-occluded-windows'],{cwd:root,env,windowsHide:true,stdio:["ignore","pipe","pipe"]});const log=fs.createWriteStream(path.join(output,"electron.log"));child.stdout.pipe(log);child.stderr.pipe(log);
   const pages=async()=>await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();
   const page=await until(async()=> (await pages()).find(p=>p.type==="page"&&p.url.startsWith("file:")&&!p.url.includes("surface=voice")),"main renderer");main=new Cdp(page.webSocketDebuggerUrl);await main.open();await main.send("Page.enable");await main.send("Emulation.setDeviceMetricsOverride",{width:1500,height:1000,deviceScaleFactor:1,mobile:false});

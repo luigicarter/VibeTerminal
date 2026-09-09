@@ -39,7 +39,7 @@ test('task status is semantically routed to frozen targets without effect author
     { statusTargetIds: ['missing'] }, { statusRequestId: 'missing' }, { actions: [send()] }]) {
     assert.throws(() => normalizeIntent({ ...raw, statusTargetIds: ['a'], ...patch }, context({ tasks: [{ requestId: 'earlier' }] })));
   }
-  assert.deepEqual(INTENT_TOOL.function.parameters.properties.responseKind.enum, ['task-status']);
+  assert.deepEqual(INTENT_TOOL.function.parameters.properties.responseKind.enum, ['task-status', 'terminal-inspection']);
 });
 
 test('compiler contract supports workspace effects and excludes external applications and reads', () => {

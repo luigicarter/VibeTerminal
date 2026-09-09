@@ -7,4 +7,5 @@ vendor/kimi-custom/bin/kimi-custom text eol=lf
 vendor/kimi-custom/bin/kimi-custom.cmd text eol=crlf
 
 # These files are checksummed runtime assets; preserve their original bytes.
-vendor/voice/** -text
+# Their pinned CRLF endings are intentional, including generated vocabularies.
+vendor/voice/** -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

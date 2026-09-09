@@ -21,15 +21,16 @@ async function bounded(promise, label) {
 }
 const json = value => new Response(JSON.stringify(value));
 let sequence = 0;
-const tool = (action, name = 'workspace') => ({ choices: [{ finish_reason: 'tool_calls', message: { tool_calls: [{ id: `fixture-${++sequence}`, type: 'function', function: { name, arguments: JSON.stringify(action) } }] } }] });
+const toolBatch = (actions, name = 'workspace') => ({ choices: [{ finish_reason: 'tool_calls', message: { tool_calls: actions.map(action => ({ id: `fixture-${++sequence}`, type: 'function', function: { name, arguments: JSON.stringify(action) } })) } }] });
+const tool = (action, name = 'workspace') => toolBatch([action], name);
 const reply = text => ({ choices: [{ finish_reason: 'stop', message: { content: text } }] });
 const metadata = body => JSON.parse(body.messages.find(message => message.role === 'user').content);
 const latest = body => JSON.parse(body.messages.filter(message => message.role === 'tool').at(-1).content);
 const elapsed = start => Math.round((performance.now() - start) * 10) / 10;
 
-async function fixture(source, label, scenario, script, onSpeak) {
+async function fixture(source, label, scenario, script, onSpeak, sessionCount = 2) {
   const root = path.join(out, label, scenario); fs.mkdirSync(root, { recursive: true });
-  const sessions = ['a', 'b'].map(id => ({ id, name: `Fixture ${id}`, kind: 'codex', provider: 'codex', generation: 'g1', cwd: root, status: 'running' }));
+  const sessions = Array.from({ length: sessionCount }, (_, i) => i < 2 ? ['a', 'b'][i] : `pane-${i}`).map(id => ({ id, name: `Fixture ${id}`, kind: 'codex', provider: 'codex', generation: 'g1', cwd: root, status: 'running' }));
   const effects = [], modelCalls = []; let start = 0, firstEffectMs = null;
   const app = require(path.join(source, 'backend/orchestrator.cjs')).createOrchestrator({
     userDataPath: root, secureStorage: { isEncryptionAvailable: () => false },
@@ -49,7 +50,9 @@ async function fixture(source, label, scenario, script, onSpeak) {
       if (url.endsWith('/models')) return json({ data: [{ id: 'fixture', context_length: 128000, supported_parameters: ['tools', 'tool_choice'] }] });
       assert(url.endsWith('/chat/completions'), 'Network is forbidden; no unhandled URL');
       const body = JSON.parse(options.body), stage = body.tools?.[0]?.function?.name === 'interpret_workspace' ? 'interpretation' : 'executor';
-      modelCalls.push({ stage, startedMs: elapsed(start) });
+      modelCalls.push({ stage, startedMs: elapsed(start), inputBytes: Buffer.byteLength(JSON.stringify({ messages: body.messages, tools: body.tools || [] })),
+        schemaBytes: Buffer.byteLength(JSON.stringify(body.tools || [])),
+        directoryBytes: Buffer.byteLength(JSON.stringify(metadata(body).sessions || [])) });
       await sleep(delayMs);
       return json(script({ body, stage, root, effects }));
     }
@@ -61,6 +64,7 @@ async function fixture(source, label, scenario, script, onSpeak) {
 
 async function actionScenario(source, label, kind) {
   let round = 0;
+  const batched = kind === 'operator-batched';
   const outcome = 'Verified the requested operation.';
   const f = await fixture(source, label, kind, ({ body, stage, root }) => {
     if (stage === 'interpretation') return tool(kind === 'create' ? { goal: 'Open a terminal.', executionMode: 'direct', actions: [{ kind: 'create_session', kindOfSession: 'terminal', cwd: root }] }
@@ -68,11 +72,12 @@ async function actionScenario(source, label, kind) {
     round++;
     const grant = metadata(body).authorizedCommands.grants[0];
     if (kind === 'create') return round === 1 ? tool({ kind: 'create_session', grantId: grant.id }) : reply('Opened the terminal.');
-    if (round === 1 || round === 3) return tool({ kind: 'read_session', targetId: 'a' });
-    if (round === 2 || round === 4) {
+    if (round === 1 || !batched && round === 3) return tool({ kind: 'read_session', targetId: 'a' });
+    if (round === 2 || round === (batched ? 3 : 4)) {
       const observed = latest(body); assert(observed.observationToken);
-      return tool({ kind: round === 2 ? 'send_prompt' : 'finish_terminal', grantId: grant.id, targetId: 'a', stepId: `step-${round}`, observationToken: observed.observationToken,
-        ...(round === 2 ? { text: 'Review changes.', observationSequence: observed.observation.sequence, inputRevision: observed.observation.inputRevision } : { text: outcome, outcome: 'completed' }) });
+      const action = { kind: round === 2 ? 'send_prompt' : 'finish_terminal', grantId: grant.id, targetId: 'a', stepId: `step-${round}`, observationToken: observed.observationToken,
+        ...(round === 2 ? { text: 'Review changes.', observationSequence: observed.observation.sequence, inputRevision: observed.observation.inputRevision } : { text: outcome, outcome: 'completed' }) };
+      return batched && round === 2 ? toolBatch([action, { kind: 'read_session', targetId: 'a' }]) : tool(action);
     }
     assert.equal(round, 5, 'Unexpected executor repair/extra call'); return reply(outcome);
   });
@@ -80,9 +85,29 @@ async function actionScenario(source, label, kind) {
     f.begin(); const result = await f.app.send({ text: kind === 'create' ? 'Open a terminal in this project.' : 'Use Fixture a to review changes.', origin: 'text' });
     assert.equal(result.ok, true, JSON.stringify(result));
     assert.deepEqual(f.effects.map(e => e.kind), [kind === 'create' ? 'create_session' : 'send_prompt']);
-    if (kind === 'create') assert.match(result.text, /^Opened /);
-    if (kind !== 'create') assert(result.text.includes(outcome), 'Observed finish text must survive any truthful pending-result qualification');
-    return { ...f.metrics(), finalReply: result.text, semanticChecks: 'One accepted delivery; successful result; operator observed finish text preserved.' };
+    if (kind === 'create') assert.match(result.text, /^(?:Opened |done$)/);
+    if (kind !== 'create') {
+      const finish = result.actions.find(action => action.kind === 'finish_terminal');
+      assert.equal(finish?.status, 'interaction-complete');
+      assert.match(finish?.text || '', /Input was sent to Fixture a; I haven't confirmed that the task started.*result is still pending/,
+        'Transport acceptance must remain distinct from successful delegated work');
+      assert(result.text === 'done' || result.text.includes('result is still pending'));
+    }
+    return { ...f.metrics(), finalReply: result.text, semanticChecks: 'One accepted delivery; successful command; delegated result remains pending in action receipts.' };
+  } finally { await f.app.dispose(); }
+}
+
+async function directoryScenario(source, label) {
+  const f = await fixture(source, label, 'directory', ({ body, stage }) => {
+    if (stage === 'interpretation') return tool({ goal: 'Count available terminals.', actions: [] }, 'interpret_workspace');
+    assert.equal(metadata(body).sessions.length, 40);
+    return reply('There are 40 terminals.');
+  }, undefined, 40);
+  try {
+    f.begin(); const result = await f.app.send({ text: 'How many terminals are open?', origin: 'text' });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(f.effects.length, 0);
+    return f.metrics();
   } finally { await f.app.dispose(); }
 }
 
@@ -149,15 +174,20 @@ async function heldDeliveryAck(source) {
   const file = path.join(out, 'report.json');
   for (const [label, source] of [...(baseline ? [['baseline', path.resolve(baseline)]] : []), ['current', repo]]) {
     const entry = report.sources[label] = { source };
-    for (const kind of ['create', 'operator']) { entry[kind] = await actionScenario(source, label, kind); fs.writeFileSync(file, JSON.stringify(report, null, 2) + '\n'); }
+    for (const kind of ['create', 'operator', 'operator-batched']) { entry[kind] = await actionScenario(source, label, kind); fs.writeFileSync(file, JSON.stringify(report, null, 2) + '\n'); }
+    entry.directory = await directoryScenario(source, label); fs.writeFileSync(file, JSON.stringify(report, null, 2) + '\n');
     entry.heldAck = await heldAck(source, label); fs.writeFileSync(file, JSON.stringify(report, null, 2) + '\n');
     entry.heldDeliveryAck = await heldDeliveryAck(source); fs.writeFileSync(file, JSON.stringify(report, null, 2) + '\n');
     entry.audio = await audioProbe(source); fs.writeFileSync(file, JSON.stringify(report, null, 2) + '\n');
   }
   if (report.sources.baseline) {
-    for (const kind of ['create', 'operator']) assert.deepEqual(report.sources.baseline[kind].effects, report.sources.current[kind].effects);
+    for (const kind of ['create', 'operator', 'operator-batched']) assert.deepEqual(report.sources.baseline[kind].effects, report.sources.current[kind].effects);
     report.modelCallSavings = Object.fromEntries(['create', 'operator'].map(kind => [kind, report.sources.baseline[kind].modelCalls - report.sources.current[kind].modelCalls]));
   }
+  report.batchingComparison = Object.fromEntries(Object.entries(report.sources).map(([label, entry]) => [label, {
+    sequentialExecutorCalls: entry.operator.executorCalls, batchedExecutorCalls: entry['operator-batched'].executorCalls,
+    executorCallSavings: entry.operator.executorCalls - entry['operator-batched'].executorCalls
+  }]));
   fs.writeFileSync(file, JSON.stringify(report, null, 2) + '\n');
   console.log(JSON.stringify({ report: file, ...report }, null, 2));
 })().catch(error => { console.error(error); process.exitCode = 1; });

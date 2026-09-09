@@ -122,7 +122,7 @@ function relayPayload(remainder, allowBare = false) {
   if (!value.trim()) throw new Error('A complete relay payload is required.'); return value;
 }
 function authorizeModelAction(action, intent, sessions) {
-  if (['open_file', 'open_folder'].includes(action.kind)) throw new Error('Use Workspace tools to open files or folders in an external application. Voice controls stay inside vibeTerminal.');
+  if (['open_file', 'open_folder'].includes(action.kind)) throw new Error('Use Workspace tools to open files or folders in an external application. Voice controls stay inside Lina Terminal.');
   const clauses = commandClauses(intent.text);
   const candidates = clauses.filter(c => INTENT[action.kind]?.test(c.syntax));
   if (!candidates.length) throw new Error('This action needs an explicit user instruction.');

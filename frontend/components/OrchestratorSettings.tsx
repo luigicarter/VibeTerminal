@@ -54,7 +54,7 @@ export function OrchestratorSettings() {
     if (enabled) await connect();
     const result = await api.setEnabled(enabled);
     if (!result.ok) throw new Error(result.error || 'Could not change Orchestrator listening.');
-    setNote(enabled ? draft?.handsFreeEnabled ? 'Microphone on. Say Hey Vibe or hold Space to talk.' : 'Microphone on. Hold Space to talk.' : 'Orchestrator disabled.');
+    setNote(enabled ? draft?.handsFreeEnabled ? 'Microphone on. Say Hey Lina or hold Space to talk.' : 'Microphone on. Hold Space to talk.' : 'Orchestrator disabled.');
   }
   if (!draft) return <section className="orchestrator-settings"><p>Loading assistant settings…</p></section>;
   const voices = speech.find(item => item.id === draft.ttsModel)?.voices || [];
@@ -63,15 +63,15 @@ export function OrchestratorSettings() {
   const error = voiceState?.error || state?.error;
   return <section className="orchestrator-settings vibe-assistant-settings">
     <div className="settings-section-heading"><h3>Orchestrator</h3><span>{state?.enabled ? 'On' : 'Off'}</span></div>
-    <p className="settings-description">Enter your key and model, then enable Orchestrator and hold the space bar to talk. Release the key to send what you said. Enable hands-free voice to say "Hey Vibe" in English.</p>
+    <p className="settings-description">Enter your key and model, then enable Orchestrator and hold the space bar to talk. Release the key to send what you said. Enable hands-free voice to say "Hey Lina" in English.</p>
     <fieldset disabled={busy}>
       <div className="assistant-device-row"><label>OpenRouter API key<input type="password" autoComplete="off" disabled={keyLocked} value={apiKey} placeholder={keyLocked ? 'Saved securely' : 'sk-or-…'} onChange={event => { setKey(event.target.value); setNote(''); }}/></label>{keyLocked && <button type="button" onClick={() => setChangingKey(true)}>Change</button>}{changingKey && <button type="button" onClick={() => { setChangingKey(false); setKey(''); }}>Cancel</button>}</div>
       <label>Assistant model<input list="orchestrator-models" value={draft.model} onChange={event => edit('model', event.target.value)} placeholder="Choose or enter an OpenRouter model ID"/><datalist id="orchestrator-models">{models.map(item => <option key={item.id} value={item.id}>{item.name || item.label || item.id}</option>)}</datalist></label>
       <button className="assistant-browse" type="button" disabled={!api} onClick={() => void action(async () => { setModels(await api!.models('brain')); setNote('Assistant models refreshed.'); })}>Browse models</button>
       <div className="assistant-enable"><label className="assistant-check"><input type="checkbox" checked={!!state?.enabled} disabled={busy || !api || (!state?.enabled && ((!state?.settings.hasKey && !apiKey.trim()) || !draft.model.trim()))} onChange={event => void action(() => toggle(event.target.checked))}/> Enable Orchestrator</label></div>
-      <label className="assistant-check"><input type="checkbox" checked={draft.handsFreeEnabled} onChange={event => edit('handsFreeEnabled', event.target.checked)}/> Hands-free voice - Hey Vibe (English)</label>
+      <label className="assistant-check"><input type="checkbox" checked={draft.handsFreeEnabled} onChange={event => edit('handsFreeEnabled', event.target.checked)}/> Hands-free voice - Hey Lina (English)</label>
       {voiceState?.handsFreeStatus === 'loading' && <p className="settings-description" role="status">Starting hands-free voice... Hold Space to talk.</p>}
-      {voiceState?.handsFreeStatus === 'ready' && <p className="settings-description" role="status">Say Hey Vibe or hold Space to talk.</p>}
+      {voiceState?.handsFreeStatus === 'ready' && <p className="settings-description" role="status">Say Hey Lina or hold Space to talk.</p>}
       {voiceState?.handsFreeStatus === 'unavailable' && <p className="settings-description" role="status">{voiceState.handsFreeError || 'Hands-free voice is unavailable.'} Hold Space to talk. Turn hands-free voice off and on to retry.</p>}
       <details className="voice-settings"><summary>Advanced</summary>
       <label className="assistant-check"><input type="checkbox" checked={sessionOnly} onChange={event => setSessionOnly(event.target.checked)}/> Use a new key for this app session only</label>

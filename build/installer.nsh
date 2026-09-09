@@ -1,4 +1,4 @@
-; Custom NSIS hooks for vibeTerminal.
+; Custom NSIS hooks for Lina Terminal.
 ;
 ; electron-updater launches the downloaded installer with the "--updated" flag for
 ; every auto-update, and never for a first-time install (see electron-updater's
