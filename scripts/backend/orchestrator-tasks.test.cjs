@@ -416,7 +416,9 @@ test('restart preserves unfinished task as paused and explicit resume asks the m
   const restored = createOrchestrator({ userDataPath: f.root, secureStorage: { isEncryptionAvailable: () => false }, getSessions: () => f.sessions,
     interpretIntent: () => { interpretations++; return { goal: 'No effect.', actions: [] }; }, dispatchAction: () => { effects++; return { ok: true }; },
     fetch: async url => new Response(JSON.stringify(url.endsWith('/key') ? { data: {} } : { data: [{ id: 'model', supported_parameters: ['tools'] }] })) });
-  t.after(() => restored.dispose());
+  // The fixture owns the directory and its after hook runs first. Transfer its
+  // app reference so it drains the restored instance's writes before removal.
+  f.app = restored;
   assert.equal(restored.getState().tasks.find(task => task.id === sent.requestId).status, 'paused'); assert.equal(effects, 0);
   await restored.configure({ apiKey: 'fixture', model: 'model', sessionOnly: true }); await restored.setEnabled(true);
   assert.equal(effects, 0); assert.equal(interpretations, 0);

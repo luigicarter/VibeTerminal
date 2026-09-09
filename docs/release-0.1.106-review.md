@@ -35,3 +35,14 @@ its binary hash can differ from the local build.
 
 Publication does not replace the running installed app or restart active work.
 Installed users apply the release through Check for update, Update and Restart.
+
+## Publication follow-up
+
+The v0.1.106 tag did not publish: its clean Windows workflow passed the earlier
+release gates but encountered `ENOTEMPTY` in the restart test's cleanup hook.
+The fixture removed its directory before the restored Orchestrator disposed and
+drained pending writes. v0.1.107 transfers cleanup ownership to that restored
+instance; all assertions remain intact. The targeted regression passed twenty
+consecutive runs. The v0.1.106 tag is preserved, and v0.1.107 reruns the complete
+release workflow before publication. Runtime repairs and listening-cue behavior
+are the same; the added change fixes test teardown ordering.
