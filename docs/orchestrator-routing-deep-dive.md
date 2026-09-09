@@ -2,6 +2,11 @@
 
 ## Implemented behavior
 
+The [September 9 ownership repair](orchestrator-task-ownership-review.md) closes an
+earlier boundary: interpretation could mistake a provider/project request for a
+selected existing terminal and bypass this routing stage. Current new-work defaults,
+selection checks and the latest live-model limitations are recorded there.
+
 The later [cohesion review](orchestrator-cohesion-review.md) checks the complete
 request path and repairs adapter, lifecycle and persistence gaps missed by the
 original implementation fixtures. The acceptance counts below describe that

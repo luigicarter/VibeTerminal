@@ -4,6 +4,10 @@ Lina Terminal is an Electron + React desktop workspace for running local termina
 
 ## Docs Index
 
+- `docs/release-0.1.109-review.md` - Task-ownership release, full local/package acceptance, test fixture readiness repairs, remaining model limits and installation boundary.
+
+- `docs/orchestrator-task-ownership-review.md` - September 9 wrong-recipient investigation, existing-conversation selection evidence, new-work versus continuation routing, verification and remaining live-model limits.
+
 - `docs/release-0.1.106-review.md` - Current-conversation repairs and listening-cue release, source/package acceptance, harness limitations and installation boundary.
 
 - `docs/orchestrator-conversation-errors-2026-09-09.md` - Current conversation failures, history context repair, specific voice feedback, startup recovery and observed handoffs, with acceptance and installed-build boundaries.

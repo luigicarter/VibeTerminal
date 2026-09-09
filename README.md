@@ -12,7 +12,7 @@ to which task.
 
 | Platform | Download | Notes |
 | --- | --- | --- |
-| Windows x64 | [LinaTerminal-Setup-0.1.108.exe](https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.108/LinaTerminal-Setup-0.1.108.exe) | Standard Windows installer. |
+| Windows x64 | [LinaTerminal-Setup-0.1.109.exe](https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.109/LinaTerminal-Setup-0.1.109.exe) | Standard Windows installer. |
 | All releases | [GitHub Releases](https://github.com/luigicarter/VibeTerminal/releases) | Older versions and release assets. |
 
 Lina Terminal was previously named vibeTerminal. Existing settings and workspaces

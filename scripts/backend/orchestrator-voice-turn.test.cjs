@@ -21,6 +21,8 @@ async function fixture(t) {
       if (url.endsWith('/key')) return new Response(JSON.stringify({ data: {} }));
       if (url.endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'model', context_length: 128000, supported_parameters: ['tools'] }] }));
       const body = JSON.parse(options.body);
+      // These transport fixtures script user-selected targets; semantic veto cases have a separate suite.
+      if (body.messages[0].content === require('../../backend/orchestratorTargetReview.cjs').TARGET_REVIEW_SYSTEM) return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ decision: 'DIRECT', evidenceIds: JSON.parse(body.messages[1].content).selectionEvidence.map(item => item.id) }) } }] }));
       if (body.tools?.[0]?.function.name === 'interpret_workspace') {
         const context = JSON.parse(body.messages[1].content); f.contexts.push(context);
         return new Response(JSON.stringify(tool('interpret_workspace', f.plan(context))));

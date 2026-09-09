@@ -19,9 +19,11 @@ if (fs.existsSync(localState)) {
 const requestedBudget = Number(process.env.VIBE_RECOVERY_LIVE_BUDGET || .20);
 const budget = Number.isFinite(requestedBudget) && requestedBudget > 0 ? Math.min(requestedBudget, .25) : .20;
 const caseNames = ['project-close-all', 'explicit-close-subset', 'bound-new-codex', 'natural-failed-route-recovery', 'ambiguous-web-terminal-clause', 'creation-purpose-guard', 'ambiguous-creation-purpose-guard', 'feature-description-history', 'feature-followup-history', 'fullscreen-history'];
+caseNames.push('unselected-existing-codex', 'unselected-existing-codex-guard', 'related-agent-continuation', 'explicit-existing-other-task');
 const caseArgs = process.argv.slice(2).filter(arg => arg.startsWith('--case='));
 const selectedCase = caseArgs[0]?.slice('--case='.length);
 const report = { boundary: 'Configured live model; synthetic project, pane inventory and effects only. The recovery case scripts only its initial intent and initial routing failure; its retry interpretation, routing and execution use the configured live model. The two purpose-guard cases script only their initial unintended draft proposal; purpose review and subsequent repair/execution use the live model. Other cases use the live model from their initial intent. No installed conversation/history, native terminals or microphone used.', initialFailureScripted: false, initialProposalScripted: false, budget, maxCallsPerCase: 24, selectedCase: selectedCase === undefined ? 'all' : caseNames.includes(selectedCase) ? selectedCase : 'invalid', cases: [], startedAt: new Date().toISOString() };
+report.boundary += ' The existing-codex guard case scripts only the initial wrong existing-target proposal; target review, repair, routing and execution use the live model.';
 const recoveryObjective = 'Investigate the partial terminal closure in Recovery QA; do not edit files.';
 const purposeTask = 'investigate the partial terminal closure; do not edit files.';
 const purposeObjectives = {
@@ -92,6 +94,14 @@ async function main() {
       const completion = url.endsWith('/chat/completions'); let reservation = 0;
       if (completion) {
         const body = JSON.parse(options.body);
+        if (name === 'unselected-existing-codex-guard' && !seededInitialIntent && body.tools?.some(tool => tool.function?.name === 'interpret_workspace')) {
+          seededInitialIntent = true; row.initialProposalScripted = true;
+          return new Response(JSON.stringify({ choices: [{ finish_reason: 'tool_calls', message: { tool_calls: [{
+            id: 'scripted-wrong-existing-target', type: 'function', function: { name: 'interpret_workspace', arguments: JSON.stringify({
+              goal: 'Fix full-screen pane height.', actions: [{ kind: 'operate_terminal', targetIds: ['worker-1'], text: 'Fix full-screen pane height; it fills horizontally but remains short vertically.' }]
+            }) }
+          }] } }], usage: { cost: 0 } }), { status: 200 });
+        }
         if (Object.hasOwn(purposeObjectives, name) && !seededInitialIntent
             && body.tools?.some(tool => tool.function?.name === 'interpret_workspace')) {
           seededInitialIntent = true; row.initialProposalScripted = true; report.initialProposalScripted = true;
@@ -132,6 +142,7 @@ async function main() {
         const purposeReview = body.messages?.some(message => message.role === 'system' && typeof message.content === 'string'
           && message.content.startsWith('Check the purpose of proposed new-terminal drafts before any action.')) === true;
         if (purposeReview) row.purposeReview = true;
+        if (body.messages?.[0]?.content === require('../../backend/orchestratorTargetReview.cjs').TARGET_REVIEW_SYSTEM) row.targetReview = true;
         row.calls.push({ stage: metadataName(body.tools?.[0]?.function?.name || 'model'), status: 'started', toolErrors, purposeReview,
           inputBytes: Buffer.byteLength(JSON.stringify({ messages: body.messages, tools: body.tools || [] })) });
       }
@@ -178,7 +189,9 @@ async function main() {
       getRoots: () => ({ documents: root, projects: [{ id: 'recovery-project', name: 'Recovery QA', path: cwd }] }),
       getSessions: () => structuredClone(sessions), getLaunchers: () => [{ kind: 'codex', label: 'Codex', available: true, configured: true },
         ...(name === 'fullscreen-history' ? [{ kind: 'claude', label: 'Claude Code', available: true, configured: true }] : [])],
-      routeTask: async (context, { read }) => {
+      // Ownership cases exercise production routing, including its real model
+      // allowance and compaction. The older recovery fixture injects failures.
+      routeTask: ['unselected-existing-codex', 'unselected-existing-codex-guard', 'related-agent-continuation', 'explicit-existing-other-task'].includes(name) ? undefined : async (context, { read }) => {
         row.routeCalls++;
         if (induceFailure) { induceFailure = false; throw new RoutingError('synthetic-route-failure'); }
         return planTaskRoute({ context, read, complete: async (messages, tools) => {
@@ -191,6 +204,7 @@ async function main() {
         const input = composer(current); input.sequence++;
         return { ok: true, id: current.id, generation: current.generation, sequence: input.sequence, observationSequence: input.sequence, inputRevision: input.revision,
           text: sends.some(item => item.targetId === current.id) ? 'The submitted synthetic investigation is running.'
+            : name.startsWith('unselected-existing-codex') && current.id === 'worker-1' ? 'User: Discuss future product strategy. Agent: Here are ideas for a dashboard redesign. This conversation has no full-screen repair task. Idle at an empty composer.'
             : input.text ? `Codex ready. Unsent input composer:\n> ${input.text}` : 'Codex ready. Empty input composer. >' }; },
       dispatchAction: action => {
         if (action.kind === 'navigate') {
@@ -306,6 +320,38 @@ async function main() {
     assert.match(question, /web|terminal.*mean|which.*terminal|clarif/i);
     assert.equal(f.row.effects.send, 0); assert.equal(f.row.effects.create, 0);
     f.row.clausePreserved = true;
+  });
+  for (const name of ['unselected-existing-codex', 'unselected-existing-codex-guard']) await scenario(name, 1, async f => {
+    f.sessions()[0].name = 'Discuss future product strategy';
+    const result = await f.send('Can you prompt a Codex terminal in Recovery QA to fix the full-screen issue? It expands horizontally but is very short vertically.');
+    assert.equal(result.ok, true);
+    assert.equal(f.row.effects.create, 1); assert.equal(f.row.effects.send, 1);
+    assert.notEqual(f.sends[0].targetId, 'worker-1'); assert.match(f.sends[0].text, /vertical|height/i);
+    if (name.endsWith('-guard')) {
+      assert.equal(f.row.initialProposalScripted, true);
+      await relay.flushDiagnostics();
+      const events = fs.readFileSync(path.join(run, name, 'profile', 'logs', 'orchestrator-errors.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+      f.row.targetSelectionVeto = events.some(event => event.stage === 'existing_target' && event.status === 'assign');
+      assert.equal(f.row.targetSelectionVeto, true);
+    }
+  });
+  await scenario('related-agent-continuation', 0, async f => {
+    const first = await f.send('Open a new Codex in Recovery QA and fix full-screen pane height.');
+    assert.equal(first.ok, true); assert.equal(f.row.effects.create, 1); assert.equal(f.row.effects.send, 1);
+    const next = await f.send('Tell that agent to also add regression coverage for its full-screen fix.', { replyToRequestId: first.requestId });
+    f.row.controlCompleted = next.ok;
+    // This acceptance measures recipient ownership and exact-once input. Keep
+    // the existing direct-operator finish failure visible as a separate result.
+    if (!next.ok) { assert.match(next.error, /^The terminal operation is unfinished\./); f.row.controlFailure = 'operator-finish-unverified'; }
+    assert.equal(f.row.effects.create, 1); assert.equal(f.row.effects.send, 2);
+    assert.equal(f.sends[1].targetId, f.sends[0].targetId);
+  });
+  await scenario('explicit-existing-other-task', 1, async f => {
+    const result = await f.send('Use the existing worker-1 terminal in Recovery QA for a different task: fix full-screen pane height.');
+    f.row.controlCompleted = result.ok;
+    if (!result.ok) { assert.match(result.error, /^The terminal operation is unfinished\./); f.row.controlFailure = 'operator-finish-unverified'; }
+    assert.equal(f.row.effects.create, 0); assert.equal(f.row.effects.send, 1);
+    assert.equal(f.sends[0].targetId, 'worker-1'); assert.equal(f.row.targetReview, true);
   });
   await scenario('creation-purpose-guard', 0, async f => {
     const result = await f.send(purposeObjectives['creation-purpose-guard']);

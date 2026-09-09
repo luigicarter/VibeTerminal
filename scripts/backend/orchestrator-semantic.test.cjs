@@ -33,6 +33,8 @@ async function fixture(t) {
       if (url.endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'scripted-brain', context_length: 128000, supported_parameters: ['tools', 'tool_choice'] }] }));
       assert.ok(url.endsWith('/chat/completions'));
       const body = JSON.parse(options.body), compiler = body.tools?.[0]?.function?.name === 'interpret_workspace';
+      // These transport fixtures script user-selected targets; semantic veto cases have a separate suite.
+      if (body.messages[0].content === require('../../backend/orchestratorTargetReview.cjs').TARGET_REVIEW_SYSTEM) return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ decision: 'DIRECT', evidenceIds: JSON.parse(body.messages[1].content).selectionEvidence.map(item => item.id) }) } }] }));
       if (compiler && f.rejectNamedChoice && typeof body.tool_choice === 'object') { f.namedRejections = (f.namedRejections || 0) + 1; return new Response(JSON.stringify({ error: { message: 'Request contains an invalid argument.' } }), { status: 400 }); }
       const queue = compiler ? f.plans : f.steps;
       assert.ok(queue.length, `Unexpected ${compiler ? 'compiler' : 'executor'} request`);

@@ -8,6 +8,7 @@ const { createWorkHistory, eligible: hasObservedTurnEnd } = require('./orchestra
 const { createWorkItemStore } = require('./orchestratorWorkItems.cjs');
 const { createRoutingRegistry, sessionIdentity, matchesBinding, paneKey } = require('./orchestratorRouting.cjs');
 const { planTaskRoute, validateRouteCall, deterministicNewTaskRoute } = require('./orchestratorRoutePlanner.cjs');
+const { TARGET_REVIEW_SYSTEM, targetReviewPayload, targetReviewDecision } = require('./orchestratorTargetReview.cjs');
 const { launcherCatalog, routingBindingMatches, sessionReady } = require('./orchestratorLaunchers.cjs');
 const { buildWorkspaceParameters, scopedWorkspaceTool } = require('./orchestratorToolSchema.cjs');
 const { workspaceToolGuide } = require('./orchestratorToolGuide.cjs');
@@ -836,6 +837,8 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
   }
   async function interpret(context, model, tokens, signal, diagnosticContext) {
     let raw, creationPurpose, creationPurposeKey, needsExecution = false;
+    const targetReviews = new Map();
+    let needsAssignment = false;
     if (interpretIntent) raw = await interpretIntent(context);
     else {
       // Intent receives user-authored commands and typed identity metadata only.
@@ -871,6 +874,36 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
           try { raw = JSON.parse(calls[0].function.arguments); }
           catch { throw new Error('The Brain returned malformed command interpretation JSON. No command was dispatched.'); }
           const plan = validateInterpretedPlan(raw, context, true);
+          const targetReview = targetReviewPayload(plan, context);
+          if (targetReview) {
+            const reviewKey = JSON.stringify(redact(targetReview));
+            if (!targetReviews.has(reviewKey) && !targetReview.proposedOperations.every((_, index) => targetReview.selectionEvidence.some(item => item.operation === index))) {
+              targetReviews.set(reviewKey, 'ASSIGN');
+              recordDiagnostic({ ...diagnosticContext, event: 'intent_review', stage: 'existing_target', status: 'assign', strategy: 'no-selection-evidence' });
+            }
+            if (!targetReviews.has(reviewKey)) {
+              const current = storage.getSettings();
+              if (current.spendingLimit != null && Object.values(state.usage).reduce((a, b) => a + b, 0) >= current.spendingLimit) throw new Error('Session spending limit reached.');
+              const reviewMessages = [{ role: 'system', content: TARGET_REVIEW_SYSTEM }, { role: 'user', content: reviewKey }];
+              const reviewed = await completionWithFallback({ model: model.id,
+                messages: fitMessages({ messages: reviewMessages, contextLength: model.contextLength, outputTokens: 512 }),
+                max_tokens: 512, ...completionOptions(model) }, signal);
+              state.usage.brain += usageCost(reviewed);
+              if (signal.aborted) throw new Error('Cancelled.');
+              targetReviews.set(reviewKey, targetReviewDecision(reviewed, targetReview));
+              recordDiagnostic({ ...diagnosticContext, event: 'intent_review', stage: 'existing_target', status: targetReviews.get(reviewKey).toLowerCase() });
+            }
+            if (targetReviews.get(reviewKey) === 'UNRESOLVED') {
+              const error = new Error('Existing-terminal selection could not be verified; no new operation was dispatched.');
+              error.code = 'ORCHESTRATOR_TARGET_REVIEW_UNRESOLVED';
+              throw error;
+            }
+            if (targetReviews.get(reviewKey) !== 'DIRECT') {
+              needsAssignment = true;
+              throw new Error('The user did not select the proposed existing conversation for this task. A provider/project request such as prompt a Codex terminal is not an existing-terminal selection. Use delegate_task with the known project and complete original objective, provider and constraints; assignmentMode auto discovers a verified same-task owner or creates a separate worker, while new requires creation. Keep explicitly selected sibling operations. Do not invent a workItemId, select another arbitrary pane, replace work with navigation or an empty pane, or ask which terminal when ordinary assignment can resolve it. Clarify only genuinely missing task or project knowledge.');
+            }
+          }
+          if (needsAssignment && !plan.clarification && !plan.grants.some(grant => grant.kind === 'delegate_task')) throw new Error('The unassigned task still requires delegate_task. Preserve the original task and constraints instead of dropping it or bypassing assignment with another effect.');
           const drafts = plan.grants.filter(grant => grant.sourceUserId === context.requestId && grant.kind === 'create_session' && grant.text);
           if (drafts.length) {
             const purposeKey = JSON.stringify(drafts.map(grant => [grant.args.kindOfSession, grant.text]));
@@ -905,6 +938,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
           return plan;
         } catch (error) {
           if (error instanceof OpenRouterError || isCancellation(error) || error?.message === 'Session spending limit reached.') throw error;
+          if (error?.code === 'ORCHESTRATOR_TARGET_REVIEW_UNRESOLVED') throw error;
           if (['ORCHESTRATOR_UNKNOWN_LAUNCHER', 'ORCHESTRATOR_UNAVAILABLE_LAUNCHER'].includes(error?.code) && typeof error.clarification === 'string') {
             // Missing launcher knowledge is not malformed JSON. Reinterpreting
             // it could substitute a provider or discard a sibling request.

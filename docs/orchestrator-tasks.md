@@ -6,6 +6,13 @@ and delivery receipt stays associated with its request and terminal.
 
 ## Automatic terminal assignment
 
+A request for "a Codex terminal in this project" identifies a provider and project,
+not an existing conversation. Independent work gets a new conversation by default;
+related continuations can reuse their verified task owner. Explicitly selecting an
+existing agent can intentionally give it different work. Newly interpreted
+existing-terminal task input must pass selection-evidence and semantic checks before
+effects; see [the ownership repair and verification limits](orchestrator-task-ownership-review.md).
+
 Users can give a task and let the Brain choose its worker. `delegate_task` binds
 the objective and project before a read-only routing stage inspects candidate
 conversations. Related work returns to its work item's owner, including while

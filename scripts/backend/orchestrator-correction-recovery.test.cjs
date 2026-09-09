@@ -56,6 +56,8 @@ test('spoken correction resumes a blocked objective with the original owner and 
       if (url.endsWith('/key')) return new Response(JSON.stringify({ data: {} }));
       if (url.endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'scripted', supported_parameters: ['tools', 'tool_choice'], context_length: 128000 }] }));
       const body = JSON.parse(options.body), meta = JSON.parse(body.messages.find(message => message.role === 'user').content);
+      // These transport fixtures script user-selected targets; semantic veto cases have a separate suite.
+      if (body.messages[0].content === require('../../backend/orchestratorTargetReview.cjs').TARGET_REVIEW_SYSTEM) return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ decision: 'DIRECT', evidenceIds: JSON.parse(body.messages[1].content).selectionEvidence.map(item => item.id) }) } }] }));
       if (body.tools[0].function.name === 'interpret_workspace') {
         contexts.push(meta);
         return new Response(JSON.stringify(tool('interpret_workspace', original

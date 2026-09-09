@@ -42,6 +42,7 @@ const screenshot = async name => { let timer; try { const shot = await Promise.r
   for (let i = 0; i < 4; i++) {
     const result = await dispatch({ kind: 'create_session', kindOfSession: 'terminal', cwd }); assert.equal(result.ok, true, JSON.stringify(result));
     const current = await until(async () => (await inventory()).find(item => item.id === result.id && item.terminalPid > 0), 'running root'); ownedRoots.push(current.terminalPid);
+    await until(async () => { const read = await dispatch({ kind: 'read_session', target: { id: current.id, generation: current.generation } }); return read.ok && read.observation?.cursorVisible !== false && read.observation?.cursorLine?.beforeCursor?.trimEnd().endsWith('>'); }, 'PowerShell input prompt');
     const pidFile = path.join(output, `child-${i}.txt`);
     const command = `$fixtureChild = Start-Process -FilePath '${env.VIBE_TERMINAL_SHELL.replace(/'/g, "''")}' -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 300' -WindowStyle Hidden -PassThru; $fixtureChild.Id | Set-Content -LiteralPath '${pidFile.replace(/'/g, "''")}'`;
     const sent = await dispatch({ kind: 'send_prompt', target: { id: current.id, generation: current.generation }, text: command }); assert.equal(sent.ok, true, JSON.stringify(sent));

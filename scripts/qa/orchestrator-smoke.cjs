@@ -44,6 +44,9 @@ const check=(label,value)=>{result.checks.push({label,value});console.log(label,
   let session=await main.eval(`window.vibe.orchestrator.getState().then(s=>s.sessions.find(s=>s.id===${JSON.stringify(paneId)}))`);
   if(!session?.generation||session.generation.startsWith("paused:"))session=await until(()=>main.eval(`window.vibe.orchestrator.getState().then(s=>s.sessions.find(s=>s.id===${JSON.stringify(paneId)}&&!s.generation.startsWith('paused:')))`),"live relay identity");
   const target={id:paneId,generation:session.generation};
+  // A live PTY precedes PowerShell's first prompt. Wait for decoded input
+  // readiness so startup output cannot invalidate this transport smoke's read.
+  await until(()=>main.eval(`window.vibe.orchestrator.dispatch({kind:'read_session',target:${JSON.stringify(target)}}).then(r=>r.ok&&r.observation?.cursorVisible!==false&&r.observation?.cursorLine?.beforeCursor?.trimEnd().endsWith('>'))`),"PowerShell input prompt");
   const draft=await main.eval(`window.vibe.orchestrator.dispatch({kind:'stage_draft',target:${JSON.stringify(target)},text:'Write-Output relay-smoke'})`);assert.equal(draft.ok,true,JSON.stringify(draft));
   const before=await main.eval(`window.vibe.orchestrator.dispatch({kind:'read_session',target:${JSON.stringify(target)}})`);assert.equal(before.ok,true);assert(!before.observation.text.includes("relay-smoke"),"draft must not send PTY bytes");
   const send=await main.eval(`window.vibe.orchestrator.dispatch({kind:'send_prompt',target:${JSON.stringify(target)},text:'Write-Output relay-smoke'})`);assert.equal(send.ok,true,JSON.stringify(send));assert.equal(send.status,"written");

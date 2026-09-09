@@ -36,6 +36,7 @@ fs.writeFileSync(path.join(fixtureBin, "codex.ps1"), "Add-Content -LiteralPath (
 const entry = path.join(output, "main.cjs");
 fs.writeFileSync(entry, `const fs=require('node:fs');
 const {interpretTestIntent}=require(${JSON.stringify(path.join(root,'scripts/backend/orchestrator-test-intent.cjs'))});
+const {TARGET_REVIEW_SYSTEM}=require(${JSON.stringify(path.join(root,'backend/orchestratorTargetReview.cjs'))});
 if(${hidden}){
  const electron=require('electron'),NativeWindow=electron.BrowserWindow,Module=require('node:module'),load=Module._load;
  // Fixture-only hidden runtime: do not create/activate a foreground QA window.
@@ -57,6 +58,8 @@ globalThis.fetch=async(url,options={})=>{
  if(url!=='https://openrouter.ai/api/v1/chat/completions')throw Error('Fixture blocked network: '+url);
  const body=JSON.parse(options.body);fs.appendFileSync(${JSON.stringify(traceFile)},JSON.stringify(body)+'\\n');
  const answer=message=>reply({choices:[{message}],usage:{cost:0}});
+ // Script this model response while keeping application selection evidence and validation intact.
+ if(body.messages[0]?.content===TARGET_REVIEW_SYSTEM){const context=JSON.parse(body.messages[1].content);return answer({content:JSON.stringify({decision:'DIRECT',evidenceIds:context.selectionEvidence.map(item=>item.id)})});}
  if(!body.tools)return answer({content:'NO_CHANGE'});
  if(body.tools.some(tool=>tool.function?.name==='interpret_workspace')){
   const context=JSON.parse(body.messages.find(message=>message.role==='user').content);

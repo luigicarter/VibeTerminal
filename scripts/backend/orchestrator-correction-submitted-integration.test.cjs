@@ -18,6 +18,8 @@ for (const explicit of [false, true]) for (const composed of [false, true]) test
       if (url.endsWith('/key')) return new Response(JSON.stringify({ data: {} }));
       if (url.endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'fixture', context_length: 128000, supported_parameters: ['tools'] }] }));
       const body = JSON.parse(options.body), context = JSON.parse(body.messages.find(message => message.role === 'user').content);
+      // These transport fixtures script user-selected targets; semantic veto cases have a separate suite.
+      if (body.messages[0].content === require('../../backend/orchestratorTargetReview.cjs').TARGET_REVIEW_SYSTEM) return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ decision: 'DIRECT', evidenceIds: JSON.parse(body.messages[1].content).selectionEvidence.map(item => item.id) }) } }] }));
       if (body.tools[0].function.name === 'interpret_workspace') {
         interpretations.push({ mode, context, system: body.messages[0].content });
         if (mode === 'submit') return call('interpret_workspace', { goal: 'Send the requested task.', actions: [{ kind: 'operate_terminal', targetIds: ['pane'], text: composed ? 'Investigate the bubble issue carefully.' : 'Fix bubble labels.', promptMode: composed ? 'compose' : 'literal' }] });
@@ -42,7 +44,7 @@ for (const explicit of [false, true]) for (const composed of [false, true]) test
   });
   t.after(async () => { await app.dispose(); assert.equal(path.dirname(root), os.tmpdir()); fs.rmSync(root, { recursive: true, force: true }); });
   await app.configure({ apiKey: 'fixture-only', model: 'fixture', sessionOnly: true }); await app.setEnabled(true);
-  const sent = await app.send({ text: composed ? 'Tell Codex to repair the names shown on the bubbles.' : 'Send exactly "Fix bubble labels." to Codex.', origin: 'text' });
+  const sent = await app.send({ text: composed ? 'Tell Codex to repair the names shown on the bubbles.' : 'Send exactly "Fix bubble labels." to Codex.', origin: 'text', targetId: 'pane' });
   assert.equal(sent.ok, true, JSON.stringify(sent)); sentId = sent.requestId;
   mode = 'correction';
   const corrected = await app.send({ text: "You didn't paste that prompt.", origin: explicit ? 'voice' : 'text', ...(explicit && { replyToRequestId: sentId }) });

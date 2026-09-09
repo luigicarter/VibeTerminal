@@ -34,6 +34,8 @@ async function fixture(t, kind = 'codex') {
       if (url.endsWith('/key')) return new Response(JSON.stringify({ data: {} }));
       if (url.endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'scripted', context_length: 128000, supported_parameters: ['tools', 'tool_choice'] }] }));
       const body = JSON.parse(options.body);
+      // These transport fixtures script user-selected targets; semantic veto cases have a separate suite.
+      if (body.messages[0].content === require('../../backend/orchestratorTargetReview.cjs').TARGET_REVIEW_SYSTEM) return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ decision: 'DIRECT', evidenceIds: JSON.parse(body.messages[1].content).selectionEvidence.map(item => item.id) }) } }] }));
       if (body.tools?.[0]?.function?.name === 'interpret_workspace') return new Response(JSON.stringify(call(f.plan, 'interpret_workspace')));
       f.bodies.push(body);
       assert.ok(f.steps.length, 'Unexpected extra model request: ' + JSON.stringify(body.messages.at(-1)));
@@ -55,7 +57,7 @@ async function fixture(t, kind = 'codex') {
   f.run = async (steps, extra = {}) => {
     f.plan = { goal: 'Operate Work to complete the user task.', ...(f.access && { access: f.access }), actions: [{ kind: 'operate_terminal', targetIds: ['pane'], text: 'Review the latest changes; answer setup questions as needed.', answerMode: 'delegated', permissionMode: 'none', ...extra }] };
     f.steps.push(...steps);
-    const result = await f.relay.send({ text: extra.answerMode === 'supplied' ? 'Use Work to review the latest changes. Answer database PostgreSQL and checks Unit and Smoke.' : 'Use Work to review the latest changes and handle setup questions for me.', origin: 'text' });
+    const result = await f.relay.send({ text: extra.targetIds?.length > 1 ? extra.text : extra.answerMode === 'supplied' ? 'Use Work to review the latest changes. Answer database PostgreSQL and checks Unit and Smoke.' : 'Use Work to review the latest changes and handle setup questions for me.', origin: 'text' });
     if (f.scriptError) throw f.scriptError;
     assert.equal(f.steps.length, 0, JSON.stringify(result));
     assertFinishText(result);
