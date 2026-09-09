@@ -22,6 +22,8 @@ export interface TerminalRuntimeSnapshot {
   turnId?: string;
   pendingInput?: "submit" | "interrupt";
   pendingInputAt?: number;
+  pendingTurnActivity?: { turnId: string; state: "running" | "waiting"; observedAt: number;
+    attention?: { id: string; state: "waiting"; reason?: string; updatedAt: number } };
   turnStartedAt?: number;
   turnEndedAt?: number;
   updatedAt: number;
@@ -51,6 +53,12 @@ export function runtimeChildAttention(runtime: TerminalRuntimeSnapshot) {
   return runtime.children.find(child => !childActivityUnverified(runtime, child) && child.attention?.state === "waiting")?.attention;
 }
 
+export function runtimePendingTurnActivity(runtime: TerminalRuntimeSnapshot) {
+  const activity = runtime.pendingTurnActivity;
+  return runtime.pendingInput && activity && activity.turnId === runtime.turnId &&
+    activity.observedAt > (runtime.pendingInputAt ?? Infinity) ? activity : undefined;
+}
+
 function retainedChildrenOnly(runtime: TerminalRuntimeSnapshot): boolean {
   const retained = runtime.children.some(child => childActivityUnverified(runtime, child)) || runtime.coarseChildObservation === "provisional";
   return retained && runtime.coarseChildObservation !== "observed" && runtime.children.every(child => childActivityUnverified(runtime, child));
@@ -74,7 +82,7 @@ export function runtimeSessionStatus(runtime: TerminalRuntimeSnapshot): SessionS
   const childObserved = liveChildren && (runtime.activityObserved === true ||
     (runtime.observation === "observed" && runtime.telemetryHealth !== "unavailable"));
   if (childObserved && runtimeChildAttention(runtime)) return "waiting";
-  if (runtime.pendingInput) return childObserved ? "running" : "idle";
+  if (runtime.pendingInput) return runtimePendingTurnActivity(runtime)?.state || (childObserved ? "running" : "idle");
   if (retainedActivityUnverified(runtime)) return "idle";
   if (runtime.telemetryHealth === "unavailable" || runtime.observation === "unavailable") return runtime.activityObserved ? (liveChildren || runtime.activeTools.length > 0 ? "running" : "idle") : "idle";
   if (runtime.turnState === "waiting") return "waiting";
@@ -95,7 +103,8 @@ export function runtimeStatusLabel(runtime?: TerminalRuntimeSnapshot, started = 
     if (runtime.agentProcessState === "failed") return "agent failed";
     if (runtime.agentProcessState === "exited") return "agent exited";
   }
-  if (runtimeSessionStatus(runtime) === "waiting" && runtime.children.some(child => child.attention?.state === "waiting")) return "needs input";
+  if (runtimeSessionStatus(runtime) === "waiting" && (runtime.pendingInput || runtime.children.some(child => child.attention?.state === "waiting"))) return "needs input";
+  if (runtime.pendingInput && runtimeSessionStatus(runtime) === "running") return "working";
   if (runtime.pendingInput === "submit") return "awaiting activity";
   if (runtime.pendingInput === "interrupt") return "interrupt requested";
   if (runtime.provider === "terminal") return "terminal open";
@@ -126,7 +135,7 @@ export function runtimeTitleTooltip(runtime: TerminalRuntimeSnapshot | undefined
 }
 
 export function runtimeElapsed(runtime: TerminalRuntimeSnapshot, now: number): string | undefined {
-  if (runtime.pendingInput || runtime.turnStartedAt === undefined) return undefined;
+  if ((runtime.pendingInput && !runtimePendingTurnActivity(runtime)) || runtime.turnStartedAt === undefined) return undefined;
   const processAlive = runtime.processState === "running" &&
     (runtime.provider === "terminal" || (runtime.agentProcessState !== "exited" && runtime.agentProcessState !== "failed"));
   const turnAlive = processAlive && (runtime.turnState === "running" || runtime.turnState === "waiting");

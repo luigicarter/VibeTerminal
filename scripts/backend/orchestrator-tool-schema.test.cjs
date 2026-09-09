@@ -32,7 +32,7 @@ test('every advertised operation has one closed schema and preserves independent
 
 test('finish advertises the accepted operator payload and excludes native input evidence', () => {
   assert.deepEqual(Object.keys(branch('finish_terminal').properties), ['kind', 'grantId', 'targetId', 'stepId', 'observationToken', 'text', 'outcome']);
-  assert.deepEqual(branch('finish_terminal').required, ['kind', 'stepId', 'observationToken', 'text', 'outcome']);
+  assert.deepEqual(branch('finish_terminal').required, ['kind', 'text', 'outcome']);
   const sessions = [{ id: 'a', generation: 'g', kind: 'codex' }];
   const plan = normalizeIntent({ goal: 'Review.', actions: [{ kind: 'operate_terminal', targetIds: ['a'], text: 'Review.' }] }, { requestId: 'user1', instruction: 'Review.', sessions });
   // doAction removes the opaque observationToken before intent authorization.
@@ -44,11 +44,11 @@ test('finish advertises the accepted operator payload and excludes native input 
   }
 });
 
-test('native evidence is explicit without requiring operator arguments on legacy and chat actions', () => {
+test('operator descriptions make redundant metadata optional without changing legacy requirements', () => {
   for (const kind of ['send_prompt', 'interrupt', 'terminal_interact']) {
-    assert.match(branch(kind).description, /observationSequence copied exactly from observation.sequence/);
-    assert.match(branch(kind).description, /inputRevision copied exactly from observation.inputRevision/);
-    assert.match(branch(kind).description, /unique stepId.*observationToken/);
+    assert.match(branch(kind).description, /observationSequence and inputRevision are optional/);
+    assert.match(branch(kind).description, /copy exactly observation.sequence and observation.inputRevision/);
+    assert.match(branch(kind).description, /earlier tool round.*stepId may be omitted.*observationToken may be omitted/);
     for (const name of ['stepId', 'observationToken', 'inputRevision']) assert.equal(branch(kind).required.includes(name), false);
   }
   assert.equal(branch('terminal_interact').required.includes('observationSequence'), true);
@@ -95,7 +95,7 @@ test('compact scopes retain root constraints and exact per-kind field boundaries
     const original = branch(item.properties.kind.enum[0]);
     assert.equal(item.additionalProperties, false);
     assert.deepEqual(Object.keys(item.properties), Object.keys(original.properties));
-    assert.deepEqual(['kind', ...(item.required || [])], original.required);
+    assert.deepEqual(['kind', ...(item.required || [])], original.required.filter(name => item.properties.kind.enum[0] !== 'terminal_interact' || name !== 'observationSequence'));
   }
   const finish = compact.anyOf.find(item => item.properties.kind.enum[0] === 'finish_terminal');
   assert.equal(Object.hasOwn(finish.properties, 'inputRevision'), false);
@@ -127,7 +127,7 @@ test('inspection scope exposes reads and only bounded terminal inspection contro
   const interaction = compact.anyOf.find(item => item.properties.kind.enum[0] === 'terminal_interact');
   assert.equal(Object.hasOwn(interaction.properties, 'editInput'), false);
   assert.ok(Object.hasOwn(interaction.properties, 'inputPurpose'));
-  assert.ok(interaction.required.includes('observationSequence'));
+  assert.equal((interaction.required || []).includes('observationSequence'), false);
   assert.equal(interaction.additionalProperties, false);
   assert.deepEqual(compact.properties.keys, flat.properties.keys);
   assert.deepEqual(branch('terminal_interact').properties.inputPurpose.enum, ['task', 'interaction']);

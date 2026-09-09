@@ -166,6 +166,7 @@ declare global {
         answerQuestion(id: string, requestId: string, answers: Record<string, string[]>): Promise<{ ok: boolean; status?: string; error?: string }>;
         start: (payload: {
           id: string;
+          launchToken?: number;
           cwd: string;
           resumeId?: string;
           // Per-role families: the planner and executor each run Claude or
@@ -234,6 +235,7 @@ declare global {
       openFusionChat: {
         start: (payload: {
           id: string;
+          launchToken?: number;
           cwd: string;
           resumeId?: string;
           plannerModel?: OpenFusionModel | string;

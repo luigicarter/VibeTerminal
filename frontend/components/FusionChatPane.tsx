@@ -1372,6 +1372,7 @@ export default function FusionChatPane({
 
         const startPayload = {
           id: session.id,
+          launchToken: session.launchToken,
           cwd: session.cwd,
           resumeId: effectiveResumeId,
           mode: fusionRunMode,

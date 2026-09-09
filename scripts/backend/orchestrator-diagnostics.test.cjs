@@ -97,3 +97,20 @@ test('native control diagnostics retain bounded named controls without raw text 
   assert.equal(records.at(-1).nativeKeys.length,16); assert.equal(records.at(-1).editInput,false);
   assert.doesNotMatch(fs.readFileSync(f.filename,'utf8'),/private|arbitrary|prompt|typed|\\u0003/);
 });
+
+test('routing, transfer and close metadata remain bounded without content', async t => {
+  const f = fixture(t, { getSecrets: () => ['private-secret'] }), logger = f.open();
+  logger.record({ grantId: 'grant-1', reservationId: 'reservation-1', predecessorRequestId: 'old', successorRequestId: 'new', operationId: 'close-1',
+    inventoryRevision: 12, strategy: 'explicit-new', assignmentState: 'not-assigned', delivery: 'not-dispatched', scopeKind: 'project',
+    controlDisposition: 'transferred', previousStatus: 'failed', newStatus: 'continued', validationCategory: 'invalid-operation',
+    resultScopeTransferred: true, progress: false, paginationAdvanced: true, round: 8, readCount: 4, candidateCount: 40, stagnantRounds: 2,
+    targetCount: 24, confirmedCount: 20, remainingCount: 4, failedCount: 1, transferredCount: 2, newTargetCount: 1, closedCount: 20, supersededCount: 1, inventoryCount: 25,
+    query: 'private query', text: 'private text', fingerprint: 'private fingerprint' });
+  logger.record({ round: -1, readCount: 0.5, targetCount: 1e12, progress: 'true', resultScopeTransferred: 1, grantId: 'private-secret', strategy: 'x'.repeat(300) });
+  await logger.flush(); const [valid, invalid] = f.read();
+  assert.equal(valid.round, 8); assert.equal(valid.inventoryRevision, '12'); assert.equal(valid.closedCount, 20);
+  assert.equal(valid.progress, false); assert.equal(valid.resultScopeTransferred, true); assert.equal(valid.successorRequestId, 'new');
+  assert.equal(invalid.round, undefined); assert.equal(invalid.readCount, undefined); assert.equal(invalid.targetCount, 1e9);
+  assert.equal(invalid.progress, undefined); assert.equal(invalid.resultScopeTransferred, undefined); assert.equal(invalid.grantId, '[REDACTED]'); assert.equal(invalid.strategy.length, 256);
+  assert.doesNotMatch(fs.readFileSync(f.filename, 'utf8'), /private|fingerprint|query|"text"/);
+});

@@ -310,7 +310,7 @@ function ptyChecks() {
     spawned.push(terminal); return terminal;
   } };
   const context = vm.createContext({
-    require: (name) => name === "node-pty" ? pty : name === "readline" ? { createInterface: () => ({ on() {} }) } : name === '../shared/terminalControls.cjs' ? require('../../shared/terminalControls.cjs') : require(name),
+    require: (name) => name === "node-pty" ? pty : name === "readline" ? { createInterface: () => ({ on() {} }) } : name === './observedStop.cjs' ? require('../../backend/observedStop.cjs') : name === '../shared/terminalControls.cjs' ? require('../../shared/terminalControls.cjs') : require(name),
     process: { platform: "win32", env: {}, stdin: {}, cwd: () => root,
       stdout: { write: (line) => events.push(JSON.parse(line)) }, exit() {} },
     setTimeout: (fn) => timers.push(fn)
@@ -396,6 +396,7 @@ async function mainChecks() {
   const telemetry = { prepareSession: () => { preparations++; return new Promise((resolve) => { finishPreparation = resolve; }); },
     releaseSession: (...args) => releases.push(args) };
   const context = vm.createContext({ ipcMain: { handle: (name, fn) => { handlers[name] = fn; }, on() {} },
+    observedLaunches: require('../../backend/observedStop.cjs').createObservedLaunchFence(),
     terminalRuntime: runtime, orchestratorIntegration: null, ptyHost: null, getTerminalRuntime: () => runtime,
     resolveLaunchCwd: (cwd) => cwd === "missing-folder" ?
       { ok: false, cwd, message: "Working directory is unavailable: missing-folder" } : { ok: true, cwd: root },

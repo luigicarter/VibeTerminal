@@ -4,10 +4,10 @@ Lina Terminal ships to Windows users as an Electron Builder NSIS installer hoste
 
 ## Current Public Release
 
-The current Windows release is `v0.1.104`:
+The current Windows release is `v0.1.105`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.104`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.104/LinaTerminal-Setup-0.1.104.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.105`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.105/LinaTerminal-Setup-0.1.105.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -66,11 +66,11 @@ The compiled `dist/` renderer is still included because it is the UI Electron di
 
 ## Local Build
 
-Version `0.1.104` introduces the Lina Terminal name, improves queued prompt
-delivery and startup readiness, and adds provider-aware native terminal navigation
-and model options. It also repairs wheel scrolling and rejects incomplete model
-responses before dispatching commands. Readiness remains
-separate from verified task results. See the
+Version `0.1.105` verifies complete pane-close scopes and owned process termination,
+improves task recovery without duplicate work, trusts Lina's exact Codex hooks at
+launch, and shows continued activity while later input remains unconfirmed. It
+also fixes restarted-terminal PID tracking and guards concurrent or failed
+restarts. Readiness remains separate from verified task results. See the
 [terminal-control contract](orchestrator-controls.md), [voice turns](orchestrator-tasks.md),
 and [work history](orchestrator-dashboard.md) for behavior and verification.
 Installed applications apply updates through the user's Update/Restart action;

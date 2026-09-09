@@ -15,6 +15,7 @@ export interface RelaySession extends Partial<Pick<AgentSession, typeof HISTORY_
     projectName?: string;
     status: string;
     statusLabel?: string;
+    pendingInput?: "submit" | "interrupt";
     observation?: string;
     lastTool?: string;
     model?: string;
@@ -58,7 +59,11 @@ export interface RelayTask {
     sequence: number;
     text: string;
     origin: string;
-    status: "queued" | "routing" | "running" | "waiting-results" | "needs-answer" | "finished" | "failed" | "cancelled" | "paused";
+    status: "queued" | "routing" | "running" | "waiting-results" | "needs-answer" | "finished" | "failed" | "cancelled" | "paused" | "continued";
+    controlDisposition?: "active" | "needs-answer" | "transferred" | "completed" | "failed";
+    continuedFromRequestId?: string;
+    continuedByRequestId?: string;
+    resultScopeTransferred?: boolean;
     label?: string;
     targetIds: string[];
     targets: { id: string; generation: string; cwd: string; name: string }[];
@@ -127,6 +132,7 @@ export interface RelayState {
     }[];
 }
 export interface RelayApi {
+    stopSessionObserved(payload: { operationId: string; id: string; launchToken: number; generation?: string | number; kind: string; observeOnly?: boolean }): Promise<{ ok: boolean; operationId: string; process: string; launchSettled: boolean; error?: string }>;
     getState(): Promise<RelayState>;
     onState(callback: (state: RelayState) => void): () => void;
     configure(patch: Record<string, unknown>): Promise<RelayResult>;

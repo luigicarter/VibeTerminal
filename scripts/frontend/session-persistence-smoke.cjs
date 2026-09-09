@@ -46,6 +46,7 @@ assert.equal(functions.length, names.size);
 const capabilities = require("../../shared/providerCapabilities.json");
 let freshId = 0;
 let updatedSessions;
+const restartMessages = [];
 const restoreContext = {
   Date, Boolean, String,
   finiteNumber: (value, fallback) => Number.isFinite(value) ? value : fallback,
@@ -61,7 +62,8 @@ const restoreContext = {
   EMPTY_ATTENTION: { state: "none", unread: false },
   normalizeSplitNode: value => value, migrateLayout: value => value,
   isGenericSessionTitle: title => /^(Claude|Codex) \d+$/.test(title || ""),
-  clearCodexTracking() {}, stopSessionProcess: () => Promise.resolve(),
+  clearCodexTracking() {}, stopSessionProcess: () => Promise.resolve(true),
+  setShellMessage: message => restartMessages.push(message),
   updateScopeSessions: (_scope, update) => { updatedSessions = update(updatedSessions); }
 };
 vm.createContext(restoreContext);
@@ -132,5 +134,25 @@ async function checkStart() {
       assert.equal(updatedSessions[0].resumeRef.id, "running-chat");
     }
   }
+  const original = { ...base, kind: 'codex' };
+  for (const rejected of [false, new Error('transport unavailable')]) {
+    updatedSessions = [original];
+    restoreContext.stopSessionProcess = () => rejected === false ? Promise.resolve(false) : Promise.reject(rejected);
+    assert.equal(await restoreContext.restartSession({}, original), false);
+    assert.equal(updatedSessions[0], original, 'failed stop cannot restart a potentially live process');
+  }
+  assert.equal(restartMessages.length, 2, 'restart failure is visible and never an unhandled rejection');
+  let stopped;
+  restoreContext.stopSessionProcess = () => new Promise(resolve => { stopped = resolve; });
+  updatedSessions = [original];
+  const restart = restoreContext.restartSession({}, original);
+  const replacement = { ...original, launchToken: 2 };
+  updatedSessions = [replacement];
+  stopped(true); await restart;
+  assert.equal(updatedSessions[0], replacement, 'late restart cannot replace a newer launch');
+  restoreContext.stopSessionProcess = () => Promise.resolve(true);
+  updatedSessions = [original];
+  await Promise.all([restoreContext.restartSession({}, original), restoreContext.restartSession({}, original)]);
+  assert.equal(updatedSessions[0].launchToken, 2, 'concurrent restarts increment the original token once');
 }
 checkStart().then(() => console.log("session persistence/migration and chat restore smoke passed")).catch(error => { console.error(error); process.exitCode = 1; });

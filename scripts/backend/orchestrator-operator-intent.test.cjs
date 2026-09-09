@@ -34,6 +34,14 @@ test('operator compiler exposes frozen complete objective and defaults without c
   assert.match(INTENT_SYSTEM, /do not select them for new terminal actions, including exact one-shot relays/);
   assert.deepEqual(INTENT_TOOL.function.parameters.properties.actions.items.anyOf.find(schema => schema.properties.kind.enum[0] === 'operate_terminal').properties.promptMode.enum, ['compose', 'literal']);
 });
+test('application step fallback fills only absent IDs and optional counters remain observer-owned', () => {
+  const p=plan(), raw={kind:'terminal_interact',keys:['down']};
+  const authorized=authorizeIntentAction(raw,p,sessions,{fallbackStepId:'tool-call-hash'});
+  assert.equal(authorized.stepId,'tool-call-hash');assert.equal(Object.hasOwn(raw,'stepId'),false);
+  assert.equal(Object.hasOwn(authorized,'observationSequence'),false);assert.equal(Object.hasOwn(authorized,'inputRevision'),false);
+  for(const stepId of [undefined,null,'']) assert.throws(()=>authorizeIntentAction({...raw,stepId},p,sessions,{fallbackStepId:'tool-call-hash'}),/step ID/);
+  for(const field of ['observationSequence','inputRevision']) for(const value of [undefined,-1,'7']) assert.throws(()=>authorizeIntentAction({...raw,[field]:value},p,sessions,{fallbackStepId:'tool-call-hash'}),/Invalid terminal/);
+});
 
 test('operator supports navigation, composed prompts and repeated submissions until explicit finish', () => {
   const p = plan();

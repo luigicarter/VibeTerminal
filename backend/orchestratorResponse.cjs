@@ -1,5 +1,7 @@
 'use strict';
 
+const { isCloseEvidence, summarizeCloseOutcomes } = require('./orchestratorCloseOutcome.cjs');
+
 function displayLabel(value) {
   if (typeof value !== 'string') return undefined;
   const label = value.trim();
@@ -34,7 +36,8 @@ function creationDescription(outcome, sessions) {
 
 // Direct execution has no model-written reply. Describe only receipt evidence.
 function formatDirectOutcomes(outcomes, sessions = [], grants = []) {
-  return outcomes.map(outcome => {
+  const closure = summarizeCloseOutcomes({ outcomes, sessions, grants });
+  return [closure.text, ...outcomes.filter(outcome => !isCloseEvidence(outcome, grants)).map(outcome => {
     const grant = grants.find(item => item.id === outcome.grantId);
     const id = outcome.targetId || outcome.id;
     const target = sessions.find(item => item.id === id) || grant?.targets?.find(item => item.id === id);
@@ -70,7 +73,7 @@ function formatDirectOutcomes(outcomes, sessions = [], grants = []) {
       return `Opened ${views[grant?.args?.view] || 'the requested view'}.`;
     }
     return 'The request was accepted.';
-  }).join(' ');
+  })].filter(Boolean).join(' ');
 }
 
 module.exports = { formatDirectOutcomes };

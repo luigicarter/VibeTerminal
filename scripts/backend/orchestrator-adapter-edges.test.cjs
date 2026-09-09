@@ -5,7 +5,7 @@ const { EventEmitter } = require("node:events");
 const { installOrchestrator, createSessionDirectory } = require("../../backend/orchestratorIntegration.cjs");
 const { interpretTestIntent } = require('./orchestrator-test-intent.cjs');
 
-function harness(t, telemetry = {}) {
+function harness(t, telemetry = {}, options = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "vibe-adapter-edges-"));
   const ipc = new EventEmitter(); ipc.handlers = new Map(); ipc.handle = (name, fn) => ipc.handlers.set(name, fn);
   const app = new EventEmitter(); app.getPath = () => root;
@@ -17,12 +17,12 @@ function harness(t, telemetry = {}) {
     ui.push(request);
     if (request.kind === "inventory" && !manualInventory) queueMicrotask(() => ack(request, { ok: true, sessions: inventory, projectPaths: [root] }));
   };
-  const snapshot = { id: "p", generation: "g", provider: "terminal", processState: "running", turnState: "idle", cwd: root };
+  const snapshot = { id: "p", generation: "g", launchToken: 1, provider: "terminal", processState: "running", turnState: "idle", cwd: root };
   const send = engine => message => { sent.push({ engine, ...message }); return true; };
   const integration = installOrchestrator({ interpretIntent: interpretTestIntent, app, ipcMain: ipc, BrowserWindow: { getAllWindows: () => [main] }, screen: {},
     shell: { openPath: async value => { opened.push(value); return ""; } }, safeStorage: { isEncryptionAvailable: () => false },
     getMainWindow: () => main, getRuntime: () => ({ listSnapshots: () => [snapshot] }),
-    sendPty: send("terminal"), sendFusion: send("fusion"), sendOpenFusion: send("openfusion"), getTelemetry: () => telemetry, getChanges: () => ({}) });
+    sendPty: send("terminal"), sendFusion: send("fusion"), sendOpenFusion: send("openfusion"), getTelemetry: () => telemetry, getChanges: () => ({}), ...options });
   t.after(async () => { await integration.dispose(); assert(path.resolve(root).startsWith(path.join(os.tmpdir(), "vibe-adapter-edges-"))); fs.rmSync(root, { recursive: true, force: true }); });
   return { integration, root, ui, sent, opened, snapshot, ack, manual: () => { manualInventory = true; }, setInventory: value => { inventory = value; },
     invoke: (name, payload = {}) => ipc.handlers.get(`orchestrator:${name}`)({ sender: main.webContents }, payload),
@@ -98,6 +98,60 @@ test("UI cancellation after dispatch reports unknown without claiming a reverted
   await until(() => h.ui.some(request => request.kind === "close")); const request = h.ui.find(item => item.kind === "close");
   await h.invoke("cancel"); const result = await work; assert.equal(result.status, "unknown");
   h.ack(request, { ok: true, status: "close_requested" }); assert.equal(h.ui.filter(item => item.kind === "close").length, 1);
+});
+
+test("close receipts require fresh committed pane removal, while runtime orphans are not panes", async t => {
+  const h = harness(t);
+  const pane = { id: "p", launchToken: 1, kind: "terminal", cwd: h.root, projectId: "project" };
+  h.setInventory([pane]);
+  const work = h.invoke("dispatch", { kind: "close", target: { id: "p", generation: "g" } });
+  await until(() => h.ui.some(request => request.kind === "close"));
+  const request = h.ui.find(request => request.kind === "close");
+  h.ack(request, { ok: true, status: "closed", close: { operationId: request.payload.actionId, target: request.payload.target,
+    pane: "removed", process: "stopped", launchSettled: true } });
+  const result = await work;
+  assert.equal(result.ok, false); assert.equal(result.close.pane, "unknown");
+  h.setInventory([]); await h.integration.refreshInventory();
+  assert.equal(h.integration.directory.get("p").visiblePane, false);
+});
+
+test("failed fresh inventory prevents close mutation using cached pane metadata", async t => {
+  const h = harness(t); h.setInventory([{ id: "p", launchToken: 1, kind: "terminal", cwd: h.root }]);
+  await h.integration.refreshInventory(); h.manual();
+  const before = h.ui.length;
+  let settled = false;
+  const work = h.invoke("dispatch", { kind: "close", target: { id: "p", generation: "g" } }).then(result => { settled = true; return result; });
+  const acknowledged = new Set();
+  for (let round = 0; round < 100 && !settled; round++) {
+    await tick();
+    for (const request of h.ui.slice(before).filter(item => item.kind === "inventory" && !acknowledged.has(item.id))) {
+      acknowledged.add(request.id); h.ack(request, { ok: false, error: "Inventory unavailable" });
+    }
+  }
+  assert.equal(settled, true);
+  const result = await work;
+  assert.equal(result.ok, false); assert.equal(h.ui.some(request => request.kind === "close"), false);
+});
+
+test("fresh inventory observes late stop proof after pane removal without another UI close", async t => {
+  const queries = [];
+  const h = harness(t, {}, { observeStoppedSession: async request => {
+    queries.push(request);
+    return { ok: true, operationId: request.operationId, process: "stopped", launchSettled: true };
+  } });
+  h.setInventory([{ id: "p", launchToken: 1, kind: "terminal", cwd: h.root }]);
+  const work = h.invoke("dispatch", { kind: "close", target: { id: "p", generation: "g" } });
+  await until(() => h.ui.some(request => request.kind === "close"));
+  const request = h.ui.find(request => request.kind === "close");
+  h.setInventory([]);
+  h.ack(request, { ok: false, status: "close-partial", close: { operationId: request.payload.actionId, target: request.payload.target,
+    pane: "removed", process: "unknown", launchSettled: false } });
+  assert.equal((await work).ok, false);
+  await h.integration.refreshInventory(); await until(() => queries.length === 1);
+  assert.deepEqual(queries[0], { operationId: request.payload.actionId, id: "p", generation: "g", launchToken: 1, kind: "terminal", observeOnly: true });
+  await h.integration.refreshInventory();
+  assert.equal(queries.length, 1); assert.equal(h.ui.filter(request => request.kind === "close").length, 1);
+  assert.equal(h.sent.length, 0);
 });
 
 test("cancellation or generation change while native Fusion interrupt awaits prevents later host effect", async t => {

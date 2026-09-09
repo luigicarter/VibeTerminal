@@ -215,7 +215,7 @@ test('PTY action channel rejects stale and unproven recipients and reports write
   const context = vm.createContext({ require: name => name === 'node-pty' ? { spawn() {
     const terminal = { writes: [], pid: 42, onData(fn) { this.data = fn; }, onExit() {}, resize() {}, kill() { this.killed = true; }, write(data) { if (data === 'FAIL') throw new Error('fixture failure'); this.writes.push(data); } };
     terminals.push(terminal); return terminal;
-  } } : name === 'readline' ? { createInterface: () => ({ on() {} }) } : name === '../shared/terminalControls.cjs' ? require('../../shared/terminalControls.cjs') : require(name), process: { platform: 'win32', env: {}, stdin: {}, cwd: () => process.cwd(), stdout: { write: line => events.push(JSON.parse(line)) }, kill(pid) { if (pid === 99) throw new Error('dead'); } }, setTimeout() {} });
+  } } : name === 'readline' ? { createInterface: () => ({ on() {} }) } : name === './observedStop.cjs' ? require('../../backend/observedStop.cjs') : name === '../shared/terminalControls.cjs' ? require('../../shared/terminalControls.cjs') : require(name), process: { platform: 'win32', env: {}, stdin: {}, cwd: () => process.cwd(), stdout: { write: line => events.push(JSON.parse(line)) }, kill(pid) { if (pid === 99) throw new Error('dead'); } }, setTimeout() {} });
   vm.runInContext(fs.readFileSync(path.resolve(__dirname, '../../backend/ptyHost.cjs'), 'utf8'), context);
   context.handleMessage({ type: 'create', payload: { id: 'p', generation: 'g', launchToken: 1 } });
   let actionSequence = 0;

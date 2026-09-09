@@ -876,6 +876,7 @@ export default function OpenFusionChatPane({
         openFusionChat
           .start({
             id: session.id,
+            launchToken: session.launchToken,
             cwd: session.cwd,
             resumeId: effectiveResumeId,
             plannerModel,

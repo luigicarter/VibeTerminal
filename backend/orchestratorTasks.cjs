@@ -2,6 +2,7 @@
 const { randomUUID } = require('node:crypto');
 const { sessionIdentity } = require('./orchestratorRouting.cjs');
 const { routingBindingMatches } = require('./orchestratorLaunchers.cjs');
+const { resultDependencyBlocker, transferredStatus } = require('./orchestratorContinuation.cjs');
 
 // FIFO capacity limits. Aborted waiters leave the queue without taking a slot.
 function createSemaphore(limit) {
@@ -24,7 +25,7 @@ function createSemaphore(limit) {
   }); }, async run(signal, fn) { const release = await this.acquire(signal); try { return await fn(); } finally { release(); } } };
 }
 
-const terminalStates = new Set(['finished', 'failed', 'cancelled', 'paused']);
+const terminalStates = new Set(['finished', 'failed', 'cancelled', 'paused', 'continued']);
 const completedStates = new Set(['completed', 'complete', 'finished', 'succeeded']);
 const failedStates = new Set(['failed', 'cancelled', 'interrupted']);
 // Result completion and workspace occupancy are separate: a failed foreground
@@ -36,7 +37,13 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
   const jobs = new Map();
   let sequence = 0, currentSessions = [];
   const listeners = new Set();
-  function changed() { onChange(); for (const listener of [...listeners]) listener(); }
+  let batchDepth = 0, batchDirty = false;
+  function changed() { if (batchDepth) { batchDirty = true; return; } onChange(); for (const listener of [...listeners]) listener(); }
+  function batch(fn) {
+    batchDepth++;
+    try { const result = fn(); if (result && typeof result.then === 'function') throw new Error('Scheduler batches must be synchronous.'); batchDirty = true; return result; }
+    finally { if (!--batchDepth && batchDirty) { batchDirty = false; changed(); } }
+  }
   function project(job) { return structuredClone(job.task); }
   for (const old of restored.slice(-200)) {
     if (!old?.requestId) continue;
@@ -44,7 +51,13 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
     sequence = Math.max(sequence, Number(task.sequence) || 0);
     jobs.set(task.requestId, { task, restored: true, waits: [], lanes: [] });
   }
-  function update(job, patch) { Object.assign(job.task, patch, { updatedAt: now() }); changed(); }
+  function update(job, patch) {
+    Object.assign(job.task, patch, { updatedAt: now() });
+    if (!patch.controlDisposition && job.task.controlDisposition !== 'transferred' && patch.status) {
+      job.task.controlDisposition = patch.status === 'finished' ? 'completed' : patch.status === 'failed' ? 'failed' : patch.status === 'needs-answer' ? 'needs-answer' : 'active';
+    }
+    changed();
+  }
   function deliveryEvidence(wait, result) {
     const baseline = result.deliveryBaseline;
     if (baseline) {
@@ -76,7 +89,7 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
     // Retain live execution state and prerequisite evidence through clearing or
     // eviction. Historical dependency chains alone must not pin the full store.
     const protectedIds = new Set(), pending = [];
-    const sources = job => [job.context?.pendingCommand?.requestId, ...(job.task.dependsOn || []),
+    const sources = job => [job.context?.pendingCommand?.requestId, job.task.continuedFromRequestId, ...(job.task.dependsOn || []),
       ...(job.intent?.commandPlan?.grants || []).map(grant => grant.sourceUserId)];
     for (const job of jobs.values()) {
       if (job.restored || job.controller?.signal.aborted || job.task.status === 'cancelled') continue;
@@ -203,6 +216,8 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
         if (signal.aborted) return abort();
         for (const id of job.task.dependsOn) {
           const prior = jobs.get(id);
+          const blocked = prior?.task.resultScopeTransferred || prior?.task.status === 'continued' ? resultDependencyBlocker(prior) : undefined;
+          if (blocked) { finish(new Error(blocked)); update(job, { status: 'paused', error: blocked }); return; }
           if (!prior || ['failed', 'cancelled', 'paused'].includes(prior.task.status)) { finish(new Error('A prerequisite did not finish successfully.')); update(job, { status: 'paused', error: 'A prerequisite did not finish successfully. Submit a new instruction to continue.' }); return; }
           if (prior.task.status !== 'finished') { setWaitingReason(job, blockingReason(job, { dependenciesOnly })); return; }
         }
@@ -399,7 +414,7 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
       }
       if (job.executionDone && job.waits.length && job.waits.every(wait => wait.done) && job.task.status === 'waiting-results') {
         const failed = job.waits.find(wait => wait.failed);
-        Object.assign(job.task, { status: failed ? 'failed' : 'finished', waitingReason: undefined, updatedAt: now(), ...(failed && { error: failed.error || 'The terminal task did not finish successfully.' }) }); dirty = true;
+        Object.assign(job.task, { status: failed ? 'failed' : job.task.resultScopeTransferred ? transferredStatus(job, true) : 'finished', waitingReason: undefined, updatedAt: now(), ...(failed && { error: failed.error || 'The terminal task did not finish successfully.' }) }); dirty = true;
       }
       if (job.executionDone && (job.task.status === 'waiting-results' || job.stagedPause)) {
         const outstanding = job.waits.filter(wait => !wait.done);
@@ -414,7 +429,7 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
                   : outstanding.some(wait => wait.nativeShell) ? 'Shell input was sent; task completion cannot be verified automatically.'
                     : outstanding.some(wait => wait.inputDisposition === 'submitted-while-running' && !wait.observedState) ? 'Prompt submitted while the agent was working; incorporation into its result remains unverified.'
                       : outstanding.length ? 'Waiting for a verified terminal result.' : undefined;
-        const status = stagedOnly ? 'paused' : outstanding.length ? 'waiting-results' : job.waits.some(wait => wait.failed) ? 'failed' : 'finished';
+        const status = stagedOnly ? 'paused' : outstanding.length ? 'waiting-results' : job.waits.some(wait => wait.failed) ? 'failed' : job.task.resultScopeTransferred ? transferredStatus(job, true) : 'finished';
         job.stagedPause = stagedOnly;
         if (job.task.status !== status || job.task.waitingReason !== waitingReason) {
           Object.assign(job.task, { status, waitingReason, updatedAt: now() }); dirty = true;
@@ -438,6 +453,6 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
     for (const job of selected) if (!terminalStates.has(job.task.status)) { job.controller?.abort(); for (const wait of job.waits) if (wait.source === 'watch') { wait.done = true; wait.delivered = false; } Object.assign(job.task, { status: 'cancelled', updatedAt: now(), waitingReason: job.waits.some(wait => !wait.done && wait.delivered) ? 'Request cancelled; previously sent terminal work may still be running.' : undefined }); }
     changed(); return { ok: selected.length > 0 || !requestId, status: 'cancelled' };
   }
-  return { create, hasCapacity, update, blockingReason, ready, waitForDependencies: job => ready(job, { dependenciesOnly: true }), waitForAssignmentSubmission, track, watch, reconcile, delivery, cancel, jobs, get: id => jobs.get(id), snapshot: () => [...jobs.values()].map(project), busy: () => [...jobs.values()].some(job => ['queued', 'routing', 'running'].includes(job.task.status)), clear() { const protectedIds = liveRequestOwners(); for (const [id, job] of jobs) if (terminalStates.has(job.task.status) && !protectedIds.has(id) && !job.waits.some(wait => hasWorkspaceOccupancy(wait))) jobs.delete(id); changed(); } };
+  return { create, hasCapacity, update, batch, blockingReason, ready, waitForDependencies: job => ready(job, { dependenciesOnly: true }), waitForAssignmentSubmission, track, watch, reconcile, delivery, cancel, jobs, get: id => jobs.get(id), snapshot: () => [...jobs.values()].map(project), busy: () => [...jobs.values()].some(job => ['queued', 'routing', 'running'].includes(job.task.status)), clear() { const protectedIds = liveRequestOwners(); for (const [id, job] of jobs) if (terminalStates.has(job.task.status) && !protectedIds.has(id) && !job.waits.some(wait => hasWorkspaceOccupancy(wait))) jobs.delete(id); changed(); } };
 }
 module.exports = { createTaskScheduler, createSemaphore, hasWorkspaceOccupancy };

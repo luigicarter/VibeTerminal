@@ -70,7 +70,7 @@ import {
 import TerminalPane from "./components/TerminalPane";
 import { createTerminalLaunchCoordinator } from "./terminalLaunchCoordinator";
 import { WorkspaceStart } from "./components/WorkspaceStart";
-import { runtimeActiveChildCount, runtimeChildAttention, runtimeDisplayTitle, runtimeSessionStatus, runtimeStatusLabel, type TerminalRuntimeSnapshot } from "./terminalRuntime";
+import { runtimeActiveChildCount, runtimeChildAttention, runtimePendingTurnActivity, runtimeDisplayTitle, runtimeSessionStatus, runtimeStatusLabel, type TerminalRuntimeSnapshot } from "./terminalRuntime";
 import { migrateRemovedAgent, rememberChatThread, serializeSession } from "./sessionPersistence";
 import { findAvailablePlacement, type GeometryItem } from "./components/tiledBoardGeometry";
 import FusionChatPane from "./components/FusionChatPane";
@@ -102,6 +102,7 @@ import {
 } from "./sessionLaunch";
 import { computeCwdConflicts } from "./cwdConflicts";
 import { readSessionDraft, writeSessionDraft, forgetSessionDraft } from "./sessionDrafts";
+import { closeSessionOperation, type CloseTarget } from "./closeSessionOperation";
 import { useOrchestrator, relayApi, type RelaySession } from "./orchestratorUi";
 import { conversationKey, conversationLaunch, conversationNeedsResume, matchingConversation, normalizeSavedConversation, HISTORY_CONFIG_FIELDS, type SavedConversation } from "./orchestratorHistory";
 import { WorkspaceSetups, type WorkspaceSetupsProps } from "./components/WorkspaceSetups";
@@ -784,6 +785,8 @@ function visibleRuntimeAttention(runtime: TerminalRuntimeSnapshot) {
   if (runtime.processState !== "running" || runtime.launchState === "pending" || runtime.agentProcessState === "exited" || runtime.agentProcessState === "failed") return undefined;
   const childAttention = runtimeChildAttention(runtime);
   if (childAttention && runtimeSessionStatus(runtime) === "waiting") return childAttention;
+  const pendingAttention = runtimePendingTurnActivity(runtime)?.attention;
+  if (pendingAttention && runtimeSessionStatus(runtime) === "waiting") return pendingAttention;
   if (runtime.pendingInput ||
       runtime.observation !== "observed" || runtime.telemetryHealth !== "available") return false;
   const state = runtime.attention?.state;
@@ -1501,6 +1504,8 @@ export default function App() {
     ...multiSessions,
     ...workspaces.flatMap((workspace) => workspace.sessions)
   ].map(withRuntime);
+  const closeSessionsRef = useRef(allSessions);
+  closeSessionsRef.current = allSessions;
   const [terminalLaunchCoordinator] = useState(() => createTerminalLaunchCoordinator({
     platform: window.vibe?.platform,
     create: payload => window.vibe?.terminal.create(payload) ?? Promise.resolve(false),
@@ -2847,11 +2852,10 @@ export default function App() {
     }) ?? Promise.resolve(false);
   }
 
-  function closeSession(scope: SessionScope, session: AgentSession) {
+  function removeClosedSession(scope: SessionScope, session: AgentSession) {
     forgetSessionDraft(session.id);
     closedRuntimeIdsRef.current.add(session.id);
     clearCodexTracking(session.id);
-    void stopSessionProcess(session, "close");
     const sessionId = session.id;
     updateScopeSessions(scope, (sessions) =>
       // Detach first so the tile collapses into its surviving sibling (and
@@ -2868,6 +2872,24 @@ export default function App() {
     if (selectedSessionId === sessionId) {
       setSelectedSessionId(null);
     }
+  }
+
+  async function closeSession(scope: SessionScope, session: AgentSession, frozen?: CloseTarget, operationId: string = crypto.randomUUID()) {
+    const current = () => {
+      const pane = closeSessionsRef.current.find(item => item.id === session.id);
+      if (!pane) return undefined;
+      const runtime = runtimeSnapshotsRef.current[pane.id];
+      const generation = runtime?.launchToken === pane.launchToken ? runtime.generation
+        : orchestratorState?.sessions.find(item => item.id === pane.id && item.launchToken === pane.launchToken)?.generation || `paused:${pane.id}:${pane.launchToken}`;
+      return { id: pane.id, launchToken: pane.launchToken, generation };
+    };
+    const target = frozen || current() || { id: session.id, launchToken: session.launchToken };
+    return closeSessionOperation({ operationId, target, current,
+      cancelLaunch: () => terminalLaunchCoordinator.cancel(target.id, target.launchToken),
+      stop: () => relayApi()?.stopSessionObserved({ ...target, operationId, kind: session.fusion ? "fusion" : session.openFusion ? "openfusion" : session.kind })
+        ?? Promise.resolve({ ok: false, operationId, process: "unknown", launchSettled: false, error: "Observed process stop is unavailable." }),
+      remove: () => { flushSync(() => removeClosedSession(scope, session)); }
+    });
   }
 
   function requestWorkspaceClose(workspaceId: string) {
@@ -2935,10 +2957,14 @@ export default function App() {
 
   function restartSession(scope: SessionScope, session: AgentSession) {
     clearCodexTracking(session.id);
-    stopSessionProcess(session).then(() => {
+    return stopSessionProcess(session).then((stopped) => {
+      if (!stopped) {
+        setShellMessage(`${session.name}: The terminal could not be stopped for restart.`);
+        return false;
+      }
       updateScopeSessions(scope, (sessions) =>
         sessions.map((item) => {
-          if (item.id !== session.id) {
+          if (item.id !== session.id || item.launchToken !== session.launchToken) {
             return item;
           }
 
@@ -2974,6 +3000,10 @@ export default function App() {
           };
         })
       );
+      return true;
+    }).catch((error) => {
+      setShellMessage(`${session.name}: Restart failed: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
     });
   }
 
@@ -4585,7 +4615,7 @@ export default function App() {
       const session = withRuntimeLabel(raw);
       const project = workspaces.find(item => item.sessions.some(pane => pane.id === session.id));
       const runtime = runtimeSnapshotsRef.current[session.id];
-      return { ...Object.fromEntries(HISTORY_CONFIG_FIELDS.map(field => [field, session[field]])), threadRef: session.threadRef, resumeRef: session.resumeRef, fusion: session.fusion, openFusion: session.openFusion, id: session.id, name: session.name, kind: sessionCreationKind(session), cwd: session.cwd, status: session.status, statusLabel: session.fusion || session.openFusion ? session.status : runtimeStatusLabel(runtime?.launchToken === session.launchToken ? runtime : undefined, session.started), observation: runtime?.observation, lastTool: runtime?.lastTool?.name, projectName: project?.name, started: session.started, launchToken: session.launchToken, generation: runtime?.generation, revision: runtime?.revision };
+      return { ...Object.fromEntries(HISTORY_CONFIG_FIELDS.map(field => [field, session[field]])), threadRef: session.threadRef, resumeRef: session.resumeRef, fusion: session.fusion, openFusion: session.openFusion, id: session.id, name: session.name, kind: sessionCreationKind(session), cwd: session.cwd, status: session.status, statusLabel: session.fusion || session.openFusion ? session.status : runtimeStatusLabel(runtime?.launchToken === session.launchToken ? runtime : undefined, session.started), observation: runtime?.observation, lastTool: runtime?.lastTool?.name, projectName: project?.name, projectId: project?.id, visiblePane: true, board: project ? "project" : "multi", started: session.started, launchToken: session.launchToken, generation: runtime?.generation, revision: runtime?.revision };
   });
   function focusRelaySession(id: string) {
       const project = workspaces.find(item => item.sessions.some(session => session.id === id));
@@ -4714,7 +4744,7 @@ export default function App() {
                   ...(profile.kind === "fusion" ? { model: fusion.plannerModel, plannerModel: fusion.plannerModel, executorModel: fusion.executorModel } : {}),
                   ...(profile.kind === "openfusion" ? { model: openFusion.plannerModel, ...openFusion } : {}) };
           });
-          return { ok: true, launchers, projectPaths: workspaces.map(workspace=>workspace.path), sessions: relaySessions.map(session => ({ ...session, projectId: workspaces.find(p => p.sessions.some(s => s.id === session.id))?.id })) };
+          return { ok: true, launchers, projectPaths: workspaces.map(workspace=>workspace.path), projects: workspaces.map(({id,path,name}) => ({id,path,name})), sessions: relaySessions.map(session => ({ ...session, projectId: workspaces.find(p => p.sessions.some(s => s.id === session.id))?.id })) };
       }
       if (kind === "focus_session")
           return { ok: focusRelaySession(String(payload.id)) };
@@ -4755,7 +4785,7 @@ export default function App() {
               writeSessionDraft(id, payload.prompt);
           return { ok: true, id, launchToken: 1, status: "created", draftStaged: Boolean(payload.prompt) };
       }
-      if (payload.generation && payload.id) {
+      if (kind !== "close" && payload.generation && payload.id) {
           const currentGeneration = runtimeSnapshotsRef.current[String(payload.id)]?.generation || orchestratorState?.sessions.find(session => session.id === payload.id)?.generation;
           if (currentGeneration && currentGeneration !== payload.generation)
               return { ok: false, error: "Session restarted; select its current generation." };
@@ -4776,15 +4806,25 @@ export default function App() {
       if (kind === "restart" || kind === "close") {
           const id = String(payload.id || "");
           const session = allSessions.find(s => s.id === id);
-          if (!session)
-              return { ok: false, error: "Session no longer exists." };
+          if (!session) {
+              if (kind !== "close") return { ok: false, error: "Session no longer exists." };
+              const target = payload.target as CloseTarget | undefined;
+              if (!target || !Number.isSafeInteger(target.launchToken)) return { ok: false, status: "close-partial", error: "Missing frozen pane identity." };
+              const operationId = String(payload.actionId || crypto.randomUUID());
+              return closeSessionOperation({ operationId, target, current: () => undefined,
+                  cancelLaunch: () => terminalLaunchCoordinator.cancel(target.id, target.launchToken),
+                  stop: () => relayApi()?.stopSessionObserved({ ...target, operationId, kind: String(payload.kindOfSession || "terminal") })
+                    ?? Promise.resolve({ ok: false, operationId, process: "unknown", launchSettled: false }),
+                  remove: () => {} });
+          }
           const project = workspaces.find(p => p.sessions.some(s => s.id === id));
           const scope: SessionScope = project ? { type: "workspace", workspaceId: project.id } : { type: "multi" };
-          if (kind === "restart")
-              restartSession(scope, session);
+          if (kind === "restart") {
+              if (!await restartSession(scope, session)) return { ok: false, status: "restart-failed", error: "The terminal could not be stopped for restart." };
+          }
           else
-              closeSession(scope, session);
-          return { ok: true, status: kind === "restart" ? "restart_requested" : "close_requested" };
+              return closeSession(scope, session, payload.target as CloseTarget | undefined, String(payload.actionId || crypto.randomUUID()));
+          return { ok: true, status: "restart_requested" };
       }
       return { ok: false, error: `Unsupported workspace action: ${kind}` };
   };

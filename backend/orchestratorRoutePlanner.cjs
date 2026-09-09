@@ -1,4 +1,5 @@
 'use strict';
+const { createHash } = require('node:crypto');
 
 // Discovery selects resources inside an existing task grant. This tool has no
 // execution effects; the caller validates/reserves and mints terminal authority.
@@ -55,11 +56,47 @@ function validateRouteCall(value) {
   return value;
 }
 
-async function planTaskRoute({ context, complete, read, check = () => {}, maxRounds = 8, resetReadBudget = () => {} }) {
+function deterministicNewTaskRoute({ scope, launchers = [] }) {
+  if (scope?.assignmentMode !== 'new') return null;
+  const eligible = launchers.filter(item => item.kind !== 'terminal' && item.available === true && item.configured === true);
+  const selected = scope.kindOfSession ? eligible.find(item => item.kind === scope.kindOfSession) : eligible.length === 1 ? eligible[0] : null;
+  if (selected) return { kind: 'choose', decision: 'create', kindOfSession: selected.kind, reason: 'The user requested a new conversation with this configured coding agent.' };
+  const requested = launchers.find(item => item.kind === scope.kindOfSession);
+  const blocker = typeof requested?.reason === 'string' && requested.reason.trim() ? requested.reason.trim().slice(0, 240)
+    : requested?.configured === false ? 'it needs configuration' : requested?.available === false ? 'it is unavailable' : 'its availability or configuration is not confirmed';
+  return { kind: 'choose', decision: 'clarify', reason: 'The new conversation needs an available configured launcher.',
+    text: scope.kindOfSession ? `The requested ${scope.kindOfSession} launcher cannot start: ${blocker}. Which configured coding agent should I use?`
+      : 'Which configured coding agent should I use for the new conversation?' };
+}
+
+// Read bookkeeping is not evidence of a changed conversation. Keep meaningful
+// identities, output, pagination and lifecycle timestamps in the fingerprint.
+const volatileReadKeys = new Set(['timestamp', 'time', 'readAt', 'observedAt', 'updatedAt', 'fetchedAt', 'revision', 'observationSequence', 'sequence', 'observationToken', 'inputRevision']);
+function semanticFingerprint(value) {
+  const normalize = item => Array.isArray(item) ? item.map(normalize) : item && typeof item === 'object'
+    ? Object.fromEntries(Object.keys(item).sort().filter(key => !volatileReadKeys.has(key)).map(key => [key, normalize(item[key])])) : item;
+  return createHash('sha256').update(JSON.stringify(normalize(value)) ?? 'undefined').digest('hex');
+}
+class RoutingError extends Error {
+  constructor(grantId) {
+    super('Routing discovery reached its limit; no terminal was assigned.');
+    this.name = 'RoutingError'; this.code = 'ROUTING_EXHAUSTED';
+    this.grantId = grantId; this.assignmentState = 'not-assigned'; this.delivery = 'not-dispatched';
+  }
+}
+const ROUTING_CHOOSE_TOOL = structuredClone(ROUTING_TOOL);
+ROUTING_CHOOSE_TOOL.function.parameters.properties.kind.enum = ['choose'];
+ROUTING_CHOOSE_TOOL.function.parameters.anyOf = ROUTING_CHOOSE_TOOL.function.parameters.anyOf.filter(item => item.properties.kind.enum[0] === 'choose');
+
+async function planTaskRoute({ context, complete, read, check = () => {}, maxRounds = 8, resetReadBudget = () => {}, grantId, onEvent = () => {} }) {
   const messages = [{ role: 'system', content: ROUTING_SYSTEM }, { role: 'user', content: JSON.stringify(context) }];
+  const seen = new Set(); let stagnantRounds = 0;
+  const emit = event => { try { onEvent({ event: 'routing_progress', grantId, ...event }); } catch { /* Telemetry cannot change routing. */ } };
   for (let round = 0; round < maxRounds; round++) {
     check();
-    const response = await complete(messages, [ROUTING_TOOL]);
+    const finalRound = round === maxRounds - 1;
+    if (finalRound) messages.push({ role: 'system', content: 'This is the final routing call. Return one standalone choose using existing evidence. If evidence is insufficient, choose clarify with the specific unresolved fact. Do not invent a suitable worker or perform more reads.' });
+    const response = await complete(messages, [finalRound ? ROUTING_CHOOSE_TOOL : ROUTING_TOOL]);
     check();
     const choice = response?.choices?.[0], reply = choice?.message;
     if (choice?.finish_reason && !['stop', 'tool_calls'].includes(choice.finish_reason)) throw new Error('Routing interpretation was incomplete; no terminal was assigned.');
@@ -68,6 +105,7 @@ async function planTaskRoute({ context, complete, read, check = () => {}, maxRou
     messages.push({ role: 'assistant', content: reply.content || null, tool_calls: calls,
       ...(reply.reasoning_details && { reasoning_details: structuredClone(reply.reasoning_details) }) });
     resetReadBudget();
+    let progress = false, readCount = 0;
     for (const call of calls) {
       check();
       let result;
@@ -76,16 +114,30 @@ async function planTaskRoute({ context, complete, read, check = () => {}, maxRou
         const args = validateRouteCall(JSON.parse(call.function.arguments));
         if (args.kind === 'choose') {
           if (calls.length !== 1) throw new Error('An assignment proposal must be its own single tool call after evidence reads.');
+          emit({ round: round + 1, decision: args.decision, stage: 'routing_choice', stagnantRounds });
           return args;
         }
+        if (finalRound) throw new Error('The final routing call permits only one standalone choose; no more reads.');
         result = await read(args);
+        readCount++;
+        const fingerprint = semanticFingerprint({ args, result });
+        const readProgress = result?.ok !== false && !seen.has(fingerprint);
+        if (readProgress) progress = true;
+        seen.add(fingerprint);
+        emit({ round: round + 1, actionKind: args.kind, stage: 'routing_read', status: result?.ok === false ? 'failed' : 'observed',
+          progress: readProgress, candidateCount: (result?.sessions || result?.items || result?.conversations || []).length });
       } catch (error) {
         check();
         result = { ok: false, error: error instanceof SyntaxError ? 'Invalid routing arguments JSON.' : String(error?.message || error).slice(0, 1000) };
+        emit({ round: round + 1, stage: 'routing_validation', category: error instanceof SyntaxError ? 'invalid-json' : 'invalid-operation' });
       }
       messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
     }
+    stagnantRounds = progress ? 0 : stagnantRounds + 1;
+    emit({ round: round + 1, stage: 'routing_round', readCount, stagnantRounds, progress });
+    if (stagnantRounds >= 2 && !finalRound) messages.push({ role: 'system', content: 'The last two routing rounds added no new usable evidence. Use the evidence already returned to choose, or identify the specific missing fact. Repeating unchanged reads or invalid calls does not resolve the assignment.' });
   }
-  throw new Error('Routing discovery reached its limit; no terminal was assigned.');
+  emit({ stage: 'routing_exhausted', assignmentState: 'not-assigned', delivery: 'not-dispatched', stagnantRounds });
+  throw new RoutingError(grantId);
 }
-module.exports = { ROUTING_TOOL, ROUTING_SYSTEM, validateRouteCall, planTaskRoute };
+module.exports = { ROUTING_TOOL, ROUTING_CHOOSE_TOOL, ROUTING_SYSTEM, validateRouteCall, planTaskRoute, deterministicNewTaskRoute, RoutingError };

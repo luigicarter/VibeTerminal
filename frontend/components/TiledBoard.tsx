@@ -95,6 +95,7 @@ export default function TiledBoard({
   revealItemId
 }: TiledBoardProps) {
   const boardRef = useRef<HTMLDivElement | null>(null);
+  const frameElementsRef = useRef(new Map<string, HTMLDivElement>());
   const interactionRef = useRef<InteractionState | null>(null);
   const onArrangeChangeRef = useRef(onArrangeChange);
   const onLayoutCommitRef = useRef(onLayoutCommit);
@@ -185,15 +186,18 @@ export default function TiledBoard({
     [geometryItems, innerWidth]
   );
   const propLayoutsRef = useRef(propLayouts);
+  // Pointer previews are painted in the animation frame itself. Keep the same
+  // snapshot available to unrelated React renders so they cannot rewind a drag.
+  const displayedLayouts = interactionRef.current?.lastValidLayouts ?? liveLayouts;
 
   const boardHeight = useMemo(() => {
     const contentHeight = Math.max(
       0,
-      ...Object.values(liveLayouts).map((layout) => layout.y + layout.h)
+      ...Object.values(displayedLayouts).map((layout) => layout.y + layout.h)
     );
 
     return Math.max(metrics.height, contentHeight + BOARD_PADDING);
-  }, [liveLayouts, metrics.height]);
+  }, [displayedLayouts, metrics.height]);
 
   useEffect(() => {
     onArrangeChangeRef.current = onArrangeChange;
@@ -359,9 +363,11 @@ export default function TiledBoard({
       const desired = buildMoveDropRect(interaction.startRect,dx,dy);
       interaction.snap = {x: (Math.abs(fitted.left-desired.left)>0.001 || interaction.snap.x === fitted.left) && Math.abs(fitted.left-desired.left)<=18 ? fitted.left : undefined,
         y:(Math.abs(fitted.top-desired.top)>0.001 || interaction.snap.y === fitted.top) && Math.abs(fitted.top-desired.top)<=18 ? fitted.top : undefined};
-      setLiveLayouts((current) =>
-        layoutsEqual(current, nextLayouts) ? current : nextLayouts
-      );
+      // setState in rAF schedules another React render after this frame. During
+      // terminal activity that render can wait behind other work, leaving the
+      // pane trailing the pointer. Paint only geometry here; publish state and
+      // persist once on release.
+      paintLayoutPreview(nextLayouts);
     };
 
     const handlePointerMove = (event: PointerEvent) => {
@@ -611,6 +617,9 @@ export default function TiledBoard({
       }
     }
 
+    // React may still remember the pre-drag styles, so reverting state alone
+    // would not necessarily undo the geometry written directly during preview.
+    paintLayoutPreview(propLayoutsRef.current);
     setLiveLayouts((current) =>
       layoutsEqual(current, propLayoutsRef.current) ? current : propLayoutsRef.current
     );
@@ -643,10 +652,29 @@ export default function TiledBoard({
   function layoutToStyle(layout: LayoutBox): CSSProperties {
     const rect = layoutToRect(layout, innerWidth);
     return {
-      transform: `translate3d(${BOARD_PADDING + rect.left}px, ${rect.top}px, 0)`,
+      transform: `translate3d(${BOARD_PADDING + rect.left}px, ${rect.top}px, 0px)`,
       width: rect.width,
       height: rect.height
     };
+  }
+
+  function paintLayoutPreview(layouts: Record<string, LayoutBox>) {
+    let contentHeight = 0;
+    for (const [id, layout] of Object.entries(layouts)) {
+      contentHeight = Math.max(contentHeight, layout.y + layout.h);
+      const frame = frameElementsRef.current.get(id);
+      if (!frame) continue;
+      const rect = layoutToRect(layout, innerWidth);
+      const transform = `translate3d(${BOARD_PADDING + rect.left}px, ${rect.top}px, 0px)`;
+      const width = `${rect.width}px`;
+      const height = `${rect.height}px`;
+      if (frame.style.transform !== transform) frame.style.transform = transform;
+      if (frame.style.width !== width) frame.style.width = width;
+      if (frame.style.height !== height) frame.style.height = height;
+    }
+    const board = boardRef.current;
+    const height = `${Math.max(metrics.height, contentHeight + BOARD_PADDING)}px`;
+    if (board && board.style.height !== height) board.style.height = height;
   }
 
   return (
@@ -661,12 +689,16 @@ export default function TiledBoard({
       style={{ height: boardHeight, width: innerWidth + BOARD_PADDING * 2 }}
     >
       {items.map((item) => {
-        const layout = liveLayouts[item.id] ?? propLayouts[item.id] ?? item.layout;
+        const layout = displayedLayouts[item.id] ?? propLayouts[item.id] ?? item.layout;
         const isActive = activeInteraction?.itemId === item.id;
 
         return (
           <div
             key={item.id}
+            ref={(element) => {
+              if (element) frameElementsRef.current.set(item.id, element);
+              else frameElementsRef.current.delete(item.id);
+            }}
             className={clsx(
               "pane-frame",
               isActive && activeInteraction.type === "move" && "pane-frame-moving",

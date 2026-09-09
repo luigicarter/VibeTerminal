@@ -1156,6 +1156,10 @@ function updateQuestionProgress(state, payload) {
 
 function runHost() {
   const sessions = new Map(); // paneId -> state
+  const stopObserver = require('./observedStop.cjs').createHostStopObserver({
+    lookup: id => { const state = sessions.get(id); return state && { id, launchToken: state.launchToken, generation: state.generation }; },
+    emit
+  });
 
   function emit(obj) {
     process.stdout.write(`${JSON.stringify(obj)}\n`);
@@ -2216,6 +2220,7 @@ function runHost() {
     const state = {
       child,
       generation: payload.generation,
+      launchToken: payload.launchToken,
       password,
       port: 0,
       cwd: String(cwd || ""),
@@ -2253,6 +2258,7 @@ function runHost() {
       backgroundAgent: payload.backgroundAgent === true
     };
     sessions.set(id, state);
+    stopObserver.track(payload, child);
     writeBackgroundStatusFile(id, state);
 
     const portTimer = setTimeout(() => {
@@ -2988,8 +2994,10 @@ function runHost() {
       });
   }
 
-  function stop(payload) {
+  function stop(payload, skipKill = false) {
     const state = sessions.get(payload?.id);
+    if (state && (payload.generation !== undefined && payload.generation !== state.generation ||
+      payload.launchToken !== undefined && payload.launchToken !== state.launchToken)) return;
     if (state) {
       observeInteractionEvent(payload.id, state, { type: "closed" }, emit);
       state.stopping = true;
@@ -3004,7 +3012,7 @@ function runHost() {
       } catch {
         // ignore
       }
-      killChild(state.child);
+      if (!skipKill) killChild(state.child);
       sessions.delete(payload.id);
     }
   }
@@ -3045,6 +3053,7 @@ function runHost() {
         continue;
       }
       if (msg.type === "start") start(msg.payload);
+      else if (msg.type === "stop-observed") void stopObserver.stop(msg.payload, () => stop(msg.payload, true));
       else if (["input", "steer", "interrupt"].includes(msg.type) && msg.payload?.actionId) void dispatchCheckedAction(msg.type, msg.payload);
       else if (msg.type === "input") input(msg.payload);
       else if (msg.type === "permission") permission(msg.payload);

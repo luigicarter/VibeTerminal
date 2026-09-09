@@ -1033,3 +1033,22 @@ export interface ChatMessage {
   background?: boolean;
   backgroundReport?: boolean;
 }
+export interface ObservedStopRequest {
+  operationId: string;
+  id: string;
+  launchToken: number;
+  generation?: string | number;
+  kind: string;
+  observeOnly?: boolean;
+}
+
+export interface ObservedStopResult {
+  operationId: string;
+  id?: string;
+  launchToken?: number;
+  generation?: string | number;
+  ok: boolean;
+  process: 'stopped' | 'already-absent' | 'failed' | 'unknown' | 'superseded';
+  launchSettled: boolean;
+  error?: string;
+}

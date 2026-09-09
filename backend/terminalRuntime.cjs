@@ -28,6 +28,8 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
   const metadataReads = new Map();
 
   function publish(record) {
+    if (record.snapshot.processState !== "running" ||
+        ["exited", "failed"].includes(record.snapshot.agentProcessState)) record.snapshot.pendingTurnActivity = undefined;
     if (record.rootIdentityConflict) {
       record.snapshot.binding = { status: "ambiguous", message: "Another native root conversation was observed. Restart this pane to verify the current conversation." };
       record.snapshot.observation = "unavailable";
@@ -127,7 +129,55 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
   function clearInput(record) {
     record.snapshot.pendingInput = undefined;
     record.snapshot.pendingInputAt = undefined;
+    record.snapshot.pendingTurnActivity = undefined;
+    record.pendingTurnEnded = false;
+    record.pendingTurnEventAt = undefined;
+    record.pendingTurnTools = undefined;
     record.pendingPriorTurnId = undefined;
+  }
+  // Display evidence for the old turn must never acknowledge a later submit.
+  // Consume its running/end callbacks; tool bookkeeping can still proceed.
+  function observePendingTurn(record, event, child) {
+    const s = record.snapshot;
+    if (child || s.pendingInput !== "submit" || !record.pendingPriorTurnId ||
+        event.providerTurnId !== record.pendingPriorTurnId || event.providerThreadId !== s.conversation?.id ||
+        !["agent-running", "agent-activity", "agent-attention", "agent-response"].includes(event.type)) return false;
+    const at = event.observedAt;
+    if (!Number.isFinite(at) || at <= s.pendingInputAt || at < (record.pendingTurnEventAt || 0) ||
+        record.pendingTurnEnded || record.retiredTurnIds.has(event.providerTurnId)) return true;
+    const previous = s.pendingTurnActivity;
+    if (event.type === "agent-response" || (event.type === "agent-attention" &&
+        ["completed", "failed"].includes(event.attention?.state) && event.attention.reason !== "exit")) {
+      s.pendingTurnActivity = undefined;
+      record.pendingTurnEnded = true;
+      record.displayEndedTurnId = event.providerTurnId;
+      record.pendingTurnEventAt = at;
+      clearActiveTools(record);
+      return true;
+    }
+    if (event.type === "agent-attention") {
+      if (event.attention?.state === "waiting") {
+        s.pendingTurnActivity = { turnId: s.turnId, state: "waiting", observedAt: at,
+          attention: previous?.state === "waiting" && previous.attention?.reason === event.attention.reason ? previous.attention :
+            { id: randomUUID(), state: "waiting", reason: event.attention.reason, toolId: event.toolId, updatedAt: at } };
+        record.pendingTurnEventAt = at;
+      }
+      return true;
+    }
+    // Replayed native starts, old tools, and returns alone do not prove new work.
+    if (event.type === "agent-running" && event.turnStart !== false) return true;
+    const tools = record.pendingTurnTools;
+    const fresh = event.phase !== "stop" && (!event.toolId ? event.type === "agent-running" :
+      !tools?.has(event.toolId) && !record.settledToolIds.has(event.toolId));
+    const resolvesWait = previous?.state === "waiting" && event.phase === "stop" &&
+      event.toolId && event.toolId === previous.attention?.toolId;
+    if ((fresh && previous?.state !== "waiting") || resolvesWait) {
+      s.pendingTurnActivity = { turnId: s.turnId, state: "running", observedAt: at };
+      record.pendingTurnEventAt = at;
+    }
+    if (event.toolId) tools?.add(event.toolId);
+    if (tools?.size > 1024) tools.delete(tools.values().next().value);
+    return event.type !== "agent-activity";
   }
   function childId(record, event) {
     return event.taskId || (event.providerThreadId !== record.snapshot.conversation?.id ? event.providerThreadId : undefined) || event.toolId;
@@ -240,6 +290,11 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
     record.pendingPriorTurnId = waitingReply ? undefined : s.turnId;
     s.pendingInput = intent;
     s.pendingInputAt = now();
+    s.pendingTurnActivity = undefined;
+    record.pendingTurnEnded = !record.nativeActive || !["running", "waiting"].includes(s.turnState) ||
+      Boolean(s.turnId && record.displayEndedTurnId === s.turnId);
+    record.pendingTurnEventAt = undefined;
+    record.pendingTurnTools = new Set([...record.settledToolIds, ...s.activeTools.map(tool => tool.id)]);
     s.observation = "provisional";
     if (submit) s.attention = undefined;
     return publish(record);
@@ -309,6 +364,7 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
     if (event.transcriptPath && !child && event.rootVerified === true &&
         event.providerThreadId === s.conversation?.id) record.transcriptPath = event.transcriptPath;
     const eventAt = event.observedAt || now();
+    if (observePendingTurn(record, event, child)) return publish(record);
     const pendingQuestion = s.turnState === "waiting"
       ? s.activeTools.find(tool => isQuestionTool(s.provider, tool.name)) : undefined;
     switch (event.type) {

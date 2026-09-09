@@ -36,6 +36,10 @@ function harness(kind, plannerFamily) {
     buildServeSpawn: () => ({ command: 'fixture', args: [], options: {} }),
     clearSteerRoutingState() {}, settleAllBackgroundTasks() {},
   };
+  context.stopObserver = require('../../backend/observedStop.cjs').createHostStopObserver({
+    lookup: id => { const state = sessions.get(id); return kind === 'fusion' ? state?.launchPayload : state && { id, launchToken: state.launchToken, generation: state.generation }; },
+    kill: value => context.killChild(value), emit: event => context.emit(event)
+  });
   vm.createContext(context);
   return { context, directory, sessions, events, payload, ready: () => sessionReady(directory.get('pane')) };
 }

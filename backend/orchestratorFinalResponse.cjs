@@ -2,6 +2,7 @@
 
 const { formatDirectOutcomes } = require('./orchestratorResponse.cjs');
 const { formatTaskWait } = require('./orchestratorTaskStatus.cjs');
+const { isClose, isCloseEvidence, summarizeCloseOutcomes } = require('./orchestratorCloseOutcome.cjs');
 const submissionKinds = new Set(['send_prompt', 'stage_draft']);
 const uncertain = new Set(['unknown', 'unconfirmed', 'uncertain', 'write-failed']);
 const labels = { codex: 'Codex', claude: 'Claude', 'claude-custom': 'Claude', gemini: 'Gemini',
@@ -29,11 +30,12 @@ function publicOutcome(outcome) {
 // reply is accepted here: compose independent effects without losing failures.
 function formatFinalResponse({ outcomes = [], waits = [], deliveryUpdates = [], sessions = [], grants = [] } = {}) {
   const submissions = waits.filter(wait => wait.source !== 'watch');
-  if (!submissions.length && !outcomes.some(outcome => outcome.kind === 'create_session' || submissionKinds.has(outcome.kind))) return undefined;
+  const closure = summarizeCloseOutcomes({ outcomes, grants, sessions });
+  if (!closure.present && !submissions.length && !outcomes.some(outcome => outcome.kind === 'create_session' || submissionKinds.has(outcome.kind))) return undefined;
   const safeSessions = sessions.map(session => ({ ...session, name: safeName(session), conversationTitle: undefined }));
   const safeGrants = grants.map(grant => ({ ...grant, targets: grant.targets?.map(target => ({ ...target, name: safeName(target) })) }));
-  const parts = [], consumed = new Set();
-  const direct = outcome => formatDirectOutcomes([publicOutcome(outcome)], safeSessions, safeGrants);
+  const parts = closure.present ? [closure.text] : [], consumed = new Set();
+  const direct = outcome => formatDirectOutcomes([publicOutcome(outcome)], safeSessions, safeGrants.filter(grant => !isClose(grant)));
   const renderWait = wait => {
     const session = safeSessions.find(session => session.id === targetId(wait) && session.generation === generation(wait));
     const target = safeGrants.flatMap(grant => grant.targets || []).find(target => target.id === targetId(wait) && target.generation === generation(wait));
@@ -42,9 +44,12 @@ function formatFinalResponse({ outcomes = [], waits = [], deliveryUpdates = [], 
   const nonTaskFinishes = outcomes.filter(outcome => outcome.kind === 'finish_terminal' && outcome.ok
     && outcome.status === 'interaction-complete' && outcome.text?.trim()
     && !outcomes.some(other => other.kind === 'create_session' && sameTarget(other, outcome))
+    && !outcomes.some(other => isCloseEvidence(other, grants) && sameTarget(other, outcome))
+    && !grants.some(grant => isClose(grant) && grant.id === outcome.grantId)
     && !submissions.some(wait => sameTarget(wait, outcome))
     && !outcomes.some(other => submissionKinds.has(other.kind) && sameTarget(other, outcome)));
   for (const outcome of outcomes) {
+    if (isCloseEvidence(outcome, grants)) continue;
     if (outcome.kind === 'create_session') { parts.push(direct(outcome)); continue; }
     const wait = submissions.find(wait => sameAction(wait, outcome));
     if (submissionKinds.has(outcome.kind) || wait) {

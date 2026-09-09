@@ -13,13 +13,14 @@ function checkTiming(entry) {
     model_started: ['modelCallId', 'category', 'attempt', 'deadlineMs', 'toolChoice'],
     model_headers: ['modelCallId', 'category', 'attempt', 'deadlineMs', 'toolChoice', 'headersMs', 'httpStatus'],
     model_complete: ['modelCallId', 'category', 'status', 'totalMs', 'httpStatus', 'attempt', 'deadlineMs', 'toolChoice', 'headersMs', 'bodyMs', 'provider', 'generationId', 'promptTokens', 'completionTokens', 'reasoningTokens', 'reason', 'requestPhase'],
-    tool_started: ['toolCallId', 'actionKind', 'targetId'], tool_complete: ['toolCallId', 'actionId', 'actionKind', 'targetId', 'generation', 'status', 'totalMs'],
+    tool_started: ['toolCallId', 'actionKind', 'targetId'], tool_complete: ['toolCallId', 'actionId', 'actionKind', 'targetId', 'generation', 'grantId', 'status', 'totalMs'],
     first_effect: ['actionKind', 'targetId', 'generation', 'status']
   };
   assert(stages[entry.stage], `Unexpected timing stage: ${entry.stage}`);
   assert(Object.keys(entry).every(key => [...base, ...stages[entry.stage]].includes(key)));
   assert.equal(typeof entry.requestId, 'string'); assert.equal(typeof entry.elapsedMs, 'number'); assert(entry.elapsedMs >= 0);
   if (entry.stage.startsWith('model_')) assert.equal(typeof entry.modelCallId, 'string');
+  if (entry.grantId !== undefined) { assert.equal(typeof entry.grantId, 'string'); assert(entry.grantId.length > 0 && entry.grantId.length <= 256); }
   assert.doesNotMatch(JSON.stringify(entry), /PRIVATE_|private-configured-key|Can you prompt|random one/);
 }
 function fixture(t, overrides = {}) {
@@ -84,8 +85,12 @@ test('queued delivery failure retains the originating request and tool identifie
   assert(timings.some(entry => entry.stage === 'routing' && entry.status === 'complete'));
   assert(timings.some(entry => entry.stage === 'execution' && entry.status === 'started'));
   assert.equal(new Set(timings.map(entry => entry.requestId)).size, 1);
+  const queuedTiming = timings.find(entry => entry.stage === 'tool_complete' && entry.toolCallId === 'queued-tool');
+  assert(sent.grantId); assert.equal(queuedTiming.grantId, sent.grantId); assert.equal(queuedTiming.actionId, sent.actionId);
+  assert.equal(queuedTiming.targetId, 'vyp-1'); assert.equal(queuedTiming.generation, 3);
   f.instance.recordDelivery({ actionId: sent.actionId, id: 'vyp-1', generation: 3, ok: false, status: 'not-running' });
   const [entry] = await f.read(); assert.equal(entry.stage, 'delivery'); assert.equal(entry.toolCallId, 'queued-tool'); assert(entry.requestId); assert.equal(entry.actionId, sent.actionId); assert.equal(entry.error.message, 'Action not-running.');
+  assert.equal(entry.grantId, sent.grantId); assert.equal(entry.requestId, queuedTiming.requestId);
 });
 
 test('an adapter exception retains generated action and resolved target identity exactly once', async t => {
@@ -96,6 +101,10 @@ test('an adapter exception retains generated action and resolved target identity
   const entries = await f.read(); assert.equal(entries.length, 1);
   assert.equal(entries[0].actionId, attempted.actionId); assert.equal(entries[0].targetId, 'vyp-1'); assert.equal(entries[0].generation, 3);
   assert.equal(entries[0].error.code, 'EPIPE'); assert.equal(entries[0].error.message, 'PTY write failed'); assert(entries[0].error.stack);
+  assert(attempted.grantId); assert.equal(entries[0].grantId, attempted.grantId);
+  const failedTiming = fs.readFileSync(f.filename, 'utf8').trim().split('\n').map(JSON.parse)
+    .find(entry => entry.event === 'request_stage' && entry.stage === 'tool_complete' && entry.actionId === attempted.actionId);
+  assert.equal(failedTiming.grantId, attempted.grantId); assert.equal(failedTiming.requestId, entries[0].requestId);
 });
 
 test('provider failures keep classified HTTP details and exclude response bodies', async t => {

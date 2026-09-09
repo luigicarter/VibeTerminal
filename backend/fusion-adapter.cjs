@@ -22,7 +22,7 @@ const fs = require("fs");
 const http = require("http");
 const os = require("os");
 const path = require("path");
-const { spawn } = require("child_process");
+const { spawn: spawnProcess } = require("child_process");
 const { tailFile } = require("./buildSupervisor.cjs");
 const { modelCatalogEntry, resolveCodexEffortForModel } = require("./codexModels.cjs");
 const { stripClaudeProviderEnv } = require("./claudeCustomHome.cjs");
@@ -38,6 +38,33 @@ const SESSION_ID = process.env.VIBE_TERMINAL_SESSION_ID;
 const CALLBACK_URL = process.env.VIBE_TERMINAL_CALLBACK_URL;
 const TOKEN = process.env.VIBE_TERMINAL_TELEMETRY_TOKEN;
 const LAUNCH_NONCE = process.env.VIBE_TERMINAL_LAUNCH_NONCE;
+let adapterStopping = false;
+const adapterStopIdentity = { id: SESSION_ID || 'unbound-fusion-adapter', launchToken: 0, generation: LAUNCH_NONCE || 'unbound' };
+const adapterStops = require('./observedStop.cjs').createHostStopObserver({ lookup: () => undefined, timeoutMs: 5000 });
+function spawn(...args) {
+  if (adapterStopping) throw new Error('Fusion is stopping; no new executor process can start.');
+  const child = spawnProcess(...args);
+  // All actual children created by this adapter belong to this exact session,
+  // including separate Claude workers and detached, explicitly owned builds.
+  adapterStops.track(adapterStopIdentity, child);
+  return child;
+}
+
+async function stopHarnessObserved(payload) {
+  if (!LAUNCH_NONCE || payload?.launchNonce !== LAUNCH_NONCE || typeof payload.operationId !== 'string') {
+    return { ok: false, process: 'superseded', launchSettled: false, operationId: payload?.operationId, error: 'The Fusion adapter launch identity changed.' };
+  }
+  if (payload.observeOnly === true) {
+    const observed = await adapterStops.stop({ ...adapterStopIdentity, operationId: payload.operationId, observeOnly: true });
+    return { ...observed, launchNonce: LAUNCH_NONCE, launchSettled: adapterStopping };
+  }
+  adapterStopping = true;
+  const observed = await adapterStops.stop({ ...adapterStopIdentity, operationId: payload.operationId });
+  // References may be reset only after evidence was captured independently;
+  // an acknowledgment from legacy resetHarness never certifies process exit.
+  if (observed.ok) resetHarness('Fusion stopped.');
+  return { ...observed, launchNonce: LAUNCH_NONCE, launchSettled: true };
+}
 const SETTINGS_FILE = process.env.VIBE_FUSION_CODEX_SETTINGS || null;
 const ENV_CODEX_MODEL = process.env.VIBE_FUSION_CODEX_MODEL || null;
 const ENV_CODEX_EFFORT = process.env.VIBE_FUSION_CODEX_EFFORT || null;
@@ -1357,7 +1384,7 @@ function startControlServer() {
   controlServer = http.createServer((request, response) => {
     if (
       request.method !== "POST" ||
-      !["/steer", "/interrupt", "/stop", "/mode", "/background-cancel", "/answer-question"].includes(request.url)
+      !["/steer", "/interrupt", "/stop", "/stop-observed", "/mode", "/background-cancel", "/answer-question"].includes(request.url)
     ) {
       response.writeHead(404);
       response.end();
@@ -1400,6 +1427,8 @@ function startControlServer() {
           result = { ok: true, status: "submitted", requestId: pendingId };
         } else if (request.url === "/interrupt") {
           result = await codexInterrupt();
+        } else if (request.url === "/stop-observed") {
+          result = await stopHarnessObserved(parsed);
         } else if (request.url === "/stop") {
           resetHarness("Fusion stopped.");
           result = { status: "stopped" };
@@ -1521,6 +1550,7 @@ function connect() {
 }
 
 function codexSend(obj) {
+  if (adapterStopping) return false;
   if (!codexChild || !codexChild.stdin || codexChild.stdin.destroyed || !codexChild.stdin.writable) {
     return false;
   }
@@ -1534,7 +1564,7 @@ function codexSend(obj) {
 }
 
 function killCodex() {
-  if (!codexChild || codexChild.killed) return;
+  if (!codexChild || codexChild.killed || codexChild.exitCode != null || codexChild.signalCode != null) return;
   threadReady = null;
   if (isWin && codexChild.pid) {
     try {
@@ -1645,6 +1675,7 @@ function ensureExecutorFamily(family) {
 }
 
 function writeChildJson(child, obj) {
+  if (adapterStopping) return false;
   if (!child || !child.stdin || child.stdin.destroyed || !child.stdin.writable) {
     return false;
   }
@@ -1661,7 +1692,7 @@ function claudeSend(obj) {
 }
 
 function killChildProcessTree(child) {
-  if (!child || child.killed) return;
+  if (!child || child.killed || child.exitCode != null || child.signalCode != null) return;
   if (isWin && child.pid) {
     try {
       require("child_process").execFileSync(

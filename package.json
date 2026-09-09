@@ -1,6 +1,6 @@
 {
   "name": "vibe-terminal",
-  "version": "0.1.104",
+  "version": "0.1.105",
   "private": true,
   "description": "A tiled local workspace for running multiple coding agents side by side.",
   "author": "Lina Terminal contributors",
@@ -23,7 +23,8 @@
     "smoke:backend:terminal-runtime": "node scripts/backend/terminal-runtime-smoke.cjs",
     "test:grok": "node --test scripts/backend/grok-*.test.cjs && node scripts/frontend/grok-integration-smoke.cjs",
     "smoke:grok:native": "node scripts/qa/grok-native-history-smoke.cjs",
-    "test:terminal-status": "node --test scripts/backend/terminal-status-lifecycle.test.cjs scripts/backend/provider-status-telemetry.test.cjs scripts/backend/kimi-task-observer.test.cjs scripts/backend/native-status-reconciliation.test.cjs scripts/backend/orchestrator-status-parity.test.cjs && node scripts/backend/terminal-runtime-smoke.cjs && node scripts/backend/agent-generation-telemetry-smoke.cjs && node scripts/backend/agent-telemetry-smoke.cjs && node scripts/frontend/terminal-runtime-smoke.cjs && node scripts/frontend/app-runtime-smoke.cjs",
+    "test:terminal-status": "node --test scripts/backend/terminal-status-lifecycle.test.cjs scripts/backend/terminal-pending-activity.test.cjs scripts/backend/provider-status-telemetry.test.cjs scripts/backend/codex-hook-trust.test.cjs scripts/backend/kimi-task-observer.test.cjs scripts/backend/native-status-reconciliation.test.cjs scripts/backend/orchestrator-status-parity.test.cjs && node scripts/backend/terminal-runtime-smoke.cjs && node scripts/backend/agent-generation-telemetry-smoke.cjs && node scripts/backend/agent-telemetry-smoke.cjs && node scripts/frontend/terminal-runtime-smoke.cjs && node scripts/frontend/app-runtime-smoke.cjs",
+    "smoke:codex:hook-trust": "node scripts/qa/codex-hook-trust-smoke.cjs",
     "smoke:backend:agent-generation": "node scripts/backend/agent-generation-telemetry-smoke.cjs",
     "smoke:backend:metadata": "node scripts/backend/metadata-discovery-smoke.cjs",
     "smoke:backend:code-changes": "node scripts/backend/code-changes-smoke.cjs",
@@ -52,6 +53,7 @@
     "smoke:frontend:app-runtime": "node scripts/frontend/app-runtime-smoke.cjs",
     "smoke:frontend:session-persistence": "node scripts/frontend/session-persistence-smoke.cjs",
     "smoke:electron:terminal-board": "node scripts/qa/terminal-board-smoke.cjs",
+    "smoke:electron:tiled-drag": "node scripts/qa/tiled-board-drag-smoke.cjs",
     "smoke:electron:terminal-scroll": "node scripts/qa/terminal-scroll-smoke.cjs",
     "smoke:frontend:workspace": "node scripts/frontend/workspace-smoke.cjs",
     "smoke:frontend:session-launch": "node scripts/frontend/session-launch-smoke.cjs",
@@ -79,8 +81,8 @@
     "pack:win": "npm run prepare:codex-bin:required && npm run prepare:voice && npm run build && electron-builder --win --dir",
     "dist:win": "npm run prepare:codex-bin:required && npm run prepare:voice && npm run build && electron-builder --win nsis",
     "prepare:voice": "node scripts/dev/verify-error-audio.cjs && node scripts/dev/prepare-voice-models.cjs",
-    "test:orchestrator": "node --test scripts/backend/orchestrator-*.test.cjs scripts/backend/terminal-observation*.test.cjs scripts/backend/voice*.test.cjs scripts/backend/microphone-*.test.cjs scripts/backend/cli-probe-*.test.cjs scripts/backend/workspace-changes.test.cjs scripts/backend/grok-*.test.cjs scripts/backend/terminal-status-lifecycle.test.cjs scripts/backend/provider-status-telemetry.test.cjs scripts/backend/kimi-task-observer.test.cjs scripts/backend/native-status-reconciliation.test.cjs scripts/backend/chat-host-readiness-integration.test.cjs scripts/backend/chat-main-launch-lifecycle.test.cjs",
-    "check:orchestrator": "npm run test:orchestrator && npm run smoke:backend:terminal-runtime && npm run smoke:backend:agent-generation && npm run smoke:backend:agent-telemetry && npm run smoke:backend:metadata && npm run smoke:backend:fusion-chat-parse && npm run smoke:backend:openfusion-chat-parse && npm run build && npm run smoke:frontend:terminal-runtime && npm run smoke:frontend:app-runtime && node scripts/frontend/grok-integration-smoke.cjs && npm run test:frontend:session-resume && npm run smoke:frontend:session-persistence && npm run smoke:frontend:session-launch && npm run smoke:frontend:orchestrator-routing && npm run smoke:frontend:orchestrator-dashboard && npm run smoke:frontend:orchestrator-tasks && npm run smoke:frontend:orchestrator-work && npm run smoke:frontend:orchestrator-history && npm run smoke:frontend:voice-experience && npm run test:voice:capture && npm run test:frontend:voice-mic-stop && node scripts/qa/orchestrator-smoke.cjs --hidden && npm run smoke:electron:orchestrator-tasks && npm run smoke:electron:session-resume",
+    "test:orchestrator": "node --test scripts/backend/*observed-stop*.test.cjs scripts/backend/orchestrator-*.test.cjs scripts/backend/terminal-observation*.test.cjs scripts/backend/voice*.test.cjs scripts/backend/microphone-*.test.cjs scripts/backend/cli-probe-*.test.cjs scripts/backend/workspace-changes.test.cjs scripts/backend/grok-*.test.cjs scripts/backend/terminal-status-lifecycle.test.cjs scripts/backend/terminal-pending-activity.test.cjs scripts/backend/codex-hook-trust.test.cjs scripts/backend/provider-status-telemetry.test.cjs scripts/backend/kimi-task-observer.test.cjs scripts/backend/native-status-reconciliation.test.cjs scripts/backend/chat-host-readiness-integration.test.cjs scripts/backend/chat-main-launch-lifecycle.test.cjs",
+    "check:orchestrator": "npm run test:orchestrator && node --test scripts/frontend/close-session-operation.test.cjs && npm run smoke:backend:terminal-runtime && npm run smoke:backend:agent-generation && npm run smoke:backend:agent-telemetry && npm run smoke:backend:metadata && npm run smoke:backend:fusion-chat-parse && npm run smoke:backend:openfusion-chat-parse && npm run build && npm run smoke:frontend:terminal-runtime && npm run smoke:frontend:app-runtime && node scripts/frontend/grok-integration-smoke.cjs && npm run test:frontend:session-resume && npm run smoke:frontend:session-persistence && npm run smoke:frontend:session-launch && npm run smoke:frontend:orchestrator-routing && npm run smoke:frontend:orchestrator-dashboard && npm run smoke:frontend:orchestrator-tasks && npm run smoke:frontend:orchestrator-work && npm run smoke:frontend:orchestrator-history && npm run smoke:frontend:voice-experience && npm run test:voice:capture && npm run test:frontend:voice-mic-stop && node scripts/qa/orchestrator-smoke.cjs --hidden && npm run smoke:electron:orchestrator-tasks && npm run smoke:electron:session-resume",
     "smoke:frontend:orchestrator-routing": "node scripts/frontend/orchestrator-routing-smoke.cjs",
     "smoke:frontend:workspace-setups": "node scripts/frontend/workspace-setups-smoke.cjs",
     "smoke:electron:orchestrator": "node scripts/qa/orchestrator-smoke.cjs",
@@ -105,7 +107,9 @@
     "smoke:frontend:orchestrator-dashboard": "node scripts/frontend/orchestrator-dashboard-smoke.cjs",
     "smoke:frontend:session-recency": "node scripts/frontend/session-recency-smoke.cjs",
     "smoke:electron:orchestrator-dashboard": "node scripts/qa/orchestrator-dashboard-smoke.cjs",
-    "smoke:frontend:orchestrator-work": "node scripts/frontend/orchestrator-work-smoke.cjs"
+    "smoke:frontend:orchestrator-work": "node scripts/frontend/orchestrator-work-smoke.cjs",
+    "test:frontend": "node --test scripts/frontend/*.test.cjs",
+    "smoke:electron:orchestrator-close": "node scripts/qa/orchestrator-close-smoke.cjs"
   },
   "dependencies": {
     "@xterm/addon-canvas": "^0.7.0",

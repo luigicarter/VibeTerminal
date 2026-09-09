@@ -11,7 +11,7 @@ async function fixture(t) {
   const main = { isDestroyed: () => false, webContents: new EventEmitter() };
   const runtime = { id: 'p', generation: 'g', launchToken: 1, provider: 'codex', cwd: root, observation: 'observed',
     processState: 'running', launchState: 'ready', agentProcessState: 'running', turnState: 'unknown', revision: 1 };
-  const f = { sent: [], runtime };
+  const f = { sent: [], runtime, uiToken: 1 };
   main.webContents.send = (channel, action) => {
     if (channel !== 'orchestrator:ui-action') return;
     if (action.kind === 'create_session') {
@@ -20,7 +20,7 @@ async function fixture(t) {
     }
     assert.equal(action.kind, 'inventory');
     queueMicrotask(() => ipc.emit('orchestrator:ui-result', { sender: main.webContents }, { id: action.id, result: { ok: true,
-      sessions: [{ id: 'p', kind: 'codex', cwd: root, started: true, launchToken: 1 }], projectPaths: [root] } }));
+      sessions: [{ id: 'p', kind: 'codex', cwd: root, started: true, launchToken: f.uiToken }], projectPaths: [root] } }));
   };
   const integration = f.integration = installOrchestrator({ app, ipcMain: ipc, BrowserWindow: { getAllWindows: () => [main] },
     screen: {}, shell: {}, safeStorage: { isEncryptionAvailable: () => false }, getMainWindow: () => main,
@@ -41,6 +41,22 @@ async function fixture(t) {
   });
   return f;
 }
+
+test('restart creation arrives before renderer inventory without losing the new PID or accepting old events', async t => {
+  const f = await fixture(t);
+  f.integration.forgetTerminal('p', 'g');
+  f.runtime.generation = 'replacement'; f.runtime.launchToken = 2;
+  assert.equal(f.integration.directory.get('p').generation, 'paused:p:1');
+  assert.equal(f.event({ generation: 'replacement', type: 'created', pid: 199, cols: 80, rows: 24 }), true);
+  f.event({ generation: 'replacement', type: 'agent-process', phase: 'start', pid: 142 });
+  f.uiToken = 2; await f.integration.refreshInventory();
+  assert.equal(f.integration.directory.get('p').terminalPid, 199);
+  assert.equal(f.integration.directory.get('p').agentPid, 142);
+  assert.equal(f.event({ type: 'created', pid: 99 }), false);
+  assert.equal(f.event({ type: 'agent-process', phase: 'exit', pid: 42 }), false);
+  assert.equal(f.integration.directory.get('p').terminalPid, 199);
+  assert.equal(f.integration.directory.get('p').agentPid, 142);
+});
 
 for (const mode of ['operator', 'nonoperator', 'task-staging']) test(`${mode} initial prompt crosses real directory, decoder and transport only after ready`, async t => {
   const f = await fixture(t);

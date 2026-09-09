@@ -28,7 +28,7 @@ async function fixture(t, kind = 'codex') {
   const f = { effects: [], steps: [], bodies: [], reads: 0, sequence: 10, sessions: [{ id: 'pane', name: 'Work', kind, provider: kind, generation: 'g1', cwd: root, status: 'running' }] };
   f.relay = createOrchestrator({ userDataPath: root, secureStorage: { isEncryptionAvailable: () => false },
     getRoots: () => ({ documents: root, projects: [{ name: 'Work', path: root }] }), getSessions: () => f.sessions,
-    readSession: async target => { f.reads++; const session = f.sessions.find(session => session.id === target.id); return { ok: true, id: session.id, generation: session.generation, text: f.screen || 'Ready for input', sequence: f.sequence, observationSequence: f.sequence, inputRevision: 2 }; },
+    readSession: async target => { f.reads++; if (f.readOverride) return f.readOverride(target); const session = f.sessions.find(session => session.id === target.id); return { ok: true, id: session.id, generation: session.generation, text: f.screen || 'Ready for input', sequence: f.sequence, observationSequence: f.sequence, inputRevision: 2 }; },
     dispatchAction: async action => { f.effects.push(action); return f.dispatch ? f.dispatch(action) : { ok: true, status: 'written' }; },
     fetch: async (url, options) => {
       if (url.endsWith('/key')) return new Response(JSON.stringify({ data: {} }));
@@ -47,7 +47,8 @@ async function fixture(t, kind = 'codex') {
   const assertFinishText = result => {
     const lastActions = f.lastResponse?.choices?.[0]?.message?.tool_calls?.map(call => JSON.parse(call.function.arguments)) || [];
     for (const action of lastActions.filter(action => action.kind === 'finish_terminal' && action.outcome === 'completed')) {
-      const receipt = result.actions?.find(item => item.kind === 'finish_terminal' && item.stepId === action.stepId);
+      const receipt = result.actions?.find(item => item.kind === 'finish_terminal' && (action.stepId !== undefined ? item.stepId === action.stepId :
+        item.targetId === action.targetId && (!action.grantId || item.grantId === action.grantId)));
       if (result.ok) assert.ok(receipt && (result.text === 'done' || result.text.includes(receipt.text)), 'The result acknowledges completion or preserves delivery issues, with the full finish receipt retained.');
     }
   };
@@ -249,12 +250,12 @@ test('native interrupt rejects an explicit mismatched revision and preserves obs
   assert.equal(f.effects[0].kind, 'interrupt'); assert.equal(f.effects[0].operator, true); assert.equal(f.effects[0].observationSequence, 10); assert.equal(f.effects[0].inputRevision, 2);
 });
 
-for (const kind of ['send_prompt', 'interrupt']) for (const omitted of [['observationSequence', 'inputRevision'], ['inputRevision'], ['observationSequence']]) {
+for (const kind of ['send_prompt', 'interrupt', 'terminal_interact']) for (const omitted of [['observationSequence', 'inputRevision'], ['inputRevision'], ['observationSequence']]) {
   test(`${kind} derives omitted ${omitted.join('/')} from its token without changing step replay identity`, async t => {
     const f = await fixture(t); let original;
     if (kind === 'interrupt') Object.assign(f.sessions[0], { turnState: 'running', turnId: 'active-turn' });
     const result = await f.run([read(), body => {
-      original = JSON.parse(operation(body, kind, { ...(kind === 'send_prompt' && { text: 'Review the latest changes.' }), stepId: 'derived-once' }).choices[0].message.tool_calls[0].function.arguments);
+      original = JSON.parse(operation(body, kind, { ...(kind === 'send_prompt' && { text: 'Review the latest changes.' }), ...(kind === 'terminal_interact' && { keys: ['down'] }), stepId: 'derived-once' }).choices[0].message.tool_calls[0].function.arguments);
       for (const field of omitted) delete original[field];
       return call(original);
     }, body => { assert.equal(latest(body).ok, true, JSON.stringify(latest(body))); return call(original); },
@@ -273,7 +274,7 @@ test('derived counters require valid fresh evidence and never replace supplied m
   const observations = createOperatorObservations({ now: () => time });
   const target = { id: 'pane', generation: 'g1', revision: 1, kind: 'codex' };
   const token = observations.observe(target, { sequence: 0, inputRevision: 0 });
-  for (const kind of ['send_prompt', 'interrupt']) {
+  for (const kind of ['send_prompt', 'interrupt', 'terminal_interact']) {
     assert.ok(observations.authorize(token, target, { kind }));
     for (const field of ['observationSequence', 'inputRevision']) for (const value of [1, null, -1])
       assert.throws(() => observations.authorize(token, target, { kind, [field]: value }), /screen sequence and input revision/);
@@ -283,7 +284,7 @@ test('derived counters require valid fresh evidence and never replace supplied m
     for (const screen of [{ sequence: 0 }, { inputRevision: 0 }, { sequence: -1, inputRevision: 0 }, { sequence: 0, inputRevision: -1 }])
       assert.throws(() => observations.authorize(observations.observe(target, screen), target, { kind }), /screen sequence and input revision/);
   }
-  assert.throws(() => observations.authorize(token, target, { kind: 'terminal_interact' }), /screen sequence and input revision/);
+  assert.ok(observations.authorize(token, target, { kind: 'terminal_interact' }));
   time += 30001;
   assert.throws(() => observations.authorize(token, target, { kind: 'send_prompt' }), /missing, used, or stale/);
 });
@@ -311,6 +312,49 @@ test('completion after an action requires another read, not the consumed pre-act
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(f.reads, 2); assert.equal(f.effects.length, 1);
 });
+
+const implicitFinish = body => call({ kind: 'finish_terminal', grantId: meta(body).authorizedCommands.grants[0].id,
+  targetId: 'pane', text: 'Verified the requested operation.', outcome: 'completed' });
+
+test('request-owned metadata completes read-send-read-finish and repeated call identity dispatches once', async t => {
+  const f = await fixture(t); let sent;
+  const result = await f.run([read(), () => sent = call({ kind: 'send_prompt', targetId: 'pane', text: 'Review the latest changes.' }),
+    () => sent, body => { assert.equal(latest(body).ok, true); assert.equal(f.effects.length, 1); return read(); }, implicitFinish]);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(f.effects.length, 1); assert.equal(f.reads, 2);
+  assert.equal(typeof f.effects[0].stepId, 'string'); assert.ok(f.effects[0].stepId.length);
+  assert.equal(f.effects[0].observationSequence, 10); assert.equal(f.effects[0].inputRevision, 2);
+});
+
+test('a same-response batched read cannot supply implicit evidence to its already chosen action', async t => {
+  const f = await fixture(t);
+  const batched = read();
+  batched.choices[0].message.tool_calls.push(...call({ kind: 'send_prompt', targetId: 'pane', text: 'Review the latest changes.' }).choices[0].message.tool_calls);
+  const result = await f.run([batched, body => {
+    assert.equal(latest(body).ok, false); assert.match(latest(body).error, /observation|read|token/i); assert.equal(f.effects.length, 0);
+    return call({ kind: 'send_prompt', targetId: 'pane', text: 'Review the latest changes.' });
+  }, read(), implicitFinish]);
+  assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(f.effects.length, 1);
+});
+
+test('a failed current read prevents implicit fallback to an earlier successful read', async t => {
+  const f = await fixture(t);
+  const result = await f.run([read(), () => { f.readOverride = () => ({ ok: false, error: 'Synthetic current read failed.' }); return read(); },
+    body => { assert.equal(latest(body).ok, false); return call({ kind: 'send_prompt', targetId: 'pane', text: 'Review the latest changes.' }); },
+    body => { assert.equal(latest(body).ok, false); assert.equal(f.effects.length, 0); delete f.readOverride; return read(); },
+    () => call({ kind: 'send_prompt', targetId: 'pane', text: 'Review the latest changes.' }), read(), implicitFinish, reply('The input was inspected after submission.')]);
+  assert.equal(result.upstreamError, undefined, JSON.stringify(result)); assert.equal(f.effects.length, 1);
+});
+
+for (const invalid of [{ stepId: '' }, { stepId: null }, { observationToken: '' }, { observationToken: null }]) {
+  test(`supplied invalid ${Object.keys(invalid)[0]}=${JSON.stringify(Object.values(invalid)[0])} is not silently replaced`, async t => {
+    const f = await fixture(t);
+    const result = await f.run([read(), () => call({ kind: 'send_prompt', targetId: 'pane', text: 'Review the latest changes.', ...invalid }),
+      body => { assert.equal(latest(body).ok, false); assert.equal(f.effects.length, 0); return call({ kind: 'send_prompt', targetId: 'pane', text: 'Review the latest changes.' }); },
+      read(), implicitFinish]);
+    assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(f.effects.length, 1);
+  });
+}
 
 for (const kind of ['fusion', 'openfusion']) for (const answerMode of ['supplied', 'delegated']) {
   test(`${kind} ${answerMode} answers support custom text and multiple selections`, async t => {

@@ -14,7 +14,17 @@ class Cdp {
   constructor(url) { this.ws = new WebSocket(url); this.pending = new Map(); this.n = 0; }
   async open() { await new Promise((resolve, reject) => { this.ws.addEventListener("open", resolve, { once: true }); this.ws.addEventListener("error", reject, { once: true }); }); this.ws.addEventListener("message", event => { const packet = JSON.parse(String(event.data)), pending = this.pending.get(packet.id); if (pending) { this.pending.delete(packet.id); clearTimeout(pending.timer); packet.error ? pending.reject(Error(packet.error.message)) : pending.resolve(packet.result); } }); }
   send(method, params = {}) { return new Promise((resolve, reject) => { const id = ++this.n; const timer = setTimeout(() => { this.pending.delete(id); reject(Error(`CDP timeout: ${method}`)); }, 60000); this.pending.set(id, { resolve, reject, timer }); this.ws.send(JSON.stringify({ id, method, params })); }); }
-  async eval(expression) { const r = await this.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }); if (r.exceptionDetails) throw Error(JSON.stringify(r.exceptionDetails)); return r.result.value; }
+  async eval(expression) {
+    let diagnostic;
+    if (process.env.VIBE_QA_DEBUG && expression.includes('"navigate"')) diagnostic = setTimeout(() => {
+      this.ws.send(JSON.stringify({ id: ++this.n, method: 'Debugger.pause' }));
+    }, 5000);
+    try {
+      const r = await this.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
+      if (r.exceptionDetails) throw Error(JSON.stringify(r.exceptionDetails)); return r.result.value;
+    } catch (error) { throw Error(`${error.message}; expression: ${expression.slice(0, 300)}`); }
+    finally { clearTimeout(diagnostic); }
+  }
   close() { for (const pending of this.pending.values()) clearTimeout(pending.timer); this.pending.clear(); this.ws.close(); }
 }
 function record(name, value) { result.checks.push({ name, value }); console.log(name, JSON.stringify(value)); }
@@ -70,7 +80,7 @@ function toolsFrom(reply, expectedOk = true) { assert.equal(reply.ok, expectedOk
 (async () => { try {
   assert.equal(process.platform, "win32", "This hidden Electron/PTY harness targets Windows.");
   const port = await new Promise(resolve => { const s = net.createServer(); s.listen(0, "127.0.0.1", () => { const port = s.address().port; s.close(() => resolve(port)); }); });
-  const env = { ...process.env, VIBE_SCREENSHOT_MODE: "1", VIBE_INTERNAL_SCREENSHOT: "0", VIBE_SCREENSHOT_USER_DATA: userData, VIBE_AGENT_SHIM_BASE_DIR: path.join(output, "shims"), CODEX_HOME: path.join(output, "codex"), CLAUDE_CONFIG_DIR: path.join(output, "claude"), XDG_CONFIG_HOME: path.join(output, "config"), XDG_DATA_HOME: path.join(output, "data") };
+  const env = { ...process.env, VIBE_SCREENSHOT_MODE: "1", VIBE_SCREENSHOT_HIDDEN: "1", VIBE_INTERNAL_SCREENSHOT: "0", VIBE_SCREENSHOT_USER_DATA: userData, VIBE_AGENT_SHIM_BASE_DIR: path.join(output, "shims"), CODEX_HOME: path.join(output, "codex"), CLAUDE_CONFIG_DIR: path.join(output, "claude"), XDG_CONFIG_HOME: path.join(output, "config"), XDG_DATA_HOME: path.join(output, "data") };
   for (const key of Object.keys(env)) if (/API_KEY|AUTH_TOKEN/.test(key) || ["ELECTRON_RUN_AS_NODE", "VITE_DEV_SERVER_URL"].includes(key)) delete env[key];
   // No real user-installed agent can resolve from this test's PATH.
   for (const key of Object.keys(env)) if (key.toLowerCase() === "path") delete env[key];
@@ -78,10 +88,22 @@ function toolsFrom(reply, expectedOk = true) { assert.equal(reply.ok, expectedOk
   env.VIBE_NODE_PATH = process.execPath;
   env.VIBE_TERMINAL_SHELL = path.join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
   Object.assign(env, { KIMI_CODE_HOME: path.join(output, "kimi"), QWEN_HOME: path.join(output, "qwen"), GEMINI_CLI_HOME: path.join(output, "gemini"), CURSOR_CONFIG_DIR: path.join(output, "cursor"), VIBE_CLAUDE_CUSTOM_HOME: path.join(output, "claude-custom") });
-  child = spawn(path.join(root, "node_modules/electron/dist/electron.exe"), [entry, `--remote-debugging-port=${port}`, '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'], { cwd: root, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+  // This window deliberately stays hidden. Keep Chromium's native occlusion
+  // policy from suspending the transport harness during rapid view switches.
+  child = spawn(path.join(root, "node_modules/electron/dist/electron.exe"), [entry, `--remote-debugging-port=${port}`, '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows', '--disable-features=CalculateNativeWinOcclusion', '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'], { cwd: root, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
   const log = fs.createWriteStream(path.join(output, "electron.log")); child.stdout.pipe(log); child.stderr.pipe(log);
   const page = await until(async () => (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(p => p.type === "page" && p.url.startsWith("file:") && !p.url.includes("surface=voice")), "main renderer");
   cdp = new Cdp(page.webSocketDebuggerUrl); await cdp.open();
+  if (process.env.VIBE_QA_DEBUG) {
+    await cdp.send('Debugger.enable');
+    cdp.ws.addEventListener('message', event => {
+      const packet = JSON.parse(String(event.data));
+      if (packet.method === 'Debugger.paused') {
+        fs.writeFileSync(path.join(output, 'paused.json'), JSON.stringify(packet.params.callFrames.map(({functionName,location,url}) => ({functionName,location,url})), null, 2));
+        cdp.ws.send(JSON.stringify({ id: ++cdp.n, method: 'Debugger.resume' }));
+      }
+    });
+  }
   await until(() => cdp.eval("Boolean(window.vibe?.orchestrator && document.querySelector('.orchestrator-mic'))"), "orchestrator UI");
   assert.equal((await cdp.eval("window.vibe.orchestrator.configure({key:'fixture-no-real-key',sessionOnly:true,model:'fixture/relay',monitoringIntervalSeconds:300})")).ok, true);
   assert.equal((await cdp.eval("window.vibe.orchestrator.setEnabled(true)")).ok, true);
@@ -144,6 +166,13 @@ function toolsFrom(reply, expectedOk = true) { assert.equal(reply.ok, expectedOk
   await until(() => launchCount(a) === 1, "maximized-away launcher");
   record("maximized-away-launch", obscured);
 
+  if (process.env.VIBE_QA_DEBUG) for (let cycle = 0; cycle < 10; cycle++) {
+    await navigate(a);
+    assert.equal((await dispatch({ kind: "navigate", view: "orchestrator" })).ok, true);
+    await navigate(b);
+    record('navigation-stress-cycle', cycle + 1);
+  }
+
   await navigate(a);
   assert.equal((await dispatch({ kind: "navigate", view: "orchestrator" })).ok, true);
   const covered = await create(a);
@@ -163,13 +192,17 @@ function toolsFrom(reply, expectedOk = true) { assert.equal(reply.ok, expectedOk
   await navigate(a);
   const restarted = await dispatch({ kind: "restart", target: background.receipt.target });
   assert.equal(restarted.ok, true, JSON.stringify(restarted));
+  record("hidden-restart-request", restarted);
   const fresh = await until(async () => { const r = await inventory(background.receipt.id); return r?.terminalPid > 0 && r.generation !== background.live.generation && !r.generation.startsWith("paused:") && r; }, "hidden restart generation");
   await until(() => launchCount(b) === 2, "hidden restart launcher");
   assert.equal(await mounted(background.receipt.id), false);
   assert.notEqual(fresh.terminalPid, background.live.terminalPid);
   record("hidden-restart-launches-once", { receipt: restarted, generation: fresh.generation, pid: fresh.terminalPid });
   result.pass = true;
-} catch (error) { result.pass = false; result.error = error.stack; console.error(error.stack); process.exitCode = 1; }
+} catch (error) {
+  result.pass = false; result.error = error.stack; console.error(error.stack); process.exitCode = 1;
+  try { result.failureState = await cdp.eval("Promise.all([window.vibe.orchestrator.getState().then(s=>s.sessions),window.vibe.terminal.getRuntimeSnapshots()]).then(([sessions,runtime])=>({sessions,runtime,workspaces:localStorage.getItem('vibe-terminal:workspaces:v2')}))"); } catch {}
+}
 finally {
   fs.writeFileSync(path.join(output, "results.json"), JSON.stringify(result, null, 2));
   cdp?.close();

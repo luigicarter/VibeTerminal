@@ -54,7 +54,7 @@ for (const pendingInput of ['submit', 'interrupt']) {
   for (const turnState of ['completed', 'running', 'waiting']) {
     const pending = {...state,provider:'codex',turnState,pendingInput,turnStartedAt:1000,children:[{id:'child'}],childActivity:true};
     assert.equal(runtimeSessionStatus(pending), 'running', 'known live children survive a pending root input');
-    assert.equal(runtimeStatusLabel(pending), pendingInput === 'submit' ? 'awaiting activity' : 'interrupt requested');
+    assert.equal(runtimeStatusLabel(pending), 'working');
     assert.equal(runtimeElapsed(pending,66000), undefined);
     assert.equal(runtimeSessionStatus({...pending,pendingInput:undefined}), turnState === 'waiting' ? 'waiting' : 'running');
     assert.equal(runtimeStatusLabel({...pending,pendingInput:undefined}), turnState === 'waiting' ? 'needs input' : 'working');

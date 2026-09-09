@@ -1,5 +1,9 @@
 # Terminal runtime, progress, and board behavior
 
+Release 0.1.105 adds separate pending-turn display evidence and generation-owned
+restart PID tracking. See [the release audit](release-0.1.105-review.md) for input
+and result boundaries and acceptance checks.
+
 Standalone panes use a main-process runtime service. The renderer subscribes to retained snapshots, so switching workspaces or rebuilding xterm does not reset conversation discovery, status, or titles. Fusion and Open Fusion retain their chat-host lifecycle transports; all panes share the board geometry repairs.
 
 ## Wheel scrolling
@@ -59,7 +63,14 @@ their existing rules.
 
 The runtime separates shell lifetime, agent invocation lifetime, foreground turns, and child work. An agent exiting into its shell is not a completed task. Neither Enter nor quiet output establishes agent progress. Native turn IDs reject stale activity/completion; repeated semantic attention events retain their occurrence ID. End timestamps are frozen independently of metadata refresh timestamps.
 
-Submit/interrupt keystrokes are provisional input intent (“awaiting activity” / “interrupt requested”), cleared by provider evidence. They never manufacture a turn start or cancellation. Completion-only Codex configurations can report successive completed turns even when the optional lifecycle observer has not been trusted; no start time is invented for those turns.
+Submit/interrupt keystrokes are provisional input intent (“awaiting activity” / “interrupt requested”), cleared by provider evidence. They never manufacture a turn start or cancellation. Completion-only Codex configurations can report successive completed turns even when lifecycle observation is disabled or unavailable; no start time is invented for those turns.
+
+Lina grants invocation-scoped trust to its six exact Codex observer commands by
+default. Updated observer paths receive matching hashes on the next launch,
+without rewriting global Codex configuration. Explicitly disabled hooks remain
+disabled, and user/project hooks keep their own trust requirements. See the
+[activity and hook trust plan](codex-activity-and-hook-trust-plan.md) for the
+implementation and the separate planned pending-input display repair.
 
 Native automated text/paste submissions separate the text from the final Enter
 by 200 ms. Codex 0.153.4 on Windows was observed leaving both plain and bracketed

@@ -102,6 +102,9 @@ jobs:
       - name: Exercise packaged workspace and task interfaces
         run: node scripts/qa/orchestrator-smoke.cjs --packaged --hidden
 
+      - name: Verify packaged pane closure and process termination
+        run: node scripts/qa/orchestrator-close-smoke.cjs --packaged
+
       - name: Exercise queued task interface
         run: npm run smoke:electron:orchestrator-tasks
 

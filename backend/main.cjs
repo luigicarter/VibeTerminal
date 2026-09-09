@@ -35,6 +35,13 @@ const { resolveLaunchCwd } = require("./launchCwd.cjs");
 const providerProfiles = require("./providerProfiles.cjs");
 const claudeCustomHome = require("./claudeCustomHome.cjs");
 const chatLaunchPreparation = require("./chatLaunchPreparation.cjs").createChatLaunchPreparation();
+const { createObservedLaunchFence, createObservedStopBroker } = require('./observedStop.cjs');
+const observedLaunches = createObservedLaunchFence();
+const observedStopHosts = new Map();
+const observedStops = createObservedStopBroker({
+  prepare: prepareObservedStop,
+  send: sendObservedStop
+});
 
 const isScreenshotMode =
   process.env.VIBE_SCREENSHOT_MODE === "1" || Boolean(process.env.VIBE_SCREENSHOT_PATH);
@@ -1164,6 +1171,7 @@ function sendToPtyHost(message) {
   }
 
   try {
+    if (message.type === 'create' && !observedLaunches.outgoing('terminal', message.payload, ptyHost)) return false;
     ptyHost.stdin.write(`${JSON.stringify(message)}\n`);
     return true;
   } catch (error) {
@@ -1210,6 +1218,7 @@ function parsePtyHostOutput(chunk) {
     if (line) {
       try {
         const event = JSON.parse(line);
+        if (event.type === 'stop-observed-result') { observedStops.receive(event); newlineIndex = ptyHostBuffer.indexOf("\n"); continue; }
         if (event.type === "ready") {
           ptyHostReady = true;
         }
@@ -1317,6 +1326,7 @@ function parseFusionChatHostOutput(chunk) {
     if (line) {
       try {
         const message = JSON.parse(line);
+        if (message.type === 'stop-observed-result') { receiveObservedChatStop('fusion', message); newlineIndex = fusionChatHostBuffer.indexOf("\n"); continue; }
         if (message.type === "event") {
           const fusionEvent = { id: message.id, ...message.event, generation: message.generation || message.event?.generation };
           broadcastFusionChatEvent(fusionEvent);
@@ -1382,10 +1392,12 @@ function startFusionChatHost() {
 }
 
 function sendToFusionChatHost(message) {
+  if (message.type === 'start' && !observedLaunches.canSend('fusion', message.payload)) return false;
   if (!fusionChatHost || !fusionChatHost.stdin.writable) {
     return false;
   }
-  message = orchestratorIntegration?.outgoing("fusion", message) || message;
+  if (message.type !== 'stop-observed') message = orchestratorIntegration?.outgoing("fusion", message) || message;
+  if (message.type === 'start' && !observedLaunches.outgoing('fusion', message.payload, fusionChatHost)) return false;
   fusionChatHost.stdin.write(`${JSON.stringify(message)}\n`);
   return true;
 }
@@ -1406,6 +1418,7 @@ function parseOpenFusionChatHostOutput(chunk) {
     if (line) {
       try {
         const message = JSON.parse(line);
+        if (message.type === 'stop-observed-result') { receiveObservedChatStop('openfusion', message); newlineIndex = openFusionChatHostBuffer.indexOf("\n"); continue; }
         if (message.type === "event") {
           broadcastOpenFusionChatEvent({ id: message.id, ...message.event, generation: message.generation || message.event?.generation });
         } else if (["action-result", "interaction-request", "interaction-resolved"].includes(message.type)) {
@@ -1458,10 +1471,12 @@ function startOpenFusionChatHost() {
 }
 
 function sendToOpenFusionChatHost(message) {
+  if (message.type === 'start' && !observedLaunches.canSend('openfusion', message.payload)) return false;
   if (!openFusionChatHost || !openFusionChatHost.stdin.writable) {
     return false;
   }
-  message = orchestratorIntegration?.outgoing("openfusion", message) || message;
+  if (message.type !== 'stop-observed') message = orchestratorIntegration?.outgoing("openfusion", message) || message;
+  if (message.type === 'start' && !observedLaunches.outgoing('openfusion', message.payload, openFusionChatHost)) return false;
   openFusionChatHost.stdin.write(`${JSON.stringify(message)}\n`);
   return true;
 }
@@ -1930,6 +1945,7 @@ app.whenReady().then(() => {
     getMainWindow: () => mainWindow, getRuntime: getTerminalRuntime,
     sendPty: sendToPtyHost, sendFusion: sendToFusionChatHost, sendOpenFusion: sendToOpenFusionChatHost,
     getTelemetry: getAgentTelemetry, getChanges: getCodeChangeSummary,
+    observeStoppedSession: payload => stopSessionObserved({ ...payload, observeOnly: true }),
     getHistoryConfig: () => {
       let openFusion = null;
       try { const telemetry = getAgentTelemetry(), home = telemetry.getOpenFusionOpencodeHome(); openFusion = { env: { XDG_DATA_HOME: home.dataDir, XDG_CONFIG_HOME: home.configDir }, after: telemetry.getOpenFusionThreadCutoffMs() }; } catch {}
@@ -2250,7 +2266,7 @@ ipcMain.handle("agent-thread:list", (_event, payload) => {
   }
 });
 
-ipcMain.handle("terminal:create", async (_event, payload) => {
+ipcMain.handle("terminal:create", (_event, payload) => observedLaunches.run('terminal', payload, async () => {
   const launchCwd = resolveLaunchCwd(payload?.cwd, getDefaultRuntimeCwd());
   const standalone = payload?.id && !payload.fusion && !payload.openFusion;
   const runtime = standalone ? getTerminalRuntime() : null;
@@ -2486,7 +2502,7 @@ ipcMain.handle("terminal:create", async (_event, payload) => {
     if (runtime.isCurrent(payload.id, admission.generation)) void runtime.refreshRecord(admission.record);
   }
   return result;
-});
+}));
 
 ipcMain.handle("terminal:get-runtime-snapshots", () => getTerminalRuntime().listSnapshots());
 
@@ -2509,7 +2525,7 @@ ipcMain.handle("terminal:attach", (_event, payload) => {
   return { ok, generation: snapshot.generation, launchToken: snapshot.launchToken };
 });
 
-ipcMain.handle("fusion-chat:start", async (_event, payload) => {
+ipcMain.handle("fusion-chat:start", (_event, payload) => observedLaunches.run('fusion', payload, async () => {
   const id = payload?.id;
   if (!id) {
     return { ok: false, error: "missing session id" };
@@ -2616,6 +2632,7 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
       type: "start",
       payload: {
         id,
+        launchToken: Number(payload.launchToken || 0),
         cwd: launchCwd.cwd,
         plannerFamily,
         codexBin,
@@ -2646,7 +2663,7 @@ ipcMain.handle("fusion-chat:start", async (_event, payload) => {
     return { ok: false, error: error.message };
   }
   });
-});
+}));
 
 ipcMain.handle("fusion-model-catalog:list", async (_event, payload) => {
   const family = normalizeFusionCatalogFamily(payload?.family);
@@ -2907,7 +2924,7 @@ ipcMain.on("fusion-chat:steer", (_event, payload) => {
   }
 });
 
-ipcMain.handle("openfusion-chat:start", async (_event, payload) => {
+ipcMain.handle("openfusion-chat:start", (_event, payload) => observedLaunches.run('openfusion', payload, async () => {
   const id = payload?.id;
   if (!id) {
     return { ok: false, error: "missing session id" };
@@ -2939,6 +2956,7 @@ ipcMain.handle("openfusion-chat:start", async (_event, payload) => {
       type: "start",
       payload: {
         id,
+        launchToken: Number(payload.launchToken || 0),
         cwd: launchCwd.cwd,
         env: files.env,
         plannerModel: files.env.VIBE_TERMINAL_OPEN_FUSION_PLANNER_MODEL,
@@ -2965,7 +2983,7 @@ ipcMain.handle("openfusion-chat:start", async (_event, payload) => {
     return { ok: false, error: error.message };
   }
   });
-});
+}));
 
 ipcMain.handle("openfusion-chat:save-models", async (_event, payload) => {
   if (!payload?.id) {
@@ -3337,6 +3355,76 @@ ipcMain.on("terminal:resize", (_event, payload) => {
   const scoped = scopedTerminalPayload(payload);
   if (scoped) sendResizeToPtyHost(scoped);
 });
+
+function receiveObservedChatStop(kind, event) {
+  if (!observedStops.receive(event) || !['stopped', 'already-absent'].includes(event.process) || event.generation === undefined) return;
+  const closed = { id: event.id, generation: event.generation, launchToken: event.launchToken, type: 'closed', stopObserved: true };
+  if (kind === 'fusion') broadcastFusionChatEvent(closed); else broadcastOpenFusionChatEvent(closed);
+}
+
+function sendObservedStop(payload) {
+  const kind = ['fusion', 'openfusion'].includes(payload.kind) ? payload.kind : 'terminal';
+  const entry = observedLaunches.get(kind, payload.id);
+  const host = kind === 'fusion' ? fusionChatHost : kind === 'openfusion' ? openFusionChatHost : ptyHost;
+  if (payload.observeOnly) {
+    const original = observedStopHosts.get(payload.operationId);
+    if (!original || original.host !== host || original.kind !== kind) return false;
+  } else {
+  // A fresh host has no evidence about children orphaned by its predecessor.
+  if (!entry || entry.kind !== kind || entry.launchToken !== payload.launchToken || entry.dispatched && entry.host !== host) return false;
+    observedStopHosts.set(payload.operationId, { host, kind });
+    while (observedStopHosts.size > 500) observedStopHosts.delete(observedStopHosts.keys().next().value);
+  }
+  return kind === 'fusion' ? sendToFusionChatHost({ type: 'stop-observed', payload })
+    : kind === 'openfusion' ? sendToOpenFusionChatHost({ type: 'stop-observed', payload })
+      : sendToPtyHost({ type: 'stop-observed', payload });
+}
+
+async function prepareObservedStop(payload) {
+  const kind = ['fusion', 'openfusion'].includes(payload.kind) ? payload.kind : 'terminal';
+  const record = kind === 'terminal' ? terminalRuntime?.getRecord(payload.id) : undefined;
+  const snapshot = record?.snapshot;
+  if (snapshot && (snapshot.launchToken !== payload.launchToken || payload.generation !== undefined && snapshot.generation !== payload.generation)) {
+    return { process: 'superseded', launchSettled: false, error: 'The pane runtime has been replaced.' };
+  }
+  const cancellation = observedLaunches.cancel(kind, payload, entry => {
+    if (kind === 'terminal') {
+      // This retires launch admission only; its synthetic exited state is not
+      // used by the observed-stop protocol as termination evidence.
+      if (snapshot) terminalRuntime.stop({ id: payload.id, launchToken: payload.launchToken, generation: snapshot.generation });
+      return record?.createPromise;
+    }
+    return chatLaunchPreparation.cancel(payload.id, async () => {
+      const telemetry = getAgentTelemetry();
+      if (kind === 'fusion' && entry.dispatched) {
+        const stopped = await telemetry.stopFusionSessionObserved(payload.id, { operationId: `${payload.operationId}:executor` });
+        if (stopped?.ok !== true || stopped?.launchSettled !== true || !['stopped', 'already-absent'].includes(stopped?.process)) {
+          throw new Error(stopped?.error || 'The Fusion executor process tree stop is unconfirmed.');
+        }
+      }
+      telemetry.releaseSession(payload.id);
+    });
+  });
+  if (cancellation.superseded) return { process: 'superseded', launchSettled: false, error: 'The pane launch has been replaced.' };
+  if (cancellation.error) return { process: 'failed', launchSettled: false, error: cancellation.error };
+  await cancellation.settled;
+  return { launchSettled: true, generation: payload.generation ?? snapshot?.generation ?? cancellation.entry.generation,
+    neverDispatched: !cancellation.entry.dispatched && !snapshot, cleanupError: cancellation.entry.cleanupError };
+}
+
+async function stopSessionObserved(payload) {
+  if (payload?.generation === `paused:${payload.id}:${payload.launchToken}`) {
+    const { generation, ...paneIdentity } = payload;
+    payload = paneIdentity;
+  }
+  const stopped = await observedStops.stop(payload);
+  if (stopped.ok && stopped.launchSettled && !['fusion', 'openfusion'].includes(payload?.kind)) {
+    const snapshot = terminalRuntime?.getRecord(payload.id)?.snapshot;
+    if (snapshot?.launchToken === payload.launchToken && (payload.generation === undefined || snapshot.generation === payload.generation)) releaseTerminalResources(payload.id, snapshot.generation);
+  }
+  return stopped;
+}
+ipcMain.handle('orchestrator:stop-session-observed', (_event, payload) => stopSessionObserved(payload));
 
 ipcMain.handle("terminal:kill", (_event, payload) => {
   const scoped = scopedTerminalPayload(payload);

@@ -1267,9 +1267,10 @@ function postTelemetry(callbackUrl, token, payload) {
       const providerArgs = JSON.parse(fs.readFileSync(providerArgsPath, "utf8"));
       const baseArgs = ["--hello", "a&b", literalArg, spacedArg];
       assert(
-        JSON.stringify(providerArgs.slice(0, baseArgs.length)) ===
+        providerArgs[0] === '-c' && providerArgs[1] === instrumentation.env.VIBE_TERMINAL_CODEX_HOOK_TRUST_OVERRIDE &&
+        JSON.stringify(providerArgs.slice(2, 2 + baseArgs.length)) ===
           JSON.stringify(baseArgs),
-        `PowerShell shim should preserve provider argv; got ${JSON.stringify(providerArgs)}`
+        `PowerShell shim should prepend narrow trust and preserve provider argv; got ${JSON.stringify(providerArgs)}`
       );
       assert(
         providerArgs.includes("-c") &&

@@ -77,6 +77,7 @@ contextBridge.exposeInMainWorld("vibe", {
   // for the right shell.
   platform: process.platform,
   orchestrator: {
+    stopSessionObserved: payload => ipcRenderer.invoke('orchestrator:stop-session-observed', payload),
     getState: () => ipcRenderer.invoke("orchestrator:get-state"),
     onState: callback => subscribe("orchestrator:state", callback),
     configure: patch => ipcRenderer.invoke("orchestrator:configure", patch),

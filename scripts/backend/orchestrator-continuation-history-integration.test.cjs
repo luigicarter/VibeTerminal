@@ -94,7 +94,10 @@ for (const cleanup of ['clear', 'capacity']) test(`two clarifications retain the
   const f = await fixture(t);
   const a = await f.run(objective, { goal: objective, actions: [{ kind: 'delegate_task', cwd: f.root, text: objective }] });
   const c = await f.follow(a.requestId, a.requestId);
-  assert.equal(f.task(a.requestId).status, 'finished'); assert.equal(f.task(c.requestId).status, 'needs-answer');
+  assert.equal(f.task(a.requestId).status, 'continued'); assert.equal(f.task(c.requestId).status, 'needs-answer');
+  assert.equal(f.task(a.requestId).controlDisposition, 'transferred');
+  assert.equal(f.task(a.requestId).continuedByRequestId, c.requestId);
+  assert.equal(f.task(c.requestId).continuedFromRequestId, a.requestId);
   if (cleanup === 'clear') await f.app.clearHistory();
   else for (let index = 0; index < 202; index++) assert.equal((await f.app.send({ text: 'hello', origin: 'text' })).ok, true);
   assert(f.task(a.requestId), 'The original live operator state remains available');

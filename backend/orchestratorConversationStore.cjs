@@ -6,7 +6,7 @@ const MAX_AGE = 30 * 24 * 60 * 60 * 1000;
 const fields = {
   messages: ['id', 'role', 'text', 'at', 'requestId', 'taskId', 'replyToId', 'questionId', 'origin',
     'reportKind', 'status', 'targetId', 'generation', 'turnId', 'actionId', 'completionCue'],
-  receipts: ['id', 'kind', 'targetId', 'generation', 'cwd', 'status', 'text', 'at', 'requestId', 'taskId'],
+  receipts: ['id', 'kind', 'targetId', 'generation', 'launchToken', 'actionId', 'grantId', 'cwd', 'status', 'text', 'at', 'requestId', 'taskId'],
   tasks: ['id', 'requestId', 'text', 'instruction', 'originalInstruction', 'status', 'phase', 'at', 'createdAt', 'updatedAt', 'targetId', 'generation', 'projectId', 'cwd', 'terminalId', 'question', 'questionId', 'result', 'error', 'replyToId', 'replyToRequestId', 'sequence', 'label', 'summary', 'outcome', 'origin'],
 };
 const empty = () => ({ messages: [], receipts: [], tasks: [] });
@@ -39,6 +39,32 @@ function createConversationStore({ userDataPath, getSecrets = () => [], now = Da
       const at = Number(source.updatedAt ?? source.at ?? source.createdAt);
       if (!Number.isFinite(at) || at < cutoff || at > now() + 60000) continue;
       const item = pick(source, fields[kind]);
+      if (kind === 'receipts') {
+        for (const key of ['actionId', 'grantId']) {
+          if (typeof source[key] === 'string') item[key] = clean(source[key].slice(0, 256)); else delete item[key];
+        }
+        if (!Number.isSafeInteger(source.launchToken) || source.launchToken < 0) delete item.launchToken;
+      }
+      if (kind === 'receipts' && source.kind === 'close' && source.close && typeof source.close === 'object') {
+        const close = {}, value = source.close;
+        if (typeof value.operationId === 'string' && value.operationId) close.operationId = clean(value.operationId.slice(0, 256));
+        if (value.target && typeof value.target === 'object') {
+          const target = {};
+          for (const key of ['id', 'kind']) if (typeof value.target[key] === 'string') target[key] = clean(value.target[key].slice(0, 256));
+          if (typeof value.target.generation === 'string') target.generation = clean(value.target.generation.slice(0, 256));
+          else if (Number.isSafeInteger(value.target.generation) && value.target.generation >= 0) target.generation = value.target.generation;
+          if (Number.isSafeInteger(value.target.launchToken) && value.target.launchToken >= 0) target.launchToken = value.target.launchToken;
+          if (target.id) close.target = target;
+        }
+        if (['present', 'removed', 'already-absent', 'superseded', 'unknown'].includes(value.pane)) close.pane = value.pane;
+        if (['running', 'stopped', 'already-absent', 'superseded', 'failed', 'unknown'].includes(value.process)) close.process = value.process;
+        for (const key of ['launchSettled', 'scopeEmpty']) if (typeof value[key] === 'boolean') close[key] = value[key];
+        if (Number.isSafeInteger(value.verifiedAt) && value.verifiedAt >= 0 && value.verifiedAt <= now() + 60000) close.verifiedAt = value.verifiedAt;
+        for (const key of ['targetCount', 'verifiedTargetCount', 'remainingTargetCount', 'newTargetCount', 'supersededTargetCount']) {
+          if (Number.isSafeInteger(value[key]) && value[key] >= 0 && value[key] <= 20000) close[key] = value[key];
+        }
+        if (Object.keys(close).length) item.close = close;
+      }
       if (kind === 'messages' && source.question && typeof source.question === 'object') item.question = pick(source.question, ['id', 'requestId', 'text']);
       if (kind === 'tasks') {
         // Routing describes a past decision; it cannot restore execution authority.
@@ -59,7 +85,19 @@ function createConversationStore({ userDataPath, getSecrets = () => [], now = Da
         if (source.question && typeof source.question === 'object') item.question = pick(source.question, ['id', 'requestId', 'text']);
         for (const key of ['result', 'outcome']) if (source[key] && typeof source[key] === 'object') item[key] = pick(source[key], ['ok', 'status', 'text', 'summary', 'error', 'targetId', 'requestId', 'generation', 'at']);
       }
-      if (restore && kind === 'tasks' && !['finished', 'completed', 'cancelled'].includes(item.status)) { item.status = 'paused'; item.phase = 'paused'; }
+      if (kind === 'tasks') {
+        for (const key of ['continuedFromRequestId', 'continuedByRequestId']) if (typeof source[key] === 'string') item[key] = clean(source[key].slice(0, 256));
+        if (['active', 'needs-answer', 'transferred', 'completed', 'failed'].includes(source.controlDisposition)) item.controlDisposition = source.controlDisposition;
+        if (typeof source.resultScopeTransferred === 'boolean') item.resultScopeTransferred = source.resultScopeTransferred;
+      }
+      if (restore && kind === 'tasks' && !['finished', 'completed', 'cancelled', 'continued', ...(item.controlDisposition === 'transferred' ? ['failed'] : [])].includes(item.status)) { item.status = 'paused'; item.phase = 'paused'; }
+      // Older versions could retire a failed request as finished while retaining
+      // its error. Preserve the history, but never restore that conflict as proof
+      // of success or reconstruct executable retry authority from its prose.
+      if (restore && kind === 'tasks' && ['finished', 'completed'].includes(item.status) && typeof item.error === 'string' && item.error.trim()) {
+        item.status = 'paused'; item.phase = 'paused';
+        if (item.controlDisposition === 'completed') delete item.controlDisposition;
+      }
       result[kind].push(item);
     }
     // Evict oldest records together rather than favoring one history category.

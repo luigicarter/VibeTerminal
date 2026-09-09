@@ -1578,6 +1578,9 @@ function windowsPowerShellShimSource(provider) {
     "  $ProviderArgs = @($ProviderArgs) + @('--settings', $env:VIBE_TERMINAL_CLAUDE_SETTINGS)",
     "}",
     "elseif ($Provider -eq 'codex' -and -not [string]::IsNullOrEmpty($env:VIBE_TERMINAL_NOTIFY_PROGRAM)) {",
+    "  if (-not [string]::IsNullOrEmpty($env:VIBE_TERMINAL_CODEX_HOOK_TRUST_OVERRIDE)) {",
+    "    $ProviderArgs = @('-c', $env:VIBE_TERMINAL_CODEX_HOOK_TRUST_OVERRIDE) + @($ProviderArgs)",
+    "  }",
     "  $notifyValue = \"notify=['powershell','-NoProfile','-ExecutionPolicy','Bypass','-File','$($env:VIBE_TERMINAL_NOTIFY_PROGRAM)','agent.completed']\"",
     "  $ProviderArgs = @($ProviderArgs) + @('-c', $notifyValue)",
     "  if (-not [string]::IsNullOrEmpty($env:VIBE_TERMINAL_CODEX_HOOK_OVERRIDES)) {",
@@ -1812,6 +1815,9 @@ function powershellCommand() {
   if (provider === "claude" && process.env.VIBE_TERMINAL_CLAUDE_SETTINGS) {
     args = args.concat(["--settings", process.env.VIBE_TERMINAL_CLAUDE_SETTINGS]);
   } else if (provider === "codex" && process.env.VIBE_TERMINAL_NOTIFY_PROGRAM) {
+    if (process.env.VIBE_TERMINAL_CODEX_HOOK_TRUST_OVERRIDE) {
+      args = ["-c", process.env.VIBE_TERMINAL_CODEX_HOOK_TRUST_OVERRIDE].concat(args);
+    }
     args = args.concat([
       "-c",
       "notify=['" + process.env.VIBE_TERMINAL_NOTIFY_PROGRAM + "','agent.completed']"
@@ -2005,7 +2011,7 @@ const CODEX_LIFECYCLE_EVENTS = [
 // parent session id and therefore still describe activity in the root turn.
 // Native child hooks describe child lifetime. Child tool and permission events
 // carry explicit child scope so they cannot end or restart the parent turn.
-// Codex's normal hook trust review still applies; vibeTerminal never bypasses it.
+// Only these exact app-owned command definitions receive invocation-scoped trust.
 function codexLifecycleHookSource() {
   return String.raw`const http = require("http");
 
@@ -2113,22 +2119,41 @@ process.stdin.resume();
 `;
 }
 
-function codexLifecycleConfigOverrides(nodePath, hookPath, isWin) {
-  let handler;
+function codexLifecycleCommand(nodePath, hookPath, isWin) {
   if (isWin) {
     // PowerShell -> .cmd native argv forwarding strips nested double quotes.
     // An encoded command leaves the complete -c TOML value as one safe arg.
     const script = `$env:ELECTRON_RUN_AS_NODE='1'; & ${quotePowerShell(nodePath)} ${quotePowerShell(hookPath)}`;
     const encoded = Buffer.from(script, "utf16le").toString("base64");
-    const command = `powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`;
-    handler = `[{ hooks = [{ type = 'command', command = '${command}', timeout = 5 }] }]`;
-  } else {
-    const command = `ELECTRON_RUN_AS_NODE=1 ${quotePosixShell(nodePath)} ${quotePosixShell(hookPath)}`;
-    handler = `[{ hooks = [{ type = "command", command = ${JSON.stringify(command)}, timeout = 5 }] }]`;
+    return `powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`;
   }
+  return `ELECTRON_RUN_AS_NODE=1 ${quotePosixShell(nodePath)} ${quotePosixShell(hookPath)}`;
+}
+
+function codexLifecycleConfigOverrides(nodePath, hookPath, isWin) {
+  const command = codexLifecycleCommand(nodePath, hookPath, isWin);
+  const handler = isWin
+    ? `[{ hooks = [{ type = 'command', command = '${command}', timeout = 5 }] }]`
+    : `[{ hooks = [{ type = "command", command = ${JSON.stringify(command)}, timeout = 5 }] }]`;
   return CODEX_LIFECYCLE_EVENTS.map((eventName) =>
     `hooks.${eventName}=${handler}`
   );
+}
+
+function codexLifecycleTrustOverride(nodePath, hookPath, isWin) {
+  const command = codexLifecycleCommand(nodePath, hookPath, isWin);
+  // Codex hashes normalized TOML as recursively key-sorted JSON. Absent optional
+  // fields disappear during TOML conversion. Keep these keys in canonical order.
+  const source = isWin ? 'C:\\<session-flags>\\config.toml' : '/<session-flags>/config.toml';
+  const entries = CODEX_LIFECYCLE_EVENTS.map(event => {
+    const eventName = event.replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase();
+    const identity = { event_name: eventName, hooks: [{ async: false, command, timeout: 5, type: 'command' }] };
+    const hash = 'sha256:' + crypto.createHash('sha256').update(JSON.stringify(identity)).digest('hex');
+    return `'${source}:${eventName}:0:0' = { trusted_hash = '${hash}' }`;
+  });
+  // A whole inline table avoids the CLI's naive dotted-key parser. Wrappers
+  // prepend it so explicit user CLI state wins; never override enablement.
+  return `hooks.state={ ${entries.join(', ')} }`;
 }
 
 // Windows notify program body (PowerShell). Same contract as notifyHookSource
@@ -3368,8 +3393,8 @@ function createAgentTelemetryManager(options = {}) {
   const notifyShPath = path.join(runDir, "notify.sh");
   const codexLifecycleSource = codexLifecycleHookSource();
   // Stable for identical content, but changes when the observer implementation
-  // changes. Codex can retain trust for an unchanged definition without a code
-  // update silently inheriting that trust. The final rename publishes a complete
+  // changes. Trust is restricted to the generated command for this version.
+  // The final rename publishes a complete
   // file atomically when two app instances start together.
   const codexLifecycleVersion = crypto
     .createHash("sha256")
@@ -3417,16 +3442,22 @@ function createAgentTelemetryManager(options = {}) {
   const ready = new Promise((resolve, reject) => {
     try {
       fs.mkdirSync(baseDir, { recursive: true });
-      if (!fs.existsSync(codexLifecycleHookPath)) {
+      const hadLifecycleObserver = fs.existsSync(codexLifecycleHookPath);
+      let lifecycleVerified = false;
+      try { lifecycleVerified = fs.readFileSync(codexLifecycleHookPath, 'utf8') === codexLifecycleSource; } catch {}
+      if (!lifecycleVerified) {
         const temporaryLifecyclePath = `${codexLifecycleHookPath}.tmp-${process.pid}-${crypto.randomUUID()}`;
-        fs.writeFileSync(temporaryLifecyclePath, codexLifecycleSource);
         try {
+          fs.writeFileSync(temporaryLifecyclePath, codexLifecycleSource);
           fs.renameSync(temporaryLifecyclePath, codexLifecycleHookPath);
         } catch (error) {
-          if (!fs.existsSync(codexLifecycleHookPath)) {
-            throw error;
-          }
-          fs.rmSync(temporaryLifecyclePath, { force: true });
+          let verifiedAfterRace = false;
+          try { verifiedAfterRace = fs.readFileSync(codexLifecycleHookPath, 'utf8') === codexLifecycleSource; } catch {}
+          // A failed repair of an existing cache must not block other providers.
+          // Session preparation independently withholds trust until verified.
+          if (!hadLifecycleObserver && !verifiedAfterRace) throw error;
+        } finally {
+          try { fs.rmSync(temporaryLifecyclePath, { force: true }); } catch {}
         }
       }
       cleanupStaleShimDirs({ baseDir, currentRunId: runId });
@@ -3800,7 +3831,15 @@ function createAgentTelemetryManager(options = {}) {
         VIBE_TERMINAL_SHIM_DIR: shimDir,
         VIBE_TERMINAL_CLAUDE_SETTINGS: claudeSettingsPath,
         VIBE_TERMINAL_NOTIFY_PROGRAM: notifyProgramPath,
-        VIBE_TERMINAL_CODEX_HOOK_OVERRIDES: JSON.stringify(codexHookOverrides)
+        VIBE_TERMINAL_CODEX_HOOK_OVERRIDES: JSON.stringify(codexHookOverrides),
+        // Recheck at session preparation: do not grant trust to a stale or
+        // replaced cached observer, even when the manager initialized earlier.
+        VIBE_TERMINAL_CODEX_HOOK_TRUST_OVERRIDE: (() => {
+          try {
+            return fs.readFileSync(codexLifecycleHookPath, 'utf8') === codexLifecycleSource
+              ? codexLifecycleTrustOverride(nodePath, codexLifecycleHookPath, isWin) : '';
+          } catch { return ''; }
+        })()
       }
     };
 
@@ -4211,12 +4250,12 @@ function createAgentTelemetryManager(options = {}) {
     return Boolean(session);
   }
 
-  function postFusionAdapterControl(sessionId, pathName, payload = {}) {
+  function postFusionAdapterControl(sessionId, pathName, payload = {}, options = {}) {
     const normalizedSessionId = normalizeSessionId(sessionId);
     if (!normalizedSessionId) {
       return Promise.resolve({ status: "skipped", reason: "invalid_session" });
     }
-    const controlUrl = fusionAdapterControls.get(normalizedSessionId);
+    const controlUrl = options.controlUrl || fusionAdapterControls.get(normalizedSessionId);
     if (!controlUrl) {
       return Promise.resolve({ status: "skipped", reason: "adapter_not_ready" });
     }
@@ -4243,7 +4282,7 @@ function createAgentTelemetryManager(options = {}) {
           port: url.port,
           path: url.pathname,
           method: "POST",
-          timeout: 1000,
+          timeout: options.timeoutMs || 1000,
           headers: {
             "content-type": "application/json",
             "content-length": Buffer.byteLength(body),
@@ -4324,6 +4363,37 @@ function createAgentTelemetryManager(options = {}) {
 
   function stopFusionSession(sessionId) {
     return postFusionAdapterControl(sessionId, "/stop");
+  }
+
+  // Retain only the exact adapter identity captured for an observed stop. A
+  // late observation must never switch to a replacement session's adapter.
+  const fusionObservedStops = new Map();
+  async function stopFusionSessionObserved(sessionId, { operationId, observeOnly = false } = {}) {
+    const normalized = normalizeSessionId(sessionId);
+    const unknown = error => ({ ok: false, operationId, process: 'unknown', launchSettled: false, error });
+    if (!normalized || typeof operationId !== 'string' || !operationId || operationId.length > 256) return unknown('Invalid observed adapter stop identity.');
+    let observed = fusionObservedStops.get(operationId);
+    if (observed && observed.sessionId !== normalized) return unknown('Observed adapter stop identity changed.');
+    if (!observed) {
+      if (observeOnly) return unknown('The adapter stop operation is not recorded.');
+      const launchNonce = sessions.get(normalized)?.launchNonce;
+      const controlUrl = fusionAdapterControls.get(normalized);
+      if (!launchNonce || !controlUrl) return unknown('The original executor adapter is not available for verified shutdown.');
+      if (fusionObservedStops.size >= 4096) return unknown('Observed adapter stop capacity reached.');
+      observed = { sessionId: normalized, launchNonce, controlUrl };
+      fusionObservedStops.set(operationId, observed);
+    }
+    if (observed.result?.ok) return observed.result;
+    const result = await postFusionAdapterControl(normalized, '/stop-observed', {
+      operationId, launchNonce: observed.launchNonce, observeOnly
+    }, { timeoutMs: observeOnly ? 2000 : 6500, controlUrl: observed.controlUrl });
+    if (result?.operationId !== operationId || result.launchNonce !== observed.launchNonce ||
+        typeof result.ok !== 'boolean' || !['stopped', 'already-absent', 'unknown', 'failed'].includes(result.process) ||
+        result.ok && (!['stopped', 'already-absent'].includes(result.process) || result.launchSettled !== true)) {
+      return unknown('The executor adapter did not return matching process-exit evidence.');
+    }
+    observed.result = result;
+    return result;
   }
 
   // Cursor has no per-invocation hook flag, so its hooks are registered in the
@@ -4566,6 +4636,7 @@ function createAgentTelemetryManager(options = {}) {
   function cleanup() {
     for (const cleanupGrok of grokHookCleanups.values()) cleanupGrok();
     grokHookCleanups.clear();
+    fusionObservedStops.clear();
     for (const sessionId of Array.from(sessions.keys())) {
       releaseSession(sessionId);
     }
@@ -4610,6 +4681,7 @@ function createAgentTelemetryManager(options = {}) {
     cancelFusionBackgroundTask,
     setFusionSessionMode,
     stopFusionSession,
+    stopFusionSessionObserved,
     // Trusted main-process integration only. Never exposed through preload.
     getFusionSessionControl: (sessionId) => ({ controlUrl: fusionAdapterControls.get(normalizeSessionId(sessionId)), token }),
     runDir,
@@ -4622,6 +4694,7 @@ module.exports = {
   buildClaudeSettingsJson,
   buildFusionSystemPrompt,
   codexLifecycleConfigOverrides,
+  codexLifecycleTrustOverride,
   codexLifecycleHookSource,
   ensureOpenFusionOpencodeHome,
   migrateOpenFusionThreadsFromGlobal,

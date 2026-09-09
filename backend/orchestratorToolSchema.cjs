@@ -31,16 +31,16 @@ const fields = {
 const required = {
   read_session: ['targetId'], read_setup: ['name'], ask_user: ['text'], respond: ['text', 'responseTurn'],
   read_conversation: ['reference'], search_conversation: ['reference'],
-  terminal_interact: ['observationSequence'], finish_terminal: ['stepId', 'observationToken', 'text', 'outcome'],
+  terminal_interact: ['observationSequence'], finish_terminal: ['text', 'outcome'],
 };
-const operator = 'For operate_terminal grants include a unique stepId and the latest read_session observationToken. ';
-const nativeEvidence = 'Native operator input also requires observationSequence copied exactly from observation.sequence and inputRevision copied exactly from observation.inputRevision in that read. ';
+const operator = 'For operate_terminal grants, read this terminal in an earlier tool round before acting. stepId may be omitted to use this tool call identity; observationToken may be omitted only for the latest unused read already returned to you for this terminal. Supplied step IDs cannot change their input or replay dispatched work. ';
+const nativeEvidence = 'Native operator observationSequence and inputRevision are optional when bound by that read token; if supplied, copy exactly observation.sequence and observation.inputRevision from the same read. ';
 const descriptions = {
   send_prompt: operator + nativeEvidence + 'Supply the task text for composed operator work; omit text for an already bound legacy prompt. Fusion/OpenFusion do not need native input revisions.',
   interrupt: operator + nativeEvidence,
   focus_session: operator,
-  terminal_interact: operator + nativeEvidence + 'Submit with submit:true OR a final Enter key, never both. Use inputPurpose:task when starting agent work.',
-  finish_terminal: 'After a post-action read, report the observed outcome with text and completed or blocked. Include stepId and observationToken only; no native input revisions or controls.',
+  terminal_interact: operator + nativeEvidence + 'Legacy terminal_interact still requires observationSequence. Submit with submit:true OR a final Enter key, never both. Use inputPurpose:task when starting agent work.',
+  finish_terminal: operator + 'After a post-action read, report the observed outcome with text and completed or blocked. No native input revisions or controls.',
   answer_question: operator + 'Operator answers require the current pending interaction requestId and revision, plus answerText or answerTexts. Legacy answers are already bound.',
   permission: operator + 'Operator decisions require the current pending interaction requestId and revision. Follow the grant permissionMode; delegated decisions allow once or reject only.',
 };
@@ -66,10 +66,13 @@ function scopedWorkspaceTool(tool, grants = []) {
   // binds it first; neither arbitrary creation nor terminal input is exposed.
   for (const grant of grants) for (const kind of grant.kind === 'delegate_task' ? [] : grant.kind === 'operate_terminal' ? grant.inspection === true ? inspectionKinds : operatorKinds : [grant.kind]) allowed.add(kind);
   const branches = tool.function.parameters.anyOf.filter(branch => allowed.has(branch.properties.kind.enum[0])).map(branch => {
-    if (!inspectionOnly || branch.properties.kind.enum[0] !== 'terminal_interact') return branch;
+    if (branch.properties.kind.enum[0] !== 'terminal_interact' || !operatorGrants.length) return branch;
     const scoped = structuredClone(branch);
-    delete scoped.properties.editInput;
-    scoped.properties.inputPurpose = { ...scoped.properties.inputPurpose, enum: ['interaction'] };
+    scoped.required = scoped.required.filter(name => name !== 'observationSequence');
+    if (inspectionOnly) {
+      delete scoped.properties.editInput;
+      scoped.properties.inputPurpose = { ...scoped.properties.inputPurpose, enum: ['interaction'] };
+    }
     return scoped;
   });
   // Shared definitions live once at the root. Each branch still closes its own
@@ -87,10 +90,10 @@ function scopedWorkspaceTool(tool, grants = []) {
   properties.kind = { type: 'string', enum: branches.map(branch => branch.properties.kind.enum[0]) };
   // These are model-facing limits; direct UI reads may request larger excerpts.
   if (properties.maxChars) properties.maxChars.maximum = 4000;
-  if (properties.observationSequence) properties.observationSequence.description = 'Native operator input: copy exactly observation.sequence from the latest read_session.';
-  if (properties.inputRevision) properties.inputRevision.description = 'Native operator input: copy exactly observation.inputRevision from the same read_session.';
+  if (properties.observationSequence) properties.observationSequence.description = 'Native operator input: optional token-bound counter. If supplied, copy exactly observation.sequence from that read_session.';
+  if (properties.inputRevision) properties.inputRevision.description = 'Native operator input: optional token-bound counter. If supplied, copy exactly observation.inputRevision from the same read_session.';
   return { ...tool, function: { ...tool.function,
-    description: tool.function.description + (grants.some(grant => grant.kind === 'operate_terminal') ? ' Operator actions require stepId and observationToken; native input also requires observationSequence and inputRevision. finish_terminal needs text and outcome, never native input fields.' : ''),
+    description: tool.function.description + (operatorGrants.length ? ' ' + operator + nativeEvidence + 'finish_terminal needs text and outcome, never native input fields.' : ''),
     parameters: { type: 'object', additionalProperties: false, required: ['kind'], properties,
       anyOf: branches.map(branch => ({ additionalProperties: false,
         ...(branch.required.length > 1 && { required: branch.required.filter(name => name !== 'kind') }),

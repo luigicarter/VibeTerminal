@@ -1,5 +1,7 @@
 'use strict';
 
+const { isClose, summarizeCloseOutcomes } = require('./orchestratorCloseOutcome.cjs');
+
 const pending = new Set(['queued', 'unknown', 'unconfirmed', 'uncertain', 'write-failed', 'blocked', 'rejected', 'cancelled', 'failed', 'needs-answer']);
 const sent = new Set(['written', 'submitted', 'delivered', 'sent', 'acknowledged']);
 const completed = new Set([...sent, 'interaction-complete', 'staged', 'created', 'navigated', 'focused', 'opened', 'added', 'saved', 'launched', 'resumed', 'remembered', 'forgotten', 'stopped', 'ready', 'already-completed']);
@@ -13,6 +15,8 @@ function commandCompleted({ plan, progress, unfinished = [], failed, question, r
   outcomes = [], waits = [], deliveryUpdates = [], sessions = [] }) {
   if (!plan.grants.length || plan.clarification || ['task-status', 'terminal-inspection'].includes(plan.responseKind) || deferred || failed || question ||
       responseTurn !== 'complete' || unfinished.length || progress.grants.some(grant => !grant.dispatched || grant.blockedTargetIds?.length)) return false;
+  const closure = summarizeCloseOutcomes({ outcomes, grants: plan.grants, sessions });
+  if (closure.present && !closure.complete) return false;
   for (const wait of waits) {
     const explicitDraft = plan.grants.some(grant => grant.kind === 'stage_draft' && grant.targets.some(target => target.id === wait.targetId && target.generation === wait.generation));
     if (wait.failed || wait.attributionAmbiguous || pending.has(wait.deliveryStatus) && !(wait.deliveryStatus === 'queued' && wait.delivered) ||
@@ -22,6 +26,7 @@ function commandCompleted({ plan, progress, unfinished = [], failed, question, r
     if (wait.nativeIdentity && !require('./orchestratorLaunchers.cjs').routingBindingMatches({ target: { id: wait.targetId, generation: wait.generation }, nativeIdentity: wait.nativeIdentity }, session)) return false;
   }
   for (const grant of plan.grants) for (const target of grant.targets.length ? grant.targets : [null]) {
+    if (isClose(grant)) continue; // Exact frozen targets were checked above.
     const matching = outcomes.filter(outcome => outcome.grantId === grant.id && (!target || id(outcome) === target.id));
     let receipt = matching.filter(outcome => outcome.kind === (grant.kind === 'operate_terminal' ? 'finish_terminal' : grant.kind)).at(-1);
     if (grant.kind === 'watch_terminal' && receipt?.ok) {

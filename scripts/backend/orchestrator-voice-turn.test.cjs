@@ -49,7 +49,10 @@ test('respond listen owns a question and bound reply consumes only the selected 
   const answered = await f.app.send({ text: 'Project Alpha', origin: 'voice', replyToRequestId: first.requestId, questionId: firstQuestion.id });
   assert.equal(answered.ok, true); assert.equal(answered.responseTurn, 'complete');
   assert.equal(f.contexts.at(-1).previousCommand.requestId, first.requestId);
-  assert.equal(f.task(first.requestId).status, 'finished'); assert.equal(f.task(first.requestId).question, undefined);
+  assert.equal(f.task(first.requestId).status, 'continued'); assert.equal(f.task(first.requestId).question, undefined);
+  assert.equal(f.task(first.requestId).controlDisposition, 'transferred');
+  assert.equal(f.task(first.requestId).continuedByRequestId, answered.requestId);
+  assert.equal(f.task(answered.requestId).continuedFromRequestId, first.requestId);
   assert.equal(f.task(second.requestId).status, 'needs-answer'); assert.deepEqual(f.task(second.requestId).question, secondQuestion);
   assert.equal(f.app.enqueue({ text: 'Again', origin: 'voice', replyToRequestId: first.requestId, questionId: firstQuestion.id }).ok, false);
   assert.equal(f.effects.length, 0);

@@ -12,6 +12,7 @@ try {
 }
 
 const sessions = new Map();
+const stopObserver = require('./observedStop.cjs').createHostStopObserver({ lookup: id => sessions.get(id), emit });
 const checkedResults = new Map();
 const pendingActions = new Map();
 const NATIVE_SUBMIT_DELAY_MS = 200;
@@ -299,6 +300,7 @@ function createSession(payload) {
 
     session.terminal = terminal;
     sessions.set(payload.id, session);
+    stopObserver.track(session, terminal, exited => terminal.onExit(exited));
     emit({ id: payload.id, type: "created", generation: session.generation, launchToken: session.launchToken, cols, rows, pid: terminal.pid, launchPending: session.launchPending, ...inputState(session) });
 
     terminal.onData((data) => {
@@ -443,6 +445,16 @@ function handleMessage(message) {
       break;
     }
 
+    case "stop-observed": {
+      void stopObserver.stop(message.payload, () => {
+        const session = sessions.get(message.payload.id);
+        if (matchesSession(session, message.payload)) {
+          cancelSessionSubmission(session);
+          sessions.delete(message.payload.id);
+        }
+      });
+      break;
+    }
     case "kill": {
       if (message.payload.actionId) { handleAction({ ...message.payload, kind: "kill" }, false); break; }
       const session = sessions.get(message.payload.id);

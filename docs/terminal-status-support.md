@@ -78,3 +78,55 @@ provider hook trust/disable settings still apply. Stops that other hooks can
 block remain provisional. Background polling has its stated cadence, and
 unsupported native fields stay unknown. A model-written reporting skill is not
 used as authoritative lifecycle evidence.
+
+Lina's six app-owned Codex lifecycle commands receive exact-hash trust through
+launch configuration by default. Global Codex configuration is not rewritten;
+explicit disables and unrelated hook trust remain in effect. The generated
+observer is checked against the app's expected contents before granting trust.
+`npm run smoke:codex:hook-trust -- --codex-bin <native-codex-executable>` verifies
+native discovery in an isolated Codex home without starting a model turn. See the
+[activity and hook trust plan](codex-activity-and-hook-trust-plan.md) for scope,
+acceptance evidence and the separate planned activity-display fix.
+
+## Codex "awaiting activity" investigation (September 9, 2026)
+
+The label can hide observed work. A reproduction using the actual runtime and
+renderer helpers starts a verified Codex turn, records Escape followed by Enter,
+then delivers fresh tool activity for the same native turn. The snapshot retains
+`turnState: running` and one active tool, but `pendingInput: submit` takes
+precedence: the label is **awaiting activity** and the projected session status
+is **idle**. Ordinary Enter during an observed running turn preserves **working**.
+
+`recordInput` in `backend/terminalRuntime.cjs` treats Escape/Ctrl+C as provisional
+interrupt intent. Enter after that records a possible new submission and retains
+the prior turn ID. Same-turn tool/running/completion callbacks cannot acknowledge
+that submission, because they might belong to work preceding the interrupt.
+`frontend/terminalRuntime.ts` and `backend/orchestratorIntegration.cjs` then display
+the pending input before root activity. A fresh identified turn start clears it.
+Terminal output alone never clears pending intent, so missing lifecycle events
+can also leave the label visible throughout real work.
+
+The stale-event fences are deliberate; the existing runtime smoke test protects
+them. A correction should distinguish observed ongoing work from confirmation
+of the latest input, preserving turn identity and completion checks. Simply
+clearing pending input on arbitrary output, a timeout, or an old-turn callback
+would falsely acknowledge submissions.
+
+Installed checks found Lina **0.1.104** and Codex CLI **0.153.4**. The installed
+runtime and telemetry code matched source after newline normalization. All six
+observed Codex TUI processes carried Lina's six lifecycle hook overrides; the
+saved hook trust hashes matched the current installed commands, with none of
+those hooks disabled. These are configuration checks, not a recording of hook
+delivery during the reported episode.
+
+Independent parent checks passed 57 lifecycle/projection tests, both backend and
+frontend runtime smoke checks, and the reproduction above. Isolated hook delivery
+using the installed executable passed through direct Node mode, encoded
+PowerShell, and `cmd` plus encoded PowerShell (about 50, 617, and 1,039 ms).
+Each emitted one identified turn-start event, exited successfully, and produced
+no stdout/stderr. No deterministic Windows transport failure was reproduced.
+
+The exact reported episode was not captured, so Escape/Enter is a confirmed
+mechanism, not an established account of the user's keystrokes. No production
+behavior, hook trust settings, or running sessions were changed by this
+investigation.

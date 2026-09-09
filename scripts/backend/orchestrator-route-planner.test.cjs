@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { planTaskRoute, validateRouteCall, ROUTING_TOOL } = require('../../backend/orchestratorRoutePlanner.cjs');
+const { planTaskRoute, validateRouteCall, ROUTING_TOOL, ROUTING_CHOOSE_TOOL, deterministicNewTaskRoute, RoutingError } = require('../../backend/orchestratorRoutePlanner.cjs');
 const call = (args, id = 'call', name = 'route_workspace_task') => ({ id, type: 'function', function: { name, arguments: typeof args === 'string' ? args : JSON.stringify(args) } });
 const response = (...calls) => ({ choices: [{ message: { tool_calls: calls } }] });
 const choose = { kind: 'choose', decision: 'reuse', targetId: 'owner-237', workItemId: 'work-a', reason: 'Observed continuation of task A.' };
@@ -12,10 +12,10 @@ test('read-only loop pages beyond 200 initial candidates then reads the selected
   const result = await planTaskRoute({ context: { sessions: sessions.slice(0, 20), sessionDirectory: { total: 240, truncated: true } },
     resetReadBudget: () => resets++,
     complete: async (messages, tools) => {
-      assert.deepEqual(tools, [ROUTING_TOOL]);
+      assert.deepEqual(tools, [round === 7 ? ROUTING_CHOOSE_TOOL : ROUTING_TOOL]);
       if (round < 6) return response(call({ kind: 'list_sessions', offset: round++ * 40, limit: 40 }, `page-${round}`));
       if (round++ === 6) { assert.ok(messages.some(m => m.role === 'tool' && m.content.includes('owner-237'))); return response(call({ kind: 'read_session', targetId: 'owner-237' })); }
-      assert.match(messages.at(-1).content, /task A/); return response(call(choose));
+      assert.match(messages.filter(message => message.role === 'tool').at(-1).content, /task A/); return response(call(choose));
     }, read: async args => { reads.push(args); return args.kind === 'list_sessions' ? { ok: true, sessions: sessions.slice(args.offset, args.offset + args.limit), nextOffset: args.offset < 200 ? args.offset + 40 : null } : { ok: true, text: 'This agent owns task A.' }; } });
   assert.equal(result.targetId, 'owner-237'); assert.equal(reads.length, 7); assert.equal(resets, 8);
 });
@@ -24,7 +24,7 @@ test('effect tools, extra replay authority and malformed model args never reach 
   const invalid = [call({ kind: 'send_prompt', text: 'unsafe' }), call({ kind: 'list_sessions' }, 'other-tool', 'workspace'), call({ kind: 'list_sessions', grantId: 'replayed-authority' }), call('{bad'), call({ kind: 'read_session', targetId: 'x', generation: 'replayed-generation' })];
   let round = 0, reads = 0;
   const result = await planTaskRoute({ context: {}, maxRounds: 7, read: async () => { reads++; }, complete: async messages => {
-    if (round) assert.equal(JSON.parse(messages.at(-1).content).ok, false);
+    if (round) assert.equal(JSON.parse(messages.filter(message => message.role === 'tool').at(-1).content).ok, false);
     return response(round < invalid.length ? invalid[round++] : call({ kind: 'choose', decision: 'create', kindOfSession: 'codex', reason: 'No suitable worker.' }));
   } });
   assert.equal(reads, 0); assert.equal(result.decision, 'create');
@@ -103,4 +103,48 @@ test('complete routing tool responses retain supported provider finish reasons',
 test('strict routing shape refuses forged replay fields and invalid paging, preserving valid cursors', () => {
   for (const input of [{ kind: 'list_sessions', offset: -1 }, { kind: 'list_sessions', limit: 201 }, { ...choose, observationToken: 'old' }, { ...choose, kindOfSession: 'codex' }, { kind: 'choose', decision: 'clarify', reason: 'Scope missing', text: 'Which project?', workItemId: 'old' }, { kind: 'read_conversation', reference: 'x', cursor: 1 }]) assert.throws(() => validateRouteCall(input));
   assert.deepEqual(validateRouteCall({ kind: 'read_conversation', reference: 'opaque-ref', cursor: 'opaque-page' }), { kind: 'read_conversation', reference: 'opaque-ref', cursor: 'opaque-page' });
+});
+
+test('bound new chooses only its configured exact launcher without discovery', () => {
+  const launchers = [{ kind: 'codex', available: true, configured: true }, { kind: 'claude', available: true, configured: true }];
+  assert.equal(deterministicNewTaskRoute({ scope: { assignmentMode: 'auto' }, launchers }), null);
+  assert.equal(deterministicNewTaskRoute({ scope: { assignmentMode: 'new', kindOfSession: 'codex' }, launchers }).kindOfSession, 'codex');
+  assert.equal(deterministicNewTaskRoute({ scope: { assignmentMode: 'new' }, launchers }).decision, 'clarify');
+  assert.equal(deterministicNewTaskRoute({ scope: { assignmentMode: 'new' }, launchers: launchers.slice(0, 1) }).kindOfSession, 'codex');
+  const unavailable = deterministicNewTaskRoute({ scope: { assignmentMode: 'new', kindOfSession: 'codex' }, launchers: [launchers[1]] });
+  assert.equal(unavailable.decision, 'clarify'); assert.match(unavailable.text, /codex/);
+});
+
+test('timestamp-only repeated reads trigger correction and final call cannot read', async () => {
+  let rounds = 0, reads = 0; const events = [];
+  await assert.rejects(planTaskRoute({ context: {}, grantId: 'grant-only', onEvent: event => events.push(event),
+    complete: async (messages, tools) => {
+      rounds++;
+      if (rounds === 4) assert.match(messages.at(-1).content, /no new usable evidence/);
+      if (rounds === 8) assert.deepEqual(tools, [ROUTING_CHOOSE_TOOL]);
+      return response(call({ kind: 'read_session', targetId: 'same' }));
+    }, read: async () => ({ ok: true, text: 'same output', timestamp: ++reads, observation: { sequence: reads, revision: reads } })
+  }), error => error instanceof RoutingError && error.code === 'ROUTING_EXHAUSTED' && error.grantId === 'grant-only' && error.delivery === 'not-dispatched');
+  assert.equal(rounds, 8); assert.equal(reads, 7);
+  assert.equal(events.find(event => event.stage === 'routing_round' && event.round === 3).stagnantRounds, 2);
+  assert.equal(events.at(-1).stage, 'routing_exhausted');
+});
+
+test('changed output restores progress and final standalone choice remains valid', async () => {
+  let round = 0; const events = [];
+  const result = await planTaskRoute({ context: {}, maxRounds: 5, onEvent: event => events.push(event),
+    complete: async () => ++round === 5 ? response(call(choose)) : response(call({ kind: 'read_session', targetId: 'same' })),
+    read: async () => ({ ok: true, text: round === 4 ? 'changed output' : 'same output' }) });
+  assert.equal(result.targetId, choose.targetId);
+  assert.equal(events.find(event => event.stage === 'routing_round' && event.round === 4).stagnantRounds, 0);
+});
+
+test('repeated invalid calls count as stagnation and telemetry failures cannot alter routing', async () => {
+  let round = 0;
+  const result = await planTaskRoute({ context: {}, maxRounds: 3, onEvent: () => { throw Error('logging failed'); },
+    complete: async messages => {
+      if (++round === 3) { assert.ok(messages.some(message => /no new usable evidence/.test(message.content))); return response(call(choose)); }
+      return response(call('{bad'));
+    }, read: async () => assert.fail('invalid calls cannot read') });
+  assert.equal(result.targetId, choose.targetId);
 });

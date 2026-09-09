@@ -301,7 +301,8 @@ test('continuing an unsent queued task transfers its original request and submit
     ] };
   });
   const resumed = f.relay.send({ text: 'Send that queued task.', origin: 'text', replyToRequestId: original.requestId });
-  await until(() => f.relay.getState().tasks.find(task => task.requestId === original.requestId).status === 'cancelled');
+  await until(() => f.relay.getState().tasks.find(task => task.requestId === original.requestId).status === 'continued');
+  assert.equal(f.relay.getState().tasks.find(task => task.requestId === original.requestId).controlDisposition, 'transferred');
   assert.equal(f.effects.filter(action => action.kind === 'send_prompt').length, 1, 'A project conflict still gates the transfer');
   Object.assign(earlier, { turnId: 'earlier-done', actionId: earlierSend.actionId, turnState: 'completed', turnStartedAt: Date.now(), turnEndedAt: Date.now() });
   await f.relay.refresh();

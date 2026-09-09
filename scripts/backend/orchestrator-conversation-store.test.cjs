@@ -11,6 +11,77 @@ function fixture(t, now = Date.now()) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-store-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   return { dir, file: path.join(dir, 'orchestrator-conversation.json'), now, store: createConversationStore({ userDataPath: dir, now: () => now, getSecrets: () => ['private-token'] }) };
 }
+
+test('continuation history restores disposition and lineage without executable recovery authority', async t => {
+  const { store, now } = fixture(t);
+  await store.save({ tasks: [
+    { requestId: 'failed', status: 'failed', error: 'Discovery failed', updatedAt: now, controlDisposition: 'transferred', continuedByRequestId: 'next', resultScopeTransferred: true, controlRevision: 7, pendingCommand: { grants: ['unsafe'] } },
+    { requestId: 'clarified', status: 'continued', updatedAt: now, controlDisposition: 'transferred', continuedByRequestId: 'next' },
+    { requestId: 'next', status: 'running', updatedAt: now, continuedFromRequestId: 'failed', controlDisposition: 'active', unboundCreation: true }
+  ] });
+  const [failed, clarified, next] = store.load().tasks;
+  assert.equal(failed.status, 'failed'); assert.equal(failed.resultScopeTransferred, true);
+  assert.equal(failed.continuedByRequestId, 'next'); assert.equal(failed.pendingCommand, undefined); assert.equal(failed.controlRevision, undefined);
+  assert.equal(clarified.status, 'continued'); assert.equal(next.status, 'paused');
+  assert.equal(next.continuedFromRequestId, 'failed'); assert.equal(next.unboundCreation, undefined);
+});
+
+test('close receipts retain bounded identity and observed outcomes, excluding raw scope and executable fields', async t => {
+  const { store, now, file } = fixture(t);
+  const close = { operationId: 'close-private-token', target: { id: 'pane', generation: 0, launchToken: 4, kind: 'codex', name: 'private target prose', grant: { close: true } },
+    pane: 'removed', process: 'stopped', launchSettled: true, verifiedAt: now,
+    targetCount: 8, verifiedTargetCount: 7, remainingTargetCount: 1, newTargetCount: 2, supersededTargetCount: 0, scopeEmpty: false,
+    error: 'private error prose', text: 'private response prose', scope: { type: 'all' }, grants: ['executable'], authorization: 'private-token' };
+  await store.save({ receipts: [{ id: 'receipt', kind: 'close', status: 'closed', text: 'Recorded close.', at: now,
+    actionId: 'action-private-token', grantId: 'grant', launchToken: 4, close }] });
+  const [receipt] = store.load().receipts;
+  assert.equal(receipt.actionId, 'action-[redacted]'); assert.equal(receipt.grantId, 'grant'); assert.equal(receipt.launchToken, 4);
+  assert.deepEqual(receipt.close, { operationId: 'close-[redacted]', target: { id: 'pane', kind: 'codex', generation: 0, launchToken: 4 },
+    pane: 'removed', process: 'stopped', launchSettled: true, scopeEmpty: false, verifiedAt: now,
+    targetCount: 8, verifiedTargetCount: 7, remainingTargetCount: 1, newTargetCount: 2, supersededTargetCount: 0 });
+  assert.doesNotMatch(fs.readFileSync(file, 'utf8'), /private-token|private target prose|private error prose|private response prose|executable|authorization/);
+});
+
+test('invalid close evidence cannot become success and old receipts gain no invented proof', async t => {
+  const { store, now } = fixture(t);
+  await store.save({ receipts: [
+    { id: 'old', kind: 'close', status: 'close_requested', text: 'Requested', at: now },
+    { id: 'bad', kind: 'close', status: 'closed', text: 'Claimed', at: now, actionId: 123, grantId: true, launchToken: -1,
+      close: { operationId: 'a'.repeat(2000), target: { id: 'b'.repeat(2000), generation: -1, launchToken: 0.5 }, pane: 'success', process: 'complete', launchSettled: 'yes',
+        verifiedAt: now + 120000, remainingTargetCount: -1, newTargetCount: 20001, scopeEmpty: 'yes', raw: 'ignored' } },
+    { id: 'other', kind: 'send_prompt', status: 'written', text: 'Sent', at: now, close: { pane: 'removed' } }
+  ] });
+  const [old, bad, other] = store.load().receipts;
+  assert.equal(old.close, undefined); assert.equal(other.close, undefined);
+  assert.equal(bad.actionId, undefined); assert.equal(bad.grantId, undefined); assert.equal(bad.launchToken, undefined);
+  assert.deepEqual(bad.close, { operationId: 'a'.repeat(256), target: { id: 'b'.repeat(256) } });
+});
+
+test('restoring contradictory historical success pauses it without rewriting content or granting retry authority', async t => {
+  const { store, now, file } = fixture(t);
+  const messages = [{ id: 'message', role: 'assistant', text: 'The historical answer stays unchanged.', at: now }];
+  const snapshot = { messages, tasks: [
+    { requestId: 'normal', status: 'finished', updatedAt: now, text: 'A normal control completed.' },
+    ...['finished', 'completed'].map(status => ({ requestId: status, status, controlDisposition: 'completed', updatedAt: now,
+      text: 'Investigate the issue.', summary: 'Original historical summary.', error: 'Routing discovery failed.',
+      grants: [{ kind: 'delegate_task' }], pendingCommand: { instruction: 'Execute this' }, executionAuthority: true })),
+    { requestId: 'blank-error', status: 'finished', error: '  ', updatedAt: now }
+  ] };
+  await store.save(snapshot);
+  const before = fs.readFileSync(file, 'utf8');
+  const restored = store.load();
+  assert.equal(restored.tasks[0].status, 'finished');
+  for (const item of restored.tasks.slice(1, 3)) {
+    assert.equal(item.status, 'paused'); assert.equal(item.phase, 'paused');
+    assert.equal(item.error, 'Routing discovery failed.'); assert.equal(item.text, 'Investigate the issue.');
+    assert.equal(item.summary, 'Original historical summary.'); assert.equal(item.controlDisposition, undefined);
+    assert.equal(item.grants, undefined); assert.equal(item.pendingCommand, undefined); assert.equal(item.executionAuthority, undefined);
+  }
+  assert.equal(restored.tasks[3].status, 'finished');
+  assert.deepEqual(restored.messages, messages);
+  assert.equal(fs.readFileSync(file, 'utf8'), before, 'load projects conservatively without rewriting the stored transcript');
+  assert.equal(JSON.parse(before).tasks[1].status, 'finished', 'save does not retrospectively reinterpret live status');
+});
 test('identical snapshots coalesce, committed snapshots skip IO, clear permits identical save', async t => {
   const { dir, now, store } = fixture(t); const original = fs.promises.writeFile; let writes = 0;
   fs.promises.writeFile = async (...args) => { if (String(args[0]).startsWith(dir)) writes++; return original(...args); };

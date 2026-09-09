@@ -23,8 +23,12 @@ function createDiagnostics({ userDataPath, getSecrets = () => [], now = Date.now
       return text.slice(0, limit);
     };
     const result = { time: new Date(now()).toISOString() };
-    for (const key of ['event', 'stage', 'requestId', 'workItemId', 'decision', 'modelCallId', 'toolCallId', 'receiptId', 'replyId', 'actionId', 'origin', 'model', 'actionKind', 'targetId', 'generation', 'status', 'category', 'reason', 'endpoint', 'provider', 'generationId', 'toolChoice']) {
+    for (const key of ['event', 'stage', 'requestId', 'workItemId', 'decision', 'modelCallId', 'toolCallId', 'receiptId', 'replyId', 'actionId', 'origin', 'model', 'actionKind', 'targetId', 'generation', 'status', 'category', 'reason', 'endpoint', 'provider', 'generationId', 'toolChoice', 'grantId', 'reservationId', 'predecessorRequestId', 'successorRequestId', 'operationId', 'inventoryRevision', 'strategy', 'assignmentState', 'delivery', 'scopeKind', 'controlDisposition', 'previousStatus', 'newStatus', 'validationCategory']) {
       const value = redact(input?.[key], 256); if (value !== undefined) result[key] = value;
+    }
+    for (const key of ['resultScopeTransferred', 'paginationAdvanced', 'progress']) if (typeof input?.[key] === 'boolean') result[key] = input[key];
+    for (const key of ['round', 'readCount', 'candidateCount', 'stagnantRounds', 'targetCount', 'confirmedCount', 'remainingCount', 'failedCount', 'transferredCount', 'newTargetCount', 'closedCount', 'supersededCount', 'inventoryCount']) {
+      if (Number.isSafeInteger(input?.[key]) && input[key] >= 0) result[key] = Math.min(input[key], 1e9);
     }
     if (Number.isFinite(input?.generation)) result.generation = input.generation;
     if (['headers', 'body'].includes(input?.requestPhase)) result.requestPhase = input.requestPhase;

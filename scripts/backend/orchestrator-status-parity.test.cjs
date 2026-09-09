@@ -109,7 +109,7 @@ test('observed child activity and questions survive pending root input without p
   const child = { id: 'child', startedAt: 1 };
   const snapshot = { ...base, provider: 'claude', turnState: 'unknown', observation: 'unavailable', activityObserved: true, pendingInput: 'submit', children: [child] };
   assert.equal(runtimeSessionStatus(snapshot), 'running');
-  assert.equal(runtimeStatusLabel(snapshot), 'awaiting activity');
+  assert.equal(runtimeStatusLabel(snapshot), 'working');
   child.attention = { id: 'question', state: 'waiting', updatedAt: 2 };
   assert.equal(runtimeSessionStatus(snapshot), 'waiting');
   assert.equal(runtimeStatusLabel(snapshot), 'needs input');

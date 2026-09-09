@@ -23,6 +23,7 @@ function fixture({ cleanup } = {}) {
     });
   }
   const context = { ipcMain: { handle(name, fn) { handlers[name] = fn; } },
+    observedLaunches: require('../../backend/observedStop.cjs').createObservedLaunchFence(),
     chatLaunchPreparation: require('../../backend/chatLaunchPreparation.cjs').createChatLaunchPreparation(),
     resolveLaunchCwd: cwd => ({ ok: true, cwd }), getDefaultRuntimeCwd: () => 'C:/fixture',
     startFusionChatHost() {}, startOpenFusionChatHost() {}, getAgentTelemetry: () => telemetry,

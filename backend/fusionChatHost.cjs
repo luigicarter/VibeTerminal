@@ -771,6 +771,10 @@ function claimInteraction(state, payload, kind) {
 // ---- the host (only runs when executed as a process, not when required) ----
 function runHost() {
   const sessions = new Map(); // id -> { child, normalizer, buffer, history }
+  const stopObserver = require('./observedStop.cjs').createHostStopObserver({
+    lookup: id => sessions.get(id)?.launchPayload,
+    emit
+  });
 
   function emit(obj) {
     process.stdout.write(`${JSON.stringify(obj)}\n`);
@@ -1225,6 +1229,8 @@ function runHost() {
     };
     sessions.set(id, state);
 
+    stopObserver.track(payload, child);
+
     // `claude --resume` loads the old conversation silently; restore it into
     // the pane before any live child output arrives.
     if (payload.resumeId && !options.preserveHistory) {
@@ -1370,6 +1376,7 @@ function runHost() {
     }
     state.brain = brain;
     state.child = brain.child;
+    stopObserver.track(payload, brain.child);
     void brain.ready.then(() => {
       if (isCurrentChatState(sessions, id, state) && state.child === brain.child && !brain.child.killed) {
         emitSessionEvent(id, state, { type: "engine-ready" });
@@ -1624,12 +1631,14 @@ function runHost() {
     }
   }
 
-  function stop(payload) {
+  function stop(payload, skipKill = false) {
     const state = sessions.get(payload.id);
+    if (state && (payload.generation !== undefined && payload.generation !== state.launchPayload?.generation ||
+      payload.launchToken !== undefined && payload.launchToken !== state.launchPayload?.launchToken)) return;
     if (state) {
       observeInteractionEvent(payload.id, state, { type: "closed" }, emit);
       clearPlannerResultBackstop(state);
-      killChild(state.child);
+      if (!skipKill) killChild(state.child);
       sessions.delete(payload.id);
     }
   }
@@ -1659,6 +1668,7 @@ function runHost() {
         continue;
       }
       if (msg.type === "start") start(msg.payload);
+      if (msg.type === "stop-observed") void stopObserver.stop(msg.payload, () => stop(msg.payload, true));
       else if (["input", "steer", "interrupt"].includes(msg.type) && msg.payload?.actionId) void dispatchCheckedAction(msg.type, msg.payload);
       else if (msg.type === "input") input(msg.payload);
       else if (msg.type === "steer") input({ ...msg.payload, steer: true });

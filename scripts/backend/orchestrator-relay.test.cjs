@@ -132,11 +132,26 @@ test('relay dispatch preserves a quoted title containing a payload separator', a
 
 test('speech failure preserves successful text and delivered action without replay', async t => {
   for (const throws of [false, true]) {
-    const f = fixture(t, { onSpeak: async () => { if (throws) throw new Error('Playback failed.'); return { ok: false, error: 'Playback failed.' }; } });
+    const f = fixture(t, {
+      // Keep the attributed native task running after the command completes;
+      // the default fixture finishes turns between separate legacy commands.
+      dispatchAction: async action => {
+        f.actions.push(action);
+        Object.assign(f.sessions[0], { turnId: action.actionId, turnState: 'running', turnStartedAt: Date.now(), actionId: action.actionId });
+        return { ok: true, status: 'delivered' };
+      },
+      onSpeak: async () => { if (throws) throw new Error('Playback failed.'); return { ok: false, error: 'Playback failed.' }; }
+    });
     await f.ready(); f.responses(tool({ kind: 'send_prompt', targetId: 'a' }), reply('Delivered.'));
     const result = await f.instance.send({ text: 'I want you to tell Worker A to fix the bug', origin: 'voice' });
-    assert.equal(result.ok, true); assert.match(result.text, /task is running in Worker A.*result is still pending/s); assert.equal(result.speech.ok, false);
-    assert.equal(result.actions[0].status, 'delivered'); assert.equal(f.actions.length, 1); assert.equal(f.instance.getState().receipts.length, 1);
+    assert.equal(result.ok, true); assert.equal(result.text, 'done'); assert.equal(result.speech.ok, false);
+    assert.equal(result.actions.length, 1); assert.equal(result.actions[0].status, 'delivered'); assert.equal(f.actions.length, 1);
+    const state = f.instance.getState(), delivered = state.receipts[0];
+    assert.equal(state.receipts.length, 1); assert.equal(f.actions[0].kind, 'send_prompt');
+    assert.equal(delivered.actionId, f.actions[0].actionId); assert.equal(delivered.grantId, f.actions[0].grantId);
+    assert.equal(delivered.status, 'delivered'); assert.equal(delivered.targetId, 'a'); assert.equal(delivered.generation, 1);
+    assert.equal(state.tasks.find(task => task.requestId === result.requestId).status, 'waiting-results');
+    assert.equal(f.sessions[0].turnState, 'running');
   }
 });
 

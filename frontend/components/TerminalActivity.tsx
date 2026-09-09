@@ -46,6 +46,7 @@ export default function TerminalActivity({ runtime, started }: { runtime?: Termi
   // A coarse delegation flag is activity, never evidence of a child count.
   const children = [...new Map((runtime?.children ?? []).filter(child => child.id).map(child => [child.id, child])).values()];
   const elapsed = runtime && runtimeElapsed(runtime, now);
+  const lifecycleObserved = runtime && (runtime.activityObserved || runtime.turnStartedAt !== undefined || runtime.attention || runtime.turnEndedAt !== undefined);
   return <div ref={root} className="terminal-activity" onPointerDown={(event) => event.stopPropagation()}>
     <button type="button" className={`status-pill status-${runtime ? runtimeSessionStatus(runtime) : "idle"}`} aria-expanded={open} aria-label="Terminal activity" onClick={() => setOpen(!open)}>
       {runtimeStatusLabel(runtime, started)}{children.length > 0 && ` | ${children.length} ${children.length === 1 ? "child" : "children"}`}
@@ -53,8 +54,8 @@ export default function TerminalActivity({ runtime, started }: { runtime?: Termi
     {open && createPortal(<div ref={popover} className="terminal-activity-popover" role="region" aria-label="Terminal activity details"
       style={{ position: "fixed", top: position?.top ?? 0, right: position?.right ?? 8, zIndex: 1000, maxHeight: "min(300px, calc(100vh - 16px))", maxWidth: "calc(100vw - 16px)", visibility: position ? "visible" : "hidden" }}>
       <strong>{runtimeStatusLabel(runtime, started)}</strong>
-      {elapsed && <span>Turn elapsed: {elapsed}</span>}
-      {runtime?.pendingInput && <span>Waiting for provider confirmation.</span>}
+      {elapsed && <span>{runtime?.pendingInput ? "Observed turn elapsed" : "Turn elapsed"}: {elapsed}</span>}
+      {runtime?.pendingInput && <span>{runtime.pendingInput === "submit" ? "Latest input has not been confirmed." : "Interruption has not been confirmed."}</span>}
       {runtime?.activeTools.map(tool => <span key={tool.id}>Tool: {tool.name}</span>)}
       {runtime?.lastTool && !runtime.activeTools.length && <span>Last tool: {runtime.lastTool.name}</span>}
       {children.length > 0 && <>
@@ -62,7 +63,7 @@ export default function TerminalActivity({ runtime, started }: { runtime?: Termi
         <ul>{children.map(child => <li key={child.id}>{child.label || child.id}</li>)}</ul>
       </>}
       {!children.length && runtime?.childActivity && <span>Child activity</span>}
-      <span>{!runtime || runtime.telemetryHealth === "pending" ? "Connecting observation…" : (runtime.observation === "unavailable" || runtime.telemetryHealth === "unavailable") ? "Activity observation unavailable" : runtime.observation === "provisional" ? "Limited activity observation" : "Activity observation available"}</span>
+      <span>{!runtime || runtime.telemetryHealth === "pending" ? "Connecting observation…" : (runtime.observation === "unavailable" || runtime.telemetryHealth === "unavailable") ? "Activity observation unavailable" : !lifecycleObserved ? "Process connected; lifecycle activity has not been confirmed." : runtime.observation === "provisional" ? "Limited activity observation" : "Activity observation available"}</span>
       {runtime && <span>Last update: {new Date(runtime.updatedAt).toLocaleTimeString()}</span>}
       {runtime && (runtime.pendingInput || runtime.observation === "unavailable" || runtime.telemetryHealth === "unavailable") && <span>Last observed turn: {runtime.turnState}</span>}
       {runtime?.binding.message && <span>{runtime.binding.message}</span>}

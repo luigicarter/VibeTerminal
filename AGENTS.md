@@ -4,6 +4,12 @@ Lina Terminal is an Electron + React desktop workspace for running local termina
 
 ## Docs Index
 
+- `docs/release-0.1.105-review.md` - September 9 release audit, pending activity, restart identity and race repairs, expanded release gates, and packaged verification.
+
+- `docs/orchestrator-recovery-review.md` - September 9 close-scope and process verification, truthful continuation/routing, model safeguards, complete source/package acceptance, and installation boundary.
+
+- `docs/codex-activity-and-hook-trust-plan.md` - Default trust for Lina's exact Codex hooks, pending-input activity display repair, acceptance checks and installed-build boundaries.
+
 - `docs/release-0.1.104-review.md` - September 8 repeated bug sweeps, terminal wheel and voice repairs, independent verification, packaged acceptance and evidence boundaries.
 
 - `docs/orchestrator-openrouter-compatibility.md` - Forced-tool timeout investigation, live model comparisons, automatic tool selection fix, capability-aware options, diagnostics, and installed/source verification boundaries.
