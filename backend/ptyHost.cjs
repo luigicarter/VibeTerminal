@@ -1,5 +1,7 @@
 const readline = require("readline");
 const { encodeTerminalControls } = require('../shared/terminalControls.cjs');
+const { createTerminalHistory } = require('./terminalHistory.cjs');
+const sessions = new Map();
 
 let pty = null;
 try {
@@ -11,14 +13,17 @@ try {
   });
 }
 
-const sessions = new Map();
 const stopObserver = require('./observedStop.cjs').createHostStopObserver({ lookup: id => sessions.get(id), emit });
 const checkedResults = new Map();
 const pendingActions = new Map();
 const NATIVE_SUBMIT_DELAY_MS = 200;
-const MAX_SESSION_BUFFER_CHARS = 400_000;
 
 function emit(event) {
+  const session = sessions.get(event.id);
+  if (session?.pendingEvents?.length && event.type !== 'action-result' && event.type !== 'stop-observed-result') {
+    session.pendingEvents.push({ event: { at: Date.now(), ...event } });
+    return;
+  }
   process.stdout.write(`${JSON.stringify({ at: Date.now(), ...event })}\n`);
 }
 
@@ -97,19 +102,11 @@ function terminalEnvironment(instrumentationEnv = {}, stripEnv = []) {
   };
 }
 
-function appendSessionBuffer(session, data) {
-  session.buffer += data;
-
-  if (session.buffer.length > MAX_SESSION_BUFFER_CHARS) {
-    session.buffer = session.buffer.slice(-MAX_SESSION_BUFFER_CHARS);
-  }
-}
-
 function emitSnapshot(id, session) {
-  emit({
+  const event = {
+    at: Date.now(),
     id,
     type: "snapshot",
-    data: session.buffer,
     isRunning: Boolean(session.terminal),
     launchPending: Boolean(session.launchPending),
     launchToken: session.launchToken,
@@ -119,6 +116,18 @@ function emitSnapshot(id, session) {
     signal: session.signal,
     cols: session.cols, rows: session.rows, sequence: session.sequence, outputAt: session.outputAt,
     ...inputState(session)
+  };
+  // Freeze the snapshot's position in the stream while its decoder catches up.
+  // Later data/resize/exit events must arrive AFTER this replay, including when
+  // multiple attaches race. Other panes and normal live output remain immediate.
+  const slot = {};
+  session.pendingEvents.push(slot);
+  session.history.snapshot(snapshot => {
+    if (sessions.get(id) !== session) return;
+    slot.event = { ...event, ...snapshot };
+    while (session.pendingEvents[0]?.event) {
+      process.stdout.write(`${JSON.stringify(session.pendingEvents.shift().event)}\n`);
+    }
   });
 }
 
@@ -231,6 +240,7 @@ function createSession(payload) {
     if (incomingToken > existingToken) {
       cancelSessionSubmission(existingSession);
       existingSession?.terminal?.kill();
+      existingSession?.history.dispose();
       sessions.delete(payload.id);
     } else {
       if (existingSession?.terminal && (payload.cols || payload.rows)) {
@@ -240,6 +250,7 @@ function createSession(payload) {
           existingSession.terminal.resize(cols, rows);
           existingSession.cols = cols;
           existingSession.rows = rows;
+          existingSession.history.resize(cols, rows);
           emit({ id: payload.id, type: "resize", generation: existingSession.generation, cols, rows });
           debug({ type: "dedup-resize", id: payload.id, cols, rows });
         } else {
@@ -273,7 +284,8 @@ function createSession(payload) {
     id: payload.id, inputRevision: 0, interactionInputPending: false, ownerRequestId: null,
     terminal: null,
     launchPending: Boolean(payload.command),
-    buffer: "",
+    history: null,
+    pendingEvents: [],
     cols,
     rows,
     launchToken: Number(payload.launchToken || 0),
@@ -290,6 +302,7 @@ function createSession(payload) {
   };
 
   try {
+    session.history = createTerminalHistory(cols, rows);
     const terminal = pty.spawn(shell.file, shell.args, {
       name: "xterm-256color",
       cols,
@@ -308,7 +321,7 @@ function createSession(payload) {
         return;
       }
 
-      appendSessionBuffer(session, data);
+      session.history.write(data);
       const modeText = session.modeTail + data;
       const modes = /\x1b\[\?([0-9;]+)([hl])/g;
       for (const match of modeText.matchAll(modes)) {
@@ -376,6 +389,7 @@ function createSession(payload) {
       }, 250);
     }
   } catch (error) {
+    session.history?.dispose();
     emit({
       id: payload.id,
       type: "error",
@@ -410,6 +424,7 @@ function handleMessage(message) {
         if (cols !== session.cols || rows !== session.rows) {
           session.terminal.resize(cols, rows);
           session.cols = cols; session.rows = rows;
+          session.history.resize(cols, rows);
           emit({ id: payload.id, type: "resize", generation: session.generation, cols, rows });
         }
       }
@@ -436,6 +451,7 @@ function handleMessage(message) {
           session.terminal.resize(cols, rows);
           session.cols = cols;
           session.rows = rows;
+          session.history.resize(cols, rows);
           emit({ id: message.payload.id, type: "resize", generation: session.generation, cols, rows });
           debug({ type: "resize", id: message.payload.id, cols, rows });
         } else {
@@ -450,6 +466,7 @@ function handleMessage(message) {
         const session = sessions.get(message.payload.id);
         if (matchesSession(session, message.payload)) {
           cancelSessionSubmission(session);
+          session.history.dispose();
           sessions.delete(message.payload.id);
         }
       });
@@ -463,13 +480,14 @@ function handleMessage(message) {
         if (session.terminal) {
           session.terminal.kill();
         }
+        session.history.dispose();
         sessions.delete(message.payload.id);
       }
       break;
     }
 
     case "shutdown":
-      sessions.forEach((session) => { cancelSessionSubmission(session); session.terminal?.kill(); });
+      sessions.forEach((session) => { cancelSessionSubmission(session); session.terminal?.kill(); session.history.dispose(); });
       sessions.clear();
       process.exit(0);
       break;
@@ -603,6 +621,7 @@ function handleAction(payload, strict) {
     }
     if (payload.kind === "kill") {
       session.terminal.kill();
+      session.history.dispose();
       sessions.delete(payload.id);
       return result(true, "kill-requested");
     }

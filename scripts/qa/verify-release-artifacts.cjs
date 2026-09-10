@@ -15,6 +15,17 @@ const item = feed.files?.find(file => file.url === installerName);
 if (!item || item.sha512 !== sha512 || item.size !== bytes.length) throw Error('Update feed asset hash/size does not match this installer.');
 if (!fs.statSync(installer + '.blockmap').size) throw Error('Installer blockmap is empty.');
 const resources = path.join(release, 'win-unpacked/resources');
+// The PTY helper runs outside app.asar with Electron in Node mode. Its decoded
+// history dependencies and shared limit must be available at unpacked paths.
+for (const relative of [
+  'shared/terminalDisplay.json',
+  'node_modules/@xterm/headless/package.json',
+  'node_modules/@xterm/headless/lib-headless/xterm-headless.js',
+  'node_modules/@xterm/addon-serialize/package.json',
+  'node_modules/@xterm/addon-serialize/lib/addon-serialize.js',
+]) {
+  if (!fs.statSync(path.join(resources, 'app.asar.unpacked', relative)).size) throw Error(`Missing or empty unpacked terminal history payload: ${relative}`);
+}
 // Both spoken alerts and local detection models are checksum-verified.
 const alerts = createLocalErrorAudio({ directory: path.join(resources, 'voice/alerts') });
 for (const category of Object.keys(ERROR_AUDIO_TEXT)) alerts.load(category);

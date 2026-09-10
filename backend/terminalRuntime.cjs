@@ -2,6 +2,7 @@
 
 const { randomUUID } = require("node:crypto");
 const path = require("node:path");
+const { normalizeClaudeTaskResult, normalizeClaudeBackgroundTasks } = require("./claudeTaskTelemetry.cjs");
 
 function cleanTitle(value) {
   return typeof value === "string" ? value.replace(/[\x00-\x1f\x7f-\x9f]/g, "").trim().slice(0, 512) : "";
@@ -67,6 +68,7 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
       closed: false, preparing: true, startedAt, lookupInFlight: false, coarseDepth: 0, coarseProvisional: false, coarseBackground: false,
       identityHints: new Map(), pendingEvents: [], retiredTurnIds: new Set(), resolvedQuestionToolIds: new Set(), nextLookupAt: 0, lookupFailures: 0,
       nativeActive: false, pendingPriorTurnId: undefined, settledToolIds: new Set(), childStops: new Map(),
+      claudeNativeChildren: new Set(), claudeBackgroundChildren: new Set(), claudeTaskSnapshotAt: 0,
       transcriptPath: undefined, explicitRef: payload.threadRef,
       claudeHome: payload.providerProfileId ? "custom" : undefined,
       snapshot: {
@@ -185,7 +187,8 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
   function observeChild(record, event, eventAt) {
     const id = childId(record, event);
     if (!id) return undefined;
-    if (event.observedAt && record.childStops.get(id) > event.observedAt) return undefined;
+    if (event.observedAt && (record.childStops.get(id) > event.observedAt ||
+        (record.snapshot.provider === "claude" && record.childStops.get(id) === event.observedAt))) return undefined;
     let entry = record.snapshot.children.find(item => item.id === id);
     if (event.observedAt && entry?.observedAt > event.observedAt) return undefined;
     if (!entry) {
@@ -194,6 +197,8 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
     }
     entry.observation = "observed";
     entry.observedAt = eventAt;
+    if (record.snapshot.provider === "claude" && event.taskId && event.providerThreadId === record.snapshot.conversation?.id &&
+        (event.lifecycle === "native" || event.transcriptKind === "subagent")) record.claudeNativeChildren.add(id);
     if (event.providerThreadId && event.providerThreadId !== record.snapshot.conversation?.id) {
       entry.providerThreadId = event.providerThreadId;
       if (event.providerTurnId) entry.providerTurnId = event.providerTurnId;
@@ -204,7 +209,8 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
   function childEndIsStale(record, event, eventAt) {
     const id = childId(record, event);
     const entry = record.snapshot.children.find(item => item.id === id);
-    return !id || record.childStops.get(id) > eventAt || entry?.observedAt > eventAt ||
+    return !id || record.childStops.get(id) > eventAt ||
+      (record.snapshot.provider === "claude" && record.childStops.get(id) === eventAt) || entry?.observedAt > eventAt ||
       Boolean(event.providerThreadId && event.providerThreadId !== record.snapshot.conversation?.id &&
         event.providerTurnId && entry?.providerTurnId && event.providerTurnId !== entry.providerTurnId);
   }
@@ -228,8 +234,58 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
     const id = childId(record, event);
     if (childEndIsStale(record, event, eventAt)) return;
     record.snapshot.children = record.snapshot.children.filter(item => item.id !== id);
+    record.claudeNativeChildren.delete(id);
+    record.claudeBackgroundChildren.delete(id);
     record.childStops.set(id, eventAt);
     if (record.childStops.size > 512) record.childStops.delete(record.childStops.keys().next().value);
+  }
+  function claudeTaskRoot(record, event) {
+    return record.snapshot.provider === "claude" && Boolean(record.snapshot.conversation?.id) &&
+      event.providerThreadId === record.snapshot.conversation.id && Number.isFinite(event.observedAt);
+  }
+  function observeClaudeTaskResult(record, event, eventAt) {
+    if (!claudeTaskRoot(record, event) || event.phase !== "stop" || event.kind !== "tool" ||
+        !["Agent", "Task"].includes(event.toolName)) return;
+    const result = normalizeClaudeTaskResult(event.claudeTaskResult);
+    if (!result || result.agentId === event.taskId) return;
+    // An Agent tool's issuer and the returned agent are different identities.
+    // A completed result is after the child's stop gate; async_launched only
+    // confirms a detached lifetime. Neither result completes the root turn.
+    const target = { ...event, taskId: result.agentId, lifecycle: "native" };
+    if (result.status === "completed") endChild(record, target, eventAt);
+    else {
+      // A fast background child may already have reached its stop hook before
+      // the launching tool returns. Its launch receipt must not resume it.
+      const existing = record.snapshot.children.find(child => child.id === result.agentId);
+      if (existing ? existing.observedAt <= eventAt : observeChild(record, target, eventAt)) {
+        record.claudeBackgroundChildren.add(result.agentId);
+      }
+    }
+  }
+  function reconcileClaudeBackgroundTasks(record, event, eventAt) {
+    if (!claudeTaskRoot(record, event) || isChild(record, event) || eventAt <= record.claudeTaskSnapshotAt) return;
+    const tasks = normalizeClaudeBackgroundTasks(event.claudeBackgroundTasks);
+    if (!tasks) return;
+    const taskId = item => item.type === "subagent" ? item.id : `background:claude:${item.id}`;
+    const active = new Set(tasks.map(taskId));
+    for (const child of [...record.snapshot.children]) {
+      if (active.has(child.id)) continue;
+      // Foreground descendants are excluded from Claude's background registry.
+      // A missing known background task can settle independently. A provisional
+      // child with unknown launch mode settles only when the root has responded
+      // and no background parent could still be running its stop gate.
+      if (record.claudeBackgroundChildren.has(child.id) || (tasks.length === 0 &&
+          record.claudeNativeChildren.has(child.id) && child.observation === "provisional")) {
+        endChild(record, { ...event, taskId: child.id }, eventAt);
+      }
+    }
+    for (const item of tasks) {
+      const id = taskId(item);
+      const entry = observeChild(record, { ...event, taskId: id, lifecycle: item.type === "subagent" ? "native" : undefined,
+        taskLabel: item.type === "subagent" ? "Background agent" : item.type === "shell" ? "Background command" : "Background task" }, eventAt);
+      if (entry) record.claudeBackgroundChildren.add(id);
+    }
+    record.claudeTaskSnapshotAt = eventAt;
   }
   function staleTurn(record, event) {
     const s = record.snapshot;
@@ -263,6 +319,9 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
     for (const key of ["turnId", "turnStartedAt", "turnEndedAt", "attention", "lastTool"]) s[key] = undefined;
     s.turnState = "unknown";
     s.children = [];
+    record.claudeNativeChildren.clear();
+    record.claudeBackgroundChildren.clear();
+    record.claudeTaskSnapshotAt = 0;
     s.activityObserved = false;
     record.nativeActive = false;
     record.coarseDepth = 0;
@@ -513,6 +572,7 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
         // Legacy wrappers emitted task completion for process exit. It is not a
         // completed model turn and must never manufacture a completion badge.
         if (event.attention.reason === "exit") break;
+        if (event.attention.state === "completed") reconcileClaudeBackgroundTasks(record, event, eventAt);
         const attention = event.attention;
         // Replayed hooks can carry a freshly generated transport id. The same
         // semantic occurrence keeps its original attention identity/timestamps;
@@ -549,6 +609,7 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
         break;
       }
       case "agent-activity": {
+        observeClaudeTaskResult(record, event, eventAt);
         if (child) {
           // A tool returning does not mean its agent stopped. Keep the native
           // child identity through parallel tools, thinking and background work.

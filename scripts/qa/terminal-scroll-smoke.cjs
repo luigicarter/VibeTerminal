@@ -25,7 +25,7 @@ function slice(start, end) {
   return pane.slice(from, to);
 }
 const compile = source => ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
-const modules = ['terminalOutput', 'terminalWheel'].map(name => {
+const modules = ['terminalOutput', 'terminalWheel', 'terminalScrollback'].map(name => {
   return `Object.assign(window, (() => {const exports = {}; ${compile(fs.readFileSync(path.join(root, `frontend/${name}.ts`), 'utf8'))}; return exports;})());`;
 }).join('\n');
 const handlers = compile(
@@ -40,6 +40,8 @@ const html = `<!doctype html><link rel="stylesheet" href="${url('node_modules/@x
 window.makeFixture = async () => {
   const host = document.createElement('div');host.className='terminal-fit-host';document.body.append(host);
   const terminal = new Terminal({cols:70,rows:20,scrollback:5000,fontSize:13});terminal.open(host);
+  preserveTerminalScrollback(terminal);
+  const replay=createTerminalReplay(terminal,()=>terminal.scrollToBottom());
   const followTailRef={current:true}, terminalPointerRef={current:false}, terminalRef={current:terminal}, containerRef={current:host};
   const terminalExitedRef={current:false},createdRef={current:true},session={id:'fixture'},runtimeScope=()=>({});
   const sgrMouse=createSgrMouseTracker(),inputs=[];
@@ -52,7 +54,7 @@ window.makeFixture = async () => {
   await write(Array.from({length:150},(_,i)=>'scroll fixture line '+i+'\\r\\n').join(''));
   const wheel=async (deltaY,options={})=>{const rect=host.querySelector('.xterm-screen').getBoundingClientRect();host.querySelector('.xterm-screen').dispatchEvent(new WheelEvent('wheel',{bubbles:true,cancelable:true,clientX:rect.left+50,clientY:rect.top+50,deltaY,...options}));await pause(90)};
   const state=()=>({y:terminal.buffer.active.viewportY,base:terminal.buffer.active.baseY,follow:followTailRef.current,scrollTop:host.querySelector('.xterm-viewport').scrollTop,scrollHeight:host.querySelector('.xterm-viewport').scrollHeight,inputs:inputs.join('')});
-  return {terminal,host,inputs,write,wheel,state,pause,followTailRef,terminalExitedRef};
+  return {terminal,host,inputs,write,wheel,state,pause,followTailRef,terminalExitedRef,replay};
 };</script>`;
 const file = path.join(output, 'fixture.html');fs.writeFileSync(file, html);
 app.whenReady().then(async () => {
@@ -103,6 +105,31 @@ app.whenReady().then(async () => {
       f.terminalExitedRef.current=true;f.inputs.length=0;await f.wheel(-120);
       check('exited TUI history scrolls despite retained mouse mode',f.state().y<f.state().base&&f.inputs.length===0);
       f.terminalExitedRef.current=false;
+      await f.write('\\x1b[?1000l');
+      await f.write(Array.from({length:6500},(_,i)=>'long-running line '+i+'\\r\\n').join(''));
+      f.terminal.scrollToBottom();await f.pause(60);
+      check('overflow retains exactly 5000 scrollback rows',f.state().base===5000);
+      await f.wheel(-120);check('wheel works after the buffer fills',f.state().y<f.state().base);
+      await f.write('new rows after overflow\\r\\n'.repeat(20));
+      const afterOverflowOutput=f.state().y;await f.wheel(-120);
+      check('FIFO eviction during output keeps history scrollable',f.state().base===5000&&f.state().y<afterOverflowOutput);
+      const retained=f.terminal.buffer.normal.getLine(0).translateToString(true);
+      await f.write('\\x1b[3');await f.write('J\\x1b[H\\x1b[2Jredrawn screen');
+      check('split erase-saved-lines redraw retains history',f.state().base===5000&&f.terminal.buffer.normal.getLine(0).translateToString(true)===retained);
+      const beforeClearWheel=f.state().y;await f.wheel(-120);
+      check('wheel works after a full-screen redraw',f.state().y<beforeClearWheel);
+      await f.write('\\x1b[?1000h\\x1b[?1006h');
+      f.terminal.scrollToBottom();await f.pause(60);f.inputs.length=0;
+      await f.wheel(-120,{shiftKey:true});
+      check('shift wheel reaches full history with TUI mouse tracking',f.state().y<f.state().base&&f.inputs.length===0);
+      f.terminal.write('queued stale line\\r\\n'.repeat(500));
+      f.replay.restore({data:'restored history\\r\\n'.repeat(40),cols:70,rows:20});
+      await f.write('live after replay');
+      const restoredText=Array.from({length:f.terminal.buffer.normal.length},(_,i)=>f.terminal.buffer.normal.getLine(i).translateToString(true)).join('\\n');
+      check('replay replaces queued old output before subsequent live output',!restoredText.includes('queued stale')&&restoredText.includes('restored history')&&restoredText.includes('live after replay'));
+      await f.write('\\x1b[3J');
+      check('scrollback protection survives snapshot reset',f.state().base>0);
+      await f.write('\\x1b[?1000h\\x1b[?1006h');
       await f.write('\\x1b[?1049h');f.inputs.length=0;
       await f.wheel(-120);check('alternate screen keeps native mouse reporting',f.inputs.join('').includes('\\x1b[<64;'));
       await f.write('\\x1b[?1000l');f.inputs.length=0;

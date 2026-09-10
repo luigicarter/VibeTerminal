@@ -302,7 +302,7 @@ async function runtimeChecks() {
   assert(ambiguous.listSnapshots().every((snapshot) => snapshot.binding.status === "ambiguous"));
 }
 
-function ptyChecks() {
+async function ptyChecks() {
   const events = [], spawned = [], timers = [];
   const pty = { spawn: () => {
     const terminal = { writes: [], resize() {}, write(data) { this.writes.push(data); }, kill() {},
@@ -310,7 +310,7 @@ function ptyChecks() {
     spawned.push(terminal); return terminal;
   } };
   const context = vm.createContext({
-    require: (name) => name === "node-pty" ? pty : name === "readline" ? { createInterface: () => ({ on() {} }) } : name === './observedStop.cjs' ? require('../../backend/observedStop.cjs') : name === '../shared/terminalControls.cjs' ? require('../../shared/terminalControls.cjs') : require(name),
+    require: (name) => name === "node-pty" ? pty : name === "readline" ? { createInterface: () => ({ on() {} }) } : name === './observedStop.cjs' ? require('../../backend/observedStop.cjs') : name === '../shared/terminalControls.cjs' ? require('../../shared/terminalControls.cjs') : require('node:module').createRequire(path.resolve(__dirname, '../../backend/ptyHost.cjs'))(name),
     process: { platform: "win32", env: {}, stdin: {}, cwd: () => root,
       stdout: { write: (line) => events.push(JSON.parse(line)) }, exit() {} },
     setTimeout: (fn) => timers.push(fn)
@@ -332,6 +332,7 @@ function ptyChecks() {
   assert.equal(events.find((event) => event.type === "title").title, "Terminal Title");
   assert.equal(events.filter((event) => event.type === "data").map((event) => event.data).join(""), "hello\x1b]2;Terminal Title\x1b\\ world");
   context.handleMessage({ type: "create", payload: create });
+  await new Promise(resolve => vm.runInContext("sessions.get('pane').history", context).snapshot(resolve));
   assert.equal(spawned.length, 1);
   assert.equal(events.at(-1).terminalTitle, "Terminal Title");
   const beforeAttach = events.length;
@@ -455,6 +456,6 @@ async function mainChecks() {
 }
 
 (async () => {
-  await runtimeChecks(); ptyChecks(); await mainChecks();
+  await runtimeChecks(); await ptyChecks(); await mainChecks();
   console.log("terminal runtime smoke passed (lifecycle, stale generations, retained metadata, ambiguity, OSC, UTF8, create cancellation)");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

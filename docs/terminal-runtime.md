@@ -8,6 +8,34 @@ Standalone panes use a main-process runtime service. The renderer subscribes to 
 
 ## Wheel scrolling
 
+Terminal history retains the newest **5,000 scrollback rows**, plus the live
+screen, using FIFO eviction. Agent `CSI 3 J` (erase saved lines) redraw commands
+are ignored by both display decoders so they cannot wipe all saved history.
+Other screen erases still work, alternate-screen applications keep their native
+buffers/input, and a terminal reset or a new generation starts fresh.
+
+`backend/terminalHistory.cjs` keeps decoded cells with `@xterm/headless` and
+serializes them on attachment. The previous 400,000-character raw-output suffix
+could discard all earlier history during spinner/redraw traffic or begin midway
+through an escape sequence. Retention is now based on rows, including while a
+pane is hidden. Snapshots preserve both buffers, styles, geometry, incomplete
+escape/Unicode sequences and the supported TUI input modes. Later output,
+resizes and exits stay ordered after each snapshot; command receipts remain
+immediate. The extra decoder is bounded by the row limit and disposed on close
+or replacement; it has no PTY input connection.
+
+The renderer restores snapshots with an in-stream reset before later live
+output, and delays fitting until replay completes. This prevents queued old
+output from reappearing after a synchronous reset. Both decoders share
+`shared/terminalDisplay.json` for the retention limit.
+
+`node --test scripts/backend/terminal-scrollback.test.cjs` covers sustained
+redraws, FIFO overflow, reset protection, split sequences, Unicode, normal and
+alternate buffers, reflow, input modes, event ordering and generation disposal.
+It also runs in `smoke:backend:terminal-runtime`, a release gate. These repairs
+are source changes; existing installed builds and already-discarded output are
+not changed by them.
+
 Normal terminal history remains scrollable with the wheel after moving the
 scrollbar, including when a TUI has enabled mouse reporting. Shift-wheel selects
 local history from the live tail, and exited panes keep their history scrollable.

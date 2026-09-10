@@ -7,6 +7,7 @@ const url = require("url");
 const { prepareGeminiTelemetry } = require("./geminiTelemetry.cjs");
 const { prepareGrokTelemetry } = require("./grokTelemetry.cjs");
 const { hookMetadata, readHookInput, powershellReadHookInput, powershellHookMetadata } = require("./providerHookMetadata.cjs");
+const { normalizeClaudeTaskResult, normalizeClaudeBackgroundTasks, claudeTaskMetadata, powershellClaudeTaskMetadata } = require("./claudeTaskTelemetry.cjs");
 
 const SHIM_BASE_DIR =
   process.env.VIBE_AGENT_SHIM_BASE_DIR ||
@@ -1907,6 +1908,9 @@ function notifyHookSource() {
   return String.raw`const http = require("http");
 ${hookMetadata.toString()}
 ${readHookInput.toString()}
+${normalizeClaudeTaskResult.toString()}
+${normalizeClaudeBackgroundTasks.toString()}
+${claudeTaskMetadata.toString()}
 
 const KNOWN_DETAILS = new Set(${JSON.stringify(NOTIFY_KNOWN_DETAILS)});
 const type = process.argv[2];
@@ -1950,7 +1954,7 @@ if (!type || !callbackUrl || !token || !sessionId || !launchNonce) {
 
 function deliver(raw = "") {
 let metadata = {};
-try { metadata = hookMetadata(JSON.parse(raw)); } catch {}
+try { const input = JSON.parse(raw); metadata = { ...hookMetadata(input), ...claudeTaskMetadata(input) }; } catch {}
 const event = { type, sessionId, launchNonce, timestamp: Date.now(), ...metadata };
 if (detail) event.detail = detail;
 if (provider) event.provider = provider;
@@ -2204,7 +2208,8 @@ function windowsNotifyPs1Source() {
     "  if ($ProviderThreadId) { $payload['providerThreadId'] = $ProviderThreadId }",
     "  if ($ProviderTurnId) { $payload['providerTurnId'] = $ProviderTurnId }",
     ...powershellHookMetadata(),
-    "  $body = $payload | ConvertTo-Json -Compress",
+    ...powershellClaudeTaskMetadata(),
+    "  $body = $payload | ConvertTo-Json -Depth 5 -Compress",
     "  $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)",
     "  $request = [System.Net.WebRequest]::Create($env:VIBE_TERMINAL_CALLBACK_URL)",
     "  $request.Method = 'POST'",
@@ -3544,6 +3549,19 @@ function createAgentTelemetryManager(options = {}) {
             if (event.provisional === true) eventMetadata.provisional = true;
             if (Number.isFinite(event.timestamp) && event.timestamp > 0 && event.timestamp <= Date.now() + 5000) eventMetadata.observedAt = event.timestamp;
             if (typeof event.transcriptKind === "string") eventMetadata.transcriptKind = event.transcriptKind;
+            // Revalidate stripped native task metadata at the authenticated
+            // provider boundary. Other providers and chat-host callers retain
+            // their own task contracts.
+            if (activeSession.provider === "claude" && activeSession.generation !== undefined) {
+              if (event.type === "agent.completed") {
+                const tasks = normalizeClaudeBackgroundTasks(event.claudeBackgroundTasks);
+                if (tasks) eventMetadata.claudeBackgroundTasks = tasks;
+              }
+              if (event.type === "agent.running" && event.phase === "stop" && ["Agent", "Task"].includes(event.toolName)) {
+                const result = normalizeClaudeTaskResult(event.claudeTaskResult);
+                if (result) eventMetadata.claudeTaskResult = result;
+              }
+            }
             const emitEvent = (value) => emit({
               ...value,
               provider: value.provider || event.provider || activeSession.provider,

@@ -516,6 +516,8 @@ export type TerminalEvent = (
   | {
       id: string;
       type: "snapshot";
+      cols?: number;
+      rows?: number;
       data: string;
       isRunning: boolean;
       launchToken?: number;

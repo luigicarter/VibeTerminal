@@ -42,10 +42,20 @@ const screenshot = async name => { let timer; try { const shot = await Promise.r
   for (let i = 0; i < 4; i++) {
     const result = await dispatch({ kind: 'create_session', kindOfSession: 'terminal', cwd }); assert.equal(result.ok, true, JSON.stringify(result));
     const current = await until(async () => (await inventory()).find(item => item.id === result.id && item.terminalPid > 0), 'running root'); ownedRoots.push(current.terminalPid);
-    await until(async () => { const read = await dispatch({ kind: 'read_session', target: { id: current.id, generation: current.generation } }); return read.ok && read.observation?.cursorVisible !== false && read.observation?.cursorLine?.beforeCursor?.trimEnd().endsWith('>'); }, 'PowerShell input prompt');
     const pidFile = path.join(output, `child-${i}.txt`);
     const command = `$fixtureChild = Start-Process -FilePath '${env.VIBE_TERMINAL_SHELL.replace(/'/g, "''")}' -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 300' -WindowStyle Hidden -PassThru; $fixtureChild.Id | Set-Content -LiteralPath '${pidFile.replace(/'/g, "''")}'`;
-    const sent = await dispatch({ kind: 'send_prompt', target: { id: current.id, generation: current.generation }, text: command }); assert.equal(sent.ok, true, JSON.stringify(sent));
+    // Startup output and board reflow can invalidate a read before dispatch.
+    // Retry only an explicit zero-byte rejection, obtaining fresh evidence each
+    // time. An accepted or uncertain submission must never be repeated.
+    await until(async () => {
+      const target = { id: current.id, generation: current.generation };
+      const read = await dispatch({ kind: 'read_session', target });
+      if (!read.ok || read.observation?.cursorVisible === false || !read.observation?.cursorLine?.beforeCursor?.trimEnd().endsWith('>')) return false;
+      const sent = await dispatch({ kind: 'send_prompt', target, text: command });
+      if (sent.ok === false && sent.status === 'stale-observation' && sent.delivery === 'not-dispatched') return false;
+      assert.equal(sent.ok, true, JSON.stringify(sent));
+      return true;
+    }, 'PowerShell fixture command accepted');
     const descendant = await until(() => fs.existsSync(pidFile) && Number(fs.readFileSync(pidFile, 'utf8').replace(/^\uFEFF/, '').trim()), 'fixture child pid'); assert(descendant > 0); ownedChildren.push(descendant);
   }
   const frozen = (await inventory()).filter(item => item.visiblePane && item.projectId === workspace.id);

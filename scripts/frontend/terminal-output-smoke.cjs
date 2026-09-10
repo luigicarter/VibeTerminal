@@ -364,10 +364,10 @@ function makeCoalescer(options = {}) {
     "no direct terminal.write remains on the data path"
   );
   assert.ok(
-    /event\.type === "snapshot"[\s\S]{0,400}syncOutput\.reset\(\);\s*\n\s*sgrMouse\.reset\(\);\s*\n\s*terminal\.reset\(\);/.test(
+    /event\.type === "snapshot"[\s\S]{0,400}syncOutput\.reset\(\);\s*\n\s*sgrMouse\.reset\(\);\s*\n\s*sgrMouse\.push\(event.data\);\s*\n\s*terminalReplay\.restore\(event\);/.test(
       paneSource
     ),
-    "snapshot replay resets coalescer and tracker before terminal.reset"
+    "snapshot replay resets coalescer and tracker before the ordered replay"
   );
   assert.ok(
     paneSource.includes("terminal.attachCustomWheelEventHandler"),

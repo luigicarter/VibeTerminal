@@ -8,7 +8,7 @@ key are not proof of a running or completed agent turn.
 | --- | --- | --- | --- |
 | Terminal | PTY lifecycle | Arbitrary shell jobs have no agent lifecycle contract | Shows terminal open/exited; never invents task completion |
 | Codex | Invocation-scoped native prompt/tool/permission hooks and completion notify | Native SubagentStart/Stop plus child-scoped tools and approvals | Completion notify needs verified root and native turn identity; child work remains separate |
-| Claude Code (including custom provider profiles) | Invocation-scoped prompt/tool/permission/error hooks | Native SubagentStart/Stop tracks agent IDs; Task/Agent tool return does not end a detached child | Stop is response available, because other hooks can request continuation |
+| Claude Code (including custom provider profiles) | Invocation-scoped prompt/tool/permission/error hooks | Native child hooks, completed Agent results and bounded root background-task snapshots; an async launch does not end its child | Stop is response available, because other hooks can request continuation |
 | Cursor | Project hooks and native stop status | No native detached-child contract in this adapter | Aborted is a provisional response, never a fabricated question; errors remain failures |
 | Gemini | Invocation-scoped defaults overlay with agent/model/tool/permission hooks | Explicit child transcript identity is kept separate from the root | AfterAgent is provisional; retry keeps the turn's elapsed time |
 | OpenCode | Plugin session status, permissions, and errors | Known parent/session identities scope child busy, idle, and approval events | Idle is a provisional response; metadata/message replay does not start a turn |
@@ -45,6 +45,25 @@ key are not proof of a running or completed agent turn.
   rejects dependencies while known surviving children keep the workspace held.
   Successful task completion waits for observed child settlement. Structured
   permission resolution alone does not make an active turn ready for new work.
+
+## Claude child settlement
+
+Claude's native SubagentStop is provisional because another hook may make the
+child continue. Later completed Agent/Task result metadata settles that child;
+an async launch receipt only establishes its background identity. Root Stop's
+native task registry keeps background work visible and settles background tasks
+that ended. A provisional child of unknown launch mode clears when a later root
+snapshot reports no background work. Active foreground children and descendants
+of remaining background work retain their observations.
+
+Only valid, complete snapshots of at most 256 identified running/pending tasks
+and 16 KiB of metadata are used. Missing/unsupported schemas and child-scoped stops cannot clear the
+parent. Stale generations and timestamps are fenced. No prompts, commands or
+result bodies are forwarded in the added metadata. This repairs stale **activity
+unverified** labels without turning a root response into verified completion.
+Older Claude versions lacking the task registry retain their hook evidence until
+a completed Agent result or another supported settlement signal arrives.
+See the [Claude status investigation](claude-terminal-status-investigation.md).
 
 ## Passive Kimi task observation
 

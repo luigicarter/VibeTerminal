@@ -4,6 +4,10 @@ Lina Terminal is an Electron + React desktop workspace for running local termina
 
 ## Docs Index
 
+- `docs/release-0.1.113-review.md` - Claude child status and terminal scrollback release, acceptance checks and installation boundary.
+
+- `docs/claude-terminal-status-investigation.md` - September 10 Claude status audit and child settlement repair: native task reconciliation, preserved background work, remaining child-approval gap, installed evidence and Windows/Node regressions.
+
 - `docs/release-0.1.112-review.md` - Final native Windows 8.3 fixture repair and early CI gate for publishing the performance/harness overhaul; retained failed tags and runtime verification.
 
 - `docs/release-0.1.111-review.md` - Publication of the performance/harness overhaul after repairing the Windows canonical-path test fixture; immutable failed-tag history and verification boundary.

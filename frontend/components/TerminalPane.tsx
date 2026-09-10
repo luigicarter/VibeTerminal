@@ -9,6 +9,8 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { configureCodexCursor } from "../terminalCursor";
+import { createTerminalReplay, preserveTerminalScrollback } from "../terminalScrollback";
+import terminalDisplay from "../../shared/terminalDisplay.json";
 import {
   CopyPlus,
   GripVertical,
@@ -697,7 +699,7 @@ export default function TerminalPane({
       fontWeight: 500,
       lineHeight: 1.18,
       letterSpacing: 0,
-      scrollback: 5000,
+      scrollback: terminalDisplay.scrollback,
       theme: {
         background: "#17181c",
         foreground: "#ededf0",
@@ -723,6 +725,11 @@ export default function TerminalPane({
       }
     });
 
+    const scrollbackHandler = preserveTerminalScrollback(terminal);
+    const terminalReplay = createTerminalReplay(terminal, () => {
+      terminal.scrollToBottom();
+      scheduleFitAndResize();
+    });
     const cursorStyleHandler = session.kind === "codex"
       ? configureCodexCursor(terminal)
       : undefined;
@@ -914,6 +921,7 @@ export default function TerminalPane({
     setTerminalReadyToken((value) => value + 1);
 
     const fitAndResize = () => {
+      if (terminalReplay.pending) return;
       if (isArrangingRef.current) {
         pendingFitRef.current = true;
         return;
@@ -1054,11 +1062,8 @@ export default function TerminalPane({
         // so it does not need the coalescer.
         syncOutput.reset();
         sgrMouse.reset();
-        terminal.reset();
-        if (event.data) {
-          sgrMouse.push(event.data);
-          terminal.write(event.data, () => terminal.scrollToBottom());
-        }
+        sgrMouse.push(event.data);
+        terminalReplay.restore(event);
 
         if (event.isRunning) {
           // A snapshot is a REPLAY of buffered output (remount/reattach), not
@@ -1153,6 +1158,8 @@ export default function TerminalPane({
       syncOutputRef.current = null;
       sgrMouseRef.current = null;
       cursorStyleHandler?.dispose();
+      scrollbackHandler.dispose();
+      terminalReplay.dispose();
       terminal.dispose();
       terminalRef.current = null;
       fitRef.current = null;
