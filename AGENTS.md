@@ -4,6 +4,20 @@ Lina Terminal is an Electron + React desktop workspace for running local termina
 
 ## Docs Index
 
+- `docs/release-0.1.114-review.md` - Terminal resource and Orchestrator reliability release, acceptance gates and remaining capability/installation boundaries.
+
+- `docs/orchestrator-historical-errors-crosscheck-2026-09-10.md` - Direct saved-history/log/installed-package reconciliation: recovered and failed requests, shipped versus source-only repairs, unverifiable older causes and diagnostic-retention gap.
+
+- `docs/orchestrator-repair-plan-2026-09-10.md` - Complete repair roadmap reconciling capability/performance audits; completed stale-code cleanup and current-schema readiness fix, dependencies, migration rules and acceptance criteria.
+
+- `docs/orchestrator-capability-audit-2026-09-10.md` - Capability audit: repaired stale reads, workspace counts and configuration discovery; live-model factual failures, request-control and child-approval gaps, acceptance and remaining risks.
+
+- `docs/performance-orchestrator-overhaul-2026-09-10.md` - Implemented terminal retirement, batched observation, transport pressure, activity-only publications, metadata and Orchestrator grounding; measured improvements, acceptance and remaining limits.
+
+- `docs/orchestrator-inactive-close-investigation-2026-09-10.md` - Wrong inactive-terminal closure, recent interpretation errors, conditional-close review and runtime/input guards, verification and remaining model-answer limits.
+
+- `docs/performance-memory-audit-2026-09-10.md` - RAM and performance investigation: reproduced closed-PTY buffer retention, observer backlog, output-driven history copying, renderer and process lifecycle risks, offline probes and prioritized recommendations.
+
 - `docs/release-0.1.113-review.md` - Claude child status and terminal scrollback release, acceptance checks and installation boundary.
 
 - `docs/claude-terminal-status-investigation.md` - September 10 Claude status audit and child settlement repair: native task reconciliation, preserved background work, remaining child-approval gap, installed evidence and Windows/Node regressions.

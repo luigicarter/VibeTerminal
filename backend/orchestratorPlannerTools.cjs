@@ -7,6 +7,8 @@ function plannerTools(context) {
   const { actions: omitted, ...metadata } = schema.properties;
   const tools = [{ type: 'function', function: { name: 'interpret_workspace', description: 'Optional request metadata or an observation-only/clarification plan. Use plan_* tools for operations.',
     parameters: { type: 'object', additionalProperties: false, properties: metadata } } }];
+  tools.push({ type: 'function', function: { name: 'plan_conversation', description: 'Answer an ordinary question about Lina, its capabilities, an error, or conversation history. No terminal targets, actions, or continuation. Use alone.',
+    parameters: { type: 'object', additionalProperties: false, required: ['goal'], properties: { goal: { type: 'string', minLength: 1, maxLength: 4000 } } } } });
   for (const branch of actions.anyOf) {
     const kind = branch.properties.kind.enum[0];
     const properties = Object.fromEntries(Object.keys(branch.properties).filter(key => key !== 'kind').map(key => [key, { ...actions.properties[key], ...branch.properties[key] }]));
@@ -37,6 +39,10 @@ function decodePlannerCalls(calls, tools, instruction) {
     let args;
     try { args = JSON.parse(call.function.arguments); } catch { throw new Error('The Brain returned malformed command interpretation JSON. No command was dispatched.'); }
     if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Planning arguments must be an object.');
+    if (name === 'plan_conversation') {
+      if (calls.length !== 1 || Object.keys(args).some(key => key !== 'goal')) throw new Error('A conversation plan must stand alone with only its goal and no terminal effects.');
+      return { goal: args.goal, actions: [], access: 'read-only', executionMode: 'reason' };
+    }
     if (name === 'interpret_workspace') {
       // Preserve older adapter responses, always through the same complete-plan
       // normalization and ownership checks. Never merge two authority formats.

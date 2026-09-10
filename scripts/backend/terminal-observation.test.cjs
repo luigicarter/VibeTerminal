@@ -5,6 +5,44 @@ const vm = require('node:vm');
 const path = require('node:path');
 const { createTerminalObservation } = require('../../backend/terminalObservation.cjs');
 
+test('a burst shares bounded parse batches and preserves every byte and final evidence sequence', async () => {
+  const observation = createTerminalObservation();
+  try {
+    await observation.ingest({ type: 'created', id: 'burst', generation: 'g', cols: 40, rows: 100 });
+    const promises = [];
+    for (let sequence = 1; sequence <= 2000; sequence++) promises.push(observation.ingest({
+      type: 'data', id: 'burst', generation: 'g', sequence, outputAt: sequence,
+      data: sequence % 20 === 0 ? '\r\n' : 'x'
+    }));
+    assert.equal(new Set(promises).size, 1, 'Adjacent chunks share one parser completion, without per-chunk wait chains.');
+    await Promise.all(promises);
+    const view = await observation.read({ id: 'burst', generation: 'g' });
+    assert.equal(view.sequence, 2000); assert.equal(view.outputAt, 2000);
+    assert.equal(view.text.split('\n').length, 99);
+    assert(view.text.split('\n').every(line => line === 'x'.repeat(19)));
+    assert.equal(view.history.length, 1);
+    await observation.ingest({ type: 'data', id: 'burst', generation: 'g', sequence: 1999, data: 'STALE' });
+    assert.equal((await observation.read({ id: 'burst' })).text, view.text);
+  } finally { observation.dispose(); }
+});
+
+test('reads and resizes seal output batches before later output', async () => {
+  const observation = createTerminalObservation();
+  try {
+    await observation.ingest({ type: 'created', id: 'p', generation: 'g', cols: 20, rows: 4 });
+    const first = observation.ingest({ type: 'data', id: 'p', generation: 'g', sequence: 1, data: 'before' });
+    const reading = observation.read({ id: 'p' });
+    const resize = observation.ingest({ type: 'resize', id: 'p', generation: 'g', cols: 40, rows: 8 });
+    const second = observation.ingest({ type: 'data', id: 'p', generation: 'g', sequence: 2, data: '\r\nafter' });
+    assert.notEqual(first, second); assert.notEqual(resize, second);
+    const boundary = await reading;
+    assert.equal(boundary.text, 'before'); assert.equal(boundary.sequence, 1);
+    const final = await observation.read({ id: 'p' });
+    assert.equal(final.text, 'before\nafter'); assert.equal(final.cols, 40); assert.equal(final.rows, 8);
+    assert.deepEqual(final.history.map(item => item.sequence), [1, 2]);
+  } finally { observation.dispose(); }
+});
+
 test('cursor visibility follows decoded split and multi-parameter modes without consuming terminal behavior', async () => {
   const observation = createTerminalObservation();
   let sequence = 0;

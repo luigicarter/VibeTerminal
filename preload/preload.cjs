@@ -80,6 +80,7 @@ contextBridge.exposeInMainWorld("vibe", {
     stopSessionObserved: payload => ipcRenderer.invoke('orchestrator:stop-session-observed', payload),
     getState: () => ipcRenderer.invoke("orchestrator:get-state"),
     onState: callback => subscribe("orchestrator:state", callback),
+    onActivity: callback => subscribe("orchestrator:activity", callback),
     configure: patch => ipcRenderer.invoke("orchestrator:configure", patch),
     models: async kind => { const result = await ipcRenderer.invoke("orchestrator:models", { kind }); if (!Array.isArray(result)) throw new Error(result?.error || "Could not load models."); return result; },
     testConnection: () => ipcRenderer.invoke("orchestrator:test"),

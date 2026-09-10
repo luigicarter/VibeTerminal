@@ -239,12 +239,11 @@ function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
     const childActivity = Boolean(c.detachedTaskIds?.length || c.backgroundActivity?.active);
     return { childActivity, status: c.status === "waiting" ? "waiting" : childActivity ? "running" : c.status };
   }
-  function list() {
-    const out = [];
-    for (const s of getRuntime?.()?.listSnapshots() || []) {
+  function projectNative(s) {
+      if (!s) return;
       const u = ui.get(s.id) || {}, a = activity.get(s.id);
-      if (Number.isSafeInteger(u.launchToken) && Number.isSafeInteger(s.launchToken) && u.launchToken !== s.launchToken) continue;
-      out.push({ ...u, ...s, visiblePane: ui.has(s.id), board: u.board, projectId: u.projectId, inventoryRevision, kind: u.kind || s.provider,
+      if (Number.isSafeInteger(u.launchToken) && Number.isSafeInteger(s.launchToken) && u.launchToken !== s.launchToken) return;
+      return { ...u, ...s, visiblePane: ui.has(s.id), board: u.board, projectId: u.projectId, inventoryRevision, kind: u.kind || s.provider,
         name: s.conversation?.title || u.name || s.terminalTitle || s.provider,
         conversationTitle: s.conversation?.title,
         aliases: [...new Set([u.name, u.threadRef?.title, s.conversation?.title].filter(value => typeof value === "string" && value.trim()))],
@@ -252,17 +251,30 @@ function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
         lastActivityAt: a?.generation === s.generation ? a.lastActivityAt : undefined,
         lastOutputAt: a?.generation === s.generation ? a.lastOutputAt : undefined,
         agentPid: a?.generation === s.generation ? a.pid : undefined,
-        terminalPid: a?.generation === s.generation ? a.terminalPid : undefined });
-    }
-    for (const c of chats.values()) if (!c.closed) { const u = ui.get(c.id);
-      if (Number.isSafeInteger(u?.launchToken) && Number.isSafeInteger(c.launchToken) && u.launchToken !== c.launchToken) continue;
-      out.push({ ...u, ...c, ...chatActivity(c), visiblePane: Boolean(u), board: u?.board, projectId: u?.projectId, inventoryRevision,
+        terminalPid: a?.generation === s.generation ? a.terminalPid : undefined };
+  }
+  function projectChat(c) {
+      if (!c || c.closed) return;
+      const u = ui.get(c.id);
+      if (Number.isSafeInteger(u?.launchToken) && Number.isSafeInteger(c.launchToken) && u.launchToken !== c.launchToken) return;
+      return { ...u, ...c, ...chatActivity(c), visiblePane: Boolean(u), board: u?.board, projectId: u?.projectId, inventoryRevision,
       name: u?.threadRef?.title || u?.name || c.kind, conversationTitle: u?.threadRef?.title,
-      aliases: [...new Set([u?.name, u?.threadRef?.title].filter(value => typeof value === "string" && value.trim()))] }); }
-    for (const u of ui.values()) if (!out.some(s => s.id === u.id)) out.push({ ...u,
-      generation: `paused:${u.id}:${u.launchToken || 0}`, revision: 0, observation: "unavailable", status: "paused" });
+      aliases: [...new Set([u?.name, u?.threadRef?.title].filter(value => typeof value === "string" && value.trim()))] };
+  }
+  const projectPaused = u => u && ({ ...u, generation: `paused:${u.id}:${u.launchToken || 0}`, revision: 0, observation: "unavailable", status: "paused" });
+  function list() {
+    const out = [];
+    for (const s of getRuntime?.()?.listSnapshots() || []) { const value = projectNative(s); if (value) out.push(value); }
+    for (const c of chats.values()) { const value = projectChat(c); if (value) out.push(value); }
+    const present = new Set(out.map(s => s.id));
+    for (const u of ui.values()) if (!present.has(u.id)) out.push(projectPaused(u));
     return out;
   }
+  function nativeSnapshot(id) {
+    const runtime = getRuntime?.();
+    return typeof runtime?.getSnapshot === 'function' ? runtime.getSnapshot(id) : runtime?.listSnapshots().find(s => s.id === id);
+  }
+  function get(id) { return projectNative(nativeSnapshot(id)) || projectChat(chats.get(id)) || projectPaused(ui.get(id)); }
   function readChat(target) {
     if (target.beforeSequence !== undefined) return { ok: false, status: "use-saved-history", error: "For older chat content, search or page the saved conversation." };
     const s = chats.get(target.id);
@@ -274,7 +286,7 @@ function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
       complete: false, ...chatActivity(s), turnId: s.turnId, turnState: s.turnState,
       completedResult: structuredClone(completedResults.get(JSON.stringify([s.id, s.generation, target.completedTurnId || s.completedTurnId]))) };
   }
-  return { updateUi, outgoing, ingest, list, readChat, canRestartChat, projectPaths: () => projectPaths, projects: () => structuredClone(projects), launchers: () => structuredClone(launchers), get: id => list().find(s => s.id === id),
+  return { updateUi, outgoing, ingest, list, get, nativeSnapshot, readChat, canRestartChat, projectPaths: () => projectPaths, projects: () => structuredClone(projects), launchers: () => structuredClone(launchers),
     forget: (id, generation) => { if (activity.get(id)?.generation === generation) activity.delete(id); if (chats.get(id)?.generation === generation) { chats.delete(id); bodies.delete(id); interactions.delete(id); } for (const key of completedResults.keys()) { const identity = JSON.parse(key); if (identity[0] === id && identity[1] === generation) completedResults.delete(key); } },
     clear: () => { ui.clear(); chats.clear(); activity.clear(); bodies.clear(); interactions.clear(); completedResults.clear(); } };
 }
@@ -299,6 +311,7 @@ function installOrchestrator(options) {
   const changes = require("./workspaceChanges.cjs");
   const directory = createSessionDirectory({ getRuntime });
   const observations = createTerminalObservation();
+  const observationPublications = new Set();
   const completions = createCompletionEvidence({ getSession: id => directory.get(id), readObservation: target => observations.read(target) });
   const setups = createWorkspaceSetupStore({ userDataPath: app.getPath("userData") });
   const pendingUi = new Map(), pendingHost = new Map();
@@ -596,6 +609,12 @@ function installOrchestrator(options) {
       // disappeared or restarted. The renderer and process owner fence mutation.
       const inventory = await inventoryReader.refresh();
       if (!inventory?.ok) return { ok: false, status: "close-partial", error: inventory?.error || "Current workspace inventory is unavailable.", delivery: "not-dispatched" };
+      try {
+        const closeSafety = require('./orchestratorCloseSafety.cjs'), sessions = directory.list();
+        closeSafety.assertCloseEligibility(action.closeScope, sessions, relay.getRequests());
+        closeSafety.assertCloseInputEligibility(action.closeScope, sessions, target => observations.inputState(target));
+      }
+      catch (error) { return { ok: false, status: 'close-partial', error: error.message, delivery: 'not-dispatched' }; }
       const supplied = action.target || {};
       const current = directory.get(supplied.id || action.targetId);
       const target = { id: supplied.id || action.targetId, generation: supplied.generation ?? action.generation,
@@ -725,6 +744,7 @@ function installOrchestrator(options) {
       return directory.list();
     },
     getLaunchers: () => directory.launchers(),
+    getSession: id => directory.get(id),
     getWorkspaceState: signal => requestUi("workspace_state", {}, signal),
     readSession: async target => {
       const session = directory.get(target.id);
@@ -740,6 +760,7 @@ function installOrchestrator(options) {
     getRoots: () => ({ documents: app.getPath("documents"), locations: folderLocations(), projects: [...directory.projects(), ...[...new Set([...directory.projectPaths(), ...directory.list().map(s => s.cwd)].filter(Boolean))].filter(path => !directory.projects().some(project => project.path === path))] }),
     onCancel: input => { if (!input?.requestId) delivery.cancel(); voice?.cancelSpeech(input); },
     onUpstreamError: info => voice?.announceError(info),
+    onActivity: state => { voice?.reconcileTaskQuestions?.(); broadcast("orchestrator:activity", state); },
     onChange: state => {
       voice?.reconcileTaskQuestions?.();
       broadcast("orchestrator:state", { ...state, ready: state.ready && voiceReady, voiceReady });
@@ -1032,6 +1053,10 @@ function installOrchestrator(options) {
     // output/process events cannot replace the current pane's PID or activity.
     if (event?.type === "action-result") { const pending = pendingHost.get(event.actionId);
       if (pending && pending.engine === kind && pending.id === event.id && pending.generation === event.generation) pending.finish({ ...event, status: event.status || "acknowledged" }); }
+    // Retirement removed this pane from inventory, so there may be no current
+    // generation to compare. Its compact launch fence must still reject late
+    // creation/output events that would otherwise recreate a forgotten decoder.
+    if (kind === 'terminal' && getRuntime?.()?.getRecord?.(event?.id)?.closed) return false;
     if (kind === 'terminal') event = queuedInputAttempts.correlate(event);
     // Closed Fusion owners are retained privately while inventory exposes a
     // paused fallback. Only the matching owner's explicit restart may cross
@@ -1042,7 +1067,7 @@ function installOrchestrator(options) {
     // token. The visible inventory then has a paused fallback for the old pane.
     // Runtime admission, not that lagging UI projection, owns native identity.
     const native = kind === 'terminal' && event?.id
-      ? getRuntime?.()?.listSnapshots().find(snapshot => snapshot.id === event.id) : undefined;
+      ? directory.nativeSnapshot(event.id) : undefined;
     const currentGeneration = native?.generation ?? current?.generation;
     if (currentGeneration && event.generation && currentGeneration !== event.generation && !restartingChat) return false;
     directory.ingest(kind, event);
@@ -1060,12 +1085,20 @@ function installOrchestrator(options) {
       }
     }
     if (ended) relay.observeWork?.([ended]);
-    if (kind === "terminal") void observations.ingest(event).then(async () => {
-      const session = directory.get(event.id);
-      if (!session) return;
-      const result = await completions.capture(session);
-      relay.observeWork?.([session], result);
-    }).catch(() => {});
+    if (kind === "terminal") {
+      const parsed = observations.ingest(event);
+      if (!observationPublications.has(parsed)) {
+        observationPublications.add(parsed);
+        void parsed.then(async () => {
+          observationPublications.delete(parsed);
+          if (disposed) return;
+          const session = directory.get(event.id);
+          if (!session || session.generation !== event.generation) return;
+          const result = await completions.capture(session);
+          if (!disposed) relay.observeWork?.([session], result);
+        }).catch(() => { observationPublications.delete(parsed); });
+      }
+    }
     else if (ended && ["result", "error", "interrupted"].includes(event.type)) {
       relay.observeWork?.([ended], directory.readChat(ended).completedResult);
     }

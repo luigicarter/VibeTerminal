@@ -2,6 +2,36 @@ const readline = require("readline");
 const { encodeTerminalControls } = require('../shared/terminalControls.cjs');
 const { createTerminalHistory } = require('./terminalHistory.cjs');
 const sessions = new Map();
+let transportBlocked = false;
+const outgoingEvents = [];
+let outgoingOffset = 0;
+
+function updateSessionFlow(session) {
+  if (!session.terminal) return;
+  const paused = transportBlocked || session.historyBlocked === true;
+  if (paused === Boolean(session.outputPaused)) return;
+  session.outputPaused = paused;
+  if (paused) session.terminal.pause?.();
+  else session.terminal.resume?.();
+}
+function flushEvents() {
+  while (!transportBlocked && outgoingOffset < outgoingEvents.length) {
+    if (process.stdout.write(outgoingEvents[outgoingOffset++]) === false) {
+      transportBlocked = true;
+      for (const session of sessions.values()) updateSessionFlow(session);
+    }
+  }
+  if (outgoingOffset) { outgoingEvents.splice(0, outgoingOffset); outgoingOffset = 0; }
+}
+function writeEvent(event) {
+  outgoingEvents.push(`${JSON.stringify(event)}\n`);
+  flushEvents();
+}
+process.stdout.on?.('drain', () => {
+  transportBlocked = false;
+  flushEvents();
+  for (const session of sessions.values()) updateSessionFlow(session);
+});
 
 let pty = null;
 try {
@@ -24,7 +54,7 @@ function emit(event) {
     session.pendingEvents.push({ event: { at: Date.now(), ...event } });
     return;
   }
-  process.stdout.write(`${JSON.stringify({ at: Date.now(), ...event })}\n`);
+  writeEvent({ at: Date.now(), ...event });
 }
 
 function debug(event) {
@@ -126,7 +156,7 @@ function emitSnapshot(id, session) {
     if (sessions.get(id) !== session) return;
     slot.event = { ...event, ...snapshot };
     while (session.pendingEvents[0]?.event) {
-      process.stdout.write(`${JSON.stringify(session.pendingEvents.shift().event)}\n`);
+      writeEvent(session.pendingEvents.shift().event);
     }
   });
 }
@@ -199,6 +229,18 @@ function captureTerminalTitle(session, data, id) {
   }
 }
 
+function detachSessionListeners(session) {
+  session.dataSubscription?.dispose?.();
+  session.exitSubscription?.dispose?.();
+  session.dataSubscription = session.exitSubscription = undefined;
+}
+
+function disposeSession(session) {
+  detachSessionListeners(session);
+  session.history?.dispose();
+  session.pendingEvents.length = 0;
+}
+
 function createSession(payload) {
   debug({
     type: "create",
@@ -240,7 +282,7 @@ function createSession(payload) {
     if (incomingToken > existingToken) {
       cancelSessionSubmission(existingSession);
       existingSession?.terminal?.kill();
-      existingSession?.history.dispose();
+      disposeSession(existingSession);
       sessions.delete(payload.id);
     } else {
       if (existingSession?.terminal && (payload.cols || payload.rows)) {
@@ -302,7 +344,10 @@ function createSession(payload) {
   };
 
   try {
-    session.history = createTerminalHistory(cols, rows);
+    session.history = createTerminalHistory(cols, rows, { onBackpressure: blocked => {
+      session.historyBlocked = blocked;
+      updateSessionFlow(session);
+    } });
     const terminal = pty.spawn(shell.file, shell.args, {
       name: "xterm-256color",
       cols,
@@ -313,10 +358,11 @@ function createSession(payload) {
 
     session.terminal = terminal;
     sessions.set(payload.id, session);
+    updateSessionFlow(session);
     stopObserver.track(session, terminal, exited => terminal.onExit(exited));
     emit({ id: payload.id, type: "created", generation: session.generation, launchToken: session.launchToken, cols, rows, pid: terminal.pid, launchPending: session.launchPending, ...inputState(session) });
 
-    terminal.onData((data) => {
+    session.dataSubscription = terminal.onData((data) => {
       if (sessions.get(payload.id) !== session) {
         return;
       }
@@ -349,7 +395,8 @@ function createSession(payload) {
       });
     });
 
-    terminal.onExit(({ exitCode, signal }) => {
+    session.exitSubscription = terminal.onExit(({ exitCode, signal }) => {
+      detachSessionListeners(session);
       const currentSession = sessions.get(payload.id);
       if (currentSession !== session) {
         return;
@@ -389,7 +436,7 @@ function createSession(payload) {
       }, 250);
     }
   } catch (error) {
-    session.history?.dispose();
+    disposeSession(session);
     emit({
       id: payload.id,
       type: "error",
@@ -466,7 +513,7 @@ function handleMessage(message) {
         const session = sessions.get(message.payload.id);
         if (matchesSession(session, message.payload)) {
           cancelSessionSubmission(session);
-          session.history.dispose();
+          disposeSession(session);
           sessions.delete(message.payload.id);
         }
       });
@@ -480,14 +527,14 @@ function handleMessage(message) {
         if (session.terminal) {
           session.terminal.kill();
         }
-        session.history.dispose();
+        disposeSession(session);
         sessions.delete(message.payload.id);
       }
       break;
     }
 
     case "shutdown":
-      sessions.forEach((session) => { cancelSessionSubmission(session); session.terminal?.kill(); session.history.dispose(); });
+      sessions.forEach((session) => { cancelSessionSubmission(session); session.terminal?.kill(); disposeSession(session); });
       sessions.clear();
       process.exit(0);
       break;
@@ -621,7 +668,7 @@ function handleAction(payload, strict) {
     }
     if (payload.kind === "kill") {
       session.terminal.kill();
-      session.history.dispose();
+      disposeSession(session);
       sessions.delete(payload.id);
       return result(true, "kill-requested");
     }

@@ -2862,6 +2862,16 @@ export default function App() {
   function removeClosedSession(scope: SessionScope, session: AgentSession) {
     forgetSessionDraft(session.id);
     closedRuntimeIdsRef.current.add(session.id);
+    if (runtimeSnapshotsRef.current[session.id]) {
+      const next = { ...runtimeSnapshotsRef.current };
+      delete next[session.id];
+      runtimeSnapshotsRef.current = next;
+      setRuntimeSnapshots(next);
+    }
+    setRuntimeAcknowledgements(current => {
+      if (!(session.id in current)) return current;
+      const next = { ...current }; delete next[session.id]; return next;
+    });
     clearCodexTracking(session.id);
     const sessionId = session.id;
     updateScopeSessions(scope, (sessions) =>

@@ -17,7 +17,7 @@ const { prepareProjectPrerequisites } = require('./orchestratorProjects.cjs');
 const { handoffTargets } = require('./orchestratorHandoff.cjs');
 const { executeToolBatch, createHarnessProgress } = require('./orchestratorExecutionHarness.cjs');
 const { createModelRuntime } = require('./orchestratorModelRuntime.cjs');
-const { createIntentInterpreter } = require('./orchestratorInterpreter.cjs');
+const { createIntentInterpreter, createPlanningInput } = require('./orchestratorInterpreter.cjs');
 const { launcherCatalog, routingBindingMatches, sessionReady } = require('./orchestratorLaunchers.cjs');
 const { buildWorkspaceParameters, scopedWorkspaceTool } = require('./orchestratorToolSchema.cjs');
 const { workspaceToolGuide } = require('./orchestratorToolGuide.cjs');
@@ -41,7 +41,7 @@ const { buildReplyContext } = require('./orchestratorReplyContext.cjs');
 const { captureQueuedCommand, assertQueuedTransfer } = require('./orchestratorQueuedRecovery.cjs');
 const { remainingGrantSnapshots, settledRequestState, requestHasFailures } = require('./orchestratorRequestState.cjs');
 const { normalizeSpeech, prepareSpeech, RESULT_SPEECH_FALLBACK } = require('./orchestratorSpeech.cjs');
-const { INTENT_SYSTEM, INTENT_TOOL, normalizeIntent, projectIntent, bindDelegatedTask, claimDelegatedTaskCreation, resolveIntentTargetAvailability } = require('./orchestratorIntent.cjs');
+const { normalizeIntent, projectIntent, bindDelegatedTask, claimDelegatedTaskCreation, resolveIntentTargetAvailability } = require('./orchestratorIntent.cjs');
 const { matchAnswer } = require('./voiceAnswers.cjs');
 const { createFiles } = require('./orchestratorFiles.cjs');
 const { ACTIONS, isConversationResumeConfirmation, captureRelay, clarifyRelay, identifyProject, identifySessionGroup, selectRelay } = require('./orchestratorPolicy.cjs');
@@ -93,7 +93,7 @@ lifecycleMode preserve keeps the agent alive: never use Ctrl-C, Ctrl-D, Ctrl-Bac
 After accomplishing the requested terminal interaction, read its outcome and call finish_terminal with the current token, stepId, outcome completed and a concise factual text. Transport acceptance alone proves only input was written; distinguish sent, accepted/running, and finished work. If blocked, inspect and try a different applicable control only when the previous effect is known not dispatched; uncertain writes must never be replayed. Use finish_terminal outcome blocked with the concrete obstacle when recovery needs user input. Do not save a draft unless the user explicitly requested a draft. Do not repeat the request as your answer or stop with a promise while grants remain unfinished. Report what actually happened in natural language.`;
 const INSPECTION_SYSTEM = `${TERMINAL_NAVIGATION_POLICY}
 For responseKind terminal-inspection, and for individual grants marked inspection in mixed requests, inspect the existing terminal yourself and report the requested facts. Use terminal_interact with inputPurpose interaction for local informational commands and menu navigation; never send_prompt, start a coding task, change settings, spend a usage reset, grant permission, clear human input or interrupt work. An inspection grant permits the navigation needed to reveal information, not unrelated menu effects. Read the resulting screen before finishing; follow visible tabs or navigation hints when the requested detail is elsewhere. Use non-interrupting Escape only when the observed help identifies it as closing the inspection menu; read again after closing. If the data is already visible, report it without unnecessary input. If safe access or the requested data is unavailable, finish blocked with the observed limitation. finish_terminal text must contain the actual findings (provider, used versus remaining, relevant windows/reset times when shown) or the concrete missing information, never just 'done'.`;
-function createOrchestrator({ userDataPath, secureStorage, interpretIntent, routeTask, autoInspectionCompletion = true, getLaunchers = async () => [], getWorkspaceState = async () => ({ ok: false }), fetch: fetcher = globalThis.fetch, getSessions = async () => [], readSession = async () => ({}), dispatchAction = async () => ({ ok: false, error: 'No action adapter.' }), getRoots = async () => [], onChange = () => {}, onSpeak, onUpstreamError = () => {}, onCancel = () => {}, resolveWorkspaceIdentity = cwd => require('node:path').resolve(cwd).toLowerCase(), now = Date.now }) {
+function createOrchestrator({ userDataPath, secureStorage, interpretIntent, routeTask, autoInspectionCompletion = true, getLaunchers = async () => [], getWorkspaceState = async () => ({ ok: false }), fetch: fetcher = globalThis.fetch, getSessions = async () => [], getSession = async id => (await getSessions()).find(session => session.id === id), readSession = async () => ({}), dispatchAction = async () => ({ ok: false, error: 'No action adapter.' }), getRoots = async () => [], onChange = () => {}, onActivity, onSpeak, onUpstreamError = () => {}, onCancel = () => {}, resolveWorkspaceIdentity = cwd => require('node:path').resolve(cwd).toLowerCase(), now = Date.now }) {
   const storage = createSettings({ userDataPath, secureStorage }); const files = createFiles({ getRoots });
   const diagnostics = createDiagnostics({ userDataPath, getSecrets: () => [storage.getKey()], now });
   const workHistory = createWorkHistory({ userDataPath, getSecrets: () => [storage.getKey()], now });
@@ -101,7 +101,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
   const assignments = createRoutingRegistry({ now });
   const creations = new Map();
   const deliveryDiagnostics = new Map(), loggedResults = new WeakSet();
-  const state = { enabled: false, ready: false, busy: false, phase: 'off', sessions: [], messages: [], requests: [], receipts: [], usage: { brain: 0, transcription: 0, speech: 0 } };
+  const state = { publicationRevision: 0, enabled: false, ready: false, busy: false, phase: 'off', sessions: [], messages: [], requests: [], receipts: [], usage: { brain: 0, transcription: 0, speech: 0 } };
   let epoch = 0, timer = null, disposed = false, catalog = [], catalogAt = 0, refreshPending = null, monitorController = null, monitoring = false;
   const observed = new Map();
   const historyCandidates = new Map();
@@ -356,7 +356,15 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
     });
   }
   function snapshot() { return redact({ ...state, workHistory: workHistory.snapshot(), tasks: tasks.snapshot(), activeTargets: activity.snapshot(state.sessions, epoch), ready: validated && Boolean(storage.getKey() && storage.getSettings().model), settings: storage.getSettings(), preferences: storage.getPreferences() }); }
-  function emit() { if (!disposed) { try { const view = snapshot(); conversationStore.save({ messages: view.messages, receipts: view.receipts, tasks: view.tasks }); onChange(view); } catch {} } }
+  function emit() { if (!disposed) { try { state.publicationRevision++; const view = snapshot(); conversationStore.save({ messages: view.messages, receipts: view.receipts, tasks: view.tasks }); onChange(view); } catch {} } }
+  function emitActivity() {
+    if (!onActivity) return emit();
+    if (disposed) return;
+    try {
+      state.publicationRevision++;
+      onActivity(redact({ publicationRevision: state.publicationRevision, sessions: state.sessions, activeTargets: activity.snapshot(state.sessions, epoch) }));
+    } catch {}
+  }
   function message(role, text, extra = {}) { state.messages.push({ id: randomUUID(), ...(context().job && { requestId: context().job.task.requestId }), role, text: String(text).slice(0, 16000), at: now(), ...extra }); state.messages = state.messages.slice(-10000); emit(); }
   function diagnosticContextRequest(value) { return value.requestId || context().job?.task.requestId; }
   function receipt(action, result, context = {}) { const item = { id: randomUUID(), requestId: diagnosticContextRequest(context), kind: action.kind, targetId: action.target?.id || action.targetId || result.id || context.targetId, generation: action.target?.generation ?? action.generation ?? result.generation ?? context.generation, status: result.status || (result.ok ? 'acknowledged' : 'rejected'), text: result.error || result.message || result.reason || result.text || (result.ok ? 'Action acknowledged.' : 'Action rejected.'), at: now() }; state.receipts.push(item); state.receipts = state.receipts.slice(-10000);
@@ -634,7 +642,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
       }
     }
   }
-  async function prepareTaskAssignments({ job, intent, model, tokens, signal, token, scope, diagnosticContext, commandContext }) {
+  async function prepareTaskAssignments({ job, intent, model, tokens, signal, token, scope, diagnosticContext }) {
     const pending = [];
     for (const grant of intent.commandPlan.grants.filter(item => item.kind === 'delegate_task')) {
       try {
@@ -860,7 +868,8 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
       // Reconciliation still runs on unchanged observations: waiting tasks and
       // expired context must progress independently of UI publication.
       rememberTurnEndings(state.sessions); tasks.reconcile(state.sessions); reconcileAssignments(); reportTaskProgress(); reconcileConversationTarget();
-      if (changed || historyChanged) emit();
+      if (historyChanged) emit();
+      else if (changed) emitActivity();
       return { ok: true, sessions: redact(state.sessions) };
     } catch (error) { diagnosticError(error, { stage: 'inventory' }); return { ok: false, error: cleanError(error) }; } finally { refreshPending = null; } })(); const result = await refreshPending; if (options.monitor) await monitor(); return result;
   }
@@ -906,6 +915,8 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
   const workspaceExecutor = createWorkspaceExecutor({
     getSessions: () => state.sessions, getRequests: () => state.requests, getEpoch: () => epoch, isDisposed: () => disposed,
     active, getRoots, getWorkspaceState, readSession, dispatchAction, requireFreshSessions, refresh, files,
+    getCurrentSession: getSession,
+    getConfiguration: () => ({ ...storage.getSettings(), enabled: state.enabled, ready: validated && Boolean(storage.getKey() && storage.getSettings().model) }),
     preferences: { get: () => storage.getPreferences(), update: input => storage.preferences(input) },
     tasks: { snapshot: () => tasks.snapshot(), waitForAssignmentSubmission: (...args) => tasks.waitForAssignmentSubmission(...args),
       watch: (...args) => tasks.watch(...args), reconcile: (...args) => tasks.reconcile(...args), track: (...args) => tasks.track(...args) },
@@ -1137,7 +1148,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
           intent.projectContext = context().projectContext;
           intent.sessions = structuredClone(state.sessions);
         }
-        const pending = await prepareTaskAssignments({ job, intent, model: chosenModel, tokens: brainTokens, signal, token, scope, diagnosticContext, commandContext }); active(token);
+        const pending = await prepareTaskAssignments({ job, intent, model: chosenModel, tokens: brainTokens, signal, token, scope, diagnosticContext }); active(token);
         if (pending.some(item => item.ownsCreation)) { context().conversationTarget = null; context().pendingConversationTarget = null; }
         if (!routingContext.sequence || routingContext.sequence <= job.task.sequence) Object.assign(routingContext, { sequence: job.task.sequence, conversationTarget: context().conversationTarget, projectContext: context().projectContext, conversationGroup: context().conversationGroup, pendingConversationTarget: context().pendingConversationTarget });
         // Launch/result waits never occupy the serialized interpretation lane.
@@ -1229,6 +1240,10 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
       const conversation = [{ role: 'system', content: operating ? `${SYSTEM}\nFor operate_terminal grants the following request-scoped rules replace legacy one-shot input restrictions:\n${OPERATOR_SYSTEM}` : SYSTEM }, { role: 'user', content: JSON.stringify({ instruction: intent.text, confirmedResume: intent.confirmedResume && { reference: intent.confirmedResume.reference, selection: intent.confirmedResume.selection }, dependencyResults, authorizedCommands: projectIntent(intent.commandPlan), operationHistory, projectContext: context().projectContext, authorizedRelay: intent.authorizedRelay, targetId: intent.targetId, conversationTarget: intent.conversationTarget, pendingTarget: context().pendingConversationTarget, recentConversation, replyContext, latestAction: actionContext(recentActions.at(-1)), recentActions: recentActions.slice(0, -1).map(item => actionContext(item, 500)), readBookmarks: [...readBookmarks.values()].filter(item => relevantIds.has(item.requestId)), roots, sessions: listSessionSummaries(state.sessions, { limit: 40, includeNavigationGuide: false }).sessions, sessionDirectory: { total: state.sessions.length, truncated: state.sessions.length > 40 }, preferences: storage.getPreferences() }) }];
       conversation[0].content += `\n${workspaceToolGuide(workspaceTool)}`;
       if (intent.commandPlan.grants.some(grant => grant.inspection) || intent.commandPlan.responseKind === 'terminal-inspection') conversation[0].content += `\n${INSPECTION_SYSTEM}`;
+      if (!intent.commandPlan.grants.length) {
+        const voice = require('./orchestratorWorkspace.cjs').VOICE_CAPABILITIES;
+        conversation[0].content += `\nVoice: ${voice.followUp} There is no always-listen-after-reply setting or voice-settings tool. Generic interpretation errors do not establish a cause.`;
+      }
       if (input.origin === 'voice') conversation[0].content += '\nVoice turn contract: finish your reply with workspace respond, text, speechText and responseTurn. Put the full written response in text and a natural spoken TL;DR in speechText. Be brief by default and choose the detail needed for the actual outcome, reported checks, and unresolved blockers. Summarize rather than reading a detailed report aloud. For a brief conversational reply, speechText can match text. Questions must retain their complete wording. Use listen when you ask a question, offer choices, or need a user decision (even in ordinary conversation); this opens the microphone for their answer without Hey Lina. Use complete when you have answered and need no reply. Use dismiss when the user asks to end this voice conversation. ask_user also opens listening and is appropriate for missing task information. Do not ask a question only in unstructured prose, and do not invite an unnecessary answer after a completed action. These response controls do not cancel terminal work or authorize any terminal effect.';
       const originalTasks = [...new Set((job.routeItems || []).map(item => item.workItemId))].map(id => workItems.get(id))
         .filter(item => item?.objective && !intent.commandPlan.grants.some(grant => grant.text === item.objective))
@@ -1646,7 +1661,10 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
     // Reject a known window that cannot even hold the fixed interpreter before
     // presenting the selected model as ready. This is local; it makes no paid call.
     if (selected?.contextLength && !interpretIntent) {
-      try { fitMessages({ messages: [{ role: 'system', content: INTENT_SYSTEM }, { role: 'user', content: JSON.stringify({ instruction: 'Hi', sessions: [] }) }], tools: [INTENT_TOOL], contextLength: selected.contextLength, outputTokens: outputTokensFor(selected, BRAIN_OUTPUT_TOKENS) }); }
+      try {
+        const { messages, planningTools } = createPlanningInput({ instruction: 'Hi', sessions: [] });
+        fitMessages({ messages, tools: planningTools, contextLength: selected.contextLength, outputTokens: outputTokensFor(selected, BRAIN_OUTPUT_TOKENS) });
+      }
       catch (error) { validated = false; throw error; }
     }
     state.monitoringPaused = false; monitorRetryAt = 0;

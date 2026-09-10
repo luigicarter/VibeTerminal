@@ -13,12 +13,14 @@ const { listSessionSummaries } = require('./orchestratorContext.cjs');
 const { terminalNavigationGuide } = require('./orchestratorTerminalGuide.cjs');
 const { createInspectionEvidence } = require('./orchestratorInspectionEvidence.cjs');
 const { fileReadSource } = require('./orchestratorReadRecovery.cjs');
+const { assertCloseEligibility } = require('./orchestratorCloseSafety.cjs');
 
 // Executes a scoped plan through workspace capabilities. It has no model API,
 // credential storage, conversation ownership or ambient request context. The
 // caller passes the active request explicitly; live identity getters are reread
 // after awaits. Only this executor owns its cross-request effect deduplication.
 function createWorkspaceExecutor({ getSessions, getRequests, getEpoch, isDisposed, active,
+  getCurrentSession = id => getSessions().find(session => session.id === id), getConfiguration = () => undefined,
   getRoots, getWorkspaceState, readSession, dispatchAction, requireFreshSessions, refresh,
   files, preferences: preferenceStore, tasks, activity, historyCandidates, deliveryDiagnostics,
   workHistory, workItems, operationState, userAnswer, trackManagedTaskOwnership,
@@ -65,7 +67,7 @@ function createWorkspaceExecutor({ getSessions, getRequests, getEpoch, isDispose
       await requireFreshSessions(); check();
       const ui = await getWorkspaceState(signal); check();
       const roots = await getRoots(); check();
-      return redact(workspaceMap({ ui, roots, sessions: getSessions(), tasks: tasks.snapshot() }));
+      return redact(workspaceMap({ ui, roots, sessions: getSessions(), tasks: tasks.snapshot(), interactions: getRequests(), configuration: getConfiguration() }));
     }
     if (action.kind === 'list_work') { await requireFreshSessions(); check(); return redact(workHistory.list({ ...action, limit: Math.min(Number(action.limit) || 10, 10) })); }
     if (action.kind === 'list_sessions') { await requireFreshSessions(); check(); return redact(listSessionSummaries(getSessions(), { ...action, includeNavigationGuide: !intent })); }
@@ -80,6 +82,7 @@ function createWorkspaceExecutor({ getSessions, getRequests, getEpoch, isDispose
       await requireFreshSessions(); check();
       const target = getSessions().find(s => s.id === id);
       if (!target) throw new Error('Unknown target session.');
+      const binding = { target: { id, generation: target.generation, launchToken: target.launchToken }, nativeIdentity: sessionIdentity(target) };
       const readId = intent?.operatorObservations.beginRead(target, diagnosticContext.modelRound);
       const requestedGeneration = action.target?.generation ?? action.generation;
       if (requestedGeneration != null && requestedGeneration !== target.generation) throw new Error('This source session changed. Select it again.');
@@ -91,6 +94,13 @@ function createWorkspaceExecutor({ getSessions, getRequests, getEpoch, isDispose
       catch (error) { check(); return { ok: false, status: 'unavailable', error: cleanError(error), readSource }; }
       check();
       if (data?.ok === false) return { ok: false, status: data.status || 'unavailable', error: data.error || 'The terminal observation is unavailable.', readSource };
+      const current = await getCurrentSession(id); check();
+      if (!current || current.generation !== binding.target.generation || current.launchToken !== binding.target.launchToken ||
+          data?.id !== undefined && data.id !== id || data?.generation !== undefined && data.generation !== binding.target.generation) {
+        return { ok: false, status: 'stale-generation', error: 'The terminal changed during this read. Read its current generation again.', readSource };
+      }
+      if (!routingBindingMatches(binding, current)) return { ok: false, status: 'conversation-changed',
+        error: 'The native conversation changed during this read. Read the current conversation again.', readSource };
       if (action.beforeSequence === undefined && intent?.commandPlan.grants.some(grant => grant.inspection && grant.targets.some(item => item.id === target.id && item.generation === target.generation))) {
         intent.inspectionEvidence ||= createInspectionEvidence();
         intent.inspectionEvidence.observe(target, redact(data));
@@ -309,6 +319,7 @@ function createWorkspaceExecutor({ getSessions, getRequests, getEpoch, isDispose
     const baseline = activityTarget && { ...structuredClone(getSessions().find(session => session.id === targetId)), submittedAt: now() };
     const work = Promise.resolve().then(() => {
       check();
+      if (scopedClose) assertCloseEligibility(action.closeScope, getSessions(), getRequests());
       if (intent && action.grantId) assertIntentTargetAvailability(intent.commandPlan, action, getSessions());
       if (intent) { claimGrant(action, intent.commandPlan); intent.commandDispatched = true; requestContext.pendingCommand = null; }
       if (operatorGrant) {

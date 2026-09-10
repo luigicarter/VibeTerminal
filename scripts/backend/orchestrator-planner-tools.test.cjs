@@ -17,3 +17,10 @@ test('planner decoder rejects unoffered functions, discriminator overrides and m
     [call('plan_open_blank_terminal',{text:'Run work.'})], [call('plan_add_project',{kind:'remove_project',path:'C:/App'})],
     [call('interpret_workspace',{goal:'Mixed',actions:[]}),call('plan_add_project',{path:'C:/App'})]])assert.throws(()=>decodePlannerCalls(calls,tools,'Original request'));
 });
+test('conversation planning grants no effects and rejects mixed or extra authority',()=>{
+  const tools=plannerTools({sessions:[]});
+  assert.deepEqual(decodePlannerCalls([call('plan_conversation',{goal:'Explain the earlier error.'})],tools,'What was that error?'),
+    {goal:'Explain the earlier error.',actions:[],access:'read-only',executionMode:'reason'});
+  for(const calls of [[call('plan_conversation',{goal:'Explain',targetIds:['worker']})],
+    [call('plan_conversation',{goal:'Explain'}),call('plan_close',{scope:{type:'workspace'}})]])assert.throws(()=>decodePlannerCalls(calls,tools,'Explain'));
+});

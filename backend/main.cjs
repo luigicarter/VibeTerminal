@@ -3420,7 +3420,10 @@ async function stopSessionObserved(payload) {
   const stopped = await observedStops.stop(payload);
   if (stopped.ok && stopped.launchSettled && !['fusion', 'openfusion'].includes(payload?.kind)) {
     const snapshot = terminalRuntime?.getRecord(payload.id)?.snapshot;
-    if (snapshot?.launchToken === payload.launchToken && (payload.generation === undefined || snapshot.generation === payload.generation)) releaseTerminalResources(payload.id, snapshot.generation);
+    if (snapshot?.launchToken === payload.launchToken && (payload.generation === undefined || snapshot.generation === payload.generation)) {
+      releaseTerminalResources(payload.id, snapshot.generation);
+      orchestratorIntegration?.forgetTerminal(payload.id, snapshot.generation);
+    }
   }
   return stopped;
 }

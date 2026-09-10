@@ -4,10 +4,10 @@ Lina Terminal ships to Windows users as an Electron Builder NSIS installer hoste
 
 ## Current Public Release
 
-The current Windows release is `v0.1.113`:
+The current Windows release is `v0.1.114`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.113`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.113/LinaTerminal-Setup-0.1.113.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.114`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.114/LinaTerminal-Setup-0.1.114.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -66,13 +66,14 @@ The compiled `dist/` renderer is still included because it is the UI Electron di
 
 ## Local Build
 
-Version `0.1.113` repairs Claude child task settlement and retains native
-background activity after a root response. Terminal scrollback now preserves
-5,000 rows of decoded history through redraws and pane reattachment, including
-terminal styles, modes and replay ordering. See
-[the release review](release-0.1.113-review.md),
-[the Claude investigation](claude-terminal-status-investigation.md) and
-[terminal runtime](terminal-runtime.md) for verification and remaining boundaries.
+Version `0.1.114` releases closed-terminal resources, batches screen observation,
+and publishes terminal activity without copying unchanged conversation history.
+It also tightens conditional closure and conversation identity checks, repairs
+workspace activity counts, and aligns model readiness with the current planner.
+See [the release review](release-0.1.114-review.md),
+[the performance review](performance-orchestrator-overhaul-2026-09-10.md) and
+[the capability audit](orchestrator-capability-audit-2026-09-10.md) for verification
+and remaining boundaries.
 Installed applications apply updates through the user's Update/Restart action;
 publication does not restart an active workspace.
 

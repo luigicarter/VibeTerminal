@@ -9,6 +9,7 @@ The `frontend/` folder contains the Vite React renderer that users see inside th
 
 ## Files
 
+- `frontend/orchestratorState.ts` + `orchestratorUi.ts` - Merge small activity publications with full Orchestrator state by publication revision. Activity keeps history-array references and cannot overwrite the initial transcript with an incomplete snapshot.
 - `frontend/main.tsx` - React entry point mounted by `index.html`.
 - `frontend/components/WorkspaceStart.tsx` + `workspaceStart.css` - Balanced session catalog and initial project actions; uses the same profile registry and launch callbacks as the toolbar.
 - `frontend/components/OrchestratorPanel.tsx` + `workspaceDockResize.ts` + `workspaceDock.css` - Workspace tool dock with pointer/keyboard resizing, persisted height and viewport clamps; full retained transcript scrolling follows new messages only while at the bottom.

@@ -2,6 +2,7 @@ import type { AgentSession } from "./types";
 import type { HISTORY_CONFIG_FIELDS } from "./orchestratorHistory";
 import type { WorkRecord } from "./components/orchestratorWorkHistoryModel";
 import { useEffect, useState } from "react";
+import { mergeRelayActivity, type RelayActivity } from "./orchestratorState";
 export interface RelaySession extends Partial<Pick<AgentSession, typeof HISTORY_CONFIG_FIELDS[number] | "threadRef" | "resumeRef" | "fusion" | "openFusion">> {
     id: string;
     generation?: string;
@@ -79,6 +80,7 @@ export interface RelayTask {
     assignment?: { decision: "create" | "reuse"; reason?: string; workItemId?: string };
 }
 export interface RelayState {
+    publicationRevision?: number;
     enabled: boolean;
     ready: boolean;
     busy: boolean;
@@ -135,6 +137,7 @@ export interface RelayApi {
     stopSessionObserved(payload: { operationId: string; id: string; launchToken: number; generation?: string | number; kind: string; observeOnly?: boolean }): Promise<{ ok: boolean; operationId: string; process: string; launchSettled: boolean; error?: string }>;
     getState(): Promise<RelayState>;
     onState(callback: (state: RelayState) => void): () => void;
+    onActivity?(callback: (state: RelayActivity) => void): () => void;
     configure(patch: Record<string, unknown>): Promise<RelayResult>;
     models(kind?: "brain" | "transcription" | "speech"): Promise<{
         id: string;
@@ -170,11 +173,17 @@ export function useOrchestrator() {
             return;
         let live = true;
         let received = false;
+        let latestActivity: RelayActivity | undefined;
+        const unsubscribeActivity = api.onActivity?.(next => {
+            if (!live || latestActivity && next.publicationRevision <= latestActivity.publicationRevision) return;
+            latestActivity = next;
+            setState(previous => previous && mergeRelayActivity(previous, next));
+        });
         const unsubscribe = api.onState(next => { received = true; if (live)
-            setState(next); });
+            setState(mergeRelayActivity(next, latestActivity)); });
         void api.getState().then(next => { if (live && !received)
-            setState(next); }).catch(() => { });
-        return () => { live = false; unsubscribe(); };
+            setState(mergeRelayActivity(next, latestActivity)); }).catch(() => { });
+        return () => { live = false; unsubscribe(); unsubscribeActivity?.(); };
     }, []);
     return state;
 }

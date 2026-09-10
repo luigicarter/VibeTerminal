@@ -1,5 +1,5 @@
 'use strict';
-const { INTENT_SYSTEM, INTENT_TOOL, normalizeIntent } = require('./orchestratorIntent.cjs');
+const { INTENT_SYSTEM, normalizeIntent } = require('./orchestratorIntent.cjs');
 const { PLANNER_TOOL_PROTOCOL, plannerTools, decodePlannerCalls } = require('./orchestratorPlannerTools.cjs');
 const { canonicalizeInterpretation } = require('./orchestratorInterpretationSchema.cjs');
 const { TARGET_REVIEW_SYSTEM, targetReviewPayload, targetReviewDecision, eligibleExistingTargets } = require('./orchestratorTargetReview.cjs');
@@ -9,6 +9,37 @@ const { listSessionSummaries } = require('./orchestratorContext.cjs');
 const { fitMessages } = require('./orchestratorBudget.cjs');
 const { completionOptions, exhaustedReply } = require('./orchestratorModelOptions.cjs');
 const { OpenRouterError, isCancellation } = require('./openRouterErrors.cjs');
+const { CLOSE_REVIEW_SYSTEM, closeReviewPayload, closeReviewPolicies } = require('./orchestratorCloseSafety.cjs');
+
+function createPlanningInput(context, redact = value => value) {
+  // Completed conversations provide context, not recoverable command IDs.
+  // Do not advertise continuation fields when no pending authority exists.
+  const planningTools = plannerTools(context);
+  const plannerSystem = INTENT_SYSTEM + "\n" + PLANNER_TOOL_PROTOCOL;
+  const prioritized = new Set([context.targetId, ...eligibleExistingTargets(context), ...(context.previousCommand?.candidates || []).map(target => target.id), ...(context.previousCommand?.grants || []).flatMap(grant => grant.targets?.map(target => target.id) || [])].filter(Boolean));
+  const sessions = context.sessions.filter(session => prioritized.has(session.id));
+  const capabilities = new Map();
+  for (const session of context.sessions) {
+    const key = JSON.stringify([session.kind || session.provider, session.cwd]);
+    if (!capabilities.has(key)) capabilities.set(key, { provider: session.kind || session.provider, cwd: session.cwd, count: 0 });
+    capabilities.get(key).count++;
+  }
+  const planningWork = item => { if (!item) return item; const { binding, ...summary } = item; return summary; };
+  const workspaceContext = context.workspaceContext && { view: context.workspaceContext.view, projectId: context.workspaceContext.projectId, cwd: context.workspaceContext.cwd };
+  // Intent receives user-authored commands and typed identity metadata only.
+  // Terminal prose, assistant summaries, diagnostics and preferences cannot mint effects.
+  const payload = { instruction: context.instruction, requestId: context.requestId, workItems: context.workItems?.map(planningWork), replyWorkItem: planningWork(context.replyWorkItem), launchers: context.launchers,
+    recentUserMessages: context.recentUserMessages, recentConversation: context.recentConversation, replyContext: context.replyContext, dependencyResults: context.dependencyResults, originalInstruction: context.originalInstruction, pendingCommands: context.pendingCommands?.map(command => ({ requestId: command.requestId, queued: command.queued, access: command.access, dependsOnRequestIds: command.dependsOnRequestIds, afterResults: command.afterResults, responseKind: command.responseKind, instruction: command.instruction.slice(0, 500), candidates: command.candidates?.slice(0, 50), grants: command.grants?.map(grant => ({ kind: grant.kind, inspection: grant.inspection, targets: grant.targets, args: grant.args, ...(grant.text && { textPreview: grant.text.slice(0, 300) }) })) })), tasks: context.tasks?.slice(-70).map(task => ({ requestId: task.requestId, sequence: task.sequence, text: task.text.slice(0, 500), status: task.status, label: task.label, targets: task.targets, dependsOn: task.dependsOn, ...(task.question && { question: { id: task.question.id, text: task.question.text.slice(0, 500) } }) })), previousCommand: context.previousCommand,
+    projectContext: context.projectContext, targetId: context.targetId, conversationTarget: context.conversationTarget, interactionContext: context.interactionContext,
+    conversationGroup: context.conversationGroup, authorizedRelay: context.authorizedRelay,
+    workspaceContext, terminalCapabilities: [...capabilities.values()].slice(0, 100),
+    capabilityDirectory: { total: capabilities.size, truncated: capabilities.size > 100 },
+    sessions: listSessionSummaries(sessions, { limit: 200, includeNavigationGuide: false }).sessions,
+    sessionDirectory: { total: context.sessions.length, addressed: sessions.length, unaddressedOmitted: true, truncated: sessions.length > 200 },
+    requests: context.requests, roots: context.roots };
+  const messages = [{ role: 'system', content: plannerSystem }, { role: 'user', content: JSON.stringify(redact(payload)) }];
+  return { planningTools, plannerSystem, messages };
+}
 
 // Compiles a request into a validated plan. This component has no terminal,
 // routing-reservation, scheduler-mutation or dispatch capability. The caller owns
@@ -33,32 +64,7 @@ function createIntentInterpreter({ interpretIntent, getTask, complete, redact, c
     let needsAssignment = false, inspectionRepair;
     if (interpretIntent) raw = await interpretIntent(context);
     else {
-      // Completed conversations provide context, not recoverable command IDs.
-      // Do not advertise continuation fields when no pending authority exists.
-      const planningTools = plannerTools(context);
-      const plannerSystem = INTENT_SYSTEM + "\n" + PLANNER_TOOL_PROTOCOL;
-      const prioritized = new Set([context.targetId, ...eligibleExistingTargets(context), ...(context.previousCommand?.candidates || []).map(target => target.id), ...(context.previousCommand?.grants || []).flatMap(grant => grant.targets?.map(target => target.id) || [])].filter(Boolean));
-      const sessions = context.sessions.filter(session => prioritized.has(session.id));
-      const capabilities = new Map();
-      for (const session of context.sessions) {
-        const key = JSON.stringify([session.kind || session.provider, session.cwd]);
-        if (!capabilities.has(key)) capabilities.set(key, { provider: session.kind || session.provider, cwd: session.cwd, count: 0 });
-        capabilities.get(key).count++;
-      }
-      const planningWork = item => { if (!item) return item; const { binding, ...summary } = item; return summary; };
-      const workspaceContext = context.workspaceContext && { view: context.workspaceContext.view, projectId: context.workspaceContext.projectId, cwd: context.workspaceContext.cwd };
-      // Intent receives user-authored commands and typed identity metadata only.
-      // Terminal prose, assistant summaries, diagnostics and preferences cannot mint effects.
-      const payload = { instruction: context.instruction, requestId: context.requestId, workItems: context.workItems?.map(planningWork), replyWorkItem: planningWork(context.replyWorkItem), launchers: context.launchers,
-        recentUserMessages: context.recentUserMessages, recentConversation: context.recentConversation, replyContext: context.replyContext, dependencyResults: context.dependencyResults, originalInstruction: context.originalInstruction, pendingCommands: context.pendingCommands?.map(command => ({ requestId: command.requestId, queued: command.queued, access: command.access, dependsOnRequestIds: command.dependsOnRequestIds, afterResults: command.afterResults, responseKind: command.responseKind, instruction: command.instruction.slice(0, 500), candidates: command.candidates?.slice(0, 50), grants: command.grants?.map(grant => ({ kind: grant.kind, inspection: grant.inspection, targets: grant.targets, args: grant.args, ...(grant.text && { textPreview: grant.text.slice(0, 300) }) })) })), tasks: context.tasks?.slice(-70).map(task => ({ requestId: task.requestId, sequence: task.sequence, text: task.text.slice(0, 500), status: task.status, label: task.label, targets: task.targets, dependsOn: task.dependsOn, ...(task.question && { question: { id: task.question.id, text: task.question.text.slice(0, 500) } }) })), previousCommand: context.previousCommand,
-        projectContext: context.projectContext, targetId: context.targetId, conversationTarget: context.conversationTarget, interactionContext: context.interactionContext,
-        conversationGroup: context.conversationGroup, authorizedRelay: context.authorizedRelay,
-        workspaceContext, terminalCapabilities: [...capabilities.values()].slice(0, 100),
-        capabilityDirectory: { total: capabilities.size, truncated: capabilities.size > 100 },
-        sessions: listSessionSummaries(sessions, { limit: 200, includeNavigationGuide: false }).sessions,
-        sessionDirectory: { total: context.sessions.length, addressed: sessions.length, unaddressedOmitted: true, truncated: sessions.length > 200 },
-        requests: context.requests, roots: context.roots };
-      const messages = [{ role: 'system', content: plannerSystem }, { role: 'user', content: JSON.stringify(redact(payload)) }];
+      const { planningTools, plannerSystem, messages } = createPlanningInput(context, redact);
       const ask = (outputTokens, repair) => complete({ model: model.id,
         messages: fitMessages({ messages: repair ? [{ role: 'system', content: `${plannerSystem}\nYour previous interpretation did not conform to the tool contract. Validation failure: ${repair} Interpret the original user request again. Use the supplied planning tools with their exact argument schemas. Use operation calls for actions, and interpret_workspace only for metadata or clarification. Do not add wrappers or commentary keys; actionable requests still require their authorized effects. Preserve all original authorization constraints; do not guess missing targets or answers.` }, ...messages.slice(1)] : messages, tools: planningTools, contextLength: model.contextLength, outputTokens }),
         // Some providers accept a forced function request, then never finish it.
@@ -85,8 +91,18 @@ function createIntentInterpreter({ interpretIntent, getTask, complete, redact, c
           const calls = response.choices?.[0]?.message?.tool_calls;
           raw = decodePlannerCalls(calls, planningTools, context.instruction);
           raw = canonicalizeInterpretation(raw);
-          const plan = validateInterpretedPlan(raw, context, true);
+          let plan = validateInterpretedPlan(raw, context, true);
           repairStage = 'review';
+          const closeReview = closeReviewPayload(plan, context);
+          if (closeReview) {
+            const reviewed = await complete({ model: model.id, max_tokens: 1600, ...completionOptions(model),
+              messages: fitMessages({ messages: [{ role: 'system', content: CLOSE_REVIEW_SYSTEM },
+                { role: 'user', content: JSON.stringify(redact(closeReview)) }], contextLength: model.contextLength, outputTokens: 1600 }) }, signal);
+            if (signal.aborted) throw new Error('Cancelled.');
+            const closePolicies = closeReviewPolicies(reviewed, closeReview);
+            plan = validateInterpretedPlan(raw, { ...context, closePolicies }, true);
+            recordDiagnostic({ ...diagnosticContext, event: 'intent_review', stage: 'close_selection', status: 'verified' });
+          }
           const targetReview = targetReviewPayload(plan, context);
           if (targetReview) {
             const reviewKey = JSON.stringify(redact(targetReview));
@@ -170,11 +186,11 @@ function createIntentInterpreter({ interpretIntent, getTask, complete, redact, c
         } catch (error) {
           if (error instanceof OpenRouterError || isCancellation(error) || error?.message === 'Session spending limit reached.') throw error;
           if (error?.code === 'ORCHESTRATOR_TARGET_REVIEW_UNRESOLVED') throw error;
-          if (['ORCHESTRATOR_UNKNOWN_LAUNCHER', 'ORCHESTRATOR_UNAVAILABLE_LAUNCHER', 'ORCHESTRATOR_INSPECTION_SELECTION'].includes(error?.code) && typeof error.clarification === 'string') {
-            // Missing launcher knowledge is not malformed JSON. Reinterpreting
-            // it could substitute a provider or discard a sibling request.
+          if (['ORCHESTRATOR_UNKNOWN_LAUNCHER', 'ORCHESTRATOR_UNAVAILABLE_LAUNCHER', 'ORCHESTRATOR_INSPECTION_SELECTION', 'ORCHESTRATOR_CLOSE_SELECTION'].includes(error?.code) && typeof error.clarification === 'string') {
+            // Unresolved selection is not malformed JSON. Reinterpreting could
+            // substitute a provider, weaken a close condition or drop a sibling.
             diagnosticError(error, { ...diagnosticContext, stage: 'interpretation', status: 'clarification' });
-            return normalizeIntent({ goal: 'Clarify the requested terminal type while preserving the original request.',
+            return normalizeIntent({ goal: 'Clarify the requested selection while preserving the original request.',
               actions: [], clarification: error.clarification }, context);
           }
           // Validator-owned messages describe the contract failure, never echo raw arguments.
@@ -204,4 +220,4 @@ function createIntentInterpreter({ interpretIntent, getTask, complete, redact, c
   return interpret;
 }
 
-module.exports = { createIntentInterpreter };
+module.exports = { createIntentInterpreter, createPlanningInput };

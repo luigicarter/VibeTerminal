@@ -305,6 +305,14 @@ function normalizeIntent(raw, context = {}) {
         closeScope = require('./orchestratorCloseScope.cjs').resolveCloseScope(command, context);
         command = { ...command, targetIds: closeScope.targets.map(target => target.id), selection: 'all' };
       } else if (context.requireCloseScope) throw new Error('Close requires a scope selector; do not enumerate a project subset.');
+      if (closeScope) {
+        const policy = context.closePolicies?.[commandIndex];
+        if (policy && !closeScope.condition) {
+          closeScope.condition = policy.condition;
+          if (policy.expectedCount !== null && policy.expectedCount !== closeScope.targetCount) throw require('./orchestratorCloseSafety.cjs').closeSafetyError('The selected pane count does not match the requested count. No terminal was closed.');
+        }
+        require('./orchestratorCloseSafety.cjs').assertCloseEligibility(closeScope, context.sessions || [], context.requests || []);
+      }
     }
     const targeted = TARGET_KINDS.has(command.kind), answer = ANSWER_KINDS.has(command.kind);
     const argumentNames = ARGUMENTS[command.kind] || [];

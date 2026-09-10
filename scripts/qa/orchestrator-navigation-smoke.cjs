@@ -63,6 +63,17 @@ async function navigate(view, cwd) { const result = await dispatch({ kind: "navi
     const measurements = await cdp.eval(`(async()=>{let events=0;const stop=window.vibe.orchestrator.onState(()=>events++);const start=performance.now();try{for(let i=0;i<40;i++){const result=await window.vibe.orchestrator.dispatch({kind:'list_sessions'});if(!result.ok)throw Error('Inventory refresh failed');}return {refreshes:40,elapsedMs:performance.now()-start,stateEvents:events,messages:(await window.vibe.orchestrator.getState()).messages.length};}finally{stop();}})()`);
     measurements.rendererTaskMs = ((await cdp.send('Performance.getMetrics')).metrics.find(item => item.name === 'TaskDuration').value - before) * 1000;
     assert(measurements.messages >= 1500, 'The retained conversation remains complete.'); check('retained-history-performance', measurements);
+    await cdp.eval(`(()=>{window.__activityCheck={full:0,activity:0,historyInActivity:false,lastOutputAt:0};window.__stopFull=window.vibe.orchestrator.onState(()=>window.__activityCheck.full++);window.__stopActivity=window.vibe.orchestrator.onActivity(state=>{window.__activityCheck.activity++;window.__activityCheck.historyInActivity ||= 'messages' in state || 'receipts' in state;window.__activityCheck.lastOutputAt=state.sessions.find(s=>s.id===${runtimeId})?.lastOutputAt||0;});})()`);
+    try {
+      const command = '1..8 | ForEach-Object { [Console]::WriteLine("LINA_ACTIVITY_" + $_); Start-Sleep -Milliseconds 40 }\r';
+      await cdp.eval(`window.vibe.terminal.input(${runtimeId},${JSON.stringify(command)},{generation:${JSON.stringify(runtime.generation)},launchToken:${runtime.launchToken}})`);
+      await until(() => cdp.eval("document.querySelector('.xterm-rows')?.textContent.includes('LINA_ACTIVITY_8') && window.__activityCheck.activity>0"), 'real output and activity publication');
+      const streamed = await cdp.eval("(async()=>({...window.__activityCheck,messages:(await window.vibe.orchestrator.getState()).messages.length}))()");
+      assert.equal(streamed.full, 0, 'Unchanged history is not sent with native output.');
+      assert.equal(streamed.historyInActivity, false); assert(streamed.lastOutputAt > 0);
+      assert(streamed.messages >= 1500, 'Output does not truncate saved conversation history.');
+      check('native-output-activity-without-history', streamed);
+    } finally { await cdp.eval("window.__stopFull();window.__stopActivity()"); }
   }
   await navigate("settings"); assert(await cdp.eval("Boolean(document.querySelector('.settings-dialog'))")); await shot("settings"); await preserved();
   await navigate("history"); assert(await cdp.eval("Boolean(document.querySelector('.conversation-history')) && !document.querySelector('.settings-dialog')"));

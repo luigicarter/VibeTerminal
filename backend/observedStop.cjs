@@ -34,12 +34,27 @@ function createHostStopObserver({ lookup, kill = killObservedProcess, emit, time
     if (!resource || resources.has(resource)) return;
     const record = { scope: identity(scope), resource, exited: false, listeners: new Set(), killRequested: false, treeStopAcknowledged: false };
     resources.set(resource, record); records.add(record);
-    const exited = () => { record.exited = true; for (const notify of record.listeners) notify(); };
-    if (subscribe) subscribe(exited);
+    let unsubscribe;
+    const exited = () => {
+      record.exited = true;
+      // Exit/tree facts must survive pane removal, but an exited handle cannot
+      // safely be killed again (its PID may be reused). Release its listeners
+      // and buffers immediately, including for an unverified descendant tree.
+      record.resource = null;
+      unsubscribe?.(); unsubscribe = undefined;
+      for (const notify of record.listeners) notify();
+    };
+    if (subscribe) {
+      const subscription = subscribe(exited);
+      if (record.exited) subscription?.dispose?.();
+      else unsubscribe = () => subscription?.dispose?.();
+    }
     else {
+      const closed = () => { if (!resource.pid) { record.neverSpawned = true; exited(); } };
+      unsubscribe = () => { resource.removeListener('exit', exited); resource.removeListener('close', closed); };
       resource.once('exit', exited);
       // Node spawn failure has close but no exit, and no process ever existed.
-      resource.once('close', () => { if (!resource.pid) { record.neverSpawned = true; exited(); } });
+      resource.once('close', closed);
       if (resource.exitCode != null || resource.signalCode != null) exited();
     }
     // Never evict unresolved process evidence.

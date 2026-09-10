@@ -1,9 +1,23 @@
 # Orchestrator and terminal controls
 
+The [capability audit](orchestrator-capability-audit-2026-09-10.md) documents current
+limits separately from functional test passes. `read_workspace` now exposes
+allowlisted Orchestrator configuration and capability limits, and live reads
+revalidate pane/conversation ownership after awaiting output. Free-form product
+answers and missing child-approval identity remain demonstrated reliability gaps.
+
 The current [harness overhaul](orchestrator-harness-overhaul.md) adds semantic
 inspection and folder controls, application-managed inspection completion, and
 project removal that preserves files. It supersedes older external-folder and
 model-finish limitations described in historical reviews below.
+
+The [September 10 inactive-close audit](orchestrator-inactive-close-investigation-2026-09-10.md)
+adds user-scope review and runtime/input checks for conditional terminal cleanup.
+Unknown status, pending input and running/background work do not establish
+inactivity. The reviewed condition remains attached to the frozen selection and
+is checked again before closing. Ordinary capability/history/error questions now
+have a separate conversation planning tool with no terminal effects; their
+free-form explanations still require factual scrutiny.
 
 ## Conversation and recovery
 

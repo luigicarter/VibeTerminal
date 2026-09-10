@@ -17,6 +17,8 @@ function createTerminalObservation({ maxHistoryBytes = 1024 * 1024, globalHistor
     pane.disposed = true;
     for (const resolve of pane.waiters) resolve();
     pane.waiters.clear();
+    pane.queue.length = 0;
+    pane.batch = null;
     pane.terminal.dispose();
   }
   function dimensions(event) {
@@ -64,13 +66,53 @@ function createTerminalObservation({ maxHistoryBytes = 1024 * 1024, globalHistor
     // Empty/unchanged screens must not accumulate unbounded sample metadata.
     while (pane.history.length > 1024) evict(pane);
   }
+  function drain(pane) {
+    if (pane.disposed || pane.writing) return;
+    const operation = pane.queue.shift();
+    if (!operation) return;
+    if (pane.batch === operation) pane.batch = null;
+    const finish = () => {
+      pane.writing = false;
+      pane.waiters.delete(operation.resolve);
+      operation.resolve();
+      // Let readers of this barrier inspect its screen before xterm can parse
+      // another write synchronously inside its current callback loop.
+      void Promise.resolve().then(() => drain(pane));
+    };
+    if (operation.type === 'resize') {
+      pane.terminal.resize(operation.cols, operation.rows);
+      finish();
+      return;
+    }
+    pane.writing = true;
+    const data = operation.chunks.join('');
+    operation.chunks.length = 0;
+    pane.terminal.write(data, () => {
+      if (!pane.disposed) {
+        pane.sequence = operation.sequence;
+        pane.outputAt = operation.at;
+        retain(pane, screen(pane), operation.at);
+      }
+      finish();
+    });
+  }
+  function enqueue(pane, operation) {
+    operation.promise = new Promise(resolve => { operation.resolve = resolve; });
+    pane.waiters.add(operation.resolve);
+    pane.queue.push(operation);
+    pane.pending = operation.promise;
+    // One microtask per operation, not one timer/write/screen copy per chunk.
+    // Adjacent output shares a batch; resize and explicit reads seal that batch.
+    void Promise.resolve().then(() => drain(pane));
+    return operation;
+  }
   function ingest(event) {
     if (!event || !event.id || event.generation === undefined) return Promise.resolve();
     let pane = panes.get(event.id);
     if (event.type === 'created') {
       if (pane && pane.generation === event.generation) return pane.pending;
       forget(event.id);
-      pane = { generation: event.generation, terminal: new Terminal({ ...dimensions(event), scrollback: 0, allowProposedApi: true }), pending: Promise.resolve(), waiters: new Set(), sequence: 0, history: [], bytes: 0, truncated: false, outputAt: null, metadataAt: event.at || Date.now(), fromLaunch: true };
+      pane = { generation: event.generation, terminal: new Terminal({ ...dimensions(event), scrollback: 0, allowProposedApi: true }), pending: Promise.resolve(), waiters: new Set(), queue: [], sequence: 0, acceptedSequence: 0, history: [], bytes: 0, truncated: false, outputAt: null, metadataAt: event.at || Date.now(), fromLaunch: true };
       // Observe the same decoded stream as xterm, including split sequences.
       // Return false so mode changes/reset still reach xterm's own handlers.
       // A displayed prompt marker with a hidden cursor can be a disabled TUI.
@@ -94,33 +136,29 @@ function createTerminalObservation({ maxHistoryBytes = 1024 * 1024, globalHistor
       pane.interactionInputPending = event.interactionInputPending === true;
       pane.ownerRequestId = typeof event.ownerRequestId === 'string' ? event.ownerRequestId : undefined;
     }
+    if (event.type !== 'data') pane.batch = null;
     if (event.type === 'snapshot') return pane.pending; // UI replay never counts as new output.
     if (event.type === 'exit') pane.exited = true;
     if (event.type === 'resize') {
-      pane.pending = pane.pending.then(() => { if (!pane.disposed) pane.terminal.resize(...Object.values(dimensions(event))); });
+      enqueue(pane, { type: 'resize', ...dimensions(event) });
     }
     if (event.type === 'data' && typeof event.data === 'string') {
-      const at = event.outputAt || event.at || Date.now();
-      pane.pending = pane.pending.then(() => new Promise(resolve => {
-        if (pane.disposed) return resolve();
-        if (Number.isFinite(event.sequence) && event.sequence <= pane.sequence) return resolve();
-        pane.waiters.add(resolve);
-        pane.terminal.write(event.data, () => {
-          pane.waiters.delete(resolve);
-          if (!pane.disposed) {
-            pane.sequence = Number.isFinite(event.sequence) ? event.sequence : pane.sequence + 1;
-            pane.outputAt = at;
-            retain(pane, screen(pane), at);
-          }
-          resolve();
-        });
-      }));
+      if (Number.isFinite(event.sequence) && event.sequence <= pane.acceptedSequence) return pane.pending;
+      pane.acceptedSequence = Number.isFinite(event.sequence) ? event.sequence : pane.acceptedSequence + 1;
+      const batch = pane.batch || (pane.batch = enqueue(pane, { type: 'data', chunks: [], size: 0 }));
+      batch.chunks.push(event.data);
+      batch.size += event.data.length;
+      batch.sequence = pane.acceptedSequence;
+      batch.at = event.outputAt || event.at || Date.now();
+      // Bound individual parse jobs so other panes and IPC get execution time.
+      if (batch.size >= 65536) pane.batch = null;
     }
     return pane.pending;
   }
   async function read({ id, generation, maxChars = 20000, since, beforeSequence } = {}) {
     const pane = panes.get(id);
     if (!pane || (generation !== undefined && generation !== pane.generation)) return { ok: false, status: 'unavailable', source: 'terminal-screen', error: 'No live decoder for this generation.' };
+    pane.batch = null;
     await pane.pending;
     if (pane.disposed || panes.get(id) !== pane) return { ok: false, status: 'stale-generation' };
     maxChars = Math.max(0, Math.min(1024 * 1024, Number(maxChars) || 0));
@@ -133,7 +171,7 @@ function createTerminalObservation({ maxHistoryBytes = 1024 * 1024, globalHistor
       const historyUnavailable = Boolean(pane.evictedThroughSequence);
       const common = { ok: true, source: 'terminal-screen', historySource: 'display-samples', id, generation: pane.generation,
         currentSequence: pane.sequence, beforeSequence, readAt: Date.now(), historyUnavailable,
-        contextNote: 'These are retained terminal display samples, not a full conversation transcript. Repeated unchanged displays are sampled once; older samples may have been evicted.' };
+        contextNote: 'These are retained terminal display samples, not a full conversation transcript. Adjacent output is batched, repeated unchanged displays are sampled once, and older samples may have been evicted.' };
       if (!sample) return { ...common, status: 'history-end', text: '', sequence: null, nextBeforeSequence: null, hasEarlier: false,
         complete: true, completenessScope: 'retained-display-samples', truncated: historyUnavailable };
       const characters = Array.from(sample.text);
@@ -174,6 +212,12 @@ function createTerminalObservation({ maxHistoryBytes = 1024 * 1024, globalHistor
       inputRevision: pane.inputRevision, manualInputPending: pane.manualInputPending, interactionInputPending: pane.interactionInputPending, ownerRequestId: pane.ownerRequestId,
       hasEarlier: pane.history.length > 1, historyUnavailable: Boolean(pane.evictedThroughSequence) };
   }
-  return { ingest, read, forget, dispose() { for (const id of panes.keys()) forget(id); } };
+  function inputState({ id, generation }) {
+    const pane = panes.get(id);
+    if (!pane || pane.disposed || pane.generation !== generation || !Number.isSafeInteger(pane.inputRevision)) return { ok: false };
+    return { ok: true, id, generation, inputRevision: pane.inputRevision,
+      manualInputPending: pane.manualInputPending, interactionInputPending: pane.interactionInputPending };
+  }
+  return { ingest, read, inputState, forget, dispose() { for (const id of panes.keys()) forget(id); } };
 }
 module.exports = { createTerminalObservation };

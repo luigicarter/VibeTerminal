@@ -2,6 +2,7 @@
 
 const { randomUUID } = require("node:crypto");
 const path = require("node:path");
+const { isDeepStrictEqual } = require("node:util");
 const { normalizeClaudeTaskResult, normalizeClaudeBackgroundTasks } = require("./claudeTaskTelemetry.cjs");
 
 function cleanTitle(value) {
@@ -25,6 +26,7 @@ function isQuestionTool(provider, name) {
 // terminal output, keystrokes, elapsed silence, or a clean shell/CLI exit.
 function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabilities = () => ({}) } = {}) {
   const records = new Map();
+  const retired = new Map();
   let timer = null;
   const metadataReads = new Map();
 
@@ -43,7 +45,7 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
     emit(snapshot);
     return snapshot;
   }
-  function get(id) { return records.get(id); }
+  function get(id) { return records.get(id) || retired.get(id); }
   function current(id, generation) {
     const record = get(id);
     return Boolean(record && !record.closed && !record.cancelled && record.snapshot.generation === generation);
@@ -81,7 +83,8 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
       }
     };
     records.set(payload.id, record);
-    if (payload.threadRef?.id && payload.threadRef.provider === provider && !bind(record, payload.threadRef, true)) {
+    retired.delete(payload.id);
+    if (payload.threadRef?.id && payload.threadRef.provider === provider && !bind(record, payload.threadRef)) {
       record.preparing = false;
       record.rejected = true;
       record.snapshot.processState = "failed";
@@ -96,7 +99,7 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
     return Array.from(records.values()).some((record) => !record.closed &&
       record.snapshot.id !== exceptId && record.snapshot.provider === provider && record.claudeHome === home && record.snapshot.conversation?.id === id);
   }
-  function bind(record, ref, authoritative = false, liveTitle = false) {
+  function bind(record, ref, { liveTitle = false } = {}) {
     if (!ref?.id || record.rootIdentityConflict) return false;
     const s = record.snapshot;
     // Root binding is stable. Child metadata and cwd-recency results cannot
@@ -400,7 +403,7 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
       if (event.providerThreadId && !s.conversation?.id && !explicitlyChild && event.rootVerified !== false &&
           ["agent-session", "agent-running", "agent-attention", "agent-response", "agent-activity", "agent-subagent"].includes(event.type)) {
         if (event.rootVerified === true) {
-          if (!bind(record, { id: event.providerThreadId }, true)) {
+          if (!bind(record, { id: event.providerThreadId })) {
             s.binding = { status: "ambiguous", message: "Provider identity belongs to another open pane." };
             s.observation = "provisional";
             return publish(record);
@@ -475,7 +478,7 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
       case "agent-session":
         if (child && event.phase === "end") endChild(record, event, eventAt);
         if (!child && event.title && event.providerThreadId) bind(record,
-          { id: event.providerThreadId, title: event.title, titleSource: event.titleSource, updatedAt: eventAt }, true, true);
+          { id: event.providerThreadId, title: event.title, titleSource: event.titleSource, updatedAt: eventAt }, { liveTitle: true });
         if (!child && event.phase === "start" && s.turnState === "unknown") {
           s.turnState = "idle";
           s.observation = "observed";
@@ -747,8 +750,22 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
     record.closed = true;
     record.preparing = false;
     record.snapshot.processState = "exited";
-    // Retain evidence internally, but closed panes leave the snapshot inventory.
-    return publish(record);
+    const final = publish(record);
+    if (records.get(payload.id) !== record) return final;
+    // Retain the launch high-water mark without keeping per-turn tools,
+    // children, transcript paths or lookup queues in the periodic inventory.
+    // OS process-stop evidence is owned separately by the stop broker/host.
+    const tombstone = { closed: true, preparing: false, snapshot: {
+      id: final.id, generation: final.generation, launchToken: final.launchToken,
+      revision: final.revision, processState: final.processState
+    } };
+    if (record.createPromise) {
+      tombstone.createPromise = record.createPromise;
+      void record.createPromise.finally(() => { tombstone.createPromise = null; }).catch(() => {});
+    }
+    records.delete(payload.id);
+    retired.set(payload.id, tombstone);
+    return final;
   }
   function hostExited(message) {
     for (const record of records.values()) {
@@ -779,7 +796,9 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
   }
   async function refreshRecord(record) {
     const s = record.snapshot;
-    if (!lookup || record.rootIdentityConflict || record.closed || record.cancelled || record.rejected || record.lookupInFlight || s.provider === "terminal" || now() < record.nextLookupAt) return;
+    if (!lookup || record.rootIdentityConflict || record.closed || record.cancelled || record.rejected || record.lookupInFlight || s.provider === "terminal" || ['exited', 'failed'].includes(s.processState) || now() < record.nextLookupAt) return;
+    const before = structuredClone(s);
+    const publishMetadata = () => { if (!isDeepStrictEqual(before, s)) publish(record); };
     record.lookupInFlight = true;
     record.nextLookupAt = now() + 8000;
     const generation = s.generation;
@@ -798,10 +817,10 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
               confirmed.rootVerified === true && !confirmed.threadRef.parentThreadId &&
               !owned(s.provider, hintId, s.id, record.claudeHome)) {
             record.lookupFailures = 0;
-            bind(record, confirmed.threadRef, true);
+            bind(record, confirmed.threadRef);
             if (transcriptPath) record.transcriptPath = transcriptPath;
             replayPending(record);
-            publish(record);
+            publishMetadata();
             return;
           }
         }
@@ -824,7 +843,7 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
         if (["kimi", "kimi-custom"].includes(s.provider) &&
             !(result?.status === "found" && result.rootVerified === true && result.threadRef?.id === knownId && result.nativeBackgroundActivity)) backgroundUnavailable(record);
         if (result?.status === "found" && result.threadRef?.id === knownId) {
-          bind(record, result.threadRef, true);
+          bind(record, result.threadRef);
           if (result.rootVerified === true && result.nativeBackgroundActivity && ["kimi", "kimi-custom"].includes(s.provider)) {
             ingest({ id: s.id, generation, type: "agent-background-activity", providerThreadId: knownId,
               rootVerified: true, backgroundActivity: result.nativeBackgroundActivity });
@@ -849,14 +868,14 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
         } else s.binding = { status: "pending" };
       }
       if (s.conversation?.id) replayPending(record);
-      publish(record);
+      publishMetadata();
     } catch (error) {
       record.lookupFailures += 1;
       record.nextLookupAt = now() + Math.min(60000, 8000 * 2 ** Math.min(record.lookupFailures, 3));
       if (current(s.id, generation) && s.conversation?.id === knownId) {
         backgroundUnavailable(record);
         s.binding = { status: knownId ? "found" : "unavailable", message: error.message };
-        publish(record);
+        publishMetadata();
       }
     } finally { record.lookupInFlight = false; }
   }

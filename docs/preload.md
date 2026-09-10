@@ -33,3 +33,4 @@ The `preload/` folder contains the context-isolated bridge between the renderer 
 - `window.vibe.terminal.kill(id)` - Stops and removes a PTY session.
 - Terminal input, resize, and kill accept optional `{ generation, launchToken }` scope; kill also accepts the close/restart reason. Scope prevents delayed commands from affecting replacement sessions.
 - `window.vibe.terminal.onEvent(callback)` - Subscribes to PTY host, terminal, snapshot, error, and exit events.
+- `window.vibe.orchestrator.onActivity(callback)` - Receives redacted `{ publicationRevision, sessions, activeTargets }` patches without conversation history. Subscribe alongside `onState`; `getState()` still returns a complete snapshot. Merge by publication revision, including when activity races the initial state read. See [performance repairs](performance-orchestrator-overhaul-2026-09-10.md).

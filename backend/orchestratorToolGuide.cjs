@@ -4,7 +4,7 @@
 // This describes tools; frozen grants and runtime validators remain authoritative.
 const operations = {
   read_file: 'UTF-8 workspace file; nextCursor+reference for more; maxChars<=4000 bytes.',
-  read_workspace: 'Current view, destinations, projects and discovery tools.',
+  read_workspace: 'View, projects, activity, Orchestrator config and capability limits.',
   list_roots: 'Allowed roots.',
   list_sessions: 'Live terminals; query/provider/cwd; nextOffset.',
   read_session: 'Live output/questions, provider navigation guide, fresh action evidence; maxChars<=4000. beforeSequence: older output, no action token.',

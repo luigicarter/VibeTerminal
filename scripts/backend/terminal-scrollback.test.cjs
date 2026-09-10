@@ -5,6 +5,28 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { createRequire } = require('node:module');
 const { Terminal } = require('@xterm/headless');
+const { createTerminalHistory } = require('../../backend/terminalHistory.cjs');
+
+for (const [name, start, end] of [['OSC BEL', '\x1b]2;', '\x07'], ['OSC ST', '\x1b]2;', '\x1b\\'], ['DCS', '\x1bP0z', '\x1b\\']]) {
+  test(`oversized unfinished ${name} replay stays bounded and consumes the remaining payload`, async () => {
+    const history = createTerminalHistory(40, 8);
+    const snapshot = () => new Promise(resolve => history.snapshot(resolve));
+    let restored;
+    try {
+      history.write('before\r\n' + start + '世界'.repeat(50000));
+      if (end.startsWith('\x1b')) history.write('\x1b');
+      const partial = await snapshot();
+      assert.equal(partial.incompleteSequenceTruncated, true);
+      assert(Buffer.byteLength(partial.data) < 1024);
+      restored = await replay(partial);
+      const suffix = end.startsWith('\x1b') ? '\\' : 'hidden suffix' + end;
+      history.write(suffix + 'after');
+      await new Promise(resolve => restored.write(suffix + 'after', resolve));
+      assert.equal(lines(restored).filter(Boolean).join('\n'), 'before\nafter');
+      assert.equal((await snapshot()).incompleteSequenceTruncated, undefined);
+    } finally { restored?.dispose(); history.dispose(); }
+  });
+}
 
 function host() {
   const filename = path.resolve(__dirname, '../../backend/ptyHost.cjs');
