@@ -9,6 +9,30 @@ const raw = { goal: context.instruction, responseKind: 'terminal-inspection', ac
 const normalize = (input = raw, ctx = context) => normalizeIntent(input, ctx);
 const operation = (plan, extra = {}) => ({ kind: 'terminal_interact', grantId: plan.grants[0].id, targetId: 'codex', stepId: 'nav1', observationSequence: 4, inputRevision: 0, inputPurpose: 'interaction', text: '/status', submit: true, ...extra });
 
+test('semantic inspection supplies read-only modes and cannot acquire task or permission authority', () => {
+  const plan = normalize({ goal: context.instruction, actions: [{ kind: 'inspect_terminal', targetIds: ['codex'], text: context.instruction }] });
+  assert.equal(plan.access, 'read-only'); assert.equal(plan.responseKind, 'terminal-inspection');
+  assert.equal(plan.grants[0].kind, 'operate_terminal'); assert.equal(plan.grants[0].inspection, true);
+  assert.equal(plan.grants[0].permissionMode, 'none'); assert.equal(plan.grants[0].lifecycleMode, 'preserve');
+  assert.throws(() => authorizeIntentAction(operation(plan, { inputPurpose: 'task' }), plan, sessions), /inspection/);
+  assert.throws(() => normalize({ goal: context.instruction, actions: [{ kind: 'inspect_terminal', targetIds: ['codex'], text: context.instruction, permissionMode: 'delegated' }] }), /inspection command/);
+});
+
+test('semantic inspection can coexist with a separately authorized folder action', () => {
+  const plan = normalize({ goal: 'Inspect usage and show the folder.', actions: [
+    { kind: 'inspect_terminal', targetIds: ['codex'], text: context.instruction }, { kind: 'open_folder', path: 'C:/Project' },
+  ] });
+  assert.equal(plan.grants.length, 2); assert.equal(plan.grants[0].inspection, true);
+  assert.equal(plan.grants[1].kind, 'open_folder'); assert.equal(plan.responseKind, undefined);
+});
+test('read-only provider selectors bind a unique real terminal and reject ambiguous selection', () => {
+  const plan=normalize({goal:context.instruction,actions:[{kind:'inspect_terminal',provider:'codex',text:context.instruction}]});
+  assert.deepEqual(plan.grants[0].targets,[{id:'codex',generation:'g1'}]);
+  const more={...context,sessions:[...sessions,{id:'second',generation:'g4',kind:'codex'}]};
+  assert.throws(()=>normalize({goal:context.instruction,actions:[{kind:'inspect_terminal',provider:'codex',text:context.instruction}]},more),error=>error.code==='ORCHESTRATOR_INSPECTION_SELECTION');
+  assert.throws(()=>normalize({goal:context.instruction,actions:[{kind:'inspect_terminal',provider:'codex',targetIds:['claude'],text:context.instruction}]}),/does not match/);
+});
+
 test('native usage inspection projects informational scope and permits freshly observed slash navigation', () => {
   const plan = normalize();
   assert.equal(plan.access, 'read-only');

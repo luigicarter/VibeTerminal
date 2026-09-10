@@ -105,6 +105,9 @@ jobs:
       - name: Verify packaged pane closure and process termination
         run: node scripts/qa/orchestrator-close-smoke.cjs --packaged
 
+      - name: Verify packaged navigation and project file preservation
+        run: node scripts/qa/orchestrator-navigation-smoke.cjs --packaged
+
       - name: Exercise queued task interface
         run: npm run smoke:electron:orchestrator-tasks
 

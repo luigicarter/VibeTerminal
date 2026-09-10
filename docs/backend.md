@@ -2,6 +2,17 @@
 
 The `backend/` folder contains Electron main-process code and Node-side terminal/session helpers.
 
+The [harness overhaul](orchestrator-harness-overhaul.md) maps the current planner,
+model runtime, workspace executor, inspection goal review, request-state and
+project-operation owners. Folder opening and project removal are scoped semantic
+commands; project removal has no filesystem deletion operation.
+
+`orchestratorInterpreter.cjs` owns command interpretation, schema and semantic
+review recovery through narrow model/task-lookup adapters, with no terminal
+dispatch access. The coordinator wires model accounting and consumes its plan.
+See [Orchestrator architecture review](orchestrator-architecture-review.md) for
+the remaining execution, lifecycle and reporting boundaries.
+
 `orchestratorDiagnostics.cjs` writes the private rotating Orchestrator error log.
 See [Orchestrator storage and validation](orchestrator.md#storage-and-validation)
 for the location, retained fields, limits and verification.

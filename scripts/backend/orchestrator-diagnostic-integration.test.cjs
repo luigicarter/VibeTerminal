@@ -10,6 +10,7 @@ function checkTiming(entry) {
   const base = ['time', 'event', 'stage', 'requestId', 'origin', 'model', 'elapsedMs'];
   const stages = {
     routing_started: [], routing_acquired: [], routing: ['status'], execution: ['status'], executor_reply: ['status'], final_text: ['status'],
+    harness_progress: ['round', 'stagnantRounds', 'progress'],
     model_started: ['modelCallId', 'category', 'attempt', 'deadlineMs', 'toolChoice'],
     model_headers: ['modelCallId', 'category', 'attempt', 'deadlineMs', 'toolChoice', 'headersMs', 'httpStatus'],
     model_complete: ['modelCallId', 'category', 'status', 'totalMs', 'httpStatus', 'attempt', 'deadlineMs', 'toolChoice', 'headersMs', 'bodyMs', 'provider', 'generationId', 'promptTokens', 'completionTokens', 'reasoningTokens', 'reason', 'requestPhase'],
@@ -109,7 +110,7 @@ test('an adapter exception retains generated action and resolved target identity
 
 test('provider failures keep classified HTTP details and exclude response bodies', async t => {
   const f = fixture(t); await f.ready();
-  f.responses.push(() => ({ ok: false, status: 503, json: async () => ({ error: { message: 'PRIVATE_PROVIDER_BODY private-configured-key' } }) }));
+  f.responses.push(...Array.from({ length: 2 }, () => () => ({ ok: false, status: 503, json: async () => ({ error: { message: 'PRIVATE_PROVIDER_BODY private-configured-key' } }) })));
   assert.equal((await f.instance.send({ text: 'PRIVATE_USER_COMMAND', origin: 'text' })).ok, false);
   const [entry] = await f.read(); assert.equal(entry.stage, 'brain'); assert.equal(entry.httpStatus, 503); assert.equal(entry.category, 'upstream'); assert(entry.error.stack);
   assert.doesNotMatch(fs.readFileSync(f.filename, 'utf8'), /PRIVATE_PROVIDER_BODY|PRIVATE_USER_COMMAND|private-configured-key/);

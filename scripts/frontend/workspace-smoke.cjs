@@ -74,12 +74,12 @@ assert(
 );
 
 assert(
-  appSource.includes("function removeWorkspace(workspaceId: string)") &&
-    appSource.includes("window.vibe?.terminal.kill(session.id, {") &&
-    appSource.includes('stopSessionProcess(session, "close")') &&
-    appSource.includes("setWorkspaces(nextWorkspaces)") &&
-    appSource.includes("setActiveWorkspaceId(nextActiveWorkspace?.id ?? null)"),
-  "folder removal should clear state and kill its terminal sessions"
+  appSource.includes("function removeWorkspace(workspaceId: string, expected?: ProjectRemovalSnapshot)") &&
+    appSource.includes("projectRemovalsRef.current.run({ snapshot,") &&
+    appSource.includes('return closeSession({ type: "workspace", workspaceId }, session, target, operationId, observeOnly)') &&
+    appSource.includes("setWorkspaces(next)") &&
+    appSource.includes("setActiveWorkspaceId(active => active === workspaceId"),
+  "project removal should use verified pane stops and commit workspace selection through the shared removal controller"
 );
 
 assert(

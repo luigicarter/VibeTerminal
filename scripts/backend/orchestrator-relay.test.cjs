@@ -97,12 +97,12 @@ test('tool rejection records receipt and returns action failure alongside answer
   assert.equal(result.text, 'I could not close it.'); assert.equal(f.actions.length, 0); assert.equal(f.instance.getState().receipts[0].status, 'rejected');
 });
 
-test('model tools cannot open external applications but direct workspace actions remain available', async t => {
+test('external files remain unavailable and folder opening requires a matching user grant', async t => {
   const f = fixture(t); await f.ready();
   for (const kind of ['open_file', 'open_folder']) {
     f.responses(tool({ kind, path: f.dir }), tool({ kind: 'respond', text: 'Use Workspace tools to open that.', speechText: 'Use Workspace tools to open that.', responseTurn: 'complete' }));
     const result = await f.instance.send({ text: `Open ${f.dir}`, origin: 'voice' });
-    assert.equal(result.ok, false); assert.match(result.actions[0].error, /Workspace tools/);
+    assert.equal(result.ok, false); assert.match(result.actions[0].error, kind === 'open_file' ? /Workspace tools/ : /matching user command grant/);
     assert.equal(f.actions.length, 0);
     const kinds = JSON.parse(f.requests.at(-1).options.body).tools[0].function.parameters.properties.kind.enum;
     assert.ok(!kinds.includes('open_file')); assert.ok(!kinds.includes('open_folder'));
@@ -234,8 +234,8 @@ test('filesystem restricts canonical roots and native project creation', async t
   const f = fixture(t); const files = createFiles({ getRoots: () => ({ documents: f.dir, projects: [] }) }); const created = await files.createProject({ parent: f.dir, name: 'my project' }); assert.ok(fs.statSync(created.path).isDirectory()); await assert.rejects(files.createProject({ parent: f.dir, name: '../escape' })); await assert.rejects(files.createProject({ parent: os.tmpdir(), name: 'escape' })); assert.equal((await files.search({ query: 'my project' })).files.length, 1); await assert.rejects(files.search({ root: os.tmpdir() })); const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-outside-')); t.after(() => fs.rmSync(outside, { recursive: true, force: true })); fs.symlinkSync(outside, path.join(f.dir, 'junction'), process.platform === 'win32' ? 'junction' : 'dir'); await assert.rejects(files.createProject({ parent: path.join(f.dir, 'junction'), name: 'escape' }));
 });
 test('bounded relay stops tool loops and honors configured usage threshold', async t => {
-  const f = fixture(t); await f.ready(); f.responses(...Array.from({ length: 12 }, (_, n) => tool({ kind: 'list_sessions' }, String(n)))); const result = await f.instance.send({ text: 'List sessions', origin: 'text' }); assert.equal(result.ok, false); assert.match(result.error, /limit reached/); assert.equal(f.requests.filter(r => r.url.endsWith('/chat/completions')).length, 12);
-  await f.instance.configure({ spendingLimit: 0 }); const before = f.requests.length; assert.equal((await f.instance.send({ text: 'Hello', origin: 'text' })).ok, false); assert.equal(f.requests.filter(r => r.url.endsWith('/chat/completions')).length, 12); assert.ok(f.requests.length <= before + 1);
+  const f = fixture(t); await f.ready(); f.responses(...Array.from({ length: 12 }, (_, n) => tool({ kind: 'list_sessions' }, String(n)))); const result = await f.instance.send({ text: 'List sessions', origin: 'text' }); assert.equal(result.ok, false); assert.match(result.error, /limit reached/); assert.equal(f.requests.filter(r => r.url.endsWith('/chat/completions')).length, 7);
+  await f.instance.configure({ spendingLimit: 0 }); const before = f.requests.length; assert.equal((await f.instance.send({ text: 'Hello', origin: 'text' })).ok, false); assert.equal(f.requests.filter(r => r.url.endsWith('/chat/completions')).length, 7); assert.ok(f.requests.length <= before + 1);
 });
 test('connection test authenticates the key, not only public model discovery', async t => {
   const f = fixture(t, { fetch: async url => url.endsWith('/key') ? { ok: false, status: 401 } : { ok: true, json: async () => ({ data: [{ id: 'brain', supported_parameters: ['tools'] }] }) } }); await f.instance.configure({ apiKey: key, model: 'brain' }); assert.equal((await f.instance.models()).length, 1); const result = await f.instance.testConnection(); assert.equal(result.ok, false); assert.match(result.error, /401/);

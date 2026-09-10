@@ -8,12 +8,13 @@ const native = ['observationSequence', 'inputRevision'];
 const fields = {
   watch_terminal: [...target, 'watchUntil'],
   navigate: ['grantId', 'view', 'cwd'],
-  list_roots: [], list_sessions: ['query', 'provider', 'cwd', 'offset', 'limit'],
+  read_file: ['path', 'cursor', 'maxChars', 'reference'], read_workspace: [], list_roots: [], list_sessions: ['query', 'provider', 'cwd', 'offset', 'limit'],
   read_session: ['targetId', 'beforeSequence', 'maxChars'],
   list_conversations: ['provider', 'cwd', 'query', 'limit', 'offset'],
   read_conversation: ['reference', 'cursor', 'maxChars', 'limit'],
   search_conversation: ['reference', 'query', 'cursor', 'limit'],
   resume_conversation: ['grantId', 'provider', 'cwd', 'reference'],
+  open_folder: ['grantId', 'path'], remove_project: ['grantId', 'path'],
   search_files: ['root', 'query', 'limit'], create_project: ['grantId', 'parent', 'name'],
   focus_session: observed, stage_draft: [...target, 'text'],
   send_prompt: [...observed, 'text', ...native, 'editInput'],
@@ -29,7 +30,7 @@ const fields = {
   finish_terminal: [...observed, 'text', 'outcome'],
 };
 const required = {
-  read_session: ['targetId'], read_setup: ['name'], ask_user: ['text'], respond: ['text', 'responseTurn'],
+  read_file: ['path'], read_session: ['targetId'], read_setup: ['name'], ask_user: ['text'], respond: ['text', 'responseTurn'],
   read_conversation: ['reference'], search_conversation: ['reference'],
   terminal_interact: ['observationSequence'], finish_terminal: ['text', 'outcome'],
 };
@@ -55,7 +56,7 @@ function buildWorkspaceParameters(flat) {
       })) };
   }) };
 }
-const readKinds = ['list_roots', 'list_sessions', 'read_session', 'list_conversations', 'read_conversation', 'search_conversation', 'search_files', 'list_setups', 'read_setup', 'list_preferences', 'list_work'];
+const readKinds = ['read_file', 'read_workspace', 'list_roots', 'list_sessions', 'read_session', 'list_conversations', 'read_conversation', 'search_conversation', 'search_files', 'list_setups', 'read_setup', 'list_preferences', 'list_work'];
 const operatorKinds = ['send_prompt', 'terminal_interact', 'answer_question', 'permission', 'interrupt', 'focus_session', 'finish_terminal'];
 const inspectionKinds = ['terminal_interact', 'focus_session', 'finish_terminal'];
 function scopedWorkspaceTool(tool, grants = []) {

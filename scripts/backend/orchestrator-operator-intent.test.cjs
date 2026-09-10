@@ -29,7 +29,8 @@ test('operator compiler exposes frozen complete objective and defaults without c
   assert.ok(INTENT_TOOL.function.parameters.properties.actions.items.anyOf.some(schema => schema.properties.kind.enum[0] === 'operate_terminal'));
   assert.match(INTENT_SYSTEM, /permissionMode defaults to 'none'/);
   assert.match(INTENT_SYSTEM, /stage_draft is only for an explicit request/);
-  assert.match(INTENT_SYSTEM, /ALL newly interpreted input actions inside existing terminals/);
+  assert.match(INTENT_SYSTEM, /operate_terminal for task delivery and general interactive actions/);
+  assert.match(INTENT_SYSTEM, /native informational lookups use inspect_terminal/);
   assert.match(INTENT_SYSTEM, /watch_terminal.*observation only/s);
   assert.match(INTENT_SYSTEM, /do not select them for new terminal actions, including exact one-shot relays/);
   assert.deepEqual(INTENT_TOOL.function.parameters.properties.actions.items.anyOf.find(schema => schema.properties.kind.enum[0] === 'operate_terminal').properties.promptMode.enum, ['compose', 'literal']);

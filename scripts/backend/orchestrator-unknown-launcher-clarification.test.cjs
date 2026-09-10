@@ -22,7 +22,9 @@ async function fixture(t) {
       if (url.endsWith('/key')) return new Response(JSON.stringify({ data: {} }));
       if (url.endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'fixture-brain', supported_parameters: ['tools'], context_length: 128000 }] }));
       assert(url.endsWith('/chat/completions'));
-      const body = JSON.parse(options.body); f.calls.push(body);
+      const body = JSON.parse(options.body);
+      if (body.messages[0].content.startsWith('Check the purpose of proposed new-terminal drafts')) return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: 'OPEN' } }] }));
+      f.calls.push(body);
       assert.equal(body.tools?.[0]?.function?.name, 'interpret_workspace', 'clarification and direct creation require no executor');
       assert(f.plans.length, 'unexpected extra interpretation call');
       const plan = f.plans.shift(), context = JSON.parse(body.messages.find(message => message.role === 'user').content);

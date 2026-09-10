@@ -67,7 +67,7 @@ test('production interpreter honors catalog reasoning effort, output maximum and
   assert.equal(f.effects.length, 0);
 });
 
-for (const contextLength of [8192, 16384, 32768]) test(`known ${contextLength} context rejects readiness locally without paid completion`, async t => {
+for (const contextLength of [8192, 16384]) test(`known ${contextLength} context rejects readiness locally without paid completion`, async t => {
   const f = await fixture(t, { context_length: contextLength });
   for (const result of [await f.instance.testConnection(), await f.instance.setEnabled(true)]) {
     assert.equal(result.ok, false);
@@ -79,8 +79,8 @@ for (const contextLength of [8192, 16384, 32768]) test(`known ${contextLength} c
   assert.ok((await f.logs()).some(entry => entry.error?.code === 'LOCAL_CONTEXT_LIMIT'));
 });
 
-test('64k production model passes local readiness and omits unadvertised tool choice', async t => {
-  const f = await fixture(t, { context_length: 65536, supported_parameters: ['tools', 'temperature'] });
+for (const contextLength of [32768, 65536]) test(`${contextLength} context passes compact planning readiness and omits unadvertised tool choice`, async t => {
+  const f = await fixture(t, { context_length: contextLength, supported_parameters: ['tools', 'temperature'] });
   assert.equal((await f.instance.testConnection()).ready, true);
   assert.equal(f.calls.length, 0);
   await f.enable(); f.responses.push(noEffects(), answer('Ready.'));

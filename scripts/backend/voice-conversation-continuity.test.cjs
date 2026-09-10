@@ -13,7 +13,8 @@ async function fixture(t, options = {}) {
   let voice, transcript = 'yes';
   voice = createVoiceController({
     orchestrator: {
-      getState: () => ({ enabled: true, tasks, requests }),
+      getState: () => assert.fail('Voice control must not serialize the complete conversation history.'),
+      isEnabled: () => true, getUsage: () => ({}), getTasks: () => tasks, getRequests: () => requests,
       enqueue: input => { inputs.push(input); return { ok: true, status: 'queued' }; },
       dispatch: input => { dispatched.push(input); return { ok: true }; },
     },

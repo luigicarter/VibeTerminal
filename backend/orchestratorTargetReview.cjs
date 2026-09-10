@@ -64,4 +64,9 @@ function targetReviewDecision(response, payload) {
   return cited.every(Boolean) && payload.proposedOperations.every((_, index) => cited.some(item => item.operation === index)) ? 'DIRECT' : 'UNRESOLVED';
 }
 
-module.exports = { TARGET_REVIEW_SYSTEM, targetReviewPayload, targetReviewDecision };
+function eligibleExistingTargets(context = {}) {
+  const sessions = context.sessions || [];
+  const operations = sessions.map(session => ({ targets: [{ id: session.id, generation: session.generation }] }));
+  return [...new Set(selectionEvidence(operations, { ...context, sessions }).map(item => sessions[item.operation].id))];
+}
+module.exports = { TARGET_REVIEW_SYSTEM, targetReviewPayload, targetReviewDecision, eligibleExistingTargets };

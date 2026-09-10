@@ -16,7 +16,7 @@ function createActivity() {
       scope.targets.get(key).operations.add(operation);
       return true;
     },
-    end(scope) { scopes.delete(scope); },
+    end(scope) { return scopes.delete(scope) && scope.targets.size > 0; },
     clear() { scopes.clear(); },
     snapshot(sessions, epoch) {
       const live = new Set(sessions.map(s => JSON.stringify([s.id, s.generation])));

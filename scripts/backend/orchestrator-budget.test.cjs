@@ -77,7 +77,7 @@ test('production intent trims historical work items before losing the feature de
     workItems: Array.from({ length: 20 }, (_, i) => ({ id: `old-${i}`, objective: 'Old task. '.repeat(70), summary: 'Historical result. '.repeat(25) })) };
   const messages = [{ role: 'system', content: INTENT_SYSTEM }, { role: 'user', content: JSON.stringify(payload) }];
   const original = JSON.stringify(messages);
-  const fitted = fitMessages({ messages, tools: [INTENT_TOOL], contextLength: 128000 });
+  const fitted = fitMessages({ messages, tools: [INTENT_TOOL], contextLength: 32768 });
   const actual = JSON.parse(fitted[1].content);
   assert.ok(size({ messages: fitted, tools: [INTENT_TOOL] }) <= 48000);
   assert.ok(actual.workItems.length < payload.workItems.length);

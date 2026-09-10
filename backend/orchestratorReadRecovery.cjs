@@ -1,9 +1,20 @@
 'use strict';
 
-const reads = new Set(['list_sessions', 'read_session', 'list_conversations', 'read_conversation', 'search_conversation']);
-const contentReads = new Set(['read_session', 'read_conversation', 'search_conversation']);
+const reads = new Set(['read_file', 'list_sessions', 'read_session', 'list_conversations', 'read_conversation', 'search_conversation']);
+const contentReads = new Set(['read_file', 'read_session', 'read_conversation', 'search_conversation']);
 const unavailable = new Set(['read-step-limit', 'unavailable', 'unsupported', 'stale-generation', 'invalid-cursor', 'failed']);
 const path = require('node:path');
+function fileReadSource(requested, resolved) {
+  const normalize = value => {
+    if (typeof value !== 'string') return;
+    const flavor = /^[a-z]:[\\/]|^\\\\/i.test(value) ? path.win32 : path.posix;
+    if (!flavor.isAbsolute(value)) return;
+    const normalized = flavor.normalize(value).replace(/\\/g, '/');
+    return flavor === path.win32 ? normalized.toLowerCase() : normalized;
+  };
+  const requestedPath = normalize(requested);
+  return requestedPath ? { file: { requestedPath, ...(resolved && { path: normalize(resolved) }) } } : undefined;
+}
 function readSource(identity, session = false) {
   if (!identity) return undefined;
   const native = session ? identity.conversation || identity.threadRef : undefined;
@@ -23,6 +34,8 @@ function readSource(identity, session = false) {
 }
 function sameSource(prior, action, result) {
   const before = prior.source, after = result.readSource;
+  if (before?.file) return action.kind === 'read_file' && after?.file?.requestedPath === before.file.requestedPath &&
+    (!before.file.path || after.file.path === before.file.path);
   if (before?.targetId) return after?.targetId === before.targetId && after.generation === before.generation
     && (!before.native || JSON.stringify(before.native) === JSON.stringify(after.native));
   if (before?.native) return after?.native && JSON.stringify(before.native) === JSON.stringify(after.native);
@@ -32,6 +45,7 @@ function sameSource(prior, action, result) {
 }
 function hasContent(action, result) {
   if (result?.ok !== true || !contentReads.has(action?.kind) || unavailable.has(result.status) || result.retrySamePage) return false;
+  if (action.kind === 'read_file') return Boolean(result.readSource?.file && typeof result.text === 'string');
   if (action.kind === 'read_session') {
     const observed = result.observation;
     return observed?.ok !== false && !unavailable.has(observed?.status) && observed?.id === action.targetId
@@ -65,4 +79,4 @@ function createReadRecovery() {
   };
 }
 
-module.exports = { createReadRecovery, readSource };
+module.exports = { createReadRecovery, readSource, fileReadSource };

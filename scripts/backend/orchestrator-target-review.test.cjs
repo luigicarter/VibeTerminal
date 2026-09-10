@@ -4,7 +4,7 @@ const {createOrchestrator}=require('../../backend/orchestrator.cjs');
 const {TARGET_REVIEW_SYSTEM,targetReviewPayload,targetReviewDecision}=require('../../backend/orchestratorTargetReview.cjs');
 async function fixture(t){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'vibe-target-review-'));
-  const f={root,sessions:[],effects:[],plans:[],markers:[],checks:[],interpretations:[],phases:new Map()};let sequence=0;
+  const f={root,sessions:[],effects:[],plans:[],markers:[],checks:[],interpretations:[],executions:[],phases:new Map()};let sequence=0;
   const response=body=>new Response(JSON.stringify(body));
   const tool=(name,args)=>response({choices:[{finish_reason:'tool_calls',message:{tool_calls:[{id:`call-${++sequence}`,type:'function',function:{name,arguments:JSON.stringify(args)}}]}}]});
   f.operation=(text,targetId='existing')=>({kind:'operate_terminal',targetIds:[targetId],text});
@@ -26,6 +26,12 @@ async function fixture(t){
       if(url.endsWith('/key'))return response({data:{}});
       if(url.endsWith('/models'))return response({data:[{id:'scripted',context_length:128000,supported_parameters:['tools','tool_choice']}]});
       const body=JSON.parse(options.body);
+      if (body.messages[0].content === require('../../backend/orchestratorGoalReview.cjs').INSPECTION_GOAL_REVIEW) {
+        const evidence = JSON.parse(body.messages[1].content).evidence;
+        return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ decision: 'complete', evidenceIds: [evidence.at(-1).id] }) } }] }));
+      }
+
+      if(body.messages[0].content.startsWith('Classify the ORIGINAL user request')) return response({choices:[{finish_reason:'stop',message:{content:f.inspectionDecision}}]});
       if(body.messages[0].content===TARGET_REVIEW_SYSTEM){
         assert(!body.tools?.length);f.checks.push(JSON.parse(body.messages[1].content));
         let marker=f.markers.shift();assert.notEqual(marker,undefined,'Every target review is scripted');if(typeof marker==='function')marker=await marker(options);if(marker instanceof Error)throw marker;
@@ -34,10 +40,16 @@ async function fixture(t){
       if(body.tools?.some(tool=>tool.function.name==='interpret_workspace')){
         f.interpretations.push(body);const plan=f.plans.shift();assert(plan,'Every interpretation is scripted');return tool('interpret_workspace',typeof plan==='function'?plan(body):plan);
       }
+      f.executions.push(body);
       const context=JSON.parse(body.messages.find(message=>message.role==='user').content);
       const grant=context.authorizedCommands.grants.find(grant=>(f.phases.get(grant.id)||0)<(grant.kind==='create_session'?1:4));
       if(!grant)return response({choices:[{finish_reason:'stop',message:{content:'Requested effects observed.'}}]});
       const phase=f.phases.get(grant.id)||0;f.phases.set(grant.id,phase+1);
+      if (grant.inspection && phase > 0) {
+        const observed=JSON.parse(body.messages.filter(message=>message.role==='tool').at(-1).content);
+        return tool('workspace',{kind:'finish_terminal',targetId:grant.targets[0].id,grantId:grant.id,stepId:`inspection-${phase}`,observationToken:observed.observationToken,outcome:'completed',text:f.readText});
+      }
+      if(f.omitFinish && phase>=2)return response({choices:[{finish_reason:'stop',message:{content:'The task was sent.'}}]});
       if(grant.kind==='create_session')return tool('workspace',{kind:'create_session',grantId:grant.id});
       assert.equal(grant.kind,'operate_terminal');const targetId=grant.targets[0].id;
       if(phase%2===0)return tool('workspace',{kind:'read_session',targetId});
@@ -143,6 +155,54 @@ test('incomplete, malformed and tool-bearing review replies cannot approve an ex
   }
 });
 
+for (const order of ['schema-first', 'selection-first']) test(`schema and selection repairs compose before dispatch: ${order}`, async t => {
+  const f = await fixture(t), objective = 'Investigate full-screen pane height only; do not modify files.';
+  const malformed = f.plan([{ ...f.operation(objective), unexpected: 'PRIVATE_INVALID_ARGUMENT' }]);
+  const misbound = f.plan([f.operation(objective)]);
+  f.plans.push(...(order === 'schema-first' ? [malformed, misbound] : [misbound, malformed]), body => {
+    assert.deepEqual(f.effects, []);
+    assert.match(body.messages[0].content, /schema\/contract error/);
+    assert.match(body.messages[0].content, /did not select the proposed existing conversation/);
+    assert.equal(body.messages[0].content.includes('PRIVATE_INVALID_ARGUMENT'), false);
+    assert.equal(JSON.parse(body.messages[1].content).instruction, instruction);
+    return f.plan([f.work(objective)]);
+  });
+  const instruction = `Prompt a Codex terminal in ${f.root} to ${objective}`;
+  const result = await f.run(instruction);
+  assert.equal(result.ok, true, f.fetchError?.stack || JSON.stringify(result));
+  assert.equal(f.interpretations.length, 3);
+  assert.deepEqual(f.effects.map(effect => effect.kind), ['create_session', 'send_prompt']);
+  assert.notEqual(f.effects[1].targetId, 'existing');
+  assert.equal(f.effects[1].text, objective);
+  assert.equal(f.checks.length, 0);
+  await f.relay.flushDiagnostics();
+  const events = fs.readFileSync(path.join(f.root, 'logs', 'orchestrator-errors.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(events.filter(event => event.stage === 'interpretation' && event.status === 'retry').length, 2);
+  assert.ok(events.some(event => event.event === 'intent_repair' && event.status === 'repaired'));
+  assert.equal(JSON.stringify(events).includes('PRIVATE_INVALID_ARGUMENT'), false);
+});
+
+for (const repeated of ['schema', 'selection']) test(`a repeated ${repeated} failure cannot use the other repair allowance`, async t => {
+  const f = await fixture(t), operation = f.operation('Investigate pane height only.');
+  const plan = f.plan([repeated === 'schema' ? { ...operation, unexpected: true } : operation]);
+  f.plans.push(plan, plan);
+  const result = await f.run(`Prompt a Codex terminal in ${f.root} to investigate pane height only.`);
+  assert.equal(result.ok, false);
+  assert.equal(f.interpretations.length, 2);
+  assert.equal(f.fetchError, undefined);
+  assert.deepEqual(f.effects, []);
+});
+
+test('a repaired schema cannot drop an assignment veto on the final interpretation', async t => {
+  const f = await fixture(t), operation = f.operation('Investigate pane height only.');
+  f.plans.push(f.plan([operation]), f.plan([{ ...operation, unexpected: true }]), f.plan([]));
+  const result = await f.run(`Prompt a Codex terminal in ${f.root} to investigate pane height only.`);
+  assert.equal(result.ok, false);
+  assert.equal(f.interpretations.length, 3);
+  assert.equal(f.fetchError, undefined);
+  assert.deepEqual(f.effects, []);
+});
+
 test('DIRECT requires actual application evidence covering every operation', () => {
   const payload = { proposedOperations: [{}, {}], selectionEvidence: [{ id: 'named-0', operation: 0 }, { id: 'reply-1', operation: 1 }] };
   const response = evidenceIds => ({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ decision: 'DIRECT', evidenceIds }) } }] });
@@ -189,4 +249,54 @@ test('cancelling while reviewing target selection cannot send input', async t =>
   const deadline = Date.now() + 1000;
   while (!entered) { assert.ok(Date.now() < deadline); await new Promise(resolve => setImmediate(resolve)); }
   await f.relay.cancel(); assert.equal((await pending).ok, false); assert.deepEqual(f.effects, []);
+});
+
+test('explicit existing task handoff completes after one send when the model omits read and finish', async t => {
+  const f = await fixture(t); f.omitFinish = true;
+  const objective = 'Investigate full-screen height without editing files.';
+  f.plans.push(f.plan([{ ...f.operation(objective), operationMode: 'task' }]));
+  f.markers.push('DIRECT');
+  const result = await f.run('Ask Unrelated product discussion to investigate full-screen height without editing files.');
+  assert.equal(result.ok, true, f.fetchError?.stack || JSON.stringify(result));
+  assert.deepEqual(f.effects.map(effect => effect.kind), ['send_prompt']);
+  assert.equal(f.effects[0].targetId, 'existing');
+  assert.equal(f.effects[0].text, objective);
+  assert.equal(f.executions.length, 3);
+  const task = f.relay.getState().tasks.find(task => task.requestId === result.requestId);
+  assert.equal(task.status, 'waiting-results');
+});
+
+test('general interaction still needs its own finish after sending a task', async t => {
+  const f = await fixture(t); f.omitFinish = true;
+  f.plans.push(f.plan([f.operation('Send the investigation and then inspect the model menu.')])); f.markers.push('DIRECT');
+  const result = await f.run('Use Unrelated product discussion to send an investigation and inspect its model menu.');
+  assert.equal(result.ok, false);
+  assert.match(result.error, /unfinished/);
+  assert.equal(f.effects.length, 1);
+});
+
+test('fresh follow-up repairs an expired source ID without replaying the earlier task', async t => {
+  const f = await fixture(t); f.omitFinish = true;
+  f.plans.push(f.plan([{ ...f.operation('Investigate the height.'), operationMode: 'task' }])); f.markers.push('DIRECT');
+  const first = await f.run('Ask Unrelated product discussion to investigate the height.');
+  assert.equal(first.ok, true, JSON.stringify(first));
+  const next = { ...f.operation('Also verify narrow windows.'), operationMode: 'task' };
+  f.plans.push(f.plan([{ ...next, sourceUserId: first.requestId }]), body => {
+    assert.match(body.messages[0].content, /new follow-up instruction.*omit both fields/);
+    return f.plan([next]);
+  }); f.markers.push('DIRECT');
+  const follow = await f.run('Tell that agent to also verify narrow windows.', { replyToRequestId: first.requestId });
+  assert.equal(follow.ok, true, f.fetchError?.stack || JSON.stringify(follow));
+  assert.deepEqual(f.effects.map(effect => effect.text), ['Investigate the height.', 'Also verify narrow windows.']);
+  assert.deepEqual(f.effects.map(effect => effect.targetId), ['existing', 'existing']);
+});
+
+for (const decision of ['INSPECTION', 'TASK', 'UNCLEAR']) test(`inspection repair retains its original purpose: ${decision}`, async t => {
+  const f = await fixture(t); f.inspectionDecision = decision; f.readText = 'Session limit: 23% used; resets 19:00.';
+  const operation = f.operation('Inspect current session usage limits.');
+  f.plans.push(f.plan([operation]), { ...f.plan([operation]), responseKind: 'terminal-inspection' });
+  const result = await f.run(decision === 'INSPECTION' ? 'What are my Codex session usage limits?' : 'Prompt a Codex to investigate the layout bug.');
+  assert.equal(result.ok, decision === 'INSPECTION', f.fetchError?.stack || JSON.stringify(result));
+  assert.deepEqual(f.effects, []);
+  if (result.ok) assert.match(result.text, /23%/);
 });

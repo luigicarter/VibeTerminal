@@ -55,6 +55,9 @@ function formatDirectOutcomes(outcomes, sessions = [], grants = []) {
       const detail = outcome.error || outcome.reason;
       return `I couldn't complete the request${id ? ` for ${name}` : ''}.${detail ? ` ${detail}` : ''}`;
     }
+    if (outcome.kind === 'remove_project') return 'Removed the project from Lina Terminal. No files or folders were deleted.';
+    if (outcome.kind === 'add_project') return 'Added the folder as a Lina Terminal project.';
+    if (outcome.kind === 'open_folder') return 'Opened the folder in the file manager.';
     if (outcome.kind === 'stage_draft' || status === 'staged') return `Saved the prompt as a draft in ${name}; it hasn't been sent.${outcome.reason ? ` ${outcome.reason}` : ''}${outcome.kind === 'send_prompt' ? ' Open the terminal to review and send it.' : ''}`;
     if (status === 'queued') return `Queued the request for ${name}; it hasn't been sent yet.`;
     if (outcome.kind === 'send_prompt') {

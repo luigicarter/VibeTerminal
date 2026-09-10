@@ -21,4 +21,8 @@ function completionOptions(model) {
   return options;
 }
 
-module.exports = { outputTokensFor, completionOptions };
+// A reasoning model can exhaust its output budget before producing a tool call.
+const exhaustedReply = response => response?.choices?.[0]?.finish_reason === 'length'
+  && !String(response.choices[0].message?.content || '').trim() && !response.choices[0].message?.tool_calls?.length;
+
+module.exports = { outputTokensFor, completionOptions, exhaustedReply };

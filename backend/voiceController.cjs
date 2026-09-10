@@ -56,8 +56,10 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       if (entry) { deferredInteractions.delete(entry[0]); void announceInteraction(entry[1], true); }
     }, 200);
   };
-  const enabled = () => !disposed && orchestrator?.getState?.().enabled !== false;
-  const checkSpending = () => { const limit = getSettings().spendingLimit; const usage = orchestrator?.getState?.().usage || {}; if (limit != null && Object.values(usage).reduce((total, cost) => total + (Number(cost) || 0), 0) >= limit) throw Error('Session spending limit reached.'); };
+  const enabled = () => !disposed && (orchestrator?.isEnabled ? orchestrator.isEnabled() : orchestrator?.getState?.().enabled) !== false;
+  const pendingRequests = () => orchestrator.getRequests ? orchestrator.getRequests() : orchestrator.getState?.().requests;
+  const currentTasks = () => orchestrator.getTasks ? orchestrator.getTasks() : orchestrator.getState?.().tasks || [];
+  const checkSpending = () => { const limit = getSettings().spendingLimit; const usage = orchestrator?.getUsage ? orchestrator.getUsage() : orchestrator?.getState?.().usage || {}; if (limit != null && Object.values(usage).reduce((total, cost) => total + (Number(cost) || 0), 0) >= limit) throw Error('Session spending limit reached.'); };
   const idlePhase = () => state.listening ? 'listening' : 'off';
   const failureCategory = (error, operation) => error === 'Session spending limit reached.' ? 'spending-limit' : error === 'A relay request is already running.' ? 'busy' : String(error).startsWith('Local context limit:') ? 'context-limit' : operation;
   // Diagnostics are best-effort and never receive recorded or spoken content.
@@ -425,7 +427,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     cancelSpeech(); update({ listening: true, muted: false, ready: true, microphoneId: getSettings().microphoneId || '', phase: 'listening', error: null });
     void refreshHandsFree();
     const startEpoch = epoch;
-    const pending = orchestrator.getState?.().requests;
+    const pending = pendingRequests();
     for (const interaction of Array.isArray(pending) ? pending : [...deferredInteractions.values()]) {
       if (state.listening && epoch === startEpoch && (interaction.state === 'pending' || !Array.isArray(pending))) void announceInteraction(interaction);
     }
@@ -749,14 +751,14 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
   function currentInteraction(context) {
     if (context.followup) {
       const followup = context.followup;
-      const task = (orchestrator.getState?.().tasks || []).find(item => (item.requestId || item.id) === followup.requestId);
+      const task = (currentTasks()).find(item => (item.requestId || item.id) === followup.requestId);
       return followup.speechGeneration === speechGeneration && !cancelledSpeechRequests.has(followup.requestId) && !['cancelled', 'failed', 'paused'].includes(task?.status);
     }
     if (context.taskQuestion) {
       const question = context.taskQuestion;
-      return (orchestrator.getState?.().tasks || []).some(task => (task.requestId || task.id) === question.requestId && task.question?.id === question.id && task.status === 'needs-answer');
+      return (currentTasks()).some(task => (task.requestId || task.id) === question.requestId && task.question?.id === question.id && task.status === 'needs-answer');
     }
-    const requests = orchestrator.getState?.().requests;
+    const requests = pendingRequests();
     const item = context.interaction;
     return !resolvedInteractions.has(interactionKey(item)) && !(item.sessionId == null && legacyResolvedIds.has(item.id)) && (!Array.isArray(requests) || requests.some(r => sameInteraction(r, item) && r.state === 'pending'));
   }
@@ -781,7 +783,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     if (context.followup) {
       answerContext = null; answerSilenceMs = 0;
       const requestId = context.followup.requestId;
-      const taskExists = (orchestrator.getState?.().tasks || []).some(task => (task.requestId || task.id) === requestId);
+      const taskExists = (currentTasks()).some(task => (task.requestId || task.id) === requestId);
       const input = { text, origin: 'voice', ...(taskExists ? { replyToRequestId: requestId } : {}) };
       const result = await (orchestrator.enqueue ? orchestrator.enqueue(input) : orchestrator.send(input));
       if (current === epoch && state.phase === 'thinking') update({ phase: idlePhase() });
@@ -826,7 +828,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     if (legacy) { legacyResolvedIds.add(target.id); if (legacyResolvedIds.size > 512) legacyResolvedIds.delete(legacyResolvedIds.values().next().value); }
     const matches = item => !!item && (legacy ? item.sessionId == null && item.id === target.id : item.id === target.id && item.sessionId === target.sessionId && item.generation === target.generation && (target.revision == null || item.revision === target.revision));
     resolvedInteractions.add(interactionKey(target));
-    for (const item of [state.request, activeInteraction, answerContext?.interaction, ...deferredInteractions.values(), ...(orchestrator.getState?.().requests || [])]) if (matches(item)) resolvedInteractions.add(interactionKey(item));
+    for (const item of [state.request, activeInteraction, answerContext?.interaction, ...deferredInteractions.values(), ...(pendingRequests() || [])]) if (matches(item)) resolvedInteractions.add(interactionKey(item));
     for (const [key, item] of deferredInteractions) if (matches(item)) deferredInteractions.delete(key);
     while (resolvedInteractions.size > 512) resolvedInteractions.delete(resolvedInteractions.values().next().value);
     if (matches(state.request)) update({ request: undefined });

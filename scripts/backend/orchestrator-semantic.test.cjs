@@ -82,6 +82,18 @@ test('invalid interpretation is repaired once using original context, with both 
   assert.ok(f.compiler[1].messages[0].content.includes(`Validation failure: ${events[0].error.message}`));
 });
 
+test('interpretation cannot spend on repair after its previous response reaches the session limit', async t => {
+  const f = await fixture(t);
+  await f.relay.configure({ spendingLimit: 0.05 });
+  const invalid = { ...calls('interpret_workspace', { ...none, unexpected: true }), usage: { cost: 0.1 } };
+  const result = await f.run('Hello.', invalid);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /Session spending limit reached/);
+  assert.equal(f.compiler.length, 1);
+  assert.equal(f.relay.getState().usage.brain, 0.1);
+  assert.deepEqual(f.effects, []);
+});
+
 test('opaque provider reasoning survives prose repair and tool exchanges only within its request', async t => {
   const f = await fixture(t);
   const proseDetails = [{ type: 'reasoning.encrypted', data: 'PRIVATE_PROSE_REASONING_MARKER', id: 'reasoning-1', format: 'provider-v1', index: 0 }];

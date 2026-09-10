@@ -24,7 +24,7 @@ if (caseIndex >= 0 && !scenarios.some(scenario => scenario.name === caseName)) {
 }
 // Additional providers are individually opt-in so the default run retains its
 // original three-case cost envelope. The USD cap applies across selected cases.
-const selectedScenarios = caseName ? scenarios.filter(scenario => scenario.name === caseName) : scenarios.filter(scenario => !scenario.optional);
+const selectedScenarios = caseName ? scenarios.filter(scenario => scenario.name === caseName) : process.argv.includes('--all') ? scenarios : scenarios.filter(scenario => !scenario.optional);
 if (process.argv.includes('--self-test')) {
   for (const kind of Object.keys(providerScenarios)) {
     const sample = createPane('Atlas', kind, 'fixture'); const observed = sample.read();
@@ -42,7 +42,7 @@ if (process.argv.includes('--self-test')) {
 }
 if (!process.versions.electron) {
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
-  const child = spawnSync(require('electron'), [__filename, '--live-child', ...(caseName ? ['--case', caseName] : [])], { env, windowsHide: true, stdio: 'inherit', timeout: 420000 });
+  const child = spawnSync(require('electron'), [__filename, '--live-child', ...(caseName ? ['--case', caseName] : []), ...(process.argv.includes('--all') ? ['--all'] : [])], { env, windowsHide: true, stdio: 'inherit', timeout: 420000 });
   process.exit(child.status ?? 1);
 }
 const { app, safeStorage } = require('electron');
@@ -89,7 +89,7 @@ async function request(url, options) {
     // response; missing cost data is not a terminal/navigation failure.
     if (reportedCost) spent += cost - reservation;
     report.calls.push({ stage: body.tools?.[0]?.function?.name === 'interpret_workspace' ? 'interpretation' : 'operation', model: data.model || body.model, status: response.status, elapsedMs: Date.now() - start, cost: reportedCost ? cost : undefined, ...(!reportedCost && { reservedCost: reservation, costUnreported: true }),
-      choices: data.choices?.map(choice => ({ finishReason: choice.finish_reason, text: clean(choice.message?.content).slice(0, 2000), tools: choice.message?.tool_calls?.map(tool => { try { const args = JSON.parse(tool.function.arguments); return { tool: tool.function.name, kind: args.kind, responseKind: args.responseKind, goal: args.goal, actions: args.actions?.map(action => ({ kind: action.kind, targetIds: action.targetIds, answerMode: action.answerMode })), targetId: args.targetId, text: clean(args.text).slice(0, 1200), keys: args.keys, outcome: args.outcome }; } catch { return { tool: tool.function.name, malformedArguments: true }; } }) })), ...(!response.ok && { error: clean(data.error?.message).slice(0, 1000) }) });
+      choices: data.choices?.map(choice => ({ finishReason: choice.finish_reason, text: clean(choice.message?.content).slice(0, 2000), tools: choice.message?.tool_calls?.map(tool => { try { const args = JSON.parse(tool.function.arguments); return { tool: tool.function.name, kind: args.kind, responseKind: args.responseKind, goal: args.goal, actions: args.actions?.map(action => ({ kind: action.kind, fields: Object.keys(action).filter(field => /^[a-zA-Z][a-zA-Z0-9_]{0,63}$/.test(field)), targetIds: action.targetIds, answerMode: action.answerMode })), targetId: args.targetId, text: clean(args.text).slice(0, 1200), keys: args.keys, outcome: args.outcome }; } catch { return { tool: tool.function.name, malformedArguments: true }; } }) })), ...(!response.ok && { error: clean(data.error?.message).slice(0, 1000) }) });
   }
   return response;
 }

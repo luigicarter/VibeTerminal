@@ -4,7 +4,7 @@ const { isClose, summarizeCloseOutcomes } = require('./orchestratorCloseOutcome.
 
 const pending = new Set(['queued', 'unknown', 'unconfirmed', 'uncertain', 'write-failed', 'blocked', 'rejected', 'cancelled', 'failed', 'needs-answer']);
 const sent = new Set(['written', 'submitted', 'delivered', 'sent', 'acknowledged']);
-const completed = new Set([...sent, 'interaction-complete', 'staged', 'created', 'navigated', 'focused', 'opened', 'added', 'saved', 'launched', 'resumed', 'remembered', 'forgotten', 'stopped', 'ready', 'already-completed']);
+const completed = new Set([...sent, 'interaction-complete', 'staged', 'created', 'project-removed', 'navigated', 'focused', 'opened', 'added', 'saved', 'launched', 'resumed', 'remembered', 'forgotten', 'stopped', 'ready', 'already-completed']);
 const id = value => value.targetId || value.target?.id || value.id;
 const generation = value => value.generation ?? value.target?.generation;
 const sameAction = (a, b) => a.actionId && a.actionId === b.actionId && id(a) === id(b) && generation(a) === generation(b);
@@ -13,7 +13,7 @@ const sameAction = (a, b) => a.actionId && a.actionId === b.actionId && id(a) ==
 // delegated agent. Only application-owned progress and receipts qualify it.
 function commandCompleted({ plan, progress, unfinished = [], failed, question, responseTurn, deferred,
   outcomes = [], waits = [], deliveryUpdates = [], sessions = [] }) {
-  if (!plan.grants.length || plan.clarification || ['task-status', 'terminal-inspection'].includes(plan.responseKind) || deferred || failed || question ||
+  if (!plan.grants.length || plan.grants.some(grant => grant.inspection) || plan.clarification || ['task-status', 'terminal-inspection'].includes(plan.responseKind) || deferred || failed || question ||
       responseTurn !== 'complete' || unfinished.length || progress.grants.some(grant => !grant.dispatched || grant.blockedTargetIds?.length)) return false;
   const closure = summarizeCloseOutcomes({ outcomes, grants: plan.grants, sessions });
   if (closure.present && !closure.complete) return false;

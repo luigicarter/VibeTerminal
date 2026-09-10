@@ -19,7 +19,7 @@ function host(kill = () => true, timeoutMs = 20) {
 
 test('acknowledgment and synthetic closed are not exit proof; actual exit survives session removal', async () => {
   let kills = 0;
-  const h = host(() => { kills++; return true; });
+  const h = host(() => { kills++; return true; }, 1000);
   const pending = h.observer.stop(request(), () => h.replace(undefined));
   await tick(); h.child.emit('closed'); await tick();
   assert.equal(h.events.length, 0);

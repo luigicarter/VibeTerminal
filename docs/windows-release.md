@@ -4,10 +4,10 @@ Lina Terminal ships to Windows users as an Electron Builder NSIS installer hoste
 
 ## Current Public Release
 
-The current Windows release is `v0.1.109`:
+The current Windows release is `v0.1.110`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.109`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.109/LinaTerminal-Setup-0.1.109.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.110`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.110/LinaTerminal-Setup-0.1.110.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -66,12 +66,12 @@ The compiled `dist/` renderer is still included because it is the UI Electron di
 
 ## Local Build
 
-Version `0.1.109` repairs Orchestrator task ownership. Independent work defaults
-to a new conversation, related follow-ups can reuse their verified owner, and
-existing-terminal input requires evidence of the user's selection. A provider
-and project alone cannot select an unrelated existing conversation. See
-[the ownership review](orchestrator-task-ownership-review.md) for verification
-and remaining model-formatting and completion-reporting limits.
+Version `0.1.110` ships the Orchestrator harness overhaul, workspace/folder
+navigation, safe project removal, and repairs for unnecessary history work in
+microphone and terminal control paths. It also includes the viewport-based
+fullscreen pane sizing fix. See [the release review](release-0.1.110-review.md)
+and [the harness overhaul](orchestrator-harness-overhaul.md) for acceptance and
+remaining model/provider boundaries.
 Installed applications apply updates through the user's Update/Restart action;
 publication does not restart an active workspace.
 

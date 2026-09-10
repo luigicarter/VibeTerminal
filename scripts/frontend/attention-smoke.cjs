@@ -966,7 +966,10 @@ assert(
     appSource.includes("window.vibe?.fusionChat?.stop(session.id)") &&
     appSource.includes("window.vibe?.openFusionChat?.stop(session.id)") &&
     appSource.includes("window.vibe?.terminal.kill(session.id, {") &&
-    appSource.includes('void stopSessionProcess(session, "close")') &&
+    appSource.includes('return closeSessionOperation({ operationId, target, current,') &&
+    appSource.includes('stopSessionObserved({ ...target, operationId, observeOnly, kind:') &&
+    appSource.includes('projectRemovalsRef.current.run({ snapshot,') &&
+    !appSource.includes('void stopSessionProcess(session, "close")') &&
     appSource.includes("stopSessionProcess(session).then("),
   "Fusion/Open Fusion should stop only through explicit close/restart/resume actions"
 );

@@ -60,6 +60,11 @@ globalThis.fetch=async(url,options={})=>{
  const answer=message=>reply({choices:[{message}],usage:{cost:0}});
  // Script this model response while keeping application selection evidence and validation intact.
  if(body.messages[0]?.content===TARGET_REVIEW_SYSTEM){const context=JSON.parse(body.messages[1].content);return answer({content:JSON.stringify({decision:'DIRECT',evidenceIds:context.selectionEvidence.map(item=>item.id)})});}
+ if(body.messages[0]?.content.startsWith('Check the purpose of proposed new-terminal drafts')){
+  const purpose=JSON.parse(body.messages[1].content);
+  if(purpose.proposedDrafts.some(item=>item.text))throw Error('This transport fixture only requests blank terminal creation.');
+  return answer({content:'OPEN'});
+ }
  if(!body.tools)return answer({content:'NO_CHANGE'});
  if(body.tools.some(tool=>tool.function?.name==='interpret_workspace')){
   const context=JSON.parse(body.messages.find(message=>message.role==='user').content);

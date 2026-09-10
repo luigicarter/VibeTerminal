@@ -75,7 +75,7 @@ function createReadBudget({ maxBytes = 12000, perReadBytes = 4000 } = {}) {
 // them even when the directory page itself must shrink for a smaller model.
 // Retire historical routing candidates before the recent exchange that explains
 // a follow-up. replyWorkItem/replyContext and executable authority stay protected.
-const CONTEXT_KEYS = new Set(['tasks', 'workItems', 'recentActions', 'preferences', 'observations', 'observedReads', 'readBookmarks', 'roots', 'sessions', 'pendingCommands', 'recentConversation', 'recentUserMessages']);
+const CONTEXT_KEYS = new Set(['tasks', 'workItems', 'terminalCapabilities', 'recentActions', 'preferences', 'observations', 'observedReads', 'readBookmarks', 'roots', 'sessions', 'pendingCommands', 'recentConversation', 'recentUserMessages']);
 function compactTool(content) {
   let value;
   try { value = JSON.parse(content); } catch { return JSON.stringify({ truncated: true, contextNote: 'Earlier tool output omitted for context. Never repeat an effect because its receipt was shortened.' }); }

@@ -29,7 +29,8 @@ test('real model requests stay bounded, preserve instruction, strip history with
   const f = fixture(t); await f.ready(); let round = 0;
   f.handle(() => ++round === 1 ? calls([{ kind: 'read_session', targetId: 's' }]) : reply('Read the recent excerpt'));
   const instruction = 'Read Worker exactly as asked: ' + 'qualifier '.repeat(250);
-  assert.equal((await f.instance.send({ text: instruction, origin: 'text' })).ok, true);
+  const result = await f.instance.send({ text: instruction, origin: 'text' });
+  assert.equal(result.ok, true, JSON.stringify(result));
   for (const body of f.bodies) assert.equal(JSON.parse(body.messages.find(m => m.role === 'user').content).instruction, instruction);
   assert.ok(!JSON.stringify(f.bodies).includes('OLD_PRIVATE_HISTORY')); assert.ok(!JSON.stringify(f.bodies).includes('RAW_PRIVATE_SOURCE'));
   assert.equal(f.source.history[0], 'OLD_PRIVATE_HISTORY');
@@ -66,9 +67,9 @@ test('billing monitor pause survives unsuccessful retry and resumes after manual
   f.handle(() => json({ error: { code: 402 } }, 402)); await f.instance.refresh({ monitor: true });
   assert.equal(f.instance.getState().monitoringPaused, true); f.advance(); await f.instance.refresh({ monitor: true }); assert.equal(f.bodies.length, 1);
   f.handle(() => json({ error: { code: 503 } }, 503)); await f.instance.send({ text: 'Retry', origin: 'text' });
-  assert.equal(f.instance.getState().monitoringPaused, true); f.advance(); await f.instance.refresh({ monitor: true }); assert.equal(f.bodies.length, 2);
+  assert.equal(f.instance.getState().monitoringPaused, true); f.advance(); await f.instance.refresh({ monitor: true }); assert.equal(f.bodies.length, 3);
   f.handle(() => reply('Success')); assert.equal((await f.instance.send({ text: 'Retry', origin: 'text' })).ok, true);
-  assert.equal(f.instance.getState().monitoringPaused, false); await f.instance.refresh({ monitor: true }); assert.equal(f.bodies.length, 4);
+  assert.equal(f.instance.getState().monitoringPaused, false); await f.instance.refresh({ monitor: true }); assert.equal(f.bodies.length, 5);
 });
 test('a source page rejected before model delivery does not advance the cross-request bookmark', async t => {
   let reads = 0;

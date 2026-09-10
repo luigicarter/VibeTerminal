@@ -41,7 +41,7 @@ async function fixture(t, { operator = false, noActions = false, dispatch } = {}
     interpretIntent: async () => ({ goal: operator ? 'Review changes in A.' : 'Focus A then B.', executionMode: 'reason',
       actions: noActions ? [] : operator ? [{ kind: 'operate_terminal', targetIds: ['a'], text: 'Review changes.', answerMode: 'delegated', permissionMode: 'none' }]
         : ['a', 'b'].map(id => ({ kind: 'focus_session', targetIds: [id] })) }),
-    readSession: async target => { f.reads.push(target.id); return { ok: true, id: target.id, generation: 'g1', text: 'Input is ready.', sequence: 10, inputRevision: 2 }; },
+    readSession: async target => { f.reads.push(target.id); return { ok: true, id: target.id, generation: 'g1', text: f.evolvingOutput ? `Observed evidence page ${f.reads.length}.` : 'Input is ready.', sequence: 10, inputRevision: 2 }; },
     dispatchAction: async action => { f.effects.push(action); return dispatch ? dispatch(action) : { ok: true, status: operator ? 'written' : 'focused' }; },
     fetch: async (url, options) => {
       if (url.endsWith('/key')) return Response.json({ data: {} });
@@ -86,6 +86,7 @@ test('premature responses retain bounded continuation attempts', async t => {
 
 test('ordinary final-round respond publishes without a thirteenth executor call', async t => {
   const f = await fixture(t, { noActions: true });
+  f.evolvingOutput = true;
   const result = await f.run([...Array.from({ length: 11 }, () => calls(read('a'))),
     calls({ kind: 'respond', text: 'The terminal is ready.', responseTurn: 'complete' })]);
   assert.equal(result.ok, true, JSON.stringify(result));
@@ -95,6 +96,7 @@ test('ordinary final-round respond publishes without a thirteenth executor call'
 
 test('final-round clarification publishes without extending the executor budget', async t => {
   const f = await fixture(t);
+  f.evolvingOutput = true;
   const result = await f.run([...Array.from({ length: 11 }, () => calls(read('a'))),
     calls({ kind: 'ask_user', text: 'Which view should I show?' })]);
   assert.equal(result.ok, true, JSON.stringify(result));
@@ -106,6 +108,7 @@ test('final-round clarification publishes without extending the executor budget'
 
 test('operator final-round finish publishes without a thirty-third executor call', async t => {
   const f = await fixture(t, { operator: true });
+  f.evolvingOutput = true;
   const result = await f.run([calls(read('a')),
     body => calls(operation(body, 'send_prompt', { text: 'Review changes.' }), read('a')),
     ...Array.from({ length: 29 }, () => calls(read('a'))),
@@ -117,6 +120,7 @@ test('operator final-round finish publishes without a thirty-third executor call
 
 test('final-round response with unfinished actions cannot extend the executor budget', async t => {
   const f = await fixture(t);
+  f.evolvingOutput = true;
   const result = await f.run([...Array.from({ length: 11 }, () => calls(read('a'))),
     calls({ kind: 'respond', text: 'I will focus both terminals.', responseTurn: 'complete' })]);
   assert.equal(result.ok, false, JSON.stringify(result));
@@ -127,10 +131,21 @@ test('final-round response with unfinished actions cannot extend the executor bu
 
 test('read-only exhaustion cannot extend the executor budget', async t => {
   const f = await fixture(t, { noActions: true });
+  f.evolvingOutput = true;
   const result = await f.run(Array.from({ length: 12 }, () => calls(read('a'))));
   assert.equal(result.ok, false, JSON.stringify(result));
   assert.match(result.error, /action limit/);
   assert.equal(f.bodies.length, 12);
+});
+
+test('unchanged evidence stops repeated reads before spending the entire executor allowance', async t => {
+  const f = await fixture(t, { noActions: true });
+  const result = await f.run(Array.from({ length: 7 }, () => calls(read('a'))));
+  assert.equal(result.ok, false);
+  assert.match(result.error, /no progress/);
+  assert.equal(f.bodies.length, 7);
+  assert.deepEqual(f.effects, []);
+  assert.ok(f.bodies.some(body => body.messages.some(message => message.content?.includes('last three tool rounds'))));
 });
 
 test('respond skips later announced effects and supplies paired receipts before continuation', async t => {

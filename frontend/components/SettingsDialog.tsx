@@ -6,6 +6,8 @@ export interface SettingsDialogProps {
   // Shown as a dismissible note at the top when the dialog was opened as a
   // detour (e.g. "Open Claude Code" clicked with no provider configured).
   hint?: string | null;
+  selectedPanel?: string;
+  onPanelChange?(panel: string): void;
   onClose: () => void;
 }
 
@@ -74,8 +76,11 @@ type TestState =
   | { status: "ok"; modelCount: number }
   | { status: "error"; message: string };
 
-export function SettingsDialog({ hint, onClose }: SettingsDialogProps): JSX.Element {
-  const [panel, setPanel] = useState(hint ? "providers" : "orchestrator");
+export function SettingsDialog({ hint, onClose, selectedPanel, onPanelChange }: SettingsDialogProps): JSX.Element {
+  const [localPanel, setLocalPanel] = useState(hint ? "providers" : "orchestrator");
+  const panel = selectedPanel ?? localPanel;
+  const setPanel = (next: string) => { setLocalPanel(next); onPanelChange?.(next); };
+  useEffect(() => { onPanelChange?.(panel); }, [panel, onPanelChange]);
   const [density, setDensity] = useState(() => window.localStorage.getItem("vibe-terminal:chrome-density:v1") || "comfortable");
   const [loading, setLoading] = useState(true);
   const [listError, setListError] = useState<string | null>(null);

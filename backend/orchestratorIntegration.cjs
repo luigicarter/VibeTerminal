@@ -1,4 +1,6 @@
 "use strict";
+const { captureProjectRemoval, validateProjectRemoval } = require('./orchestratorProjects.cjs');
+const { WORKSPACE_VIEWS } = require('./orchestratorWorkspace.cjs');
 
 const { randomUUID } = require("node:crypto");
 const fs = require("node:fs");
@@ -365,7 +367,7 @@ function installOrchestrator(options) {
   function inputSession(id) {
     const session = directory.get(id);
     if (!session) return;
-    const pendingInteractions = relay.getState().requests.filter(request => request.sessionId === id &&
+    const pendingInteractions = relay.getRequests().filter(request => request.sessionId === id &&
       (request.generation === undefined || request.generation === session.generation) && request.state === "pending");
     return { ...session, pendingInteraction: pendingInteractions.length > 0, pendingInteractions: structuredClone(pendingInteractions) };
   }
@@ -405,7 +407,7 @@ function installOrchestrator(options) {
     const id = randomUUID();
     return new Promise(resolve => {
       let dispatched = false, settled = false;
-      const finish = result => { if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener("abort", abort); pendingUi.delete(id); if (kind !== "inventory" && dispatched) inventoryReader.invalidate(); resolve(result); };
+      const finish = result => { if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener("abort", abort); pendingUi.delete(id); if (!["inventory", "workspace_state"].includes(kind) && dispatched) inventoryReader.invalidate(); resolve(result); };
       const abort = () => finish({ ok: false, status: dispatched ? "unknown" : "cancelled", error: dispatched ? "Workspace action was dispatched before cancellation; its outcome is unconfirmed. No automatic retry." : "Cancelled before workspace dispatch." });
       const timer = setTimeout(() => finish({ ok: false, status: "unknown", error: "Workspace acknowledgment timed out; no automatic retry." }), 20000);
       if (signal?.aborted) return abort();
@@ -414,7 +416,7 @@ function installOrchestrator(options) {
         if (kind !== "close" && payload.id && payload.generation) currentTarget({ id: payload.id, generation: payload.generation, signal });
         if (signal?.aborted) return abort();
         dispatched = true;
-        if (kind !== "inventory") inventoryReader.invalidate();
+        if (!["inventory", "workspace_state"].includes(kind)) inventoryReader.invalidate();
         main.webContents.send("orchestrator:ui-action", { id, kind, payload });
       } catch (error) { finish({ ok: false, status: dispatched ? "unknown" : "rejected", error: String(error?.message || error) }); }
     });
@@ -467,10 +469,16 @@ function installOrchestrator(options) {
     if (action.signal?.aborted) throw new Error("Cancelled.");
     return s;
   }
-  async function allowedPath(raw) {
+  function folderLocations() {
+    return ['documents', 'desktop', 'downloads'].flatMap(id => {
+      try { const folder = app.getPath(id); return path.isAbsolute(folder) ? [{ id, path: folder }] : []; } catch { return []; }
+    });
+  }
+  async function allowedPath(raw, explicit = false) {
     if (typeof raw !== "string" || !path.isAbsolute(raw)) throw new Error("An absolute path is required.");
     const resolved = await fs.promises.realpath(raw);
-    const roots = [app.getPath("documents"), ...directory.projectPaths(), ...directory.list().map(s => s.cwd)];
+    if (explicit) return resolved;
+    const roots = [...folderLocations().map(item => item.path), ...directory.projectPaths(), ...directory.list().map(s => s.cwd)];
     for (const root of roots) {
       if (!root) continue;
       let canonical; try { canonical = await fs.promises.realpath(root); } catch { continue; }
@@ -482,12 +490,12 @@ function installOrchestrator(options) {
   async function answerExisting(kind, payload) {
     const s = directory.get(payload.id);
     if (!s || s.kind !== kind || (payload.generation && payload.generation !== s.generation)) return { ok: false, error: "This session has changed." };
-    const request = relay.getState().requests.find(item => item.id === payload.requestId && item.sessionId === s.id && item.generation === s.generation && item.state === "pending" && (payload.revision === undefined || payload.revision === item.revision));
+    const request = relay.getRequests().find(item => item.id === payload.requestId && item.sessionId === s.id && item.generation === s.generation && item.state === "pending" && (payload.revision === undefined || payload.revision === item.revision));
     if (!request) return { ok: false, error: "This interaction is no longer current." };
     const binding = { target: { id: s.id, generation: s.generation }, nativeIdentity: require("./orchestratorRouting.cjs").sessionIdentity(s) };
     const base = { ...payload, id: s.id, generation: s.generation, revision: request.revision, actionId: payload.actionId || randomUUID() };
     const sendCurrent = (send, value, type) => {
-      if (!require("./orchestratorLaunchers.cjs").routingBindingMatches(binding, directory.get(s.id)) || !relay.getState().requests.some(item => item.id === request.id && item.sessionId === s.id && item.generation === s.generation && item.revision === request.revision && item.state === "pending")) return { ok: false, status: "blocked", delivery: "not-dispatched", error: "This interaction is no longer current." };
+      if (!require("./orchestratorLaunchers.cjs").routingBindingMatches(binding, directory.get(s.id)) || !relay.getRequests().some(item => item.id === request.id && item.sessionId === s.id && item.generation === s.generation && item.revision === request.revision && item.state === "pending")) return { ok: false, status: "blocked", delivery: "not-dispatched", error: "This interaction is no longer current." };
       return hostAction(send, value, type);
     };
     if (kind === "openfusion") return sendCurrent(sendOpenFusion, base, payload.kind === "permission" ? "permission" : payload.kind === "progress" ? "question-progress" : "question");
@@ -504,7 +512,7 @@ function installOrchestrator(options) {
       const current = currentTarget(action);
       if (!require("./orchestratorLaunchers.cjs").routingBindingMatches(effectBinding, current)) return { ok: false, status: "blocked", delivery: "not-dispatched", reason: "conversation-changed", error: "The conversation changed before host input." };
       if (kind === 'send_prompt' && action.targetAvailability === 'idle' && !require('./orchestratorTargetAvailability.cjs').isIdleTarget(inputSession(current.id))) return unavailableIdleTarget();
-      if (["answer_question", "permission"].includes(kind) && !relay.getState().requests.some(request => request.id === action.requestId && request.sessionId === current.id && request.generation === current.generation && request.revision === action.revision && request.state === "pending")) return { ok: false, status: "blocked", delivery: "not-dispatched", error: "This interaction is no longer current." };
+      if (["answer_question", "permission"].includes(kind) && !relay.getRequests().some(request => request.id === action.requestId && request.sessionId === current.id && request.generation === current.generation && request.revision === action.revision && request.state === "pending")) return { ok: false, status: "blocked", delivery: "not-dispatched", error: "This interaction is no longer current." };
       return hostAction(send, payload, type, action.signal);
     };
     const createdTarget = async result => {
@@ -522,8 +530,18 @@ function installOrchestrator(options) {
         ? { ...result, target: { id: session.id, generation: session.generation, launchToken: session.launchToken } } : result;
     };
     check();
+    if (kind === 'remove_project') {
+      const inventory = await inventoryReader.refresh(); check();
+      if (!inventory?.ok) return { ok: false, status: 'project-retained', error: 'The current project inventory is unavailable.', filesDeleted: false };
+      const selection = action.projectSelection || captureProjectRemoval(action.path, directory.projects(), directory.list());
+      validateProjectRemoval(selection, directory.projects(), directory.list());
+      const result = await requestUi('remove_project', { projectSelection: selection }, action.signal);
+      await refreshInventory(); check();
+      if (result?.ok && directory.projects().some(project => project.id === selection.id)) return { ...result, ok: false, status: 'project-retained', error: 'The project is still present in the current workspace inventory.' };
+      return result;
+    }
     if (kind === "navigate") {
-      if (!["settings", "history", "orchestrator", "multi", "project"].includes(action.view)) return { ok: false, error: "Choose a supported application view." };
+      if (!WORKSPACE_VIEWS.includes(action.view)) return { ok: false, error: "Choose a supported application view." };
       if (action.view === "project" && (typeof action.cwd !== "string" || !action.cwd.trim())) return { ok: false, error: "An existing project folder is required." };
       return requestUi("navigate", { view: action.view, ...(action.view === "project" ? { cwd: action.cwd } : {}) }, action.signal);
     }
@@ -558,7 +576,7 @@ function installOrchestrator(options) {
       action.recipe = matches[0];
     }
     if (["add_project", "create_session", "launch_setup", "save_setup"].includes(kind)) {
-      if (action.path) { action.path = await allowedPath(action.path); if (!(await fs.promises.stat(action.path)).isDirectory()) throw new Error("Project path must be a folder."); }
+      if (action.path) { action.path = await allowedPath(action.path, kind === "add_project" && action.folderAccess?.explicit === true && action.folderAccess.path === action.path); if (!(await fs.promises.stat(action.path)).isDirectory()) throw new Error("Project path must be a folder."); }
       if (action.cwd) { action.cwd = await allowedPath(action.cwd); if (!(await fs.promises.stat(action.cwd)).isDirectory()) throw new Error("Session folder must be a directory."); }
       const { signal, ...payload } = action;
       const result = await requestUi(kind, { ...payload, kind: action.kindOfSession || action.agentKind || action.launcherKind || action.kind }, signal);
@@ -566,7 +584,7 @@ function installOrchestrator(options) {
     }
     if (["open_file", "open_folder"].includes(kind)) {
       if (typeof action.path !== "string") throw new Error("A path is required.");
-      const resolved = await allowedPath(action.path);
+      const resolved = await allowedPath(action.path, kind === "open_folder" && action.folderAccess?.explicit === true && action.folderAccess.path === action.path);
       const stat = await fs.promises.stat(resolved);
       if (kind === "open_folder" && !stat.isDirectory()) throw new Error("This path is not a folder.");
       if (kind === "open_file" && (!stat.isFile() || /\.(exe|com|bat|cmd|ps1|lnk|url|msi)$/i.test(resolved))) throw new Error("This is not an openable document.");
@@ -618,7 +636,7 @@ function installOrchestrator(options) {
         requestId: action.requestId, answers: action.answers, reply: action.reply || action.decision, revision: action.revision };
       if (s.kind === "openfusion") {
         if (base.answers && !Array.isArray(base.answers)) {
-          const request = relay.getState().requests.find(r => r.id === base.requestId && r.sessionId === s.id);
+          const request = relay.getRequests().find(r => r.id === base.requestId && r.sessionId === s.id);
           if (!request) throw new Error("This question is no longer current.");
           const keyed = base.answers;
           base.answers = request.questions.map((q, i) => { const answer = keyed[q.id || String(i)]; return Array.isArray(answer) ? answer : answer === undefined ? [] : [String(answer)]; });
@@ -662,7 +680,7 @@ function installOrchestrator(options) {
       if (action.operator === true || terminalInput.needsStartupReadiness(s)) {
         const prompt = { ...action, target: { id: s.id, generation: s.generation }, submit: true, promptSubmission: true,
           promptObservation: action.promptObservation ?? { agentPid: s.agentPid, turnId: s.turnId, turnStartedAt: s.turnStartedAt } };
-        if (relay.getState().requests.some(request => request.sessionId === s.id && request.generation === s.generation && request.state === 'pending')) return { ok: false, status: 'blocked', delivery: 'not-dispatched', error: 'Answer the pending terminal request before submitting a new prompt.' };
+        if (relay.getRequests().some(request => request.sessionId === s.id && request.generation === s.generation && request.state === 'pending')) return { ok: false, status: 'blocked', delivery: 'not-dispatched', error: 'Answer the pending terminal request before submitting a new prompt.' };
         if (action.routingBinding) routedInputBindings.set(action.actionId, action.routingBinding);
         if (action.targetAvailability === 'idle') idleInputActions.add(action.actionId);
         let result;
@@ -688,7 +706,7 @@ function installOrchestrator(options) {
           }
         } finally { routedInputBindings.delete(action.actionId); idleInputActions.delete(action.actionId); }
         const latest = directory.get(s.id);
-        const pendingInteraction = relay.getState().requests.some(request => request.sessionId === s.id && request.generation === s.generation && request.state === 'pending');
+        const pendingInteraction = relay.getRequests().some(request => request.sessionId === s.id && request.generation === s.generation && request.state === 'pending');
         if (require('./orchestratorBusyInput.cjs').canQueueBusyPrompt(prompt, latest && { ...latest, pendingInteraction }, result)) return delivery.submit({ ...action, target: prompt.target });
         return result;
       }
@@ -707,6 +725,7 @@ function installOrchestrator(options) {
       return directory.list();
     },
     getLaunchers: () => directory.launchers(),
+    getWorkspaceState: signal => requestUi("workspace_state", {}, signal),
     readSession: async target => {
       const session = directory.get(target.id);
       if (["fusion", "openfusion"].includes(session?.kind)) return directory.readChat(target);
@@ -718,7 +737,7 @@ function installOrchestrator(options) {
       return observation;
     },
     dispatchAction,
-    getRoots: () => ({ documents: app.getPath("documents"), projects: [...directory.projects(), ...[...new Set([...directory.projectPaths(), ...directory.list().map(s => s.cwd)].filter(Boolean))].filter(path => !directory.projects().some(project => project.path === path))] }),
+    getRoots: () => ({ documents: app.getPath("documents"), locations: folderLocations(), projects: [...directory.projects(), ...[...new Set([...directory.projectPaths(), ...directory.list().map(s => s.cwd)].filter(Boolean))].filter(path => !directory.projects().some(project => project.path === path))] }),
     onCancel: input => { if (!input?.requestId) delivery.cancel(); voice?.cancelSpeech(input); },
     onUpstreamError: info => voice?.announceError(info),
     onChange: state => {
@@ -727,7 +746,7 @@ function installOrchestrator(options) {
     },
     onSpeak: event => {
       if (event.origin === "interaction") {
-        const request = relay.getState().requests.find(r => r.id === event.requestId && r.sessionId === event.sessionId && r.generation === event.generation && r.revision === event.revision && r.state === "pending");
+        const request = relay.getRequests().find(r => r.id === event.requestId && r.sessionId === event.sessionId && r.generation === event.generation && r.revision === event.revision && r.state === "pending");
         const session = directory.get(request?.sessionId);
         return request ? voice?.announceInteraction({ ...request, sessionName: session?.name, projectName: session?.projectName }) : undefined;
       }
@@ -755,13 +774,13 @@ function installOrchestrator(options) {
   }
   function watchCaptureFrames() {
     clearTimeout(captureHeartbeatTimer); captureHeartbeatTimer = null;
-    if (disposed || !captureReady || captureRecovering || !relay.getState().enabled || !voice.getState().listening) return;
+    if (disposed || !captureReady || captureRecovering || !relay.isEnabled() || !voice.getState().listening) return;
     const token = captureToken;
     captureHeartbeatTimer = setTimeout(() => { captureHeartbeatTimer = null; void recoverCapture(token); }, options.captureHeartbeatTimeoutMs ?? 6000);
     captureHeartbeatTimer.unref?.();
   }
   async function recoverCapture(token) {
-    if (disposed || token !== captureToken || !relay.getState().enabled || !voice.getState().listening) return { ok: false, status: 'stale' };
+    if (disposed || token !== captureToken || !relay.isEnabled() || !voice.getState().listening) return { ok: false, status: 'stale' };
     if (captureRecovering) return { ok: true, status: 'recovering' };
     const now = Date.now();
     while (captureRestarts.length && now - captureRestarts[0] >= 60000) captureRestarts.shift();
@@ -774,7 +793,7 @@ function installOrchestrator(options) {
     const current = captureToken;
     captureRecoveryTimer = setTimeout(() => {
       captureRecoveryTimer = null;
-      if (!disposed && current === captureToken && captureRecovering && relay.getState().enabled && voice.getState().listening) {
+      if (!disposed && current === captureToken && captureRecovering && relay.isEnabled() && voice.getState().listening) {
         void microphoneFailure('Microphone could not restart. Check the selected microphone, then turn voice on to retry.');
       }
     }, options.captureReadyTimeoutMs ?? 15000);
@@ -797,7 +816,7 @@ function installOrchestrator(options) {
     invalidateCapture();
     finishCapture({ ok: false, error });
     voice?.configure({ microphoneError: error });
-    if (relay.getState().enabled) await relay.setEnabled(false);
+    if (relay.isEnabled()) await relay.setEnabled(false);
   }
   async function startListening(token) {
     if (captureReady && voice.getState().listening) return { ok: true, listening: true };
@@ -891,8 +910,8 @@ function installOrchestrator(options) {
       const audio = await validateVoice();
       if (disposed || token !== activation) return { ok: false, status: 'cancelled' };
       voiceReady = audio.ok; publish();
-      if (!audio.ok) { if (relay.getState().enabled) await relay.setEnabled(false); return { ...result, ...audio }; }
-      if (wasListening && relay.getState().enabled) {
+      if (!audio.ok) { if (relay.isEnabled()) await relay.setEnabled(false); return { ...result, ...audio }; }
+      if (wasListening && relay.isEnabled()) {
         const listening = await startListening(token);
         if (!listening.ok) {
           if (token === activation) {
@@ -957,7 +976,7 @@ function installOrchestrator(options) {
       pending.finish({ ok: true, sampleEnd: p.sampleEnd }); return { ok: true };
     }
     if (p.microphoneReady || p.microphoneError) {
-      if (disposed || !surface.isSender(event.sender) || p.captureToken !== captureToken || !relay.getState().enabled || !voice.getState().listening) return { ok: false, status: "stale" };
+      if (disposed || !surface.isSender(event.sender) || p.captureToken !== captureToken || !relay.isEnabled() || !voice.getState().listening) return { ok: false, status: "stale" };
       if (p.microphoneError) { await microphoneFailure(String(p.microphoneError).slice(0, 200)); return { ok: false, error: voice.getState().error }; }
       if (captureReady) return { ok: true };
       captureReady = true; captureRecovering = false;
@@ -994,13 +1013,13 @@ function installOrchestrator(options) {
   guarded("voice:send-audio", p => voice.sendAudio(p));
   guarded("voice:cancel-speech", () => voice.cancelSpeech());
   ipcMain.on("voice:frames", (event, p) => {
-    if (disposed || !surface.isSender(event.sender) || !relay.getState().enabled || !voice.getState().listening || p?.captureToken !== captureToken) return;
+    if (disposed || !surface.isSender(event.sender) || !relay.isEnabled() || !voice.getState().listening || p?.captureToken !== captureToken) return;
     if (!Array.isArray(p.samples) || !Number.isSafeInteger(p.sampleStart) || p.sampleStart < capturedSamples) return;
     const result = voice.frames(p);
     if (result?.ok) { capturedSamples = p.sampleStart + p.samples.length; if (p.samples.length) watchCaptureFrames(); }
   });
   ipcMain.on("orchestrator:ui-result", (event, p) => { if (allowed(event, true)) pendingUi.get(p.id)?.(p.result); });
-  inventoryTimer = setInterval(() => { if (relay.getState().enabled) void refreshInventory(); }, 4000); inventoryTimer.unref?.();
+  inventoryTimer = setInterval(() => { if (relay.isEnabled()) void refreshInventory(); }, 4000); inventoryTimer.unref?.();
   // Restore only the user's explicit startup preference: open the microphone at launch.
   if (relay.getKey() && relay.getSettings().model) {
     if (relay.getSettings().enabledOnLaunch) void setEnabled(true, { interactive: false });
@@ -1034,7 +1053,7 @@ function installOrchestrator(options) {
         // These requests were pending in the old native context. Retire their
         // exact revisions together with any spoken/listening interaction so
         // they cannot block or answer work in the replacement conversation.
-        for (const request of relay.getState().requests) if (request.sessionId === current.id && request.generation === current.generation && request.state === "pending") {
+        for (const request of relay.getRequests()) if (request.sessionId === current.id && request.generation === current.generation && request.state === "pending") {
           const scope = { id: request.id, sessionId: current.id, generation: current.generation, revision: request.revision };
           if (relay.resolveInteraction(scope).ok) voice.resolveInteraction?.(scope);
         }
@@ -1062,7 +1081,7 @@ function installOrchestrator(options) {
   function forgetTerminal(id, generation) {
     queuedInputAttempts.forget(id, generation);
     delivery.forget(id, generation); observations.forget(id, generation); completions.forget(id, generation); directory.forget(id, generation);
-    for (const request of relay.getState().requests) if (request.sessionId === id && request.generation === generation && request.state === "pending") {
+    for (const request of relay.getRequests()) if (request.sessionId === id && request.generation === generation && request.state === "pending") {
       const scope = { id: request.id, sessionId: id, generation, revision: request.revision };
       relay.resolveInteraction(scope); voice.resolveInteraction?.(scope);
     }

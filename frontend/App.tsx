@@ -1,3 +1,5 @@
+import { createProjectRemovalController, type ProjectRemovalSnapshot } from "./removeProjectOperation";
+import workspaceNavigation from "../shared/workspaceNavigation.json";
 import {
   Fragment,
   useCallback,
@@ -158,7 +160,6 @@ const SECOND_COLUMN_X_PERCENT = 50 + DEFAULT_COLUMN_GAP_PERCENT / 2;
 const DEFAULT_PANE_HEIGHT = 260;
 const DEFAULT_MIN_PANE_WIDTH = 280;
 const DEFAULT_MIN_PANE_HEIGHT = 170;
-const MAXIMIZED_PANE_HEIGHT = 720;
 const DEFAULT_SIDEBAR_WIDTH = 292;
 const MIN_SIDEBAR_WIDTH = 220;
 const MAX_SIDEBAR_WIDTH = 520;
@@ -1179,6 +1180,8 @@ function moveWorkspace(
 
 export default function App() {
   const orchestratorState = useOrchestrator();
+  const liveOrchestratorRef = useRef(orchestratorState);
+  liveOrchestratorRef.current = orchestratorState;
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [initialState] = useState(() => {
     const screenshotFixture = window.vibe?.app.screenshotFixture;
@@ -1304,6 +1307,9 @@ export default function App() {
   const [workspaces, setWorkspaces] = useState<ProjectWorkspace[]>(
     initialState.workspaces
   );
+  const workspacesRef = useRef(workspaces);
+  workspacesRef.current = workspaces;
+  const projectRemovalsRef = useRef(createProjectRemovalController());
   const [multiSessions, setMultiSessions] = useState<AgentSession[]>(
     initialState.multiSessions
   );
@@ -1317,6 +1323,7 @@ export default function App() {
   // the dialog was opened as a detour, e.g. "Open Claude Code" with no
   // provider configured yet.
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsPanel, setSettingsPanel] = useState<string | undefined>();
   const [workspaceToolsOpen, setWorkspaceToolsOpen] = useState(false);
   const [workspaceToolsTab, setWorkspaceToolsTab] = useState("Orchestrator");
   const [orchestratorViewOpen, setOrchestratorViewOpen] = useState(false);
@@ -2865,28 +2872,23 @@ export default function App() {
       )
     );
 
-    if (maximizedSessionId === sessionId) {
-      setMaximizedSessionId(null);
-    }
-
-    if (selectedSessionId === sessionId) {
-      setSelectedSessionId(null);
-    }
+    setMaximizedSessionId(current => current === sessionId ? null : current);
+    setSelectedSessionId(current => current === sessionId ? null : current);
   }
 
-  async function closeSession(scope: SessionScope, session: AgentSession, frozen?: CloseTarget, operationId: string = crypto.randomUUID()) {
+  async function closeSession(scope: SessionScope, session: AgentSession, frozen?: CloseTarget, operationId: string = crypto.randomUUID(), observeOnly = false) {
     const current = () => {
       const pane = closeSessionsRef.current.find(item => item.id === session.id);
       if (!pane) return undefined;
       const runtime = runtimeSnapshotsRef.current[pane.id];
       const generation = runtime?.launchToken === pane.launchToken ? runtime.generation
-        : orchestratorState?.sessions.find(item => item.id === pane.id && item.launchToken === pane.launchToken)?.generation || `paused:${pane.id}:${pane.launchToken}`;
+        : liveOrchestratorRef.current?.sessions.find(item => item.id === pane.id && item.launchToken === pane.launchToken)?.generation || `paused:${pane.id}:${pane.launchToken}`;
       return { id: pane.id, launchToken: pane.launchToken, generation };
     };
     const target = frozen || current() || { id: session.id, launchToken: session.launchToken };
     return closeSessionOperation({ operationId, target, current,
       cancelLaunch: () => terminalLaunchCoordinator.cancel(target.id, target.launchToken),
-      stop: () => relayApi()?.stopSessionObserved({ ...target, operationId, kind: session.fusion ? "fusion" : session.openFusion ? "openfusion" : session.kind })
+      stop: () => relayApi()?.stopSessionObserved({ ...target, operationId, observeOnly, kind: session.fusion ? "fusion" : session.openFusion ? "openfusion" : session.kind })
         ?? Promise.resolve({ ok: false, operationId, process: "unknown", launchSettled: false, error: "Observed process stop is unavailable." }),
       remove: () => { flushSync(() => removeClosedSession(scope, session)); }
     });
@@ -2900,59 +2902,39 @@ export default function App() {
     setWorkspaceClosePendingId(null);
   }
 
-  function confirmWorkspaceClose(workspaceId: string) {
+  async function confirmWorkspaceClose(workspaceId: string) {
     setWorkspaceClosePendingId(null);
-    removeWorkspace(workspaceId);
+    const result = await removeWorkspace(workspaceId);
+    if (!result.ok) setShellMessage(result.error || "The project could not be removed.");
   }
 
-  function removeWorkspace(workspaceId: string) {
-    const workspaceIndex = workspaces.findIndex(
-      (workspace) => workspace.id === workspaceId
-    );
-    const workspace = workspaces[workspaceIndex];
-
-    if (!workspace) {
-      return;
-    }
-
-    const removedSessionIds = new Set(
-      workspace.sessions.map((session) => session.id)
-    );
-    workspace.sessions.forEach((session) => {
-      forgetSessionDraft(session.id);
-      closedRuntimeIdsRef.current.add(session.id);
-      clearCodexTracking(session.id);
-      void stopSessionProcess(session, "close");
+  function removeWorkspace(workspaceId: string, expected?: ProjectRemovalSnapshot) {
+    const workspace = workspacesRef.current.find(item => item.id === workspaceId);
+    const snapshot = expected || { id: workspaceId, path: workspace?.path || "", targets: (workspace?.sessions || []).map(session => ({
+      id: session.id, launchToken: session.launchToken, kind: session.kind,
+      generation: runtimeSnapshotsRef.current[session.id]?.generation || liveOrchestratorRef.current?.sessions.find(item => item.id === session.id)?.generation,
+    })) };
+    return projectRemovalsRef.current.run({ snapshot,
+      current: () => workspacesRef.current.find(item => item.id === workspaceId),
+      close: async (target, operationId, observeOnly) => {
+        const session = workspace?.sessions.find(item => item.id === target.id);
+        if (!session) {
+          if (!target.kind) return { ok: false, error: "A project terminal changed before closing." };
+          const observed = await relayApi()?.stopSessionObserved({ ...target, kind: target.kind, operationId, observeOnly });
+          return { ok: observed?.ok === true && observed.launchSettled && ["stopped", "already-absent"].includes(observed.process),
+            error: observed?.error || "The original project terminal stop could not be verified." };
+        }
+        return closeSession({ type: "workspace", workspaceId }, session, target, operationId, observeOnly);
+      },
+      remove: () => flushSync(() => {
+        const current = workspacesRef.current, index = current.findIndex(item => item.id === workspaceId);
+        const next = current.filter(item => item.id !== workspaceId);
+        setWorkspaces(next);
+        setActiveWorkspaceId(active => active === workspaceId || !next.some(item => item.id === active)
+          ? next[Math.min(index, next.length - 1)]?.id ?? null : active);
+        if (!next.length) setActiveView(view => view === "project" ? "multi" : view);
+      }),
     });
-
-    const nextWorkspaces = workspaces.filter(
-      (item) => item.id !== workspaceId
-    );
-
-    setWorkspaces(nextWorkspaces);
-
-    if (
-      activeWorkspaceId === workspaceId ||
-      !nextWorkspaces.some((item) => item.id === activeWorkspaceId)
-    ) {
-      const nextActiveWorkspace =
-        nextWorkspaces[Math.min(workspaceIndex, nextWorkspaces.length - 1)] ??
-        null;
-
-      setActiveWorkspaceId(nextActiveWorkspace?.id ?? null);
-
-      if (!nextActiveWorkspace && activeView === "project") {
-        setActiveView("multi");
-      }
-    }
-
-    if (maximizedSessionId && removedSessionIds.has(maximizedSessionId)) {
-      setMaximizedSessionId(null);
-    }
-
-    if (selectedSessionId && removedSessionIds.has(selectedSessionId)) {
-      setSelectedSessionId(null);
-    }
   }
 
   function restartSession(scope: SessionScope, session: AgentSession) {
@@ -4703,7 +4685,8 @@ export default function App() {
       }
       if (kind === "navigate") {
           const view = payload.view;
-          if (typeof view !== "string" || !["settings", "history", "orchestrator", "multi", "project"].includes(view)) return { ok: false, error: "Choose a supported application view." };
+          const destination = workspaceNavigation.find(item => item.id === view);
+          if (typeof view !== "string" || !destination) return { ok: false, error: "Choose a supported application view." };
           const project = view === "project" && typeof payload.cwd === "string" && payload.cwd.trim()
               ? workspaces.find(workspace => normalizeWorkspacePath(workspace.path) === normalizeWorkspacePath(payload.cwd as string)) : undefined;
           if (view === "project" && !project) return { ok: false, error: "That project is not open. Choose an existing project folder." };
@@ -4711,9 +4694,10 @@ export default function App() {
           // ownership and launch state are unchanged by these view switches.
           flushSync(() => {
               setLauncherMenuOpen(false);
-              setSettingsOpen(view === "settings");
-              setWorkspaceToolsOpen(view === "history");
-              if (view === "history") setWorkspaceToolsTab("History");
+              setSettingsOpen(destination.surface === "settings");
+              setSettingsPanel(destination.panel);
+              setWorkspaceToolsOpen(destination.surface === "tools");
+              if (destination.tab) setWorkspaceToolsTab(destination.tab);
               if (["orchestrator", "multi", "project"].includes(view)) {
                   setOrchestratorViewOpen(view === "orchestrator");
                   if (view !== "orchestrator") {
@@ -4725,6 +4709,14 @@ export default function App() {
               }
           });
           return { ok: true, status: "navigated", view, ...(project ? { projectId: project.id, cwd: project.path } : {}) };
+      }
+      if (kind === "workspace_state") {
+          const destination = settingsOpen ? workspaceNavigation.find(item => item.panel === (settingsPanel || "orchestrator"))
+              : workspaceToolsOpen ? workspaceNavigation.find(item => item.tab === workspaceToolsTab)
+              : workspaceNavigation.find(item => item.id === (orchestratorViewOpen ? "orchestrator" : activeView));
+          const project = workspaces.find(item => item.id === activeWorkspaceId);
+          return { ok: true, view: destination?.id, selectedSessionId, maximizedSessionId,
+              ...(project ? { projectId: project.id, cwd: project.path } : {}) };
       }
       if (kind === "open_settings") { setSettingsOpen(true); return { ok: true }; }
       if (kind === "inventory") {
@@ -4748,17 +4740,23 @@ export default function App() {
       }
       if (kind === "focus_session")
           return { ok: focusRelaySession(String(payload.id)) };
+      if (kind === "remove_project") {
+          const selection = payload.projectSelection as ProjectRemovalSnapshot | undefined;
+          if (!selection?.id || !selection.path || !Array.isArray(selection.targets)) return { ok: false, error: "A captured project selection is required." };
+          return { ...await removeWorkspace(selection.id, selection) };
+      }
       if (kind === "add_project") {
           const path = String(payload.path || "").trim();
           if (!path)
               return { ok: false, error: "A project path is required." };
           const existing = workspaces.find(w => normalizeWorkspacePath(w.path) === normalizeWorkspacePath(path));
           const project = existing || starterWorkspace(path);
-          if (!existing)
-              setWorkspaces(current => [project, ...current]);
-          setActiveWorkspaceId(project.id);
-          setActiveView("project");
-          return { ok: true, projectId: project.id };
+          flushSync(() => {
+              if (!existing) setWorkspaces(current => [project, ...current]);
+              setActiveWorkspaceId(project.id);
+              setActiveView("project");
+          });
+          return { ok: true, status: "added", projectId: project.id, path: project.path };
       }
       if (kind === "create_session") {
           const cwd = String(payload.cwd || "");
@@ -5295,6 +5293,7 @@ export default function App() {
                           onClick={() => {
                             setLauncherMenuOpen(false);
                             setSettingsHint(null);
+                            setSettingsPanel(undefined);
                             setSettingsOpen(true);
                           }}
                         >
@@ -5417,7 +5416,7 @@ export default function App() {
             <TiledBoard
               onMetricsChange={(metrics) => boardMetricsRef.current.set(scopeKey(activeScope), metrics)}
               revealItemId={revealSessionId ?? undefined}
-              disabled={Boolean(maximizedSessionId)}
+              maximizedItemId={maximizedTileId ?? undefined}
               onArrangeChange={setIsArranging}
               onLayoutCommit={(layouts) => persistLayout(activeScope, layouts)}
               items={boardTiles.map((tile) => {
@@ -5592,7 +5591,6 @@ export default function App() {
                   />
                   );
 
-                const isMaximizedTile = tile.id === maximizedTileId;
                 // A split tile advertises what its partition actually needs, so
                 // sanitizeLayout/settleLayouts grow it and re-pack its
                 // neighbours with no new sizing code here.
@@ -5607,21 +5605,9 @@ export default function App() {
 
                 return {
                   id: tile.id,
-                  minW: isMaximizedTile
-                    ? Math.max(DEFAULT_MIN_PANE_WIDTH * 2, partitionMin.minW)
-                    : partitionMin.minW,
-                  minH: isMaximizedTile
-                    ? Math.max(DEFAULT_MIN_PANE_HEIGHT * 2, partitionMin.minH)
-                    : partitionMin.minH,
-                  layout: isMaximizedTile
-                    ? {
-                        x: 0,
-                        y: LEGACY_BOARD_PADDING,
-                        w: 100,
-                        h: MAXIMIZED_PANE_HEIGHT,
-                        unit: "fluid" as const
-                      }
-                    : tile.anchor.layout,
+                  minW: partitionMin.minW,
+                  minH: partitionMin.minH,
+                  layout: tile.anchor.layout,
                   content: tile.tree ? (
                     <PaneSplit
                       node={tile.tree}
@@ -5800,6 +5786,8 @@ export default function App() {
       {settingsOpen && (
         <SettingsDialog
           hint={settingsHint}
+          selectedPanel={settingsPanel}
+          onPanelChange={setSettingsPanel}
           onClose={() => {
             setSettingsOpen(false);
             setSettingsHint(null);

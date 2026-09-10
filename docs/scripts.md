@@ -2,11 +2,23 @@
 
 The `scripts/` folder is split by purpose so app launch, backend validation, and visual QA do not sit in one flat bucket.
 
+`npm run smoke:electron:orchestrator-navigation` verifies all workspace views and
+real project removal/re-addition with a preserved file and unrelated terminal.
+`node scripts/qa/orchestrator-terminal-inspection-live.cjs --all` runs the bounded
+configured-model inspection matrix against synthetic provider screens.
+`node scripts/qa/orchestrator-performance-bench.cjs` measures local control work
+with a retained synthetic conversation and writes a CPU profile. Add
+`--performance` to the navigation smoke for real Electron polling measurements,
+or `--packaged` to validate the shipped executable. The navigation gate uses
+hidden windows and DOM/geometry assertions; `--screenshots` opens a visible
+disposable window and captures optional visual evidence.
+
 `npm run check:orchestrator` runs the combined harness acceptance check: backend,
 voice, Grok, status and host-readiness regressions; runtime/telemetry/metadata/host-parser
-smokes; production build; renderer/persistence/capture/mic-stop checks; and hidden
-Electron/preload/PTY, task-UI and two-process session-resume smokes. See the
-[cohesion review](orchestrator-cohesion-review.md) for scope and evidence boundaries.
+smokes; production build; renderer/persistence/capture/mic-stop and project-removal
+checks; and isolated Electron/preload/PTY, workspace navigation, project lifecycle,
+task-UI and two-process session-resume smokes. See the
+[harness overhaul](orchestrator-harness-overhaul.md) for current scope and evidence.
 
 ## App Scripts
 

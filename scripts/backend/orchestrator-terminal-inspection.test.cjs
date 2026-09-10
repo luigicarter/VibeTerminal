@@ -22,13 +22,18 @@ async function fixture(t, kind, mode = 'usage') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-inspection-'));
   const pane = createPane('Atlas', kind, root, mode), bodies = [], steps = [], spoken = [];
   let scriptError, interpretation;
-  const relay = createOrchestrator({ userDataPath: root, secureStorage: { isEncryptionAvailable: () => false },
+  const relay = createOrchestrator({ autoInspectionCompletion: false, userDataPath: root, secureStorage: { isEncryptionAvailable: () => false },
     onSpeak: event => { spoken.push(event); return { ok: true }; },
     getRoots: () => ({ documents: root, projects: [{ name: 'Fixture', path: root }] }), getSessions: () => [{ ...pane.session }], readSession: async () => pane.read(), dispatchAction: async action => pane.dispatch(action),
     fetch: async (url, options) => {
       if (url.endsWith('/key')) return new Response(JSON.stringify({ data: {} }));
       if (url.endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'scripted', context_length: 128000, supported_parameters: ['tools', 'tool_choice'] }] }));
       const body = JSON.parse(options.body);
+      if (body.messages[0].content === require('../../backend/orchestratorGoalReview.cjs').INSPECTION_GOAL_REVIEW) {
+        const evidence = JSON.parse(body.messages[1].content).evidence;
+        return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ decision: 'complete', evidenceIds: [evidence.at(-1).id] }) } }] }));
+      }
+
       if (body.tools?.[0]?.function?.name === 'interpret_workspace') { interpretation = body; return new Response(JSON.stringify(call(mode === 'passive' ? { goal: 'Read existing task output.', access: 'read-only', actions: [] } : { goal: 'Inspect local terminal usage.', responseKind: 'terminal-inspection', actions: [{ kind: 'operate_terminal', targetIds: ['Atlas'], text: 'Inspect local usage and report the observed limits.', permissionMode: 'none' }] }, 'interpret_workspace'))); }
       bodies.push(body);
       try { assert.ok(steps.length, 'Unexpected model call: ' + JSON.stringify(body.messages.at(-1))); const step = steps.shift(); return new Response(JSON.stringify(typeof step === 'function' ? step(body) : step)); }
@@ -87,7 +92,7 @@ test('Grok usage limit tab is inspected from its visible consumer menu', async t
 test('unavailable local quota is reported truthfully without invented subscription advice', async t => {
   const f = await fixture(t, 'claude', 'missing'); const facts = 'Usage information is unavailable for this terminal authentication method; remaining quota and reset time could not be verified.';
   const result = await f.run([read(), body => operate(body, 'terminal_interact', { text: '/usage', submit: true }), read(), body => operate(body, 'finish_terminal', { text: facts, outcome: 'completed' })]);
-  assert.equal(result.ok, true); assert.equal(result.text, facts); assert.doesNotMatch(result.text, /subscription page|\d+%/);
+  assert.equal(result.ok, true); assert.equal(result.text, `Observed terminal output:\n${f.pane.screen()}`); assert.doesNotMatch(result.text, /subscription page|\d+%/);
 });
 test('existing task output remains a passive read with zero terminal effects', async t => {
   const f = await fixture(t, 'codex', 'passive'); const facts = 'Review completed: 2 defects found in parser.js. No changes made.';

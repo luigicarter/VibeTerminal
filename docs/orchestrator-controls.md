@@ -1,5 +1,10 @@
 # Orchestrator and terminal controls
 
+The current [harness overhaul](orchestrator-harness-overhaul.md) adds semantic
+inspection and folder controls, application-managed inspection completion, and
+project removal that preserves files. It supersedes older external-folder and
+model-finish limitations described in historical reviews below.
+
 ## Conversation and recovery
 
 Vibe's response contract calls for a warm, direct voice, brief useful replies, and

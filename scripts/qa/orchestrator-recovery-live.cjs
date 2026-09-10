@@ -19,11 +19,12 @@ if (fs.existsSync(localState)) {
 const requestedBudget = Number(process.env.VIBE_RECOVERY_LIVE_BUDGET || .20);
 const budget = Number.isFinite(requestedBudget) && requestedBudget > 0 ? Math.min(requestedBudget, .25) : .20;
 const caseNames = ['project-close-all', 'explicit-close-subset', 'bound-new-codex', 'natural-failed-route-recovery', 'ambiguous-web-terminal-clause', 'creation-purpose-guard', 'ambiguous-creation-purpose-guard', 'feature-description-history', 'feature-followup-history', 'fullscreen-history'];
-caseNames.push('unselected-existing-codex', 'unselected-existing-codex-guard', 'related-agent-continuation', 'explicit-existing-other-task');
+caseNames.push('unselected-existing-codex', 'unselected-existing-codex-guard', 'unselected-existing-codex-schema-guard', 'related-agent-continuation', 'explicit-existing-other-task', 'add-project-and-task');
 const caseArgs = process.argv.slice(2).filter(arg => arg.startsWith('--case='));
 const selectedCase = caseArgs[0]?.slice('--case='.length);
 const report = { boundary: 'Configured live model; synthetic project, pane inventory and effects only. The recovery case scripts only its initial intent and initial routing failure; its retry interpretation, routing and execution use the configured live model. The two purpose-guard cases script only their initial unintended draft proposal; purpose review and subsequent repair/execution use the live model. Other cases use the live model from their initial intent. No installed conversation/history, native terminals or microphone used.', initialFailureScripted: false, initialProposalScripted: false, budget, maxCallsPerCase: 24, selectedCase: selectedCase === undefined ? 'all' : caseNames.includes(selectedCase) ? selectedCase : 'invalid', cases: [], startedAt: new Date().toISOString() };
 report.boundary += ' The existing-codex guard case scripts only the initial wrong existing-target proposal; target review, repair, routing and execution use the live model.';
+report.boundary += ' The schema-guard case scripts a malformed interpretation followed by a wrong-target proposal; the third interpretation, routing and execution use the live model.';
 const recoveryObjective = 'Investigate the partial terminal closure in Recovery QA; do not edit files.';
 const purposeTask = 'investigate the partial terminal closure; do not edit files.';
 const purposeObjectives = {
@@ -58,7 +59,7 @@ function toolMetadata(call) {
     hasObservationSequence: Object.hasOwn(args, 'observationSequence'), hasInputRevision: Object.hasOwn(args, 'inputRevision') });
   if (call.function?.name === 'interpret_workspace') result.intent = {
     executionMode: ['direct', 'reason'].includes(args.executionMode) ? args.executionMode : 'omitted-or-invalid',
-    actions: Array.isArray(args.actions) ? args.actions.slice(0, 24).map(action => ({ kind: metadataName(action?.kind),
+    actions: Array.isArray(args.actions) ? args.actions.slice(0, 24).map(action => ({ kind: metadataName(action?.kind), argumentKeys: Object.keys(action || {}).slice(0, 32).map(metadataName),
       ...(action?.scope && { scopeType: ['project', 'board', 'workspace', 'explicit'].includes(action.scope.type) ? action.scope.type : 'other' }) })) : [],
     hasClarification: typeof args.clarification === 'string' && Boolean(args.clarification.trim())
   };
@@ -80,7 +81,7 @@ async function main() {
     const root = path.join(run, name), cwd = path.join(root, 'Recovery QA'); fs.mkdirSync(cwd, { recursive: true });
     const sameProject = value => typeof value === 'string' && path.win32.isAbsolute(value)
       && path.win32.normalize(value).replace(/[\\/]+$/, '').toLowerCase() === path.win32.normalize(cwd).replace(/[\\/]+$/, '').toLowerCase();
-    let sessions = [], sequence = 0, induceFailure = false, seededInitialIntent = false; const sends = [], spoken = [], statuses = [], composers = new Map(), submittedActions = new Set();
+    let sessions = [], sequence = 0, induceFailure = false, seededInitialIntent = false, seededSchemaFailure = false, projectAdded = name !== 'add-project-and-task'; const sends = [], spoken = [], statuses = [], composers = new Map(), submittedActions = new Set();
     const composer = current => {
       if (!composers.has(current.id)) composers.set(current.id, { text: '', cursor: 0, selected: false, sequence: 0, revision: 0 });
       return composers.get(current.id);
@@ -94,11 +95,19 @@ async function main() {
       const completion = url.endsWith('/chat/completions'); let reservation = 0;
       if (completion) {
         const body = JSON.parse(options.body);
-        if (name === 'unselected-existing-codex-guard' && !seededInitialIntent && body.tools?.some(tool => tool.function?.name === 'interpret_workspace')) {
+        if (name === 'unselected-existing-codex-schema-guard' && !seededSchemaFailure && body.tools?.some(tool => tool.function?.name === 'interpret_workspace')) {
+          seededSchemaFailure = true; row.initialSchemaFailureScripted = true;
+          return new Response(JSON.stringify({ choices: [{ finish_reason: 'tool_calls', message: { tool_calls: [{
+            id: 'scripted-malformed-intent', type: 'function', function: { name: 'interpret_workspace', arguments: JSON.stringify({
+              goal: 'Investigate full-screen pane height without edits.', actions: [{ kind: 'operate_terminal', targetIds: ['worker-1'], unexpected: true, text: 'Investigate full-screen pane height without editing files.' }]
+            }) }
+          }] } }], usage: { cost: 0 } }), { status: 200 });
+        }
+        if (['unselected-existing-codex-guard', 'unselected-existing-codex-schema-guard'].includes(name) && !seededInitialIntent && body.tools?.some(tool => tool.function?.name === 'interpret_workspace')) {
           seededInitialIntent = true; row.initialProposalScripted = true;
           return new Response(JSON.stringify({ choices: [{ finish_reason: 'tool_calls', message: { tool_calls: [{
             id: 'scripted-wrong-existing-target', type: 'function', function: { name: 'interpret_workspace', arguments: JSON.stringify({
-              goal: 'Fix full-screen pane height.', actions: [{ kind: 'operate_terminal', targetIds: ['worker-1'], text: 'Fix full-screen pane height; it fills horizontally but remains short vertically.' }]
+              goal: 'Investigate full-screen pane height.', actions: [{ kind: 'operate_terminal', targetIds: ['worker-1'], text: name.endsWith('-schema-guard') ? 'Investigate full-screen pane height without editing files.' : 'Fix full-screen pane height; it fills horizontally but remains short vertically.' }]
             }) }
           }] } }], usage: { cost: 0 } }), { status: 200 });
         }
@@ -145,11 +154,42 @@ async function main() {
         if (body.messages?.[0]?.content === require('../../backend/orchestratorTargetReview.cjs').TARGET_REVIEW_SYSTEM) row.targetReview = true;
         row.calls.push({ stage: metadataName(body.tools?.[0]?.function?.name || 'model'), status: 'started', toolErrors, purposeReview,
           inputBytes: Buffer.byteLength(JSON.stringify({ messages: body.messages, tools: body.tools || [] })) });
+        if (name.endsWith('-schema-guard') && body.tools?.[0]?.function?.name === 'interpret_workspace') {
+          const sources = [];
+          const inspect = (value, key) => { if (typeof value === 'string' && value.includes('worker-1')) sources.push(key); else if (value && typeof value === 'object') for (const [field, child] of Object.entries(value)) inspect(child, `${key}.${field}`); };
+          for (const [index, message] of body.messages.entries()) if (message.role === 'user') { try { inspect(JSON.parse(message.content), `message-${index}`); } catch {} }
+          row.calls.at(-1).targetIdentitySources = sources;
+          row.calls.at(-1).offeredActions = body.tools.map(tool => tool.function.name);
+        }
       }
       const record = completion ? row.calls.at(-1) : null, start = Date.now();
       try {
         const signal = options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(45000)]) : AbortSignal.timeout(45000);
-        const response = await fetch(url, { ...options, signal });
+        let wireOptions = options, jsonInterpretation = false;
+        if (completion && process.argv.includes('--json-intent')) {
+          const wire = JSON.parse(options.body), tool = wire.tools?.find(tool => tool.function?.name === 'interpret_workspace');
+          if (tool) {
+            jsonInterpretation = true; delete wire.tools; delete wire.tool_choice;
+            const planningContext = JSON.parse(wire.messages.find(message => message.role === 'user').content);
+            const legacySchema = require('../../backend/orchestratorInterpretationSchema.cjs').interpretationTool(planningContext).function.parameters;
+            wire.response_format = { type: 'json_schema', json_schema: { name: 'interpret_workspace', strict: true, schema: legacySchema } };
+            wire.provider = { require_parameters: true };
+            wire.messages[0].content += '\nTransport override: return ONLY the interpretation JSON object matching response_format. Do not call a tool, wrap it in another object, or include commentary.';
+            wireOptions = { ...options, body: JSON.stringify(wire) };
+            record.protocol = 'json-schema-probe';
+            record.inputBytes = Buffer.byteLength(JSON.stringify({ messages: wire.messages, response_format: wire.response_format }));
+          }
+        }
+        let response = await fetch(url, { ...wireOptions, signal });
+        if (jsonInterpretation && response.ok) {
+          const data = await response.clone().json(), message = data.choices?.[0]?.message;
+          try {
+            JSON.parse(message?.content);
+            message.tool_calls = [{ id: 'structured-interpretation', type: 'function', function: { name: 'interpret_workspace', arguments: message.content } }];
+            message.content = null;
+            response = new Response(JSON.stringify(data), { status: response.status, headers: { 'Content-Type': 'application/json' } });
+          } catch { /* Production validation must reject an invalid response. */ }
+        }
         if (url.endsWith('/models')) {
           const data = await response.clone().json(), selected = data.data?.find(item => item.id === model);
           const prompt = Number(selected?.pricing?.prompt), completion = Number(selected?.pricing?.completion);
@@ -186,12 +226,12 @@ async function main() {
         messages: history.map(([role, text], i) => ({ id: `history-${i}`, role, text, at: at + i, requestId: `exchange-${Math.floor(i / 2)}`, origin: 'text' })) }));
     }
     relay = createOrchestrator({ userDataPath: path.join(root, 'profile'), fetch: request,
-      getRoots: () => ({ documents: root, projects: [{ id: 'recovery-project', name: 'Recovery QA', path: cwd }] }),
+      getRoots: () => ({ documents: root, projects: projectAdded ? [{ id: 'recovery-project', name: 'Recovery QA', path: cwd }] : [] }),
       getSessions: () => structuredClone(sessions), getLaunchers: () => [{ kind: 'codex', label: 'Codex', available: true, configured: true },
         ...(name === 'fullscreen-history' ? [{ kind: 'claude', label: 'Claude Code', available: true, configured: true }] : [])],
       // Ownership cases exercise production routing, including its real model
       // allowance and compaction. The older recovery fixture injects failures.
-      routeTask: ['unselected-existing-codex', 'unselected-existing-codex-guard', 'related-agent-continuation', 'explicit-existing-other-task'].includes(name) ? undefined : async (context, { read }) => {
+      routeTask: ['unselected-existing-codex', 'unselected-existing-codex-guard', 'unselected-existing-codex-schema-guard', 'related-agent-continuation', 'explicit-existing-other-task'].includes(name) ? undefined : async (context, { read }) => {
         row.routeCalls++;
         if (induceFailure) { induceFailure = false; throw new RoutingError('synthetic-route-failure'); }
         return planTaskRoute({ context, read, complete: async (messages, tools) => {
@@ -207,6 +247,11 @@ async function main() {
             : name.startsWith('unselected-existing-codex') && current.id === 'worker-1' ? 'User: Discuss future product strategy. Agent: Here are ideas for a dashboard redesign. This conversation has no full-screen repair task. Idle at an empty composer.'
             : input.text ? `Codex ready. Unsent input composer:\n> ${input.text}` : 'Codex ready. Empty input composer. >' }; },
       dispatchAction: action => {
+        if (action.kind === 'add_project') {
+          assert(sameProject(action.path)); assert.equal(projectAdded, false, 'Add the project only once');
+          projectAdded = true; row.effects.add = (row.effects.add || 0) + 1;
+          return { ok: true, status: 'added', path: cwd, projectId: 'recovery-project' };
+        }
         if (action.kind === 'navigate') {
           if (!['settings', 'history', 'orchestrator', 'multi', 'project'].includes(action.view)
               || action.cwd !== undefined && !sameProject(action.cwd) || action.view === 'project' && !sameProject(action.cwd)) fail('navigation-outside-fixture');
@@ -217,7 +262,7 @@ async function main() {
           if (action.cwd !== undefined && !sameProject(action.cwd)) fail('history-outside-fixture');
           return { ok: true, conversations: [], total: 0, hasMore: false };
         }
-        if (action.kind === 'create_session') { assert(sameProject(action.cwd), 'creation must stay within the same known Windows project'); assert.equal(action.kindOfSession, name === 'fullscreen-history' ? 'claude' : 'codex'); assert.equal(action.text, undefined); assert.equal(action.prompt, undefined);
+        if (action.kind === 'create_session') { assert(projectAdded, 'The project must exist before its worker launches'); assert(sameProject(action.cwd), 'creation must stay within the same known Windows project'); assert.equal(action.kindOfSession, name === 'fullscreen-history' ? 'claude' : 'codex'); assert.equal(action.text, undefined); assert.equal(action.prompt, undefined);
           row.effects.create++; const current = pane(`created-${row.effects.create}`, { kind: action.kindOfSession, provider: action.kindOfSession }); sessions.push(current);
           return { ok: true, status: 'created', id: current.id, launchToken: current.launchToken, processState: 'running', target: { id: current.id, generation: current.generation, launchToken: current.launchToken } }; }
         const current = sessions.find(item => item.id === action.targetId && item.generation === action.generation); if (!current) fail('effect-outside-fixture');
@@ -282,7 +327,7 @@ async function main() {
     try {
       assert.equal((await relay.configure({ apiKey: secret, sessionOnly: true, model, spendingLimit: Math.max(.001, budget - spent) })).ok, true);
       assert.equal((await relay.setEnabled(true)).ok, true);
-      await exercise({ send: (text, extra = {}) => relay.send({ text, origin: 'text', ...extra }), sessions: () => sessions, sends, spoken, statuses, row,
+      await exercise({ cwd, send: (text, extra = {}) => relay.send({ text, origin: 'text', ...extra }), sessions: () => sessions, sends, spoken, statuses, row,
         failNextRoute: () => { induceFailure = true; }, task: id => relay.getState().tasks.find(item => item.requestId === id) });
       row.passed = true;
     } catch (error) { row.failure = row.limitReason || reasonCode(error); }
@@ -297,6 +342,12 @@ async function main() {
     const result = await f.send('Close only worker-1 and worker-2 in Recovery QA. Leave every other terminal open.');
     assert.equal(result.ok, true); assert.equal(f.row.effects.close, 2);
     assert.deepEqual(f.sessions().map(item => item.id), ['worker-3', 'worker-4', 'worker-5', 'worker-6', 'worker-7', 'worker-8']);
+  });
+  await scenario('add-project-and-task', 0, async f => {
+    const result = await f.send(`Add the existing folder ${f.cwd} as a Lina project, then open a new Codex there and investigate the pane-height issue without editing files.`);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(f.row.effects.add, 1); assert.equal(f.row.effects.create, 1); assert.equal(f.row.effects.send, 1);
+    assert.match(f.sends[0].text, /height|vertical/i); assert.match(f.sends[0].text, /without editing|do not (?:edit|modify)|read.only/i);
   });
   await scenario('bound-new-codex', 0, async f => {
     const result = await f.send('Open a new Codex terminal in Recovery QA and investigate the partial terminal closure. Do not edit files.');
@@ -321,9 +372,11 @@ async function main() {
     assert.equal(f.row.effects.send, 0); assert.equal(f.row.effects.create, 0);
     f.row.clausePreserved = true;
   });
-  for (const name of ['unselected-existing-codex', 'unselected-existing-codex-guard']) await scenario(name, 1, async f => {
+  for (const name of ['unselected-existing-codex', 'unselected-existing-codex-guard', 'unselected-existing-codex-schema-guard']) await scenario(name, 1, async f => {
     f.sessions()[0].name = 'Discuss future product strategy';
-    const result = await f.send('Can you prompt a Codex terminal in Recovery QA to fix the full-screen issue? It expands horizontally but is very short vertically.');
+    const result = await f.send(name.endsWith('-schema-guard')
+      ? 'Can you prompt a Codex terminal in Recovery QA just to investigate why full screen expands horizontally but not vertically? Do not edit files.'
+      : 'Can you prompt a Codex terminal in Recovery QA to fix the full-screen issue? It expands horizontally but is very short vertically.');
     assert.equal(result.ok, true);
     assert.equal(f.row.effects.create, 1); assert.equal(f.row.effects.send, 1);
     assert.notEqual(f.sends[0].targetId, 'worker-1'); assert.match(f.sends[0].text, /vertical|height/i);
@@ -333,6 +386,11 @@ async function main() {
       const events = fs.readFileSync(path.join(run, name, 'profile', 'logs', 'orchestrator-errors.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
       f.row.targetSelectionVeto = events.some(event => event.stage === 'existing_target' && event.status === 'assign');
       assert.equal(f.row.targetSelectionVeto, true);
+      if (name.endsWith('-schema-guard')) {
+        assert.equal(f.row.initialSchemaFailureScripted, true);
+        assert.deepEqual(events.filter(event => event.stage === 'interpretation' && event.status === 'retry').map(event => event.strategy), ['contract', 'review']);
+        assert.match(f.sends[0].text, /do not (?:edit|modify)|without (?:editing|modifying)|read.only/i);
+      }
     }
   });
   await scenario('related-agent-continuation', 0, async f => {

@@ -1,10 +1,11 @@
 'use strict';
+const { handoffTargets } = require('./orchestratorHandoff.cjs');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
 const { formatTaskWait } = require('./orchestratorTaskStatus.cjs');
 const { routingBindingMatches } = require('./orchestratorLaunchers.cjs');
 const launchers = new Set([...Object.keys(require('../shared/providerCapabilities.json')), 'claude-custom']);
-const directKinds = new Set(['send_prompt', 'stage_draft', 'focus_session', 'navigate', 'interrupt', 'watch_terminal']);
+const directKinds = new Set(['send_prompt', 'stage_draft', 'focus_session', 'navigate', 'interrupt', 'watch_terminal', 'add_project', 'remove_project', 'open_folder']);
 
 function canExecuteDirect(plan) {
   return plan.executionMode === 'direct' && !plan.clarification &&
@@ -23,16 +24,15 @@ function delegatedSubmissionFinishes({ plan, outcomes = [], waits = [], sessions
       !observations?.latest || !observations?.authorize || typeof getOperation !== 'function') return [];
   const delivered = new Set(['written', 'submitted', 'delivered', 'sent', 'acknowledged']);
   const actions = [];
-  for (const grant of plan.grants || []) {
-    if (grant.kind !== 'operate_terminal' || grant.inspection || !grant.routing?.binding ||
-        typeof grant.routing.cwd !== 'string' || !grant.routing.cwd || grant.targets?.length !== 1) continue;
-    const target = grant.targets[0], binding = grant.routing.binding;
+  for (const grant of plan.grants || []) for (const handoff of handoffTargets(grant)) {
+    if (typeof handoff.cwd !== 'string' || !handoff.cwd) continue;
+    const { target, binding } = handoff;
     const matches = sessions.filter(session => session.id === target.id);
     const session = matches.length === 1 ? matches[0] : undefined;
     const kind = session?.kind || session?.provider;
     if (!session || session.generation !== target.generation || binding.id !== target.id || binding.generation !== target.generation ||
-        kind !== grant.routing.kindOfSession || ['terminal', 'shell'].includes(kind) ||
-        !routingBindingMatches({ target: binding, nativeIdentity: { workspace: grant.routing.cwd, id: binding.conversationId } }, session)) continue;
+        kind !== handoff.kindOfSession || ['terminal', 'shell'].includes(kind) ||
+        !routingBindingMatches({ target: binding, nativeIdentity: { workspace: handoff.cwd, id: binding.conversationId } }, session)) continue;
     const chat = ['fusion', 'openfusion'].includes(kind);
     if (session.started === false || ['failed', 'exited'].includes(session.processState) || (chat ? session.engineReady !== true : session.processState !== 'running' ||
         session.agentProcessState !== 'running' || !(Number(session.agentPid) > 0) || session.observation !== 'observed') ||

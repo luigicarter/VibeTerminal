@@ -20,10 +20,17 @@ function createPane(id, kind, cwd, mode = 'usage') {
     ? { command: '/usage', facts: 'Grok Build Usage limit: 64% remaining; resets 22:45. Context usage: 3200 tokens.', requiredFacts: ['64', '22:45', '3200'] }
     : providerScenarios[kind];
   assert.ok(scenario, `No explicit synthetic inspection scenario for ${kind}`);
-  const pane = { session: { id, name: id, title: id, kind, provider: kind, cwd, generation: 'fixture-1', status: 'running', turnState: 'idle' }, sequence: 1, inputRevision: 0, reads: [], actions: [], phase: 'prompt', done: mode === 'passive' };
+  const pane = { session: { id, name: id, title: id, kind, provider: kind, cwd, generation: 'fixture-1', status: 'running', turnState: 'idle' }, sequence: 1, inputRevision: 0, reads: [], actions: [], composer: '', phase: 'prompt', done: mode === 'passive' };
   pane.facts = scenario.facts; pane.command = scenario.command; pane.requiredFacts = scenario.requiredFacts; pane.quotaUnavailable = scenario.quotaUnavailable;
-  pane.screen = () => mode === 'passive' ? 'Review completed: 2 defects found in parser.js. No changes made.' : pane.phase === 'prompt' ? `${kind} ready. Empty prompt. No task running.` : pane.phase === 'closed' ? (pane.observedUsage ? `Returned to empty prompt. Last inspected: ${pane.facts}` : 'Returned to empty prompt.') : mode === 'missing' ? 'Usage information unavailable for this authentication method. Esc closes.' : pane.phase === 'discovery' ? 'Local help: Account information is selected. Press Enter to inspect its availability; Esc closes.' : pane.phase === 'menu' ? (mode === 'credits-menu' ? 'Grok Build: Context usage 3200 tokens. Tabs: Context usage | Usage limit | Session info. Tab/Right next; Shift-Tab/Left previous; Esc closes.' : 'Account information. Tabs: Status | Usage. Press right for Usage; Esc closes.') : `${pane.facts}\n${scenario.appendOnly ? 'Informational output appended above empty prompt; no modal is open.' : 'Esc closes.'}`;
-  pane.read = () => { pane.reads.push({ sequence: pane.sequence, inputRevision: pane.inputRevision, afterActions: pane.actions.length }); if (pane.phase === 'usage' && mode !== 'missing') pane.observedUsage = true; return { ok: true, id, generation: pane.session.generation, sequence: pane.sequence, observationSequence: pane.sequence, inputRevision: pane.inputRevision, text: pane.screen(), inputState: { kind: 'empty', hasText: false } }; };
+  const commands = [...new Set([scenario.command, ...(kind === 'codex' ? [] : ['/help']),
+    ...({ claude: ['/status', '/context', '/cost'], gemini: ['/stats', '/stats session', '/stats model', '/usage'],
+      kimi: ['/status'], 'kimi-custom': ['/status'], qwen: ['/status', '/usage'], grok: ['/session-info', '/context', '/usage', '/cost'],
+      cursor: ['/model'], opencode: ['/models'] }[kind] || [])])];
+  const aliases = { claude: '/cost', gemini: '/usage', qwen: '/usage', grok: '/cost' };
+  pane.screen = () => mode === 'passive' ? 'Review completed: 2 defects found in parser.js. No changes made.' : pane.phase === 'prompt' ? `${kind} ready. ${pane.composer ? `Input: ${pane.composer} (not submitted). Press Enter to run it.` : "Empty prompt."} No task running.` : pane.phase === 'closed' ? (pane.observedUsage ? `Returned to empty prompt. Last inspected: ${pane.facts}` : 'Returned to empty prompt.') : mode === 'missing' ? 'Usage information unavailable for this authentication method. Esc closes.' : pane.phase === 'discovery' ? 'Local help: Account information is selected. Press Enter to inspect its availability; Esc closes.' : pane.phase === 'menu' ? (mode === 'credits-menu' ? 'Grok Build: Context usage 3200 tokens. Tabs: Context usage | Usage limit | Session info. Tab/Right next; Shift-Tab/Left previous; Esc closes.' : 'Account information. Tabs: Status | Usage. Press right for Usage; Esc closes.') : `${pane.facts}\n${scenario.appendOnly ? 'Informational output appended above empty prompt; no modal is open.' : 'Esc closes.'}`;
+  pane.read = () => { pane.reads.push({ sequence: pane.sequence, inputRevision: pane.inputRevision, afterActions: pane.actions.length }); if (pane.phase === 'usage' && mode !== 'missing') pane.observedUsage = true; return { ok: true, id, generation: pane.session.generation, sequence: pane.sequence, observationSequence: pane.sequence, inputRevision: pane.inputRevision, text: pane.screen(), inputState: { kind: pane.composer ? 'text' : 'empty', hasText: Boolean(pane.composer) } }; };
+  const originalScreen = pane.screen;
+  pane.screen = () => pane.phase === 'info' ? `${kind} informational output. No quota figures on this page. Available read-only commands: ${commands.join(', ')}. Empty prompt ready.` : originalScreen();
   pane.dispatch = action => {
     assert.equal(action.targetId, id); assert.equal(action.generation, pane.session.generation);
     assert.equal(action.kind, 'terminal_interact', 'Inspection must not submit tasks or change lifecycle');
@@ -31,20 +38,33 @@ function createPane(id, kind, cwd, mode = 'usage') {
     assert.ok(pane.reads.some(read => read.afterActions === pane.actions.length), 'A fresh read is required before every input');
     assert.equal(action.observationSequence, pane.sequence); assert.equal(action.inputRevision, pane.inputRevision);
     assert.equal(mode === 'passive', false, 'Passive output inspection must have zero effects');
-    if (pane.phase === 'prompt') {
-      assert.equal(action.text, mode === 'discovery' ? '/help' : scenario.command);
-      assert.ok(action.submit || action.keys?.includes('enter'));
-      pane.phase = ['menu', 'credits-menu'].includes(mode) ? 'menu' : mode === 'discovery' ? 'discovery' : 'usage';
-    } else {
-      assert.ok(!action.text, 'Informational navigation must not enter arbitrary text');
-      assert.equal(Boolean(scenario.appendOnly), false, 'Append-only informational output has no modal to navigate');
-      for (const key of action.keys || []) {
-        if (key === 'right' || key === 'tab') { assert.equal(pane.phase, 'menu'); pane.phase = 'usage'; }
-        else if (key === 'enter') { assert.equal(pane.phase, 'discovery'); pane.phase = 'usage'; }
-        else if (key === 'escape') pane.phase = 'closed';
-        else throw Error(`Unexpected inspection key ${key}`);
+    // Plan the whole synthetic transition before committing it. A fixture-level
+    // unsupported control is proven unsent, not an uncertain native write.
+    let phase = pane.phase, composer = pane.composer;
+    try {
+      if (['prompt', 'closed', 'info'].includes(phase) || scenario.appendOnly && phase === 'usage') {
+        const next = composer + (action.text || '');
+        assert.ok(commands.some(command => command.startsWith(next)), 'Use an observed read-only command');
+        assert.ok((action.keys || []).every(key => key === 'enter'), 'Only Enter submits this prompt fixture');
+        composer = next;
+        if (action.submit || action.keys?.includes('enter')) {
+          assert.ok(commands.includes(composer), 'Complete the observed command before submission');
+          phase = mode === 'discovery' && composer === '/help' ? 'discovery'
+            : composer === scenario.command || composer === aliases[kind] ? ['menu', 'credits-menu'].includes(mode) ? 'menu' : 'usage' : 'info';
+          composer = '';
+        } else phase = 'prompt';
+      } else {
+        assert.ok(!action.text || kind === 'qwen' && action.text.toLowerCase() === 'r', 'Use the observed menu controls');
+        for (const key of action.keys || []) {
+          if (['right', 'tab', 'left', 'shift-tab'].includes(key)) {
+            assert.ok(['menu', 'usage'].includes(phase)); phase = phase === 'menu' ? 'usage' : 'menu';
+          } else if (key === 'enter') { assert.equal(phase, 'discovery'); phase = 'usage'; }
+          else if (key === 'escape') phase = 'closed';
+          else throw Error(`Unexpected inspection key ${key}`);
+        }
       }
-    }
+    } catch (error) { return { ok: false, status: 'rejected', delivery: 'not-dispatched', error: error.message }; }
+    pane.phase = phase; pane.composer = composer;
     pane.done = pane.phase === 'usage' || pane.phase === 'closed';
     pane.actions.push({ kind: action.kind, targetId: id, text: action.text, keys: action.keys, submit: action.submit });
     pane.sequence++; pane.inputRevision++;

@@ -3,6 +3,8 @@
 // One compact catalog per request, filtered by the same schema the model sees.
 // This describes tools; frozen grants and runtime validators remain authoritative.
 const operations = {
+  read_file: 'UTF-8 workspace file; nextCursor+reference for more; maxChars<=4000 bytes.',
+  read_workspace: 'Current view, destinations, projects and discovery tools.',
   list_roots: 'Allowed roots.',
   list_sessions: 'Live terminals; query/provider/cwd; nextOffset.',
   read_session: 'Live output/questions, provider navigation guide, fresh action evidence; maxChars<=4000. beforeSequence: older output, no action token.',
@@ -29,6 +31,8 @@ const operations = {
   create_session: 'Create the bound terminal; text is an unsent draft, not task execution.',
   resume_conversation: 'Resume an exact discovered/confirmed saved reference within the grant.',
   create_project: 'Create the bound project folder under parent/name.',
+  open_folder: 'Reveal the authorized folder in the file manager.',
+  remove_project: 'Remove the bound project from Lina and close its panes; keep all files.',
   add_project: 'Add the authorized existing project path.',
   launch_setup: 'Launch the authorized named setup.',
   save_setup: 'Save the authorized named setup.',

@@ -45,7 +45,7 @@ interface TiledBoardItem {
 
 interface TiledBoardProps {
   items: TiledBoardItem[];
-  disabled?: boolean;
+  maximizedItemId?: string;
   onArrangeChange?: (isArranging: boolean) => void;
   onLayoutCommit: (layouts: Record<string, LayoutBox>) => void;
   onMetricsChange?: (metrics: BoardGeometryMetrics) => void;
@@ -88,12 +88,13 @@ function shouldIgnoreDragTarget(target: HTMLElement) {
 
 export default function TiledBoard({
   items,
-  disabled = false,
+  maximizedItemId,
   onArrangeChange,
   onLayoutCommit,
   onMetricsChange,
   revealItemId
 }: TiledBoardProps) {
+  const disabled = Boolean(maximizedItemId);
   const boardRef = useRef<HTMLDivElement | null>(null);
   const frameElementsRef = useRef(new Map<string, HTMLDivElement>());
   const interactionRef = useRef<InteractionState | null>(null);
@@ -145,11 +146,22 @@ export default function TiledBoard({
     () =>
       items.map((item) => ({
         id: item.id,
-        layout: item.layout,
+        // Fullscreen is a view of the tile, independent of its saved layout.
+        // Measure the scroll host so resizing the window also refits the pane.
+        // Keep split minima when the partition cannot fit in a small viewport.
+        layout: item.id === maximizedItemId
+          ? {
+              x: 0,
+              y: BOARD_PADDING,
+              w: 100,
+              h: Math.max(item.minH ?? DEFAULT_MIN_H, metrics.height - BOARD_PADDING * 2),
+              unit: "fluid" as const
+            }
+          : item.layout,
         minW: item.minW,
         minH: item.minH
       })),
-    [itemGeometrySignature]
+    [itemGeometrySignature, maximizedItemId, metrics.height]
   );
 
   const innerWidth = useMemo(

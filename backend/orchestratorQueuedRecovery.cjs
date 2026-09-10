@@ -19,7 +19,7 @@ function captureQueuedCommand(job, now = Date.now()) {
 }
 
 function signature(grant) {
-  const fields = ['kind', 'args', 'text', 'answerText', 'answerTexts', 'promptMode', 'answerMode', 'permissionMode', 'lifecycleMode', 'inspection', 'routing'];
+  const fields = ['kind', 'args', 'text', 'answerText', 'answerTexts', 'operationMode', 'taskBindings', 'projectSelection', 'folderAccess', 'promptMode', 'answerMode', 'permissionMode', 'lifecycleMode', 'inspection', 'routing'];
   return JSON.stringify({ ...Object.fromEntries(fields.filter(key => grant[key] !== undefined).map(key => [key, grant[key]])),
     targetAvailability: grant.targetAvailability || 'any',
     targets: grant.targets.map(({ id, generation }) => ({ id, generation })).sort((a, b) => a.id.localeCompare(b.id)) });

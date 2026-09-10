@@ -1,6 +1,7 @@
 'use strict';
+const { WORKSPACE_VIEWS } = require('./orchestratorWorkspace.cjs');
 const path = require('node:path');
-const ACTIONS = new Set(['navigate', 'focus_session', 'create_session', 'stage_draft', 'get_draft', 'send_prompt', 'terminal_interact', 'interrupt', 'restart', 'close', 'answer_question', 'permission', 'open_file', 'open_folder', 'add_project', 'launch_setup', 'save_setup', 'stage_handoff', 'resume_conversation']);
+const ACTIONS = new Set(['navigate', 'focus_session', 'create_session', 'stage_draft', 'get_draft', 'send_prompt', 'terminal_interact', 'interrupt', 'restart', 'close', 'answer_question', 'permission', 'open_file', 'open_folder', 'remove_project', 'add_project', 'launch_setup', 'save_setup', 'stage_handoff', 'resume_conversation']);
 const VERBS = 'navigate to|go to|take me to|focus|show|switch to|create|start|launch|open|reopen|resume|new|draft|stage|prepare|send|tell|ask|prompt|relay|forward|instruct|stop|interrupt|cancel|restart|close|add|make|load|remember|forget|save';
 const INTENT = {
   navigate: /^(navigate to|go to|take me to|focus|show|switch to|open)\b/i,
