@@ -186,3 +186,8 @@ jobs:
             .tmp/orchestrator-task-ui-smoke/**/*.png
             .tmp/orchestrator-smoke/**/results.json
             .tmp/orchestrator-smoke/**/electron.log
+            .tmp/orchestrator-close-smoke/**/results.json
+            .tmp/orchestrator-close-smoke/**/electron.log
+            .tmp/orchestrator-close-smoke/**/*.png
+            .tmp/orchestrator-navigation-smoke/**/results.json
+            .tmp/orchestrator-navigation-smoke/**/electron.log

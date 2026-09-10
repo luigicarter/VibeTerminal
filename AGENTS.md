@@ -4,7 +4,8 @@ Lina Terminal is an Electron + React desktop workspace for running local termina
 
 ## Docs Index
 
-- `docs/release-0.1.114-review.md` - Terminal resource and Orchestrator reliability release, acceptance gates and remaining capability/installation boundaries.
+- `docs/release-0.1.115-review.md` - Terminal resource and Orchestrator release, closure-fixture startup repair, CI diagnostics and acceptance boundaries.
+- `docs/release-0.1.114-review.md` - Unpublished terminal resource candidate, local acceptance and failed CI closure setup; immutable tag retained.
 
 - `docs/orchestrator-historical-errors-crosscheck-2026-09-10.md` - Direct saved-history/log/installed-package reconciliation: recovered and failed requests, shipped versus source-only repairs, unverifiable older causes and diagnostic-retention gap.
 

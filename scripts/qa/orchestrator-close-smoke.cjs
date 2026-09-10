@@ -37,8 +37,13 @@ const screenshot = async name => { let timer; try { const shot = await Promise.r
   await until(() => cdp.eval('Boolean(window.vibe?.orchestrator)'), 'preload');
   const dormant = Array.from({ length: 4 }, (_, i) => ({ id: `dormant-${i}`, name: `Dormant ${i + 1}`, kind: 'terminal', cwd, started: false, launchToken: 0, status: 'idle', createdAt: Date.now(), nextLaunchMode: 'new', layout: { x: (i % 2) * 50, y: Math.floor(i / 2) * 300, w: 48, h: 280, unit: 'fluid' } }));
   const workspace = { id: 'close-qa-project', name: 'Close QA', path: cwd, sessions: dormant };
-  await cdp.eval(`localStorage.setItem('vibe-terminal:workspaces:v2',${JSON.stringify(JSON.stringify([workspace]))});localStorage.setItem('vibe-terminal:active-workspace:v1','close-qa-project');localStorage.setItem('vibe-terminal:active-view:v1','project');localStorage.setItem('vibe-terminal:multi-sessions:v1','[]');location.reload();void 0`);
+  // Seed the replacement document before React reads storage. Writing into the
+  // first document after preload can race its initial persistence effects and
+  // leave the replacement document with an empty workspace on a fast CI runner.
+  const seed = await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: `localStorage.setItem('vibe-terminal:workspaces:v2',${JSON.stringify(JSON.stringify([workspace]))});localStorage.setItem('vibe-terminal:active-workspace:v1','close-qa-project');localStorage.setItem('vibe-terminal:active-view:v1','project');localStorage.setItem('vibe-terminal:multi-sessions:v1','[]');` });
+  await cdp.send('Page.reload');
   await until(async () => (await inventory()).filter(item => item.visiblePane && item.projectId === workspace.id).length === 4, 'four dormant inventory panes');
+  await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: seed.identifier });
   for (let i = 0; i < 4; i++) {
     const result = await dispatch({ kind: 'create_session', kindOfSession: 'terminal', cwd }); assert.equal(result.ok, true, JSON.stringify(result));
     const current = await until(async () => (await inventory()).find(item => item.id === result.id && item.terminalPid > 0), 'running root'); ownedRoots.push(current.terminalPid);
@@ -77,7 +82,11 @@ const screenshot = async name => { let timer; try { const shot = await Promise.r
   assert(dormant.every(target => !snapshots.some(item => item.id === target.id && item.processState === 'running')));
   record('verified-removal-and-process-stop', { originalPaneCount: 8, rootsStopped: ownedRoots.length, descendantsStopped: ownedChildren.length, newcomerPreserved: remaining[0].id, dormantLateStarts: 0 });
   report.pass = true;
-} catch (error) { report.pass = false; report.error = error.stack; console.error(error.stack); process.exitCode = 1; }
+} catch (error) {
+  report.pass = false; report.error = error.stack; console.error(error.stack); process.exitCode = 1;
+  try { report.failureState = await cdp?.eval(`(async () => ({ url: location.href, readyState: document.readyState, workspace: localStorage.getItem('vibe-terminal:workspaces:v2'), activeWorkspace: localStorage.getItem('vibe-terminal:active-workspace:v1'), paneIds: Array.from(document.querySelectorAll('[data-pane-id]'), item => item.dataset.paneId), sessions: (await window.vibe.orchestrator.getState()).sessions }))()`); }
+  catch (diagnosticError) { report.failureDiagnosticError = diagnosticError.message; }
+}
 finally {
   try { cdp?.close(); } catch {}
   if (child?.pid && child.exitCode === null) spawnSync('taskkill', ['/pid', String(child.pid), '/t', '/f'], { windowsHide: true, stdio: 'ignore' });

@@ -4,10 +4,10 @@ Lina Terminal ships to Windows users as an Electron Builder NSIS installer hoste
 
 ## Current Public Release
 
-The current Windows release is `v0.1.114`:
+The current Windows release is `v0.1.115`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.114`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.114/LinaTerminal-Setup-0.1.114.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.115`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.115/LinaTerminal-Setup-0.1.115.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -66,11 +66,11 @@ The compiled `dist/` renderer is still included because it is the UI Electron di
 
 ## Local Build
 
-Version `0.1.114` releases closed-terminal resources, batches screen observation,
+Version `0.1.115` releases closed-terminal resources, batches screen observation,
 and publishes terminal activity without copying unchanged conversation history.
 It also tightens conditional closure and conversation identity checks, repairs
 workspace activity counts, and aligns model readiness with the current planner.
-See [the release review](release-0.1.114-review.md),
+See [the release review](release-0.1.115-review.md),
 [the performance review](performance-orchestrator-overhaul-2026-09-10.md) and
 [the capability audit](orchestrator-capability-audit-2026-09-10.md) for verification
 and remaining boundaries.

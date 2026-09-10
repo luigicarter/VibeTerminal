@@ -1,5 +1,9 @@
 # Release 0.1.114 verification
 
+The tag is retained, but publication failed at the CI closure fixture's initial
+four-dormant-pane setup. No 0.1.114 public release was created. See the
+[0.1.115 release review](release-0.1.115-review.md) for the fixture repair.
+
 This release publishes the current terminal retirement, observation batching,
 transport pressure, activity publication and Orchestrator safety/readiness repairs.
 The [performance review](performance-orchestrator-overhaul-2026-09-10.md),
@@ -18,6 +22,11 @@ and all 50 release checks, including 2,010 backend tests and the performance,
 frontend, terminal, telemetry and voice suites. The existing Vite large-bundle
 advisory remains. The local build uses the pinned Codex 0.144.0 payload from
 `.tmp/codex-release-cli`; the user's newer global CLI is left intact.
+
+The local installer and SHA-512 update feed also passed verification. All 136
+runtime source files matched the local package. Packaged voice, workspace,
+closure and navigation checks passed, including activity publication with a
+1,500-message conversation. These local results do not override the failed CI gate.
 
 Free-form model factual accuracy, child approval correlation, aggregate memory
 budgets and the other open roadmap items remain unresolved. Fixture checks do
