@@ -38,6 +38,9 @@ jobs:
             throw "Electron test runtime does not match the installed package."
           }
 
+      - name: Verify native Windows file paging
+        run: node --test scripts/backend/orchestrator-file-navigation-integration.test.cjs
+
       - name: Prepare embedded Codex binary
         shell: pwsh
         run: |
