@@ -4,6 +4,8 @@ Lina Terminal is an Electron + React desktop workspace for running local termina
 
 ## Docs Index
 
+- `docs/release-0.1.111-review.md` - Publication of the performance/harness overhaul after repairing the Windows canonical-path test fixture; immutable failed-tag history and verification boundary.
+
 - `docs/release-0.1.110-review.md` - Orchestrator overhaul and performance release: measured history-copying and polling costs, control readers, fullscreen review, acceptance and deployment boundary.
 
 - `docs/orchestrator-harness-overhaul.md` - Implemented semantic planning/execution separation, inspection goal loop, workspace/file navigation, safe project removal and retry, acceptance evidence and remaining boundaries.

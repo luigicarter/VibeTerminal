@@ -1,5 +1,9 @@
 # Release 0.1.110: performance and harness review
 
+Publication of this tag was blocked by a Windows path assumption in a test fixture.
+The same runtime is published by [0.1.111](release-0.1.111-review.md), which corrects
+that fixture without changing production behavior.
+
 This release includes the [Orchestrator overhaul](orchestrator-harness-overhaul.md),
 the viewport-based fullscreen correction, and the performance changes below.
 
