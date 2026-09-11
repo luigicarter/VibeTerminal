@@ -48,9 +48,14 @@ Final package closure and navigation also passed, including descendant process
 termination and project-file preservation. All 169 packaged backend, preload,
 shared, and renderer files matched the final source/build. Task UI, real
 Electron voice transport/playback, and history/context acceptance passed.
-The tagged production workflow must pass before publication. Logs are retained
-under `.tmp/release-review-20260911`.
+The [Windows production workflow](https://github.com/luigicarter/VibeTerminal/actions/runs/34630039259)
+succeeded for commit `1fda46a` and tag `v0.1.116`. GitHub published the
+[release](https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.116)
+on September 11, 2026 at 18:08 UTC, with the installer, blockmap, and `latest.yml`.
+The downloaded public installer is 536,469,578 bytes; its SHA-512 and size match
+the published feed. GitHub's latest release resolves to 0.1.116. Logs and public
+artifact verification are retained under `.tmp/release-review-20260911`.
 
-The website has independent build/test output. Its production host is a separate
-deployment decision. Native and Electron fixtures use isolated homes and local
+The website's independent GitHub CI passed. Its production host remains
+unconfigured, so this release publishes the Windows app. Native and Electron fixtures use isolated homes and local
 model endpoints; they do not certify every live provider/account combination.

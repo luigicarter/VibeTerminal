@@ -4,7 +4,7 @@ Lina Terminal ships to Windows users as an Electron Builder NSIS installer hoste
 
 ## Current Public Release
 
-The Windows release for this revision is `v0.1.116`:
+The current Windows release is `v0.1.116`:
 
 - Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.116`
 - Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.116/LinaTerminal-Setup-0.1.116.exe`
