@@ -2,7 +2,38 @@
 
 Lina Terminal is an Electron + React desktop workspace for running local terminals and coding agents side by side.
 
+## Repository layout
+
+- Desktop source, vendor resources, and app-specific scripts live in `apps/desktop`.
+- Website frontend/API and user-guide content live in `apps/website`.
+- Shared brand source lives in `packages/brand`; root scripts synchronize exports.
+- Engineering docs stay in root `docs`. Historical desktop paths in these docs are relative to `apps/desktop`.
+- Each app owns its dependency lockfile and build output. Root npm scripts forward to the appropriate app.
+- Local root-level compatibility junctions are ignored; edit the canonical `apps/` paths.
+
 ## Docs Index
+
+- `docs/release-0.1.116-review.md` - Monorepo and agent integration release review, bug fixes, acceptance evidence, and production publication status.
+
+- `docs/repository-layout.md` - Desktop/website separation, root commands, independent CI, branding, preserved history and migration evidence.
+
+- `docs/model-providers.md` - One provider/model catalog for Open Claude Code and Open Codex; preserved legacy settings, shared default, CLI selection, protocol bridges, and verification.
+
+- `docs/stripe-access.md` - Local Stripe credential location, verified live-mode read access, Git protection, and unverified write permissions; contains no credentials.
+
+- `docs/open-codex.md` - Separate bundled Open Codex CLI, app-configured providers/models, Responses and Chat Completions routing, native lifecycle/history isolation, packaging and acceptance boundaries.
+
+- `docs/fusion-menu-refresh.md` - Fusion/Open Fusion command-palette overhaul, updated model choices, current selection and draft handling, catalog refresh/pagination, Electron checks and live-runtime boundaries.
+
+- `docs/orchestrator-agent-harness-progress.md` - Scoped agent harness: automatic project assignment, task isolation, on-demand records, acceptance evidence and verification limits.
+
+- `docs/branding.md` - Shared Lina identity: editable vector, renderer PNG, Windows window/installer ICO, legacy compatibility, and source-versus-installed verification.
+
+- `docs/codex-web.md` - Codex Web native TUI: external-browser login, private auth/shared global capabilities, exposed Web models and Astra preference, quota/Fast filtering, error recovery, PTY verification and live-account limits. Supersedes the removed custom chat pane.
+
+- `docs/orchestrator-agent-harness-overhaul-plan.md` - Agent harness deep dive and original roadmap, with the narrowed implementation scope and deferred work stated first.
+
+- `docs/git-branch-display.md` - Local branch/worktree display repairs: viewport placement, request isolation, live refresh, truthful Git/error states, keyboard access, bounded scans and regression checks.
 
 - `docs/release-0.1.115-review.md` - Terminal resource and Orchestrator release, closure-fixture startup repair, CI diagnostics and acceptance boundaries.
 - `docs/release-0.1.114-review.md` - Unpublished terminal resource candidate, local acceptance and failed CI closure setup; immutable tag retained.
@@ -81,6 +112,7 @@ Lina Terminal is an Electron + React desktop workspace for running local termina
 - `docs/backend.md` - Electron main process, PTY host, and agent thread discovery files.
 - `docs/preload.md` - Context bridge and IPC surface exposed to the renderer.
 - `docs/terminal-runtime.md` - Standalone terminal identity, titles, progress, generation-scoped lifecycle, Gemini adapter, and board placement/sizing behavior.
+- `docs/chat-resume-identity-fix-plan.md` - Implemented clear/new-chat resume repair: invocation-owned selection, exact ID persistence, stale-event/input fencing, native and packaged acceptance, and remaining provider boundaries.
 - `docs/terminal-status-support.md` - Provider status evidence, child/background observation, provisional completion limits and shared display behavior.
 - `docs/grok-build.md` - Grok Build launch, native hooks, status, conversation discovery/history, and installed-version verification.
 - `docs/scripts.md` - Development, smoke test, and screenshot helper scripts.

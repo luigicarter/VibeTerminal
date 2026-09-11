@@ -1,5 +1,9 @@
 # Terminal Fusion
 
+> **September 10 menu and model refresh:** see [the implementation and verification record](fusion-menu-refresh.md)
+> for the shared searchable palette, updated model choices, reasoning controls,
+> catalog refresh, saved-chat pagination, and current runtime acceptance limits.
+
 > **Per-role families (2026-07-04):** the planner and executor each pick a
 > FAMILY — Claude (claude CLI) or Codex (codex app-server) — then a model
 > inside it, through an Open Fusion-style two-stage picker (`/planner-model`,

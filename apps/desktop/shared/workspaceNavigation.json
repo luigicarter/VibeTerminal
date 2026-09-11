@@ -1,0 +1,14 @@
+[
+  { "id": "orchestrator", "label": "Orchestrator dashboard", "surface": "dashboard" },
+  { "id": "chat", "label": "Orchestrator conversation", "surface": "tools", "tab": "Orchestrator" },
+  { "id": "history", "label": "Saved conversations", "surface": "tools", "tab": "History" },
+  { "id": "activity", "label": "Agent activity and action receipts", "surface": "tools", "tab": "Activity" },
+  { "id": "changes", "label": "Project changes", "surface": "tools", "tab": "Changes" },
+  { "id": "files", "label": "Workspace file search", "surface": "tools", "tab": "Files" },
+  { "id": "setups", "label": "Saved workspace setups", "surface": "tools", "tab": "Setups" },
+  { "id": "settings", "label": "Orchestrator and voice settings", "surface": "settings", "panel": "orchestrator" },
+  { "id": "settings-providers", "label": "Models and provider settings for Open Claude Code and Open Codex", "surface": "settings", "panel": "providers" },
+  { "id": "settings-appearance", "label": "Appearance settings", "surface": "settings", "panel": "appearance" },
+  { "id": "multi", "label": "Multi-project terminal board", "surface": "board" },
+  { "id": "project", "label": "Project terminal board", "surface": "board", "requiresCwd": true }
+]

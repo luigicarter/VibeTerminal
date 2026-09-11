@@ -1,11 +1,11 @@
 # Vendored kimi-custom runtime: keep the prebuilt bundle and native prebuilds
 # byte-identical to the fork (no line-ending conversion), and pin each launcher
 # wrapper to the endings its shell requires.
-vendor/kimi-custom/dist/** -text
-vendor/kimi-custom/native/** -text
-vendor/kimi-custom/bin/kimi-custom text eol=lf
-vendor/kimi-custom/bin/kimi-custom.cmd text eol=crlf
+apps/desktop/vendor/kimi-custom/dist/** -text
+apps/desktop/vendor/kimi-custom/native/** -text
+apps/desktop/vendor/kimi-custom/bin/kimi-custom text eol=lf
+apps/desktop/vendor/kimi-custom/bin/kimi-custom.cmd text eol=crlf
 
 # These files are checksummed runtime assets; preserve their original bytes.
 # Their pinned CRLF endings are intentional, including generated vocabularies.
-vendor/voice/** -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+apps/desktop/vendor/voice/** -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

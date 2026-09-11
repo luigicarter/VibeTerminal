@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <title>Lina Terminal</title>
+  <defs><linearGradient id="surface" x1="8" y1="0" x2="55" y2="64" gradientUnits="userSpaceOnUse"><stop stop-color="#2B2D33"/><stop offset="1" stop-color="#111216"/></linearGradient><linearGradient id="mark" x1="20" y1="16" x2="49" y2="49" gradientUnits="userSpaceOnUse"><stop stop-color="#FFFFFF"/><stop offset="1" stop-color="#B6BDC9"/></linearGradient></defs>
+  <rect x=".75" y=".75" width="62.5" height="62.5" rx="16" fill="url(#surface)" stroke="#474A53" stroke-width="1.5"/>
+  <path d="M18 16H28V38H48V48H18V16Z" fill="url(#mark)"/>
+  <path d="M39 16H48V25H39V16Z" fill="#F0F3FA"/>
+</svg>

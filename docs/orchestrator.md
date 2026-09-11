@@ -10,6 +10,15 @@ Brain interprets natural language; application code binds operations to current
 terminal identities and validates delivery. See [semantic commands and terminal
 controls](orchestrator-controls.md) for the current operating contract.
 
+Project tasks now use **Auto-assign**: the Orchestrator finds the verified owner
+of a continuation or creates a separate configured agent for independent work.
+The submitted project stays attached to the request if you change views. Terminals
+and chat panes remain the interface. Small agent records expose work, activity,
+attention and notes on demand; unrelated transcripts are omitted from the initial
+context. **Clear history** also clears these Orchestrator notes, while preserving
+active task ownership. See the [agent harness review](orchestrator-agent-harness-progress.md)
+for verification and the source/installed-build boundary.
+
 For the reading/voice follow-up, see [progressive context and local error audio](orchestrator-context-and-audio.md).
 
 ## Setup

@@ -1,0 +1,5539 @@
+import { createProjectRemovalController, type ProjectRemovalSnapshot } from "./removeProjectOperation";
+import workspaceNavigation from "../shared/workspaceNavigation.json";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type DragEvent as ReactDragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent
+} from "react";
+import { flushSync } from "react-dom";
+import {
+  Check,
+  Mic,
+  Settings,
+  PanelsTopLeft,
+  ChevronDown,
+  ChevronRight,
+  Download,
+  Folder,
+  FolderOpen,
+  GripVertical,
+  LayoutGrid,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Plus,
+  RefreshCw,
+  Search,
+  TerminalSquare,
+  X
+} from "lucide-react";
+import clsx from "clsx";
+import "./components/projectReorder.css";
+import providerCapabilities from "../shared/providerCapabilities.json";
+import vibeTerminalLogo from "./assets/lina-logo.png";
+import openFusionLogo from "./assets/openfusion-logo.png";
+import {
+  DEFAULT_OPEN_FUSION_EXECUTOR_MODEL,
+  DEFAULT_OPEN_FUSION_PLANNER_MODEL,
+  normalizeOpenFusionModel
+} from "./openFusion";
+import {
+  EMPTY_ATTENTION,
+  attentionFromEvent,
+  attentionFromTerminalEvent,
+  clearSubagentDepth,
+  clearUnreadAttention,
+  codexTurnAttentionDecision,
+  isSessionWorking,
+  isTurnTelemetryKind,
+  normalizeAttention,
+  providerAttentionDecision,
+  reconcileStatus,
+  shouldMarkCompletedTurnUnread,
+  shouldMarkAttentionUnread,
+  shouldShowAttentionDot,
+  shouldSuppressAgentCompletion,
+  shouldUseTerminalEventAttention,
+  statusFromAttentionState,
+  statusFromTerminalEvent,
+  summarizeSessions,
+  updateDetachedTaskIds,
+  updateSubagentDepth,
+  type SessionSummary
+} from "./attention";
+import TerminalPane from "./components/TerminalPane";
+import { GitBranchDisplay } from "./components/GitBranchDisplay";
+import { createTerminalLaunchCoordinator } from "./terminalLaunchCoordinator";
+import { WorkspaceStart } from "./components/WorkspaceStart";
+import { runtimeActiveChildCount, runtimeChildAttention, runtimePendingTurnActivity, runtimeDisplayTitle, runtimeSessionStatus, runtimeStatusLabel, type TerminalRuntimeSnapshot } from "./terminalRuntime";
+import { migrateRemovedAgent, rememberChatThread, rememberTerminalThread, serializeSession } from "./sessionPersistence";
+import { findAvailablePlacement, type GeometryItem } from "./components/tiledBoardGeometry";
+import FusionChatPane from "./components/FusionChatPane";
+import {
+  normalizeFusionRoleSettings,
+  type NormalizedFusionRoleSettings
+} from "./components/fusionSlashMenu";
+import OpenFusionChatPane, {
+  type OpenFusionSettingsChange
+} from "./components/OpenFusionChatPane";
+import TiledBoard from "./components/TiledBoard";
+import PaneSplit, { SPLIT_DIVIDER_PX } from "./components/PaneSplit";
+import {
+  buildBoardTiles,
+  detachSessionFromTile,
+  effectiveTileId,
+  isTileAnchor,
+  leafIds,
+  normalizeSplitNode,
+  reconcileTiles,
+  setRatioAtPath,
+  splitLeaf,
+  subtreeMin,
+  type SplitPath
+} from "./components/splitTree";
+import {
+  createThreadRef,
+  isThreadedAgentKind
+} from "./sessionLaunch";
+import { computeCwdConflicts } from "./cwdConflicts";
+import { readSessionDraft, writeSessionDraft, forgetSessionDraft } from "./sessionDrafts";
+import { closeSessionOperation, type CloseTarget } from "./closeSessionOperation";
+import { useOrchestrator, relayApi, type RelaySession } from "./orchestratorUi";
+import { conversationKey, conversationLaunch, conversationNeedsResume, matchingConversation, normalizeSavedConversation, HISTORY_CONFIG_FIELDS, type SavedConversation } from "./orchestratorHistory";
+import { WorkspaceSetups, type WorkspaceSetupsProps } from "./components/WorkspaceSetups";
+import { HandoffPanel } from "./components/HandoffPanel";
+import { createWorkspaceSetup, instantiateWorkspaceSetup, SETUP_CONFIG_FIELDS, type WorkspaceSetup } from "./workspaceSetups";
+import { OrchestratorPanel } from "./components/OrchestratorPanel";
+import { WorkspaceToolsDialog } from "./components/WorkspaceToolsDialog";
+import { OrchestratorDashboard } from "./components/OrchestratorDashboard";
+import { dashboardSessionMetadata } from "./components/orchestratorDashboardLayout";
+import { RECENCY_STORAGE_KEY, loadSessionRecency, recordSessionRecency } from "./sessionRecency";
+import VoiceIndicator from "./VoiceIndicator";
+import VoicePushToTalk from "./VoicePushToTalk";
+import { NewProjectDialog } from "./components/NewProjectDialog";
+import { BoardHeading } from "./components/WorkspaceChrome";
+import { SettingsDialog } from "./components/SettingsDialog";
+import type { InstalledCliReport } from "./electron";
+import type {
+  AgentAttentionEvent,
+  AgentBackgroundActivity,
+  AppVersionList,
+  AgentKind,
+  AgentProfile,
+  AgentSession,
+  AgentThreadRef,
+  AgentThreadLookupStatus,
+  ClaudeProviderProfile,
+  FusionRunMode,
+  FusionChatEvent,
+  FusionSettings,
+  LayoutBox,
+  OpenFusionChatEvent,
+  ProjectWorkspace,
+  SplitNode,
+  UpdateState
+} from "./types";
+
+const STORAGE_KEY = "vibe-terminal:workspaces:v2";
+const ACTIVE_WORKSPACE_STORAGE_KEY = "vibe-terminal:active-workspace:v1";
+const MULTI_SESSIONS_STORAGE_KEY = "vibe-terminal:multi-sessions:v1";
+const ACTIVE_VIEW_STORAGE_KEY = "vibe-terminal:active-view:v1";
+const SIDEBAR_WIDTH_STORAGE_KEY = "vibe-terminal:sidebar-width:v1";
+const LEGACY_GRID_COLS = 12;
+const LEGACY_ROW_HEIGHT = 82;
+const PREVIOUS_DEFAULT_BOARD_GAP = 10;
+const LEGACY_BOARD_GAP = 6;
+const LEGACY_BOARD_PADDING = 10;
+const DEFAULT_COLUMN_GAP_PERCENT = 0.65;
+const DEFAULT_PANE_WIDTH_PERCENT = (100 - DEFAULT_COLUMN_GAP_PERCENT) / 2;
+const SECOND_COLUMN_X_PERCENT = 50 + DEFAULT_COLUMN_GAP_PERCENT / 2;
+const DEFAULT_PANE_HEIGHT = 260;
+const DEFAULT_MIN_PANE_WIDTH = 280;
+const DEFAULT_MIN_PANE_HEIGHT = 170;
+const DEFAULT_SIDEBAR_WIDTH = 292;
+const MIN_SIDEBAR_WIDTH = 220;
+const MAX_SIDEBAR_WIDTH = 520;
+const MIN_WORKSPACE_WIDTH = 360;
+const CODEX_INPUT_GRACE_MS = 450;
+// Trusted Codex lifecycle hooks drive precise starts/waits; bare Enter is the
+// compatibility fallback until trust/older-version gaps are resolved. Every
+// PTY chunk refreshes this App-owned safety watchdog, including while hidden.
+// It is intentionally much longer than the plain-terminal idle heuristic.
+const CODEX_RUNNING_QUIET_MS = 60_000;
+const DEFAULT_FUSION_RUN_MODE: FusionRunMode = "auto";
+
+// Last-used model configuration, per terminal mode. New panes start from the
+// previous session's picks instead of hard defaults — a model choice survives
+// closing the pane/app until the user changes it somewhere. Run mode is
+// deliberately NOT carried over (Plan vs Auto is situational).
+const LAST_FUSION_SETTINGS_KEY = "vibe-terminal:last-fusion-settings";
+const LAST_OPEN_FUSION_MODELS_KEY = "vibe-terminal:last-openfusion-models";
+
+function readStoredJson(key: string): Record<string, unknown> | null {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredJson(key: string, value: Record<string, unknown>) {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Persistence is best-effort; the session still works without it.
+  }
+}
+
+function rememberFusionSettings(settings: NormalizedFusionRoleSettings) {
+  writeStoredJson(LAST_FUSION_SETTINGS_KEY, { ...settings });
+}
+
+function lastFusionSettings(): NormalizedFusionRoleSettings {
+  // Reads both the per-role shape and the legacy {model, codexModel,
+  // claudeEffort, codexEffort} seed written before families existed.
+  return normalizeFusionRoleSettings(readStoredJson(LAST_FUSION_SETTINGS_KEY));
+}
+
+function rememberOpenFusionModels(models: {
+  plannerModel: string;
+  executorModel: string;
+}) {
+  writeStoredJson(LAST_OPEN_FUSION_MODELS_KEY, models);
+}
+
+function lastOpenFusionModels() {
+  const stored = readStoredJson(LAST_OPEN_FUSION_MODELS_KEY);
+  return {
+    plannerModel: normalizeOpenFusionModel(
+      stored?.plannerModel,
+      DEFAULT_OPEN_FUSION_PLANNER_MODEL
+    ),
+    executorModel: normalizeOpenFusionModel(
+      stored?.executorModel,
+      DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
+    )
+  };
+}
+
+type AppView = "multi" | "project";
+
+type SessionScope =
+  | { type: "multi" }
+  | { type: "workspace"; workspaceId: string };
+
+type WorkspaceDropPosition = "before" | "after";
+
+interface WorkspaceDropTarget {
+  workspaceId: string;
+  position: WorkspaceDropPosition;
+}
+
+interface WorkspaceContextMenuState {
+  workspaceId: string;
+  name: string;
+  path: string;
+  x: number;
+  y: number;
+}
+
+interface ThreadLookupPatch {
+  threadLookupStartedAt?: number;
+  threadLookupStatus: AgentThreadLookupStatus;
+  threadLookupMessage?: string;
+}
+
+interface PendingCodexAttention {
+  providerThreadId: string;
+  providerTurnId?: string;
+  attention: AgentAttentionEvent;
+}
+
+const agentProfiles: AgentProfile[] = [
+  { kind: 'open-codex', label: 'Open Codex', command: 'open-codex', accent: '#df9e55' },
+  { kind: "codex-web", label: "Codex Web", command: "codex-web", accent: "#ff9f43" },
+  {
+    kind: "terminal",
+    label: "Terminal",
+    command: providerCapabilities["terminal"].command,
+    accent: "#f4cf5a"
+  },
+  {
+    kind: "codex",
+    label: "Codex",
+    command: providerCapabilities["codex"].command,
+    accent: "#ff9f43"
+  },
+  {
+    kind: "claude",
+    label: "Claude",
+    command: providerCapabilities["claude"].command,
+    accent: "#8fd694"
+  },
+  {
+    kind: "claude-custom",
+    label: "Open Claude Code",
+    command: providerCapabilities["claude"].command,
+    accent: "#d97757",
+    claudeCustom: true
+  },
+  {
+    kind: "fusion",
+    label: "Fusion",
+    command: providerCapabilities["claude"].command,
+    accent: "#b98bff",
+    fusion: true
+  },
+  {
+    kind: "openfusion",
+    label: "Open Fusion",
+    command: providerCapabilities["opencode"].command,
+    accent: "#2ee8be",
+    openFusion: true
+  },
+  {
+    kind: "cursor",
+    label: "Cursor",
+    command: providerCapabilities["cursor"].command,
+    accent: "#46c2c9"
+  },
+  {
+    kind: "gemini",
+    label: "Gemini",
+    command: providerCapabilities["gemini"].command,
+    accent: "#70a8ff"
+  },
+  {
+    kind: "opencode",
+    label: "OpenCode",
+    command: providerCapabilities["opencode"].command,
+    accent: "#c78bff"
+  },
+  {
+    kind: "kimi",
+    label: "Kimi",
+    command: providerCapabilities["kimi"].command,
+    accent: "#1e88e5"
+  },
+  {
+    kind: "kimi-custom",
+    label: "Kimi + CC",
+    command: providerCapabilities["kimi-custom"].command,
+    accent: "#8e24aa"
+  },
+  {
+    kind: "qwen",
+    label: "Qwen",
+    command: providerCapabilities["qwen"].command,
+    accent: "#6d7cff"
+  },
+  {
+    kind: "grok",
+    label: "Grok Build",
+    command: providerCapabilities["grok"].command,
+    accent: "#d8e2ef"
+  }
+];
+
+// Every retained profile is offered. Availability comes from the shared registry
+// unconditionally, which hid them from the users who do have them installed;
+// the launch-time CLI probe now dims what is missing instead of hiding it.
+const launcherAgentProfiles = agentProfiles;
+
+// One row in the toolbar launcher dropdown: an agent profile or a saved
+// Claude provider.
+type LauncherMenuEntry = {
+  key: string;
+  section: "agents" | "models";
+  label: string;
+  sub?: string;
+  hint?: string;
+  profile?: AgentProfile;
+  missing?: boolean;
+  run: () => void;
+};
+
+// Pane labels the app itself minted ("Claude 2", "Fusion 1 copy"). Older builds
+// copied them into threadRef.title and forced them onto Claude via --name, so
+// stored refs may still carry them. They say nothing about the conversation:
+// restore strips them so the provider's own generated title can take over.
+const genericSessionTitlePattern = new RegExp(
+  `^(?:${agentProfiles.map((profile) => profile.label).join("|")})\\s+\\d+(?:\\s+copy)*$`,
+  "i"
+);
+
+function isGenericSessionTitle(title: string | undefined) {
+  return Boolean(title && genericSessionTitlePattern.test(title.trim()));
+}
+
+function sanitizeThreadRefTitle(
+  ref: AgentThreadRef | undefined
+): AgentThreadRef | undefined {
+  if (!ref?.title || !isGenericSessionTitle(ref.title)) {
+    return ref;
+  }
+
+  return { ...ref, title: undefined };
+}
+
+function createId(prefix: string) {
+  return `${prefix}_${Math.random().toString(36).slice(2, 9)}_${Date.now().toString(36)}`;
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function folderName(path: string) {
+  const normalized = path.replace(/\\/g, "/").replace(/\/$/, "");
+  return normalized.split("/").pop() || path;
+}
+
+function normalizeWorkspacePath(path: string) {
+  return path.trim().replace(/[\\/]+$/, "").replace(/\\/g, "/").toLowerCase();
+}
+
+function formatCount(count: number, label: string) {
+  return `${count} ${label}${count === 1 ? "" : "s"}`;
+}
+
+// The live per-project tally on a sidebar card. Every bucket comes from
+// summarizeSessions, which is built from the same predicates the pane's own
+// status pill and attention dot use, so a card can never disagree with the pane
+// it is counting. Buckets that are zero are not rendered — a quiet project
+// should read as quiet, not as a row of zeros — and a project with nothing
+// happening falls back to the plain terminal count.
+function SessionCounts({ summary }: { summary: SessionSummary }) {
+  const { working, done, blocked, failed, total } = summary;
+
+  if (!working && !done && !blocked && !failed) {
+    return (
+      <span className="session-counts session-counts-quiet">
+        {total ? formatCount(total, "terminal") : "No terminals"}
+      </span>
+    );
+  }
+
+  const label = [
+    working ? `${working} working` : null,
+    done ? `${done} done` : null,
+    blocked ? `${blocked} blocked` : null,
+    failed ? `${failed} failed` : null
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  return (
+    <span className="session-counts" title={label} aria-label={label}>
+      {working > 0 && (
+        <span className="session-count session-count-working">
+          <span className="session-count-glyph" aria-hidden="true" />
+          {working} working
+        </span>
+      )}
+      {done > 0 && (
+        <span className="session-count session-count-done">
+          <span className="session-count-glyph" aria-hidden="true">
+            ✓
+          </span>
+          {done} done
+        </span>
+      )}
+      {blocked > 0 && (
+        <span className="session-count session-count-blocked">
+          <span className="session-count-glyph" aria-hidden="true">
+            △
+          </span>
+          {blocked} blocked
+        </span>
+      )}
+      {failed > 0 && (
+        <span className="session-count session-count-failed">
+          <span className="session-count-glyph" aria-hidden="true">
+            ✕
+          </span>
+          {failed} failed
+        </span>
+      )}
+    </span>
+  );
+}
+
+function formatUpdatePercent(state: UpdateState) {
+  const percent = state.progress?.percent;
+  return Number.isFinite(percent) ? Math.round(percent ?? 0) : 0;
+}
+
+function getProfile(kind: AgentKind) {
+  return agentProfiles.find((profile) => profile.kind === kind) ?? agentProfiles[0];
+}
+
+// A Fusion pane's conversation belongs to its PLANNER: claude session ids for
+// a claude planner, codex thread ids for a codex planner. Either provider is
+// a resumable Fusion thread ref (family match is enforced at launch time).
+function hasClaudeThreadId(threadRef?: AgentThreadRef): threadRef is AgentThreadRef {
+  return (
+    (threadRef?.provider === "claude" || threadRef?.provider === "codex") &&
+    Boolean(threadRef.id)
+  );
+}
+
+function threadRefForKind(kind: AgentKind, threadRef?: AgentThreadRef) {
+  return threadRef && isThreadedAgentKind(kind) && threadRef.provider === kind
+    ? threadRef
+    : undefined;
+}
+
+function resumableThreadRefForKind(kind: AgentKind, threadRef?: AgentThreadRef) {
+  const matchingRef = threadRefForKind(kind, threadRef);
+  return matchingRef?.id ? matchingRef : undefined;
+}
+
+function canResumeSessionThread(session: AgentSession) {
+  return session.fusion
+    ? hasClaudeThreadId(session.threadRef)
+    : Boolean(resumableThreadRefForKind(session.kind, session.threadRef));
+}
+
+function sessionResumeRef(session: AgentSession) {
+  return session.fusion
+    ? hasClaudeThreadId(session.resumeRef)
+      ? session.resumeRef
+      : undefined
+    : resumableThreadRefForKind(session.kind, session.resumeRef);
+}
+
+function activeSessionThreadRef(session: AgentSession) {
+  return session.fusion
+    ? hasClaudeThreadId(session.threadRef)
+      ? session.threadRef
+      : undefined
+    : resumableThreadRefForKind(session.kind, session.threadRef);
+}
+
+function rectanglesOverlap(a: LayoutBox, b: LayoutBox) {
+  const horizontalGap = DEFAULT_COLUMN_GAP_PERCENT;
+  const verticalGap = LEGACY_BOARD_GAP;
+
+  return (
+    a.x < b.x + b.w + horizontalGap &&
+    a.x + a.w + horizontalGap > b.x &&
+    a.y < b.y + b.h + verticalGap &&
+    a.y + a.h + verticalGap > b.y
+  );
+}
+
+function layoutsMatch(a: LayoutBox, b: LayoutBox) {
+  return (
+    a.x === b.x &&
+    a.y === b.y &&
+    a.w === b.w &&
+    a.h === b.h &&
+    a.unit === b.unit
+  );
+}
+
+function isClose(value: number, target: number, tolerance = 0.001) {
+  return Math.abs(value - target) <= tolerance;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object");
+}
+
+function finiteNumber(value: unknown, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+// Per-role Fusion settings normalization lives in the shared menu module
+// (normalizeFusionRoleSettings) so App, the pane, and the settings smoke all
+// migrate legacy fields identically. This helper maps a session's stored
+// fields through it and clears the legacy fields.
+function normalizedFusionSessionFields(session: AgentSession) {
+  const role = normalizeFusionRoleSettings({
+    plannerFamily: session.fusionPlannerFamily,
+    plannerModel: session.fusionPlannerModel,
+    plannerEffort: session.fusionPlannerEffort,
+    plannerFast: session.fusionPlannerFast,
+    executorFamily: session.fusionExecutorFamily,
+    executorModel: session.fusionExecutorModel,
+    executorEffort: session.fusionExecutorEffort,
+    executorFast: session.fusionExecutorFast,
+    model: session.fusionModel,
+    claudeEffort: session.fusionClaudeEffort ?? session.fusionEffort,
+    codexModel: session.fusionCodexModel,
+    codexEffort: session.fusionCodexEffort ?? session.fusionEffort
+  });
+  return {
+    fusionPlannerFamily: role.plannerFamily,
+    fusionPlannerModel: role.plannerModel,
+    fusionPlannerEffort: role.plannerEffort,
+    fusionPlannerFast: role.plannerFast,
+    fusionExecutorFamily: role.executorFamily,
+    fusionExecutorModel: role.executorModel,
+    fusionExecutorEffort: role.executorEffort,
+    fusionExecutorFast: role.executorFast,
+    fusionModel: undefined,
+    fusionCodexModel: undefined,
+    fusionClaudeEffort: undefined,
+    fusionCodexEffort: undefined,
+    fusionEffort: undefined
+  };
+}
+
+function normalizeFusionRunMode(value: unknown): FusionRunMode {
+  return String(value || "").trim().toLowerCase() === "plan" ? "plan" : DEFAULT_FUSION_RUN_MODE;
+}
+
+function normalizeBackgroundActivity(
+  activity?: AgentBackgroundActivity
+): AgentBackgroundActivity | undefined {
+  const active = activity?.active === true;
+  const count = Math.max(
+    0,
+    Math.floor(finiteNumber(activity?.count, active ? 1 : 0))
+  );
+  if (!active || count <= 0) {
+    return undefined;
+  }
+
+  return {
+    ...activity,
+    active: true,
+    count,
+    updatedAt: finiteNumber(activity?.updatedAt, Date.now()),
+    items: Array.isArray(activity.items) ? activity.items : []
+  };
+}
+
+function normalizeSessionStatus(value: unknown) {
+  return ["idle", "starting", "running", "waiting", "done", "failed"].includes(
+    value as string
+  )
+    ? (value as AgentSession["status"])
+    : "idle";
+}
+
+function normalizeLaunchMode(value: unknown) {
+  return value === "resume" ? "resume" : "new";
+}
+
+function isAgentKind(value: unknown): value is AgentKind {
+  return agentProfiles.some((profile) => profile.kind === value);
+}
+
+function tightenDefaultFluidGutters(layout: LayoutBox): LayoutBox {
+  const next = { ...layout };
+
+  if (isClose(layout.w, 49)) {
+    next.w = DEFAULT_PANE_WIDTH_PERCENT;
+  }
+
+  if (isClose(layout.x, 51)) {
+    next.x = SECOND_COLUMN_X_PERCENT;
+  }
+
+  if (isClose(layout.h, DEFAULT_PANE_HEIGHT)) {
+    const oldRowStep = DEFAULT_PANE_HEIGHT + PREVIOUS_DEFAULT_BOARD_GAP;
+    const row = (layout.y - LEGACY_BOARD_PADDING) / oldRowStep;
+    const roundedRow = Math.round(row);
+
+    if (Number.isFinite(row) && isClose(row, roundedRow)) {
+      next.y =
+        LEGACY_BOARD_PADDING +
+        roundedRow * (DEFAULT_PANE_HEIGHT + LEGACY_BOARD_GAP);
+    }
+  }
+
+  return next;
+}
+
+function defaultFluidLayout(): LayoutBox {
+  return {
+    x: 0,
+    y: LEGACY_BOARD_PADDING,
+    w: DEFAULT_PANE_WIDTH_PERCENT,
+    h: DEFAULT_PANE_HEIGHT,
+    unit: "fluid"
+  };
+}
+
+function migrateLayout(layout: LayoutBox | null | undefined): LayoutBox {
+  if (!isRecord(layout)) {
+    return defaultFluidLayout();
+  }
+
+  const normalizedLayout: LayoutBox = {
+    x: finiteNumber(layout.x, 0),
+    y: finiteNumber(layout.y, LEGACY_BOARD_PADDING),
+    w: finiteNumber(layout.w, DEFAULT_PANE_WIDTH_PERCENT),
+    h: finiteNumber(layout.h, DEFAULT_PANE_HEIGHT),
+    unit: layout.unit === "fluid" ? "fluid" : undefined
+  };
+
+  if (normalizedLayout.unit === "fluid") {
+    const tightenedLayout = tightenDefaultFluidGutters(normalizedLayout);
+
+    return {
+      x: Math.max(0, Math.min(tightenedLayout.x, 100)),
+      y: Math.max(LEGACY_BOARD_PADDING, tightenedLayout.y),
+      w: Math.max(1, Math.min(tightenedLayout.w, 100)),
+      h: Math.max(DEFAULT_MIN_PANE_HEIGHT, tightenedLayout.h),
+      unit: "fluid"
+    };
+  }
+
+  return {
+    x: (normalizedLayout.x / LEGACY_GRID_COLS) * 100,
+    y:
+      LEGACY_BOARD_PADDING +
+      normalizedLayout.y * (LEGACY_ROW_HEIGHT + LEGACY_BOARD_GAP),
+    w: (normalizedLayout.w / LEGACY_GRID_COLS) * 100,
+    h:
+      normalizedLayout.h * LEGACY_ROW_HEIGHT +
+      Math.max(0, normalizedLayout.h - 1) * LEGACY_BOARD_GAP,
+    unit: "fluid"
+  };
+}
+
+function findNextFluidLayout(sessions: AgentSession[], metrics?: PlacementMetrics): LayoutBox {
+  return placeSession(sessions, metrics ?? { innerWidth: 1000, viewportTop: 0, viewportBottom: 600 });
+}
+
+type PlacementMetrics = { innerWidth: number; viewportTop: number; viewportBottom: number };
+
+function placeSession(sessions: AgentSession[], metrics: PlacementMetrics): LayoutBox {
+  const items: GeometryItem[] = buildBoardTiles(sessions).map((tile) => ({
+    id: tile.id,
+    layout: migrateLayout(tile.anchor.layout),
+    ...(tile.tree
+      ? subtreeMin(tile.tree, DEFAULT_MIN_PANE_WIDTH, DEFAULT_MIN_PANE_HEIGHT, SPLIT_DIVIDER_PX)
+      : { minW: DEFAULT_MIN_PANE_WIDTH, minH: DEFAULT_MIN_PANE_HEIGHT })
+  }));
+  return findAvailablePlacement(items, metrics.innerWidth, {
+    top: metrics.viewportTop,
+    bottom: metrics.viewportBottom
+  });
+}
+
+function visibleRuntimeAttention(runtime: TerminalRuntimeSnapshot) {
+  if (runtime.processState !== "running" || runtime.launchState === "pending" || runtime.agentProcessState === "exited" || runtime.agentProcessState === "failed") return undefined;
+  const childAttention = runtimeChildAttention(runtime);
+  if (childAttention && runtimeSessionStatus(runtime) === "waiting") return childAttention;
+  const pendingAttention = runtimePendingTurnActivity(runtime)?.attention;
+  if (pendingAttention && runtimeSessionStatus(runtime) === "waiting") return pendingAttention;
+  if (runtime.pendingInput ||
+      runtime.observation !== "observed" || runtime.telemetryHealth !== "available") return false;
+  const state = runtime.attention?.state;
+  if (runtime.turnState === "completed") return state === "completed" && !runtime.childActivity && runtime.children.length === 0 ? runtime.attention : undefined;
+  return (runtime.turnState === "waiting" && state === "waiting") || (runtime.turnState === "failed" && state === "failed") ? runtime.attention : undefined;
+}
+
+function createSession(
+  kind: AgentKind,
+  cwd: string,
+  existingSessions: AgentSession[],
+  name?: string,
+  options?: { providerProfileId?: string; providerModelOverride?: string; openCodexModel?: string; placement?: PlacementMetrics }
+): AgentSession {
+  const profile = getProfile(kind);
+  // "fusion" is a selection-only kind: persist a real claude session flagged
+  // `fusion` so every existing claude path (telemetry, resume, working-state,
+  // thread discovery) applies unchanged; only the launch gets Fusion wiring.
+  const isFusion = profile.fusion === true;
+  // "openfusion" follows the same pattern but persists as OpenCode.
+  const isOpenFusion = profile.openFusion === true;
+  // "claude-custom" too: a real claude session pinned to a provider profile.
+  const isClaudeCustom = profile.claudeCustom === true;
+  const effectiveKind: AgentKind = isFusion
+    ? "claude"
+    : isOpenFusion
+      ? "opencode"
+      : isClaudeCustom
+        ? "claude"
+        : kind;
+  const sessionName = name ?? `${profile.label} ${existingSessions.length + 1}`;
+  // New panes inherit the last-used model configuration for their mode (the
+  // normalizers fall back to the stock defaults when nothing is stored yet).
+  const fusionSeed = isFusion ? lastFusionSettings() : null;
+  const openFusionSeed = isOpenFusion ? lastOpenFusionModels() : null;
+
+  return {
+    id: createId("session"),
+    name: sessionName,
+    kind: effectiveKind,
+    openCodexModel: kind === 'open-codex' ? options?.openCodexModel : undefined,
+    fusion: isFusion || undefined,
+    fusionPlannerFamily: fusionSeed?.plannerFamily,
+    fusionPlannerModel: fusionSeed?.plannerModel,
+    fusionPlannerEffort: fusionSeed?.plannerEffort,
+    fusionPlannerFast: fusionSeed?.plannerFast,
+    fusionExecutorFamily: fusionSeed?.executorFamily,
+    fusionExecutorModel: fusionSeed?.executorModel,
+    fusionExecutorEffort: fusionSeed?.executorEffort,
+    fusionExecutorFast: fusionSeed?.executorFast,
+    fusionRunMode: isFusion ? DEFAULT_FUSION_RUN_MODE : undefined,
+    fusionModel: undefined,
+    fusionCodexModel: undefined,
+    fusionClaudeEffort: undefined,
+    fusionCodexEffort: undefined,
+    fusionEffort: undefined,
+    openFusion: isOpenFusion || undefined,
+    openFusionPlannerModel: openFusionSeed?.plannerModel,
+    openFusionExecutorModel: openFusionSeed?.executorModel,
+    openFusionRunMode: isOpenFusion ? DEFAULT_FUSION_RUN_MODE : undefined,
+    providerProfileId: isClaudeCustom
+      ? options?.providerProfileId || "default-custom"
+      : undefined,
+    providerModelOverride: isClaudeCustom
+      ? options?.providerModelOverride || undefined
+      : undefined,
+    command: profile.command,
+    cwd,
+    createdAt: Date.now(),
+    threadRef: isFusion ? undefined : createThreadRef(effectiveKind),
+    threadLookupStatus: "idle",
+    nextLaunchMode: "new",
+    started: true,
+    launchToken: 1,
+    status: "idle",
+    attention: EMPTY_ATTENTION,
+    layout: findNextFluidLayout(existingSessions, options?.placement)
+  };
+}
+
+function starterWorkspace(path: string): ProjectWorkspace {
+  return {
+    id: createId("workspace"),
+    name: folderName(path),
+    path,
+    sessions: []
+  };
+}
+
+function isStoredSession(value: unknown): value is AgentSession {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.name === "string" &&
+    isAgentKind(value.kind) &&
+    typeof value.cwd === "string"
+  );
+}
+
+function restoreSession(session: AgentSession): AgentSession {
+  const launchToken = finiteNumber(session.launchToken, 0);
+  const previousStatus = normalizeSessionStatus(session.status);
+  const isFusion = session.fusion === true || session.kind === "fusion";
+  const isOpenFusion = session.openFusion === true || session.kind === "openfusion";
+  const restoredKind: AgentKind = isFusion
+    ? "claude"
+    : isOpenFusion
+      ? "opencode"
+      : session.kind;
+  const profile = getProfile(
+    isFusion ? "fusion" : isOpenFusion ? "openfusion" : restoredKind
+  );
+  const createdAt = finiteNumber(session.createdAt, Date.now());
+  // A completed Fusion turn still leaves a reusable chat host while the app is
+  // open, so restore the host intent whenever the pane itself was started.
+  // Threaded agent kinds set status "done"/"failed" from per-turn telemetry
+  // while their process is still alive, so a finished TURN must not read as a
+  // finished PROCESS: they restore the saved conversation. Only non-threaded panes treat done/failed
+  // as "the process exited; stay paused".
+  const shouldAutoStart =
+    session.started === true &&
+    (isFusion || restoredKind === 'codex-web' ||
+      isThreadedAgentKind(restoredKind) ||
+      (previousStatus !== "done" && previousStatus !== "failed"));
+
+  // Restore this pane's current conversation by its exact saved ID. resumeRef
+  // belongs to an older chat (including after New/duplicate), so never choose it
+  // automatically when the current pane has no discovered conversation yet.
+  const activeThreadRef = isFusion
+    ? hasClaudeThreadId(session.threadRef)
+      ? session.threadRef
+      : undefined
+    : threadRefForKind(restoredKind, session.threadRef);
+  const storedResumeRef = isFusion
+    ? hasClaudeThreadId(session.resumeRef)
+      ? session.resumeRef
+      : undefined
+    : resumableThreadRefForKind(restoredKind, session.resumeRef);
+  // Stored refs from older builds carry the pane's placeholder label as their
+  // title; strip it so the harvested (generated) title can replace it.
+  const savedCurrentThreadRef = activeThreadRef &&
+    typeof activeThreadRef.id === "string" && activeThreadRef.id.trim() &&
+    (!isFusion || activeThreadRef.provider === normalizedFusionSessionFields(session).fusionPlannerFamily)
+      ? sanitizeThreadRefTitle(activeThreadRef)
+      : undefined;
+  const currentThreadRef = shouldAutoStart ? savedCurrentThreadRef : undefined;
+  // Paused panes retain the existing fresh Start behavior. Their last chat is
+  // still available through the deliberate Resume action.
+  const resumeRef = !shouldAutoStart && savedCurrentThreadRef
+    ? savedCurrentThreadRef
+    : storedResumeRef && typeof storedResumeRef.id === "string" && storedResumeRef.id.trim()
+      ? sanitizeThreadRefTitle(storedResumeRef)
+      : undefined;
+
+  // Attention describes a moment inside the OLD process, which restore always
+  // replaces with a new process, even when resuming the same chat. A stale
+  // "waiting" is the damaging one: it claims an approval/question prompt is on
+  // screen for a pane that has not even started, so every project that ever
+  // parked a pane at its idle prompt reads as "blocked" on the next launch.
+  // Panes that stay paused on a finished process keep their completed/failed
+  // state, which still matches the status restored beside it — but never its
+  // `unread` dot: that badge means "you have not seen this yet", and across a
+  // relaunch every stored result is old news.
+  const restoredAttention = normalizeAttention(session.attention);
+  const attention =
+    shouldAutoStart || restoredAttention.state === "waiting"
+      ? EMPTY_ATTENTION
+      : restoredAttention.unread
+        ? { ...restoredAttention, unread: false }
+        : restoredAttention;
+
+  return {
+    ...session,
+    name: session.name || profile.label,
+    kind: restoredKind,
+    command: typeof session.command === "string" ? session.command : profile.command,
+    fusion: isFusion || undefined,
+    openFusion: isOpenFusion || undefined,
+    createdAt,
+    started: shouldAutoStart,
+    launchToken,
+    nextLaunchMode: normalizeLaunchMode(currentThreadRef ? "resume" : "new"),
+    threadRef: currentThreadRef ?? (isFusion || session.threadSelectionPending === true && !savedCurrentThreadRef ? undefined : createThreadRef(restoredKind)),
+    threadSelectionPending: session.threadSelectionPending === true && !isFusion && !isOpenFusion || undefined,
+    resumeRef,
+    ...(isFusion ? normalizedFusionSessionFields(session) : {}),
+    fusionRunMode: isFusion
+      ? normalizeFusionRunMode(session.fusionRunMode)
+      : session.fusionRunMode,
+    openFusionPlannerModel: isOpenFusion
+      ? normalizeOpenFusionModel(
+          session.openFusionPlannerModel,
+          DEFAULT_OPEN_FUSION_PLANNER_MODEL
+        )
+      : session.openFusionPlannerModel,
+    openFusionExecutorModel: isOpenFusion
+      ? normalizeOpenFusionModel(
+          session.openFusionExecutorModel,
+          DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
+        )
+      : session.openFusionExecutorModel,
+    openFusionRunMode: isOpenFusion
+      ? normalizeFusionRunMode(session.openFusionRunMode)
+      : session.openFusionRunMode,
+    threadLookupStartedAt: undefined,
+    threadLookupStatus: "idle",
+    threadLookupMessage: undefined,
+    status: shouldAutoStart ? "idle" : previousStatus,
+    attention,
+    backgroundActivity: undefined,
+    detachedTaskIds: undefined,
+    subagentDepth: undefined,
+    // Shape validation only — a single session cannot know whether its siblings
+    // exist, so membership is repaired by reconcileTiles once the sessions are
+    // a set (see restoreStoredWorkspace / loadMultiSessions).
+    tileId: typeof session.tileId === "string" ? session.tileId : undefined,
+    splitTree: normalizeSplitNode(session.splitTree),
+    layout: migrateLayout(session.layout)
+  };
+}
+
+function restoreStoredSession(value: unknown): AgentSession | null {
+  value = migrateRemovedAgent(value);
+  if (!isStoredSession(value)) {
+    return null;
+  }
+
+  try {
+    return restoreSession(value);
+  } catch {
+    return null;
+  }
+}
+
+function restoreStoredWorkspace(value: unknown): ProjectWorkspace | null {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    typeof value.name !== "string" ||
+    typeof value.path !== "string"
+  ) {
+    return null;
+  }
+
+  const sessions = Array.isArray(value.sessions)
+    ? reconcileTiles(
+        value.sessions
+          .map(restoreStoredSession)
+          .filter((session): session is AgentSession => Boolean(session))
+      )
+    : [];
+
+  return {
+    id: value.id,
+    name: value.name,
+    path: value.path,
+    sessions
+  };
+}
+
+function loadWorkspaces(): ProjectWorkspace[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      return [];
+    }
+
+    const parsed = JSON.parse(raw) as ProjectWorkspace[];
+    return Array.isArray(parsed)
+      ? parsed
+          .map(restoreStoredWorkspace)
+          .filter((workspace): workspace is ProjectWorkspace => Boolean(workspace))
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function loadMultiSessions(): AgentSession[] {
+  try {
+    const raw = localStorage.getItem(MULTI_SESSIONS_STORAGE_KEY);
+    if (!raw) {
+      return [];
+    }
+
+    const parsed = JSON.parse(raw) as AgentSession[];
+    return Array.isArray(parsed)
+      ? reconcileTiles(
+          parsed
+            .map(restoreStoredSession)
+            .filter((session): session is AgentSession => Boolean(session))
+        )
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function loadActiveWorkspaceId(workspaces: ProjectWorkspace[]) {
+  const savedWorkspaceId = localStorage.getItem(ACTIVE_WORKSPACE_STORAGE_KEY);
+  if (
+    savedWorkspaceId &&
+    workspaces.some((workspace) => workspace.id === savedWorkspaceId)
+  ) {
+    return savedWorkspaceId;
+  }
+
+  return workspaces[0]?.id ?? null;
+}
+
+function loadActiveView(workspaces: ProjectWorkspace[]): AppView {
+  if (workspaces.length === 0) {
+    return "multi";
+  }
+
+  return localStorage.getItem(ACTIVE_VIEW_STORAGE_KEY) === "multi"
+    ? "multi"
+    : "project";
+}
+
+function maxSidebarWidth() {
+  return Math.max(
+    MIN_SIDEBAR_WIDTH,
+    Math.min(MAX_SIDEBAR_WIDTH, window.innerWidth - MIN_WORKSPACE_WIDTH)
+  );
+}
+
+function clampSidebarWidth(width: number) {
+  return clamp(width, MIN_SIDEBAR_WIDTH, maxSidebarWidth());
+}
+
+function loadSidebarWidth() {
+  const storedWidth = localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
+  const savedWidth = storedWidth === null ? NaN : Number(storedWidth);
+
+  if (Number.isFinite(savedWidth) && savedWidth > 0) {
+    return clampSidebarWidth(savedWidth);
+  }
+
+  return clampSidebarWidth(DEFAULT_SIDEBAR_WIDTH);
+}
+
+function getWorkspaceDropPosition(
+  element: HTMLElement,
+  clientY: number
+): WorkspaceDropPosition {
+  const rect = element.getBoundingClientRect();
+  return clientY < rect.top + rect.height / 2 ? "before" : "after";
+}
+
+function moveWorkspace(
+  workspaces: ProjectWorkspace[],
+  draggedWorkspaceId: string,
+  targetWorkspaceId: string,
+  position: WorkspaceDropPosition
+) {
+  if (draggedWorkspaceId === targetWorkspaceId) {
+    return workspaces;
+  }
+
+  const draggedIndex = workspaces.findIndex(
+    (workspace) => workspace.id === draggedWorkspaceId
+  );
+  const targetIndex = workspaces.findIndex(
+    (workspace) => workspace.id === targetWorkspaceId
+  );
+
+  if (draggedIndex === -1 || targetIndex === -1) {
+    return workspaces;
+  }
+
+  const nextWorkspaces = [...workspaces];
+  const [draggedWorkspace] = nextWorkspaces.splice(draggedIndex, 1);
+  const adjustedTargetIndex = nextWorkspaces.findIndex(
+    (workspace) => workspace.id === targetWorkspaceId
+  );
+
+  if (!draggedWorkspace || adjustedTargetIndex === -1) {
+    return workspaces;
+  }
+
+  const insertIndex =
+    position === "after" ? adjustedTargetIndex + 1 : adjustedTargetIndex;
+  nextWorkspaces.splice(insertIndex, 0, draggedWorkspace);
+
+  const orderChanged = nextWorkspaces.some(
+    (workspace, index) => workspace.id !== workspaces[index]?.id
+  );
+
+  return orderChanged ? nextWorkspaces : workspaces;
+}
+
+export default function App() {
+  const orchestratorState = useOrchestrator();
+  const liveOrchestratorRef = useRef(orchestratorState);
+  liveOrchestratorRef.current = orchestratorState;
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [initialState] = useState(() => {
+    const screenshotFixture = window.vibe?.app.screenshotFixture;
+    if (
+      screenshotFixture?.mode === "openfusion" ||
+      screenshotFixture?.mode === "fusion-picker" ||
+      screenshotFixture?.mode === "fusion-builds"
+    ) {
+      const workspace = starterWorkspace(screenshotFixture.cwd);
+      const kind = screenshotFixture.mode === "openfusion" ? "openfusion" : "fusion";
+      const session = createSession(
+        kind,
+        screenshotFixture.cwd,
+        [],
+        screenshotFixture.mode === "openfusion"
+          ? "Open Fusion"
+          : screenshotFixture.mode === "fusion-builds"
+            ? "Fusion Build Rows"
+            : "Fusion Picker"
+      );
+      const screenshotSession: AgentSession = {
+        ...session,
+        id: screenshotFixture.mode === "fusion-builds" ? "screenshot-fusion-builds" : session.id,
+        command:
+          screenshotFixture.mode === "openfusion"
+            ? screenshotFixture.openCodeCommand?.trim() || session.command
+            : session.command,
+        started:
+          screenshotFixture.mode === "openfusion"
+            ? session.started
+            : false,
+        layout: {
+          x: LEGACY_BOARD_PADDING,
+          y: LEGACY_BOARD_PADDING,
+          w: 100 - LEGACY_BOARD_PADDING * 2,
+          h: 640,
+          unit: "fluid"
+        }
+      };
+
+      return {
+        workspaces: [
+          {
+            ...workspace,
+            sessions: [screenshotSession]
+          }
+        ],
+        activeWorkspaceId: workspace.id,
+        multiSessions: [],
+        activeView: "project" as AppView,
+        sidebarWidth: loadSidebarWidth()
+      };
+    }
+
+    // Visual QA for split tiles and the sidebar card counts: a 3-terminal tile
+    // (two side by side over one full-width) next to an ordinary solo pane.
+    if (screenshotFixture?.mode === "split") {
+      const workspace = starterWorkspace(screenshotFixture.cwd);
+      const cwd = screenshotFixture.cwd;
+      const anchor = createSession("terminal", cwd, [], "Split A");
+      const right = createSession("terminal", cwd, [anchor], "Split B");
+      const below = createSession("terminal", cwd, [anchor, right], "Split C");
+      const solo = createSession("terminal", cwd, [anchor, right, below], "Solo");
+      const tileLayout: LayoutBox = {
+        x: 0,
+        y: LEGACY_BOARD_PADDING,
+        w: 64,
+        h: 620,
+        unit: "fluid"
+      };
+      const splitTree: SplitNode = {
+        dir: "col",
+        ratio: 0.55,
+        a: { dir: "row", ratio: 0.5, a: { id: anchor.id }, b: { id: right.id } },
+        b: { id: below.id }
+      };
+
+      return {
+        workspaces: [
+          {
+            ...workspace,
+            sessions: [
+              {
+                ...anchor,
+                started: false,
+                tileId: anchor.id,
+                splitTree,
+                layout: tileLayout
+              },
+              { ...right, started: false, tileId: anchor.id },
+              { ...below, started: false, tileId: anchor.id },
+              {
+                ...solo,
+                started: false,
+                status: "running" as const,
+                layout: {
+                  x: 66,
+                  y: LEGACY_BOARD_PADDING,
+                  w: 34,
+                  h: 620,
+                  unit: "fluid" as const
+                }
+              }
+            ]
+          }
+        ],
+        activeWorkspaceId: workspace.id,
+        multiSessions: [],
+        activeView: "project" as AppView,
+        sidebarWidth: loadSidebarWidth()
+      };
+    }
+
+    const initialWorkspaces = loadWorkspaces();
+    return {
+      workspaces: initialWorkspaces,
+      activeWorkspaceId: loadActiveWorkspaceId(initialWorkspaces),
+      multiSessions: loadMultiSessions(),
+      activeView: loadActiveView(initialWorkspaces),
+      sidebarWidth: loadSidebarWidth()
+    };
+  });
+  const [workspaces, setWorkspaces] = useState<ProjectWorkspace[]>(
+    initialState.workspaces
+  );
+  const workspacesRef = useRef(workspaces);
+  workspacesRef.current = workspaces;
+  const projectRemovalsRef = useRef(createProjectRemovalController());
+  const [multiSessions, setMultiSessions] = useState<AgentSession[]>(
+    initialState.multiSessions
+  );
+  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(
+    initialState.activeWorkspaceId
+  );
+  const [activeView, setActiveView] = useState<AppView>(initialState.activeView);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarWidth, setSidebarWidth] = useState(initialState.sidebarWidth);
+  // Settings dialog (File → Settings…, Ctrl+,). The hint is shown when
+  // the dialog was opened as a detour, e.g. "Open Claude Code" with no
+  // provider configured yet.
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsPanel, setSettingsPanel] = useState<string | undefined>();
+  const [workspaceToolsOpen, setWorkspaceToolsOpen] = useState(false);
+  const [workspaceToolsTab, setWorkspaceToolsTab] = useState("Orchestrator");
+  const [orchestratorViewOpen, setOrchestratorViewOpen] = useState(false);
+  const [sessionRecency, setSessionRecency] = useState(() => loadSessionRecency(localStorage));
+  const sessionRecencyRef = useRef(sessionRecency);
+  const recentVibeTargets = useRef(new Set<string>());
+  const workspaceMainRef = useRef<HTMLElement | null>(null);
+  const [voiceToggleBusy, setVoiceToggleBusy] = useState(false);
+  const [settingsHint, setSettingsHint] = useState<string | null>(null);
+  // The toolbar launcher dropdown: one trigger opens a searchable list of
+  // every agent profile plus the saved Claude providers (each launches with
+  // the model configured on its profile).
+  const [launcherMenuOpen, setLauncherMenuOpen] = useState(false);
+  const [launcherQuery, setLauncherQuery] = useState("");
+  const [launcherHighlight, setLauncherHighlight] = useState(0);
+  const launcherSearchRef = useRef<HTMLInputElement | null>(null);
+  const [sharedModels, setSharedModels] = useState<import('./types').ConfiguredProviderModel[]>([]);
+  const [modelLaunchKind, setModelLaunchKind] = useState<'claude-custom'|'open-codex'>('open-codex');
+  const [providerList, setProviderList] = useState<ClaudeProviderProfile[] | null>(
+    null
+  );
+  const [maximizedSessionId, setMaximizedSessionId] = useState<string | null>(
+    null
+  );
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
+    null
+  );
+  const screenshotFixtureSeededRef = useRef(false);
+  const attentionSelectionRef = useRef<{
+    selectedSessionId: string | null;
+    visibleSessionIds: string[];
+  }>({
+    selectedSessionId: null,
+    visibleSessionIds: []
+  });
+  const codexRunningWatchdogsRef = useRef<Map<string, number>>(new Map());
+  const codexWatchdogSettledRef = useRef<Set<string>>(new Set());
+  const codexLastInputAtRef = useRef<Map<string, number>>(new Map());
+  const codexActiveTurnIdsRef = useRef<Map<string, string>>(new Map());
+  const codexSubmitPendingRef = useRef<Map<string, string | null>>(new Map());
+  const codexSettledTurnIdsRef = useRef<Map<string, string[]>>(new Map());
+  // Synchronous event-order latch for provider hooks. React state and the
+  // sessions snapshot ref update after commit, while independent hook POSTs
+  // can race one another in the same tick.
+  const codexTurnLiveRef = useRef<Map<string, boolean>>(new Map());
+  const sessionsByIdRef = useRef<Map<string, AgentSession>>(new Map());
+  const [runtimeSnapshots, setRuntimeSnapshots] = useState<Record<string, TerminalRuntimeSnapshot>>({});
+  const runtimeSnapshotsRef = useRef(runtimeSnapshots);
+  const [runtimeAcknowledgements, setRuntimeAcknowledgements] = useState<Record<string, string>>({});
+  const closedRuntimeIdsRef = useRef(new Set<string>());
+  const boardMetricsRef = useRef(new Map<string, PlacementMetrics>());
+  const activeScopeKeyRef = useRef<string | null>(null);
+  const [revealSessionId, setRevealSessionId] = useState<string | null>(null);
+  const pendingCodexAttentionRef = useRef<
+    Map<string, PendingCodexAttention[]>
+  >(new Map());
+  const fusionBridgeToolRef = useRef<Map<string, boolean>>(new Map());
+  const [shellMessage, setShellMessage] = useState<string | null>(null);
+  // null = the PATH scan has not answered yet, so nothing is dimmed. Only a
+  // definite "not found" dims a launcher — never the pending state, which would
+  // flash every button grey for a frame on a slow probe.
+  const [installedClis, setInstalledClis] = useState<InstalledCliReport | null>(
+    null
+  );
+  const [updateState, setUpdateState] = useState<UpdateState | null>(null);
+  const [versionPickerOpen, setVersionPickerOpen] = useState(false);
+  // null = not fetched yet (the menu shows a loading note).
+  const [versionList, setVersionList] = useState<AppVersionList | null>(null);
+  const [dismissedUpdateKey, setDismissedUpdateKey] = useState<string | null>(
+    null
+  );
+  const [isArranging, setIsArranging] = useState(false);
+  const [workspaceClosePendingId, setWorkspaceClosePendingId] = useState<
+    string | null
+  >(null);
+  const [draggingWorkspaceId, setDraggingWorkspaceId] = useState<string | null>(
+    null
+  );
+  const [workspaceDropTarget, setWorkspaceDropTarget] =
+    useState<WorkspaceDropTarget | null>(null);
+  const workspaceDragRef = useRef<string | null>(null);
+  const workspaceDragClickUntil = useRef(0);
+  const [workspaceOrderAnnouncement, setWorkspaceOrderAnnouncement] = useState("");
+  const [workspaceContextMenu, setWorkspaceContextMenu] =
+    useState<WorkspaceContextMenuState | null>(null);
+  function withRuntime(session: AgentSession): AgentSession {
+    if (session.fusion || session.openFusion) return session;
+    const runtime = runtimeSnapshots[session.id];
+    if (!runtime || runtime.launchToken !== session.launchToken) {
+      return { ...session, status: session.started ? "starting" : "idle", attention: undefined, subagentDepth: undefined };
+    }
+    const attention = visibleRuntimeAttention(runtime) || undefined;
+    const reason = attention?.reason;
+    return {
+      ...session,
+      status: runtimeSessionStatus(runtime),
+      threadRef: runtime.conversation?.id ? runtime.conversation as AgentThreadRef : session.threadRef,
+      subagentDepth: runtimeSessionStatus(runtime) === "running"
+        ? runtimeActiveChildCount(runtime)
+        : undefined,
+      attention: attention
+        ? {
+            state: attention.state,
+            reason: reason === "approval" || reason === "question" || reason === "done" || reason === "exit" || reason === "error" ? reason : undefined,
+            source: "provider",
+            updatedAt: attention.updatedAt,
+            unread: runtimeAcknowledgements[session.id] !== attention.id
+          }
+        : undefined
+    };
+  }
+
+  function withRuntimeLabel(session: AgentSession): AgentSession {
+    if (session.kind === 'codex-web') return withRuntime(session);
+    const runtime = runtimeSnapshots[session.id];
+    return {
+      ...withRuntime(session),
+      name: runtimeDisplayTitle(runtime?.launchToken === session.launchToken ? runtime : undefined, session.name)
+    };
+  }
+
+  function scopeKey(scope: SessionScope) {
+    return scope.type === "multi" ? "multi" : scope.workspaceId;
+  }
+
+  function placementMetrics(scope: SessionScope): PlacementMetrics {
+    const board = scopeKey(scope) === activeScopeKeyRef.current ? document.querySelector<HTMLElement>(".terminal-board") : null;
+    const stored = boardMetricsRef.current.get(scopeKey(scope));
+    if (!board?.clientWidth) return stored ?? { innerWidth: 1000, viewportTop: 0, viewportBottom: 600 };
+    const sessions = scope.type === "multi" ? multiSessions : workspaces.find((workspace) => workspace.id === scope.workspaceId)?.sessions ?? [];
+    const minimumWidth = Math.max(DEFAULT_MIN_PANE_WIDTH, ...buildBoardTiles(sessions).map((tile) => tile.tree
+      ? subtreeMin(tile.tree, DEFAULT_MIN_PANE_WIDTH, DEFAULT_MIN_PANE_HEIGHT, SPLIT_DIVIDER_PX).minW
+      : DEFAULT_MIN_PANE_WIDTH));
+    return {
+      innerWidth: Math.max(board.clientWidth - 20, minimumWidth),
+      viewportTop: board.scrollTop,
+      viewportBottom: board.scrollTop + board.clientHeight
+    };
+  }
+
+  const activeWorkspace =
+    workspaces.find((workspace) => workspace.id === activeWorkspaceId) ??
+    workspaces[0] ??
+    null;
+  const activeScope: SessionScope | null =
+    activeView === "multi"
+      ? { type: "multi" }
+      : activeWorkspace
+        ? { type: "workspace", workspaceId: activeWorkspace.id }
+        : null;
+  useLayoutEffect(() => {
+    activeScopeKeyRef.current = activeScope ? scopeKey(activeScope) : null;
+  });
+  const boardSessions = (
+    activeScope?.type === "multi"
+      ? multiSessions
+      : activeWorkspace?.sessions ?? []).map(withRuntime);
+  const visibleSessionIds = boardSessions.map((session) => session.id);
+  const boardTitle = activeView === "multi" ? "Multi mode" : activeWorkspace?.name ?? "No folder";
+  const boardSubtitle =
+    activeView === "multi"
+      ? "Free terminal board"
+      : activeWorkspace?.path ?? "Open a folder to start";
+  const activeScreenshotFixture = window.vibe?.app.screenshotFixture;
+  const screenshotFusionPicker =
+    activeScreenshotFixture?.mode === "fusion-picker"
+      ? {
+          role: activeScreenshotFixture.role,
+          family: activeScreenshotFixture.family
+        }
+      : undefined;
+  const allSessions = [
+    ...multiSessions,
+    ...workspaces.flatMap((workspace) => workspace.sessions)
+  ].map(withRuntime);
+  const closeSessionsRef = useRef(allSessions);
+  closeSessionsRef.current = allSessions;
+  const [terminalLaunchCoordinator] = useState(() => createTerminalLaunchCoordinator({
+    platform: window.vibe?.platform,
+    create: payload => window.vibe?.terminal.create(payload) ?? Promise.resolve(false),
+    confirmThread: payload => window.vibe?.agentThreads.findLatest(payload) ?? Promise.reject(new Error("Thread discovery unavailable")),
+    onFreshLaunchFallback: (session, freshSession) => {
+      updateAnySession(session.id, current => {
+        if (!current.started || current.launchToken !== session.launchToken) return current;
+        return {
+          ...current,
+          nextLaunchMode: freshSession.nextLaunchMode,
+          threadRef: freshSession.threadRef,
+          threadSelectionPending: freshSession.threadSelectionPending,
+          threadLookupStartedAt: freshSession.threadLookupStartedAt,
+          threadLookupStatus: freshSession.threadLookupStatus,
+          threadLookupMessage: freshSession.threadLookupMessage
+        };
+      });
+      setShellMessage(`${session.name}: The saved chat is no longer available. Starting a fresh chat.`);
+    },
+    isCurrent: session => {
+      const current = sessionsByIdRef.current.get(session.id);
+      return Boolean(current?.started && current.launchToken === session.launchToken &&
+        !closedRuntimeIdsRef.current.has(session.id));
+    },
+    onError: (session, message) => setShellMessage(`${session.name}: ${message}`)
+  }));
+  useLayoutEffect(() => {
+    sessionsByIdRef.current = new Map(
+      allSessions.map((session) => [session.id, session])
+    );
+  }, [multiSessions, workspaces, runtimeSnapshots, runtimeAcknowledgements]);
+  useEffect(() => {
+    terminalLaunchCoordinator.reconcile(allSessions);
+  }, [multiSessions, workspaces, terminalLaunchCoordinator]);
+  useEffect(() => () => terminalLaunchCoordinator.suspend(), [terminalLaunchCoordinator]);
+  const cwdConflicts = useMemo(
+    () =>
+      computeCwdConflicts([
+        ...multiSessions.map((session) => ({
+          session: withRuntimeLabel(session),
+          scopeLabel: "Multi"
+        })),
+        ...workspaces.flatMap((workspace) =>
+          workspace.sessions.map((session) => ({
+            session: withRuntimeLabel(session),
+            scopeLabel: workspace.name
+          }))
+        )
+      ]),
+    [multiSessions, workspaces, runtimeSnapshots, runtimeAcknowledgements]
+  );
+  const workspaceClosePending =
+    workspaces.find((workspace) => workspace.id === workspaceClosePendingId) ??
+    null;
+  const workspaceClosePendingSessionCount =
+    workspaceClosePending?.sessions.length ?? 0;
+
+  useEffect(() => {
+    if (screenshotFixtureSeededRef.current) {
+      return;
+    }
+
+    screenshotFixtureSeededRef.current = true;
+    let cancelled = false;
+
+    window.vibe?.app.getScreenshotFixture?.().then((fixture) => {
+      if (
+        cancelled ||
+        (fixture?.mode !== "openfusion" &&
+          fixture?.mode !== "fusion-picker" &&
+          fixture?.mode !== "fusion-builds") ||
+        boardSessions.length > 0 ||
+        multiSessions.length > 0
+      ) {
+        return;
+      }
+
+      const workspace =
+        activeWorkspace?.sessions.length === 0
+          ? { ...activeWorkspace, path: fixture.cwd, name: folderName(fixture.cwd) }
+          : starterWorkspace(fixture.cwd);
+      const kind = fixture.mode === "openfusion" ? "openfusion" : "fusion";
+      const session = createSession(
+        kind,
+        fixture.cwd,
+        [],
+        fixture.mode === "openfusion"
+          ? "Open Fusion CLI"
+          : fixture.mode === "fusion-builds"
+            ? "Fusion Build Rows"
+            : "Fusion Picker"
+      );
+      const screenshotSession: AgentSession = {
+        ...session,
+        id: fixture.mode === "fusion-builds" ? "screenshot-fusion-builds" : session.id,
+        started: fixture.mode === "openfusion" ? session.started : false,
+        layout: {
+          x: LEGACY_BOARD_PADDING,
+          y: LEGACY_BOARD_PADDING,
+          w: 100 - LEGACY_BOARD_PADDING * 2,
+          h: 640,
+          unit: "fluid"
+        }
+      };
+
+      setWorkspaces(() => [
+        {
+          ...workspace,
+          sessions: [screenshotSession]
+        }
+      ]);
+      setActiveWorkspaceId(workspace.id);
+      setActiveView("project");
+      setSelectedSessionId(screenshotSession.id);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeWorkspace, boardSessions.length, multiSessions.length]);
+
+  useEffect(() => {
+    let cancelled = false;
+    window.vibe?.app?.getInstalledClis?.().then(
+      (report) => {
+        if (!cancelled) setInstalledClis(report);
+      },
+      () => {
+        // A failed probe leaves every launcher enabled, which is the safe
+        // default: presence is a hint, not a gate.
+      }
+    );
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // A launcher is dimmed only when the probe positively reports its CLI
+  // missing. Kinds with no PATH command of their own (Terminal, the vendored
+  // Kimi + CC) are absent from the report and stay normal. Fusion and Open
+  // Fusion are not probed either: they launch claude/opencode sessions, so
+  // their entries follow those two.
+  const agentCliMissing = useCallback(
+    (kind: AgentKind) => {
+      if (!installedClis) return false;
+      const probeKind =
+        kind === "fusion" || kind === "claude-custom"
+          ? "claude"
+          : kind === "openfusion"
+            ? "opencode"
+            : kind;
+      const entry = installedClis.clis?.[probeKind];
+      return Boolean(entry) && !entry.available;
+    },
+    [installedClis]
+  );
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(workspaces.map((workspace) => ({
+      ...workspace, sessions: workspace.sessions.map(serializeSession)
+    }))));
+  }, [workspaces]);
+
+  useEffect(() => {
+    localStorage.setItem(MULTI_SESSIONS_STORAGE_KEY, JSON.stringify(multiSessions.map(serializeSession)));
+  }, [multiSessions]);
+
+  useEffect(() => {
+    if (activeWorkspaceId) {
+      localStorage.setItem(ACTIVE_WORKSPACE_STORAGE_KEY, activeWorkspaceId);
+      return;
+    }
+
+    localStorage.removeItem(ACTIVE_WORKSPACE_STORAGE_KEY);
+  }, [activeWorkspaceId]);
+
+  useEffect(() => {
+    localStorage.setItem(ACTIVE_VIEW_STORAGE_KEY, activeView);
+  }, [activeView]);
+
+  useEffect(() => {
+    localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth));
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    if (!workspaceContextMenu) {
+      return;
+    }
+
+    if (
+      !workspaces.some(
+        (workspace) => workspace.id === workspaceContextMenu.workspaceId
+      )
+    ) {
+      setWorkspaceContextMenu(null);
+    }
+  }, [workspaceContextMenu, workspaces]);
+
+  useEffect(() => {
+    if (!workspaceContextMenu) {
+      return;
+    }
+
+    const closeMenu = () => setWorkspaceContextMenu(null);
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeMenu();
+      }
+    };
+    const handlePointerDown = (event: PointerEvent) => {
+      if (
+        event.target instanceof Element &&
+        event.target.closest(".workspace-context-menu")
+      ) {
+        return;
+      }
+
+      closeMenu();
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("resize", closeMenu);
+    window.addEventListener("scroll", closeMenu, true);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("scroll", closeMenu, true);
+    };
+  }, [workspaceContextMenu]);
+
+  useEffect(() => {
+    const handleWindowResize = () => {
+      setSidebarWidth((current) => clampSidebarWidth(current));
+    };
+
+    window.addEventListener("resize", handleWindowResize);
+    return () => {
+      window.removeEventListener("resize", handleWindowResize);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      maximizedSessionId &&
+      !boardSessions.some((session) => session.id === maximizedSessionId)
+    ) {
+      setMaximizedSessionId(null);
+    }
+  }, [boardSessions, maximizedSessionId]);
+
+  useEffect(() => {
+    if (!workspaceClosePending) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setWorkspaceClosePendingId(null);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [workspaceClosePending]);
+
+  useEffect(() => {
+    attentionSelectionRef.current = {
+      selectedSessionId: orchestratorViewOpen ? null : selectedSessionId,
+      visibleSessionIds: orchestratorViewOpen ? [] : visibleSessionIds
+    };
+  }, [selectedSessionId, visibleSessionIds, orchestratorViewOpen]);
+
+  useEffect(() => {
+    if (workspaceMainRef.current) workspaceMainRef.current.inert = orchestratorViewOpen;
+  }, [orchestratorViewOpen]);
+
+  useEffect(() => {
+    const current = new Set<string>();
+    for (const target of orchestratorState?.activeTargets || []) {
+      if (!target.operations?.some(operation => ["send_prompt", "stage_draft", "answer_question", "permission"].includes(operation))) continue;
+      const key = `${target.id}:${target.generation}`;
+      current.add(key);
+      if (!recentVibeTargets.current.has(key)) recordSessionUse(target.id, true);
+    }
+    recentVibeTargets.current = current;
+  }, [orchestratorState?.activeTargets]);
+
+  useEffect(() => {
+    if (!orchestratorViewOpen) return;
+    let live = true, pending = false;
+    const refresh = async () => {
+      if (!live || pending || document.hidden) return;
+      pending = true;
+      try { await relayApi()?.dispatch({ kind: "list_sessions" }); } catch { /* Runtime events continue to update the directory. */ }
+      finally { pending = false; }
+    };
+    void refresh();
+    const timer = orchestratorState?.enabled ? undefined : window.setInterval(() => void refresh(), 4000);
+    const onVisible = () => { if (!document.hidden) void refresh(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { live = false; clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
+  }, [orchestratorViewOpen, orchestratorState?.enabled]);
+
+  useEffect(() => {
+    return window.vibe?.terminal.onEvent((event) => {
+      if (event.type === "host-error" || event.type === "host-exit") {
+        setShellMessage(event.message);
+      }
+
+      // Standalone lifecycle belongs to the backend runtime, never screen replay.
+      if ("id" in event && event.id) {
+        const session = sessionsByIdRef.current.get(event.id);
+        if (session && !session.fusion && !session.openFusion) return;
+      }
+
+      if (event.type === "agent-attention") {
+        applyAgentAttention(
+          event.id,
+          event.attention,
+          event.provider,
+          event.providerThreadId,
+          event.providerTurnId
+        );
+      }
+
+      if (event.type === "agent-running") {
+        applyAgentRunning(
+          event.id,
+          event.turnStart !== false,
+          event.provider,
+          event.providerThreadId,
+          event.providerTurnId
+        );
+      }
+
+      if (event.type === "agent-subagent") {
+        applyAgentSubagent(event.id, event.phase, event.provider);
+        return;
+      }
+
+      if (event.type === "agent-background-activity") {
+        applyAgentBackgroundActivity(event.id, event.backgroundActivity);
+        return;
+      }
+
+      if ("id" in event && typeof event.id === "string") {
+        if (event.type === "data") {
+          refreshCodexRunningWatchdog(event.id);
+        }
+
+        // Raw output does not directly drive the pill here. It refreshes only
+        // an already-started Codex turn's App-owned safety watchdog; telemetry
+        // drives other agents, and mounted plain terminals retain their
+        // input-aware heuristic. snapshot/exit/error still settle centrally.
+        if (event.type !== "data") {
+          applyTerminalStatus(event.id, statusFromTerminalEvent(event));
+        }
+
+        const attention = attentionFromTerminalEvent(event);
+        if (attention) {
+          applyTerminalAttention(event.id, attention);
+        }
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    const terminal = window.vibe?.terminal;
+    if (!terminal?.onRuntime || !terminal.getRuntimeSnapshots) return;
+    let disposed = false;
+    const receive = (snapshot: TerminalRuntimeSnapshot, replay = false) => {
+      const session = sessionsByIdRef.current.get(snapshot.id);
+      if (disposed || !session || session.fusion || session.openFusion ||
+          closedRuntimeIdsRef.current.has(snapshot.id) || snapshot.launchToken !== session.launchToken) return;
+      const previous = runtimeSnapshotsRef.current[snapshot.id];
+      if (previous && previous.launchToken === snapshot.launchToken &&
+          (previous.generation !== snapshot.generation || previous.revision >= snapshot.revision)) return;
+      const next = { ...runtimeSnapshotsRef.current, [snapshot.id]: snapshot };
+      runtimeSnapshotsRef.current = next;
+      setRuntimeSnapshots(next);
+      const attention = visibleRuntimeAttention(snapshot);
+      if (attention && (replay || attentionSelectionRef.current.selectedSessionId === snapshot.id)) {
+        const attentionId = attention.id;
+        setRuntimeAcknowledgements((current) => current[snapshot.id] === attentionId ? current : { ...current, [snapshot.id]: attentionId });
+      }
+      updateAnySession(snapshot.id, current => rememberTerminalThread(current, snapshot));
+    };
+    const unsubscribe = terminal.onRuntime((snapshot) => receive(snapshot));
+    void terminal.getRuntimeSnapshots().then((snapshots) => {
+      snapshots.forEach((snapshot) => receive(snapshot, true));
+    }).catch(() => { if (!disposed) setShellMessage("Terminal observation could not be connected."); });
+    return () => { disposed = true; unsubscribe(); };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      for (const timeoutId of codexRunningWatchdogsRef.current.values()) {
+        window.clearTimeout(timeoutId);
+      }
+      codexRunningWatchdogsRef.current.clear();
+      codexWatchdogSettledRef.current.clear();
+      codexLastInputAtRef.current.clear();
+      codexActiveTurnIdsRef.current.clear();
+      codexSubmitPendingRef.current.clear();
+      codexSettledTurnIdsRef.current.clear();
+      codexTurnLiveRef.current.clear();
+      pendingCodexAttentionRef.current.clear();
+    };
+  }, []);
+
+  useEffect(() => {
+    return window.vibe?.fusionChat?.onEvent((event: FusionChatEvent) => {
+      if (event.type === "host-error") {
+        setShellMessage(event.message);
+        return;
+      }
+
+      applyFusionChatLifecycle(event);
+    });
+  }, []);
+
+  useEffect(() => {
+    return window.vibe?.openFusionChat?.onEvent((event: OpenFusionChatEvent) => {
+      if (event.type === "host-error") {
+        setShellMessage(event.message);
+        return;
+      }
+
+      applyOpenFusionChatLifecycle(event);
+    });
+  }, []);
+
+
+  useEffect(() => {
+    let disposed = false;
+
+    window.vibe?.updates.getState().then((state) => {
+      if (!disposed) {
+        setUpdateState(state);
+      }
+    });
+
+    const unsubscribe = window.vibe?.updates.onEvent((state) => {
+      setUpdateState(state);
+    });
+
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
+  }, []);
+
+  // Native application menu actions (File/Edit/View). The ref indirection keeps
+  // the single subscription while always running the latest addSession/scope
+  // closures.
+  const menuActionRef = useRef<(action: string) => void>(() => {});
+  useEffect(() => {
+    menuActionRef.current = (action: string) => {
+      if (action === "open-settings") {
+        setSettingsHint(null);
+        setSettingsOpen(true);
+      } else if (action === "toggle-sidebar") {
+        setSidebarOpen((open) => !open);
+      } else if (action === "new-terminal") {
+        void addSession("terminal");
+      } else if (action === "new-claude") {
+        void addSession("claude");
+      } else if (action === "open-claude-code") {
+        void addSession("claude-custom");
+      } else if (action === 'open-codex') {
+        void addSession('open-codex');
+      }
+    };
+  });
+  useEffect(() => {
+    if (!window.vibe?.menu?.onEvent) {
+      return;
+    }
+    const unsubscribe = window.vibe.menu.onEvent((event) => {
+      if (event?.type === "action" && typeof event.action === "string") {
+        menuActionRef.current(event.action);
+      }
+    });
+    return unsubscribe;
+  }, []);
+
+  function updateWorkspace(
+    workspaceId: string,
+    updater: (workspace: ProjectWorkspace) => ProjectWorkspace
+  ) {
+    setWorkspaces((current) => {
+      let changed = false;
+      const nextWorkspaces = current.map((workspace) => {
+        if (workspace.id !== workspaceId) {
+          return workspace;
+        }
+
+        const nextWorkspace = updater(workspace);
+        if (nextWorkspace === workspace) {
+          return workspace;
+        }
+
+        changed = true;
+        return nextWorkspace;
+      });
+
+      return changed ? nextWorkspaces : current;
+    });
+  }
+
+  function updateScopeSessions(
+    scope: SessionScope,
+    updater: (sessions: AgentSession[]) => AgentSession[]
+  ) {
+    if (scope.type === "multi") {
+      setMultiSessions((current) => {
+        const nextSessions = updater(current);
+        return nextSessions === current ? current : nextSessions;
+      });
+      return;
+    }
+
+    updateWorkspace(scope.workspaceId, (workspace) => {
+      const nextSessions = updater(workspace.sessions);
+      return nextSessions === workspace.sessions
+        ? workspace
+        : {
+            ...workspace,
+            sessions: nextSessions
+          };
+    });
+  }
+
+  function updateAnySession(
+    sessionId: string,
+    updater: (session: AgentSession) => AgentSession
+  ) {
+    setMultiSessions((current) => {
+      let changed = false;
+      const nextSessions = current.map((session) => {
+        if (session.id !== sessionId) {
+          return session;
+        }
+
+        const nextSession = updater(session);
+        changed = changed || nextSession !== session;
+        return nextSession;
+      });
+
+      return changed ? nextSessions : current;
+    });
+
+    setWorkspaces((current) => {
+      let changed = false;
+      const nextWorkspaces = current.map((workspace) => {
+        let sessionsChanged = false;
+        const nextSessions = workspace.sessions.map((session) => {
+          if (session.id !== sessionId) {
+            return session;
+          }
+
+          const nextSession = updater(session);
+          sessionsChanged = sessionsChanged || nextSession !== session;
+          return nextSession;
+        });
+
+        if (!sessionsChanged) {
+          return workspace;
+        }
+
+        changed = true;
+        return {
+          ...workspace,
+          sessions: nextSessions
+        };
+      });
+
+      return changed ? nextWorkspaces : current;
+    });
+  }
+
+  function applyTerminalStatus(
+    sessionId: string,
+    status: AgentSession["status"] | null
+  ) {
+    if (!status) {
+      return;
+    }
+
+    if (status === "done" || status === "failed") {
+      clearCodexRunningWatchdog(sessionId);
+    }
+
+    updateAnySession(sessionId, (session) => {
+      // claude/opencode "working" is telemetry-driven, so never let raw terminal
+      // output (a snapshot replay on reconnect, a focus/click redraw) flip them
+      // to "running" — that is the typing/selecting false positive we are fixing.
+      if (status === "running" && isTurnTelemetryKind(session.kind)) {
+        return session;
+      }
+
+      // A dead agent has no live children by definition, so a real process
+      // exit/error always releases the delegation bracket.
+      const settled = status === "done" || status === "failed";
+      const nextStatus = reconcileStatus(session.status, status);
+      if (nextStatus === session.status) {
+        return settled ? clearSubagentDepth(session) : session;
+      }
+
+      const next = { ...session, status: nextStatus };
+      return settled ? clearSubagentDepth(next) : next;
+    });
+  }
+
+  // A genuine turn START (provider telemetry, or the renderer-owned Codex
+  // submit fallback) forces the pane to "running" even
+  // past done/failed stickiness and drops stale unread attention. Mid-turn tool activity (claude
+  // PreToolUse/PostToolUse, turnStart false) goes through reconcileStatus
+  // instead: the hook POSTs ride independent short-lived processes with no
+  // ordering guarantee, so a tool event that lands after the turn's Stop must
+  // not resurrect a finished pane's spinner (or clear its attention dot).
+  function applyAgentRunning(
+    sessionId: string,
+    turnStart = true,
+    provider?: string,
+    providerThreadId?: string,
+    providerTurnId?: string
+  ) {
+    if (provider === "codex") {
+      const session = sessionsByIdRef.current.get(sessionId);
+      if (!turnStart && codexTurnLiveRef.current.get(sessionId) === false) {
+        return;
+      }
+      if (
+        !turnStart &&
+        session &&
+        reconcileStatus(session.status, "running") !== "running"
+      ) {
+        return;
+      }
+      const decision = providerAttentionDecision(
+        session,
+        provider,
+        providerThreadId
+      );
+      if (decision === "reject") {
+        return;
+      }
+      if (turnStart) {
+        codexTurnLiveRef.current.set(sessionId, true);
+        codexSubmitPendingRef.current.delete(sessionId);
+      }
+      if (providerTurnId) {
+        codexActiveTurnIdsRef.current.set(sessionId, providerTurnId);
+      }
+      armCodexRunningWatchdog(sessionId);
+    }
+
+    updateAnySession(sessionId, (session) => {
+      if (!turnStart && reconcileStatus(session.status, "running") !== "running") {
+        return session;
+      }
+
+      // A genuine turn start supersedes the previous turn outright, so no
+      // delegation opened by that turn can still be in flight. This is the
+      // primary expiry for the subagent bracket. Mid-turn tool activity must
+      // NOT clear it — that would drop a live delegation on the parent's very
+      // next tool call.
+      const subagentDepth = turnStart ? undefined : session.subagentDepth;
+
+      if (
+        session.status === "running" &&
+        !session.attention?.unread &&
+        !session.backgroundActivity &&
+        session.subagentDepth === subagentDepth
+      ) {
+        return session;
+      }
+
+      return {
+        ...session,
+        status: "running",
+        backgroundActivity: undefined,
+        subagentDepth,
+        attention: {
+          state: "none",
+          unread: false,
+          updatedAt: Date.now(),
+          source: "provider"
+        }
+      };
+    });
+  }
+
+  // A subagent delegation opened or closed. The OPEN half is the only signal
+  // besides a genuine turn start that may push a pane past the done/failed
+  // latch: it is emitted from a tool-call boundary the model itself created, so
+  // unlike raw PTY output it can never be a keystroke echo, a focus/mouse
+  // report, a TUI redraw or a replayed snapshot.
+  function applyAgentSubagent(
+    sessionId: string,
+    phase: "start" | "stop",
+    provider?: string
+  ) {
+    if (phase === "start") {
+      if (provider === "codex") {
+        // Codex's bracket is derived from CHILD tool hooks, which can
+        // legitimately land after the root turn settled — so it stays
+        // latch-respecting, exactly like codex tool activity already is.
+        updateAnySession(sessionId, (session) =>
+          reconcileStatus(session.status, "running") === "running"
+            ? { ...session, status: "running" }
+            : session
+        );
+      } else {
+        updateAnySession(sessionId, (session) => ({
+          ...session,
+          status: "running",
+          attention: { state: "none", unread: false, updatedAt: Date.now(), source: "provider" }
+        }));
+      }
+    }
+
+    // A child start is not a new parent turn: retain every already-open child.
+    updateAnySession(sessionId, (session) =>
+      updateSubagentDepth(session, phase)
+    );
+  }
+
+  function clearCodexRunningWatchdog(sessionId: string) {
+    const timeoutId = codexRunningWatchdogsRef.current.get(sessionId);
+    if (timeoutId !== undefined) {
+      window.clearTimeout(timeoutId);
+      codexRunningWatchdogsRef.current.delete(sessionId);
+    }
+    codexWatchdogSettledRef.current.delete(sessionId);
+  }
+
+  function clearCodexTracking(sessionId: string) {
+    clearCodexRunningWatchdog(sessionId);
+    codexLastInputAtRef.current.delete(sessionId);
+    pendingCodexAttentionRef.current.delete(sessionId);
+    codexActiveTurnIdsRef.current.delete(sessionId);
+    codexSubmitPendingRef.current.delete(sessionId);
+    codexSettledTurnIdsRef.current.delete(sessionId);
+    codexTurnLiveRef.current.delete(sessionId);
+  }
+
+  function armCodexRunningWatchdog(sessionId: string) {
+    clearCodexRunningWatchdog(sessionId);
+    const timeoutId = window.setTimeout(() => {
+      if (codexRunningWatchdogsRef.current.get(sessionId) !== timeoutId) {
+        return;
+      }
+      codexRunningWatchdogsRef.current.delete(sessionId);
+      const session = sessionsByIdRef.current.get(sessionId);
+      if (!session || !["codex", "open-codex"].includes(session.kind) || session.status !== "running") {
+        return;
+      }
+      codexWatchdogSettledRef.current.add(sessionId);
+      updateAnySession(sessionId, (session) =>
+        ["codex", "open-codex"].includes(session.kind) && session.status === "running"
+          ? { ...session, status: "waiting" }
+          : session
+      );
+    }, CODEX_RUNNING_QUIET_MS);
+    codexRunningWatchdogsRef.current.set(sessionId, timeoutId);
+  }
+
+  function refreshCodexRunningWatchdog(sessionId: string) {
+    const lastInputAt = codexLastInputAtRef.current.get(sessionId) ?? 0;
+    if (Date.now() - lastInputAt < CODEX_INPUT_GRACE_MS) {
+      return;
+    }
+
+    if (codexRunningWatchdogsRef.current.has(sessionId)) {
+      armCodexRunningWatchdog(sessionId);
+      return;
+    }
+
+    // A safety timeout is not authoritative turn completion. If real PTY work
+    // resumes later, restore running and start a fresh quiet window even while
+    // the pane is hidden.
+    if (codexWatchdogSettledRef.current.has(sessionId)) {
+      applyAgentRunning(sessionId, true);
+      armCodexRunningWatchdog(sessionId);
+    }
+  }
+
+  function applyCodexTurnStart(sessionId: string) {
+    const session = sessionsByIdRef.current.get(sessionId);
+    const approvalResume =
+      session?.attention?.state === "waiting" &&
+      session.attention.reason === "approval";
+    if (!approvalResume) {
+      pendingCodexAttentionRef.current.delete(sessionId);
+      codexSubmitPendingRef.current.set(
+        sessionId,
+        codexActiveTurnIdsRef.current.get(sessionId) ?? null
+      );
+    }
+    codexTurnLiveRef.current.set(sessionId, true);
+    applyAgentRunning(sessionId, true);
+    armCodexRunningWatchdog(sessionId);
+  }
+
+  function rememberSettledCodexTurn(sessionId: string, turnId: string) {
+    const settled = codexSettledTurnIdsRef.current.get(sessionId) ?? [];
+    codexSettledTurnIdsRef.current.set(
+      sessionId,
+      [...settled.filter((candidate) => candidate !== turnId), turnId].slice(-8)
+    );
+  }
+
+  function recordCodexTerminalInput(sessionId: string) {
+    codexLastInputAtRef.current.set(sessionId, Date.now());
+  }
+
+  function applyAgentBackgroundActivity(
+    sessionId: string,
+    activity: AgentBackgroundActivity
+  ) {
+    const backgroundActivity = normalizeBackgroundActivity(activity);
+    updateAnySession(sessionId, (session) => {
+      if (!backgroundActivity && !session.backgroundActivity) {
+        return session;
+      }
+
+      return {
+        ...session,
+        backgroundActivity
+      };
+    });
+  }
+
+  function applyAcceptedAgentAttention(
+    sessionId: string,
+    attentionEvent: AgentAttentionEvent
+  ) {
+    clearCodexRunningWatchdog(sessionId);
+    const selection = attentionSelectionRef.current;
+    const attentionStatus = statusFromAttentionState(attentionEvent.state);
+
+    updateAnySession(sessionId, (session) => {
+      const nextStatus = attentionStatus
+        ? reconcileStatus(session.status, attentionStatus)
+        : session.status;
+
+      // An idle "your turn" prompt means the agent is blocked on the human,
+      // which is incompatible with a delegation still running. This is what
+      // closes the one bracket leak claude can produce: a DENIED Task fires
+      // PreToolUse but never PostToolUse. An "approval" wait must NOT reset —
+      // that is a child asking permission mid-delegation.
+      const releasesDelegation =
+        attentionEvent.state === "waiting" && attentionEvent.reason === "question";
+
+      // A SETTLED turn owns its attention. claude fires its idle Notification
+      // (idle_prompt -> waiting/question) about a minute after every turn ends,
+      // and it lands on a pane whose status is already a latched done/failed.
+      // reconcileStatus keeps the pill honest, but writing the attention anyway
+      // did two visible kinds of damage: the sidebar counted the finished pane
+      // as "blocked", and the unread flag re-raised an attention dot the user
+      // had already dismissed — for a pane that had done nothing. Keep the
+      // completion/failure that settled the turn instead.
+      //
+      // Scoped to "waiting" on purpose: a late completed/failed still writes
+      // (it describes the same settled turn), and while the pane is running,
+      // starting or idle the event applies normally — that is the ~60s liveness
+      // backstop for a turn whose Stop hook never landed. Mid-turn approval
+      // waits are unaffected: a permission prompt can only occur inside a turn,
+      // whose UserPromptSubmit already released the latch.
+      const settled = session.status === "done" || session.status === "failed";
+      const keepSettledAttention = settled && attentionEvent.state === "waiting";
+
+      return {
+        ...session,
+        status: nextStatus,
+        // Still released even when the notification itself is dropped: the
+        // bracket expiry is a fact about the delegation, not a notification.
+        subagentDepth: releasesDelegation ? undefined : session.subagentDepth,
+        attention: keepSettledAttention
+          ? session.attention
+          : attentionFromEvent(
+              attentionEvent,
+              shouldMarkAttentionUnread(
+                sessionId,
+                selection.selectedSessionId,
+                selection.visibleSessionIds,
+                attentionEvent
+              )
+            )
+      };
+    });
+  }
+
+  function applyAgentAttention(
+    sessionId: string,
+    attentionEvent: AgentAttentionEvent,
+    provider?: string,
+    providerThreadId?: string,
+    providerTurnId?: string
+  ) {
+    const decision = providerAttentionDecision(
+      sessionsByIdRef.current.get(sessionId),
+      provider,
+      providerThreadId
+    );
+    if (decision === "defer" && providerThreadId) {
+      const pending = pendingCodexAttentionRef.current.get(sessionId) ?? [];
+      pending.push({ providerThreadId, providerTurnId, attention: attentionEvent });
+      // One launch can report several child completions before discovery.
+      // Keep a small bounded tail and decide only after the root id is known.
+      pendingCodexAttentionRef.current.set(sessionId, pending.slice(-8));
+      return;
+    }
+    if (decision === "reject") {
+      return;
+    }
+
+    if (provider === "codex") {
+      const activeTurnId = codexActiveTurnIdsRef.current.get(sessionId);
+      const submitPending = codexSubmitPendingRef.current.has(sessionId);
+      if (
+        codexTurnAttentionDecision(
+          activeTurnId,
+          submitPending,
+          codexSubmitPendingRef.current.get(sessionId),
+          codexSettledTurnIdsRef.current.get(sessionId) ?? [],
+          providerTurnId,
+          codexTurnLiveRef.current.get(sessionId)
+        ) === "reject"
+      ) {
+        return;
+      }
+      codexSubmitPendingRef.current.delete(sessionId);
+      if (providerTurnId) {
+        codexActiveTurnIdsRef.current.set(sessionId, providerTurnId);
+      }
+      if (attentionEvent.state === "completed" || attentionEvent.state === "failed") {
+        if (providerTurnId) {
+          rememberSettledCodexTurn(sessionId, providerTurnId);
+        }
+        codexActiveTurnIdsRef.current.delete(sessionId);
+        codexTurnLiveRef.current.set(sessionId, false);
+      }
+    }
+
+    // A completion that lands while a subagent delegation is open cannot be
+    // attributed to the pane's own turn (kimi/kimi-custom fire the
+    // session-level Stop at a CHILD's turn end), so drop it rather than latch
+    // a false "done". Placed after the codex gates above so codex's own turn
+    // bookkeeping still runs for a completion codex itself accepted, and before
+    // applyAcceptedAgentAttention so neither status nor attention is written.
+    const current = sessionsByIdRef.current.get(sessionId);
+    if (current && shouldSuppressAgentCompletion(current, attentionEvent)) {
+      return;
+    }
+
+    applyAcceptedAgentAttention(sessionId, attentionEvent);
+  }
+
+  function applyTerminalAttention(
+    sessionId: string,
+    attentionEvent: AgentAttentionEvent
+  ) {
+    const selection = attentionSelectionRef.current;
+
+    updateAnySession(sessionId, (session) => {
+      if (!shouldUseTerminalEventAttention(session)) {
+        return session;
+      }
+
+      return {
+        ...session,
+        attention: attentionFromEvent(
+          attentionEvent,
+          shouldMarkAttentionUnread(
+            sessionId,
+            selection.selectedSessionId,
+            selection.visibleSessionIds,
+            attentionEvent
+          )
+        )
+      };
+    });
+  }
+
+  function clearSessionAttention(sessionId: string) {
+    const runtime = runtimeSnapshotsRef.current[sessionId];
+    const attentionId = runtime ? (visibleRuntimeAttention(runtime) || undefined)?.id : undefined;
+    if (attentionId) setRuntimeAcknowledgements((current) => ({ ...current, [sessionId]: attentionId }));
+    updateAnySession(sessionId, clearUnreadAttention);
+  }
+
+  function selectSession(sessionId: string) {
+    recordSessionUse(sessionId, true);
+    setSelectedSessionId(sessionId);
+    clearSessionAttention(sessionId);
+  }
+
+  function recordSessionUse(sessionId: string, immediate = false) {
+    const now = Date.now();
+    if (!immediate && now - (sessionRecencyRef.current[sessionId] || 0) < 15000) return;
+    const next = recordSessionRecency(sessionRecencyRef.current, sessionId, now);
+    if (next === sessionRecencyRef.current) return;
+    sessionRecencyRef.current = next; setSessionRecency(next);
+    try { localStorage.setItem(RECENCY_STORAGE_KEY, JSON.stringify(next)); } catch { /* Optional local preference. */ }
+  }
+
+  function addSessionForCwd(
+    scope: SessionScope,
+    kind: AgentKind,
+    cwd: string,
+    options?: { providerProfileId?: string; providerModelOverride?: string; openCodexModel?: string }
+  ) {
+    const created = createSession(kind, cwd, [], undefined, options);
+    const metrics = placementMetrics(scope);
+    updateScopeSessions(scope, (sessions) => [
+      ...sessions,
+      { ...created, name: `${getProfile(kind).label} ${sessions.length + 1}`, layout: findNextFluidLayout(sessions, metrics) }
+    ]);
+    if (scopeKey(scope) === activeScopeKeyRef.current) {
+      setSelectedSessionId(created.id);
+      setRevealSessionId(created.id);
+    }
+    return created.id;
+  }
+
+  function sessionCreationKind(session: AgentSession): AgentKind {
+    return session.fusion
+      ? "fusion"
+      : session.openFusion
+        ? "openfusion"
+        : session.providerProfileId
+          ? "claude-custom"
+          : session.kind;
+  }
+
+  // Provider-pinned panes must keep their pin through split/duplicate/
+  // add-matching — otherwise the copy silently launches against the user's own
+  // Anthropic login instead of the source pane's custom endpoint.
+  function providerOptionsFor(session: AgentSession) {
+    if (session.kind === 'open-codex') return { openCodexModel: session.openCodexModel };
+    return session.providerProfileId
+      ? {
+          providerProfileId: session.providerProfileId,
+          providerModelOverride: session.providerModelOverride
+        }
+      : undefined;
+  }
+
+  // Split a pane in two inside its own tile. The new terminal is created the
+  // same way "Add matching pane" creates one; the only difference is that it
+  // joins the source's tile instead of taking a board box of its own.
+  function splitSession(
+    scope: SessionScope,
+    session: AgentSession,
+    dir: "row" | "col"
+  ) {
+    const created = createSession(sessionCreationKind(session), session.cwd, [], undefined, providerOptionsFor(session));
+
+    updateScopeSessions(scope, (sessions) => {
+
+      const tileId = effectiveTileId(session);
+      const anchor = sessions.find((candidate) => candidate.id === tileId);
+      const tree = anchor?.splitTree ?? { id: session.id };
+      const nextTree = splitLeaf(tree, session.id, dir, created.id);
+      // A solo pane becomes the anchor of the tile it just created.
+      const anchorId = anchor?.splitTree ? tileId : session.id;
+
+      return [
+        ...sessions.map((candidate) => {
+          if (candidate.id === anchorId) {
+            return { ...candidate, tileId: anchorId, splitTree: nextTree };
+          }
+          return leafIds(nextTree).includes(candidate.id)
+            ? { ...candidate, tileId: anchorId, splitTree: undefined }
+            : candidate;
+        }),
+        { ...created, name: `${getProfile(sessionCreationKind(session)).label} ${sessions.length + 1}`, tileId: anchorId, splitTree: undefined }
+      ];
+    });
+
+    setSelectedSessionId(created.id);
+  }
+
+  // Give a grouped pane its own board tile again. It needs a fresh box: its
+  // stored layout is the one it had before joining, which for the anchor is the
+  // tile's own box and would land exactly on top of it.
+  function popOutSession(scope: SessionScope, session: AgentSession) {
+    const metrics = placementMetrics(scope);
+    updateScopeSessions(scope, (sessions) => {
+      const detached = detachSessionFromTile(sessions, session.id);
+      const others = detached.filter(
+        (candidate) => candidate.id !== session.id
+      );
+      return detached.map((candidate) =>
+        candidate.id === session.id
+          ? { ...candidate, layout: findNextFluidLayout(others, metrics) }
+          : candidate
+      );
+    });
+    setSelectedSessionId(session.id);
+    setRevealSessionId(session.id);
+  }
+
+  function setTileRatio(
+    scope: SessionScope,
+    tileId: string,
+    path: SplitPath,
+    ratio: number
+  ) {
+    updateScopeSessions(scope, (sessions) => {
+      let changed = false;
+      const next = sessions.map((session) => {
+        if (session.id !== tileId || !session.splitTree) {
+          return session;
+        }
+        const splitTree = setRatioAtPath(session.splitTree, path, ratio);
+        if (splitTree === session.splitTree) {
+          return session;
+        }
+        changed = true;
+        return { ...session, splitTree };
+      });
+
+      return changed ? next : sessions;
+    });
+  }
+
+  async function addSession(
+    kind: AgentKind,
+    options?: { providerProfileId?: string; providerModelOverride?: string; openCodexModel?: string }
+  ) {
+    if (!activeScope) {
+      return;
+    }
+
+    if (kind === 'open-codex' || kind === 'claude-custom') {
+      try {
+        const configured = await window.vibe?.modelProviders?.list();
+        if (!configured?.models.length) throw new Error('Add a provider and models below, then choose Open Claude Code or Open Codex.');
+        if (kind === 'open-codex') options = { ...options, openCodexModel: options?.openCodexModel || configured.defaultModel || undefined };
+      } catch (error) {
+        setSettingsHint(error instanceof Error ? error.message : 'Configure shared providers and models below.');
+        setSettingsPanel('providers'); setSettingsOpen(true); return;
+      }
+    }
+
+    if (activeScope.type === "multi") {
+      const cwd = await window.vibe?.workspace.selectFolder();
+      if (cwd) {
+        addSessionForCwd(activeScope, kind, cwd, options);
+      }
+      return;
+    }
+
+    if (activeWorkspace) {
+      addSessionForCwd(activeScope, kind, activeWorkspace.path, options);
+    }
+  }
+
+  function duplicateSession(scope: SessionScope, session: AgentSession) {
+    // A duplicate is a fresh pane (two panes must never resume the same id), but
+    // it inherits the source's conversation as `resumeRef` so the copy can offer
+    // "Resume last chat" to continue where the original left off.
+    const sourceThread = activeSessionThreadRef(session) ?? sessionResumeRef(session);
+    const createdId = createId("session");
+    const metrics = placementMetrics(scope);
+    updateScopeSessions(scope, (sessions) => [
+      ...sessions,
+      {
+        ...createSession(
+          sessionCreationKind(session),
+          session.cwd,
+          sessions,
+          undefined,
+          providerOptionsFor(session)
+        ),
+        id: createdId,
+        layout: findNextFluidLayout(sessions, metrics),
+        name: `${session.name} copy`,
+        command: session.command,
+        // The copy keeps the source's Fusion family/model/effort/mode settings
+        // instead of silently reverting to defaults.
+        ...(session.fusion
+          ? {
+              ...normalizedFusionSessionFields(session),
+              fusionRunMode: normalizeFusionRunMode(session.fusionRunMode)
+            }
+          : {}),
+        openFusionPlannerModel: session.openFusion
+          ? normalizeOpenFusionModel(
+              session.openFusionPlannerModel,
+              DEFAULT_OPEN_FUSION_PLANNER_MODEL
+            )
+          : undefined,
+        openFusionExecutorModel: session.openFusion
+          ? normalizeOpenFusionModel(
+              session.openFusionExecutorModel,
+              DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
+            )
+          : undefined,
+        openFusionRunMode: session.openFusion
+          ? normalizeFusionRunMode(session.openFusionRunMode)
+          : undefined,
+        resumeRef: sourceThread
+      }
+    ]);
+    setSelectedSessionId(createdId);
+    setRevealSessionId(createdId);
+  }
+
+  function stopSessionProcess(session: AgentSession, reason: "close" | "restart" = "restart"): Promise<boolean> {
+    if (session.fusion) {
+      return window.vibe?.fusionChat?.stop(session.id) ?? Promise.resolve(false);
+    }
+
+    if (session.openFusion) {
+      return window.vibe?.openFusionChat?.stop(session.id) ?? Promise.resolve(false);
+    }
+
+    terminalLaunchCoordinator.cancel(session.id, session.launchToken);
+    const runtime = runtimeSnapshotsRef.current[session.id];
+    return window.vibe?.terminal.kill(session.id, {
+      launchToken: session.launchToken,
+      generation: runtime?.launchToken === session.launchToken ? runtime.generation : undefined,
+      reason
+    }) ?? Promise.resolve(false);
+  }
+
+  function removeClosedSession(scope: SessionScope, session: AgentSession) {
+    forgetSessionDraft(session.id);
+    closedRuntimeIdsRef.current.add(session.id);
+    if (runtimeSnapshotsRef.current[session.id]) {
+      const next = { ...runtimeSnapshotsRef.current };
+      delete next[session.id];
+      runtimeSnapshotsRef.current = next;
+      setRuntimeSnapshots(next);
+    }
+    setRuntimeAcknowledgements(current => {
+      if (!(session.id in current)) return current;
+      const next = { ...current }; delete next[session.id]; return next;
+    });
+    clearCodexTracking(session.id);
+    const sessionId = session.id;
+    updateScopeSessions(scope, (sessions) =>
+      // Detach first so the tile collapses into its surviving sibling (and
+      // re-anchors, keeping the tile's board box) before the session is gone.
+      detachSessionFromTile(sessions, sessionId).filter(
+        (candidate) => candidate.id !== sessionId
+      )
+    );
+
+    setMaximizedSessionId(current => current === sessionId ? null : current);
+    setSelectedSessionId(current => current === sessionId ? null : current);
+  }
+
+  async function closeSession(scope: SessionScope, session: AgentSession, frozen?: CloseTarget, operationId: string = crypto.randomUUID(), observeOnly = false) {
+    const current = () => {
+      const pane = closeSessionsRef.current.find(item => item.id === session.id);
+      if (!pane) return undefined;
+      const runtime = runtimeSnapshotsRef.current[pane.id];
+      const generation = runtime?.launchToken === pane.launchToken ? runtime.generation
+        : liveOrchestratorRef.current?.sessions.find(item => item.id === pane.id && item.launchToken === pane.launchToken)?.generation || `paused:${pane.id}:${pane.launchToken}`;
+      return { id: pane.id, launchToken: pane.launchToken, generation };
+    };
+    const target = frozen || current() || { id: session.id, launchToken: session.launchToken };
+    return closeSessionOperation({ operationId, target, current,
+      cancelLaunch: () => terminalLaunchCoordinator.cancel(target.id, target.launchToken),
+      stop: () => relayApi()?.stopSessionObserved({ ...target, operationId, observeOnly, kind: session.fusion ? "fusion" : session.openFusion ? "openfusion" : session.kind })
+        ?? Promise.resolve({ ok: false, operationId, process: "unknown", launchSettled: false, error: "Observed process stop is unavailable." }),
+      remove: () => { flushSync(() => removeClosedSession(scope, session)); }
+    });
+  }
+
+  function requestWorkspaceClose(workspaceId: string) {
+    setWorkspaceClosePendingId(workspaceId);
+  }
+
+  function cancelWorkspaceClose() {
+    setWorkspaceClosePendingId(null);
+  }
+
+  async function confirmWorkspaceClose(workspaceId: string) {
+    setWorkspaceClosePendingId(null);
+    const result = await removeWorkspace(workspaceId);
+    if (!result.ok) setShellMessage(result.error || "The project could not be removed.");
+  }
+
+  function removeWorkspace(workspaceId: string, expected?: ProjectRemovalSnapshot) {
+    const workspace = workspacesRef.current.find(item => item.id === workspaceId);
+    const snapshot = expected || { id: workspaceId, path: workspace?.path || "", targets: (workspace?.sessions || []).map(session => ({
+      id: session.id, launchToken: session.launchToken, kind: session.kind,
+      generation: runtimeSnapshotsRef.current[session.id]?.generation || liveOrchestratorRef.current?.sessions.find(item => item.id === session.id)?.generation,
+    })) };
+    return projectRemovalsRef.current.run({ snapshot,
+      current: () => workspacesRef.current.find(item => item.id === workspaceId),
+      close: async (target, operationId, observeOnly) => {
+        const session = workspace?.sessions.find(item => item.id === target.id);
+        if (!session) {
+          if (!target.kind) return { ok: false, error: "A project terminal changed before closing." };
+          const observed = await relayApi()?.stopSessionObserved({ ...target, kind: target.kind, operationId, observeOnly });
+          return { ok: observed?.ok === true && observed.launchSettled && ["stopped", "already-absent"].includes(observed.process),
+            error: observed?.error || "The original project terminal stop could not be verified." };
+        }
+        return closeSession({ type: "workspace", workspaceId }, session, target, operationId, observeOnly);
+      },
+      remove: () => flushSync(() => {
+        const current = workspacesRef.current, index = current.findIndex(item => item.id === workspaceId);
+        const next = current.filter(item => item.id !== workspaceId);
+        setWorkspaces(next);
+        setActiveWorkspaceId(active => active === workspaceId || !next.some(item => item.id === active)
+          ? next[Math.min(index, next.length - 1)]?.id ?? null : active);
+        if (!next.length) setActiveView(view => view === "project" ? "multi" : view);
+      }),
+    });
+  }
+
+  function restartSession(scope: SessionScope, session: AgentSession) {
+    clearCodexTracking(session.id);
+    return stopSessionProcess(session).then((stopped) => {
+      if (!stopped) {
+        setShellMessage(`${session.name}: The terminal could not be stopped for restart.`);
+        return false;
+      }
+      updateScopeSessions(scope, (sessions) =>
+        sessions.map((item) => {
+          if (item.id !== session.id || item.launchToken !== session.launchToken) {
+            return item;
+          }
+
+          const currentChatRef = item.fusion
+            ? hasClaudeThreadId(item.threadRef)
+              ? item.threadRef
+              : undefined
+            : activeSessionThreadRef(item);
+          const previousChatRef = sessionResumeRef(item);
+          // Chat panes (Fusion, Open Fusion) restart FRESH; their old thread is
+          // stashed as resumeRef so Resume stays a deliberate action.
+          const isChatPane = Boolean(item.fusion || item.openFusion);
+          const canResume = !isChatPane && canResumeSessionThread(item);
+          return {
+            ...item,
+            ...(isChatPane
+              ? {
+                  threadRef: undefined,
+                  resumeRef: currentChatRef ?? previousChatRef
+                }
+              : {}),
+            started: true,
+            launchToken: item.launchToken + 1,
+            nextLaunchMode: canResume ? "resume" : "new",
+            threadSelectionPending: canResume ? item.threadSelectionPending : undefined,
+            threadLookupStartedAt: undefined,
+            threadLookupStatus: canResume ? "found" : "idle",
+            threadLookupMessage: undefined,
+            status: "idle",
+            attention: EMPTY_ATTENTION,
+            backgroundActivity: undefined,
+            detachedTaskIds: undefined,
+            subagentDepth: undefined
+          };
+        })
+      );
+      return true;
+    }).catch((error) => {
+      setShellMessage(`${session.name}: Restart failed: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    });
+  }
+
+  function applyFusionChatLifecycle(event: FusionChatEvent) {
+    if (!("id" in event) || typeof event.id !== "string") {
+      return;
+    }
+
+    // Detached task history is the exception to replay neutrality: replayed
+    // starts without a matching settle rehydrate real work still owned by the
+    // live host. The id reducer is idempotent and touches no status/attention.
+    if (event.type === "background-task") {
+      updateAnySession(event.id, (session) =>
+        session.fusion ? updateDetachedTaskIds(session, event) : session
+      );
+      return;
+    }
+
+    // Reattach replay (pane remount onto a live host session) is a transcript
+    // restore for the pane, not fresh activity. This mirror tracked the live
+    // events while the pane was unmounted, so it already holds the settled
+    // status/attention — reprocessing the replay would re-latch "done" and
+    // re-mark the attention dot the user already acknowledged.
+    if (event.replay) {
+      return;
+    }
+
+    if (event.type === "session") {
+      updateAnySession(event.id, session => session.fusion
+        ? rememberChatThread(session, normalizedFusionSessionFields(session).fusionPlannerFamily, event.sessionId)
+        : session);
+      return;
+    }
+
+    if (event.type === "turn-start") {
+      updateAnySession(event.id, (session) => {
+        if (!session.fusion) {
+          return session;
+        }
+
+        return {
+          ...session,
+          status: "running",
+          attention: EMPTY_ATTENTION,
+          backgroundActivity: undefined
+        };
+      });
+      return;
+    }
+
+    if (event.type === "activity" && event.kind === "warmup_error") {
+      applyFusionAttention(event.id, {
+        state: "failed",
+        reason: "error",
+        source: "provider",
+        updatedAt: Date.now(),
+        message: event.text || "Fusion execution bridge failed to start."
+      });
+      return;
+    }
+
+    if (event.type === "tool-call") {
+      fusionBridgeToolRef.current.set(
+        `${event.id}:${event.toolId}`,
+        /codex_investigate|codex_implement|codex_respond|codex_steer_resolve/.test(event.name)
+      );
+      return;
+    }
+
+    if (event.type === "tool-result") {
+      const toolKey = `${event.id}:${event.toolId}`;
+      const isFusionBridgeTool = fusionBridgeToolRef.current.get(toolKey) === true;
+      fusionBridgeToolRef.current.delete(toolKey);
+      if (!isFusionBridgeTool) {
+        return;
+      }
+      const parsed = parseFusionToolResult(event.text);
+      if (parsed?.status === "needs_decision" || parsed?.nextAction === "ask_human") {
+        applyFusionAttention(event.id, {
+          state: "waiting",
+          reason: parsed.status === "needs_decision" ? "approval" : "question",
+          source: "provider",
+          updatedAt: Date.now(),
+          message:
+            typeof parsed.detail === "string"
+              ? parsed.detail
+              : "Fusion needs a decision to continue."
+        });
+      } else if (parsed?.status === "failed" || parsed?.status === "error") {
+        applyFusionAttention(event.id, {
+          state: "failed",
+          reason: "error",
+          source: "provider",
+          updatedAt: Date.now(),
+          message:
+            typeof parsed.error === "string"
+              ? parsed.error
+              : "Fusion returned an error."
+        });
+      } else if (parsed) {
+        updateAnySession(event.id, (session) =>
+          session.fusion && session.status === "waiting"
+            ? { ...session, status: "running", attention: EMPTY_ATTENTION, backgroundActivity: undefined }
+            : session
+        );
+      }
+      return;
+    }
+
+    if (event.type === "result") {
+      updateAnySession(event.id, (session) => {
+        if (!session.fusion) {
+          return session;
+        }
+
+        if (session.status === "waiting") {
+          return session.backgroundActivity
+            ? { ...session, backgroundActivity: undefined }
+            : session;
+        }
+
+        const attentionEvent: AgentAttentionEvent = {
+          state: "completed",
+          reason: "done",
+          source: "provider",
+          updatedAt: Date.now()
+        };
+        return {
+          ...session,
+          status: reconcileStatus(session.status, "done"),
+          backgroundActivity: undefined,
+          attention: attentionFromEvent(
+            attentionEvent,
+            // This result only ends the foreground launcher turn. Keep the
+            // spinner unopposed; the wake-report turn owns the real done dot.
+            shouldMarkCompletedTurnUnread(
+              session,
+              shouldMarkFusionAttentionUnread(event.id, attentionEvent)
+            )
+          )
+        };
+      });
+      return;
+    }
+
+    if (event.type === "interrupted") {
+      updateAnySession(event.id, (session) =>
+        session.fusion ? { ...session, status: "waiting", backgroundActivity: undefined } : session
+      );
+      return;
+    }
+
+    if (event.type === "error") {
+      applyFusionAttention(event.id, {
+        state: "failed",
+        reason: "error",
+        source: "provider",
+        updatedAt: Date.now(),
+        message: event.message
+      });
+      return;
+    }
+
+    if (event.type === "closed") {
+      updateAnySession(event.id, (session) => {
+        if (!session.fusion) {
+          return session;
+        }
+
+        // Any in-flight state is stranded by a dead host: "waiting" especially
+        // (a pending needs_decision can never be answered), so it must fail
+        // too, not sit waiting on a process that is gone. done/idle stay put —
+        // that is a normal shutdown.
+        const inFlight =
+          session.status === "running" ||
+          session.status === "waiting" ||
+          session.status === "starting" ||
+          Boolean(session.detachedTaskIds?.length);
+        if (!inFlight) {
+          return session.backgroundActivity || session.detachedTaskIds
+            ? {
+                ...session,
+                backgroundActivity: undefined,
+                detachedTaskIds: undefined
+              }
+            : session;
+        }
+
+        const message =
+          event.code != null && event.code !== 0
+            ? `Fusion process exited with code ${event.code}.`
+            : session.status === "waiting"
+              ? "Fusion process closed while a decision was still pending."
+              : "Fusion process closed before returning a result.";
+        const attentionEvent: AgentAttentionEvent = {
+          state: "failed",
+          reason: "exit",
+          source: "provider",
+          updatedAt: Date.now(),
+          message
+        };
+
+        return {
+          ...session,
+          status: "failed",
+          backgroundActivity: undefined,
+          detachedTaskIds: undefined,
+          attention: attentionFromEvent(
+            attentionEvent,
+            shouldMarkFusionAttentionUnread(event.id, attentionEvent)
+          )
+        };
+      });
+    }
+  }
+
+  function parseFusionToolResult(text: string): Record<string, unknown> | null {
+    try {
+      const parsed = JSON.parse(text);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function shouldMarkFusionAttentionUnread(
+    sessionId: string,
+    attentionEvent: AgentAttentionEvent
+  ) {
+    const selection = attentionSelectionRef.current;
+    return shouldMarkAttentionUnread(
+      sessionId,
+      selection.selectedSessionId,
+      selection.visibleSessionIds,
+      attentionEvent
+    );
+  }
+
+  function applyFusionAttention(
+    sessionId: string,
+    attentionEvent: AgentAttentionEvent
+  ) {
+    const attentionStatus = statusFromAttentionState(attentionEvent.state);
+    updateAnySession(sessionId, (session) => {
+      if (!session.fusion) {
+        return session;
+      }
+
+      return {
+        ...session,
+        status: attentionStatus
+          ? reconcileStatus(session.status, attentionStatus)
+          : session.status,
+        backgroundActivity:
+          attentionEvent.state === "completed" || attentionEvent.state === "failed"
+            ? undefined
+            : session.backgroundActivity,
+        attention: attentionFromEvent(
+          attentionEvent,
+          shouldMarkFusionAttentionUnread(sessionId, attentionEvent)
+        )
+      };
+    });
+  }
+
+  function applyOpenFusionAttention(
+    sessionId: string,
+    attentionEvent: AgentAttentionEvent
+  ) {
+    const attentionStatus = statusFromAttentionState(attentionEvent.state);
+    updateAnySession(sessionId, (session) => {
+      if (!session.openFusion) {
+        return session;
+      }
+
+      return {
+        ...session,
+        status: attentionStatus
+          ? reconcileStatus(session.status, attentionStatus)
+          : session.status,
+        attention: attentionFromEvent(
+          attentionEvent,
+          shouldMarkFusionAttentionUnread(sessionId, attentionEvent)
+        )
+      };
+    });
+  }
+
+  // App-level mirror of the Open Fusion pane's lifecycle so the sidebar status
+  // pill and attention dot stay correct even while the pane is unmounted
+  // (project switched away). Same contract as applyFusionChatLifecycle.
+  function applyOpenFusionChatLifecycle(event: OpenFusionChatEvent) {
+    if (!("id" in event) || typeof event.id !== "string") {
+      return;
+    }
+
+    // Process replayed starts/settles before the neutrality guard for the same
+    // live-host rehydration contract as Fusion. Progress remains state-neutral.
+    if (event.type === "background-task") {
+      updateAnySession(event.id, (session) =>
+        session.openFusion ? updateDetachedTaskIds(session, event) : session
+      );
+      return;
+    }
+
+    // Same replay contract as applyFusionChatLifecycle: a reattach replay
+    // carries no new status/attention information — skip it.
+    if (event.replay) {
+      return;
+    }
+
+    if (event.type === "session") {
+      updateAnySession(event.id, session => session.openFusion
+        ? rememberChatThread(session, "opencode", event.sessionId)
+        : session);
+      return;
+    }
+
+    if (event.type === "turn-start") {
+      updateAnySession(event.id, (session) =>
+        session.openFusion
+          ? { ...session, status: "running", attention: EMPTY_ATTENTION }
+          : session
+      );
+      return;
+    }
+
+    if (event.type === "permission") {
+      applyOpenFusionAttention(event.id, {
+        state: "waiting",
+        reason: "approval",
+        source: "provider",
+        updatedAt: Date.now(),
+        message: `Permission requested: ${event.permission}`
+      });
+      return;
+    }
+
+    if (event.type === "permission-resolved") {
+      updateAnySession(event.id, (session) =>
+        session.openFusion && session.status === "waiting"
+          ? { ...session, status: "running", attention: EMPTY_ATTENTION }
+          : session
+      );
+      return;
+    }
+
+    if (event.type === "result") {
+      if (event.subtype === "restored") {
+        return;
+      }
+      updateAnySession(event.id, (session) => {
+        if (!session.openFusion) {
+          return session;
+        }
+
+        if (session.status === "waiting") {
+          return session;
+        }
+
+        const attentionEvent: AgentAttentionEvent = {
+          state: "completed",
+          reason: "done",
+          source: "provider",
+          updatedAt: Date.now()
+        };
+        return {
+          ...session,
+          status: reconcileStatus(session.status, "done"),
+          attention: attentionFromEvent(
+            attentionEvent,
+            // The detached task still owns sidebar working state. Its later
+            // wake-report turn will produce the completed attention signal.
+            shouldMarkCompletedTurnUnread(
+              session,
+              shouldMarkFusionAttentionUnread(event.id, attentionEvent)
+            )
+          )
+        };
+      });
+      return;
+    }
+
+    if (event.type === "interrupted") {
+      updateAnySession(event.id, (session) =>
+        session.openFusion ? { ...session, status: "waiting" } : session
+      );
+      return;
+    }
+
+    if (event.type === "error") {
+      applyOpenFusionAttention(event.id, {
+        state: "failed",
+        reason: "error",
+        source: "provider",
+        updatedAt: Date.now(),
+        message: event.message
+      });
+      return;
+    }
+
+    if (event.type === "closed") {
+      updateAnySession(event.id, (session) => {
+        if (!session.openFusion) {
+          return session;
+        }
+
+        // A dead engine strands any in-flight state — "waiting" especially (a
+        // pending permission can never be answered) — so it must fail rather
+        // than sit waiting. done/idle stay put: that is a normal shutdown.
+        const inFlight =
+          session.status === "running" ||
+          session.status === "waiting" ||
+          session.status === "starting" ||
+          Boolean(session.detachedTaskIds?.length);
+        if (!inFlight) {
+          return session.detachedTaskIds
+            ? { ...session, detachedTaskIds: undefined }
+            : session;
+        }
+
+        const message =
+          event.code != null && event.code !== 0
+            ? `Open Fusion engine exited with code ${event.code}.`
+            : session.status === "waiting"
+              ? "Open Fusion engine closed while a request was still pending."
+              : "Open Fusion engine closed before returning a result.";
+        const attentionEvent: AgentAttentionEvent = {
+          state: "failed",
+          reason: "exit",
+          source: "provider",
+          updatedAt: Date.now(),
+          message
+        };
+
+        return {
+          ...session,
+          status: "failed",
+          detachedTaskIds: undefined,
+          attention: attentionFromEvent(
+            attentionEvent,
+            shouldMarkFusionAttentionUnread(event.id, attentionEvent)
+          )
+        };
+      });
+    }
+  }
+
+  // Deliberately resume a previous conversation. Mirrors restartSession but
+  // forces nextLaunchMode "resume" against the stashed resumeRef — or, when the
+  // Open Fusion resume picker hands over a specific saved chat, against that
+  // targetRef. The outgoing active thread becomes the next resumeRef so
+  // switching back does not discard the current conversation pointer.
+  function resumeSession(
+    scope: SessionScope,
+    session: AgentSession,
+    targetRef?: AgentThreadRef
+  ) {
+    const resumeRef = targetRef?.id ? targetRef : sessionResumeRef(session);
+    if (!resumeRef?.id) {
+      return;
+    }
+
+    if (isThreadRefClaimedByOther(session.id, resumeRef)) {
+      updateScopeSessions(scope, (sessions) =>
+        sessions.map((item) =>
+          item.id === session.id
+            ? {
+                ...item,
+                threadLookupStatus: "failed",
+                threadLookupMessage: "That chat is already open in another pane."
+              }
+            : item
+        )
+      );
+      return;
+    }
+
+    clearCodexTracking(session.id);
+    stopSessionProcess(session).then((stopped) => {
+      if (!stopped) {
+        setShellMessage(`${session.name}: The terminal could not be stopped for resume.`);
+        return;
+      }
+      updateScopeSessions(scope, (sessions) =>
+        sessions.map((item) => {
+          if (item.id !== session.id || item.launchToken !== session.launchToken || item.threadRef?.id !== session.threadRef?.id) {
+            return item;
+          }
+
+          const latestResumeRef = targetRef?.id
+            ? targetRef
+            : sessionResumeRef(item);
+          if (!latestResumeRef?.id) {
+            return item;
+          }
+
+          const currentThreadRef = activeSessionThreadRef(item);
+          const nextResumeRef =
+            currentThreadRef?.id &&
+            (currentThreadRef.provider !== latestResumeRef.provider ||
+              currentThreadRef.id !== latestResumeRef.id)
+              ? currentThreadRef
+              : undefined;
+
+          return {
+            ...item,
+            started: true,
+            launchToken: item.launchToken + 1,
+            nextLaunchMode: "resume",
+            threadRef: latestResumeRef,
+            threadSelectionPending: latestResumeRef.id === item.threadRef?.id ? item.threadSelectionPending : undefined,
+            resumeRef: nextResumeRef,
+            threadLookupStartedAt: undefined,
+            threadLookupStatus: "found",
+            threadLookupMessage: undefined,
+            status: "idle",
+            attention: EMPTY_ATTENTION,
+            backgroundActivity: undefined,
+            detachedTaskIds: undefined,
+            subagentDepth: undefined
+          };
+        })
+      );
+    }).catch(error => {
+      setShellMessage(`${session.name}: Resume failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }
+
+  function clearFusionSession(scope: SessionScope, session: AgentSession) {
+    if (!session.fusion && !session.openFusion) {
+      return;
+    }
+
+    stopSessionProcess(session).then(() => {
+      updateScopeSessions(scope, (sessions) =>
+        sessions.map((item) => {
+          if (item.id !== session.id) {
+            return item;
+          }
+
+          const currentChatRef = item.fusion
+            ? hasClaudeThreadId(item.threadRef)
+              ? item.threadRef
+              : undefined
+            : activeSessionThreadRef(item);
+          const previousChatRef = sessionResumeRef(item);
+
+          return {
+            ...item,
+            started: true,
+            launchToken: item.launchToken + 1,
+            nextLaunchMode: "new",
+            threadRef: undefined,
+            resumeRef: currentChatRef ?? previousChatRef,
+            threadLookupStartedAt: undefined,
+            threadLookupStatus: "idle",
+            threadLookupMessage: undefined,
+            status: "idle",
+            attention: EMPTY_ATTENTION,
+            backgroundActivity: undefined,
+            detachedTaskIds: undefined,
+            subagentDepth: undefined
+          };
+        })
+      );
+    });
+  }
+
+  function updateFusionSettings(
+    scope: SessionScope,
+    session: AgentSession,
+    settings: FusionSettings
+  ) {
+    if (!session.fusion) {
+      return;
+    }
+
+    const next = normalizeFusionRoleSettings(settings);
+    const nextFusionRunMode = normalizeFusionRunMode(settings.mode);
+    const current = normalizeFusionRoleSettings({
+      plannerFamily: session.fusionPlannerFamily,
+      plannerModel: session.fusionPlannerModel,
+      plannerEffort: session.fusionPlannerEffort,
+      plannerFast: session.fusionPlannerFast,
+      executorFamily: session.fusionExecutorFamily,
+      executorModel: session.fusionExecutorModel,
+      executorEffort: session.fusionExecutorEffort,
+      executorFast: session.fusionExecutorFast,
+      model: session.fusionModel,
+      claudeEffort: session.fusionClaudeEffort ?? session.fusionEffort,
+      codexModel: session.fusionCodexModel,
+      codexEffort: session.fusionCodexEffort ?? session.fusionEffort
+    });
+    // Planner family/model/effort changes relaunch the planner process;
+    // executor settings and fast-serving toggles apply live.
+    const plannerFamilyChanged = next.plannerFamily !== current.plannerFamily;
+    const requiresRestart =
+      plannerFamilyChanged ||
+      next.plannerModel !== current.plannerModel ||
+      next.plannerEffort !== current.plannerEffort;
+    const executorSettingsChanged =
+      next.executorFamily !== current.executorFamily ||
+      next.executorModel !== current.executorModel ||
+      next.executorEffort !== current.executorEffort;
+    const fastSettingsChanged =
+      next.plannerFast !== current.plannerFast ||
+      next.executorFast !== current.executorFast;
+
+    // Carry the pick forward: the next NEW Fusion pane starts from this
+    // configuration instead of the stock defaults.
+    rememberFusionSettings(next);
+
+    if (session.started && !requiresRestart && (executorSettingsChanged || fastSettingsChanged)) {
+      window.vibe?.fusionChat
+        ?.updateSettings(session.id, {
+          plannerFamily: next.plannerFamily,
+          plannerFast: next.plannerFast,
+          executorFamily: next.executorFamily,
+          executorModel: next.executorModel,
+          executorEffort: next.executorEffort,
+          executorFast: next.executorFast
+        })
+        .catch(() => {});
+    }
+
+    const applySettings = () => {
+      updateScopeSessions(scope, (sessions) =>
+        sessions.map((item) => {
+          if (item.id !== session.id) {
+            return item;
+          }
+
+          // A thread only survives the relaunch within the SAME planner
+          // family — a claude session id means nothing to a codex planner.
+          const familyRef = (ref?: AgentThreadRef) =>
+            ref?.provider === next.plannerFamily && ref.id ? ref : undefined;
+          const currentPlannerRef = familyRef(
+            hasClaudeThreadId(item.threadRef) ? item.threadRef : undefined
+          );
+          const previousPlannerRef = familyRef(sessionResumeRef(item));
+          const relaunchResumeRef = currentPlannerRef ?? previousPlannerRef;
+          return {
+            ...item,
+            fusionPlannerFamily: next.plannerFamily,
+            fusionPlannerModel: next.plannerModel,
+            fusionPlannerEffort: next.plannerEffort,
+            fusionPlannerFast: next.plannerFast,
+            fusionExecutorFamily: next.executorFamily,
+            fusionExecutorModel: next.executorModel,
+            fusionExecutorEffort: next.executorEffort,
+            fusionExecutorFast: next.executorFast,
+            fusionRunMode: nextFusionRunMode,
+            fusionModel: undefined,
+            fusionCodexModel: undefined,
+            fusionClaudeEffort: undefined,
+            fusionCodexEffort: undefined,
+            fusionEffort: undefined,
+            ...(requiresRestart && item.fusion
+              ? {
+                  threadRef: relaunchResumeRef,
+                  resumeRef: currentPlannerRef ? previousPlannerRef : undefined
+                }
+              : {}),
+            ...(requiresRestart && item.started
+              ? {
+                  started: true,
+                  launchToken: item.launchToken + 1,
+                  nextLaunchMode: relaunchResumeRef?.id ? "resume" : "new",
+                  threadLookupStartedAt: undefined,
+                  threadLookupStatus: relaunchResumeRef?.id ? "found" : "idle",
+                  threadLookupMessage: undefined,
+                  status: "idle" as const,
+                  attention: EMPTY_ATTENTION,
+                  detachedTaskIds: undefined,
+                  subagentDepth: undefined
+                }
+              : {})
+          };
+        })
+      );
+    };
+
+    if (session.started && requiresRestart) {
+      stopSessionProcess(session).then(applySettings);
+    } else {
+      applySettings();
+    }
+  }
+
+  // Open Fusion model changes: the pane already persisted models.json through
+  // the host; here we mirror the pick into the session (so restore/duplicate
+  // keep it) and restart the pane when the Executor changed — that model is
+  // baked into the generated OpenCode config, unlike the live-switching Brain.
+  function updateOpenFusionSettings(
+    scope: SessionScope,
+    session: AgentSession,
+    settings: OpenFusionSettingsChange
+  ) {
+    if (!session.openFusion) {
+      return;
+    }
+
+    const nextPlannerModel = normalizeOpenFusionModel(
+      settings.plannerModel ?? session.openFusionPlannerModel,
+      DEFAULT_OPEN_FUSION_PLANNER_MODEL
+    );
+    const nextExecutorModel = normalizeOpenFusionModel(
+      settings.executorModel ?? session.openFusionExecutorModel,
+      DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
+    );
+    // Plan/Auto is renderer-only state (the host reads it per turn from the
+    // input payload), so a mode change never restarts the pane.
+    const nextRunMode = normalizeFusionRunMode(
+      settings.runMode ?? session.openFusionRunMode
+    );
+    const currentExecutorModel = normalizeOpenFusionModel(
+      session.openFusionExecutorModel,
+      DEFAULT_OPEN_FUSION_EXECUTOR_MODEL
+    );
+    const requiresRestart = nextExecutorModel !== currentExecutorModel;
+
+    // Carry the pair forward for the next NEW Open Fusion pane (only once
+    // both roles are chosen — a half-configured pair shouldn't half-seed the
+    // first-run gate).
+    if (nextPlannerModel && nextExecutorModel) {
+      rememberOpenFusionModels({
+        plannerModel: nextPlannerModel,
+        executorModel: nextExecutorModel
+      });
+    }
+
+    const applySettings = () => {
+      updateScopeSessions(scope, (sessions) =>
+        sessions.map((item) => {
+          if (item.id !== session.id) {
+            return item;
+          }
+
+          const currentChatRef = activeSessionThreadRef(item);
+          const previousChatRef = sessionResumeRef(item);
+          const relaunchResumeRef = currentChatRef ?? previousChatRef;
+          return {
+            ...item,
+            openFusionPlannerModel: nextPlannerModel,
+            openFusionExecutorModel: nextExecutorModel,
+            openFusionRunMode: nextRunMode,
+            ...(requiresRestart && item.started
+              ? {
+                  threadRef: relaunchResumeRef,
+                  resumeRef: currentChatRef ? previousChatRef : undefined,
+                  started: true,
+                  launchToken: item.launchToken + 1,
+                  nextLaunchMode: (relaunchResumeRef?.id ? "resume" : "new") as
+                    | "resume"
+                    | "new",
+                  threadLookupStartedAt: undefined,
+                  threadLookupStatus: (relaunchResumeRef?.id ? "found" : "idle") as
+                    | "found"
+                    | "idle",
+                  threadLookupMessage: undefined,
+                  status: "idle" as const,
+                  attention: EMPTY_ATTENTION,
+                  detachedTaskIds: undefined,
+                  subagentDepth: undefined
+                }
+              : {})
+          };
+        })
+      );
+    };
+
+    if (session.started && requiresRestart) {
+      stopSessionProcess(session).then(applySettings);
+    } else {
+      applySettings();
+    }
+  }
+
+  function updateSessionStatus(
+    scope: SessionScope,
+    sessionId: string,
+    status: AgentSession["status"],
+    // force skips the done/failed latch. Reserved for the pane's human-input
+    // signal (statusAfterUserInput): a keystroke is the non-telemetry
+    // equivalent of a turn start, so it may release a latched pill where
+    // process output never can.
+    options?: { force?: boolean }
+  ) {
+    updateScopeSessions(scope, (sessions) => {
+      let changed = false;
+      const nextSessions = sessions.map((session) => {
+        if (session.id !== sessionId) {
+          return session;
+        }
+
+        const nextStatus = options?.force
+          ? status
+          : reconcileStatus(session.status, status);
+        if (nextStatus === session.status) {
+          return session;
+        }
+
+        changed = true;
+        return { ...session, status: nextStatus };
+      });
+
+      return changed ? nextSessions : sessions;
+    });
+  }
+
+  function persistLayout(scope: SessionScope, nextLayouts: Record<string, LayoutBox>) {
+    updateScopeSessions(scope, (sessions) => {
+      let changed = false;
+      const nextSessions = sessions.map((session) => {
+        const item = nextLayouts[session.id];
+        if (!item) {
+          return session;
+        }
+
+        const nextLayout = {
+          x: item.x,
+          y: item.y,
+          w: item.w,
+          h: item.h,
+          unit: "fluid" as const
+        };
+
+        if (layoutsMatch(session.layout, nextLayout)) {
+          return session;
+        }
+
+        changed = true;
+        return {
+          ...session,
+          layout: nextLayout
+        };
+      });
+
+      return changed ? nextSessions : sessions;
+    });
+  }
+
+  function updateSessionThreadRef(
+    scope: SessionScope,
+    sessionId: string,
+    threadRef: AgentThreadRef
+  ) {
+    updateScopeSessions(scope, (sessions) =>
+      sessions.map((session) =>
+        session.id === sessionId
+          ? {
+              ...session,
+              threadRef: {
+                ...session.threadRef,
+                ...threadRef
+              },
+              threadLookupStatus: "found",
+              threadLookupMessage: undefined
+            }
+          : session
+      )
+    );
+
+    const pending = pendingCodexAttentionRef.current.get(sessionId);
+    if (pending?.length) {
+      pendingCodexAttentionRef.current.delete(sessionId);
+      const rootAttention = [...pending]
+        .reverse()
+        .find((event) => event.providerThreadId === threadRef.id);
+      if (rootAttention) {
+        const activeTurnId = codexActiveTurnIdsRef.current.get(sessionId);
+        if (
+          codexTurnAttentionDecision(
+            activeTurnId,
+            codexSubmitPendingRef.current.has(sessionId),
+            codexSubmitPendingRef.current.get(sessionId),
+            codexSettledTurnIdsRef.current.get(sessionId) ?? [],
+            rootAttention.providerTurnId
+          ) === "reject"
+        ) {
+          return;
+        }
+        codexSubmitPendingRef.current.delete(sessionId);
+        if (
+          rootAttention.attention.state === "completed" ||
+          rootAttention.attention.state === "failed"
+        ) {
+          if (rootAttention.providerTurnId) {
+            rememberSettledCodexTurn(sessionId, rootAttention.providerTurnId);
+          }
+          codexActiveTurnIdsRef.current.delete(sessionId);
+          codexTurnLiveRef.current.set(sessionId, false);
+        }
+        // Functional state updates preserve call order, so the thread binding
+        // above lands before this status/attention update.
+        applyAcceptedAgentAttention(sessionId, rootAttention.attention);
+      } else {
+        // A lifecycle event for a thread other than the discovered pane root
+        // must not poison the next root completion's turn-id latch.
+        codexActiveTurnIdsRef.current.delete(sessionId);
+      }
+    }
+  }
+
+  function resetSessionThreadForFreshLaunch(
+    scope: SessionScope,
+    sessionId: string,
+    patch: ThreadLookupPatch
+  ) {
+    updateScopeSessions(scope, (sessions) =>
+      sessions.map((session) =>
+        session.id === sessionId
+          ? {
+              ...session,
+              threadRef: undefined,
+              nextLaunchMode: "new",
+              threadLookupStartedAt: patch.threadLookupStartedAt,
+              threadLookupStatus: patch.threadLookupStatus,
+              threadLookupMessage: patch.threadLookupMessage
+            }
+          : session
+      )
+    );
+  }
+
+  function updateSessionThreadLookup(
+    scope: SessionScope,
+    sessionId: string,
+    patch: ThreadLookupPatch
+  ) {
+    updateScopeSessions(scope, (sessions) => {
+      let changed = false;
+      const nextSessions = sessions.map((session) => {
+        if (session.id !== sessionId) {
+          return session;
+        }
+
+        if (
+          session.threadLookupStartedAt === patch.threadLookupStartedAt &&
+          session.threadLookupStatus === patch.threadLookupStatus &&
+          session.threadLookupMessage === patch.threadLookupMessage
+        ) {
+          return session;
+        }
+
+        changed = true;
+        return {
+          ...session,
+          ...patch
+        };
+      });
+
+      return changed ? nextSessions : sessions;
+    });
+  }
+
+  function claimedThreadIds(sessionId: string) {
+    return allSessions
+      .filter((session) => session.id !== sessionId)
+      .map((session) => session.threadRef?.id)
+      .filter((id): id is string => Boolean(id));
+  }
+
+  function isThreadRefClaimedByOther(
+    sessionId: string,
+    threadRef?: AgentThreadRef
+  ) {
+    if (!threadRef?.id) {
+      return false;
+    }
+
+    return allSessions.some(
+      (session) =>
+        session.id !== sessionId &&
+        session.threadRef?.provider === threadRef.provider &&
+        session.threadRef.id === threadRef.id
+    );
+  }
+
+  function workspaceHasUnreadAttention(workspace: ProjectWorkspace) {
+    return workspace.sessions.map(withRuntime).some(shouldShowAttentionDot);
+  }
+
+  function workspaceHasWorking(workspace: ProjectWorkspace) {
+    return workspace.sessions.map(withRuntime).some(isSessionWorking);
+  }
+
+  const multiModeHasUnreadAttention =
+    multiSessions.map(withRuntime).some(shouldShowAttentionDot);
+
+  const multiModeHasWorking = multiSessions.map(withRuntime).some(isSessionWorking);
+
+  // Every workspace's sessions live in renderer state and keep receiving live
+  // status/attention updates while their folder is in the background (all
+  // mutations go through updateAnySession, and the event subscriptions are
+  // mounted once), so the cards tally without any new state, IPC, or polling.
+  const multiModeSummary = summarizeSessions(multiSessions.map(withRuntime));
+
+  function handleSidebarResizePointerDown(
+    event: ReactPointerEvent<HTMLDivElement>
+  ) {
+    if (!sidebarOpen || event.button !== 0) {
+      return;
+    }
+
+    event.preventDefault();
+
+    const pointerId = event.pointerId;
+    const startX = event.clientX;
+    const startWidth = sidebarWidth;
+    const handle = event.currentTarget;
+
+    try {
+      handle.setPointerCapture(pointerId);
+    } catch {
+      // Window listeners still carry the resize if capture is unavailable.
+    }
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId) {
+        return;
+      }
+
+      moveEvent.preventDefault();
+      setSidebarWidth(
+        clampSidebarWidth(startWidth + moveEvent.clientX - startX)
+      );
+    };
+
+    const finishResize = (finishEvent: PointerEvent) => {
+      if (finishEvent.pointerId !== pointerId) {
+        return;
+      }
+
+      try {
+        handle.releasePointerCapture(pointerId);
+      } catch {
+        // Capture may already be released if focus moved away.
+      }
+
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", finishResize);
+      window.removeEventListener("pointercancel", finishResize);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove, {
+      passive: false
+    });
+    window.addEventListener("pointerup", finishResize);
+    window.addEventListener("pointercancel", finishResize);
+  }
+
+  function handleSidebarResizeKeyDown(
+    event: ReactKeyboardEvent<HTMLDivElement>
+  ) {
+    if (!sidebarOpen) {
+      return;
+    }
+
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      setSidebarWidth((current) => clampSidebarWidth(current - 16));
+    }
+
+    if (event.key === "ArrowRight") {
+      event.preventDefault();
+      setSidebarWidth((current) => clampSidebarWidth(current + 16));
+    }
+
+    if (event.key === "Home") {
+      event.preventDefault();
+      setSidebarWidth(MIN_SIDEBAR_WIDTH);
+    }
+
+    if (event.key === "End") {
+      event.preventDefault();
+      setSidebarWidth(maxSidebarWidth());
+    }
+  }
+
+  function updateWorkspaceDropTarget(nextTarget: WorkspaceDropTarget | null) {
+    setWorkspaceDropTarget((currentTarget) => {
+      if (
+        currentTarget?.workspaceId === nextTarget?.workspaceId &&
+        currentTarget?.position === nextTarget?.position
+      ) {
+        return currentTarget;
+      }
+
+      return nextTarget;
+    });
+  }
+
+  function handleWorkspaceDragStart(
+    event: ReactDragEvent<HTMLButtonElement>,
+    workspaceId: string
+  ) {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", workspaceId);
+    workspaceDragRef.current = workspaceId;
+    workspaceDragClickUntil.current = Infinity;
+    setDraggingWorkspaceId(workspaceId);
+    updateWorkspaceDropTarget(null);
+  }
+
+  function handleWorkspaceDragOver(
+    event: ReactDragEvent<HTMLDivElement>,
+    targetWorkspaceId: string
+  ) {
+    if (!workspaceDragRef.current || workspaceDragRef.current === targetWorkspaceId) {
+      updateWorkspaceDropTarget(null);
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    updateWorkspaceDropTarget({
+      workspaceId: targetWorkspaceId,
+      position: getWorkspaceDropPosition(event.currentTarget, event.clientY)
+    });
+  }
+
+  function handleWorkspaceDrop(
+    event: ReactDragEvent<HTMLDivElement>,
+    targetWorkspaceId: string
+  ) {
+    const draggedWorkspaceId = workspaceDragRef.current;
+    const position = getWorkspaceDropPosition(event.currentTarget, event.clientY);
+    event.preventDefault();
+    handleWorkspaceDragEnd();
+    if (draggedWorkspaceId) commitWorkspaceMove(draggedWorkspaceId, targetWorkspaceId, position);
+  }
+
+  function handleWorkspaceDragEnd() {
+    workspaceDragRef.current = null;
+    workspaceDragClickUntil.current = Date.now() + 250;
+    setDraggingWorkspaceId(null);
+    updateWorkspaceDropTarget(null);
+  }
+
+  function commitWorkspaceMove(draggedWorkspaceId: string, targetWorkspaceId: string, position: WorkspaceDropPosition) {
+    const next = moveWorkspace(workspaces, draggedWorkspaceId, targetWorkspaceId, position);
+    if (next === workspaces) return;
+    setWorkspaces((current) => moveWorkspace(current, draggedWorkspaceId, targetWorkspaceId, position));
+    const index = next.findIndex(workspace => workspace.id === draggedWorkspaceId);
+    setWorkspaceOrderAnnouncement(`${next[index].name} moved to position ${index + 1} of ${next.length}.`);
+  }
+
+  function handleWorkspaceReorderKey(event: ReactKeyboardEvent<HTMLButtonElement>, workspaceId: string) {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    event.stopPropagation();
+    const button = event.currentTarget;
+    const index = workspaces.findIndex(workspace => workspace.id === workspaceId);
+    const target = workspaces[index + (event.key === "ArrowUp" ? -1 : 1)];
+    if (target) commitWorkspaceMove(workspaceId, target.id, event.key === "ArrowUp" ? "before" : "after");
+    requestAnimationFrame(() => button.scrollIntoView({ block: "nearest" }));
+  }
+
+  function handleWorkspaceListDragOver(event: ReactDragEvent<HTMLDivElement>) {
+    if (!workspaceDragRef.current) return;
+    event.preventDefault();
+    const list = event.currentTarget;
+    const rect = list.getBoundingClientRect();
+    // Native dragover repeats while held at the edge, including over the source row.
+    if (event.clientY < rect.top + 36) list.scrollTop -= 24;
+    else if (event.clientY > rect.bottom - 36) list.scrollTop += 24;
+  }
+
+  function handleWorkspaceListDragLeave(event: ReactDragEvent<HTMLDivElement>) {
+    const nextTarget = event.relatedTarget;
+    if (
+      !(nextTarget instanceof Node) ||
+      !event.currentTarget.contains(nextTarget)
+    ) {
+      updateWorkspaceDropTarget(null);
+    }
+  }
+
+  function openWorkspaceContextMenu(
+    event: ReactMouseEvent<HTMLElement>,
+    workspace: ProjectWorkspace
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    setWorkspaceContextMenu({
+      workspaceId: workspace.id,
+      name: workspace.name,
+      path: workspace.path,
+      x: Math.min(event.clientX, Math.max(16, window.innerWidth - 238)),
+      y: Math.min(event.clientY, Math.max(16, window.innerHeight - 122))
+    });
+  }
+
+  async function runWorkspaceContextAction(
+    action: "explorer" | "terminal",
+    workspace: WorkspaceContextMenuState
+  ) {
+    setWorkspaceContextMenu(null);
+
+    const workspaceApi = window.vibe?.workspace;
+    if (!workspaceApi) {
+      setShellMessage("Workspace actions are unavailable in this window.");
+      return;
+    }
+
+    try {
+      const result =
+        action === "explorer"
+          ? await workspaceApi.openInExplorer(workspace.path)
+          : await workspaceApi.openTerminal(workspace.path);
+
+      if (result?.ok) {
+        return;
+      }
+
+      setShellMessage(
+        result?.error ||
+          (action === "explorer"
+            ? "Could not open the folder in file explorer."
+            : "Could not open a terminal for this folder.")
+      );
+    } catch (err) {
+      setShellMessage(String(err));
+    }
+  }
+
+  async function openFolder() {
+    const path = await window.vibe?.workspace.selectFolder();
+    if (!path) {
+      return;
+    }
+
+    const existingWorkspace = workspaces.find(
+      (workspace) =>
+        normalizeWorkspacePath(workspace.path) === normalizeWorkspacePath(path)
+    );
+
+    if (existingWorkspace) {
+      setOrchestratorViewOpen(false);
+      setActiveWorkspaceId(existingWorkspace.id);
+      setActiveView("project");
+      return;
+    }
+
+    const workspace = starterWorkspace(path);
+    setOrchestratorViewOpen(false);
+    setWorkspaces((current) => [workspace, ...current]);
+    setActiveWorkspaceId(workspace.id);
+    setActiveView("project");
+  }
+
+  // Maximize operates on the TILE, not the sub-pane. Maximizing one terminal of
+  // a split to fill its tile would hide its siblings, and a hidden pane has a
+  // zero-sized box that xterm cannot measure — exactly the state all-visible
+  // splits exist to avoid.
+  const maximizedTileId = maximizedSessionId
+    ? effectiveTileId(
+        boardSessions.find((session) => session.id === maximizedSessionId) ?? {
+          id: maximizedSessionId
+        }
+      )
+    : null;
+  const visibleSessions = boardSessions.filter(
+    (session) => !maximizedTileId || effectiveTileId(session) === maximizedTileId
+  );
+  const boardTiles = buildBoardTiles(visibleSessions);
+  const updateNoticeKey = updateState
+    ? [
+        updateState.status,
+        updateState.info?.version ?? "",
+        updateState.errorMessage ?? ""
+      ].join(":")
+    : "";
+  const shouldShowUpdateOverlay =
+    updateState !== null &&
+    ["available", "downloading", "downloaded", "switching", "error"].includes(
+      updateState.status
+    ) &&
+    dismissedUpdateKey !== updateNoticeKey;
+  const updateVersion = updateState?.info?.version
+    ? `v${updateState.info.version}`
+    : "a new version";
+  const currentAppVersionLabel = updateState?.currentVersion
+    ? `v${updateState.currentVersion}`
+    : null;
+  const updatePercent = updateState ? formatUpdatePercent(updateState) : 0;
+  const updateCheckLabel =
+    updateState?.status === "checking"
+      ? "Checking..."
+      : updateState?.status === "downloaded"
+        ? "Update ready"
+        : updateState?.status === "available"
+          ? "Update available"
+          : updateState?.status === "downloading"
+            ? "Downloading..."
+            : "Check for update";
+  const updateCheckDisabled =
+    updateState?.status === "checking" ||
+    updateState?.status === "downloading" ||
+    updateState?.status === "switching";
+
+  const appVersion = updateState?.currentVersion ?? "";
+
+  // Same dismissal rules as the folder context menu: Escape, or a press
+  // anywhere outside the picker.
+  useEffect(() => {
+    if (!versionPickerOpen) {
+      return;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setVersionPickerOpen(false);
+      }
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target as HTMLElement | null;
+      if (!target?.closest(".version-picker")) {
+        setVersionPickerOpen(false);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, [versionPickerOpen]);
+
+  // Same dismissal rules as the version picker: Escape, or a press anywhere
+  // outside the launcher menu.
+  useEffect(() => {
+    if (!launcherMenuOpen) {
+      return;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setLauncherMenuOpen(false);
+      }
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target as HTMLElement | null;
+      if (!target?.closest(".launcher-picker")) {
+        setLauncherMenuOpen(false);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, [launcherMenuOpen]);
+
+  // Every open starts a fresh search and lands focus in the search box.
+  useEffect(() => {
+    if (!launcherMenuOpen) {
+      return;
+    }
+    setLauncherQuery("");
+    setLauncherHighlight(0);
+    launcherSearchRef.current?.focus();
+  }, [launcherMenuOpen]);
+
+  // Providers and their model lists are fetched on open rather than at launch:
+  // same reasoning as the version picker — rare, deliberate, off the startup
+  // path.
+  async function toggleLauncherMenu() {
+    if (launcherMenuOpen) {
+      setLauncherMenuOpen(false);
+      return;
+    }
+    setLauncherMenuOpen(true);
+    try { setSharedModels((await window.vibe?.modelProviders?.list())?.models || []); } catch { setSharedModels([]); }
+    const list = await window.vibe?.claudeProviders?.list?.();
+    setProviderList(list?.profiles ?? []);
+  }
+
+  // The launcher dropdown's flat item list: agent profiles first, then the
+  // saved Claude providers. The search box filters all of them by label
+  // (provider rows also match on the profile's model id).
+  const launcherQueryText = launcherQuery.trim().toLowerCase();
+  const launcherEntries: LauncherMenuEntry[] = [];
+  for (const profile of launcherAgentProfiles) {
+    if (
+      launcherQueryText &&
+      !profile.label.toLowerCase().includes(launcherQueryText)
+    ) {
+      continue;
+    }
+    launcherEntries.push({
+      key: profile.kind,
+      section: "agents",
+      label: profile.label,
+      hint: agentCliMissing(profile.kind)
+        ? `${profile.label} was not found on your PATH — click to launch anyway`
+        : undefined,
+      profile,
+      missing: agentCliMissing(profile.kind),
+      run: () => {
+        setLauncherMenuOpen(false);
+        void addSession(profile.kind);
+      }
+    });
+  }
+  for (const model of sharedModels) {
+    if (launcherQueryText && !`${model.label} ${model.id} ${model.providerName} Open Claude Code Open Codex`.toLowerCase().includes(launcherQueryText)) continue;
+    launcherEntries.push({ key: `model:${model.key}`, section: 'models', label: model.label,
+      sub: model.providerName, hint: `${model.id} · ${modelLaunchKind === 'open-codex' ? 'Open Codex' : 'Open Claude Code'}`, run: () => {
+        setLauncherMenuOpen(false); void addSession(modelLaunchKind, modelLaunchKind === 'open-codex' ? { openCodexModel: model.key } : { providerProfileId:model.providerId,providerModelOverride:model.id });
+      } });
+  }
+  // Arrow keys can leave the highlight past the end once a search narrows the
+  // list; clamp it to the rows that actually exist.
+  const launcherActiveIndex = Math.min(
+    launcherHighlight,
+    Math.max(launcherEntries.length - 1, 0)
+  );
+
+  function handleLauncherSearchKeyDown(
+    event: ReactKeyboardEvent<HTMLInputElement>
+  ) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setLauncherHighlight((current) =>
+        Math.min(current + 1, launcherEntries.length - 1)
+      );
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setLauncherHighlight((current) => Math.max(current - 1, 0));
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      launcherEntries[launcherActiveIndex]?.run();
+    } else if (event.key === "Escape") {
+      setLauncherMenuOpen(false);
+    }
+  }
+
+  function renderLauncherEntry(entry: LauncherMenuEntry, index: number) {
+    const highlighted = index === launcherActiveIndex;
+    return (
+      <button
+        key={entry.key}
+        role="option"
+        aria-selected={highlighted}
+        className={clsx(
+          "launcher-picker-item",
+          highlighted && "is-active",
+          entry.missing && "agent-launcher-missing"
+        )}
+        style={
+          entry.profile
+            ? ({ "--agent-accent": entry.profile.accent } as React.CSSProperties)
+            : undefined
+        }
+        title={entry.hint}
+        ref={
+          highlighted
+            ? (node) => {
+                node?.scrollIntoView({ block: "nearest" });
+              }
+            : undefined
+        }
+        onMouseMove={() => setLauncherHighlight(index)}
+        onClick={entry.run}
+      >
+        {entry.profile &&
+          (entry.profile.openFusion ? (
+            <img className="agent-launcher-logo" src={openFusionLogo} alt="" />
+          ) : (
+            <Plus size={13} />
+          ))}
+        <span className="launcher-picker-item-label">{entry.label}</span>
+        {entry.sub && (
+          <span className="launcher-picker-item-sub">{entry.sub}</span>
+        )}
+      </button>
+    );
+  }
+
+  function dismissUpdateOverlay() {
+    setDismissedUpdateKey(updateNoticeKey);
+  }
+
+  // Releases are fetched on open rather than at launch: this is a rare,
+  // deliberate action, and it keeps startup off the network.
+  async function toggleVersionPicker() {
+    if (versionPickerOpen) {
+      setVersionPickerOpen(false);
+      return;
+    }
+
+    setVersionPickerOpen(true);
+    setVersionList(null);
+
+    const result = await window.vibe?.updates.listVersions();
+    setVersionList(
+      result ?? {
+        ok: false,
+        message: "Version switching is unavailable in this window.",
+        versions: []
+      }
+    );
+  }
+
+  async function selectAppVersion(version: string) {
+    setVersionPickerOpen(false);
+    setDismissedUpdateKey(null);
+
+    const result = await window.vibe?.updates.installVersion(version);
+    if (!result) {
+      setShellMessage("Version switching is unavailable in this window.");
+      return;
+    }
+
+    if (!result.ok) {
+      setShellMessage(result.message || `Couldn't switch to v${version}.`);
+    }
+  }
+
+  async function checkForUpdates() {
+    setDismissedUpdateKey(null);
+
+    const result = await window.vibe?.updates.check();
+    if (!result) {
+      setShellMessage("Update checks are unavailable in this window.");
+      return;
+    }
+
+    if (!result.ok || result.message) {
+      setShellMessage(result.message || "Update check failed.");
+    }
+  }
+
+  async function downloadUpdate() {
+    const result = await window.vibe?.updates.download();
+    if (result && !result.ok) {
+      setUpdateState((current) => ({
+        status: "error",
+        updatedAt: Date.now(),
+        info: current?.info,
+        errorMessage: result.message || "Update failed."
+      }));
+    }
+  }
+
+  const setupsApi = (window.vibe as unknown as {
+      setups?: WorkspaceSetupsProps["api"];
+  })?.setups;
+  async function loadRelaySetup(recipe: WorkspaceSetup) {
+      const recipeProject = recipe.scope === "project"
+        ? workspaces.find(project=>normalizeWorkspacePath(project.path) === normalizeWorkspacePath(recipe.projectPath || "")) || (recipe.projectPath ? starterWorkspace(recipe.projectPath) : undefined)
+        : activeView === "project" ? activeWorkspace : undefined;
+      const targetScope: SessionScope | null = recipeProject ? {type:"workspace",workspaceId:recipeProject.id} : activeScope;
+      if (!targetScope) throw new Error("Open a project or choose Multi mode first.");
+      const instantiated = instantiateWorkspaceSetup(recipe, { projectPath: recipeProject?.path });
+      const providers = await window.vibe?.claudeProviders?.list();
+      for (const session of instantiated.sessions) {
+          if (session.providerProfileId && session.providerProfileId !== "default-custom" && !providers?.profiles.some(p => p.id === session.providerProfileId))
+              throw new Error(`Provider for ${session.name} is unavailable. Restore it in Settings first.`);
+          if (session.providerProfileId === "default-custom" && !providers?.profiles.length)
+              throw new Error("Configure a Claude provider before loading this setup.");
+      }
+      const metrics = placementMetrics(targetScope);
+      const fresh = instantiated.sessions.map((session,index) => ({
+        ...createSession(sessionCreationKind(session),session.cwd,[],session.name,providerOptionsFor(session)),
+        ...session,started:recipe.panes[index]?.migratedFrom !== "aider" && String(recipe.panes[index]?.config.kind) !== "aider",launchToken:1
+      }));
+      // Place whole tiles into visible holes, preserving split ownership and minima.
+      const occupied: GeometryItem[] = buildBoardTiles(recipeProject?.sessions || (targetScope.type === "multi" ? multiSessions : [])).map(tile=>({id:tile.id,layout:migrateLayout(tile.anchor.layout),...(tile.tree ? subtreeMin(tile.tree,DEFAULT_MIN_PANE_WIDTH,DEFAULT_MIN_PANE_HEIGHT,SPLIT_DIVIDER_PX) : {minW:DEFAULT_MIN_PANE_WIDTH,minH:DEFAULT_MIN_PANE_HEIGHT})}));
+      for (const tile of buildBoardTiles(fresh)) {
+        const minimum=tile.tree ? subtreeMin(tile.tree,DEFAULT_MIN_PANE_WIDTH,DEFAULT_MIN_PANE_HEIGHT,SPLIT_DIVIDER_PX) : {minW:DEFAULT_MIN_PANE_WIDTH,minH:DEFAULT_MIN_PANE_HEIGHT};
+        const saved=migrateLayout(tile.anchor.layout);
+        const layout=findAvailablePlacement(occupied,metrics.innerWidth,{top:metrics.viewportTop,bottom:metrics.viewportBottom},{width:saved.w/100*metrics.innerWidth,height:saved.h,...minimum});
+        const anchor=fresh.find(session=>session.id===tile.anchor.id)!;
+        anchor.layout=layout;
+        occupied.push({id:tile.id,layout,...minimum});
+      }
+      for (const [id, prompt] of Object.entries(instantiated.prompts))
+          writeSessionDraft(id, prompt);
+      if (recipeProject && !workspaces.some(project=>project.id===recipeProject.id)) {
+        setWorkspaces(current=>[{...recipeProject,sessions:fresh},...current]);
+      } else updateScopeSessions(targetScope, current => [...current, ...fresh]);
+      if(recipeProject){setActiveWorkspaceId(recipeProject.id);setActiveView("project");}else setActiveView("multi");
+      if (fresh[0]) {
+          setSelectedSessionId(fresh[0].id);
+          setRevealSessionId(fresh[0].id);
+      }
+  }
+  const relaySessions: RelaySession[] = allSessions.map(raw => {
+      const session = withRuntimeLabel(raw);
+      const project = workspaces.find(item => item.sessions.some(pane => pane.id === session.id));
+      const runtime = runtimeSnapshotsRef.current[session.id];
+      return { ...Object.fromEntries(HISTORY_CONFIG_FIELDS.map(field => [field, session[field]])), threadRef: session.threadRef, resumeRef: session.resumeRef, fusion: session.fusion, openFusion: session.openFusion, id: session.id, name: session.name, kind: sessionCreationKind(session), cwd: session.cwd, status: session.status, statusLabel: session.fusion || session.openFusion ? session.status : runtimeStatusLabel(runtime?.launchToken === session.launchToken ? runtime : undefined, session.started), observation: runtime?.observation, lastTool: runtime?.lastTool?.name, projectName: project?.name, projectId: project?.id, visiblePane: true, board: project ? "project" : "multi", started: session.started, launchToken: session.launchToken, generation: runtime?.generation, revision: runtime?.revision };
+  });
+  function focusRelaySession(id: string) {
+      const project = workspaces.find(item => item.sessions.some(session => session.id === id));
+      if (project) {
+          setActiveWorkspaceId(project.id);
+          setActiveView("project");
+      }
+      else if (multiSessions.some(session => session.id === id))
+          setActiveView("multi");
+      else
+          return false;
+      setOrchestratorViewOpen(false);
+      selectSession(id);
+      setRevealSessionId(null);
+      requestAnimationFrame(() => setRevealSessionId(id));
+      return true;
+  }
+  // Reserve synchronously: two IPC requests can arrive before React commits a new pane.
+  const pendingConversationOpens = useRef(new Map<string, { id: string; launchToken: number }>());
+  useEffect(() => {
+      for (const [key, pending] of pendingConversationOpens.current) {
+          if (allSessions.some(session => session.id === pending.id && session.launchToken >= pending.launchToken)) pendingConversationOpens.current.delete(key);
+      }
+  }, [allSessions]);
+  const relayActionHandler = useRef<(kind: string, payload: Record<string, unknown>) => Promise<Record<string, unknown>>>(async () => ({ ok: false }));
+  relayActionHandler.current = async (kind, payload) => {
+      if (kind === "resume_conversation") {
+          const identity = payload.conversation as SavedConversation;
+          if (!identity || typeof identity !== "object") return { ok: false, error: "Saved conversation is missing." };
+          const conversation = normalizeSavedConversation(identity);
+          const key = conversationKey(conversation);
+          const pending = pendingConversationOpens.current.get(key);
+          if (pending) return { ok: true, id: pending.id, launchToken: pending.launchToken, status: "resume_requested" };
+          const existing = matchingConversation(allSessions.map(withRuntimeLabel), conversation);
+          if (existing) {
+              setMaximizedSessionId(null);
+              focusRelaySession(existing.id);
+              if (!conversationNeedsResume(existing, runtimeSnapshotsRef.current[existing.id])) return { ok: true, id: existing.id, launchToken: existing.launchToken, status: "revealed" };
+              const project = workspaces.find(workspace => workspace.sessions.some(session => session.id === existing.id));
+              const scope: SessionScope = project ? { type: "workspace", workspaceId: project.id } : { type: "multi" };
+              const launchToken = existing.launchToken + 1;
+              pendingConversationOpens.current.set(key, { id: existing.id, launchToken });
+              try {
+                  if (existing.started && !["exited", "failed"].includes(runtimeSnapshotsRef.current[existing.id]?.processState || "") && !(await stopSessionProcess(existing))) throw new Error("Could not stop the exited conversation's terminal for resume.");
+                  const current = sessionsByIdRef.current.get(existing.id);
+                  if (!current || current.launchToken !== existing.launchToken) throw new Error("The pane changed while preparing resume. Select the conversation again.");
+                  clearCodexTracking(existing.id);
+                  updateScopeSessions(scope, sessions => sessions.map(session => session.id === existing.id ? {
+                      ...session, started: true, launchToken, nextLaunchMode: "resume",
+                      ...(session.fusion && (conversation.provider === "claude" || conversation.provider === "codex") ? { fusionPlannerFamily: conversation.provider } : {}),
+                      threadRef: { provider: existing.kind === "kimi-custom" || existing.kind === "kimi" ? existing.kind : conversation.provider, id: conversation.id, title: conversation.title, createdAt: conversation.createdAt || Date.now(), updatedAt: conversation.updatedAt || Date.now() },
+                      threadLookupStatus: "found", threadLookupStartedAt: undefined, threadLookupMessage: undefined,
+                      status: "idle", attention: EMPTY_ATTENTION, backgroundActivity: undefined, detachedTaskIds: undefined, subagentDepth: undefined
+                  } : session));
+                  return { ok: true, id: existing.id, launchToken, status: "resume_requested" };
+              } catch (error) {
+                  pendingConversationOpens.current.delete(key);
+                  return { ok: false, error: String(error) };
+              }
+          }
+          const launch = conversationLaunch(conversation);
+          const project = workspaces.find(workspace => normalizeWorkspacePath(workspace.path) === normalizeWorkspacePath(conversation.cwd));
+          const scope: SessionScope = project ? { type: "workspace", workspaceId: project.id } : { type: "multi" };
+          const created = { ...createSession(launch.kind, conversation.cwd, [], undefined, conversation), ...launch.patch };
+          pendingConversationOpens.current.set(key, { id: created.id, launchToken: created.launchToken });
+          const metrics = placementMetrics(scope);
+          updateScopeSessions(scope, sessions => [...sessions, { ...created, layout: findNextFluidLayout(sessions, metrics) }]);
+          if (project) { setActiveWorkspaceId(project.id); setActiveView("project"); } else setActiveView("multi");
+          setMaximizedSessionId(null);
+          setSelectedSessionId(created.id);
+          setRevealSessionId(created.id);
+          return { ok: true, id: created.id, launchToken: created.launchToken, status: "resume_requested" };
+      }
+      if (kind === "launch_setup") {
+          await loadRelaySetup(payload.recipe as WorkspaceSetup);
+          return { ok: true, status: "created" };
+      }
+      if (kind === "save_setup") {
+          if (!setupsApi)
+              return { ok: false, error: "Setup persistence is unavailable." };
+          const recipe = createWorkspaceSetup({ name: String(payload.name || boardTitle + " setup"), scope: activeView === "project" ? "project" : "global", projectPath: activeView === "project" ? activeWorkspace?.path : undefined, sessions: boardSessions });
+          const result=await setupsApi.save(recipe);
+          if(result && typeof result === "object" && "ok" in result && result.ok === false) return {ok:false,error:"error" in result ? String(result.error) : "Setup could not be saved."};
+          return { ok: true, recipe };
+      }
+      if (kind === "navigate") {
+          const view = payload.view;
+          const destination = workspaceNavigation.find(item => item.id === view);
+          if (typeof view !== "string" || !destination) return { ok: false, error: "Choose a supported application view." };
+          const project = view === "project" && typeof payload.cwd === "string" && payload.cwd.trim()
+              ? workspaces.find(workspace => normalizeWorkspacePath(workspace.path) === normalizeWorkspacePath(payload.cwd as string)) : undefined;
+          if (view === "project" && !project) return { ok: false, error: "That project is not open. Choose an existing project folder." };
+          // Commit the requested surface before acknowledging navigation. Pane
+          // ownership and launch state are unchanged by these view switches.
+          flushSync(() => {
+              setLauncherMenuOpen(false);
+              setSettingsOpen(destination.surface === "settings");
+              setSettingsPanel(destination.panel);
+              setWorkspaceToolsOpen(destination.surface === "tools");
+              if (destination.tab) setWorkspaceToolsTab(destination.tab);
+              if (["orchestrator", "multi", "project"].includes(view)) {
+                  setOrchestratorViewOpen(view === "orchestrator");
+                  if (view !== "orchestrator") {
+                      setSelectedSessionId(null);
+                      setMaximizedSessionId(null);
+                      setActiveView(view === "project" ? "project" : "multi");
+                      if (project) setActiveWorkspaceId(project.id);
+                  }
+              }
+          });
+          return { ok: true, status: "navigated", view, ...(project ? { projectId: project.id, cwd: project.path } : {}) };
+      }
+      if (kind === "workspace_state") {
+          const destination = settingsOpen ? workspaceNavigation.find(item => item.panel === (settingsPanel || "orchestrator"))
+              : workspaceToolsOpen ? workspaceNavigation.find(item => item.tab === workspaceToolsTab)
+              : workspaceNavigation.find(item => item.id === (orchestratorViewOpen ? "orchestrator" : activeView));
+          const project = workspaces.find(item => item.id === activeWorkspaceId);
+          return { ok: true, view: destination?.id, selectedSessionId, maximizedSessionId,
+              ...(project ? { projectId: project.id, cwd: project.path } : {}) };
+      }
+      if (kind === "open_settings") { setSettingsOpen(true); return { ok: true }; }
+      if (kind === "inventory") {
+          const fusion = lastFusionSettings(), openFusion = lastOpenFusionModels();
+          let configuredProfiles = providerList;
+          if (configuredProfiles === null) {
+              try { configuredProfiles = (await window.vibe?.claudeProviders?.list?.())?.profiles ?? null; }
+              catch { /* Unavailable configuration remains unknown to routing. */ }
+          }
+          let configuredOpenCodex: import('./types').OpenCodexProviderList | null = null;
+          try { configuredOpenCodex = await window.vibe?.openCodexProviders?.list() || null; } catch {}
+          const launchers = agentProfiles.map(profile => {
+              const probeKinds = profile.kind === "fusion" ? [fusion.plannerFamily, fusion.executorFamily] : [profile.kind === "openfusion" ? "opencode" : profile.kind === "claude-custom" ? "claude" : profile.kind];
+              const probes = probeKinds.map(probe => installedClis?.clis?.[probe]);
+              const available = profile.kind === "terminal" ? true : probes.some(probe => probe?.available === false) ? false : probes.every(probe => probe?.available === true) ? true : "unknown";
+              const configured = profile.kind === 'open-codex' ? configuredOpenCodex === null ? 'unknown' : Boolean(configuredOpenCodex.models.length) : profile.kind === "openfusion" ? Boolean(openFusion.plannerModel && openFusion.executorModel) : profile.kind === "claude-custom" ? configuredProfiles === null ? "unknown" : Boolean(configuredProfiles.length) : available === true ? true : "unknown";
+              return { kind: profile.kind, label: profile.label, available, configured,
+                  ...(profile.kind === 'open-codex' ? { model: configuredOpenCodex?.defaultModel, models: configuredOpenCodex?.models.map(model => ({ id: model.key, label: model.label, provider: model.providerName })) } : {}),
+                  reason: available === "unknown" ? "CLI availability has not been confirmed." : available === false ? "Required CLI is unavailable." : configured === false ? "Configure this launcher in Settings first." : undefined,
+                  ...(profile.kind === "fusion" ? { model: fusion.plannerModel, plannerModel: fusion.plannerModel, executorModel: fusion.executorModel } : {}),
+                  ...(profile.kind === "openfusion" ? { model: openFusion.plannerModel, ...openFusion } : {}) };
+          });
+          return { ok: true, launchers, projectPaths: workspaces.map(workspace=>workspace.path), projects: workspaces.map(({id,path,name}) => ({id,path,name})), sessions: relaySessions.map(session => ({ ...session,
+            projectId: workspaces.find(p => p.sessions.some(s => s.id === session.id))?.id })) };
+      }
+      if (kind === "focus_session")
+          return { ok: focusRelaySession(String(payload.id)) };
+      if (kind === "remove_project") {
+          const selection = payload.projectSelection as ProjectRemovalSnapshot | undefined;
+          if (!selection?.id || !selection.path || !Array.isArray(selection.targets)) return { ok: false, error: "A captured project selection is required." };
+          return { ...await removeWorkspace(selection.id, selection) };
+      }
+      if (kind === "add_project") {
+          const path = String(payload.path || "").trim();
+          if (!path)
+              return { ok: false, error: "A project path is required." };
+          const existing = workspaces.find(w => normalizeWorkspacePath(w.path) === normalizeWorkspacePath(path));
+          const project = existing || starterWorkspace(path);
+          flushSync(() => {
+              if (!existing) setWorkspaces(current => [project, ...current]);
+              setActiveWorkspaceId(project.id);
+              setActiveView("project");
+          });
+          return { ok: true, status: "added", projectId: project.id, path: project.path };
+      }
+      if (kind === "create_session") {
+          const cwd = String(payload.cwd || "");
+          const agentKind = String(payload.kind || "terminal") as AgentKind;
+          if (!cwd || !agentProfiles.some(profile => profile.kind === agentKind))
+              return { ok: false, error: "A valid folder and launcher are required." };
+          const project = workspaces.find(w => normalizeWorkspacePath(w.path) === normalizeWorkspacePath(cwd));
+          const scope: SessionScope = project ? { type: "workspace", workspaceId: project.id } : { type: "multi" };
+          if (agentKind === "claude-custom") {
+              const providers = await window.vibe?.claudeProviders?.list();
+              if (!providers?.profiles.length)
+                  return { ok: false, error: "Configure a Claude provider in Settings first." };
+          }
+          if (agentKind === 'open-codex') {
+              const configured = await window.vibe?.openCodexProviders?.list();
+              if (!configured?.models.length) return { ok: false, error: 'Configure Open Codex providers and models in Settings first.' };
+          }
+          const id = addSessionForCwd(scope, agentKind, cwd, payload.settings as {
+              providerProfileId?: string;
+              providerModelOverride?: string;
+              openCodexModel?: string;
+          } | undefined);
+          if (payload.settings && typeof payload.settings === "object") {
+              const settings = payload.settings as Record<string, unknown>;
+              const config = Object.fromEntries(SETUP_CONFIG_FIELDS.filter(key => !["kind", "fusion", "openFusion", "command"].includes(key) && (typeof settings[key] === "string" || typeof settings[key] === "boolean")).map(key => [key, settings[key]]));
+              updateScopeSessions(scope, sessions => sessions.map(session => session.id === id ? { ...session, ...config } : session));
+          }
+          if (typeof payload.prompt === "string")
+              writeSessionDraft(id, payload.prompt);
+          return { ok: true, id, launchToken: 1, status: "created", draftStaged: Boolean(payload.prompt) };
+      }
+      if (kind !== "close" && payload.generation && payload.id) {
+          const currentGeneration = runtimeSnapshotsRef.current[String(payload.id)]?.generation || orchestratorState?.sessions.find(session => session.id === payload.id)?.generation;
+          if (currentGeneration && currentGeneration !== payload.generation)
+              return { ok: false, error: "Session restarted; select its current generation." };
+      }
+      if (["stage_draft", "get_draft", "stage_handoff"].includes(kind)) {
+          const id = String(payload.id || payload.targetId || "");
+          if (!allSessions.some(session => session.id === id))
+              return { ok: false, error: "Session no longer exists." };
+          const previous = readSessionDraft(id);
+          if (kind === "get_draft")
+              return { ok: true, ...previous };
+          const text = String(payload.text || "");
+          const paths = kind === "stage_handoff" ? "" : Array.isArray(payload.paths) ? payload.paths.filter(p => typeof p === "string").join("\n") : "";
+          const incoming = [text, paths].filter(Boolean).join("\n");
+          const next = writeSessionDraft(id, payload.mode === "replace" ? incoming : [previous.text, incoming].filter(Boolean).join("\n"), typeof payload.expectedRevision === "number" ? payload.expectedRevision : undefined);
+          return { ok: true, status: "staged", ...next };
+      }
+      if (kind === "restart" || kind === "close") {
+          const id = String(payload.id || "");
+          const session = allSessions.find(s => s.id === id);
+          if (!session) {
+              if (kind !== "close") return { ok: false, error: "Session no longer exists." };
+              const target = payload.target as CloseTarget | undefined;
+              if (!target || !Number.isSafeInteger(target.launchToken)) return { ok: false, status: "close-partial", error: "Missing frozen pane identity." };
+              const operationId = String(payload.actionId || crypto.randomUUID());
+              return closeSessionOperation({ operationId, target, current: () => undefined,
+                  cancelLaunch: () => terminalLaunchCoordinator.cancel(target.id, target.launchToken),
+                  stop: () => relayApi()?.stopSessionObserved({ ...target, operationId, kind: String(payload.kindOfSession || "terminal") })
+                    ?? Promise.resolve({ ok: false, operationId, process: "unknown", launchSettled: false }),
+                  remove: () => {} });
+          }
+          const project = workspaces.find(p => p.sessions.some(s => s.id === id));
+          const scope: SessionScope = project ? { type: "workspace", workspaceId: project.id } : { type: "multi" };
+          if (kind === "restart") {
+              if (!await restartSession(scope, session)) return { ok: false, status: "restart-failed", error: "The terminal could not be stopped for restart." };
+          }
+          else
+              return closeSession(scope, session, payload.target as CloseTarget | undefined, String(payload.actionId || crypto.randomUUID()));
+          return { ok: true, status: "restart_requested" };
+      }
+      return { ok: false, error: `Unsupported workspace action: ${kind}` };
+  };
+  useEffect(() => {
+      const api = relayApi();
+      if (!api?.onUiAction)
+          return;
+      return api.onUiAction(action => { void relayActionHandler.current(action.kind, action.payload || {}).then(result => api.completeUiAction(action.id, result)).catch(error => api.completeUiAction(action.id, { ok: false, error: String(error) })); });
+  }, []);
+
+  async function restartToUpdate() {
+    await window.vibe?.updates.restart();
+  }
+
+  return (
+    <div
+      className={clsx("app-shell", !sidebarOpen && "sidebar-collapsed")}
+      style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
+    >
+      <aside className="sidebar" aria-label="Projects and chats">
+        <div className="brand">
+          <div className="brand-mark">
+            <img src={vibeTerminalLogo} alt="" aria-hidden="true" />
+          </div>
+          <div>
+            <h1>Lina Terminal</h1>
+            <span>WORKSPACE / AGENTS</span>
+          </div>
+        </div>
+
+        <button className="open-folder-button new-project-button" onClick={()=>setNewProjectOpen(true)}><Plus size={17}/><span>New project</span></button>
+        <button className="open-folder-button" onClick={openFolder}>
+          <FolderOpen size={17} />
+          Add project
+        </button>
+
+        <button className={clsx("orchestrator-nav-button", orchestratorViewOpen && "active")} aria-pressed={orchestratorViewOpen} onClick={() => { setOrchestratorViewOpen(true); setLauncherMenuOpen(false); }}><PanelsTopLeft size={17}/><span>Orchestrator</span></button>
+        <button
+          className={clsx(
+            "multi-mode-card",
+            !orchestratorViewOpen && activeView === "multi" && "active",
+            multiModeHasUnreadAttention && "has-attention",
+            !multiModeHasUnreadAttention &&
+              multiModeHasWorking &&
+              "has-working"
+          )}
+          aria-label="Multi mode"
+          onClick={() => {
+            setOrchestratorViewOpen(false);
+            setSelectedSessionId(null);
+            setActiveView("multi");
+          }}
+        >
+          <div className="multi-mode-heading">
+            <LayoutGrid size={15} />
+            <span>Multi mode</span>
+            {multiModeHasUnreadAttention ? (
+              <span className="attention-dot" aria-hidden="true" />
+            ) : multiModeHasWorking ? (
+              <span
+                className="attention-dot attention-dot-working"
+                aria-hidden="true"
+              />
+            ) : null}
+          </div>
+          <span className="multi-mode-subtitle">
+            <SessionCounts summary={multiModeSummary} />
+          </span>
+        </button>
+
+        <div className="sidebar-section-title">
+          Projects
+          {workspaces.length > 0 && (
+            <span className="sidebar-section-count">{workspaces.length}</span>
+          )}
+        </div>
+        <div
+          className="workspace-list"
+          onDragOver={handleWorkspaceListDragOver}
+          onDragLeave={handleWorkspaceListDragLeave}
+        >
+          {workspaces.length === 0 && (
+            <div className="workspace-empty-hint">
+              No folders yet.
+              <br />
+              Open one to start working.
+            </div>
+          )}
+          {workspaces.map((workspace) => {
+            const hasUnreadAttention = workspaceHasUnreadAttention(workspace);
+            const hasWorking =
+              !hasUnreadAttention && workspaceHasWorking(workspace);
+            const summary = summarizeSessions(workspace.sessions.map(withRuntime));
+            const isDropTarget =
+              workspaceDropTarget?.workspaceId === workspace.id;
+
+            return (
+              <div
+                className={clsx(
+                  "workspace-row",
+                  workspaceContextMenu?.workspaceId === workspace.id &&
+                    "context-open",
+                  draggingWorkspaceId === workspace.id && "dragging",
+                  isDropTarget &&
+                    workspaceDropTarget?.position === "before" &&
+                    "drop-before",
+                  isDropTarget &&
+                    workspaceDropTarget?.position === "after" &&
+                    "drop-after"
+                )}
+                key={workspace.id}
+                data-workspace-id={workspace.id}
+                onDragOver={(event) =>
+                  handleWorkspaceDragOver(event, workspace.id)
+                }
+                onDrop={(event) => handleWorkspaceDrop(event, workspace.id)}
+                onContextMenu={(event) =>
+                  openWorkspaceContextMenu(event, workspace)
+                }
+              >
+                <button
+                  type="button"
+                  className="workspace-reorder-grip"
+                  aria-label={`Reorder ${workspace.name}`}
+                  aria-describedby="workspace-reorder-help"
+                  title="Drag to reorder · Arrow keys move up or down"
+                  disabled={workspaces.length < 2}
+                  draggable={workspaces.length > 1}
+                  onDragStart={(event) => handleWorkspaceDragStart(event, workspace.id)}
+                  onDragEnd={handleWorkspaceDragEnd}
+                  onKeyDown={(event) => handleWorkspaceReorderKey(event, workspace.id)}
+                >
+                  <GripVertical size={14} aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  className={clsx(
+                    "workspace-button",
+                    !orchestratorViewOpen && activeView === "project" &&
+                      workspace.id === activeWorkspace?.id &&
+                      "active",
+                    hasUnreadAttention && "has-attention",
+                    hasWorking && "has-working"
+                  )}
+                  draggable={workspaces.length > 1}
+                  onDragStart={(event) =>
+                    handleWorkspaceDragStart(event, workspace.id)
+                  }
+                  onDragEnd={handleWorkspaceDragEnd}
+                  onClick={() => {
+                    if (Date.now() < workspaceDragClickUntil.current) return;
+                    setSelectedSessionId(null);
+                    setActiveWorkspaceId(workspace.id);
+                    setOrchestratorViewOpen(false);
+                    setActiveView("project");
+                  }}
+                >
+                  <span
+                    className={clsx(
+                      "attention-dot",
+                      hasWorking && "attention-dot-working",
+                      !hasUnreadAttention &&
+                        !hasWorking &&
+                        "attention-dot-empty"
+                    )}
+                    aria-hidden="true"
+                  />
+                  <Folder size={16} />
+                  <span className="workspace-name">{workspace.name}</span>
+                  <ChevronRight size={15} />
+                  <span className="workspace-path" title={workspace.path}>
+                    {workspace.path}
+                  </span>
+                  <SessionCounts summary={summary} />
+                </button>
+                <button
+                  type="button"
+                  className="workspace-remove-button"
+                  title={`Close ${workspace.name}`}
+                  aria-label={`Close ${workspace.name}`}
+                  onClick={() => requestWorkspaceClose(workspace.id)}
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+        <span id="workspace-reorder-help" className="workspace-reorder-sr-only">Drag to reorder projects, or use Up and Down arrow keys on a reorder button.</span>
+        <span className="workspace-reorder-sr-only" role="status" aria-live="polite">{workspaceOrderAnnouncement}</span>
+        <footer className="sidebar-footer"><button className="workspace-settings-button" title="Workspace settings" aria-label="Workspace settings" onClick={() => setSettingsOpen(true)}><Settings size={17} aria-hidden="true"/><span>Settings</span></button></footer>
+      </aside>
+
+      {workspaceContextMenu && (
+        <div
+          className="workspace-context-menu"
+          role="menu"
+          aria-label={`Folder actions for ${workspaceContextMenu.name}`}
+          style={
+            {
+              "--context-menu-x": `${workspaceContextMenu.x}px`,
+              "--context-menu-y": `${workspaceContextMenu.y}px`
+            } as CSSProperties
+          }
+          onClick={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          <div className="workspace-context-menu-title">
+            <Folder size={14} />
+            <span>{workspaceContextMenu.name}</span>
+          </div>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() =>
+              runWorkspaceContextAction("explorer", workspaceContextMenu)
+            }
+          >
+            <FolderOpen size={15} />
+            <span>Open in file explorer</span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() =>
+              runWorkspaceContextAction("terminal", workspaceContextMenu)
+            }
+          >
+            <TerminalSquare size={15} />
+            <span>Open terminal</span>
+          </button>
+        </div>
+      )}
+
+      {sidebarOpen && (
+        <div
+          className="sidebar-resize-handle"
+          role="separator"
+          aria-label="Resize sidebar"
+          aria-orientation="vertical"
+          aria-valuemin={MIN_SIDEBAR_WIDTH}
+          aria-valuemax={maxSidebarWidth()}
+          aria-valuenow={Math.round(sidebarWidth)}
+          tabIndex={0}
+          onKeyDown={handleSidebarResizeKeyDown}
+          onPointerDown={handleSidebarResizePointerDown}
+        />
+      )}
+
+      <main ref={workspaceMainRef} className={clsx("workspace", orchestratorViewOpen && "workspace-covered")} aria-hidden={orchestratorViewOpen || undefined} onKeyDownCapture={event => {
+        if (orchestratorViewOpen || ["Shift", "Control", "Alt", "Meta"].includes(event.key)) return;
+        const id = (event.target as HTMLElement).closest<HTMLElement>("[data-pane-id]")?.dataset.paneId;
+        if (id) recordSessionUse(id);
+      }}>
+        <header className="topbar">
+          <button
+            className="icon-button"
+            title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+            onClick={() => setSidebarOpen((open) => !open)}
+          >
+            {sidebarOpen ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}
+          </button>
+
+          <div className="workspace-title">
+            <LayoutGrid size={19} />
+            <div className="workspace-title-copy">
+              <strong>{boardTitle}</strong>
+              <span>{boardSubtitle}</span>
+            </div>
+          </div>
+
+          <div className="quick-actions">
+            {currentAppVersionLabel && (
+              <span className="app-version" title="Current app version">
+                {currentAppVersionLabel}
+              </span>
+            )}
+            <button className={clsx("orchestrator-mic", orchestratorState?.enabled && "enabled")} disabled={voiceToggleBusy} aria-pressed={orchestratorState?.enabled ?? false} title={orchestratorState?.ready ? "Turn voice on or off" : "Set up voice"} onClick={() => {
+              if (!orchestratorState?.ready && !orchestratorState?.enabled) { setSettingsOpen(true); return; }
+              setVoiceToggleBusy(true);
+              void relayApi()?.setEnabled(!orchestratorState?.enabled).then(result => { if (!result.ok) { setSettingsHint(result.error || "Voice could not start."); setSettingsOpen(true); } }).catch(() => { setSettingsHint("Voice could not start. Check your connection and microphone."); setSettingsOpen(true); }).finally(() => setVoiceToggleBusy(false));
+            }}><Mic size={15} /><span>Voice</span><i /></button>
+            {orchestratorState?.enabled && <button aria-label="Show microphone" title="Show microphone" onClick={() => void relayApi()?.showOverlay()}><Mic size={15}/></button>}
+            <button aria-label="Open workspace tools" title="History, files and workspace tools" onClick={() => setWorkspaceToolsOpen(true)}><PanelsTopLeft size={16}/></button>
+            <button onClick={checkForUpdates} disabled={updateCheckDisabled}>
+              <RefreshCw size={16} />
+              {updateCheckLabel}
+            </button>
+            <div className="version-picker">
+              <button
+                className="version-picker-toggle"
+                title="Switch to another version"
+                aria-haspopup="listbox"
+                aria-expanded={versionPickerOpen}
+                onClick={toggleVersionPicker}
+              >
+                <ChevronDown size={15} />
+              </button>
+              {versionPickerOpen && (
+                <div className="version-picker-menu" role="listbox">
+                  <div className="version-picker-title">
+                    Switch version
+                    {currentAppVersionLabel && (
+                      <span>now {currentAppVersionLabel}</span>
+                    )}
+                  </div>
+                  {versionList === null ? (
+                    <div className="version-picker-note">Loading releases…</div>
+                  ) : !versionList.ok ? (
+                    <div className="version-picker-note">
+                      {versionList.message ?? "Couldn't read releases."}
+                    </div>
+                  ) : versionList.versions.length === 0 ? (
+                    <div className="version-picker-note">
+                      No published releases.
+                    </div>
+                  ) : (
+                    <div className="version-picker-list">
+                      {versionList.versions.map((entry) => {
+                        const isCurrent =
+                          entry.version === (versionList.currentVersion ?? appVersion);
+                        return (
+                          <button
+                            key={entry.version}
+                            role="option"
+                            aria-selected={isCurrent}
+                            className={clsx(
+                              "version-picker-item",
+                              isCurrent && "is-current"
+                            )}
+                            disabled={isCurrent || !entry.installable}
+                            title={
+                              !entry.installable
+                                ? "This release has no Windows installer."
+                                : isCurrent
+                                  ? "Already installed"
+                                  : `Install v${entry.version}`
+                            }
+                            onClick={() => selectAppVersion(entry.version)}
+                          >
+                            <span className="version-picker-version">
+                              v{entry.version}
+                            </span>
+                            {entry.prerelease && (
+                              <span className="version-picker-tag">pre</span>
+                            )}
+                            <span className="version-picker-state">
+                              {isCurrent
+                                ? "current"
+                                : !entry.installable
+                                  ? "no installer"
+                                  : ""}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  <div className="version-picker-footer">
+                    Picking a version downloads its installer and closes the app.
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </header>
+
+        {shellMessage && (
+          <div className="host-message" role="status">
+            {shellMessage}
+            <button onClick={() => setShellMessage(null)}>Dismiss</button>
+          </div>
+        )}
+
+        <section className="agent-toolbar" aria-label="Agent launchers">
+          <div className="agent-toolbar-actions">
+            <div className="launcher-picker">
+              <button
+                className="launcher-picker-toggle"
+                title={activeScope ? "Start a terminal or coding agent" : "Open a project or choose Multi mode first"}
+                disabled={!activeScope}
+                aria-haspopup="listbox"
+                aria-expanded={launcherMenuOpen}
+                onClick={() => void toggleLauncherMenu()}
+                style={{ "--agent-accent": "var(--accent)" } as React.CSSProperties}
+              >
+                <Plus size={14} />
+                New session
+                <ChevronDown size={13} />
+              </button>
+              {launcherMenuOpen && (
+                <div
+                  className="launcher-picker-menu"
+                  role="listbox"
+                  aria-label="Launch a terminal or coding agent"
+                >
+                  <div className="launcher-picker-search">
+                    <Search size={14} />
+                    <input
+                      ref={launcherSearchRef}
+                      type="text"
+                      placeholder="Search agents and models…"
+                      value={launcherQuery}
+                      onChange={(event) => {
+                        setLauncherQuery(event.target.value);
+                        setLauncherHighlight(0);
+                      }}
+                      onKeyDown={handleLauncherSearchKeyDown}
+                    />
+                  </div>
+                  <div className="launcher-picker-list">
+                    {launcherEntries.length === 0 ? (
+                      <div className="launcher-picker-note">
+                        No matches for “{launcherQuery.trim()}”.
+                      </div>
+                    ) : (
+                      launcherEntries.map((entry, index) => (
+                        <Fragment key={entry.key}>
+                          {(index === 0 ||
+                            launcherEntries[index - 1].section !==
+                              entry.section) && (
+                            <div className="launcher-picker-title">
+                              {entry.section === "agents"
+                                ? "Agents"
+                                : "Configured models"}
+                              {entry.section === 'models' && <div className="launcher-model-engine" role="group" aria-label="Launch configured model with">
+                                <button type="button" aria-pressed={modelLaunchKind==='claude-custom'} onClick={()=>{setModelLaunchKind('claude-custom');setLauncherHighlight(launcherEntries.findIndex(item=>item.section==='models'));}}>Open Claude Code</button>
+                                <button type="button" aria-pressed={modelLaunchKind==='open-codex'} onClick={()=>{setModelLaunchKind('open-codex');setLauncherHighlight(launcherEntries.findIndex(item=>item.section==='models'));}}>Open Codex</button>
+                              </div>}
+                            </div>
+                          )}
+                          {renderLauncherEntry(entry, index)}
+                        </Fragment>
+                      ))
+                    )}
+                    {!launcherQueryText && providerList === null && (
+                      <>
+                        <div className="launcher-picker-title">
+                          Models & providers
+                        </div>
+                        <div className="launcher-picker-note">Loading…</div>
+                      </>
+                    )}
+                    {!launcherQueryText && providerList?.length === 0 && (
+                      <>
+                        <div className="launcher-picker-title">
+                          Models & providers
+                        </div>
+                        <div className="launcher-picker-note">
+                          Add a provider and models to use Open Claude Code or Open Codex.
+                        </div>
+                        <button
+                          className="launcher-picker-item"
+                          onClick={() => {
+                            setLauncherMenuOpen(false);
+                            setSettingsHint(
+                              "Add a provider and models for Open Claude Code and Open Codex."
+                            );
+                            setSettingsOpen(true);
+                          }}
+                        >
+                          Add a provider…
+                        </button>
+                      </>
+                    )}
+                    {!launcherQueryText &&
+                      providerList !== null &&
+                      providerList.length > 0 && (
+                        <button
+                          className="launcher-picker-item"
+                          onClick={() => {
+                            setLauncherMenuOpen(false);
+                            setSettingsHint(null);
+                            setSettingsPanel('providers');
+                            setSettingsOpen(true);
+                          }}
+                        >
+                          Manage providers…
+                        </button>
+                      )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {activeView === "project" && activeWorkspace && (
+            <GitBranchDisplay key={`${activeWorkspace.id}:${activeWorkspace.path}`} cwd={activeWorkspace.path} />
+          )}
+        </section>
+
+        <BoardHeading count={boardSessions.length} title="Session board" />
+        <section className="terminal-board">
+          {activeScope && visibleSessions.length > 0 ? (
+            <TiledBoard
+              onMetricsChange={(metrics) => boardMetricsRef.current.set(scopeKey(activeScope), metrics)}
+              revealItemId={revealSessionId ?? undefined}
+              maximizedItemId={maximizedTileId ?? undefined}
+              onArrangeChange={setIsArranging}
+              onLayoutCommit={(layouts) => persistLayout(activeScope, layouts)}
+              items={boardTiles.map((tile) => {
+                const renderSessionPane = (session: AgentSession) =>
+                  session.fusion ? (
+                  <FusionChatPane
+                    session={session}
+                    profile={getProfile("fusion")}
+                    initialPicker={screenshotFusionPicker}
+                    claimedThreadIds={claimedThreadIds(session.id)}
+                    cwdConflict={cwdConflicts.get(session.id)}
+                    isMaximized={session.id === maximizedSessionId}
+                    isSelected={!orchestratorViewOpen && session.id === selectedSessionId}
+                    onClose={() => closeSession(activeScope, session)}
+                    onDuplicate={() => duplicateSession(activeScope, session)}
+                    onRestart={() => restartSession(activeScope, session)}
+                    onResume={(threadRef) =>
+                      resumeSession(activeScope, session, threadRef)
+                    }
+                    onClear={() => clearFusionSession(activeScope, session)}
+                    onSettingsChange={(settings) =>
+                      updateFusionSettings(activeScope, session, settings)
+                    }
+                    onAdd={() =>
+                      addSessionForCwd(
+                        activeScope,
+                        sessionCreationKind(session),
+                        session.cwd,
+                        providerOptionsFor(session)
+                      )
+                    }
+                    onSelect={() => selectSession(session.id)}
+                    onMaximize={() =>
+                      setMaximizedSessionId((current) =>
+                        current === session.id ? null : session.id
+                      )
+                    }
+                    onThreadRefChange={(threadRef) =>
+                      updateSessionThreadRef(activeScope, session.id, threadRef)
+                    }
+                    onStatusChange={(status) =>
+                      updateSessionStatus(activeScope, session.id, status)
+                    }
+                    onAttention={(attention) =>
+                      applyAgentAttention(session.id, attention)
+                    }
+                  />
+                ) : session.openFusion ? (
+                  <OpenFusionChatPane
+                    session={session}
+                    profile={getProfile("openfusion")}
+                    claimedThreadIds={claimedThreadIds(session.id)}
+                    cwdConflict={cwdConflicts.get(session.id)}
+                    isMaximized={session.id === maximizedSessionId}
+                    isSelected={!orchestratorViewOpen && session.id === selectedSessionId}
+                    onClose={() => closeSession(activeScope, session)}
+                    onDuplicate={() => duplicateSession(activeScope, session)}
+                    onRestart={() => restartSession(activeScope, session)}
+                    onResume={(threadRef) =>
+                      resumeSession(activeScope, session, threadRef)
+                    }
+                    onClear={() => clearFusionSession(activeScope, session)}
+                    onSettingsChange={(settings) =>
+                      updateOpenFusionSettings(activeScope, session, settings)
+                    }
+                    onAdd={() =>
+                      addSessionForCwd(
+                        activeScope,
+                        sessionCreationKind(session),
+                        session.cwd,
+                        providerOptionsFor(session)
+                      )
+                    }
+                    onSelect={() => selectSession(session.id)}
+                    onMaximize={() =>
+                      setMaximizedSessionId((current) =>
+                        current === session.id ? null : session.id
+                      )
+                    }
+                    onThreadRefChange={(threadRef) =>
+                      updateSessionThreadRef(activeScope, session.id, threadRef)
+                    }
+                    onStatusChange={(status) =>
+                      updateSessionStatus(activeScope, session.id, status)
+                    }
+                    onAttention={(attention) =>
+                      applyAgentAttention(session.id, attention)
+                    }
+                  />
+                ) : (
+                  <TerminalPane
+                    session={session}
+                    runtime={runtimeSnapshots[session.id]}
+                    runtimeUnread={Boolean(session.attention?.unread)}
+                    profile={
+                      session.fusion ? getProfile("fusion") : getProfile(session.kind)
+                    }
+                    claimedThreadIds={claimedThreadIds(session.id)}
+                    cwdConflict={cwdConflicts.get(session.id)}
+                    isMaximized={session.id === maximizedSessionId}
+                    isArranging={isArranging}
+                    isGrouped={Boolean(session.tileId)}
+                    // An ungrouped pane keeps the original behaviour: it takes
+                    // focus when it mounts, so a freshly launched terminal is
+                    // typeable without clicking into it first. Only a split
+                    // tile needs the selective gate, because several terminals
+                    // mount into one frame there and the last one would win.
+                    autoFocus={
+                      session.id === selectedSessionId || (!selectedSessionId && session.id === visibleSessionIds[0])
+                    }
+                    onClose={() => closeSession(activeScope, session)}
+                    onDuplicate={() => duplicateSession(activeScope, session)}
+                    onSplit={(dir) => splitSession(activeScope, session, dir)}
+                    onPopOut={() => popOutSession(activeScope, session)}
+                    onRestart={() => restartSession(activeScope, session)}
+                    onResume={() => resumeSession(activeScope, session, activeSessionThreadRef(session))}
+                    onAdd={() =>
+                      addSessionForCwd(
+                        activeScope,
+                        sessionCreationKind(session),
+                        session.cwd,
+                        providerOptionsFor(session)
+                      )
+                    }
+                    onSelect={() => selectSession(session.id)}
+                    onMaximize={() =>
+                      setMaximizedSessionId((current) =>
+                        current === session.id ? null : session.id
+                      )
+                    }
+                    onThreadRefChange={(threadRef) =>
+                      updateSessionThreadRef(activeScope, session.id, threadRef)
+                    }
+                    onFreshLaunchFallback={(patch) =>
+                      resetSessionThreadForFreshLaunch(
+                        activeScope,
+                        session.id,
+                        patch
+                      )
+                    }
+                    onThreadLookupChange={(patch) =>
+                      updateSessionThreadLookup(activeScope, session.id, patch)
+                    }
+                    onStatusChange={(status) =>
+                      updateSessionStatus(activeScope, session.id, status)
+                    }
+                    onInputStatusRelease={(status) => {
+                      if (["codex", "open-codex"].includes(session.kind) && status === "waiting") {
+                        clearCodexRunningWatchdog(session.id);
+                        codexActiveTurnIdsRef.current.delete(session.id);
+                        codexTurnLiveRef.current.set(session.id, false);
+                      }
+                      // Esc is the TUI interrupt and cancels the agent's
+                      // foreground children with it, so it is also the user's
+                      // one-key escape from a delegation bracket that leaked.
+                      if (status === "waiting") {
+                        updateAnySession(session.id, clearSubagentDepth);
+                      }
+                      updateSessionStatus(activeScope, session.id, status, {
+                        force: true
+                      });
+                    }}
+                    onDelegationTimeout={() =>
+                      updateAnySession(session.id, clearSubagentDepth)
+                    }
+                    onCodexTurnStart={() =>
+                      applyCodexTurnStart(session.id)
+                    }
+                    onCodexInput={() =>
+                      recordCodexTerminalInput(session.id)
+                    }
+                  />
+                  );
+
+                // A split tile advertises what its partition actually needs, so
+                // sanitizeLayout/settleLayouts grow it and re-pack its
+                // neighbours with no new sizing code here.
+                const partitionMin = tile.tree
+                  ? subtreeMin(
+                      tile.tree,
+                      DEFAULT_MIN_PANE_WIDTH,
+                      DEFAULT_MIN_PANE_HEIGHT,
+                      SPLIT_DIVIDER_PX
+                    )
+                  : { minW: DEFAULT_MIN_PANE_WIDTH, minH: DEFAULT_MIN_PANE_HEIGHT };
+
+                return {
+                  id: tile.id,
+                  minW: partitionMin.minW,
+                  minH: partitionMin.minH,
+                  layout: tile.anchor.layout,
+                  content: tile.tree ? (
+                    <PaneSplit
+                      node={tile.tree}
+                      leafMinW={DEFAULT_MIN_PANE_WIDTH}
+                      leafMinH={DEFAULT_MIN_PANE_HEIGHT}
+                      // Same arranging flag TiledBoard uses, so every pane in
+                      // the tile defers its fit until the drag settles: one PTY
+                      // resize per pane per drag, not one per frame.
+                      onArrangeChange={setIsArranging}
+                      onRatioChange={(path, ratio) =>
+                        setTileRatio(activeScope, tile.id, path, ratio)
+                      }
+                      renderPane={(paneId) => {
+                        const member = tile.members.find(
+                          (candidate) => candidate.id === paneId
+                        );
+                        return member ? renderSessionPane(member) : null;
+                      }}
+                    />
+                  ) : (
+                    renderSessionPane(tile.anchor)
+                  )
+                };
+              })}
+            />
+          ) : (
+            <WorkspaceStart profiles={launcherAgentProfiles} mode={activeView} projectName={activeWorkspace?.name} projectPath={activeWorkspace?.path}
+              canLaunch={Boolean(activeScope)} isMissing={agentCliMissing} onLaunch={kind => void addSession(kind)}
+              onNewProject={() => setNewProjectOpen(true)} onOpenProject={() => void openFolder()} onMultiMode={() => setActiveView("multi")}/>
+          )}
+        </section>
+      </main>
+      {orchestratorViewOpen && <div className="orchestrator-view-host">
+        <OrchestratorDashboard sessions={(orchestratorState?.sessions || []).map(session => {
+          const metadata = relaySessions.find(item => item.id === session.id);
+          return { ...dashboardSessionMetadata(session, metadata), lastUsedAt: sessionRecency[session.id] };
+        })} workHistory={orchestratorState?.workHistory || []} activeTargets={orchestratorState?.activeTargets || []} busy={orchestratorState?.busy || false} enabled={orchestratorState?.enabled || false} visible onOpenSession={id => { focusRelaySession(id); }} />
+      </div>}
+      {workspaceToolsOpen && <WorkspaceToolsDialog onClose={() => setWorkspaceToolsOpen(false)}>
+        <OrchestratorPanel embedded selectedTab={workspaceToolsTab} onTabChange={setWorkspaceToolsTab} state={orchestratorState} sessions={relaySessions} selectedId={selectedSessionId} onFocus={id => { focusRelaySession(id); setWorkspaceToolsOpen(false); }} onSettings={() => { setWorkspaceToolsOpen(false); setSettingsOpen(true); }} projectPath={activeView === "project" ? activeWorkspace?.path : undefined} folders={workspaces}
+          setups={setupsApi ? <WorkspaceSetups sessions={boardSessions} projectPath={activeView === "project" ? activeWorkspace?.path : undefined} api={setupsApi} onLoad={loadRelaySetup} /> : <p className="dock-note">Setup storage is unavailable in this build.</p>}
+          handoff={<HandoffPanel sessions={(orchestratorState?.sessions || relaySessions).filter((session): session is RelaySession & {generation:string} => Boolean(session.generation)).map(session=>({id:session.id,generation:session.generation,name:session.name}))} onStage={async draft => {const api=relayApi();return api ? api.dispatch({kind:"stage_handoff",target:{id:draft.target.id,generation:draft.target.generation},sourceId:draft.source.id,sourceGeneration:draft.source.generation,text:draft.text,paths:draft.paths}) : {ok:false,error:"Orchestrator unavailable."};}} />}
+        />
+      </WorkspaceToolsDialog>}
+      <VoiceIndicator />
+      <VoicePushToTalk />
+      {newProjectOpen && <NewProjectDialog onClose={()=>setNewProjectOpen(false)}/>}
+
+      {shouldShowUpdateOverlay && updateState && (
+        <aside className="update-overlay" aria-live="polite">
+          <div className="update-overlay-heading">
+            <strong>
+              {updateState.status === "downloaded"
+                ? "Update ready"
+                : updateState.status === "switching"
+                  ? "Switching version"
+                  : updateState.status === "error"
+                    ? "Update failed"
+                    : "Update available"}
+            </strong>
+            {updateState.status !== "downloading" &&
+              updateState.status !== "switching" && (
+              <button
+                className="update-overlay-dismiss"
+                aria-label="Dismiss update notice"
+                onClick={dismissUpdateOverlay}
+              >
+                  <X size={13} />
+                </button>
+              )}
+          </div>
+
+          {/* No Restart button here on purpose: nothing is staged with
+              electron-updater, so its quitAndInstall would have nothing to
+              install. The installer is already running and closes the app. */}
+          {updateState.status === "switching" && (
+            <p>
+              Installing Lina Terminal {updateVersion}. The app will close and
+              reopen on that version.
+            </p>
+          )}
+
+          {updateState.status === "available" && (
+            <>
+              <p>Lina Terminal {updateVersion} is ready to download.</p>
+              <div className="update-overlay-actions">
+                <button onClick={dismissUpdateOverlay}>Later</button>
+                <button className="primary" onClick={downloadUpdate}>
+                  <Download size={15} />
+                  Update
+                </button>
+              </div>
+            </>
+          )}
+
+          {updateState.status === "downloading" && (
+            <>
+              <p>Downloading Lina Terminal {updateVersion}.</p>
+              <div
+                className="update-progress"
+                aria-label={`Update download ${updatePercent}%`}
+              >
+                <span style={{ width: `${updatePercent}%` }} />
+              </div>
+            </>
+          )}
+
+          {updateState.status === "downloaded" && (
+            <>
+              <p>Restart when your terminals are in a good place. The update installs silently.</p>
+              <div className="update-overlay-actions">
+                <button onClick={dismissUpdateOverlay}>Later</button>
+                <button className="primary" onClick={restartToUpdate}>
+                  <RefreshCw size={15} />
+                  Restart
+                </button>
+              </div>
+            </>
+          )}
+
+          {updateState.status === "error" && (
+            <>
+              <p>{updateState.errorMessage || "The update could not be installed."}</p>
+              <div className="update-overlay-actions">
+                <button onClick={dismissUpdateOverlay}>Dismiss</button>
+              </div>
+            </>
+          )}
+        </aside>
+      )}
+
+      {workspaceClosePending && (
+        <div
+          className="confirmation-backdrop"
+          onClick={cancelWorkspaceClose}
+        >
+          <section
+            className="confirmation-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="workspace-close-title"
+            aria-describedby="workspace-close-description"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="confirmation-mark" aria-hidden="true">
+              <Folder size={22} />
+            </div>
+
+            <div className="confirmation-copy">
+              <h2 id="workspace-close-title">
+                Close {workspaceClosePending.name}?
+              </h2>
+              <p id="workspace-close-description">
+                This removes the folder from the sidebar and closes{" "}
+                {formatCount(workspaceClosePendingSessionCount, "terminal pane")}.
+                Your files stay on disk.
+              </p>
+              <span>{workspaceClosePending.path}</span>
+            </div>
+
+            <div className="confirmation-actions">
+              <button onClick={cancelWorkspaceClose} autoFocus>
+                Cancel
+              </button>
+              <button
+                className="danger"
+                onClick={() => confirmWorkspaceClose(workspaceClosePending.id)}
+              >
+                Close Folder
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {settingsOpen && (
+        <SettingsDialog
+          hint={settingsHint}
+          selectedPanel={settingsPanel}
+          onPanelChange={setSettingsPanel}
+          onClose={() => {
+            setSettingsOpen(false);
+            setSettingsHint(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}

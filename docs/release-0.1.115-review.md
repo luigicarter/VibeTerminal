@@ -1,5 +1,9 @@
 # Release 0.1.115 verification
 
+The September 10 workflow was cancelled before publication. GitHub's latest
+published release remained 0.1.113 when checked on September 11. The 0.1.115 tag
+is retained; its changes are carried forward into 0.1.116.
+
 This candidate carries the terminal resource and Orchestrator repairs described
 in the [0.1.114 review](release-0.1.114-review.md), with a release-fixture repair.
 There are no application logic changes after that candidate's local acceptance.

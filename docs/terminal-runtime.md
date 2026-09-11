@@ -6,6 +6,15 @@ and result boundaries and acceptance checks.
 
 Standalone panes use a main-process runtime service. The renderer subscribes to retained snapshots, so switching workspaces or rebuilding xterm does not reset conversation discovery, status, or titles. Fusion and Open Fusion retain their chat-host lifecycle transports; all panes share the board geometry repairs.
 
+Claude/Codex clear/new-chat resume repairs are described in the
+[implementation and acceptance record](chat-resume-identity-fix-plan.md).
+An invocation-owned native session-start event now proposes the selected ID;
+exact root verification replaces the old reference without restarting the PTY.
+Pending IDs persist while panes are hidden and cannot fall back to older chats.
+Delayed old-root events and queued input remain tied to their original selection.
+This requires the updated instrumentation; native empty-chat and hook-review
+boundaries are recorded with the acceptance evidence.
+
 ## Wheel scrolling
 
 Terminal history retains the newest **5,000 scrollback rows**, plus the live
@@ -117,10 +126,11 @@ If an authenticated, unparented verified root conflicts with an already bound
 native conversation, the generation becomes ambiguous. The old reference remains
 available for history, while current turn/completion proof and automated input
 eligibility are retired. Delayed callbacks or metadata cannot establish which
-root the TUI selected; restart the pane to obtain a fresh generation. Explicit
+root the TUI selected. A verified invocation-owned selection event can now
+establish the replacement for supported Claude/Codex terminals; otherwise restart
+the pane to obtain a fresh generation. Explicit
 child/subagent events retain their separate handling, and manual terminal input
-remains available. This detects uncertainty around native `/new`; it does not
-implement automatic selected-root migration. See the
+remains available. Unproven roots still cannot replace the current selection. See the
 [consolidated cohesion review](orchestrator-cohesion-review.md).
 
 ## Titles and activity
@@ -158,6 +168,21 @@ Default solo minimum: **280×170 CSS pixels**. Automatic growth limit: **560×32
 Dragging previews the exact committed fit. Ordinary dragging prefers empty space; **hold Shift to swap** with another tile. Snapping acquires within 12px and releases beyond 18px. Impossible drops retain the last valid preview. Resize affects adjacent neighbors within minimum constraints and does not globally compact unaffected panes. Geometry accounts for scroll offsets and the viewport's client dimensions, excluding scrollbar width.
 
 After arrangement settles, xterm measures the final bounds and sends generation-scoped PTY dimensions. Hidden or zero-size bounds do not advertise default dimensions. Tail-following and intentionally viewed scrollback remain separate.
+
+## Web links
+
+`frontend/terminalLinks.ts` sends both plain URLs and OSC 8 labeled hyperlinks
+through the validated `app:open-external` IPC. Electron opens HTTP(S) destinations
+in the OS default browser, which controls tab/window reuse. Main-window popup
+and navigation requests use the same opener while keeping external documents
+out of Lina windows. App reloads and hash navigation still work.
+
+`node --test scripts/backend/main-navigation.test.cjs scripts/frontend/terminal-links.test.cjs`
+checks all entry points, protocol filtering, and browser-launch failures.
+`node scripts/qa/terminal-links-smoke.cjs` checks real xterm link discovery and
+activation, Electron IPC, popup and navigation events in an isolated hidden
+window. It reproduces xterm's default OSC 8 popup before applying the handler;
+the OS browser call is recorded instead of launching a real browser.
 
 ## Codex cursor
 

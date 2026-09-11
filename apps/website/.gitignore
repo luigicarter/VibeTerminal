@@ -1,0 +1,11 @@
+node_modules/
+dist/
+backend/dist/
+frontend/dist/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+*.log
+.tmp/
+backend/data/

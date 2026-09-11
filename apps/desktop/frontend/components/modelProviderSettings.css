@@ -1,0 +1,19 @@
+.model-provider-settings { min-width: 0; }
+.model-provider-settings button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid #414750; border-radius: 6px; padding: 8px 11px; background: #262c33; color: #dce1e8; font: inherit; font-size: 12px; cursor: pointer; }
+.model-provider-settings button:hover:not(:disabled) { background: #343c46; border-color: #697585; }
+.model-provider-settings button:focus-visible { outline: 2px solid #df9e55; outline-offset: 2px; }
+.model-provider-settings button:disabled { opacity: .45; cursor: default; }
+.model-provider-settings .settings-description { max-width: 68ch; line-height: 1.5; }
+.model-provider-settings fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.model-provider-field { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; color: #b9c0ca; font-size: 12px; }
+.model-provider-field input, .model-provider-field select { min-width: 0; width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid #39404a; border-radius: 6px; background: #15191e; color: #e8ebef; font: inherit; }
+.model-provider-field input:focus-visible, .model-provider-field select:focus-visible { outline: 2px solid #df9e55; outline-offset: 1px; }
+.model-provider-model-add { display: flex; align-items: end; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.model-provider-model-add .model-provider-field { flex: 1 1 200px; margin: 0; }
+.model-provider-models { display: grid; gap: 10px; }
+.model-provider-model { padding: 12px; border: 1px solid #343b43; border-radius: 8px; background: #191e24; }
+.model-provider-model-heading { display: flex; gap: 12px; justify-content: space-between; align-items: center; }
+.model-provider-model-heading strong { overflow-wrap: anywhere; font-size: 12px; }
+.model-provider-model-features { display: flex; flex-wrap: wrap; gap: 16px; font-size: 12px; }
+.model-provider-model-features label { display: flex; gap: 6px; align-items: center; }
+.model-provider-settings .provider-form-actions { display: flex; gap: 8px; margin-top: 16px; }

@@ -1,0 +1,35 @@
+.oc-skin .fusion-slash-panel.fusion-command-palette {
+  padding: 0;
+  overflow: hidden;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--oc-muted) 28%, transparent);
+  background: var(--oc-bg);
+  box-shadow: 0 14px 40px #0007;
+  min-width: 0;
+  order: -1;
+}
+.fusion-palette-header { display: flex; align-items: center; gap: 8px; padding: 11px 12px; border-bottom: 1px solid #ffffff0d; }
+.fusion-palette-heading { flex: 1; min-width: 0; }
+.fusion-command-palette .fusion-slash-title { padding: 0; font-size: 11px; text-transform: none; letter-spacing: 0; overflow-wrap: anywhere; }
+.fusion-palette-search-hint { display: block; font-size: 10px; color: var(--oc-muted); margin-top: 3px; }
+.fusion-palette-header button { flex: 0 0 26px; height: 26px; border: 1px solid #ffffff12; border-radius: 6px; background: transparent; color: var(--oc-text); cursor: pointer; }
+.fusion-palette-header button:hover { background: #ffffff0d; }
+.fusion-palette-header button:focus-visible, .fusion-command-trigger:focus-visible { outline: 2px solid var(--oc-primary); outline-offset: 2px; }
+.fusion-command-palette .fusion-slash-menu { padding: 5px; max-height: min(350px, 36vh); overscroll-behavior: contain; scrollbar-gutter: stable; }
+.fusion-command-palette .fusion-slash-item { align-items: center; padding: 8px 10px; gap: 12px; min-width: 0; }
+.fusion-palette-copy { display: flex; flex: 1; flex-direction: column; min-width: 0; gap: 3px; }
+.fusion-command-palette .fusion-slash-name { font-size: 12px; white-space: normal; overflow-wrap: anywhere; }
+.fusion-command-palette .fusion-slash-desc { white-space: normal; overflow-wrap: anywhere; line-height: 1.4; font-size: 11px; }
+.fusion-palette-section { padding: 10px 10px 5px; text-transform: uppercase; letter-spacing: .09em; color: var(--oc-muted); font-size: 9px; font-weight: 700; }
+.fusion-palette-current { color: var(--oc-primary); font-size: 10px; white-space: nowrap; }
+.fusion-palette-action { color: var(--oc-muted); font-size: 15px; }
+.fusion-command-palette .is-disabled { cursor: default; opacity: .65; }
+.fusion-palette-empty { color: var(--oc-muted); padding: 22px 12px; font-size: 12px; line-height: 1.5; }
+.fusion-palette-footer { display: flex; flex-wrap: wrap; gap: 14px; padding: 8px 12px; border-top: 1px solid #ffffff0d; color: var(--oc-muted); font-size: 10px; }
+.fusion-palette-footer kbd { font: inherit; color: var(--oc-text); padding-right: 3px; }
+.fusion-command-trigger { border: 0; background: transparent; color: var(--oc-muted); font: inherit; cursor: pointer; padding: 0; }
+.fusion-command-trigger:hover { color: var(--oc-primary); }
+.oc-skin button.oc-prompt-model { appearance: none; background: transparent; border: 0; padding: 2px 4px; border-radius: 4px; font: inherit; color: var(--oc-text); cursor: pointer; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.oc-skin button.oc-prompt-model:hover { background: #ffffff0d; }
+.oc-skin button.oc-prompt-model:focus-visible { outline: 2px solid var(--oc-primary); outline-offset: 2px; }
+.oc-skin .oc-prompt-meta { flex-wrap: wrap; }

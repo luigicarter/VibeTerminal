@@ -4,10 +4,10 @@ Lina Terminal ships to Windows users as an Electron Builder NSIS installer hoste
 
 ## Current Public Release
 
-The current Windows release is `v0.1.115`:
+The Windows release for this revision is `v0.1.116`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.115`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.115/LinaTerminal-Setup-0.1.115.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.116`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.116/LinaTerminal-Setup-0.1.116.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -66,11 +66,11 @@ The compiled `dist/` renderer is still included because it is the UI Electron di
 
 ## Local Build
 
-Version `0.1.115` releases closed-terminal resources, batches screen observation,
-and publishes terminal activity without copying unchanged conversation history.
-It also tightens conditional closure and conversation identity checks, repairs
-workspace activity counts, and aligns model readiness with the current planner.
-See [the release review](release-0.1.115-review.md),
+Version `0.1.116` adds shared model/provider settings, separate Open Codex and
+Codex Web integrations, current-chat resume tracking, refreshed Fusion menus,
+and Git branch/worktree inspection. It includes the terminal resource and
+Orchestrator repairs from the unpublished 0.1.114/0.1.115 candidates.
+See [the release review](release-0.1.116-review.md),
 [the performance review](performance-orchestrator-overhaul-2026-09-10.md) and
 [the capability audit](orchestrator-capability-audit-2026-09-10.md) for verification
 and remaining boundaries.
@@ -80,12 +80,15 @@ publication does not restart an active workspace.
 Use these commands before publishing a release:
 
 ```powershell
+cd apps/desktop
 npm ci
 node node_modules/electron/install.js
 $codexVersion = (Get-ChildItem vendor/codex-appserver -Directory | Where-Object Name -match '^\d+\.\d+\.\d+$').Name
 npm install --prefix .tmp/codex-release-cli --no-save "@openai/codex@$codexVersion"
 $env:VIBE_CODEX_BIN_SEARCH_ROOTS = (Resolve-Path .tmp/codex-release-cli/node_modules/@openai).Path
 npm run prepare:codex-bin:required
+npm run prepare:open-codex
+npm run prepare:codex-web
 npm run prepare:voice
 npm run typecheck
 npm run smoke:backend:codex-discovery
@@ -109,7 +112,8 @@ npm run smoke:frontend:tiled-resize
 npm run dist:win -- --publish never
 ```
 
-The installer artifacts are written to `release/`:
+Run desktop release commands from `apps/desktop`; artifacts are written to its
+`release/` directory. Root `npm run dist:win` forwards to this app directory.
 
 - `release/LinaTerminal-Setup-<version>.exe`
 - `release/LinaTerminal-Setup-<version>.exe.blockmap`
@@ -143,6 +147,9 @@ Production downloads and update metadata live in the public GitHub repository:
 `https://github.com/luigicarter/VibeTerminal/releases`
 
 The GitHub Actions workflow `.github/workflows/windows-release.yml` builds on `windows-latest`.
+It initializes the pinned Codex reference submodule used by the native fixtures,
+prepares the separate Open Codex and Codex Web payloads before acceptance, and
+validates their packaged executables, helpers, and Web runtime checksums.
 It builds the renderer before release checks and explicitly installs and verifies
 the pinned Electron executable for UI tests;
 the Electron npm package does not provide an automatic install lifecycle script.

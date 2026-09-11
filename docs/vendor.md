@@ -4,6 +4,8 @@ The `vendor/` folder stores external reference material that is useful locally b
 
 ## Folders
 
+- `vendor/codex-web/` - Ignored, generated executable resource for the Codex Web preview. `npm run prepare:codex-web` builds pinned `miuuyy/codex-chatgpt-web` plus a pinned Bun runtime and retained license notices. Lina loads the launcher only in a dedicated Electron process; this is an explicit runtime exception to the reference-only rule below. Do not import the bridge into the main Lina process or renderer. See `docs/codex-web.md` for patching, account isolation, setup and acceptance limits.
+
 - `vendor/codex-official/` - Local copy of the official Codex project/reference tree. The app does not import from this folder, and normal build, run, typecheck, and screenshot commands should not depend on it.
 - `vendor/kimi-custom/` - Runtime copy of the custom Kimi Code fork (kimi-k3 via Moonshot's Anthropic-compatible endpoint + claude-code profile set): the prebuilt `dist/main.mjs`, `native/` console-mode prebuilds, `package.json`, and the `bin/kimi-custom(.cmd)` launcher wrappers that the "Kimi + CC" agent option runs via the shim. The app *executes* this bundle (like `vendor/codex-bin/`) but never imports its code; the API key file `api.txt` is gitignored (optional platform key — without it the providers configured in the shared `~/.kimi-code` apply). The `.cmd` wrapper first runs `chcp 65001` so the TUI's UTF-8 box-drawing survives legacy conhost windows that default to the OEM code page. Refresh by re-copying `dist/`, `native/`, and `package.json` from the fork's `apps/kimi-code/` after a rebuild there.
 

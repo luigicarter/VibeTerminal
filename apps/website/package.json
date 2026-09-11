@@ -1,0 +1,19 @@
+{
+  "name": "vibeterminal-website",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "node scripts/dev.cjs",
+    "start": "npm run start --workspace backend",
+    "test": "node --import tsx --test scripts/site.test.mjs",
+    "build": "npm run build --workspace backend && npm run build --workspace frontend",
+    "typecheck": "npm run typecheck --workspace backend && npm run typecheck --workspace frontend",
+    "dev:backend": "npm run dev --workspace backend",
+    "dev:frontend": "npm run dev --workspace frontend",
+    "prebuild": "node ../../scripts/sync-brand.cjs website"
+  }
+}

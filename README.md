@@ -1,5 +1,32 @@
 # Lina Terminal
 
+This repository contains the desktop app and its website as independent applications:
+
+| Location | Responsibility |
+| --- | --- |
+| `apps/desktop/` | Electron app, renderer, terminals, agent integrations, and Windows packaging |
+| `apps/website/` | Marketing site, public user documentation, pricing, and website API |
+| `packages/brand/` | Shared logo source and exports |
+| `docs/` | Engineering documentation |
+| `scripts/` | Repository commands and shared tooling |
+
+From the repository root:
+
+```powershell
+npm run setup:website
+npm run dev:website
+```
+
+The website opens at **http://127.0.0.1:5174**. Its API uses port 3001.
+For desktop development, use `npm run setup:desktop` then `npm run dev:desktop`
+(renderer port 5173). Use `npm run build:website`, `npm run build:desktop`, and
+`npm test` for the corresponding builds and repository/website checks.
+
+Each app owns its own dependency lockfile. Root `npm ci` only installs root
+tooling; use `npm run setup` to install both apps. Existing desktop npm command
+names continue to work through root forwarding scripts. See
+[repository layout](docs/repository-layout.md) for migration and release details.
+
 Lina Terminal is a Windows desktop app for keeping local terminals and coding
 agents in one organized workspace.
 
@@ -12,7 +39,7 @@ to which task.
 
 | Platform | Download | Notes |
 | --- | --- | --- |
-| Windows x64 | [LinaTerminal-Setup-0.1.115.exe](https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.115/LinaTerminal-Setup-0.1.115.exe) | Standard Windows installer. |
+| Windows x64 | [LinaTerminal-Setup-0.1.116.exe](https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.116/LinaTerminal-Setup-0.1.116.exe) | Standard Windows installer. |
 | All releases | [GitHub Releases](https://github.com/luigicarter/VibeTerminal/releases) | Older versions and release assets. |
 
 Lina Terminal was previously named vibeTerminal. Existing settings and workspaces

@@ -2,6 +2,16 @@
 
 The `scripts/` folder is split by purpose so app launch, backend validation, and visual QA do not sit in one flat bucket.
 
+`npm run test:model-providers` verifies shared settings migration, both API
+interfaces, and protocol compatibility. `npm run smoke:model-providers` runs
+both native CLIs against one configured mock provider and checks the shared
+settings/launcher UI in hidden Electron. See [shared providers](model-providers.md).
+
+Open Codex uses `npm run prepare:open-codex` for its separate bundled CLI,
+`npm run test:open-codex` for provider/adapter/lifecycle tests, and
+`npm run smoke:open-codex` for native coding/resume and hidden Electron model
+selection, settings, and history checks. See [Open Codex](open-codex.md).
+
 `npm run smoke:electron:orchestrator-navigation` verifies all workspace views and
 real project removal/re-addition with a preserved file and unrelated terminal.
 `node scripts/qa/orchestrator-terminal-inspection-live.cjs --all` runs the bounded
@@ -108,7 +118,9 @@ task-UI and two-process session-resume smokes. See the
 - `npm run smoke:backend:kimi-custom-discovery` - Backend smoke test for kimi-custom thread discovery.
 - `npm run smoke:backend:qwen-discovery` - Backend smoke test for qwen thread discovery.
 - `npm run smoke:backend:agent-telemetry` - Backend smoke test for vibeTerminal-owned agent telemetry shims.
-- `npm run smoke:backend:code-changes` - Backend smoke test for code-change tracking.
+- `npm run smoke:backend:code-changes` - Status/no-HEAD smoke test and backend branch/worktree regressions.
+- `npm run test:git-branches` - Git fixtures, failure/concurrency checks, stale-response regressions and branch display state/position tests.
+- `npm run smoke:electron:git-branches` - Hidden Electron branch popup geometry, keyboard access, refresh and project-switch checks. Add `-- --screenshots` to opt into a visible QA window and PNG capture.
 - `npm run smoke:backend:launch-cwd` - Backend smoke test for terminal/Fusion launch cwd validation.
 - `npm run smoke:backend:cli-probe` - Backend smoke test for the launch-time installed-CLI PATH scan.
 - `npm run smoke:backend:updates` - Backend smoke test for update policy and silent Windows update apply behavior.

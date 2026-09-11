@@ -16,6 +16,8 @@ Runtime artifacts are generated during install, build, development, smoke tests,
 
 ## Cleanup Policy
 
+- Codex Web keeps `codex-web/{codex-home,browser,bridge,logs}` under Electron userData. Native Codex owns `codex-home/sessions/`, `history.jsonl`, its thread database and settings; Lina does not create a duplicate conversation store. These histories and browser/login stores are user data and survive pane closure and Web logout. Only bounded diagnostic logs are routinely pruned. `vendor/codex-web/` and `.tmp/codex-web-build/` are rebuildable resources; they do not contain the user's live login.
+
 - `dist/`, `release/`, `.tmp/`, and `artifacts/` are safe to delete because they are rebuildable and ignored by `.gitignore`.
 - `node_modules/` is rebuildable with `npm install`, but it is intentionally kept unless the cleanup goal is to reduce disk usage.
 - Screenshot QA recreates `artifacts/` automatically.

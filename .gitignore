@@ -5,12 +5,36 @@ artifacts/
 output/
 release/
 npm-debug.log*
+# Local credentials and environment overrides.
+.env
+.env.*
+!.env.example
 .cursor/
 # Embedded Codex binary (~300 MB) — populated by `npm run prepare:codex-bin`,
 # bundled into the installer via electron-builder extraResources.
-vendor/codex-bin/
+apps/desktop/vendor/codex-bin/
+apps/desktop/vendor/open-codex/
+apps/desktop/vendor/codex-web/
 # Vendored custom Kimi Code fork runtime: the top-level `dist/` rule would hide
 # the prebuilt bundle, so re-include it. The API key file is a local secret —
 # never commit it.
-!vendor/kimi-custom/dist/
-vendor/kimi-custom/api.txt
+!apps/desktop/vendor/kimi-custom/dist/
+apps/desktop/vendor/kimi-custom/api.txt
+
+# Local migration compatibility junctions; canonical source lives in apps/desktop.
+/backend/
+/frontend/
+/preload/
+/shared/
+/build/
+/vendor/
+/scripts/app/
+/scripts/backend/
+/scripts/frontend/
+/scripts/dev/
+/scripts/qa/
+/apps/desktop/docs/
+*.tsbuildinfo
+*.log
+# Local website signup data is recreated by the API and must not be committed.
+/apps/website/backend/data/

@@ -170,7 +170,7 @@ Sources: [settings UI](../frontend/components/OrchestratorSettings.tsx), [activa
 
 ## 4. Microphone capture and wake detection
 
-The microphone stays open while voice is enabled, including during idle listening. Capture requests mono audio, echo cancellation, noise suppression and automatic gain control. It uses the selected device ID exactly, or the system default when no ID is saved. There is no automatic fallback from an unavailable explicitly selected microphone.
+The microphone stays open while voice is enabled, including during idle listening. Capture requests mono audio, echo cancellation and noise suppression, with automatic gain control explicitly disabled so Lina does not request automatic input-level adjustments. The settings microphone-refresh capture also disables automatic gain control. It uses the selected device ID exactly, or the system default when no ID is saved. There is no automatic fallback from an unavailable explicitly selected microphone.
 
 The AudioWorklet converts the actual input sample rate to 16 kHz, then sends 320 samples per packet: **20 milliseconds of audio**. Packets carry a capture token and increasing sample positions. A zero-gain output connection keeps the audio graph active without playing microphone input through the speakers.
 

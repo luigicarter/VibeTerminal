@@ -86,8 +86,8 @@ token and sample position. A worklet flush/acknowledgment includes the final par
 packet before a manual release can submit. Old capture frames, duplicate packets,
 and obsolete flush acknowledgments are rejected.
 
-During playback, the microphone keeps its existing echo cancellation, noise
-suppression, and automatic gain control. A current keyword detection interrupts
+During playback, the microphone keeps its existing echo cancellation and noise
+suppression; automatic gain control stays disabled. A current keyword detection interrupts
 speech; ordinary speech activity alone does not. The two-second capture buffer
 preserves the wake phrase and command onset across cancellation. Stale detector,
 speech-provider, and playback callbacks cannot replace the new recording.

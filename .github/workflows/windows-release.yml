@@ -14,15 +14,22 @@ jobs:
     name: Build Windows installer
     runs-on: windows-latest
 
+    defaults:
+      run:
+        working-directory: apps/desktop
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
 
       - name: Install dependencies
         run: npm ci
@@ -54,6 +61,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Codex installation failed." }
           npm run prepare:codex-bin:required
           if ($LASTEXITCODE -ne 0) { throw "Codex preparation failed." }
+
+      - name: Prepare separate Open Codex and Codex Web runtimes
+        shell: pwsh
+        run: |
+          npm run prepare:open-codex
+          if ($LASTEXITCODE -ne 0) { throw "Open Codex preparation failed." }
+          npm run prepare:codex-web
+          if ($LASTEXITCODE -ne 0) { throw "Codex Web preparation failed." }
 
       - name: Build renderer for release checks
         run: npm run build
@@ -146,7 +161,7 @@ jobs:
             gh release upload $tag @files --repo $repo --clobber
             if ($LASTEXITCODE -ne 0) { throw "Release asset upload failed." }
           } else {
-            $notes = "docs/releases/$version.md"
+            $notes = "../../docs/releases/$version.md"
             if (Test-Path -LiteralPath $notes) {
               gh release create $tag @files --repo $repo --title $version --latest --notes-file $notes
             } else {
@@ -161,9 +176,9 @@ jobs:
         with:
           name: LinaTerminal-windows-installer
           path: |
-            release/*.exe
-            release/*.blockmap
-            release/latest.yml
+            apps/desktop/release/*.exe
+            apps/desktop/release/*.blockmap
+            apps/desktop/release/latest.yml
 
       - name: Upload UI diagnostics on failure
         if: failure()
@@ -174,20 +189,24 @@ jobs:
           if-no-files-found: ignore
           include-hidden-files: true
           path: |
-            .tmp/voice-experience-smoke/**/results.json
-            .tmp/voice-experience-smoke/**/electron.log
-            .tmp/voice-experience-smoke/**/events.jsonl
-            .tmp/voice-experience-smoke/**/*.png
-            .tmp/context-history-smoke/**/results.json
-            .tmp/context-history-smoke/**/electron.log
-            .tmp/context-history-smoke/**/*.png
-            .tmp/orchestrator-task-ui-smoke/**/results.json
-            .tmp/orchestrator-task-ui-smoke/**/electron.log
-            .tmp/orchestrator-task-ui-smoke/**/*.png
-            .tmp/orchestrator-smoke/**/results.json
-            .tmp/orchestrator-smoke/**/electron.log
-            .tmp/orchestrator-close-smoke/**/results.json
-            .tmp/orchestrator-close-smoke/**/electron.log
-            .tmp/orchestrator-close-smoke/**/*.png
-            .tmp/orchestrator-navigation-smoke/**/results.json
-            .tmp/orchestrator-navigation-smoke/**/electron.log
+            apps/desktop/.tmp/voice-experience-smoke/**/results.json
+            apps/desktop/.tmp/voice-experience-smoke/**/electron.log
+            apps/desktop/.tmp/voice-experience-smoke/**/events.jsonl
+            apps/desktop/.tmp/voice-experience-smoke/**/*.png
+            apps/desktop/.tmp/context-history-smoke/**/results.json
+            apps/desktop/.tmp/context-history-smoke/**/electron.log
+            apps/desktop/.tmp/context-history-smoke/**/*.png
+            apps/desktop/.tmp/orchestrator-task-ui-smoke/**/results.json
+            apps/desktop/.tmp/orchestrator-task-ui-smoke/**/electron.log
+            apps/desktop/.tmp/orchestrator-task-ui-smoke/**/*.png
+            apps/desktop/.tmp/orchestrator-smoke/**/results.json
+            apps/desktop/.tmp/orchestrator-smoke/**/electron.log
+            apps/desktop/.tmp/orchestrator-close-smoke/**/results.json
+            apps/desktop/.tmp/orchestrator-close-smoke/**/electron.log
+            apps/desktop/.tmp/orchestrator-close-smoke/**/*.png
+            apps/desktop/.tmp/orchestrator-navigation-smoke/**/results.json
+            apps/desktop/.tmp/orchestrator-navigation-smoke/**/electron.log
+            apps/desktop/.tmp/orchestrator-background-launch-smoke/**/results.json
+            apps/desktop/.tmp/orchestrator-background-launch-smoke/**/electron.log
+            apps/desktop/.tmp/codex-web-tui-*/results.json
+            apps/desktop/.tmp/open-codex/electron-*/electron.log

@@ -6,6 +6,12 @@ allowlisted Orchestrator configuration and capability limits, and live reads
 revalidate pane/conversation ownership after awaiting output. Free-form product
 answers and missing child-approval identity remain demonstrated reliability gaps.
 
+The [scoped agent harness](orchestrator-agent-harness-progress.md) adds automatic
+project assignment, verified task continuation and on-demand agent records. It
+also repairs the demonstrated Claude missing-ID approval disappearing after an
+unrelated tool return; unresolved identity is retained explicitly. The review
+distinguishes current source tests from the installed build.
+
 The current [harness overhaul](orchestrator-harness-overhaul.md) adds semantic
 inspection and folder controls, application-managed inspection completion, and
 project removal that preserves files. It supersedes older external-folder and

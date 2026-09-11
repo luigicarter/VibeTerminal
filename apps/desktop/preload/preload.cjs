@@ -1,0 +1,329 @@
+const { clipboard, contextBridge, ipcRenderer, webUtils } = require("electron");
+
+function parseWindowsClipboardFilePaths() {
+  if (process.platform !== "win32") {
+    return [];
+  }
+  try {
+    if (!clipboard.availableFormats().includes("FileNameW")) {
+      return [];
+    }
+    const buffer = clipboard.readBuffer("FileNameW");
+    if (!buffer || buffer.length === 0) {
+      return [];
+    }
+    return buffer
+      .toString("utf16le")
+      .replace(/\0+$/, "")
+      .split("\0")
+      .map((value) => value.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function getPathForDroppedFile(file) {
+  try {
+    return webUtils?.getPathForFile?.(file) || file?.path || "";
+  } catch {
+    return file?.path || "";
+  }
+}
+
+function screenshotFixtureFromEnv() {
+  if (process.env.VIBE_SCREENSHOT_SEED_OPEN_FUSION === "1") {
+    return {
+      mode: "openfusion",
+      cwd: process.env.VIBE_SCREENSHOT_FIXTURE_CWD || "",
+      openCodeCommand: process.env.VIBE_SCREENSHOT_OPENCODE_COMMAND || ""
+    };
+  }
+  if (process.env.VIBE_SCREENSHOT_SEED_FUSION_PICKER === "1") {
+    const role = process.env.VIBE_SCREENSHOT_FUSION_PICKER_ROLE === "executor" ? "executor" : "planner";
+    const family = process.env.VIBE_SCREENSHOT_FUSION_PICKER_FAMILY === "codex" ? "codex" : "claude";
+    return {
+      mode: "fusion-picker",
+      cwd: process.env.VIBE_SCREENSHOT_FIXTURE_CWD || "",
+      role,
+      family
+    };
+  }
+  if (process.env.VIBE_SCREENSHOT_SEED_FUSION_BUILDS === "1") {
+    return {
+      mode: "fusion-builds",
+      cwd: process.env.VIBE_SCREENSHOT_FIXTURE_CWD || ""
+    };
+  }
+  if (process.env.VIBE_SCREENSHOT_SEED_SPLIT === "1") {
+    return {
+      mode: "split",
+      cwd: process.env.VIBE_SCREENSHOT_FIXTURE_CWD || ""
+    };
+  }
+  return null;
+}
+
+const screenshotFixture = screenshotFixtureFromEnv();
+const subscribe = (channel, callback) => {
+  const listener = (_event, payload) => callback(payload);
+  ipcRenderer.on(channel, listener);
+  return () => ipcRenderer.removeListener(channel, listener);
+};
+
+contextBridge.exposeInMainWorld("vibe", {
+  // The launch command is typed into the platform shell (PowerShell on Windows,
+  // the login shell on POSIX), so the renderer needs the platform to quote args
+  // for the right shell.
+  platform: process.platform,
+  orchestrator: {
+    stopSessionObserved: payload => ipcRenderer.invoke('orchestrator:stop-session-observed', payload),
+    getState: () => ipcRenderer.invoke("orchestrator:get-state"),
+    onState: callback => subscribe("orchestrator:state", callback),
+    onActivity: callback => subscribe("orchestrator:activity", callback),
+    configure: patch => ipcRenderer.invoke("orchestrator:configure", patch),
+    models: async kind => { const result = await ipcRenderer.invoke("orchestrator:models", { kind }); if (!Array.isArray(result)) throw new Error(result?.error || "Could not load models."); return result; },
+    testConnection: () => ipcRenderer.invoke("orchestrator:test"),
+    setEnabled: enabled => ipcRenderer.invoke("orchestrator:enabled", { enabled }),
+    send: payload => ipcRenderer.invoke("orchestrator:send", payload),
+    enqueue: payload => ipcRenderer.invoke("orchestrator:enqueue", payload),
+    retry: payload => ipcRenderer.invoke("orchestrator:retry", payload),
+    clearHistory: () => ipcRenderer.invoke("orchestrator:history-clear"),
+    cancel: payload => ipcRenderer.invoke("orchestrator:cancel", payload),
+    dispatch: payload => ipcRenderer.invoke("orchestrator:dispatch", payload),
+    preferences: payload => ipcRenderer.invoke("orchestrator:preferences", payload),
+    showOverlay: () => ipcRenderer.invoke("orchestrator:overlay"),
+    openMain: () => ipcRenderer.invoke("orchestrator:open-main"),
+    getChanges: payload => ipcRenderer.invoke("orchestrator:changes", payload),
+    listChanges: payload => ipcRenderer.invoke("orchestrator:changes-list", payload),
+    readChange: payload => ipcRenderer.invoke("orchestrator:change-read", payload),
+    onUiAction: callback => subscribe("orchestrator:ui-action", callback),
+    completeUiAction: (id, result) => ipcRenderer.send("orchestrator:ui-result", { id, result })
+  },
+  setups: {
+    list: payload => ipcRenderer.invoke("orchestrator:setups-list", payload),
+    save: recipe => ipcRenderer.invoke("orchestrator:setups-save", recipe),
+    remove: id => ipcRenderer.invoke("orchestrator:setups-remove", { id })
+  },
+  voice: {
+    getState: () => ipcRenderer.invoke("voice:get-state"),
+    onState: callback => subscribe("voice:state", callback),
+    configure: payload => ipcRenderer.invoke("voice:configure", payload),
+    setListening: enabled => ipcRenderer.invoke("voice:listening", { enabled }),
+    sendAudio: payload => ipcRenderer.invoke("voice:send-audio", payload),
+    cancelSpeech: () => ipcRenderer.invoke("voice:cancel-speech"),
+    frames: payload => ipcRenderer.send("voice:frames", payload),
+    onFlush: callback => subscribe("voice:flush", callback),
+    onAudio: callback => subscribe("voice:audio", callback)
+  },
+  app: {
+    getCwd: () => ipcRenderer.invoke("app:get-cwd"),
+    // Presence-on-PATH for each agent CLI, probed once at launch. Pass
+    // { refresh: true } to re-scan after the user installs something.
+    getInstalledClis: (options) =>
+      ipcRenderer.invoke("app:installed-clis", options || {}),
+    screenshotFixture,
+    getScreenshotFixture: () =>
+      screenshotFixture
+        ? Promise.resolve(screenshotFixture)
+        : ipcRenderer.invoke("app:get-screenshot-fixture")
+  },
+  clipboard: {
+    readText: () => clipboard.readText(),
+    writeText: (text) => clipboard.writeText(String(text ?? "")),
+    readFilePaths: () => parseWindowsClipboardFilePaths()
+  },
+  // Native application menu actions ("menu:event" broadcasts from main).
+  menu: {
+    onEvent: (callback) => {
+      const listener = (_event, payload) => callback(payload);
+      ipcRenderer.on("menu:event", listener);
+      return () => ipcRenderer.removeListener("menu:event", listener);
+    }
+  },
+  updates: {
+    getState: () => ipcRenderer.invoke("updates:get-state"),
+    check: () => ipcRenderer.invoke("updates:check"),
+    download: () => ipcRenderer.invoke("updates:download"),
+    restart: () => ipcRenderer.invoke("updates:restart"),
+    listVersions: () => ipcRenderer.invoke("updates:list-versions"),
+    installVersion: (version) =>
+      ipcRenderer.invoke("updates:install-version", { version }),
+    onEvent: (callback) => {
+      const listener = (_event, payload) => callback(payload);
+      ipcRenderer.on("updates:event", listener);
+      return () => ipcRenderer.removeListener("updates:event", listener);
+    }
+  },
+  workspace: {
+    selectFolder: () => ipcRenderer.invoke("workspace:select-folder"),
+    getCodeChanges: (cwd) =>
+      ipcRenderer.invoke("workspace:code-changes", { cwd }),
+    getBranches: (cwd) =>
+      ipcRenderer.invoke("workspace:branches", { cwd }),
+    openInExplorer: (path) =>
+      ipcRenderer.invoke("workspace:open-in-explorer", { path }),
+    openTerminal: (path) =>
+      ipcRenderer.invoke("workspace:open-terminal", { path })
+  },
+  files: {
+    getPathForFile: (file) => getPathForDroppedFile(file),
+    describePaths: (payload) => ipcRenderer.invoke("files:describe-paths", payload)
+  },
+  agentThreads: {
+    findLatest: (payload) => ipcRenderer.invoke("agent-thread:latest", payload),
+    list: (payload) => ipcRenderer.invoke("agent-thread:list", payload)
+  },
+  terminal: {
+    create: (payload) => ipcRenderer.invoke("terminal:create", payload),
+    attach: (payload) => ipcRenderer.invoke("terminal:attach", payload),
+    input: (id, data, scope = {}) => ipcRenderer.send("terminal:input", { ...scope, id, data }),
+    resize: (id, cols, rows, scope = {}) =>
+      ipcRenderer.send("terminal:resize", { ...scope, id, cols, rows }),
+    kill: (id, scope = {}) => ipcRenderer.invoke("terminal:kill", { ...scope, id }),
+    getRuntimeSnapshots: () => ipcRenderer.invoke("terminal:get-runtime-snapshots"),
+    onRuntime: (callback) => {
+      const listener = (_event, snapshot) => callback(snapshot);
+      ipcRenderer.on("terminal:runtime", listener);
+      return () => ipcRenderer.removeListener("terminal:runtime", listener);
+    },
+    showContextMenu: (payload) =>
+      ipcRenderer.invoke("terminal:show-context-menu", payload),
+    onContextMenuPaste: (callback) => {
+      const listener = (_event, payload) => callback(payload);
+      ipcRenderer.on("terminal:context-menu-paste", listener);
+      return () =>
+        ipcRenderer.removeListener("terminal:context-menu-paste", listener);
+    },
+    onEvent: (callback) => {
+      const listener = (_event, payload) => callback(payload);
+      ipcRenderer.on("terminal:event", listener);
+      return () => ipcRenderer.removeListener("terminal:event", listener);
+    }
+  },
+  // Headless Claude chat for Fusion panes (no PTY). `start` spawns a per-pane
+  // headless `claude`; `sendUserTurn` writes a user message to its stdin;
+  // `onEvent` streams normalized chat events; `stop` ends it.
+  codexWeb: {
+    action: payload => ipcRenderer.invoke('codex-web:action', payload),
+    onEvent: callback => {
+      const listener = (_event, payload) => callback(payload);
+      ipcRenderer.on('codex-web:event', listener);
+      return () => ipcRenderer.removeListener('codex-web:event', listener);
+    }
+  },
+  fusionChat: {
+    answerQuestion: (id, requestId, answers) => ipcRenderer.invoke("fusion-chat:answer-question", { id, requestId, answers }),
+    start: (payload) => ipcRenderer.invoke("fusion-chat:start", payload),
+    updateSettings: (id, settings) =>
+      ipcRenderer.invoke("fusion-chat:update-settings", { id, ...settings }),
+    sendUserTurn: (id, text) => ipcRenderer.send("fusion-chat:input", { id, text }),
+    setMode: (id, mode) => ipcRenderer.invoke("fusion-chat:set-mode", { id, mode }),
+    steer: (id, text) => ipcRenderer.send("fusion-chat:steer", { id, text }),
+    interrupt: (id) => ipcRenderer.invoke("fusion-chat:interrupt", { id }),
+    backgroundCancel: (id, taskId) =>
+      ipcRenderer.invoke("fusion-chat:background-cancel", { id, taskId }),
+    buildCancel: (id, buildId) =>
+      ipcRenderer.invoke("fusion-chat:build-cancel", { id, buildId }),
+    stop: (id) => ipcRenderer.invoke("fusion-chat:stop", { id }),
+    onEvent: (callback) => {
+      const listener = (_event, payload) => callback(payload);
+      ipcRenderer.on("fusion-chat:event", listener);
+      return () => ipcRenderer.removeListener("fusion-chat:event", listener);
+    }
+  },
+  fusionModelCatalog: {
+    list: (payload) => ipcRenderer.invoke("fusion-model-catalog:list", payload)
+  },
+  // Claude provider profiles (Settings dialog). Profiles are sanitized
+  // main-process-side — `hasKey` flags only, never key material.
+  modelProviders: {
+    list: () => ipcRenderer.invoke('model-providers:list'),
+    upsert: input => ipcRenderer.invoke('model-providers:upsert', input),
+    remove: id => ipcRenderer.invoke('model-providers:delete', { id }),
+    setDefault: key => ipcRenderer.invoke('model-providers:set-default', { key }),
+    discoverModels: input => ipcRenderer.invoke('model-providers:models', input)
+  },
+  openCodexProviders: {
+    list: () => ipcRenderer.invoke('open-codex-providers:list'),
+    upsert: input => ipcRenderer.invoke('open-codex-providers:upsert', input),
+    remove: id => ipcRenderer.invoke('open-codex-providers:delete', { id }),
+    setDefault: key => ipcRenderer.invoke('open-codex-providers:set-default', { key }),
+    discoverModels: input => ipcRenderer.invoke('open-codex-providers:models', input)
+  },
+  claudeProviders: {
+    list: () => ipcRenderer.invoke("claude-providers:list"),
+    listModels: () => ipcRenderer.invoke("claude-providers:models"),
+    upsert: (profile) => ipcRenderer.invoke("claude-providers:upsert", profile),
+    remove: (id) => ipcRenderer.invoke("claude-providers:delete", { id }),
+    setDefault: (id) => ipcRenderer.invoke("claude-providers:set-default", { id }),
+    test: (payload) => ipcRenderer.invoke("claude-providers:test", payload)
+  },
+  // Headless OpenCode chat for Open Fusion panes (no PTY, no TUI). `start`
+  // spawns a per-pane `opencode serve`; `sendUserTurn` posts a planner prompt;
+  // `onEvent` streams normalized chat events shared with the Fusion pane shape.
+  openFusionChat: {
+    start: (payload) => ipcRenderer.invoke("openfusion-chat:start", payload),
+    saveModels: (id, models) =>
+      ipcRenderer.invoke("openfusion-chat:save-models", { id, ...models }),
+    requestProviders: (id) => ipcRenderer.invoke("openfusion-chat:providers", { id }),
+    setProviderKey: (id, providerId, key, metadata, nonce) =>
+      ipcRenderer.invoke("openfusion-chat:auth-set", {
+        id,
+        providerId,
+        key,
+        metadata,
+        nonce
+      }),
+    removeProviderKey: (id, providerId) =>
+      ipcRenderer.invoke("openfusion-chat:auth-remove", { id, providerId }),
+    customProviderSet: (id, provider, nonce) =>
+      ipcRenderer.invoke("openfusion-chat:custom-provider-set", {
+        id,
+        providerId: provider?.providerId,
+        name: provider?.name,
+        baseURL: provider?.baseURL,
+        models: provider?.models,
+        key: provider?.key,
+        nonce
+      }),
+    customProviderRemove: (id, providerId) =>
+      ipcRenderer.invoke("openfusion-chat:custom-provider-remove", { id, providerId }),
+    oauthAuthorize: (id, providerId, method, inputs, nonce) =>
+      ipcRenderer.invoke("openfusion-chat:oauth-authorize", {
+        id,
+        providerId,
+        method,
+        inputs,
+        nonce
+      }),
+    oauthCallback: (id, providerId, method, code, nonce) =>
+      ipcRenderer.invoke("openfusion-chat:oauth-callback", {
+        id,
+        providerId,
+        method,
+        code,
+        nonce
+      }),
+    openExternal: (url) => ipcRenderer.invoke("app:open-external", { url }),
+    sendUserTurn: (id, text, mode) =>
+      ipcRenderer.send("openfusion-chat:input", { id, text, mode }),
+    permission: (id, requestId, reply) =>
+      ipcRenderer.invoke("openfusion-chat:permission", { id, requestId, reply }),
+    backgroundCancel: (id, taskId) =>
+      ipcRenderer.invoke("openfusion-chat:background-cancel", { id, taskId }),
+    questionProgress: (id, requestId, answers, revision) => ipcRenderer.invoke("openfusion-chat:question-progress", { id, requestId, answers, revision }),
+    answerQuestion: (id, requestId, answers, revision) =>
+      ipcRenderer.invoke("openfusion-chat:question", { id, requestId, answers, revision }),
+    rejectQuestion: (id, requestId, revision) =>
+      ipcRenderer.invoke("openfusion-chat:question", { id, requestId, revision, reject: true }),
+    compact: (id) => ipcRenderer.invoke("openfusion-chat:compact", { id }),
+    interrupt: (id) => ipcRenderer.invoke("openfusion-chat:interrupt", { id }),
+    stop: (id) => ipcRenderer.invoke("openfusion-chat:stop", { id }),
+    onEvent: (callback) => {
+      const listener = (_event, payload) => callback(payload);
+      ipcRenderer.on("openfusion-chat:event", listener);
+      return () => ipcRenderer.removeListener("openfusion-chat:event", listener);
+    }
+  }
+});

@@ -1,5 +1,9 @@
 # Open Fusion
 
+> **September 10 menu refresh:** see [the implementation and verification record](fusion-menu-refresh.md)
+> for searchable grouped commands, current-model selection, expandable catalogs,
+> draft preservation, catalog error/retry states, and verification boundaries.
+
 > **Status: native chat pane over a headless OpenCode server (2026-07-01),
 > full data ownership (2026-07-02).**
 > An Open Fusion pane is now a vibeTerminal-native chat UI

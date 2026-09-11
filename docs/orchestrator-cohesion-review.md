@@ -280,11 +280,13 @@ inside the same TUI, and parentless OpenCode events can also originate from a
 nested plugin instance. Blindly adopting every different root would give
 unrelated work the selected conversation's identity.
 
-The ambiguity repair deliberately preserves this distinction. It does not add
-automatic selected-root migration. Full support requires authoritative selection
-or invocation provenance before rebinding and resetting current turn/question
-state. A new terminal generation supplies a fresh observation boundary; manual
-terminal input remains available.
+The original ambiguity repair deliberately preserved this distinction. The
+September 11 [chat-resume repair](chat-resume-identity-fix-plan.md) now adds
+invocation-owned native selection events for Claude/Codex, exact root
+verification, and conversation revisions before rebinding and resetting current
+turn/question state. Unproven roots remain ambiguous. A new terminal generation
+still supplies a fresh observation boundary; manual terminal input remains
+available.
 
 Provisional child Stop hooks are also not final settlement evidence. Providers
 without a definitive child completion/lifetime-end event retain unverified
