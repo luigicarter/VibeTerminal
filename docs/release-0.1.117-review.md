@@ -60,7 +60,17 @@ telemetry, catalog cleanup), packaged voice inference, the packaged workspace
 and task interface, pane closure with process termination, and navigation with
 project-file preservation all passed.
 
-Production publication: (to be completed after publication).
+Production publication: the
+[Windows production workflow](https://github.com/luigicarter/VibeTerminal/actions/runs/34685749385)
+succeeded for commit `dc7b7a4` and tag `v0.1.117`; all 57 release checks and
+every packaged verification, including the new packaged Open Codex console
+smoke, passed on the runner. GitHub published the
+[release](https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.117)
+on September 12, 2026 at 09:42 UTC with the installer, blockmap and
+`latest.yml`. The downloaded public installer is 536,490,361 bytes and its
+SHA-512 and size match the published feed. GitHub's latest release resolves to
+0.1.117. The tag was pushed by the user after this session's automation was
+refused permission to push it.
 
 ## Boundaries
 

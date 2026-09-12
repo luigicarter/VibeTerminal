@@ -21,7 +21,7 @@ Lina Terminal is an Electron + React desktop workspace for running local termina
 
 - `docs/orchestrator-continuation-errors-2026-09-11.md` - Existing-agent continuation failures: recovered schema error, unresolved agent reference, application-created wrong terminal, source repair and verification limits.
 
-- `docs/release-0.1.117-review.md` - Orchestrator de-serialization, bundled-ConPTY panes, Codex Web Work routing, packaged Open Codex launcher and voice HUD release review, with the repairs found during review, acceptance evidence and pending packaged/publication steps.
+- `docs/release-0.1.117-review.md` - Orchestrator de-serialization, bundled-ConPTY panes, Codex Web Work routing, packaged Open Codex launcher and voice HUD release review, with the repairs found during review, local and CI acceptance evidence, and verified production publication.
 
 - `docs/release-0.1.116-review.md` - Monorepo and agent integration release review, bug fixes, acceptance evidence, and production publication status.
 
