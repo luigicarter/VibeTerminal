@@ -13,6 +13,16 @@ Lina Terminal is an Electron + React desktop workspace for running local termina
 
 ## Docs Index
 
+- `docs/codex-cursor-flicker-2026-09-11.md` - Codex-pane cursor flicker root cause: the inbox conhost ConPTY (node-pty default) splits Codex >=0.152's per-frame cursor-style repair so the parked cursor renders for a frame; bundled/newer OpenConsole keeps the frame intact; byte captures per host and Codex version, renderer replay counts, ruled-out causes, probe boundaries, and the implemented, smoke-verified repair: every Windows pane now spawns on node-pty's bundled ConPTY (`useConptyDll`), which also ends the per-exited-pane conhost leak, with `LINA_CONPTY_HOST=system` as the escape hatch and `npm run smoke:backend:conpty-host` as the lock.
+
+- `docs/orchestrator-deserialization-plan-2026-09-11.md` - Implemented de-serialization plan (packages 1-8, September 11, 2026; only package 0, the release, is deferred) restructuring the harness after the deep dive: release current repairs, deterministic unique-title owner shortcut, structured-output reviewers, application-side observation for composer actions and composer-based startup evidence, legacy harness retirement, voice-telemetry/log, validator-reason, wake-strip and input-ceiling hygiene, and a standing call-count budget.
+
+- `docs/orchestrator-deep-dive-2026-09-11.md` - Orchestrator capability inventory and ranked September 7–11 failure audit from the saved profile: wrong-recipient continuation (three causes incl. fenced reviewer JSON, reproduced live and repaired), unstarted prompts, generic interpretation failures, 48,000-byte input ceiling, voice-telemetry log flooding, wake-prefix leaks, naming; installed-build boundary and recommendations.
+
+- `docs/orchestrator-continuation-errors-2026-09-11.md` - Existing-agent continuation failures: recovered schema error, unresolved agent reference, application-created wrong terminal, source repair and verification limits.
+
+- `docs/release-0.1.117-review.md` - Orchestrator de-serialization, bundled-ConPTY panes, Codex Web Work routing, packaged Open Codex launcher and voice HUD release review, with the repairs found during review, acceptance evidence and pending packaged/publication steps.
+
 - `docs/release-0.1.116-review.md` - Monorepo and agent integration release review, bug fixes, acceptance evidence, and production publication status.
 
 - `docs/repository-layout.md` - Desktop/website separation, root commands, independent CI, branding, preserved history and migration evidence.
@@ -30,6 +40,7 @@ Lina Terminal is an Electron + React desktop workspace for running local termina
 - `docs/branding.md` - Shared Lina identity: editable vector, renderer PNG, Windows window/installer ICO, legacy compatibility, and source-versus-installed verification.
 
 - `docs/codex-web.md` - Codex Web native TUI: external-browser login, private auth/shared global capabilities, exposed Web models and Astra preference, quota/Fast filtering, error recovery, PTY verification and live-account limits. Supersedes the removed custom chat pane.
+- `docs/codex-web-model-verification.md` - Temporary Chat versus genuine Work session evidence for Astra and Sol, resource patches 43 to 45, response-model verification across HTTP SSE and WebSocket handoffs, with acceptance evidence and live-account boundaries.
 
 - `docs/orchestrator-agent-harness-overhaul-plan.md` - Agent harness deep dive and original roadmap, with the narrowed implementation scope and deferred work stated first.
 

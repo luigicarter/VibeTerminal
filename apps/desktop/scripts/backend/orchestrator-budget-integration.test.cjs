@@ -14,7 +14,7 @@ function fixture(t, options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-budget-integration-'));
   const bodies = [], events = [], source = { id: 's', sequence: 10, text: 'RECENT ' + 'x'.repeat(5000), history: ['OLD_PRIVATE_HISTORY'], raw: 'RAW_PRIVATE_SOURCE' };
   let clock = 1, handler = () => reply('Ready');
-  const contextLength = options.contextLength || 16384;
+  const contextLength = options.contextLength || 32768;
   const instance = createOrchestrator({ interpretIntent: interpretTestIntent, userDataPath: dir, now: () => clock, onUpstreamError: e => events.push(e), getSessions: async () => [{ id: 's', generation: 1, name: 'Worker', status: 'running' }], readSession: async () => structuredClone(source), dispatchAction: options.dispatchAction, fetch: async (url, request) => {
     if (url.endsWith('/key')) return json({ data: {} });
     if (url.includes('/models')) return json({ data: [{ id: 'brain', context_length: contextLength, supported_parameters: ['tools'] }] });

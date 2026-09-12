@@ -57,13 +57,17 @@ async function fixture(t) {
     }
   });
   t.after(async () => { await app.cancel(); await app.dispose(); assert.equal(path.dirname(root), os.tmpdir()); fs.rmSync(root, { recursive: true, force: true }); });
+  // A bound task handoff is delivered by the application without a model turn,
+  // so the clarification under test comes from operating this existing worker.
+  sessions.push({ id: 'pane-1', name: 'pane-1', generation: 'g-pane-1', conversationId: 'native-pane-1', cwd: root, kind: 'codex', provider: 'codex',
+    launchToken: 1, processState: 'running', agentProcessState: 'running', agentPid: 100, observation: 'observed', turnState: 'idle', status: 'idle', started: true });
   await app.configure({ apiKey: 'fixture-only', model: 'fixture', sessionOnly: true }); await app.setEnabled(true);
   return { app, sessions, effects, plans, root, other, task: requestId => app.getState().tasks.find(item => item.requestId === requestId) };
 }
 
 for (const ending of ['completed', 'failed-before-answer']) test(`clarification retirement preserves dispatched result lifecycle: ${ending}`, { timeout: 4000 }, async t => {
   const f = await fixture(t);
-  f.plans.push({ goal: first, actions: [{ kind: 'delegate_task', cwd: f.root, text: first }] });
+  f.plans.push({ goal: first, actions: [{ kind: 'operate_terminal', targetIds: ['pane-1'], text: first }] });
   const a = await f.app.send({ text: first, origin: 'text' });
   assert.equal(a.ok, true, JSON.stringify(a));
   assert.equal(f.task(a.requestId).status, 'needs-answer');

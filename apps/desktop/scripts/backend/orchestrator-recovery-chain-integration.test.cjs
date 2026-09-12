@@ -417,18 +417,13 @@ for (const failureKind of ['delivery', 'native-result']) test(`late close proof 
 test('verified delegated submission ends a polling model loop while native results still gate dependencies', { timeout: 4000 }, async t => {
   const f = await fixture(t); let modelCalls = 0;
   const objective = 'Investigate the startup problem without editing.';
-  f.reply = ({ metadata }) => {
-    const grant = metadata.authorizedCommands.grants.find(item => item.kind === 'operate_terminal');
-    const targetId = grant.targets[0].id;
-    const phase = modelCalls++;
-    if (phase === 0 || phase === 2) return tool({ kind: 'read_session', targetId });
-    if (phase === 1) return tool({ kind: 'send_prompt', grantId: grant.id, targetId, text: objective });
-    return tool({ kind: 'list_sessions' }); // This model never supplies a finish or plain reply.
-  };
+  // This model would poll forever; the application must never need it for a
+  // bound delegation, so every call here is an unwanted round.
+  f.reply = () => { modelCalls++; return tool({ kind: 'list_sessions' }); };
   const result = await f.run(objective, { assignmentMode: 'new', kindOfSession: 'codex' });
   assert.equal(result.ok, true, JSON.stringify(result));
-  assert.equal(modelCalls, 3, 'Do not ask the model again after the fresh post-submission read');
-  assert.equal(f.reads.length, 3, 'The application supplies a post-send read even if the model also requests one');
+  assert.equal(modelCalls, 0, 'A bound task handoff is delivered by the application without any executor model turn');
+  assert.equal(f.reads.length, 3, 'The application observes the worker itself around its own send');
   assert.equal(counts(f).creates.length, 1); assert.equal(counts(f).sends.length, 1);
   assert.equal(result.actions.filter(action => action.kind === 'finish_terminal' && action.status === 'interaction-complete').length, 1);
   assert.equal(f.task(result).status, 'waiting-results');
@@ -441,7 +436,7 @@ test('verified delegated submission ends a polling model loop while native resul
   assert.equal(f.task(dependent).status, 'queued');
   await f.relay.refresh();
   assert.equal(counts(f).creates.length, 1, 'Finishing submission does not supply the native prerequisite result');
-  assert.equal(counts(f).sends.length, 1); assert.equal(modelCalls, 3);
+  assert.equal(counts(f).sends.length, 1); assert.equal(modelCalls, 0);
   await f.relay.cancel({ requestId: dependent.requestId });
   assert.equal(f.task(result).status, 'waiting-results', 'Canceling a dependent preserves its original producer wait');
 });
@@ -455,20 +450,21 @@ test('top-loop delegated completion preserves a separate failed close and suppre
       pane: 'removed', process: 'unknown', launchSettled: true } };
   };
   const objective = 'Investigate startup without editing.';
+  let closeRequested = false;
   f.reply = ({ metadata }) => {
-    const phase = modelCalls++;
-    if (phase === 0) return tool({ kind: 'close', targetId: 'spare', grantId: metadata.authorizedCommands.grants.find(item => item.kind === 'close').id });
-    const grant = metadata.authorizedCommands.grants.find(item => item.kind === 'operate_terminal'), targetId = grant.targets[0].id;
-    if (phase === 1 || phase === 3) return tool({ kind: 'read_session', targetId });
-    if (phase === 2) return tool({ kind: 'send_prompt', grantId: grant.id, targetId, text: objective });
-    return tool({ kind: 'list_sessions' });
+    modelCalls++;
+    // The delegated investigation is the application's bound handoff; this model
+    // only owns the separate close and never supplies a terminal finish.
+    const close = metadata.authorizedCommands.grants.find(item => item.kind === 'close');
+    if (close && !closeRequested) { closeRequested = true; return tool({ kind: 'close', targetId: 'spare', grantId: close.id }); }
+    return { choices: [{ finish_reason: 'stop', message: { content: 'The spare pane close did not complete.' } }] };
   };
   f.plans.push({ goal: 'Close the spare pane and investigate startup.', actions: [
     f.plan(objective, { assignmentMode: 'new', kindOfSession: 'codex' }),
     { kind: 'close', scope: { type: 'explicit', targetIds: ['spare'] } } ] });
   const result = await f.relay.send({ text: 'Close spare and open a new Codex to investigate startup without editing.', origin: 'voice' });
   assert.equal(result.ok, false, JSON.stringify(result));
-  assert.equal(modelCalls, 4, 'The separate failure does not require another ceremonial model finish');
+  assert.equal(modelCalls, 2, 'The separate failure does not require another ceremonial model finish');
   assert.equal(f.reads.length, 3); assert.equal(counts(f).creates.length, 1); assert.equal(counts(f).sends.length, 1);
   assert.equal(f.task(result).status, 'failed');
   assert.match(result.text, /Closed 0 of 1 terminals/); assert.match(result.text, /unconfirmed/);

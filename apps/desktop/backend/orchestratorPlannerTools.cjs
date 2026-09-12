@@ -19,7 +19,7 @@ function plannerTools(context) {
       const { text, ...blank } = properties;
       add('plan_open_blank_terminal', 'Open an idle terminal with no task. To run work in a new worker use plan_delegate_task.', blank, required.filter(key => key !== 'text'));
       add('plan_prepare_terminal_draft', 'Open a terminal with an explicitly requested UNSENT draft. This never executes work.', properties, [...new Set([...required, 'text'])]);
-    } else if (kind === 'delegate_task' && context.harnessVersion === 'agents-v1') {
+    } else if (kind === 'delegate_task') {
       const names = ['cwd', 'text', 'kindOfSession', 'workItemId', 'assignmentMode', 'promptMode', 'permissionMode', 'sourceUserId'];
       const props = Object.fromEntries(Object.entries(properties).filter(([name]) => names.includes(name)));
       add('plan_delegate_task', 'Delegate the complete objective in this project. Assignment chooses a suitable configured worker; independent work gets a fresh conversation.', props, required.filter(name => names.includes(name)));
@@ -27,7 +27,7 @@ function plannerTools(context) {
       if (context.replyWorkItem?.id && (!context.targetId || context.replyWorkItem.binding?.target?.id === context.targetId)) {
         continuation.workItemId = { ...continuation.workItemId, enum: [context.replyWorkItem.id], description: 'The work item explicitly addressed by this reply.' };
       }
-      add('plan_continue_task', 'Continue the same specific task, including while its owner is busy. Use the known workItemId when supplied; otherwise assignment discovers the owner. Preserve the full follow-up and original constraints. Do not wait for the old turn unless the user requests that dependency.', continuation, required.filter(name => name !== 'assignmentMode' && names.includes(name)));
+      add('plan_continue_task', 'Continue the same specific task in its EXISTING agent, including while busy. Use this when asked to tell the agent working on a named task to continue. Use the known workItemId when supplied; otherwise discover the owner. Never replace an unresolved owner with a new agent. Preserve the full follow-up and constraints.', continuation, required.filter(name => name !== 'assignmentMode' && names.includes(name)));
     } else add(`plan_${kind}`, branch.description || ({
       delegate_task: 'Assign the complete coding objective to an automatically chosen or new worker. Preserve all user constraints.',
       operate_terminal: 'Perform the complete task or interaction on user-selected existing terminals.',
@@ -65,6 +65,10 @@ function decodePlannerCalls(calls, tools, instruction) {
       }
       const kind = ['plan_open_blank_terminal', 'plan_prepare_terminal_draft'].includes(name) ? 'create_session' : name === 'plan_continue_task' ? 'delegate_task' : name.slice('plan_'.length);
       if (name === 'plan_open_blank_terminal' && args.text !== undefined) throw new Error('A blank terminal cannot carry task text. Use plan_delegate_task for execution or plan_prepare_terminal_draft for an unsent draft.');
+      if (name === 'plan_continue_task') {
+        if (args.assignmentMode !== undefined) throw new Error('Continuation selects an existing owner; omit assignmentMode.');
+        args.assignmentMode = 'existing';
+      }
       actions.push({ kind, ...args });
     }
   }

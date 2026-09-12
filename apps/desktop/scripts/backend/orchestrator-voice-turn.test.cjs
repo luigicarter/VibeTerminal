@@ -83,9 +83,9 @@ test('respond supplies model-chosen speech in the existing call without clipping
   assert.equal(f.spoken.at(-1).text, full);
   assert.equal(f.spoken.at(-1).speechText, summary);
   assert.equal(f.calls.length, 1);
-  const branch = f.calls[0].tools[0].function.parameters.anyOf.find(item => item.properties.kind.enum[0] === 'respond');
-  assert.ok(branch.properties.speechText);
-  assert.ok(!branch.required.includes('speechText'));
+  const respondTool = f.calls[0].tools.find(item => item.function.name === 'respond').function;
+  assert.ok(respondTool.parameters.properties.speechText);
+  assert.ok(!respondTool.parameters.required.includes('speechText'));
 });
 
 test('long ordinary failed summary stays brief without changing the written response', async t => {
@@ -204,8 +204,10 @@ test('respond complete cannot bypass an unfinished terminal grant and must conti
   const result = await f.app.send({ text: 'Send echo ready to Project Alpha', origin: 'voice' });
   assert.equal(result.ok, true); assert.equal(f.effects.length, 1); assert.equal(f.effects[0].text, 'echo ready');
   assert.equal(f.calls.length, 3); assert.equal(f.spoken.length, 1); assert.equal(f.spoken[0].text, result.text);
-  assert.equal(result.text, 'done');
-  assert.equal(f.spoken[0].completionCue, true);
+  // A plain shell cannot attribute a task result, so the acknowledgment states
+  // the verified delivery instead of claiming the work itself completed.
+  assert.match(result.text, /Input was sent to Project Alpha.*cannot be verified automatically/s);
+  assert.equal(f.spoken[0].completionCue, undefined, 'an unverified terminal result is never a completion cue');
   assert.equal(f.spoken[0].speechText, result.text, 'current delivery evidence replaces an unsupported model speech summary');
   assert(f.app.getState().messages.some(message => message.origin === 'task' && /plain shell.*Completion is unverified/.test(message.text || message.content)));
 });

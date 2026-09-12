@@ -4,8 +4,10 @@ const path = require('node:path');
 const namedControls = new Set(require('../shared/terminalControls.cjs').TERMINAL_KEYS);
 
 // Private diagnostics, never a transcript. Only bounded operational metadata.
-function createDiagnostics({ userDataPath, getSecrets = () => [], now = Date.now, maxFileBytes = 1024 * 1024, maxQueuedRecords = 100, fsImpl = fs.promises } = {}) {
-  const filename = path.join(userDataPath, 'logs', 'orchestrator-errors.jsonl');
+function createDiagnostics({ userDataPath, getSecrets = () => [], now = Date.now, maxFileBytes = 1024 * 1024, maxQueuedRecords = 100, fsImpl = fs.promises, filename: logName = 'orchestrator-errors.jsonl' } = {}) {
+  // High-volume operational telemetry gets its own bounded file so it cannot
+  // rotate real failures out of the error log. Names stay inside the logs folder.
+  const filename = path.join(userDataPath, 'logs', path.basename(String(logName) || 'orchestrator-errors.jsonl'));
   const fileLimit = Number.isSafeInteger(maxFileBytes) && maxFileBytes >= 256 ? maxFileBytes : 1024 * 1024;
   const queueLimit = Number.isSafeInteger(maxQueuedRecords) && maxQueuedRecords > 0 ? maxQueuedRecords : 100;
   let pending = 0, tail = Promise.resolve();
@@ -23,10 +25,13 @@ function createDiagnostics({ userDataPath, getSecrets = () => [], now = Date.now
       return text.slice(0, limit);
     };
     const result = { time: new Date(now()).toISOString() };
-    for (const key of ['event', 'stage', 'requestId', 'workItemId', 'decision', 'modelCallId', 'toolCallId', 'receiptId', 'replyId', 'actionId', 'origin', 'model', 'actionKind', 'targetId', 'generation', 'status', 'category', 'reason', 'endpoint', 'provider', 'generationId', 'toolChoice', 'grantId', 'reservationId', 'predecessorRequestId', 'successorRequestId', 'operationId', 'inventoryRevision', 'strategy', 'assignmentState', 'delivery', 'scopeKind', 'controlDisposition', 'previousStatus', 'newStatus', 'validationCategory']) {
+    for (const key of ['event', 'stage', 'requestId', 'workItemId', 'decision', 'modelCallId', 'toolCallId', 'receiptId', 'replyId', 'actionId', 'origin', 'model', 'actionKind', 'targetId', 'generation', 'status', 'category', 'reason', 'endpoint', 'provider', 'generationId', 'toolChoice', 'grantId', 'reservationId', 'predecessorRequestId', 'successorRequestId', 'operationId', 'inventoryRevision', 'strategy', 'assignmentState', 'delivery', 'scopeKind', 'controlDisposition', 'previousStatus', 'newStatus', 'validationCategory', 'turnState', 'telemetryHealth', 'optionRepair', 'reasoningReplay']) {
       const value = redact(input?.[key], 256); if (value !== undefined) result[key] = value;
     }
-    for (const key of ['resultScopeTransferred', 'paginationAdvanced', 'progress']) if (typeof input?.[key] === 'boolean') result[key] = input[key];
+    for (const key of ['resultScopeTransferred', 'paginationAdvanced', 'progress', 'hasTurnId']) if (typeof input?.[key] === 'boolean') result[key] = input[key];
+    // Signed operational offsets: a turn that started before its own submission
+    // is exactly the misattribution these records exist to show.
+    for (const key of ['turnStartedOffsetMs']) if (Number.isFinite(input?.[key])) result[key] = Math.max(-1e9, Math.min(input[key], 1e9));
     for (const key of ['round', 'readCount', 'candidateCount', 'stagnantRounds', 'targetCount', 'confirmedCount', 'remainingCount', 'failedCount', 'transferredCount', 'newTargetCount', 'closedCount', 'supersededCount', 'inventoryCount']) {
       if (Number.isSafeInteger(input?.[key]) && input[key] >= 0) result[key] = Math.min(input[key], 1e9);
     }

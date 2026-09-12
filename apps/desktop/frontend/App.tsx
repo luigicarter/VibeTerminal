@@ -125,7 +125,6 @@ import type { InstalledCliReport } from "./electron";
 import type {
   AgentAttentionEvent,
   AgentBackgroundActivity,
-  AppVersionList,
   AgentKind,
   AgentProfile,
   AgentSession,
@@ -1336,9 +1335,6 @@ export default function App() {
     null
   );
   const [updateState, setUpdateState] = useState<UpdateState | null>(null);
-  const [versionPickerOpen, setVersionPickerOpen] = useState(false);
-  // null = not fetched yet (the menu shows a loading note).
-  const [versionList, setVersionList] = useState<AppVersionList | null>(null);
   const [dismissedUpdateKey, setDismissedUpdateKey] = useState<string | null>(
     null
   );
@@ -4101,7 +4097,7 @@ export default function App() {
     : "";
   const shouldShowUpdateOverlay =
     updateState !== null &&
-    ["available", "downloading", "downloaded", "switching", "error"].includes(
+    ["available", "downloading", "downloaded", "error"].includes(
       updateState.status
     ) &&
     dismissedUpdateKey !== updateNoticeKey;
@@ -4124,41 +4120,9 @@ export default function App() {
             : "Check for update";
   const updateCheckDisabled =
     updateState?.status === "checking" ||
-    updateState?.status === "downloading" ||
-    updateState?.status === "switching";
+    updateState?.status === "downloading";
 
-  const appVersion = updateState?.currentVersion ?? "";
-
-  // Same dismissal rules as the folder context menu: Escape, or a press
-  // anywhere outside the picker.
-  useEffect(() => {
-    if (!versionPickerOpen) {
-      return;
-    }
-
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        setVersionPickerOpen(false);
-      }
-    }
-
-    function handlePointerDown(event: PointerEvent) {
-      const target = event.target as HTMLElement | null;
-      if (!target?.closest(".version-picker")) {
-        setVersionPickerOpen(false);
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown);
-    window.addEventListener("pointerdown", handlePointerDown);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-      window.removeEventListener("pointerdown", handlePointerDown);
-    };
-  }, [versionPickerOpen]);
-
-  // Same dismissal rules as the version picker: Escape, or a press anywhere
-  // outside the launcher menu.
+  // Dismiss the launcher menu on Escape or a press outside it.
   useEffect(() => {
     if (!launcherMenuOpen) {
       return;
@@ -4313,42 +4277,6 @@ export default function App() {
 
   function dismissUpdateOverlay() {
     setDismissedUpdateKey(updateNoticeKey);
-  }
-
-  // Releases are fetched on open rather than at launch: this is a rare,
-  // deliberate action, and it keeps startup off the network.
-  async function toggleVersionPicker() {
-    if (versionPickerOpen) {
-      setVersionPickerOpen(false);
-      return;
-    }
-
-    setVersionPickerOpen(true);
-    setVersionList(null);
-
-    const result = await window.vibe?.updates.listVersions();
-    setVersionList(
-      result ?? {
-        ok: false,
-        message: "Version switching is unavailable in this window.",
-        versions: []
-      }
-    );
-  }
-
-  async function selectAppVersion(version: string) {
-    setVersionPickerOpen(false);
-    setDismissedUpdateKey(null);
-
-    const result = await window.vibe?.updates.installVersion(version);
-    if (!result) {
-      setShellMessage("Version switching is unavailable in this window.");
-      return;
-    }
-
-    if (!result.ok) {
-      setShellMessage(result.message || `Couldn't switch to v${version}.`);
-    }
   }
 
   async function checkForUpdates() {
@@ -4947,82 +4875,6 @@ export default function App() {
               <RefreshCw size={16} />
               {updateCheckLabel}
             </button>
-            <div className="version-picker">
-              <button
-                className="version-picker-toggle"
-                title="Switch to another version"
-                aria-haspopup="listbox"
-                aria-expanded={versionPickerOpen}
-                onClick={toggleVersionPicker}
-              >
-                <ChevronDown size={15} />
-              </button>
-              {versionPickerOpen && (
-                <div className="version-picker-menu" role="listbox">
-                  <div className="version-picker-title">
-                    Switch version
-                    {currentAppVersionLabel && (
-                      <span>now {currentAppVersionLabel}</span>
-                    )}
-                  </div>
-                  {versionList === null ? (
-                    <div className="version-picker-note">Loading releases…</div>
-                  ) : !versionList.ok ? (
-                    <div className="version-picker-note">
-                      {versionList.message ?? "Couldn't read releases."}
-                    </div>
-                  ) : versionList.versions.length === 0 ? (
-                    <div className="version-picker-note">
-                      No published releases.
-                    </div>
-                  ) : (
-                    <div className="version-picker-list">
-                      {versionList.versions.map((entry) => {
-                        const isCurrent =
-                          entry.version === (versionList.currentVersion ?? appVersion);
-                        return (
-                          <button
-                            key={entry.version}
-                            role="option"
-                            aria-selected={isCurrent}
-                            className={clsx(
-                              "version-picker-item",
-                              isCurrent && "is-current"
-                            )}
-                            disabled={isCurrent || !entry.installable}
-                            title={
-                              !entry.installable
-                                ? "This release has no Windows installer."
-                                : isCurrent
-                                  ? "Already installed"
-                                  : `Install v${entry.version}`
-                            }
-                            onClick={() => selectAppVersion(entry.version)}
-                          >
-                            <span className="version-picker-version">
-                              v{entry.version}
-                            </span>
-                            {entry.prerelease && (
-                              <span className="version-picker-tag">pre</span>
-                            )}
-                            <span className="version-picker-state">
-                              {isCurrent
-                                ? "current"
-                                : !entry.installable
-                                  ? "no installer"
-                                  : ""}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                  <div className="version-picker-footer">
-                    Picking a version downloads its installer and closes the app.
-                  </div>
-                </div>
-              )}
-            </div>
           </div>
         </header>
 
@@ -5402,33 +5254,20 @@ export default function App() {
             <strong>
               {updateState.status === "downloaded"
                 ? "Update ready"
-                : updateState.status === "switching"
-                  ? "Switching version"
-                  : updateState.status === "error"
-                    ? "Update failed"
-                    : "Update available"}
+                : updateState.status === "error"
+                  ? "Update failed"
+                  : "Update available"}
             </strong>
-            {updateState.status !== "downloading" &&
-              updateState.status !== "switching" && (
+            {updateState.status !== "downloading" && (
               <button
                 className="update-overlay-dismiss"
                 aria-label="Dismiss update notice"
                 onClick={dismissUpdateOverlay}
               >
-                  <X size={13} />
-                </button>
-              )}
+                <X size={13} />
+              </button>
+            )}
           </div>
-
-          {/* No Restart button here on purpose: nothing is staged with
-              electron-updater, so its quitAndInstall would have nothing to
-              install. The installer is already running and closes the app. */}
-          {updateState.status === "switching" && (
-            <p>
-              Installing Lina Terminal {updateVersion}. The app will close and
-              reopen on that version.
-            </p>
-          )}
 
           {updateState.status === "available" && (
             <>

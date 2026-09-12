@@ -10,11 +10,9 @@ function semanticItem(item) {
 }
 function guardedConversationKey(parsed, baseKey, workMode = false) {
   if (!baseKey || parsed._compactionRequest || !Array.isArray(parsed._rawBody?.input)) return undefined;
-  // ChatGPT resets Work-model picker state after a reply. Adjusting that
-  // retained slider can select a different model. Rebuild those Web rounds
-  // from authoritative native history until the site supports stable reuse.
-  if (workMode) return undefined;
-  const base = digest([baseKey, parsed.context.systemPrompt, parsed.context.tools, 'lina-stream-v2']);
+  // Work selects its exact model radio before adjusting effort on every round.
+  // Retain only this same surface, model, effort, tool contract and history.
+  const base = digest([baseKey, workMode, parsed.modelId, parsed.options.reasoning, parsed.context.systemPrompt, parsed.context.tools, 'lina-stream-v4']);
   const hashes = parsed._rawBody.input.map(item => digest(semanticItem(item)));
   const prior = cursors.get(base);
   const extendsHistory = prior && prior.hashes.length <= hashes.length && prior.hashes.every((hash, index) => hash === hashes[index]);

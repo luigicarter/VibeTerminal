@@ -4,12 +4,14 @@ const {plannerTools,decodePlannerCalls}=require('../../backend/orchestratorPlann
 const call=(name,args)=>({function:{name,arguments:JSON.stringify(args)}});
 
 test('agent continuation binds an explicitly addressed work item without rediscovering terminal IDs', () => {
-  const context = { sessions: [], harnessVersion: 'agents-v1', replyWorkItem: { id: 'work-auth', binding: { target: { id: 'worker-auth' } } } };
+  const context = { sessions: [], replyWorkItem: { id: 'work-auth', binding: { target: { id: 'worker-auth' } } } };
   const tools = plannerTools(context);
   const request = { cwd: 'C:/App', text: 'Also test expired refresh tokens.' };
   const continued = decodePlannerCalls([call('plan_continue_task', request)], tools, request.text);
   assert.equal(continued.actions[0].workItemId, 'work-auth');
   assert.equal(continued.actions[0].kind, 'delegate_task', 'Continuation still uses normal task ownership validation.');
+  assert.equal(continued.actions[0].assignmentMode, 'existing');
+  assert.throws(() => decodePlannerCalls([call('plan_continue_task', { ...request, assignmentMode: 'new' })], tools, request.text), /existing owner/);
   const independent = decodePlannerCalls([call('plan_delegate_task', request)], tools, request.text);
   assert.equal(independent.actions[0].workItemId, undefined, 'A reply is not authority to reuse a conversation for independent work.');
   const otherTools = plannerTools({ ...context, targetId: 'different-worker' });

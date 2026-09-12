@@ -197,7 +197,7 @@ test('two known independent reads share one tool batch', async t => {
   assert.deepEqual(f.reads, ['a', 'b']);
   assert.equal(f.bodies.length, 2);
   const initial = f.bodies[0];
-  const advertised = initial.tools[0].function.parameters.properties.kind.enum;
+  const advertised = initial.tools.map(item => item.function.name);
   for (const kind of advertised) assert.ok(initial.messages[0].content.includes(`\n${kind}: `), `No model-facing guide for ${kind}`);
   assert.equal(advertised.includes('send_prompt'), false);
   assert.equal(metadata(initial).sessions.some(session => Object.hasOwn(session, 'terminalNavigationGuide')), false);

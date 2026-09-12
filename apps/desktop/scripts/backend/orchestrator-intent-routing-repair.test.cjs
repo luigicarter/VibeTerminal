@@ -10,6 +10,29 @@ test('missing existing targets explains task routing without changing authority'
   assert.deepEqual(raw,before);
   assert.throws(()=>normalizeIntent({goal:objective,actions:[{kind:'delegate_task',cwd:'C:/Recovery QA',targetIds:['invented'],text:objective}]},{requestId:'source',instruction:objective,sessions:[]}),error=>error.code==='ORCHESTRATOR_ROUTING_TARGET_CONFLICT');
 });
+test('a deferral blocked by a pending request is repaired into a dependency, not a duplicate task',async()=>{
+  const {createIntentInterpreter}=require('../../backend/orchestratorInterpreter.cjs');
+  const cwd='C:/Recovery QA',deferred='tell Atlas to fix the findings from that review without changing public APIs';
+  const task='Fix the findings from that review without changing public APIs.';
+  const context={requestId:'user-2',instruction:`After that review finishes, ${deferred}.`,sessions:[],projects:[{path:cwd}],roots:{projects:[cwd]},
+    pendingCommands:[{requestId:'pending-review',queued:true,instruction:'Tell Atlas in Alpha to review the fixture for bugs and report findings.'}],
+    tasks:[{requestId:'pending-review',sequence:1,status:'running',text:'Tell Atlas in Alpha to review the fixture for bugs and report findings.'}]};
+  const bodies=[];
+  const calls=(...planned)=>({choices:[{finish_reason:'tool_calls',message:{tool_calls:planned.map(([name,args],index)=>({id:`call-${bodies.length}-${index}`,type:'function',function:{name,arguments:JSON.stringify(args)}}))}}]});
+  const interpret=createIntentInterpreter({getTask:()=>undefined,redact:value=>value,cleanError:error=>error.message,recordDiagnostic(){},diagnosticError(){},
+    complete:async body=>{bodies.push(body);
+      return bodies.length===1?calls(['interpret_workspace',{goal:'Fix after the pending review finishes.',afterResults:{instruction:deferred}}])
+        :calls(['interpret_workspace',{goal:'Fix after the pending review finishes.',dependsOnRequestIds:['pending-review']}],['plan_delegate_task',{cwd,text:task}]);}});
+  const plan=await interpret(context,{id:'scripted',contextLength:128000},4000,new AbortController().signal,{});
+  assert.equal(bodies.length,2);
+  assert.match(bodies[1].messages[0].content,/Validation failure: A deferred instruction requires an initial terminal task in this same request/);
+  assert.match(bodies[1].messages[0].content,/set dependsOnRequestIds to that request's requestId from pendingCommands/);
+  assert.deepEqual(plan.dependsOnRequestIds,['pending-review']);
+  assert.equal(plan.afterResults,undefined);
+  assert.equal(plan.grants.length,1);
+  assert.equal(plan.grants[0].kind,'delegate_task');
+  assert.equal(plan.grants[0].text,task);
+});
 test('real interpretation repair preserves a zero-terminal investigation and creates exactly one routed worker', {timeout:4000}, async t=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'vibe-intent-routing-repair-'));
   const sessions=[],effects=[],requests=[];let sequence=0,phase=0,fetchError;

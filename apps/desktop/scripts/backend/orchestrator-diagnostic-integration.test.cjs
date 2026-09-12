@@ -11,11 +11,13 @@ function checkTiming(entry) {
   const stages = {
     routing_started: [], routing_acquired: [], routing: ['status'], execution: ['status'], executor_reply: ['status'], final_text: ['status'],
     harness_progress: ['round', 'stagnantRounds', 'progress'],
-    model_started: ['modelCallId', 'category', 'attempt', 'deadlineMs', 'toolChoice'],
-    model_headers: ['modelCallId', 'category', 'attempt', 'deadlineMs', 'toolChoice', 'headersMs', 'httpStatus'],
-    model_complete: ['modelCallId', 'category', 'status', 'totalMs', 'httpStatus', 'attempt', 'deadlineMs', 'toolChoice', 'headersMs', 'bodyMs', 'provider', 'generationId', 'promptTokens', 'completionTokens', 'reasoningTokens', 'reason', 'requestPhase'],
+    model_started: ['modelCallId', 'category', 'attempt', 'deadlineMs', 'toolChoice', 'optionRepair', 'reasoningReplay'],
+    model_headers: ['modelCallId', 'category', 'attempt', 'deadlineMs', 'toolChoice', 'optionRepair', 'reasoningReplay', 'headersMs', 'httpStatus'],
+    model_complete: ['modelCallId', 'category', 'status', 'totalMs', 'httpStatus', 'attempt', 'deadlineMs', 'toolChoice', 'optionRepair', 'reasoningReplay', 'headersMs', 'bodyMs', 'provider', 'generationId', 'promptTokens', 'completionTokens', 'reasoningTokens', 'reason', 'requestPhase'],
     tool_started: ['toolCallId', 'actionKind', 'targetId'], tool_complete: ['toolCallId', 'actionId', 'actionKind', 'targetId', 'generation', 'grantId', 'status', 'totalMs'],
-    first_effect: ['actionKind', 'targetId', 'generation', 'status']
+    first_effect: ['actionKind', 'targetId', 'generation', 'status'],
+    auto_observation: ['actionKind', 'targetId'],
+    unconfirmed_start: ['actionKind', 'targetId', 'generation', 'provider', 'turnState', 'hasTurnId', 'telemetryHealth', 'turnStartedOffsetMs']
   };
   assert(stages[entry.stage], `Unexpected timing stage: ${entry.stage}`);
   assert(Object.keys(entry).every(key => [...base, ...stages[entry.stage]].includes(key)));
@@ -33,15 +35,19 @@ function fixture(t, overrides = {}) {
     dispatchAction: async action => { actions.push(action); return { ok: true, status: 'delivered' }; },
     fetch: async (url, options) => {
       if (url.endsWith('/key')) return { ok: true, json: async () => ({ data: {} }) };
-      if (url.includes('/models')) return { ok: true, json: async () => ({ data: [{ id: 'test-brain', supported_parameters: ['tools'] }] }) };
+      if (url.includes('/models')) return { ok: true, json: async () => ({ data: [{ id: 'test-brain', context_length: 128000, supported_parameters: ['tools'] }] }) };
       requests.push(JSON.parse(options.body));
       const response = responses.shift() || reply('Ready.');
       return typeof response === 'function' ? response(options) : { ok: true, json: async () => response };
     }, ...overrides });
   t.after(async () => { await instance.dispose(); assert(path.resolve(root).startsWith(path.join(os.tmpdir(), 'vibe-diagnostic-integration-'))); fs.rmSync(root, { recursive: true, force: true }); });
   const filename = path.join(root, 'logs', 'orchestrator-errors.jsonl');
-  return { instance, actions, requests, responses, filename, root,
-    read: async () => { await instance.flushDiagnostics(); const entries = fs.existsSync(filename) ? fs.readFileSync(filename, 'utf8').trim().split('\n').map(JSON.parse) : []; for (const entry of entries.filter(entry => entry.event === 'request_stage')) checkTiming(entry); return entries.filter(entry => entry.event !== 'request_stage'); },
+  const voiceFilename = path.join(root, 'logs', 'voice-inference.jsonl');
+  const lines = file => fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse) : [];
+  return { instance, actions, requests, responses, filename, voiceFilename, root,
+    readAll: async () => { await instance.flushDiagnostics(); return lines(filename); },
+    readVoice: async () => { await instance.flushDiagnostics(); return lines(voiceFilename); },
+    read: async () => { await instance.flushDiagnostics(); const entries = lines(filename); for (const entry of entries.filter(entry => entry.event === 'request_stage')) checkTiming(entry); return entries.filter(entry => entry.event !== 'request_stage'); },
     ready: async () => { assert.equal((await instance.configure({ apiKey: 'private-configured-key', sessionOnly: true, model: 'test-brain' })).ok, true); assert.equal((await instance.setEnabled(true)).ok, true); } };
 }
 
@@ -124,12 +130,40 @@ test('malformed tool JSON cannot copy its argument payload into diagnostics', as
   assert.doesNotMatch(fs.readFileSync(f.filename, 'utf8'), /PRIVATE_ARGUMENT_TEXT/);
 });
 
-test('voice diagnostics reach the same private file without entering relay messages', async t => {
+test('voice diagnostics reach a private file without entering relay messages, and inference telemetry is split off', async t => {
   const f = fixture(t); await f.ready();
   const voice = createVoiceController({ orchestrator: f.instance, getKey: () => f.instance.getKey() }); t.after(() => voice.dispose());
   voice.configure({ microphoneError: 'Microphone device unavailable' });
   const [entry] = await f.read(); assert.equal(entry.event, 'voice_error'); assert.equal(entry.stage, 'microphone'); assert.equal(entry.error.message, 'Microphone device unavailable');
   assert.equal(f.instance.getState().messages.length, 0);
+  // Routine inference timing is high volume and must not share the error log.
+  for (const stage of ['stream', 'completion', 'inference']) f.instance.recordDiagnostic({ event: 'voice_inference', origin: 'voice', stage, helper: 'keyword', processingMs: 4, queuedSamples: 320 });
+  f.instance.recordDiagnostic({ event: 'voice_inference', origin: 'voice', stage: 'error', error: { name: 'Error', message: 'Voice inference failed.' } });
+  assert.deepEqual((await f.readVoice()).map(record => record.stage), ['stream', 'completion', 'inference']);
+  assert.equal((await f.readVoice())[0].processingMs, 4);
+  const main = await f.readAll();
+  assert.equal(main.some(record => record.event === 'voice_inference' && record.stage !== 'error'), false);
+  const failure = main.find(record => record.event === 'voice_inference');
+  assert.equal(failure.stage, 'error'); assert.equal(failure.error.message, 'Voice inference failed.');
+});
+
+test('a flood of voice inference telemetry cannot displace request records in the error log', async t => {
+  const f = fixture(t); await f.ready();
+  for (let i = 0; i < 5; i++) f.instance.recordDiagnostic({ event: 'request_stage', stage: 'routing_started', requestId: `request-${i}`, origin: 'text', elapsedMs: i });
+  await f.instance.flushDiagnostics();
+  for (let i = 0; i < 3000; i++) {
+    f.instance.recordDiagnostic({ event: 'voice_inference', origin: 'voice', stage: 'stream', helper: 'keyword', processingMs: 4, queuedSamples: 320 });
+    if (i % 50 === 49) await f.instance.flushDiagnostics();
+  }
+  await f.instance.flushDiagnostics();
+  const main = await f.readAll();
+  assert.deepEqual(main.map(record => record.requestId), ['request-0', 'request-1', 'request-2', 'request-3', 'request-4']);
+  for (const record of main) checkTiming(record);
+  const voice = await f.readVoice();
+  assert.equal(voice.length, 3000);
+  assert.equal(voice.every(record => record.event === 'voice_inference' && record.stage === 'stream'), true);
+  // The split is what keeps the error log small enough to survive rotation.
+  assert.ok(fs.statSync(f.filename).size < fs.statSync(f.voiceFilename).size / 100);
 });
 
 test('spoken replies carry the same diagnostic request ID as the failed action', async t => {

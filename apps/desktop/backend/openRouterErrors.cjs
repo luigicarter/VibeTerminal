@@ -27,6 +27,10 @@ function classifyOpenRouterError(status, body) {
   const error = new OpenRouterError(category, effectiveStatus);
   const reasons = { 400: 'invalid-request', 403: 'forbidden', 404: 'model-or-endpoint-unavailable', 408: 'upstream-timeout', 422: 'invalid-parameters' };
   if (reasons[effectiveStatus]) error.reason = reasons[effectiveStatus];
+  // The upstream wording is kept bounded and internal: request repair reads it,
+  // and no surface presents it as an application message or authorization.
+  const upstream = [envelope?.message, typeof metadata?.raw === 'string' ? metadata.raw : ''].filter(value => typeof value === 'string' && value).join(' ');
+  if (upstream) error.providerMessage = upstream.slice(0, 1000);
   return error;
 }
 const isCancellation = error => error?.name === 'AbortError';

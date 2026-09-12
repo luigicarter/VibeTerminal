@@ -38,7 +38,7 @@ async function fixture(t, queued = true) {
     interpretIntent: () => ({ goal: 'Send both prompts', executionMode: 'direct', actions: [{ kind: 'send_prompt', targetIds: ['a', 'b'], selection: 'all', text: 'Review' }] }),
     dispatchAction: async action => { effects.push(action); return { ok: true, status: queued ? 'queued' : 'written' }; },
     onSpeak: event => { spoken.push(event); return { ok: true }; },
-    fetch: async url => new Response(JSON.stringify(url.endsWith('/models') ? { data: [{ id: 'fixture', supported_parameters: ['tools'] }] } : { data: {} })) });
+    fetch: async url => new Response(JSON.stringify(url.endsWith('/models') ? { data: [{ id: 'fixture', context_length: 128000, supported_parameters: ['tools'] }] } : { data: {} })) });
   t.after(async () => { await app.dispose(); fs.rmSync(root, { recursive: true, force: true }); });
   await app.configure({ apiKey: 'fixture', model: 'fixture', sessionOnly: true }); await app.setEnabled(true);
   const deliver = async (index, ok = true) => {
@@ -52,12 +52,18 @@ test('queued targets acknowledge only after both deliveries, once; later failure
   const f = await fixture(t);
   const result = await f.app.send({ text: 'Send review to both terminals', origin: 'voice' });
   assert.equal(result.ok, true, JSON.stringify(result));
-  assert.match(result.text, /queued/); assert.equal(f.spoken.filter(event => event.completionCue).length, 0);
-  await f.deliver(0); assert.equal(f.spoken.filter(event => event.completionCue).length, 0);
-  await f.deliver(1); assert.equal(f.spoken.filter(event => event.completionCue).length, 1);
-  await f.app.refresh(); await tick(); assert.equal(f.spoken.filter(event => event.completionCue).length, 1);
-  assert.equal(f.spoken.find(event => event.completionCue).speechText, 'done');
-  assert.equal(f.app.getState().messages.filter(message => message.requestId === result.requestId && message.text === 'done').length, 1);
+  assert.match(result.text, /queued/);
+  // One acknowledgment, and only after both deliveries. The delegated agent
+  // result is still pending, so it reports the running task instead of cueing
+  // completion.
+  const acknowledgments = () => f.spoken.filter(event => Object.hasOwn(event, 'completionCue'));
+  assert.equal(acknowledgments().length, 0);
+  await f.deliver(0); assert.equal(acknowledgments().length, 0);
+  await f.deliver(1); assert.equal(acknowledgments().length, 1);
+  await f.app.refresh(); await tick(); assert.equal(acknowledgments().length, 1);
+  assert.equal(acknowledgments()[0].completionCue, false);
+  assert.match(acknowledgments()[0].speechText, /result is still pending/);
+  assert.equal(f.app.getState().messages.filter(message => message.requestId === result.requestId && /result is still pending/.test(message.text)).length, 1);
   Object.assign(f.sessions[0], { processState: 'failed', turnState: 'failed' });
   await f.app.refresh(); await tick();
   assert(f.spoken.some(event => event.kind === 'task-report' && /failed|could not|stopped|unavailable|ended/i.test(event.text)));

@@ -243,8 +243,9 @@ preserve that distinction.
 
 The Orchestrator already reduces its own input through compact metadata,
 progressive reads and [`orchestratorBudget.cjs`](../backend/orchestratorBudget.cjs).
-Its input ceiling is 48,000 serialized bytes under a conservative budget formula;
-this is not a measurement of a worker's remaining context.
+Its input ceiling is 48,000 serialized bytes under a conservative budget formula
+(96,000 for models with at least 131,072 context tokens); this is not a
+measurement of a worker's remaining context.
 
 There is no normalized worker context utilization in `sessionSummary`. Fusion's
 Codex adapter observes some token usage internally, but that is not a reliable

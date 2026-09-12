@@ -4,10 +4,10 @@ Lina Terminal ships to Windows users as an Electron Builder NSIS installer hoste
 
 ## Current Public Release
 
-The current Windows release is `v0.1.116`:
+The current Windows release is `v0.1.117`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.116`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.116/LinaTerminal-Setup-0.1.116.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.117`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.117/LinaTerminal-Setup-0.1.117.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -66,14 +66,13 @@ The compiled `dist/` renderer is still included because it is the UI Electron di
 
 ## Local Build
 
-Version `0.1.116` adds shared model/provider settings, separate Open Codex and
-Codex Web integrations, current-chat resume tracking, refreshed Fusion menus,
-and Git branch/worktree inspection. It includes the terminal resource and
-Orchestrator repairs from the unpublished 0.1.114/0.1.115 candidates.
-See [the release review](release-0.1.116-review.md),
-[the performance review](performance-orchestrator-overhaul-2026-09-10.md) and
-[the capability audit](orchestrator-capability-audit-2026-09-10.md) for verification
-and remaining boundaries.
+Version `0.1.117` de-serializes the Orchestrator, spawns every Windows pane on
+node-pty's bundled ConPTY, and opens genuine Work sessions for Codex Web Work
+models with response-model verification. It repairs the packaged Open Codex
+launcher, redesigns the voice indicator with a Stop control for the current
+voice turn, and removes the in-app version switcher.
+See [the release review](release-0.1.117-review.md) for verification and
+remaining boundaries.
 Installed applications apply updates through the user's Update/Restart action;
 publication does not restart an active workspace.
 
@@ -242,19 +241,16 @@ Silent updates are enforced at two layers:
 
 The second layer matters because the silent flag is decided by the *currently installed* build. A user updating away from a build released before the silent fix (v0.1.1 or earlier) would otherwise see the installer window once; the `customInit` hook makes the new installer silence itself regardless of how the old build launched it.
 
-## Version Switching (rollback)
+## Version selection
 
-The caret beside `Check for update` opens a list of published releases so a user can move to **any** version, including an older one.
+The in-app version switcher has been removed. `Check for update` still checks
+for the latest release, with the existing download and explicit restart flow.
+The release-list and selected-version installer handlers are no longer exposed
+through the preload bridge or registered in the main process.
 
-This deliberately does not go through electron-updater. Its GitHub provider only resolves "the latest release" — there is no way to request a specific version — so downgrading would mean fighting it with `allowDowngrade` plus a hand-built feed. Instead:
-
-1. `updates:list-versions` reads `GET /repos/luigicarter/VibeTerminal/releases` (unauthenticated, `user-agent` required) and returns every non-draft release with its `.exe` asset. Releases without an installer are listed but disabled rather than hidden.
-2. `updates:install-version` re-reads the list, downloads that release's installer to `%TEMP%/vibeterminal-versions/`, reporting progress through the normal update state so the existing overlay shows it.
-3. The installer is spawned detached with `["/S", "--force-run"]` — the same pair `quitAndInstall(true, true)` uses — then the app quits. `/S` installs silently; `--force-run` brings the app back. `/S` is honoured by every installer version, including ones released before the `customInit` silent-on-update hook, so rolling back that far still applies invisibly.
-
-The state published during this is `switching`, **not** `downloaded`. `downloaded` means electron-updater has an update staged and makes the overlay offer a `Restart` button wired to its `quitAndInstall`; during a version switch nothing is staged, so that button would call it with nothing to install. `switching` renders a progress note with no action, and `restartAndInstallUpdate()` (which requires `downloaded`) correctly refuses to fire.
-
-Rolling back means an older build reads the current `userData`. Fields added by newer builds are optional and additive, so older builds ignore them — but a rollback across a storage-format change is only as safe as that build's own restore path.
+This takes effect in builds containing the removal. Existing installations keep
+their previous behavior until updated. Older installers can still be installed
+manually if available; this change does not delete published release assets.
 
 ## Signing Status
 

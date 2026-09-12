@@ -15,6 +15,7 @@ const { buildAgentContext } = require('./orchestratorAgentContext.cjs');
 const agentTools = require('../shared/orchestratorAgentTools.cjs');
 const { createRoutingRegistry, sessionIdentity, matchesBinding, paneKey } = require('./orchestratorRouting.cjs');
 const { planTaskRoute, validateRouteCall, deterministicNewTaskRoute } = require('./orchestratorRoutePlanner.cjs');
+const { resolveTitledOwner } = require('./orchestratorOwnerMatch.cjs');
 const { completeInspections } = require('./orchestratorInspectionCompletion.cjs');
 const { createGoalReviewer } = require('./orchestratorGoalReview.cjs');
 const { createWorkspaceExecutor } = require('./orchestratorWorkspaceExecutor.cjs');
@@ -27,7 +28,7 @@ const { launcherCatalog, routingBindingMatches, sessionReady } = require('./orch
 const { buildWorkspaceParameters, scopedWorkspaceTool, namedWorkspaceTools } = require('./orchestratorToolSchema.cjs');
 const { workspaceToolGuide } = require('./orchestratorToolGuide.cjs');
 const { createSettings } = require('./orchestratorSettings.cjs');
-const { outputTokensFor, completionOptions, exhaustedReply } = require('./orchestratorModelOptions.cjs');
+const { outputTokensFor, completionOptions, structuredOutput, exhaustedReply } = require('./orchestratorModelOptions.cjs');
 const { createDiagnostics } = require('./orchestratorDiagnostics.cjs');
 
 const { TERMINAL_KEYS } = require('../shared/terminalControls.cjs');
@@ -100,31 +101,36 @@ lifecycleMode preserve keeps the agent alive: never use Ctrl-C, Ctrl-D, Ctrl-Bac
 After accomplishing the requested terminal interaction, read its outcome and call finish_terminal with the current token, stepId, outcome completed and a concise factual text. Transport acceptance alone proves only input was written; distinguish sent, accepted/running, and finished work. If blocked, inspect and try a different applicable control only when the previous effect is known not dispatched; uncertain writes must never be replayed. Use finish_terminal outcome blocked with the concrete obstacle when recovery needs user input. Do not save a draft unless the user explicitly requested a draft. Do not repeat the request as your answer or stop with a promise while grants remain unfinished. Report what actually happened in natural language.`;
 const INSPECTION_SYSTEM = `${TERMINAL_NAVIGATION_POLICY}
 For responseKind terminal-inspection, and for individual grants marked inspection in mixed requests, inspect the existing terminal yourself and report the requested facts. Use terminal_interact with inputPurpose interaction for local informational commands and menu navigation; never send_prompt, start a coding task, change settings, spend a usage reset, grant permission, clear human input or interrupt work. An inspection grant permits the navigation needed to reveal information, not unrelated menu effects. Read the resulting screen before finishing; follow visible tabs or navigation hints when the requested detail is elsewhere. Use non-interrupting Escape only when the observed help identifies it as closing the inspection menu; read again after closing. If the data is already visible, report it without unnecessary input. If safe access or the requested data is unavailable, finish blocked with the observed limitation. finish_terminal text must contain the actual findings (provider, used versus remaining, relevant windows/reset times when shown) or the concrete missing information, never just 'done'.`;
-function createOrchestrator({ userDataPath, secureStorage, interpretIntent, routeTask, autoInspectionCompletion = true, agentHarness = process.env.LINA_ORCHESTRATOR_HARNESS || 'shadow', reviewTaskAffinity, getLaunchers = async () => [], getWorkspaceState = async () => ({ ok: false }), fetch: fetcher = globalThis.fetch, getSessions = async () => [], getSession = async id => (await getSessions()).find(session => session.id === id), readSession = async () => ({}), dispatchAction = async () => ({ ok: false, error: 'No action adapter.' }), getRoots = async () => [], onChange = () => {}, onActivity, onSpeak, onUpstreamError = () => {}, onCancel = () => {}, resolveWorkspaceIdentity = cwd => require('node:path').resolve(cwd).toLowerCase(), now = Date.now }) {
+// The scoped agent harness is the only coordinator generation. LINA_ORCHESTRATOR_HARNESS
+// is deliberately ignored rather than rejected, so an old launcher environment
+// cannot fail startup by asking for the retired legacy path.
+function createOrchestrator({ userDataPath, secureStorage, interpretIntent, routeTask, autoInspectionCompletion = true, reviewTaskAffinity, getLaunchers = async () => [], getWorkspaceState = async () => ({ ok: false }), fetch: fetcher = globalThis.fetch, getSessions = async () => [], getSession = async id => (await getSessions()).find(session => session.id === id), readSession = async () => ({}), dispatchAction = async () => ({ ok: false, error: 'No action adapter.' }), getRoots = async () => [], onChange = () => {}, onActivity, onSpeak, onUpstreamError = () => {}, onCancel = () => {}, resolveWorkspaceIdentity = cwd => require('node:path').resolve(cwd).toLowerCase(), now = Date.now }) {
   const storage = createSettings({ userDataPath, secureStorage }); const files = createFiles({ getRoots });
   const diagnostics = createDiagnostics({ userDataPath, getSecrets: () => [storage.getKey()], now });
+  // Voice inference emits bounded timing roughly once a second while hands-free
+  // listens. Its own file keeps that volume from rotating real errors away.
+  const voiceDiagnostics = createDiagnostics({ userDataPath, getSecrets: () => [storage.getKey()], now, filename: 'voice-inference.jsonl' });
   const workHistory = createWorkHistory({ userDataPath, getSecrets: () => [storage.getKey()], now });
   const workItems = createWorkItemStore({ userDataPath, getSecrets: () => [storage.getKey()], now });
   const assignments = createRoutingRegistry({ now });
   const creations = new Map();
   const deliveryDiagnostics = new Map(), loggedResults = new WeakSet();
   const state = { publicationRevision: 0, enabled: false, ready: false, busy: false, phase: 'off', sessions: [], messages: [], requests: [], receipts: [], usage: { brain: 0, transcription: 0, speech: 0 } };
-  const useAgentHarness = agentHarness === 'agents-v1';
+  // Bounded redacted record of the most recent request that failed to compile, so
+  // a later conversational turn can say why. Never a transcript or raw arguments.
+  let lastFailure = null;
   const agentStore = createAgentStore({ userDataPath, getSecrets: () => [storage.getKey()], now });
   const agentDirectory = createAgentDirectory({ restored: agentStore.identities() });
   const agentQueries = createAgentQueries({ directory: agentDirectory, store: agentStore, workItems });
   let agentError, identityWriteSignature;
   function syncAgents() {
-    if (agentHarness === 'legacy') return;
     try {
       agentDirectory.reconcile(state.sessions, { workItems: workItems.snapshot().items, requests: state.requests });
       agentError = undefined;
-      if (useAgentHarness) {
-        const identities = agentDirectory.exportIdentities(), signature = JSON.stringify(identities);
-        if (signature !== identityWriteSignature) {
-          identityWriteSignature = signature;
-          void agentStore.syncIdentities(identities).catch(error => diagnosticError(error, { stage: 'agent_identity_persistence' }));
-        }
+      const identities = agentDirectory.exportIdentities(), signature = JSON.stringify(identities);
+      if (signature !== identityWriteSignature) {
+        identityWriteSignature = signature;
+        void agentStore.syncIdentities(identities).catch(error => diagnosticError(error, { stage: 'agent_identity_persistence' }));
       }
     } catch (error) { agentError = String(error.message || error); }
   }
@@ -140,7 +146,6 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
   const requestContext = new AsyncLocalStorage();
   const routingContext = { conversationTarget: null, pendingConversationTarget: null, pendingRelay: null, projectContext: null, conversationGroup: null, pendingCommand: null, controller: null };
   const context = () => requestContext.getStore() || routingContext;
-  const isAgentRequest = () => context().job?.task.harnessVersion ? context().job.task.harnessVersion === 'agents-v1' : useAgentHarness;
   const routing = createSemaphore(1), executors = createSemaphore(2);
   const detailReaders = createSemaphore(2), turnEndings = new Map(), turnResults = new Map(), taskDetails = new Map();
   const speakTaskUpdate = createTaskSpeech(onSpeak);
@@ -156,7 +161,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
       if (!commandCompleted({ ...job.completionContext, waits: job.waits, deliveryUpdates: [...(job.deliveryUpdates?.values() || [])], sessions: state.sessions })) continue;
       job.commandAcknowledged = true;
       const requestId = job.task.requestId;
-      const pendingAgentResult = job.task.harnessVersion === 'agents-v1' && job.waits.some(wait => !wait.done);
+      const pendingAgentResult = job.waits.some(wait => !wait.done);
       const acknowledgment = pendingAgentResult ? formatFinalResponse({ outcomes: job.actionOutcomes || [], waits: job.waits, sessions: state.sessions, grants: job.intent?.commandPlan?.grants || [] }) || 'The task was sent; its result remains pending.' : 'done';
       message('assistant', acknowledgment, { requestId, origin: job.input.origin, responseTurn: 'complete', completionCue: !pendingAgentResult });
       if (job.input.origin === 'voice' && onSpeak) {
@@ -168,7 +173,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
         }).catch(error => diagnosticError(error, { requestId, stage: 'speech' }));
       }
     }
-    for (const job of tasks.jobs.values()) for (const report of collectTaskReports(job, state.sessions, { now })) {
+    for (const job of tasks.jobs.values()) for (const report of collectTaskReports(job, state.sessions, { now, recordDiagnostic })) {
       const requestId = job.task.requestId;
       message('system', report.text, { ...report, requestId, origin: 'task', reportKind: 'lifecycle' });
       queueTaskDetails(job, report);
@@ -365,7 +370,13 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
   // Diagnostics remain local. Never include them in model context or UI snapshots.
   function recordDiagnostic(event) {
     if (disposed) return;
-    try { diagnostics.record({ model: storage.getSettings().model, ...event }); } catch {}
+    try {
+      const record = { model: storage.getSettings().model, ...event };
+      // Routine voice inference telemetry is high volume; only its failures
+      // belong in the error log that operators read first.
+      const routineVoice = record.event === 'voice_inference' && ['stream', 'completion', 'inference'].includes(record.stage);
+      (routineVoice ? voiceDiagnostics : diagnostics).record(record);
+    } catch {}
   }
   function diagnosticError(error, context = {}) {
     if (isCancellation(error) || error?.message === 'Cancelled.') return;
@@ -384,7 +395,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
       status: result.status || 'rejected', reason: result.reason,
     });
   }
-  function snapshot() { return redact({ ...state, harnessVersion: useAgentHarness ? 'agents-v1' : agentHarness === 'shadow' ? 'shadow' : 'legacy', workHistory: workHistory.snapshot(), tasks: tasks.snapshot(), activeTargets: activity.snapshot(state.sessions, epoch), ready: validated && Boolean(storage.getKey() && storage.getSettings().model), settings: storage.getSettings(), preferences: storage.getPreferences() }); }
+  function snapshot() { return redact({ ...state, workHistory: workHistory.snapshot(), tasks: tasks.snapshot(), activeTargets: activity.snapshot(state.sessions, epoch), ready: validated && Boolean(storage.getKey() && storage.getSettings().model), settings: storage.getSettings(), preferences: storage.getPreferences() }); }
   function emit() { if (!disposed) { try { state.publicationRevision++; const view = snapshot(); conversationStore.save({ messages: view.messages, receipts: view.receipts, tasks: view.tasks }); onChange(view); } catch {} } }
   function emitActivity() {
     if (!onActivity) return emit();
@@ -682,9 +693,21 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
       const reservation = known && assignments.findByWorkItem(known.id);
       const evidence = new Map(), evidenceText = new Map();
       const scopedSessions = () => state.sessions.filter(session => sameCwd(session.cwd, cwd));
+      const validateChoice = async proposal => {
+        if (proposal.decision !== 'reuse' || !proposal.agentId) return proposal;
+        await requireFreshSessions(); active(token);
+        const record = agentDirectory.get(proposal.agentId), selected = agentDirectory.resolve(proposal.agentId);
+        if (!selected || !sameCwd(record?.identity.cwd, cwd)) {
+          recordDiagnostic({ ...diagnosticContext, event: 'routing_progress', stage: 'assignment_validation',
+            grantId: grant.id, status: 'rejected', reason: !record ? 'unknown-agent-reference' : 'owner-unavailable-or-outside-project' });
+          throw new Error('The selected agent has no unique live owner in this project. Use find_agents and its exact agentId (not surfaceId or native conversation ID), then read the current candidate. If its owner is unavailable or ambiguous, clarify.');
+        }
+        const { agentId, ...choice } = proposal;
+        return { ...choice, targetId: selected.id };
+      };
       const read = async args => {
         validateRouteCall(args); active(token);
-        if (isAgentRequest() && ['find_agents', 'read_agent', 'read_work_item'].includes(args.kind)) {
+        if (['find_agents', 'read_agent', 'read_work_item'].includes(args.kind)) {
           await requireFreshSessions(); active(token);
           if (args.kind === 'read_agent' && !sameCwd(agentDirectory.get(args.agentId)?.identity.cwd, cwd) ||
               args.kind === 'read_work_item' && !sameCwd(workItems.get(args.workItemId)?.cwd, cwd)) throw new Error('This agent or work record is outside the authorized project.');
@@ -714,20 +737,59 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
       if (reservation && ['unknown', 'uncertain', 'unconfirmed'].includes(reservation.status)) {
         routingQuestion(intent, job, 'The earlier assignment has an unconfirmed outcome. Inspect its terminal before continuing this task.'); break;
       }
-      if (known && grant.args.assignmentMode !== 'new' && (creations.has(reservation?.id) || liveOwner || reservedOwner)) {
+      // A continuation that names one live agent in this project by its title
+      // needs no routing model: the title comes from the task's own first
+      // prompt, the match must be unique, and the pane is read and bound here
+      // exactly as the router path does. This never creates or opens anything.
+      let shortcutOwner = false;
+      if (grant.args.assignmentMode === 'existing' && !known) {
+        const candidates = agentDirectory.list().filter(record => record && sameCwd(record.identity?.cwd, cwd) && agentDirectory.resolve(record.agentId))
+          .map(record => ({ agentId: record.agentId, name: record.identity.name, titles: (record.work?.items || []).map(item => item.title) }));
+        const match = resolveTitledOwner({ instruction: job.input.text, candidates, projectName: require('node:path').basename(cwdKey(cwd)) });
+        recordDiagnostic({ ...diagnosticContext, event: 'routing_progress', stage: 'assignment_shortcut', grantId: grant.id,
+          status: match.status, candidateCount: match.candidateCount ?? candidates.length });
+        if (match.status === 'matched') {
+          await requireFreshSessions(); active(token);
+          const record = agentDirectory.get(match.agentId), run = agentDirectory.resolve(match.agentId);
+          const session = run && scopedSessions().find(item => item.id === run.id && item.generation === run.generation);
+          if (session && record) {
+            let observed;
+            try { observed = await read({ kind: 'read_session', targetId: session.id }); }
+            catch (error) { if (signal.aborted || token !== epoch) throw error; }
+            active(token);
+            const current = observed?.ok && scopedSessions().find(item => item.id === session.id && item.generation === session.generation);
+            if (current && evidence.has(current.id) && routingBindingMatches(evidence.get(current.id), current)) {
+              const owned = workItems.list({ cwd, limit: 100 }).find(item => item.binding && matchesBinding(item.binding, current));
+              const claimed = workItems.snapshot().items.some(item => item.id !== owned?.id && paneKey(item.binding?.target) === paneKey(current));
+              // One work item per pane. A stale claim on this pane is the
+              // router's problem, not evidence for a second adopted record.
+              const adopted = claimed ? null : owned || workItems.create({ cwd, requestId: job.task.requestId,
+                objective: (evidenceText.get(current.id) || '').slice(0, 4000) || record.identity.name, title: String(record.identity.name || '').slice(0, 150) });
+              const bound = adopted && workItems.bind(adopted.id, { target: { id: current.id, generation: current.generation, ...(current.launchToken !== undefined && { launchToken: current.launchToken }) },
+                nativeIdentity: sessionIdentity(current), evidence: { source: 'unique-title-adoption', requestId: job.task.requestId } });
+              if (bound) {
+                proposal = { kind: 'choose', decision: 'reuse', targetId: current.id, workItemId: bound.id, reason: 'unique-title-owner' };
+                shortcutOwner = true;
+              }
+            }
+          }
+        }
+      }
+      if (shortcutOwner) { /* The uniquely titled owner above already proposed a verified reuse. */ }
+      else if (known && grant.args.assignmentMode !== 'new' && (creations.has(reservation?.id) || liveOwner || reservedOwner)) {
         proposal = { kind: 'choose', decision: 'reuse', targetId: (liveOwner || reservedOwner)?.id || 'pending-creation', workItemId: known.id, reason: 'Continue the conversation already assigned to this task.' };
-      } else if ((proposal = deterministicNewTaskRoute({ scope: grant.args, launchers, automaticProvider: isAgentRequest() }))) {
+      } else if ((proposal = deterministicNewTaskRoute({ scope: grant.args, launchers, automaticProvider: true }))) {
         recordDiagnostic({ ...diagnosticContext, event: 'request_stage', stage: 'assignment_strategy', grantId: grant.id,
           strategy: 'explicit-new', decision: proposal.decision });
       } else {
-        const routeContext = redact({ instruction: grant.text, scope: grant.args, promptMode: grant.promptMode, harnessVersion: isAgentRequest() ? 'agents-v1' : 'legacy',
-          workItems: isAgentRequest() ? (known ? [workItemSummary(known)] : []) : workItemContext(cwd).slice(0, 20), replyWorkItem: workItems.findByRequest(job.input.replyToRequestId) && workItemSummary(workItems.findByRequest(job.input.replyToRequestId)),
-          sessions: listSessionSummaries(isAgentRequest() ? scopedSessions().filter(s => known && matchesBinding(known.binding, s)) : scopedSessions(), { limit: 20, includeNavigationGuide: false }).sessions,
+        const routeContext = redact({ instruction: grant.text, currentInstruction: job.input.text, scope: grant.args, promptMode: grant.promptMode,
+          workItems: known ? [workItemSummary(known)] : [], replyWorkItem: workItems.findByRequest(job.input.replyToRequestId) && workItemSummary(workItems.findByRequest(job.input.replyToRequestId)),
+          sessions: listSessionSummaries(scopedSessions().filter(s => known && matchesBinding(known.binding, s)), { limit: 20, includeNavigationGuide: false }).sessions,
           sessionDirectory: { total: scopedSessions().length, truncated: scopedSessions().length > 20 }, launchers,
           reservations: assignments.snapshot().filter(item => sameCwd(item.cwd, cwd)).map(({ id, requestId, workItemId, status, target }) => ({ id, requestId, workItemId, status, target })) });
         if (routeTask) proposal = validateRouteCall(await routeTask(routeContext, { read }));
         else proposal = await planTaskRoute({ context: routeContext, grantId: grant.id,
-          onEvent: event => recordDiagnostic({ ...diagnosticContext, ...event }), read, check: () => active(token), resetReadBudget: () => intent.readBudget.reset(),
+          onEvent: event => recordDiagnostic({ ...diagnosticContext, ...event }), read, validateChoice, check: () => active(token), resetReadBudget: () => intent.readBudget.reset(),
           complete: async (messages, tools) => {
             const settings = storage.getSettings();
             if (settings.spendingLimit != null && Object.values(state.usage).reduce((a, b) => a + b, 0) >= settings.spendingLimit) throw new Error('Session spending limit reached.');
@@ -738,14 +800,11 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
           } });
       }
       active(token);
-      if (isAgentRequest() && proposal.decision === 'reuse' && proposal.agentId) {
-        await requireFreshSessions(); active(token);
-        const selected = agentDirectory.resolve(proposal.agentId);
-        if (!selected || !sameCwd(agentDirectory.get(proposal.agentId)?.identity.cwd, cwd)) throw new Error('The selected agent has no unique live owner in this project.');
-        const { agentId, ...choice } = proposal;
-        proposal = { ...choice, targetId: selected.id };
+      proposal = await validateChoice(proposal);
+      if (grant.args.assignmentMode === 'existing' && proposal.decision === 'create') {
+        routingQuestion(intent, job, 'I could not verify the existing agent for this continuation. What is its terminal title?'); break;
       }
-      if (isAgentRequest() && proposal.decision === 'clarify') {
+      if (proposal.decision === 'clarify' && grant.args.assignmentMode !== 'existing') {
         const fresh = deterministicNewTaskRoute({ scope: { ...grant.args, assignmentMode: 'new' }, launchers, automaticProvider: true });
         if (fresh.decision === 'create' && (!known || !assignments.findByWorkItem(known.id))) proposal = {
           ...fresh, ...(known && { workItemId: known.id }), reason: 'The project task is authorized; uncertain worker selection uses a fresh configured agent.' };
@@ -755,16 +814,35 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
       if (known && proposal.workItemId && known.id !== proposal.workItemId) throw new Error('The routing proposal changed the authorized work item.');
       let workItem = known || (proposal.workItemId && workItems.get(proposal.workItemId));
       if (proposal.workItemId && !workItem || workItem && !sameCwd(workItem.cwd, cwd)) throw new Error('The routing work item is unavailable or belongs to another project.');
-      if (isAgentRequest() && proposal.decision === 'reuse' && !known && proposal.targetId !== 'pending-creation') {
+      if (proposal.decision === 'reuse' && !known && !shortcutOwner && proposal.targetId !== 'pending-creation') {
+        // Agent metadata discovery is not a native task read. Supply current
+        // candidate evidence ourselves before asking the ownership reviewer;
+        // otherwise a valid read_agent -> choose sequence reviews empty text.
+        await requireFreshSessions(); active(token);
+        let candidate = scopedSessions().find(session => session.id === proposal.targetId);
+        if (!candidate) throw new Error('The routing candidate is outside this task project or no longer exists.');
+        if (!evidence.has(candidate.id) || !routingBindingMatches(evidence.get(candidate.id), candidate)) {
+          const observed = await read({ kind: 'read_session', targetId: candidate.id }); active(token);
+          candidate = scopedSessions().find(session => session.id === proposal.targetId);
+          if (!observed.ok || !candidate || !evidence.has(candidate.id) || !routingBindingMatches(evidence.get(candidate.id), candidate)) {
+            routingQuestion(intent, job, 'I could not read the current task in that agent. Is its terminal still open and ready?'); break;
+          }
+        }
         const affinity = require('./orchestratorTaskAffinity.cjs');
         const input = affinity.evidence({ currentInstruction: job.input.text, requestedObjective: grant.text,
+          existingTitle: candidate.conversationTitle || candidate.conversation?.title || candidate.name,
           existingObjective: workItem?.objective || evidenceText.get(proposal.targetId) });
         const relation = reviewTaskAffinity ? await reviewTaskAffinity(input) : affinity.decision(await executors.run(signal, () => completionWithFallback({
-          model: model.id, max_tokens: 512, ...completionOptions(model), messages: fitMessages({ messages: [
+          model: model.id, max_tokens: 512, ...completionOptions(model), ...structuredOutput(model, 'task_affinity', affinity.SCHEMA), messages: fitMessages({ messages: [
             { role: 'system', content: affinity.SYSTEM }, { role: 'user', content: JSON.stringify(redact(input)) }],
-            contextLength: model.contextLength, outputTokens: 512 }) }, signal)), input);
+            contextLength: model.contextLength, outputTokens: 512 }) }, signal, { category: 'affinity-review' })), input);
         active(token);
+        recordDiagnostic({ ...diagnosticContext, event: 'routing_progress', stage: 'assignment_affinity',
+          grantId: grant.id, targetId: proposal.targetId, decision: relation });
         if (relation !== 'same-task') {
+          if (relation !== 'independent' || grant.args.assignmentMode === 'existing') {
+            routingQuestion(intent, job, 'I could not verify that this agent owns the task you want to continue. What is the terminal title or the original task?'); break;
+          }
           proposal = deterministicNewTaskRoute({ scope: { ...grant.args, assignmentMode: 'new' }, launchers, automaticProvider: true });
           if (proposal.decision === 'clarify') { routingQuestion(intent, job, proposal.text); break; }
           proposal.reason = 'No verified same-task ownership; this objective gets a separate agent conversation.';
@@ -880,11 +958,11 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
   }
   const interpret = createIntentInterpreter({ interpretIntent, getTask: id => tasks.get(id),
     redact, cleanError, recordDiagnostic, diagnosticError, retryCeiling: BRAIN_RETRY_CEILING,
-    complete: async (body, signal) => {
+    complete: async (body, signal, options) => {
       if (signal.aborted) throw new Error('Cancelled.');
       const current = storage.getSettings();
       if (current.spendingLimit != null && Object.values(state.usage).reduce((a, b) => a + b, 0) >= current.spendingLimit) throw new Error('Session spending limit reached.');
-      const response = await completionWithFallback(body, signal);
+      const response = await completionWithFallback(body, signal, options);
       return response;
     },
   });
@@ -978,7 +1056,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
   function schedule() { clearInterval(timer); timer = null; if (state.enabled && !disposed && storage.getSettings().monitoringEnabled === true) { timer = setInterval(() => { void refresh({ monitor: true }); }, storage.getSettings().monitoringIntervalSeconds * 1000); timer.unref?.(); } }
   const goalReviewer = createGoalReviewer({ complete: (body, signal, metadata) => executors.run(signal, () => completionWithFallback(body, signal, metadata)), recordDiagnostic, redact, now });
   const workspaceExecutor = createWorkspaceExecutor({
-    agentServices: { directory: agentDirectory, queries: agentQueries, store: agentStore, error: () => agentError, enabled: isAgentRequest },
+    agentServices: { directory: agentDirectory, queries: agentQueries, store: agentStore, error: () => agentError, enabled: () => true },
     getSessions: () => state.sessions, getRequests: () => state.requests, getEpoch: () => epoch, isDisposed: () => disposed,
     active, getRoots, getWorkspaceState, readSession, dispatchAction, requireFreshSessions, refresh, files,
     getCurrentSession: getSession,
@@ -1025,9 +1103,8 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
     if (!tasks.hasCapacity()) return { ok: false, error: 'The request history is full of unresolved work. Answer or cancel pending clarifications, or finish tracked terminal work before adding more requests.' };
     if (tasks.snapshot().filter(task => !['finished', 'failed', 'cancelled', 'paused', 'continued'].includes(task.status)).length >= 50) return { ok: false, error: 'The request queue is full. Finish or cancel a pending request first.' };
     const job = tasks.create(input);
-    job.task.harnessVersion = ['legacy', 'agents-v1'].includes(input.internalHarnessVersion) ? input.internalHarnessVersion : useAgentHarness ? 'agents-v1' : 'legacy';
     if (input.projectPath) job.task.projectPath = input.projectPath;
-    if (job.task.harnessVersion === 'agents-v1' && !input.projectPath && !input.targetId) {
+    if (!input.projectPath && !input.targetId) {
       try { job.admissionWorkspace = Promise.resolve(getWorkspaceState(job.controller.signal)).catch(() => undefined); }
       catch { job.admissionWorkspace = Promise.resolve(undefined); }
     }
@@ -1063,6 +1140,8 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
   async function executeRequest(job, releaseRoute) {
     const input = job.input;
     const recentConversation = state.messages.filter(m => m.requestId !== job.task.requestId && m.origin !== 'monitor' && (!m.requestId || (tasks.get(m.requestId)?.task.sequence || 0) < job.task.sequence)).slice(-12).map(({ role, text, requestId }) => ({ role, text: text.slice(0, 4000), requestId }));
+    // A prior request's compile failure is answerable context, never authority.
+    const recentFailure = lastFailure && lastFailure.requestId !== job.task.requestId ? { ...lastFailure } : null;
     const pendingJobs = [...tasks.jobs.values()].filter(prior => prior.task.sequence < job.task.sequence && prior.context?.pendingCommand && !['cancelled', 'finished'].includes(prior.task.status));
     const queuedSources = new Map();
     for (const prior of pendingJobs) if (prior.context.pendingCommand.queued) {
@@ -1114,19 +1193,22 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
       const replyItem = workItems.findByRequest(input.replyToRequestId);
       const replyWorkItem = replyItem && workItemSummary(replyItem);
       let workspaceContext = input.projectPath ? require('./orchestratorProjectContext.cjs').resolveSubmittedProject(input.projectPath, roots)
-        : job.admissionWorkspace ? await job.admissionWorkspace : !interpretIntent && !isAgentRequest() ? await getWorkspaceState(signal) : undefined;
+        : job.admissionWorkspace ? await job.admissionWorkspace : undefined;
       active(token);
-      if (isAgentRequest() && workspaceContext?.ok && workspaceContext.cwd && !input.projectPath) {
+      if (workspaceContext?.ok && workspaceContext.cwd && !input.projectPath) {
         workspaceContext = require('./orchestratorProjectContext.cjs').resolveSubmittedProject(workspaceContext.cwd, roots);
         input.projectPath = workspaceContext.cwd; job.task.projectPath = workspaceContext.cwd;
       }
+      // pendingJobs was filtered on a live pendingCommand many awaits ago. A
+      // concurrent request that settles or is cancelled meanwhile clears its own
+      // command, so every read below re-checks it rather than trusting that filter.
       const commandContext = { workspaceContext: workspaceContext?.ok === true ? workspaceContext : undefined, originalInstruction: input.originalInstruction, dependencyResults: initialDependencyResults, instruction: input.text, requestId: diagnosticContext.requestId, previousCommand, replyContext,
-        harnessVersion: isAgentRequest() ? 'agents-v1' : 'legacy', workItems: [...new Map([...(replyWorkItem ? [replyWorkItem] : []), ...(isAgentRequest() ? knownWorkItems.filter(item => item.binding?.target?.id === input.targetId || item.requestIds.includes(input.replyToRequestId)) : knownWorkItems.slice(0, 20))].map(item => [item.id, item])).values()], replyWorkItem, launchers: launcherCatalog(await getLaunchers()),
+        workItems: [...new Map([...(replyWorkItem ? [replyWorkItem] : []), ...knownWorkItems.filter(item => item.binding?.target?.id === input.targetId || item.requestIds.includes(input.replyToRequestId))].map(item => [item.id, item])).values()], replyWorkItem, launchers: launcherCatalog(await getLaunchers()),
         sessions: intent.sessions, requests: intent.requests, roots, projects, projectContext: context().projectContext, targetId: input.targetId,
         interactionContext: interactionContext && { id: interactionContext.id, sessionId: interactionContext.sessionId, generation: interactionContext.generation, revision: interactionContext.revision },
         conversationTarget: intent.conversationTarget, conversationGroup: intent.conversationGroup,
         pendingRelay: previousRelay, authorizedRelay: intent.authorizedRelay, preferences: storage.getPreferences(),
-        recentConversation, pendingCommands: pendingJobs.map(prior => prior.context.pendingCommand), tasks: tasks.snapshot().filter(task => task.sequence < job.task.sequence), recentUserMessages: recentConversation.filter(item => item.role === 'user').slice(-5).map(({ requestId, text }) => ({ id: requestId, text })) };
+        recentConversation, ...(recentFailure && { lastFailure: recentFailure }), pendingCommands: pendingJobs.map(prior => prior.context.pendingCommand).filter(Boolean), tasks: tasks.snapshot().filter(task => task.sequence < job.task.sequence), recentUserMessages: recentConversation.filter(item => item.role === 'user').slice(-5).map(({ requestId, text }) => ({ id: requestId, text })) };
       const confirmation = selectedPrior?.resumeConfirmation;
       const confirmedGrant = confirmation && input.replyToRequestId === selectedPrior.task.requestId && input.questionId === confirmation.questionId && selectedPrior.task.question?.id === confirmation.questionId && selectedPrior.task.status === 'needs-answer' && previousCommand?.expiresAt > now() && previousCommand.requestId === confirmation.sourceUserId && isConversationResumeConfirmation(input.text)
         && previousCommand.grants?.filter(grant => grant.kind === 'resume_conversation' && JSON.stringify(grant.args) === JSON.stringify(confirmation.args));
@@ -1311,19 +1393,19 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
       const relevantIds = new Set([job.task.requestId, input.replyToRequestId, ...job.task.dependsOn, ...(!targetIds.length ? [precedingRequest] : [])].filter(Boolean));
       const recentActions = state.receipts.filter(item => relevantIds.has(item.requestId) || targetIds.includes(item.targetId)).slice(-5);
       const operating = intent.commandPlan.grants.some(grant => grant.kind === 'operate_terminal');
-      const workspaceTool = scopedWorkspaceTool(TOOL, intent.commandPlan.grants, { agentHarness: isAgentRequest() });
-      const executionTools = isAgentRequest() ? namedWorkspaceTools(workspaceTool) : [workspaceTool];
-      const toolAliases = isAgentRequest() ? Object.fromEntries(executionTools.map(tool => [tool.function.name, tool.function.name])) : undefined;
+      const workspaceTool = scopedWorkspaceTool(TOOL, intent.commandPlan.grants);
+      const executionTools = namedWorkspaceTools(workspaceTool);
+      const toolAliases = Object.fromEntries(executionTools.map(tool => [tool.function.name, tool.function.name]));
       const operationHistory = intent.commandPlan.grants.filter(grant => grant.kind === 'operate_terminal').flatMap(grant => grant.targets.map(target => {
         const previous = operationState(grant, target.id);
         return { grantId: grant.id, targetId: target.id, uncertain: previous.uncertain, remainingSteps: 128 - previous.steps, history: previous.history };
       }));
       syncAgents();
       const agentBootstrap = buildAgentContext({ records: agentDirectory.list(), targets: intent.commandPlan.grants.flatMap(g => g.targets || []), targetId: intent.targetId, conversationTarget: intent.conversationTarget, workItemId: job.task.workItemId });
-      const executionSessions = isAgentRequest() ? state.sessions.filter(s => targetIds.includes(s.id) || s.id === intent.targetId || s.id === intent.conversationTarget?.id) : state.sessions;
-      const conversation = [{ role: 'system', content: operating ? `${SYSTEM}\nFor operate_terminal grants the following request-scoped rules replace legacy one-shot input restrictions:\n${OPERATOR_SYSTEM}` : SYSTEM }, { role: 'user', content: JSON.stringify({ instruction: intent.text, confirmedResume: intent.confirmedResume && { reference: intent.confirmedResume.reference, selection: intent.confirmedResume.selection }, dependencyResults, authorizedCommands: projectIntent(intent.commandPlan), operationHistory, projectContext: context().projectContext, authorizedRelay: intent.authorizedRelay, targetId: intent.targetId, conversationTarget: intent.conversationTarget, pendingTarget: context().pendingConversationTarget, recentConversation, replyContext, latestAction: actionContext(recentActions.at(-1)), recentActions: recentActions.slice(0, -1).map(item => actionContext(item, 500)), readBookmarks: [...readBookmarks.values()].filter(item => relevantIds.has(item.requestId)), roots, ...(isAgentRequest() && agentBootstrap), sessions: listSessionSummaries(executionSessions, { limit: 40, includeNavigationGuide: false }).sessions, sessionDirectory: { total: state.sessions.length, truncated: executionSessions.length > 40, ...(isAgentRequest() && { unaddressedOmitted: true }) }, preferences: storage.getPreferences() }) }];
+      const executionSessions = state.sessions.filter(s => targetIds.includes(s.id) || s.id === intent.targetId || s.id === intent.conversationTarget?.id);
+      const conversation = [{ role: 'system', content: operating ? `${SYSTEM}\nFor operate_terminal grants the following request-scoped rules replace legacy one-shot input restrictions:\n${OPERATOR_SYSTEM}` : SYSTEM }, { role: 'user', content: JSON.stringify({ instruction: intent.text, confirmedResume: intent.confirmedResume && { reference: intent.confirmedResume.reference, selection: intent.confirmedResume.selection }, dependencyResults, authorizedCommands: projectIntent(intent.commandPlan), operationHistory, projectContext: context().projectContext, authorizedRelay: intent.authorizedRelay, targetId: intent.targetId, conversationTarget: intent.conversationTarget, pendingTarget: context().pendingConversationTarget, recentConversation, replyContext, ...(recentFailure && { lastFailure: recentFailure }), latestAction: actionContext(recentActions.at(-1)), recentActions: recentActions.slice(0, -1).map(item => actionContext(item, 500)), readBookmarks: [...readBookmarks.values()].filter(item => relevantIds.has(item.requestId)), roots, ...agentBootstrap, sessions: listSessionSummaries(executionSessions, { limit: 40, includeNavigationGuide: false }).sessions, sessionDirectory: { total: state.sessions.length, truncated: executionSessions.length > 40, unaddressedOmitted: true }, preferences: storage.getPreferences() }) }];
       conversation[0].content += `\n${workspaceToolGuide(workspaceTool)}`;
-      if (isAgentRequest()) conversation[0].content += ' ' + agentTools.SYSTEM + ' The offered named tools determine the operation; omit kind from new tool arguments. Older workspace calls in the history retain their original meaning.';
+      conversation[0].content += ' ' + agentTools.SYSTEM + ' The offered named tools determine the operation; omit kind from new tool arguments. Older workspace calls in the history retain their original meaning.';
       if (intent.commandPlan.grants.some(grant => grant.inspection) || intent.commandPlan.responseKind === 'terminal-inspection') conversation[0].content += `\n${INSPECTION_SYSTEM}`;
       if (!intent.commandPlan.grants.length) {
         const voice = require('./orchestratorWorkspace.cjs').VOICE_CAPABILITIES;
@@ -1350,7 +1432,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
       }
       let incompleteReplies = 0;
       const harnessProgress = createHarnessProgress();
-      const automaticHandoff = isAgentRequest() ? require('./orchestratorAutomaticHandoff.cjs').createAutomaticHandoff() : null;
+      const automaticHandoff = require('./orchestratorAutomaticHandoff.cjs').createAutomaticHandoff();
       const turnLimit = operating ? MAX_TURNS : 12;
       // Reserve one finalization-only pass so the last allowed tool batch can
       const allPendingCanFinish = finishes => {
@@ -1488,8 +1570,12 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
           if (unfinished.length && actionableUnfinished && !intent.question && !intent.commandPlan.clarification && !direct) {
             intent.response = undefined;
             if (++incompleteReplies > 2) throw new Error('The terminal operation is unfinished. No completion was verified; check the action receipts before continuing.');
-            conversation.push({ role: 'assistant', content: text, ...(reply.reasoning_details && { reasoning_details: structuredClone(reply.reasoning_details) }) });
-            conversation.push({ role: 'system', content: `The authorized request still has unfinished work. A paraphrase or promise is not execution. Continue with tools: inspect, act, then verify. If blocked, report the concrete blocker with finish_terminal (operate_terminal) or ask_user for genuinely missing input. Current application-owned progress: ${JSON.stringify(projectIntent(intent.commandPlan))}` });
+            // The reply is quoted in the application's own note instead of being
+            // replayed as another model turn. The answer may be the application's
+            // synthesis rather than the model's words, and a conversation that
+            // ends with a model turn is rejected outright by providers that carry
+            // application notes as an instruction rather than as a turn.
+            conversation.push({ role: 'system', content: `Your last reply was: ${JSON.stringify(String(text).slice(0, 2000))}\nThe authorized request still has unfinished work. A paraphrase or promise is not execution. Continue with tools: inspect, act, then verify. If blocked, report the concrete blocker with finish_terminal (operate_terminal) or ask_user for genuinely missing input. Current application-owned progress: ${JSON.stringify(projectIntent(intent.commandPlan))}` });
             continue;
           }
           const continuing = previousCommand && (intent.commandPlan.continuationOf === previousCommand.requestId || intent.commandPlan.grants.some(grant => grant.sourceUserId === previousCommand.requestId));
@@ -1544,7 +1630,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
           const responseTurn = question ? 'listen' : intent.response?.responseTurn || 'complete';
           const commandAcknowledged = commandCompleted({ plan: intent.commandPlan, progress: projected, unfinished, failed, question, responseTurn,
             deferred: job.deferred, outcomes, waits: job.waits, deliveryUpdates: [...(job.deliveryUpdates?.values() || [])], sessions: state.sessions });
-          const completionCue = commandAcknowledged && !(isAgentRequest() && job.waits.some(wait => !wait.done));
+          const completionCue = commandAcknowledged && !job.waits.some(wait => !wait.done);
           if (commandAcknowledged) job.commandAcknowledged = true;
           job.completionContext = { plan: intent.commandPlan, progress: projected, unfinished, failed, question, responseTurn, deferred: job.deferred, outcomes,
             nonCloseFailed: outcomes.some(result => result.kind !== 'close' && result.ok === false && !readRecovery.recovered(result) &&
@@ -1645,7 +1731,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
         if (settings.spendingLimit != null && Object.values(state.usage).reduce((a, b) => a + b, 0) >= settings.spendingLimit) throw new Error('Session spending limit reached.');
       }
       throw new Error('Relay action limit reached. Check the action receipts before continuing.');
-    } catch (error) { if (token !== epoch || signal.aborted || isCancellation(error)) return job.result = { ok: false, requestId: job.task.requestId, status: 'cancelled', error: 'Cancelled.' }; diagnosticError(error, { ...diagnosticContext, stage: 'brain' }); state.error = cleanError(error); message('system', state.error); const upstreamError = reportUpstream(error, input.origin, 'brain', token, signal); if (!upstreamError && input.origin === 'voice') { try { Promise.resolve(onUpstreamError({ category: error?.code === 'LOCAL_CONTEXT_LIMIT' ? 'context-limit' : state.error.includes('spending limit') ? 'spending-limit' : 'orchestration', origin: 'voice', operation: 'orchestration', requestId: job.task.requestId })).catch(() => {}); } catch {} } if (!job.queueRecoveryRejected && (!previousCommand?.queued || job.queueRecoveryTransferred)) preserveUnfinished(job, job.continuationCommitted ? previousCommand : undefined, !job.continuationCommitted); return job.result = { ok: false, requestId: job.task.requestId, error: state.error, ...(outcomes.length && { actions: redact(outcomes) }), ...(upstreamError && { upstreamError }) }; }
+    } catch (error) { if (token !== epoch || signal.aborted || isCancellation(error)) return job.result = { ok: false, requestId: job.task.requestId, status: 'cancelled', error: 'Cancelled.' }; diagnosticError(error, { ...diagnosticContext, stage: 'brain' }); state.error = cleanError(error); const failureDetail = typeof error?.detail === 'string' && error.detail ? cleanError(error.detail).slice(0, 300) : ''; if (failureDetail) lastFailure = { requestId: job.task.requestId, stage: 'interpretation', reason: failureDetail, at: now() }; message('system', failureDetail ? `${state.error} Reason: ${failureDetail}` : state.error); const upstreamError = reportUpstream(error, input.origin, 'brain', token, signal); if (!upstreamError && input.origin === 'voice') { try { Promise.resolve(onUpstreamError({ category: error?.code === 'LOCAL_CONTEXT_LIMIT' ? 'context-limit' : state.error.includes('spending limit') ? 'spending-limit' : 'orchestration', origin: 'voice', operation: 'orchestration', requestId: job.task.requestId })).catch(() => {}); } catch {} } if (!job.queueRecoveryRejected && (!previousCommand?.queued || job.queueRecoveryTransferred)) preserveUnfinished(job, job.continuationCommitted ? previousCommand : undefined, !job.continuationCommitted); return job.result = { ok: false, requestId: job.task.requestId, error: state.error, ...(outcomes.length && { actions: redact(outcomes) }), ...(upstreamError && { upstreamError }) }; }
     finally {
       releaseRoute?.(); activity.end(scope); job.executionDone = true;
       const settled = settledRequestState({ task: job.task, result: job.result, waits: job.waits, pendingCommand: context().pendingCommand });
@@ -1667,7 +1753,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
       if (targets.some(target => !state.sessions.some(session => session.id === target.id && session.generation === target.generation))) { tasks.update(job, { status: 'failed', error: 'The terminal changed before the follow-up could start.' }); continue; }
       const internalBindings = (job.routeItems || []).filter(item => item.binding && item.workItemId).map(item => ({ workItemId: item.workItemId, binding: structuredClone(item.binding), decision: 'continuation' }));
       if (internalBindings.some(item => !routingBindingMatches(item.binding, state.sessions.find(session => session.id === item.binding.target.id)))) { tasks.update(job, { status: 'failed', error: 'The original task conversation changed before the follow-up could start.' }); continue; }
-      const result = submit({ text: job.deferred.instruction, origin: job.input.origin, replyToRequestId: job.task.requestId, ...(targets.length === 1 && { targetId: targets[0].id }) }, { originalInstruction: job.deferred.originalInstruction, internalHarnessVersion: job.task.harnessVersion || 'legacy', projectPath: job.input.projectPath || job.task.projectPath, internalDependencies: [job.task.requestId], internalTargets: targets, ...(internalBindings.length && { internalBindings }) });
+      const result = submit({ text: job.deferred.instruction, origin: job.input.origin, replyToRequestId: job.task.requestId, ...(targets.length === 1 && { targetId: targets[0].id }) }, { originalInstruction: job.deferred.originalInstruction, projectPath: job.input.projectPath || job.task.projectPath, internalDependencies: [job.task.requestId], internalTargets: targets, ...(internalBindings.length && { internalBindings }) });
       if (!result.ok) tasks.update(job, { status: 'failed', error: result.error });
     }
   }
@@ -1718,12 +1804,12 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
   function retry({ requestId } = {}) {
     const prior = tasks.get(requestId);
     if (prior?.task.status === 'paused') return submit({ text: 'Resume the paused request.', origin: 'text', replyToRequestId: requestId, projectPath: prior.task.projectPath },
-      { resumePaused: true, originalInstruction: prior.task.text, internalHarnessVersion: prior.task.harnessVersion || 'legacy' });
+      { resumePaused: true, originalInstruction: prior.task.text });
     if (!prior || prior.restored || !['failed', 'needs-answer'].includes(prior.task.status) || !prior.context?.pendingCommand) return { ok: false, error: 'No unconsumed operation is available to retry. Submit a new instruction.' };
     const command = prior.context.pendingCommand;
     if (prior.intent?.commandPlan && !command.grants.length && !prior.intent.commandPlan.clarification && !prior.intent.question) return { ok: false, error: 'All operations were already consumed; they will not be sent again.' };
     return submit({ text: command.instruction, origin: prior.input.origin, replyToRequestId: requestId, projectPath: prior.input.projectPath || prior.task.projectPath },
-      { retryOf: requestId, internalHarnessVersion: prior.task.harnessVersion || 'legacy' });
+      { retryOf: requestId });
   }
   async function clearHistory() {
     state.messages = []; state.receipts = []; tasks.clear(); await conversationStore.clear();
@@ -1740,12 +1826,10 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
     const retained = workItems.snapshot().items.filter(item => activeItems.has(item.id));
     await workItems.clear();
     for (const item of retained) { workItems.create({ ...item, requestId: item.requestIds[0] }); workItems.update(item.id, item); }
-    if (useAgentHarness) {
-      await agentStore.clearNotes();
-      agentDirectory.forgetArchived();
-      syncAgents();
-      await agentStore.syncIdentities(agentDirectory.exportIdentities());
-    }
+    await agentStore.clearNotes();
+    agentDirectory.forgetArchived();
+    syncAgents();
+    await agentStore.syncIdentities(agentDirectory.exportIdentities());
     emit(); return { ok: true };
   }
   async function validateConnection(requireModel = false) {
@@ -1760,7 +1844,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
     // presenting the selected model as ready. This is local; it makes no paid call.
     if (selected?.contextLength && !interpretIntent) {
       try {
-        const { messages, planningTools } = createPlanningInput({ instruction: 'Hi', sessions: [], harnessVersion: useAgentHarness ? 'agents-v1' : 'legacy' });
+        const { messages, planningTools } = createPlanningInput({ instruction: 'Hi', sessions: [] });
         fitMessages({ messages, tools: planningTools, contextLength: selected.contextLength, outputTokens: outputTokensFor(selected, BRAIN_OUTPUT_TOKENS) });
       }
       catch (error) { validated = false; throw error; }
@@ -1777,7 +1861,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
     getUsage: () => ({ ...state.usage }),
     getRequests: () => redact(state.requests),
     getTasks: () => redact(tasks.snapshot()),
-    recordDiagnostic, flushDiagnostics: () => diagnostics.flush(),
+    recordDiagnostic, flushDiagnostics: () => Promise.all([diagnostics.flush(), voiceDiagnostics.flush()]),
     async configure(patch) {
       try {
         const beforeKey = storage.getKey(), beforeModel = storage.getSettings().model;
@@ -1845,7 +1929,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, rout
         disposed = true; onCancel(); tasks.cancel(); for (const detail of taskDetails.values()) detail.controller.abort(); taskDetails.clear(); turnEndings.clear(); turnResults.clear(); conversationStore.save(saved); epoch++; activity.clear(); monitorController?.abort(); for (const own of directControllers) own.abort(); clearInterval(timer); workspaceExecutor.clear(); observed.clear(); historyCandidates.clear(); readBookmarks.clear(); deliveryDiagnostics.clear();
       }
       agentDirectory.clear();
-      return Promise.all([diagnostics.flush(), conversationStore.flush(), workHistory.flush(), workItems.flush(), agentStore.flush()]);
+      return Promise.all([diagnostics.flush(), voiceDiagnostics.flush(), conversationStore.flush(), workHistory.flush(), workItems.flush(), agentStore.flush()]);
     },
   };
 }

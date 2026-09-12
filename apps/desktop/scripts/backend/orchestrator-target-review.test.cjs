@@ -1,10 +1,10 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const {createOrchestrator}=require('../../backend/orchestrator.cjs');
-const {TARGET_REVIEW_SYSTEM,targetReviewPayload,targetReviewDecision}=require('../../backend/orchestratorTargetReview.cjs');
+const {TARGET_REVIEW_SYSTEM,TARGET_REVIEW_SCHEMA,targetReviewPayload,targetReviewDecision}=require('../../backend/orchestratorTargetReview.cjs');
 async function fixture(t){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'vibe-target-review-'));
-  const f={root,sessions:[],effects:[],plans:[],markers:[],checks:[],interpretations:[],executions:[],phases:new Map()};let sequence=0;
+  const f={root,sessions:[],effects:[],plans:[],markers:[],checks:[],affinities:[],interpretations:[],executions:[],phases:new Map()};let sequence=0;
   const response=body=>new Response(JSON.stringify(body));
   const tool=(name,args)=>response({choices:[{finish_reason:'tool_calls',message:{tool_calls:[{id:`call-${++sequence}`,type:'function',function:{name,arguments:JSON.stringify(args)}}]}}]});
   f.operation=(text,targetId='existing')=>({kind:'operate_terminal',targetIds:[targetId],text});
@@ -32,6 +32,11 @@ async function fixture(t){
       }
 
       if(body.messages[0].content.startsWith('Classify the ORIGINAL user request')) return response({choices:[{finish_reason:'stop',message:{content:f.inspectionDecision}}]});
+      if(body.messages[0].content===require('../../backend/orchestratorTaskAffinity.cjs').SYSTEM){
+        const input=JSON.parse(body.messages[1].content);f.affinities.push(input);
+        return response({choices:[{finish_reason:'stop',message:{content:JSON.stringify({relation:f.affinity||'same-task',
+          userEvidence:input.currentInstruction,workEvidence:input.existingObjective})}}]});
+      }
       if(body.messages[0].content===TARGET_REVIEW_SYSTEM){
         assert(!body.tools?.length);f.checks.push(JSON.parse(body.messages[1].content));
         let marker=f.markers.shift();assert.notEqual(marker,undefined,'Every target review is scripted');if(typeof marker==='function')marker=await marker(options);if(marker instanceof Error)throw marker;
@@ -210,6 +215,14 @@ test('DIRECT requires actual application evidence covering every operation', () 
   assert.equal(targetReviewDecision(response(['named-0', 'reply-1']), payload), 'DIRECT');
 });
 
+test('a fenced review reply is read exactly like the bare JSON it wraps', () => {
+  const payload = { proposedOperations: [{}], selectionEvidence: [{ id: 'named-0', operation: 0 }] };
+  const fenced = text => ({ choices: [{ finish_reason: 'stop', message: { content: text } }] });
+  assert.equal(targetReviewDecision(fenced('```json\n' + JSON.stringify({ decision: 'DIRECT', evidenceIds: ['named-0'] }) + '\n```'), payload), 'DIRECT');
+  assert.equal(targetReviewDecision(fenced('```json\n' + JSON.stringify({ decision: 'ASSIGN' }) + '\n```'), payload), 'ASSIGN');
+  assert.equal(targetReviewDecision(fenced('```json\nDIRECT, use the named pane.\n```'), payload), 'UNRESOLVED');
+});
+
 test('generic provider/project and creation wording cannot mint existing-selection evidence', () => {
   const session = { id: 'pane', generation: 'g1', name: 'Unrelated discussion', kind: 'codex', cwd: 'C:/QA' };
   const plan = { grants: [{ sourceUserId: 'r', kind: 'operate_terminal', targets: [{ id: 'pane', generation: 'g1' }], text: 'Fix full-screen height.' }] };
@@ -299,4 +312,24 @@ for (const decision of ['INSPECTION', 'TASK', 'UNCLEAR']) test(`inspection repai
   assert.equal(result.ok, decision === 'INSPECTION', f.fetchError?.stack || JSON.stringify(result));
   assert.deepEqual(f.effects, []);
   if (result.ok) assert.match(result.text, /23%/);
+});
+
+test('the exported target-review schema is flat, strict-mode friendly and enumerates both decisions',()=>{
+  assert.equal(TARGET_REVIEW_SCHEMA.type,'object');
+  assert.equal(TARGET_REVIEW_SCHEMA.additionalProperties,false);
+  assert.equal(TARGET_REVIEW_SCHEMA.oneOf,undefined);assert.equal(TARGET_REVIEW_SCHEMA.anyOf,undefined);
+  assert.deepEqual([...TARGET_REVIEW_SCHEMA.required].sort(),Object.keys(TARGET_REVIEW_SCHEMA.properties).sort());
+  assert.deepEqual(TARGET_REVIEW_SCHEMA.required,['decision','evidenceIds']);
+  assert.deepEqual(TARGET_REVIEW_SCHEMA.properties.decision.enum,['ASSIGN','DIRECT']);
+  assert.equal(TARGET_REVIEW_SCHEMA.properties.evidenceIds.type,'array');
+  assert.equal(TARGET_REVIEW_SCHEMA.properties.evidenceIds.items.type,'string');
+});
+
+test('the required evidence list the schema forces on ASSIGN changes nothing, and DIRECT still needs real citations',()=>{
+  const reply=value=>({choices:[{finish_reason:'stop',message:{content:JSON.stringify(value)}}]});
+  const payload={proposedOperations:[{kind:'send_prompt'}],selectionEvidence:[{id:'selection-0',operation:0,basis:'named'}]};
+  assert.equal(targetReviewDecision(reply({decision:'ASSIGN',evidenceIds:[]}),payload),'ASSIGN');
+  assert.equal(targetReviewDecision(reply({decision:'DIRECT',evidenceIds:[]}),payload),'UNRESOLVED');
+  assert.equal(targetReviewDecision(reply({decision:'DIRECT',evidenceIds:['selection-9']}),payload),'UNRESOLVED');
+  assert.equal(targetReviewDecision(reply({decision:'DIRECT',evidenceIds:['selection-0']}),payload),'DIRECT');
 });

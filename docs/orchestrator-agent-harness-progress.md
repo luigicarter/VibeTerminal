@@ -11,8 +11,10 @@ overbuilding narrows the delivery to the scope below.
   user to name a terminal. Independent work gets a separate conversation.
 - Continuations use recorded task ownership and a current conversation/run
   binding. Same project, provider, title or idle status cannot prove continuity.
-  A separate task-affinity review checks proposed reuse; uncertain ownership
-  results in a fresh conversation, subject to existing worktree coordination.
+  A separate task-affinity review checks proposed reuse. The September 11
+  [continuation repair](orchestrator-continuation-errors-2026-09-11.md) preserves
+  the existing-owner requirement and clarification when ownership is uncertain;
+  it no longer creates a replacement for an unresolved continuation.
 - The request captures its submitted project. Switching views cannot retarget
   admitted work, and removing that project causes an explicit refusal.
   An explicit terminal selection uses its own run and does not require its
@@ -54,12 +56,13 @@ section/history reads. Limits refuse excess writes instead of silently evicting
 unresolved evidence. **Clear history** clears notes and archived identities,
 preserving present agent identities and active work ownership.
 
-The production integration defaults to `agents-v1` in source. `LINA_ORCHESTRATOR_HARNESS=legacy`
-is the rollback switch for new requests; `shadow` is diagnostic-only. A request's
-harness version is frozen at admission and retained for retries/deferred work.
-The constructor remains `shadow` by default for existing direct test adapters;
-new agent tests select `agents-v1` explicitly. Rollback never repeats a delivered
-or uncertain task through a second path.
+The scoped agent harness (`agents-v1`) is the only coordinator generation as of
+September 11, 2026. The legacy path, the `shadow` diagnostic mode, the
+`agentHarness` constructor option and the per-request `harnessVersion` were
+removed by the de-serialization work (see
+[orchestrator-deserialization-plan-2026-09-11.md](orchestrator-deserialization-plan-2026-09-11.md),
+package 4). `LINA_ORCHESTRATOR_HARNESS` is ignored rather than rejected, and saved
+records that still carry `harnessVersion: legacy` load and resume on this harness.
 
 ## Verification
 

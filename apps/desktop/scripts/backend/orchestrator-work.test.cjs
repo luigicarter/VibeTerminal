@@ -149,8 +149,7 @@ test('model reads durable completed work after close and relaunch without any ef
       if (url.endsWith('/key')) return new Response(JSON.stringify({ data: {} }));
       if (url.endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'brain', context_length: 128000, supported_parameters: ['tools'] }] }));
       const body = JSON.parse(input.body);
-      const parameters = body.tools[0].function.parameters;
-      assert.ok([parameters, ...(parameters.anyOf || [])].some(branch => branch.properties?.kind?.enum?.includes('list_work')));
+      assert.ok(body.tools.some(item => item.function.name === 'list_work'));
       const tool = body.messages.find(message => message.role === 'tool');
       if (!tool) return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: null,
         tool_calls: [{ id: 'read-work', type: 'function', function: { name: 'workspace', arguments: JSON.stringify({ kind: 'list_work', cwd: 'c:/projects/api' }) } }] }, finish_reason: 'tool_calls' }] }));

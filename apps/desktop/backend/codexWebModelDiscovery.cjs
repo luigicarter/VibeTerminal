@@ -49,15 +49,15 @@ function filterNativeModelPicker(rows) {
     const pro = row._lina_web_reasoning_type === 'pro' || /-pro$/.test(slug);
     const nonThinking = /-instant$/.test(slug) || /-auto$/.test(id) || /(?:\(Auto\)| · Auto)$/.test(row.display_name || '') || ['none', 'auto'].includes(row._lina_web_reasoning_type);
     const thinking = !nonThinking && (work || pro || /-thinking$/.test(slug) || row._lina_web_reasoning_type === 'reasoning' || ['medium', 'high', 'xhigh', 'max', 'ultra'].includes(row.default_reasoning_level));
-    const family = id.replace(/-(?:instant|thinking|chat|auto)$/, '');
-    return { work, pro, thinking, family };
+    return { thinking };
   });
-  const workFamilies = new Set(details.filter(detail => detail?.work && detail.thinking).map(detail => detail.family));
   let changed = false;
   const filtered = rows.map((row, index) => {
     const detail = details[index];
     if (!detail) return row;
-    const hidden = !detail.thinking || (!detail.work && !detail.pro && workFamilies.has(detail.family));
+    // A Work listing does not prove that the service runs that named model.
+    // Keep its separate Thinking route available for an explicit selection.
+    const hidden = !detail.thinking;
     const visibility = hidden ? 'hide' : 'list';
     if (row.visibility === visibility && (row._lina_web_picker_hidden === true) === hidden) return row;
     changed = true;
@@ -148,6 +148,12 @@ function accountMode(id, reasoning, capabilities) {
   if (!model.efforts.some(item => item.effort === effort)) throw new Error('model_effort_unavailable');
   return { modelId: id, effort, displayLabel: model.label, uiEffortIndex: null, thinkEnabled: false, localTools: capabilities.localToolsEnabled };
 }
+function accountSelection(id, reasoning) {
+  if (typeof id !== 'string' || !id.startsWith(ACCOUNT_PREFIX)) return null;
+  const model = accountModel(id), effort = reasoning || model.defaultEffort;
+  if (!model.efforts.some(item => item.effort === effort)) throw new Error('model_effort_unavailable');
+  return { model: model.id, name: model.title, mode: model.mode, reasoning_effort: effort };
+}
 function accountRoutes() {
   return readAccountCatalog().models.map(model => ({ slug: model.id, displayName: model.label, description: `ChatGPT Web · ${model.label}`, interactionMode: 'automatic', backendModel: ACCOUNT_PREFIX + model.slug, codexEffort: model.defaultEffort, adapterEffort: model.defaultEffort, requiresPro: false }));
 }
@@ -185,6 +191,7 @@ function buildNativeCatalog(template, catalog = readAccountCatalog()) {
       supported_reasoning_levels: model.efforts.map(item => ({ effort: item.effort, description: item.description })),
       context_window: contextWindow, max_context_window: contextWindow, effective_context_window_percent: 90, auto_compact_token_limit: Math.floor(contextWindow * 0.85),
       additional_speed_tiers: [], service_tiers: [], default_service_tier: null };
+    if (model.workMode) row.description += ' · saved in ChatGPT';
     delete row.comp_hash; delete row.availability_nux; return row;
   })) };
 }
@@ -207,28 +214,13 @@ function responseModelMetadata(text) {
   }
   return [...models];
 }
-async function selectAccountModel(page, id, reasoning, activateMenu, preserveConversation = false) {
+async function bindAccountSelection(page, id, reasoning) {
   const model = accountModel(id), selectedEffort = model.efforts.find(item => item.effort === (reasoning || model.defaultEffort));
   if (!selectedEffort) throw new Error('model_effort_unavailable');
   let selection = pageSelections.get(page);
   if (!selection) {
-    selection = { slug: null, expected: model.slug, verified: false, error: null };
+    selection = { slug: null, expected: model.slug, verified: false, error: null, verifier: await require('./codexWebModelVerification.cjs').createResponseVerifier(page) };
     pageSelections.set(page, selection);
-    page.on('response', response => {
-      const request = response.request();
-      if (request.method() !== 'POST' || !/\/(?:f\/)?conversation$/.test(new URL(response.url()).pathname)) return;
-      let requested; try { requested = request.postDataJSON()?.model; } catch { return; }
-      if (requested !== selection.expected) return;
-      void response.text().then(async text => {
-        const models = responseModelMetadata(text);
-        if (selection.receipt?.model !== requested) return;
-        selection.receipt.responseModels = models;
-        const messages = page.locator('[data-message-model-slug]');
-        const renderedModel = await messages.count() ? await messages.last().getAttribute('data-message-model-slug') : null;
-        if (typeof renderedModel === 'string' && /^[a-z0-9][a-z0-9.-]{0,100}$/i.test(renderedModel)) selection.receipt.renderedModel = renderedModel;
-        fs.writeFileSync(path.join(path.dirname(catalogFile()), 'lina-last-model-request.json'), JSON.stringify(selection.receipt), { mode: 0o600 });
-      }).catch(() => {});
-    });
     await page.route('**/backend-api/**', async route => {
       const request = route.request(), url = new URL(request.url());
       if (request.method() !== 'POST' || !/\/(?:f\/)?conversation$/.test(url.pathname)) return route.continue();
@@ -238,15 +230,70 @@ async function selectAccountModel(page, id, reasoning, activateMenu, preserveCon
         try { fs.writeFileSync(path.join(path.dirname(catalogFile()), 'lina-model-selection-error.json'), JSON.stringify({ time: new Date().toISOString(), expected: selection.expected, actual: /^[a-z0-9][a-z0-9.-]{0,100}$/.test(body?.model || '') ? body.model : null }), { mode: 0o600 }); } catch {}
         return route.abort('failed');
       }
+      if (selection.workMode && body.history_and_training_disabled === true) {
+        selection.error = 'model_surface_mismatch'; return route.abort('failed');
+      }
+      if (selection.expectedEffort && body.thinking_effort !== selection.expectedEffort) {
+        selection.error = 'model_effort_unavailable'; return route.abort('failed');
+      }
       selection.verified = true;
       const file = path.join(path.dirname(catalogFile()), 'lina-last-model-request.json');
-      selection.receipt = { time: new Date().toISOString(), model: selection.expected, verified: true };
+      const receipt = { requestId: require('node:crypto').randomUUID(), time: new Date().toISOString(), model: selection.expected, effort: selection.expectedEffort || null, surface: selection.workMode ? 'work' : 'chat', temporary: body.history_and_training_disabled === true, verified: true, requestVerified: true, responseVerified: false, responseModels: [] };
+      selection.receipt = receipt;
       try { fs.writeFileSync(file, JSON.stringify(selection.receipt), { mode: 0o600 }); }
       catch { selection.error = 'storage_failed'; return route.abort('failed'); }
+      const requestedModel = accountModel(ACCOUNT_PREFIX + selection.expected);
+      const accepted = responseModelSlugs(requestedModel);
+      selection.verifier.begin(request, slug => accepted.has(slug), evidence => {
+        Object.assign(receipt, evidence);
+        // The shared latest-receipt file must not be overwritten by a slower
+        // response belonging to a different request or pane.
+        try {
+          const latest = JSON.parse(fs.readFileSync(file, 'utf8'));
+          if (latest.requestId === receipt.requestId) fs.writeFileSync(file, JSON.stringify(receipt), { mode: 0o600 });
+        } catch { selection.error = 'storage_failed'; }
+      });
       return route.continue();
     });
   }
-  selection.expected = model.slug; selection.error = null;
+  selection.expected = model.slug; selection.expectedEffort = selectedEffort.webEffort; selection.workMode = model.workMode; selection.error = null;
+  return { model, selectedEffort, selection };
+}
+async function selectWorkModel(page, model, selectedEffort, preserveConversation) {
+  if (new URL(page.url()).searchParams.get('temporary-chat') === 'true') throw new Error('model_surface_mismatch');
+  if (!preserveConversation) {
+    const work = page.getByRole('radio', { name: 'Work', exact: true });
+    await work.waitFor({ state: 'visible', timeout: 15000 });
+    if (await work.getAttribute('aria-checked') !== 'true') await work.click();
+    await page.waitForFunction(() => Array.from(document.querySelectorAll('[role="radio"][aria-checked="true"]')).some(node => node.textContent?.trim() === 'Work'), undefined, { timeout: 5000 });
+  }
+  const composer = page.locator('#prompt-textarea,[data-testid="prompt-textarea"]').filter({ visible: true }).last();
+  const form = composer.locator('xpath=ancestor::form[1]');
+  const picker = form.getByRole('button', { name: /^(?:GPT[ -]|Select model|Select effort)/ }).filter({ visible: true }).last();
+  await picker.click({ timeout: 10000 });
+  const choice = page.getByRole('menuitemradio', { name: model.title, exact: true }).filter({ visible: true }).last();
+  await choice.waitFor({ state: 'visible', timeout: 10000 });
+  if (!await choice.isEnabled()) throw new Error('model_unavailable');
+  // The Work radio is a custom clickable div. Its explicit selection replaces
+  // the default Power ladder, which can switch models when changing effort.
+  if (await choice.getAttribute('aria-checked') !== 'true') await choice.dispatchEvent('click');
+  await page.waitForFunction(title => Array.from(document.querySelectorAll('[role="menuitemradio"]')).some(node => node.textContent?.trim() === title && node.getAttribute('aria-checked') === 'true'), model.title, { timeout: 5000 });
+  const fast = page.getByRole('menuitemcheckbox', { name: 'Enable fast mode', exact: true }).filter({ visible: true });
+  if (await fast.count() && await fast.getAttribute('aria-checked') === 'true') await fast.dispatchEvent('click');
+  const labels = { low: 'Light', medium: 'Medium', high: 'High', xhigh: 'Extra High' };
+  const index = ['low', 'medium', 'high', 'xhigh'].indexOf(selectedEffort.effort);
+  if (index < 0) throw new Error('model_effort_unavailable');
+  const power = page.getByRole('menuitem', { name: 'Power', exact: true }).filter({ visible: true }).last();
+  // Work's explicit model ladder adds Max/Ultra after the four account levels.
+  // Start at its left bound instead of interpreting the default-model ladder.
+  for (let step = 0; step < 8; step++) await power.press('ArrowLeft');
+  for (let step = 0; step < index; step++) await power.press('ArrowRight');
+  await page.keyboard.press('Escape');
+  const expected = (model.title + labels[selectedEffort.effort]).replace(/\s+/g, '');
+  await page.waitForFunction(label => Array.from(document.querySelectorAll('main form button')).some(node => node.textContent?.replace(/\s+/g, '') === label), expected, { timeout: 5000 });
+}
+async function selectAccountModel(page, id, reasoning, activateMenu, preserveConversation = false) {
+  const { model, selectedEffort, selection } = await bindAccountSelection(page, id, reasoning);
   await page.setViewportSize({ width: 1280, height: 900 });
   const current = new URL(page.url());
   if (current.origin === 'https://chatgpt.com' && navigatedModels.get(page) === model.slug) selection.slug = model.slug;
@@ -255,10 +302,11 @@ async function selectAccountModel(page, id, reasoning, activateMenu, preserveCon
   if (preserveConversation) selection.slug = model.slug;
   if (current.origin === 'https://chatgpt.com' && current.searchParams.get('model') === model.slug) selection.slug = model.slug;
   if (selection.slug !== model.slug) {
-    await page.goto('https://chatgpt.com/?temporary-chat=true&model=' + encodeURIComponent(model.slug), { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.goto(accountChatUrl(id), { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.locator('#prompt-textarea,[data-testid="prompt-textarea"],[contenteditable="true"][data-lexical-editor="true"]').filter({ visible: true }).last().waitFor({ state: 'visible', timeout: 20000 });
     selection.slug = model.slug;
   }
+  if (model.workMode) return selectWorkModel(page, model, selectedEffort, preserveConversation);
   if (!selectedEffort.webEffort) return;
   const composer = page.locator('#prompt-textarea,[data-testid="prompt-textarea"],[contenteditable="true"][data-lexical-editor="true"]').filter({ visible: true }).last();
   const control = composer.locator('xpath=ancestor::form[1]').locator('button[aria-haspopup="menu"][data-tone="neutral"],button[data-testid="model-switcher-dropdown-button"][aria-haspopup="menu"]').last();
@@ -283,6 +331,21 @@ async function selectAccountModel(page, id, reasoning, activateMenu, preserveCon
 function assertAccountSelection(page) {
   const failure = pageSelections.get(page)?.error;
   if (failure) throw new Error(failure);
+  pageSelections.get(page)?.verifier.isVerified();
 }
-function accountChatUrl(id) { return 'https://chatgpt.com/?temporary-chat=true&model=' + encodeURIComponent(accountModel(id).slug); }
-module.exports = { ACCOUNT_PREFIX, inspectAccountModels, normalizeAccountCatalog, presentAccountCatalog, refreshNativeModelNames, filterNativeModelPicker, saveAccountCatalog, readAccountCatalog, accountModel, accountMode, accountRoutes, resolveAccountRoute, accountCatalogRow, neutralInstructions, modelContextLimits, selectAccountModel, assertAccountSelection, responseModelMetadata, buildNativeCatalog, accountChatUrl, noteAccountNavigation };
+function responseModelSlugs(model) {
+  const slugs = new Set([model.slug, model.id]);
+  // Observed service metadata pairs this resolved alias with model_slug
+  // gpt-5-6-thinking. It remains confined to the same approved model family.
+  if (slugs.has('gpt-5-6-thinking')) slugs.add('gpt-5-6-auto-thinking');
+  return slugs;
+}
+function accountResponseVerified(page) { return pageSelections.get(page)?.verifier.isVerified() || false; }
+async function requireAccountResponse(page, modelId) {
+  if (!modelId.startsWith(ACCOUNT_PREFIX)) return;
+  const verifier = pageSelections.get(page)?.verifier;
+  if (!verifier) throw new Error('model_response_unverified');
+  await verifier.verify();
+}
+function accountChatUrl(id) { const model = accountModel(id); return 'https://chatgpt.com/?' + (model.workMode ? '' : 'temporary-chat=true&') + 'model=' + encodeURIComponent(model.slug); }
+module.exports = { ACCOUNT_PREFIX, inspectAccountModels, normalizeAccountCatalog, presentAccountCatalog, refreshNativeModelNames, filterNativeModelPicker, saveAccountCatalog, readAccountCatalog, accountModel, accountMode, accountSelection, accountRoutes, resolveAccountRoute, accountCatalogRow, neutralInstructions, modelContextLimits, bindAccountSelection, selectWorkModel, selectAccountModel, assertAccountSelection, responseModelMetadata, responseModelSlugs, accountResponseVerified, requireAccountResponse, buildNativeCatalog, accountChatUrl, noteAccountNavigation };

@@ -1,6 +1,6 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict');
-const { closeReviewPayload, closeReviewPolicies, isInactiveCloseTarget, assertCloseEligibility, assertCloseInputEligibility } = require('../../backend/orchestratorCloseSafety.cjs');
+const { CLOSE_REVIEW_SCHEMA, closeReviewPayload, closeReviewPolicies, isInactiveCloseTarget, assertCloseEligibility, assertCloseInputEligibility } = require('../../backend/orchestratorCloseSafety.cjs');
 const { normalizeIntent } = require('../../backend/orchestratorIntent.cjs');
 const idle = () => ({ id: 'worker', generation: 'g1', launchToken: 1, kind: 'codex', visiblePane: true,
   observation: 'observed', status: 'idle', turnState: 'completed', processState: 'running', agentProcessState: 'running' });
@@ -64,6 +64,16 @@ test('close review uses user instructions and bound replies, never assistant lis
     { operations: [{ ...valid.operations[0], evidence: [{ sourceId: 'current', quote: 'invented' }] }] }]) assert.throws(() => closeReviewPolicies(response(value), payload));
 });
 
+test('a fenced close review reply is read exactly like the bare JSON it wraps', () => {
+  const context = { requestId: 'r', instruction: 'Yes, those three.', sessions: [idle()], recentUserMessages: [{ id: 'earlier', text: 'Close inactive terminals.' }] };
+  const plan = normalizeIntent({ goal: 'Close', actions: [{ kind: 'close', scope: { type: 'explicit', targetIds: ['worker'] } }] }, context);
+  const payload = closeReviewPayload(plan, context);
+  const valid = { operations: [{ operation: 0, condition: 'inactive', count: 3, evidence: [{ sourceId: 'current', quote: context.instruction }] }] };
+  const fenced = text => ({ choices: [{ finish_reason: 'stop', message: { content: text } }] });
+  assert.deepEqual(closeReviewPolicies(fenced('```json\n' + JSON.stringify(valid) + '\n```'), payload), { 0: { condition: 'inactive', expectedCount: 3 } });
+  assert.throws(() => closeReviewPolicies(fenced('```json\nClose the three inactive panes.\n```'), payload), { code: 'ORCHESTRATOR_CLOSE_SELECTION' });
+});
+
 test('an inactive close continuation retains its restriction and cannot inherit new busy targets', () => {
   const context = { requestId: 'r1', instruction: 'Close inactive worker', sessions: [idle()], requireCloseScope: true,
     closePolicies: { 0: { condition: 'inactive', expectedCount: 1 } } };
@@ -73,4 +83,29 @@ test('an inactive close continuation retains its restriction and cannot inherit 
   const raw = { goal: 'Retry', continuationOf: 'r1', actions: [{ kind: 'close', sourceUserId: 'r1' }] };
   assert.equal(normalizeIntent(raw, retry).grants[0].closeScope.condition, 'inactive');
   assert.throws(() => normalizeIntent(raw, { ...retry, sessions: [{ ...idle(), status: 'running' }] }), { code: 'ORCHESTRATOR_CLOSE_SELECTION' });
+});
+
+test('the exported close-review schema is strict-mode friendly and keeps the unclear escape hatch', () => {
+  const operation = CLOSE_REVIEW_SCHEMA.properties.operations.items, evidence = operation.properties.evidence.items;
+  for (const object of [CLOSE_REVIEW_SCHEMA, operation, evidence]) {
+    assert.equal(object.type, 'object');
+    assert.equal(object.additionalProperties, false);
+    assert.equal(object.oneOf, undefined); assert.equal(object.anyOf, undefined);
+    assert.deepEqual([...object.required].sort(), Object.keys(object.properties).sort());
+  }
+  assert.deepEqual(CLOSE_REVIEW_SCHEMA.required, ['operations']);
+  assert.equal(CLOSE_REVIEW_SCHEMA.properties.operations.type, 'array');
+  assert.deepEqual(operation.required, ['operation', 'condition', 'count', 'evidence']);
+  assert.equal(operation.properties.operation.type, 'integer');
+  assert.deepEqual(operation.properties.condition.enum, ['inactive', 'unconditional', 'unclear']);
+  assert.deepEqual(operation.properties.count.type, ['integer', 'null']);
+  assert.deepEqual(evidence.required, ['sourceId', 'quote']);
+});
+
+test('an unclear condition the schema permits is still refused by the validator', () => {
+  const payload = { operations: [{ operation: 0 }], userSources: [{ id: 'current', text: 'close the idle ones' }] };
+  const reply = condition => ({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ operations: [{ operation: 0, condition,
+    count: null, evidence: [{ sourceId: 'current', quote: 'close the idle ones' }] }] }) } }] });
+  assert.deepEqual(closeReviewPolicies(reply('inactive'), payload), { 0: { condition: 'inactive', expectedCount: null } });
+  assert.throws(() => closeReviewPolicies(reply('unclear'), payload), { code: 'ORCHESTRATOR_CLOSE_SELECTION' });
 });

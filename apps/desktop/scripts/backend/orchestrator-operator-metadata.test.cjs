@@ -136,14 +136,14 @@ test('failed read while absent from inventory cannot reuse old implicit evidence
   const { createOrchestrator } = require('../../backend/orchestrator.cjs');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-absent-read-'));
   const pane = { id: 'pane', generation: 'same-generation', kind: 'codex', provider: 'codex', cwd: root, status: 'running' };
-  let sessions = [pane], stage = 0, rejectedMissingRead = false, rejectedOldToken = false;
+  let sessions = [pane], stage = 0, rejectedMissingRead = false, freshReadSupplied = false, reads = 0, readsBeforeSend = 0;
   const effects = [];
   const tool = action => ({ choices: [{ finish_reason: 'tool_calls', message: { tool_calls: [{ id: `call-${stage}`,
     type: 'function', function: { name: 'workspace', arguments: JSON.stringify(action) } }] } }] });
   const relay = createOrchestrator({ userDataPath: root, secureStorage: { isEncryptionAvailable: () => false },
     getRoots: () => ({ documents: root, projects: [{ name: 'Project', path: root }] }), getSessions: () => sessions,
     interpretIntent: async () => ({ goal: 'Review the project.', actions: [{ kind: 'operate_terminal', targetIds: ['pane'], text: 'Review the project.' }] }),
-    readSession: async () => ({ ok: true, id: pane.id, generation: pane.generation, sequence: 10, inputRevision: 2, text: 'Ready for input' }),
+    readSession: async () => { reads++; return { ok: true, id: pane.id, generation: pane.generation, sequence: 10, inputRevision: 2, text: 'Ready for input' }; },
     dispatchAction: async action => { effects.push(action); return { ok: true, status: 'written' }; },
     fetch: async (url, options) => {
       if (url.endsWith('/key')) return new Response(JSON.stringify({ data: {} }));
@@ -157,9 +157,11 @@ test('failed read while absent from inventory cannot reuse old implicit evidence
         case 2: reply = tool({ kind: 'read_session', targetId: 'pane' }); break;
         case 3:
           rejectedMissingRead = observed?.ok === false && /Unknown target session/.test(observed.error);
-          sessions = [pane]; reply = tool({ kind: 'send_prompt', targetId: 'pane', text: 'Review the project.' }); break;
+          sessions = [pane]; readsBeforeSend = reads; reply = tool({ kind: 'send_prompt', targetId: 'pane', text: 'Review the project.' }); break;
         case 4:
-          rejectedOldToken = observed?.ok === false && /observation|read|token/i.test(observed.error) && effects.length === 0;
+          // The stale pre-disappearance evidence is still unusable. The write is
+          // authorized only because the application read the terminal again.
+          freshReadSupplied = observed?.ok === true && reads === readsBeforeSend + 1 && effects.length === 1;
           reply = tool({ kind: 'read_session', targetId: 'pane' }); break;
         case 5: reply = tool({ kind: 'send_prompt', targetId: 'pane', text: 'Review the project.' }); break;
         case 6: reply = tool({ kind: 'read_session', targetId: 'pane' }); break;
@@ -173,6 +175,6 @@ test('failed read while absent from inventory cannot reuse old implicit evidence
   assert.equal((await relay.setEnabled(true)).ok, true);
   await relay.send({ text: 'Review the project.', origin: 'text' });
   assert.equal(rejectedMissingRead, true);
-  assert.equal(rejectedOldToken, true, 'Reappearing with the same generation does not undo the failed-read boundary');
-  assert.equal(effects.length, 1, 'Only the subsequent successful read permits input');
+  assert.equal(freshReadSupplied, true, 'Reappearing with the same generation does not undo the failed-read boundary');
+  assert.equal(effects.length, 1, 'Only a successful read permits input, and the submitted task is never repeated');
 });

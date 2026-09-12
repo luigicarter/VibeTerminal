@@ -3,10 +3,14 @@
 // UTF-8 bytes are a deliberately conservative input bound, not a token estimate.
 // Reserve advertised tokens for output and protocol overhead, then allow at most
 // one serialized input byte per remaining token, with an application ceiling.
+// The ceiling scales with the advertised window: long-context models can carry a
+// larger serialized request without the local limit rejecting ordinary work.
+const LARGE_CONTEXT_TOKENS = 131072;
 const bytes = value => Buffer.byteLength(typeof value === 'string' ? value : JSON.stringify(value), 'utf8');
 function modelInputBudget(contextLength, outputTokens = 1200) {
   const context = Number.isFinite(Number(contextLength)) && Number(contextLength) > 0 ? Math.floor(Number(contextLength)) : 16384;
-  return Math.max(0, Math.min(48000, context - Math.max(0, Number(outputTokens) || 0) - 1024));
+  const ceiling = context >= LARGE_CONTEXT_TOKENS ? 96000 : 48000;
+  return Math.max(0, Math.min(ceiling, context - Math.max(0, Number(outputTokens) || 0) - 1024));
 }
 function boundedString(value, maxBytes, tail = false) {
   const chars = Array.from(String(value || ''));

@@ -20,7 +20,7 @@ async function fixture(t) {
     },
     fetch: async (url, options) => ({ ok: true, json: async () => {
       if (url.endsWith("/key")) return { data: {} };
-      if (url.endsWith("/models")) return { data: [{ id: "fake-brain", supported_parameters: ["tools"] }] };
+      if (url.endsWith("/models")) return { data: [{ id: "fake-brain", context_length: 128000, supported_parameters: ["tools"] }] };
       state.requests.push(JSON.parse(options.body)); return state.responses.shift() || reply("Ready.");
     } }) });
   t.after(async () => { await relay.dispose(); assert(path.resolve(root).startsWith(path.join(os.tmpdir(), "vibe-context-test-"))); fs.rmSync(root, { recursive: true, force: true }); });
@@ -102,20 +102,23 @@ test("initial context carries only twelve recent relay messages and no native tr
   for (let i = 0; i < 7; i++) await f.run(`Relay message ${i}`);
   const request = f.requests.at(-1), initial = JSON.parse(request.messages[1].content);
   assert.equal(initial.recentConversation.length, 12); assert.equal(initial.recentConversation[0].text, "Relay message 0");
-  assert.equal(initial.sessions[0].conversationId, "native-a"); assert.equal(initial.sessions[0].conversationTitle, "Native title");
-  assert.equal(JSON.stringify(request).includes("PROVIDER_TRANSCRIPT_PRIVATE_BODY"), false); assert.equal(f.reads, 0);
+  // Unaddressed panes are omitted from the executor context. The addressed pane
+  // still carries its native identity, and never its transcript body.
+  assert.deepEqual(initial.sessions, []); assert.equal(initial.sessionDirectory.unaddressedOmitted, true);
+  await f.focus();
+  const addressed = JSON.parse(f.requests.at(-1).messages[1].content);
+  assert.equal(addressed.sessions[0].conversationId, "native-a"); assert.equal(addressed.sessions[0].conversationTitle, "Native title");
+  assert.equal(JSON.stringify(f.requests).includes("PROVIDER_TRANSCRIPT_PRIVATE_BODY"), false); assert.equal(f.reads, 0);
 });
 
 test("session directory exposes bounded initial page and model query reaches a later native title alias", async t => {
   const f = await fixture(t); f.sessions = Array.from({ length: 67 }, (_, i) => ({ id: `pane-${i}`, generation: `g-${i}`, name: `Worker ${i}`, kind: "codex", provider: "codex", aliases: i === 63 ? ["Payment review"] : [], cwd: f.root }));
   await f.run("Find Payment review", { kind: "list_sessions", query: "Payment review", limit: 10 });
   const initial = JSON.parse(f.requests[0].messages[1].content);
-  // The input budget may shorten the 40-item cap when TEMP paths are longer.
-  assert.ok(initial.sessions.length > 0 && initial.sessions.length <= 40);
-  assert.equal(initial.sessions[0].id, "pane-0");
-  assert.equal(initial.sessions.some(session => Object.hasOwn(session, 'terminalNavigationGuide')), false);
-  assert.equal(initial.sessions.some(session => session.id === "pane-63"), false);
-  assert.deepEqual(initial.sessionDirectory, { total: 67, truncated: true });
+  // The executor context lists only addressed panes; the whole directory stays
+  // reachable through list_sessions, which still pages and resolves aliases.
+  assert.deepEqual(initial.sessions, []);
+  assert.deepEqual(initial.sessionDirectory, { total: 67, truncated: false, unaddressedOmitted: true });
   const listing = JSON.parse(f.requests[1].messages.at(-1).content); assert.equal(listing.sessions[0].id, "pane-63"); assert.equal(listing.total, 1);
   assert.equal(Object.hasOwn(listing.sessions[0], 'terminalNavigationGuide'), false);
   const next = listSessionSummaries(f.sessions, { offset: 40, limit: 10 }); assert.equal(next.sessions[0].id, "pane-40"); assert.equal(next.nextOffset, 50);

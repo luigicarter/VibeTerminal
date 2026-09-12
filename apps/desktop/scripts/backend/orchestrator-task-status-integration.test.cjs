@@ -87,7 +87,7 @@ for (const priorCompleted of [false, true]) test(`written input with live idle a
   const f = await fixture(t, { priorCompleted, finishRespond: true });
   const sent = await f.app.send({ text: 'Send the bubble-label task to Codex.', origin: 'text' });
   assert.equal(sent.ok, true, JSON.stringify(sent));
-  assert.equal(sent.text, 'done');
+  assert.match(sent.text, /haven't confirmed that the task started.*result is still pending/s);
   assert.doesNotMatch(sent.text, /accepted|is running|task.*ended/);
   const finish = f.app.getState().receipts.find(receipt => receipt.kind === 'finish_terminal');
   assert.match(finish.text, /haven't confirmed that the task started/);
@@ -119,14 +119,14 @@ for (const sameBatch of [false, true]) for (const delivery of [
   const sent = await f.app.send({ text: 'Send the bubble-label task to Codex.', origin: 'text' });
   assert.equal(f.effects.length, 1, JSON.stringify(sent));
   assert.doesNotMatch(sent.text, /accepted|definitely running/);
-  assert.match(sent.text, delivery.status === 'written' ? /^done$/ : /couldn't confirm|could not be verified|Transport unavailable/);
+  assert.match(sent.text, delivery.status === 'written' ? /^Input was sent to Codex; I haven't confirmed that the task started\. The agent result is still pending\.$/ : /couldn't confirm|could not be verified|Transport unavailable/);
 });
 
 test('new attributed turn acknowledges the command and retains running evidence in status responses', async t => {
   const f = await fixture(t, { started: true, priorCompleted: true });
   const sent = await f.app.send({ text: 'Send the bubble-label task to Codex.', origin: 'text' });
   assert.equal(sent.ok, true, JSON.stringify(sent));
-  assert.equal(sent.text, 'done');
+  assert.equal(sent.text, 'The task is running in Codex. The agent result is still pending.');
   f.setMode('status');
   const status = await f.app.send({ text: 'Did it start?', origin: 'text', replyToRequestId: sent.requestId });
   assert.equal(status.ok, true, JSON.stringify(status));

@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const { isVoiceDismissal } = require('../../shared/voiceDismissal.cjs');
 
 test('dismissal accepts only dedicated whole utterances with optional name and politeness', () => {
-  for (const text of ['never mind', 'Nevermind!', "that's all", 'that is all', 'Stop listening.', 'dismiss', 'go back to sleep', 'Hey Lina, never mind.', 'Please stop listening, Lina.', 'Lina, dismiss please']) assert.equal(isVoiceDismissal(text), true, text);
-  for (const text of ['', 'stop', 'cancel', 'no', 'dismiss the dialog', 'never mind the test, fix the build', "that's all the files to edit", 'tell the terminal to stop listening', 'go back to sleep after the build', 'what does dismiss mean', 'Hey Linaria, dismiss', 'Hey Lena, never mind.', 'Please stop listening, Lena.', 'Lena, dismiss please', 'Lena, dismiss the dialog']) assert.equal(isVoiceDismissal(text), false, text);
+  for (const text of ['never mind', 'Nevermind!', "that's all", 'that is all', 'Stop listening.', 'dismiss', 'go back to sleep', 'Hey Lina, never mind.', 'Please stop listening, Lina.', 'Lina, dismiss please',
+    'Hey Lena, never mind.', 'He Lena, never mind.', 'Hey Alina, never mind.', 'Here, Lina, never mind.', 'Please stop listening, Lena.', 'Lena, dismiss please']) assert.equal(isVoiceDismissal(text), true, text);
+  for (const text of ['', 'stop', 'cancel', 'no', 'dismiss the dialog', 'never mind the test, fix the build', "that's all the files to edit", 'tell the terminal to stop listening', 'go back to sleep after the build', 'what does dismiss mean', 'Hey Linaria, dismiss', 'Lena, dismiss the dialog']) assert.equal(isVoiceDismissal(text), false, text);
 });

@@ -16,6 +16,11 @@ const { fileReadSource } = require('./orchestratorReadRecovery.cjs');
 const { assertCloseEligibility } = require('./orchestratorCloseSafety.cjs');
 const agentTools = require('../shared/orchestratorAgentTools.cjs');
 
+// Operations the application will observe for when the model supplies no token.
+// Native controls (terminal_interact) and finish_terminal still require the
+// model's own read: those steps depend on what the model actually looked at.
+const AUTO_OBSERVED_KINDS = ['send_prompt', 'answer_question', 'permission', 'interrupt'];
+
 // Executes a scoped plan through workspace capabilities. It has no model API,
 // credential storage, conversation ownership or ambient request context. The
 // caller passes the active request explicitly; live identity getters are reread
@@ -35,7 +40,7 @@ function createWorkspaceExecutor({ getSessions, getRequests, getEpoch, isDispose
     if (intent && Object.keys(action).some(k => !['kind', 'view', 'targetId', 'text', 'path', 'cwd', 'root', 'query', 'parent', 'name', 'kindOfSession', 'preferenceId', 'provider', 'reference', 'limit', 'offset', 'cursor', 'beforeSequence', 'maxChars', 'grantId', 'requestId', 'revision', 'observationSequence', 'keys', 'mouse', 'inputPurpose', 'submit', 'stepId', 'observationToken', 'inputRevision', 'editInput', 'answerText', 'answerTexts', 'decision', 'outcome', 'responseTurn', 'speechText', 'watchUntil', ...agentTools.FIELDS].includes(k))) throw new Error('Unexpected tool argument.');
     let observationToken = action.observationToken;
     delete action.observationToken;
-    let operatorGrant, operatorObservation, operatorState;
+    let operatorGrant, operatorObservation, operatorState, autoObservationToken, autoObservationFailed = false;
     action.kind = ({ send: 'send_prompt', kill: 'close', respond_permission: 'permission' })[action.kind] || action.kind;
     if (intent && action.kind === 'open_file') throw new Error('Use Workspace tools to open files or folders in an external application. Voice controls stay inside Lina Terminal.');
     const check = () => { if (intent) active(token); else if (isDisposed() || token !== getEpoch() || signal?.aborted) throw new Error('Cancelled.'); };
@@ -174,6 +179,10 @@ function createWorkspaceExecutor({ getSessions, getRequests, getEpoch, isDispose
       if (data?.completedResult && workHistory.enrich(target, data.completedResult)) emit();
       if (intent && identifyReadTarget(intent, getSessions())?.id === id) bindTarget(target, intent);
       const result = { ok: true, readSource, terminalNavigationGuide: terminalNavigationGuide(target), observation: redact(data), pendingInteractions: redact(getRequests().filter(r => r.sessionId === id && r.state === 'pending' && (r.generation === undefined || r.generation === target.generation))) };
+      // A decoded read is the only place this process sees a root composer. Offer
+      // it as startup evidence for already submitted task prompts; the scheduler
+      // owns whether it proves anything. The raw screen never leaves the backend.
+      if (action.beforeSequence === undefined) tasks.reconcile(getSessions(), { observations: [{ session: target, observation: data }] });
       if (intent && action.beforeSequence === undefined) {
         intent.operatorObservations ||= createOperatorObservations({ now });
         result.observationToken = intent.operatorObservations.observe(target, data, result.pendingInteractions, { readId, modelRound: diagnosticContext.modelRound });
@@ -249,6 +258,39 @@ function createWorkspaceExecutor({ getSessions, getRequests, getEpoch, isDispose
           // fresh read if another operator or the user changed the input state.
         }
       }
+      // The observation fence is unchanged; only its supplier is. When a task,
+      // answer, permission or interrupt arrives with no observationToken property
+      // and no eligible earlier read, the application performs the ordinary
+      // read_session itself and binds the minted token explicitly below. Explicit
+      // tokens, terminal_interact and finish_terminal keep the model-must-read rule.
+      if (AUTO_OBSERVED_KINDS.includes(action.kind) && !Object.hasOwn(raw, 'observationToken')) {
+        // One decision per model tool call: a replayed identical call reaches its
+        // existing effect receipt below without taking another terminal read.
+        intent.autoObservations ||= new Map();
+        const autoCallId = diagnosticContext.toolCallId;
+        const cached = typeof autoCallId === 'string' ? intent.autoObservations.get(autoCallId) : undefined;
+        if (cached) ({ token: autoObservationToken, failed: autoObservationFailed } = cached);
+        else {
+          const autoTargetId = action.targetId || action.target?.id;
+          const operable = Boolean(autoTargetId) && intent.commandPlan.grants.some(grant => grant.kind === 'operate_terminal'
+            && grant.inspection !== true && (!action.grantId || action.grantId === grant.id) && grant.targets.some(item => item.id === autoTargetId));
+          const observable = operable && getSessions().find(session => session.id === autoTargetId);
+          if (observable && !intent.operatorObservations?.latest(observable, diagnosticContext.modelRound)) {
+            let observed;
+            try { observed = await doAction({ kind: 'read_session', targetId: autoTargetId }, { intent, scope, diagnosticContext, requestContext, token, signal }); }
+            catch { observed = undefined; }
+            check();
+            if (typeof observed?.observationToken === 'string') {
+              autoObservationToken = observed.observationToken;
+              recordDiagnostic({ event: 'request_stage', stage: 'auto_observation', actionKind: action.kind, targetId: autoTargetId });
+            } else autoObservationFailed = true;
+          }
+          if (typeof autoCallId === 'string') {
+            intent.autoObservations.set(autoCallId, { token: autoObservationToken, failed: autoObservationFailed });
+            while (intent.autoObservations.size > 64) intent.autoObservations.delete(intent.autoObservations.keys().next().value);
+          }
+        }
+      }
       const fallbackStepId = typeof diagnosticContext.toolCallId === 'string' && diagnosticContext.toolCallId.length
         ? `call-${createHash('sha256').update(diagnosticContext.toolCallId).digest('hex')}` : undefined;
       action = authorizeIntentAction(action, intent.commandPlan, getSessions(), { allowConsumed: true, fallbackStepId, requests: getRequests(), observedInteractions: intent.observedInteractions || [] });
@@ -268,7 +310,7 @@ function createWorkspaceExecutor({ getSessions, getRequests, getEpoch, isDispose
         operatorState = operationState(operatorGrant, action.targetId);
         if (action.kind !== 'finish_terminal' && operatorState.steps >= 128) throw new Error('The terminal operation reached its step limit, including earlier clarification steps.');
         const target = getSessions().find(session => session.id === action.targetId && session.generation === action.generation);
-        if (!target || !intent.operatorObservations) throw new Error('Read this terminal before operating it.');
+        if (!target || !intent.operatorObservations || autoObservationFailed) throw new Error('Read this terminal before operating it.');
         if (action.kind !== 'finish_terminal' && operatorState.uncertain) throw new Error('An earlier write in this operation is unconfirmed. Inspect its outcome; do not send more input.');
         if (action.kind === 'finish_terminal' && action.outcome === 'completed' && operatorState.uncertain) throw new Error('The earlier write remains unconfirmed. Report this operation as blocked, not completed.');
         const nativeAgent = !['terminal', 'shell', 'fusion', 'openfusion'].includes(target.kind || target.provider);
@@ -286,7 +328,9 @@ function createWorkspaceExecutor({ getSessions, getRequests, getEpoch, isDispose
         if (action.kind === 'send_prompt' && operatorState.sentTasks.has(action.text)) throw new Error('This task was already submitted by this operation. Inspect its result instead of repeating it.');
         if (action.kind === 'terminal_interact' && operatorGrant.permissionMode === 'none' && getRequests().some(request => request.sessionId === action.targetId && request.generation === action.generation && request.state === 'pending' && request.kind === 'permission') &&
             (action.text || action.submit || action.mouse || action.keys?.some(key => !['up', 'down', 'left', 'right', 'home', 'end', 'pageup', 'pagedown', 'tab', 'shift-tab', 'escape'].includes(key)))) throw new Error('The terminal is asking for permission. This request does not delegate that decision.');
-        if (!Object.hasOwn(raw, 'observationToken')) observationToken = intent.operatorObservations.latest(target, diagnosticContext.modelRound);
+        // An application read is explicit evidence for this step: it is bound by
+        // token, not by the implicit earlier-round rule latest() enforces.
+        if (!Object.hasOwn(raw, 'observationToken')) observationToken = autoObservationToken ?? intent.operatorObservations.latest(target, diagnosticContext.modelRound);
         operatorObservation = intent.operatorObservations.authorize(observationToken, target, action,
           getRequests().filter(request => request.sessionId === target.id && (request.generation === undefined || request.generation === target.generation) && request.state === 'pending'));
       }

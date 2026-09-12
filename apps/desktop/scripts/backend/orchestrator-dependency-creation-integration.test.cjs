@@ -9,7 +9,7 @@ async function until(predicate) {
 }
 async function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-dependency-create-'));
-  const f = { root, effects: [], routes: [], plans: [], sessions: [], phases: new Map(), contexts: [], resultAvailable: true };
+  const f = { root, effects: [], routes: [], plans: [], sessions: [], phases: new Map(), contexts: [], reads: [], resultAvailable: true };
   const session = id => ({ id, generation: `generation-${id}`, launchToken: 1, cwd: root, kind: 'codex', provider: 'codex',
     conversationId: `conversation-${id}`, name: id, started: true, observation: 'observed', processState: 'running',
     agentProcessState: 'running', agentPid: 42, turnState: 'idle', revision: 1 });
@@ -19,7 +19,7 @@ async function fixture(t) {
     getLaunchers: () => [{ kind: 'codex', available: true, configured: true }],
     interpretIntent: () => { const plan = f.plans.shift(); assert.ok(plan, 'Every interpretation is scripted'); return plan; },
     routeTask: context => { f.routes.push(context); return { kind: 'choose', decision: 'create', kindOfSession: 'codex', reason: 'Use a fresh worker for the dependent task.' }; },
-    readSession: async target => ({ ok: true, id: target.id, generation: target.generation, sequence: 1, inputRevision: 0, text: '> ',
+    readSession: async target => (f.reads.push(target), { ok: true, id: target.id, generation: target.generation, sequence: 1, inputRevision: 0, text: '> ',
       ...(target.completedTurnId && f.resultAvailable && { completedResult: { turnId: target.completedTurnId, status: 'completed', text: 'The review found a checkout defect.' } }) }),
     dispatchAction: action => {
       f.effects.push(action);
@@ -82,8 +82,11 @@ test('automatic dependent creation waits for an attributable result without bloc
   assert.equal(f.effects[2].target.id, 'implementer');
   assert.equal(f.effects[2].target.generation, 'generation-implementer');
   assert.equal(f.effects[1].prompt, undefined);
-  const context = f.contexts.find(item => item.authorizedCommands?.grants.some(grant => grant.targets.some(target => target.id === 'implementer')));
-  assert.equal(context.dependencyResults[0].result.turnId, 'review-turn');
+  // The application delivers a bound task handoff itself, so the attribution
+  // evidence is the prerequisite result it read before launching the worker.
+  assert.ok(f.reads.some(target => target.completedTurnId === 'review-turn'), 'The prerequisite result was read by turn identity');
+  assert.equal(f.contexts.some(item => item.authorizedCommands?.grants.some(grant => grant.targets.some(target => target.id === 'implementer'))), false,
+    'A bound task handoff needs no executor model turn');
   assert.equal(f.relay.getState().tasks.find(task => task.requestId === result.requestId).status, 'waiting-results');
 });
 

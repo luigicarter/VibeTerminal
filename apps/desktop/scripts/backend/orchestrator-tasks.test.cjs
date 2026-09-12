@@ -438,3 +438,69 @@ test('two queued answers to one clarification cannot consume its authority twice
   await until(() => f.app.getState().tasks.find(task => task.id === answers[1].requestId).status === 'failed');
   await until(() => f.effects.length === 1); assert.equal(f.effects.length, 1);
 });
+
+// Native capture shape: scripts/backend/orchestrator-prompt-readiness.test.cjs.
+const codexScreen = body => ({ ok: true, id: 'pane', generation: 'g1', sequence: 4, inputRevision: 0,
+  cursorVisible: true, cols: 110, rows: 35, cursor: { x: 2, y: 3 },
+  text: `\u2502 >_ OpenAI Codex (v0.144.0) \u2502\n\u2502 model: probe /model to change \u2502\n\n${body}\n\n  probe default \u00b7 C:\project` });
+function submitted({ provider = 'codex', at = 1000, text = 'Review the latest changes in this repository.' } = {}) {
+  let clock = at;
+  const tasks = createTaskScheduler({ now: () => clock });
+  const job = tasks.create({ text: 'Review', origin: 'text' });
+  const session = { id: 'pane', generation: 'g1', kind: provider, provider, observation: 'observed' };
+  tasks.track(job, { kind: 'send_prompt', actionId: 'a1', targetId: 'pane', generation: 'g1', text }, { ok: true, status: 'written' });
+  job.executionDone = true; tasks.update(job, { status: 'waiting-results' });
+  return { tasks, job, session, wait: job.waits[0], set: value => { clock = value; },
+    observe: body => tasks.reconcile([session], { observations: [{ session, observation: codexScreen(body) }] }),
+    observeScreen: observation => tasks.reconcile([session], { observations: [{ session, observation }] }) };
+}
+
+test('composer evidence marks a submitted prompt observed and hook attribution still replaces it', () => {
+  const f = submitted();
+  f.set(3000);
+  f.observe('\u203a Review the latest changes in this repository.');
+  assert.equal(f.wait.observedState, undefined, 'The prompt is still in the composer');
+  f.observe('\u203a Ask Codex to do anything');
+  assert.equal(f.wait.observedState, undefined, 'An empty ready composer is not evidence the prompt was taken');
+  f.observe('\u2022 Working (esc to interrupt)');
+  assert.equal(f.wait.observedState, 'submitted-observed');
+  assert.equal(f.wait.observedAt, 3000);
+  assert.equal(f.wait.done, false);
+  f.set(4000);
+  f.tasks.reconcile([{ ...f.session, turnId: 't1', turnStartedAt: 3500, turnState: 'running' }]);
+  assert.equal(f.wait.observedState, 'running');
+});
+
+test('composer evidence expires ten seconds after the write and needs a supported provider', () => {
+  const inside = submitted(); inside.set(11000);
+  inside.observe('\u2022 Working (esc to interrupt)');
+  assert.equal(inside.wait.observedState, 'submitted-observed', 'Exactly ten seconds after the write still counts');
+  const expired = submitted(); expired.set(11001);
+  expired.observe('\u2022 Working (esc to interrupt)');
+  assert.equal(expired.wait.observedState, undefined);
+  const unsupported = submitted({ provider: 'gemini' }); unsupported.set(3000);
+  unsupported.observe('\u2022 Working (esc to interrupt)');
+  assert.equal(unsupported.wait.observedState, undefined);
+  const unobserved = submitted(); unobserved.set(3000);
+  unobserved.tasks.reconcile([unobserved.session]);
+  assert.equal(unobserved.wait.observedState, undefined, 'Without an observation nothing is inferred');
+});
+
+// The composer hard-wraps a long token mid-token: the break inserts whitespace
+// the submitted text never had, so only a whitespace-free comparison still finds
+// the prompt sitting there.
+const longPath = String.raw`Fix C:\Users\ahmed\Documents\vibeTerminal\apps\desktop\backend\orchestrator.cjs so that`;
+const wrappedScreen = () => ({ ok: true, id: 'pane', generation: 'g1', sequence: 4, inputRevision: 0,
+  cursorVisible: true, cols: 44, rows: 35, cursor: { x: 12, y: 5 },
+  text: ['\u2502 >_ OpenAI Codex (v0.144.0) \u2502', '\u2502 model: probe /model to change \u2502', '',
+    '\u203a Fix ' + String.raw`C:\Users\ahmed\Documents\vibeTermi`,
+    String.raw`  nal\apps\desktop\backend\orchestrator.c`,
+    '  js so that', '', '  probe default'].join('\n') });
+
+test('a prompt the composer wrapped inside a long path is not mistaken for accepted', () => {
+  const f = submitted({ text: longPath }); f.set(3000);
+  f.observeScreen(wrappedScreen());
+  assert.equal(f.wait.observedState, undefined, 'The wrapped prompt is still in the composer');
+  f.observe('\u2022 Working (esc to interrupt)');
+  assert.equal(f.wait.observedState, 'submitted-observed', 'Once the prompt is gone the write is still observed');
+});

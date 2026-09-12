@@ -6,7 +6,7 @@ const { createTaskScheduler } = require('../../backend/orchestratorTasks.cjs');
 const objective = 'Review checkout; do not edit.';
 async function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-continuation-history-'));
-  const sessions = [], effects = [], plans = [], contexts = [], executorContexts = [], projects = [root], phases = new Map();
+  const sessions = [], effects = [], plans = [], contexts = [], executorContexts = [], reads = [], projects = [root], phases = new Map();
   let ask = true, call = 0;
   const json = value => new Response(JSON.stringify(value));
   const tool = action => json({ choices: [{ finish_reason: 'tool_calls', message: { tool_calls: [{ id: `tool-${++call}`, function: { name: 'workspace', arguments: JSON.stringify(action) } }] } }] });
@@ -17,7 +17,7 @@ async function fixture(t) {
     getLaunchers: () => [{ kind: 'codex', available: true, configured: true }],
     interpretIntent: context => { contexts.push(context); return context.instruction === 'hello' ? { goal: 'Hello', actions: [] } : plans.shift(); },
     routeTask: () => ({ kind: 'choose', decision: 'create', kindOfSession: 'codex', reason: 'Independent review.' }),
-    readSession: target => ({ ok: true, id: target.id, generation: target.generation, text: 'Ready to review.', sequence: 10, inputRevision: 2,
+    readSession: target => (reads.push(target), { ok: true, id: target.id, generation: target.generation, text: 'Ready to review.', sequence: 10, inputRevision: 2,
       ...(target.completedTurnId && { completedResult: { turnId: target.completedTurnId, status: 'completed', text: 'The review found a checkout defect.' } }) }),
     dispatchAction: action => {
       effects.push(action);
@@ -47,7 +47,7 @@ async function fixture(t) {
   const run = (text, plan, extra = {}) => { plans.push(plan); return app.send({ text, origin: 'text', ...extra }); };
   const follow = (source, reply) => run('Use the standard review mode.', { goal: 'Continue review.', continuationOf: source,
     actions: [{ kind: 'operate_terminal', sourceUserId: source, targetIds: [sessions[0].id] }] }, { replyToRequestId: reply });
-  return { app, root, sessions, effects, contexts, executorContexts, projects, session, run, follow, setAsk: value => { ask = value; }, task: id => app.getState().tasks.find(item => item.requestId === id) };
+  return { app, root, sessions, effects, contexts, executorContexts, reads, projects, session, run, follow, setAsk: value => { ask = value; }, task: id => app.getState().tasks.find(item => item.requestId === id) };
 }
 
 test('clearing history retains the actual prerequisite while a dependent waits for another workspace', { timeout: 4000 }, async t => {
@@ -72,7 +72,9 @@ test('clearing history retains the actual prerequisite while a dependent waits f
   const b = await bPending;
   assert.equal(b.ok, true, JSON.stringify(b));
   assert.equal(f.effects.filter(action => action.kind === 'send_prompt' && action.text === dependentText).length, 1);
-  assert.match(JSON.stringify(f.executorContexts.find(context => context.instruction === dependentText)?.dependencyResults), /checkout defect/);
+  // The application delivers a bound handoff itself, so the prerequisite
+  // evidence is the attributed completed result it read before dispatching.
+  assert.ok(f.reads.some(target => target.completedTurnId), 'The prerequisite result was read by turn identity');
   Object.assign(f.sessions[2], { turnState: 'completed', turnEndedAt: Date.now() }); await f.app.refresh();
   await f.app.clearHistory();
   assert.equal(f.task(a.requestId), undefined, 'Finished dependencies no longer pin old history');
@@ -92,7 +94,12 @@ for (const ending of ['finished', 'cancelled']) test(`transitive dependency prot
 
 for (const cleanup of ['clear', 'capacity']) test(`two clarifications retain the original operator through ${cleanup}`, { timeout: 30000 }, async t => {
   const f = await fixture(t);
-  const a = await f.run(objective, { goal: objective, actions: [{ kind: 'delegate_task', cwd: f.root, text: objective }] });
+  // A bound task handoff is delivered by the application, so the clarification
+  // under test comes from the model-operated request on that same worker.
+  f.setAsk(false);
+  await f.run(objective, { goal: objective, actions: [{ kind: 'delegate_task', cwd: f.root, text: objective }] });
+  f.setAsk(true);
+  const a = await f.run(objective, { goal: objective, actions: [{ kind: 'operate_terminal', targetIds: [f.sessions[0].id], text: objective }] });
   const c = await f.follow(a.requestId, a.requestId);
   assert.equal(f.task(a.requestId).status, 'continued'); assert.equal(f.task(c.requestId).status, 'needs-answer');
   assert.equal(f.task(a.requestId).controlDisposition, 'transferred');
@@ -105,8 +112,8 @@ for (const cleanup of ['clear', 'capacity']) test(`two clarifications retain the
   f.setAsk(false);
   const d = await f.follow(a.requestId, c.requestId);
   assert.equal(d.ok, true, JSON.stringify(d));
-  assert.deepEqual(f.effects.map(action => action.kind), ['create_session', 'send_prompt']);
-  assert.equal(f.effects[1].text, objective);
+  assert.deepEqual(f.effects.map(action => action.kind), ['create_session', 'send_prompt', 'send_prompt']);
+  assert.equal(f.effects[1].text, objective); assert.equal(f.effects[2].text, objective);
   Object.assign(f.sessions[0], { turnState: 'completed', turnEndedAt: Date.now() }); await f.app.refresh();
   await f.app.clearHistory();
   assert.equal(f.task(a.requestId), undefined, 'Completed continuations release their original scopes');
@@ -114,11 +121,18 @@ for (const cleanup of ['clear', 'capacity']) test(`two clarifications retain the
 
 test('cancelled continuation releases its retired owner for clearing', async t => {
   const f = await fixture(t);
-  const a = await f.run(objective, { goal: objective, actions: [{ kind: 'delegate_task', cwd: f.root, text: objective }] });
+  // The clarification owner is the model-operated request; the seeded handoff
+  // only supplies the worker it operates.
+  f.setAsk(false);
+  const seed = await f.run(objective, { goal: objective, actions: [{ kind: 'delegate_task', cwd: f.root, text: objective }] });
+  Object.assign(f.sessions[0], { turnState: 'completed', turnEndedAt: Date.now() }); await f.app.refresh();
+  assert.equal(f.task(seed.requestId).status, 'finished');
+  f.setAsk(true);
+  const a = await f.run(objective, { goal: objective, actions: [{ kind: 'operate_terminal', targetIds: [f.sessions[0].id], text: objective }] });
   const c = await f.follow(a.requestId, a.requestId);
   await f.app.cancel({ requestId: c.requestId }); await f.app.clearHistory();
   assert.equal(f.task(a.requestId), undefined); assert.equal(f.task(c.requestId), undefined);
-  assert.deepEqual(f.effects.map(action => action.kind), ['create_session']);
+  assert.deepEqual(f.effects.map(action => action.kind), ['create_session', 'send_prompt']);
 });
 
 test('fully protected capacity refuses admission and is released when its continuation is cancelled', () => {

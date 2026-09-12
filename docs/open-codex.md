@@ -47,6 +47,11 @@ can also be used through the compatibility adapter.
   injects the custom provider and native lifecycle hooks, and reports a unique
   root process identity. It does not fall back to PATH `codex`. Native approvals,
   terminal input, and execution are owned by the native CLI.
+- Packaged Windows launches run this wrapper with the console-capable Bun
+  executable already shipped at `resources/codex-web/runtime/runtime/bun.exe`.
+  This reuses only the JavaScript host; the Open Codex executable, provider
+  adapter, credentials and history remain separate. No system Node/Bun is
+  required. An absent host produces an explicit reinstall error.
 - `<userData>/open-codex`: independent native configuration and conversation
   storage. Discovery, confirmation, saved-history reads, and resume use this home;
   an unavailable home never falls back to personal Codex history.
@@ -81,11 +86,30 @@ Codex CLI 0.144.0. Open Codex owns its own runtime process for each terminal pan
   isolated native history. Artifacts live under `.tmp/open-codex/`.
 - Existing terminal status, launch/resume, history, persistence, Claude-provider,
   and renderer-build checks cover the shared integration surfaces.
+- `npm run smoke:open-codex:packaged`: exercises the actual packaged wrapper
+  and native CLI through PowerShell/ConPTY with no Node/Bun on PATH. It verifies
+  interactive input, model switching and routing, a local fixture response,
+  Ctrl+C exit, root lifecycle telemetry and catalog cleanup. The release workflow
+  runs it after packaging. `--package-dir=<directory>` selects another install;
+  `--source-runtime` tests a source launcher against that install's payload.
 
 These are local source checks with deterministic mock providers. They establish
 the native transport and integration behavior, not the coding quality or feature
-parity of every external model. No paid live-provider turn or installed release
-has been verified for this implementation.
+parity of every external model. No paid live-provider turn has been verified.
+
+## Windows stdin repair (September 11, 2026)
+
+The installed 0.1.116 launcher reproduced `Error: stdin is not a terminal`:
+PowerShell ran the GUI-subsystem `LinaTerminal.exe` with `ELECTRON_RUN_AS_NODE`,
+returned to its prompt immediately, and the native child inherited nonterminal
+stdin. The source Electron smoke used system Node, while the headless native
+smoke did not require a TTY, so neither covered this packaged failure.
+
+Using the bundled console host passed the same installed-payload test, including
+typing, `/model`, routing to the selected model, a completed fixture turn and
+clean native exit. The new packaged smoke fails against the original launcher.
+This launcher repair ships in release 0.1.117 (see
+[the release review](release-0.1.117-review.md)).
 
 Provider configuration follows the [official Codex custom-provider contract](https://learn.chatgpt.com/docs/config-file/config-advanced#custom-model-providers).
 OpenRouter documents its [Codex integration](https://openrouter.ai/docs/cookbook/coding-agents/codex-cli)

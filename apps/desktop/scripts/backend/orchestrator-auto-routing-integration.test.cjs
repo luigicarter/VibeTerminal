@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createOrchestrator } = require('../../backend/orchestrator.cjs');
+const { createPlanningInput } = require('../../backend/orchestratorInterpreter.cjs');
 const { observeWorkItemCommits } = require('./orchestrator-work-item-persistence-fixture.cjs');
 let sequence = 0;
 const tool = action => ({ choices: [{ finish_reason: 'tool_calls', message: { tool_calls: [{ id: `auto-${++sequence}`, type: 'function', function: { name: 'workspace', arguments: JSON.stringify(action) } }] } }] });
@@ -17,7 +18,7 @@ async function until(predicate) {
 
 async function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-auto-routing-'));
-  const f = { root, projects: [{ name: 'Project', path: root }], sessions: [], effects: [], contexts: [], routes: [], reads: [], plans: [], phases: new Map(),
+  const f = { root, projects: [{ name: 'Project', path: root }], sessions: [], effects: [], contexts: [], routes: [], reads: [], plans: [], affinities: [], phases: new Map(),
     launchers: [{ kind: 'codex', label: 'Codex', available: true, configured: true }] };
   f.commits = observeWorkItemCommits(t, path.join(root, 'orchestrator-work-items.json'), () => f.relay?.getState().tasks);
   f.session = (id = 'pane', cwd = root) => ({ id, name: id, cwd, kind: 'codex', provider: 'codex', generation: `generation-${id}`,
@@ -30,7 +31,9 @@ async function fixture(t) {
   };
   f.relay = createOrchestrator({ userDataPath: root, secureStorage: { isEncryptionAvailable: () => false },
     getRoots: () => ({ documents: root, projects: f.projects }), getSessions: () => f.sessions,
-    getLaunchers: () => f.launchers,
+    // Production awaits this catalog midway through building the planner context,
+    // so the hook reproduces work that settles inside that window.
+    getLaunchers: async () => { await f.beforeLaunchers?.(); return f.launchers; },
     interpretIntent: async context => {
       f.contexts.push(context);
       const plan = f.plans.shift();
@@ -68,6 +71,13 @@ async function fixture(t) {
       if (url.endsWith('/models')) return jsonResponse({ data: [{ id: 'scripted', context_length: 128000, supported_parameters: ['tools', 'tool_choice'] }] });
       const body = JSON.parse(options.body);
       const metadata = JSON.parse(body.messages.find(message => message.role === 'user').content);
+      // Reusing a conversation without a recorded work item asks for an
+      // ownership judgement before anything is bound.
+      if (body.messages[0].content === require('../../backend/orchestratorTaskAffinity.cjs').SYSTEM) {
+        f.affinities.push(metadata);
+        return jsonResponse({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ relation: f.affinity || 'same-task',
+          userEvidence: metadata.currentInstruction, workEvidence: metadata.existingObjective }) } }] });
+      }
       const grant = metadata.authorizedCommands?.grants.find(g => g.kind === 'operate_terminal');
       if (!grant) return jsonResponse({ choices: [{ message: { content: 'No terminal work submitted.' }, finish_reason: 'stop' }] });
       const phase = f.phases.get(grant.id) || 0; f.phases.set(grant.id, phase + 1);
@@ -180,8 +190,11 @@ test('unowned reuse requires candidate read evidence before binding', { timeout:
   assert.ok(f.reads.length >= 3, 'Discovery plus pre/post submission observations');
 });
 
-test('unread unowned reuse and missing configured launchers never dispatch', { timeout: 2000 }, async t => {
+test('unverified unowned reuse and missing configured launchers never dispatch', { timeout: 2000 }, async t => {
   const f = await fixture(t); f.sessions.push(f.session());
+  // The application reads the candidate itself, so the remaining gate on an
+  // unowned reuse is the ownership review of that evidence.
+  f.affinity = 'unclear';
   f.route = () => ({ kind: 'choose', decision: 'reuse', targetId: 'pane', reason: 'Title only.' });
   await f.run('Review checkout.'); assert.equal(f.effects.length, 0);
   f.sessions = []; f.launchers = [{ kind: 'codex', available: false, configured: false }];
@@ -286,14 +299,37 @@ test('an explicitly submitted managed task holds its workspace against independe
 
 test('a routed submission is observed and finalized even when the model never requests its post-send read', async t => {
   const f = await fixture(t);
-  f.executor = ({ phase }) => phase >= 2 ? { kind: 'respond', text: 'I sent it.', responseTurn: 'complete' } : undefined;
+  f.executor = () => assert.fail('A bound submission is observed and finalized without any executor model turn');
   const result = await f.run('Implement distinct listening and completion cues.');
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(f.effects.filter(action => action.kind === 'send_prompt').length, 1);
   assert.ok(f.reads.length >= 2, 'Application observes the terminal after dispatch');
-  assert.equal([...f.phases.values()][0], 3, 'The model reviews the application observation once, without needing another read or finish');
+  assert.equal(f.phases.size, 0, 'The application observes and finalizes its own submission with no executor round');
   assert.ok(result.actions.some(action => action.kind === 'finish_terminal' && action.status === 'interaction-complete'));
   assert.notEqual(f.task(result).status, 'failed');
+});
+
+test('a pending command cleared while a later request compiles never reaches interpretation as a null entry', { timeout: 4000 }, async t => {
+  const f = await fixture(t);
+  assert.equal((await f.run('Earlier project work.')).ok, true);
+  const queue = text => {
+    const sent = f.run(text);
+    return until(() => f.relay.getState().tasks.some(task => task.text === text && task.status === 'queued' && task.targetIds.length))
+      .then(() => ({ sent, requestId: f.relay.getState().tasks.find(task => task.text === text).requestId }));
+  };
+  const cleared = await queue('The cancelled queued task.'), surviving = await queue('The surviving queued task.');
+  let compiled;
+  f.beforeLaunchers = async () => { f.beforeLaunchers = undefined; await f.relay.cancel({ requestId: cleared.requestId }); };
+  f.plans.push(context => { compiled = context; return { goal: 'Report the active work.', actions: [] }; });
+  const later = await f.relay.send({ text: 'What work is still running?', origin: 'text' });
+  assert.ok(compiled, 'The later request reached interpretation');
+  assert.deepEqual(compiled.pendingCommands.filter(command => !command), [], 'A concurrently cleared command cannot survive as a null entry');
+  assert.deepEqual(compiled.pendingCommands.map(command => command.requestId), [surviving.requestId]);
+  const payload = JSON.parse(createPlanningInput(compiled).messages[1].content);
+  assert.deepEqual(payload.pendingCommands.map(command => command.requestId), [surviving.requestId]);
+  assert.doesNotMatch(String(later.error || ''), /Cannot read properties of null/);
+  assert.equal(f.relay.getState().tasks.find(task => task.requestId === cleared.requestId).status, 'cancelled');
+  await f.relay.cancel(); await cleared.sent; await surviving.sent;
 });
 
 test('continuing an unsent queued task transfers its original request and submits only once', { timeout: 3000 }, async t => {
@@ -482,7 +518,7 @@ test('a finished newer continuation cannot hide an older outstanding work-item r
     return { ok: true, status: 'written', turnId: action.actionId };
   };
   const first = await f.run('Review checkout validation.');
-  f.route = context => ({ kind: 'choose', decision: 'reuse', workItemId: context.workItems[0].id, targetId: f.sessions[0].id, reason: 'Continue the same review.' });
+  f.route = context => ({ kind: 'choose', decision: 'reuse', workItemId: context.replyWorkItem.id, targetId: f.sessions[0].id, reason: 'Continue the same review.' });
   const second = await f.run('Also inspect the test coverage.', {}, { replyToRequestId: first.requestId });
   assert.equal(second.ok, true, JSON.stringify(second));
   assert.equal(f.task(second).status, 'finished');

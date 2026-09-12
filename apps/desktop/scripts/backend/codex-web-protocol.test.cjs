@@ -79,7 +79,7 @@ test('image tool results keep image bytes out of the native transcript and next 
   assert.ok(serialized.length < 1000); assert.ok(!serialized.includes('PRIVATE_IMAGE_BYTES'));
   assert.ok(result.content[0].text.includes('\n' + name + '\n')); assert.ok(result.content[0].text.includes('1536 x 1024'));
 });
-function toolRequest() { return { modelId: 'chatgpt-account/astra', options: {}, _rawBody: { input: [{ role: 'user', content: 'Create the file.' }] }, context: { messages: [], tools: [{ name: 'apply_patch', freeform: true, parameters: { type: 'object', properties: { input: { type: 'string' } }, required: ['input'] } }, { namespace: 'functions', name: 'exec_command', parameters: { type: 'object' } }] } }; }
+function toolRequest() { return { modelId: 'fixture', options: {}, _rawBody: { input: [{ role: 'user', content: 'Create the file.' }] }, context: { messages: [], tools: [{ name: 'apply_patch', freeform: true, parameters: { type: 'object', properties: { input: { type: 'string' } }, required: ['input'] } }, { namespace: 'functions', name: 'exec_command', parameters: { type: 'object' } }] } }; }
 test('native freeform grammar reaches the Web model without duplicating edits as answer text', async () => {
   const parsed = toolRequest();
   const format = { type: 'grammar', syntax: 'lark', definition: 'start: "*** Update File: " filename' };
@@ -133,7 +133,7 @@ test('Web model names follow Codex conventions while old selections still route 
   assert.deepEqual(presentAccountCatalog(display), display, 'Reading an existing normalized cache must preserve IDs.');
   const rows = buildNativeCatalog({}, catalog).models, models = webModels(rows, { includePickerHidden: true });
   assert.equal(models.length, 5); assert.equal(webModels([{ slug: 'gpt-native' }]).length, 0);
-  assert.equal(webModels(rows).length, 4);
+  assert.equal(webModels(rows).length, 5);
   assert.equal(preferredWebModel(models, 'chatgpt-web/gpt-5-6-thinking').id, 'gpt-5.6-sol-thinking');
   const oldRows = rows.map(row => ({ ...row, slug: row._lina_web_aliases[0], display_name: catalog.models.find(model => model.slug === row._lina_web_slug).title }));
   const migrated = refreshNativeModelNames(oldRows);
@@ -149,7 +149,112 @@ test('Web model names follow Codex conventions while old selections still route 
   assert.equal(resolveAccountRoute('gpt-6-astra').backendModel, 'chatgpt-account/gpt-6-astra-wm');
   assert.equal(resolveAccountRoute('gpt-not-on-web'), undefined);
 });
-test('thinking-only picker hides non-reasoning and overlapping chat modes without removing their routes', () => {
+
+function identityCatalog(t) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lina-web-identity-'));
+  const previous = process.env.CODEX_CHATGPT_WEB_HOME;
+  process.env.CODEX_CHATGPT_WEB_HOME = directory;
+  t.after(() => {
+    if (previous === undefined) delete process.env.CODEX_CHATGPT_WEB_HOME; else process.env.CODEX_CHATGPT_WEB_HOME = previous;
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  const models = [
+    ['gpt-6-astra-wm', 'GPT-6 Astra', true],
+    ['gpt-5.6-sol-wm', 'GPT-5.6 Sol', true],
+    ['gpt-5-6-thinking', 'GPT-5.6 Sol', false],
+  ].map(([slug, title, workMode]) => ({ slug, title, workMode, reasoningType: 'reasoning', maxTokens: 100000, defaultEffort: 'medium', efforts: [{ effort: 'medium' }, { effort: 'high' }] }));
+  fs.writeFileSync(path.join(directory, 'lina-account-models.json'), JSON.stringify({ version: 1, models }));
+  return directory;
+}
+
+test('identity context follows the resolved request through aliases, model changes and resumed history', t => {
+  identityCatalog(t);
+  const { accountSelection, resolveAccountRoute } = require('../../backend/codexWebModelDiscovery.cjs');
+  const parsed = toolRequest();
+  parsed.options = { reasoning: 'high', toolChoice: 'none' };
+  parsed.context.messages = [{ role: 'assistant', content: 'I am GPT-5.6 Sol.' }, { role: 'user', content: 'which model are you ?' }];
+  const history = structuredClone(parsed.context.messages);
+  for (const [id, model, name, mode] of [
+    ['gpt-6-astra', 'gpt-6-astra', 'GPT-6 Astra', 'Work'],
+    ['chatgpt-web/gpt-6-astra-wm', 'gpt-6-astra', 'GPT-6 Astra', 'Work'],
+    ['gpt-5.6-sol', 'gpt-5.6-sol', 'GPT-5.6 Sol', 'Work'],
+    ['gpt-5.6-sol-thinking', 'gpt-5.6-sol-thinking', 'GPT-5.6 Sol', 'Thinking'],
+  ]) {
+    parsed.modelId = resolveAccountRoute(id).backendModel;
+    for (const request of [parsed, resumeRequest(parsed)]) {
+      const contract = toolContract(request), marker = contract.indexOf('<lina_model_selection>');
+      assert.ok(marker >= 0);
+      assert.deepEqual(JSON.parse(contract[marker + 1]), { model, name, mode, reasoning_effort: 'high' });
+      assert.match(contract.join('\n'), /not the identity of the server/);
+      assert.doesNotMatch(contract.join('\n'), /You are GPT/);
+    }
+  }
+  assert.deepEqual(parsed.context.messages, history, 'Historical replies are preserved, not silently rewritten.');
+  assert.equal(accountSelection('chatgpt-account/gpt-6-astra-wm').reasoning_effort, 'medium');
+  assert.throws(() => accountSelection('chatgpt-account/gpt-6-astra-wm', 'ultra'), /model_effort_unavailable/);
+  assert.throws(() => accountSelection('chatgpt-account/missing-model'), /model_unavailable/);
+  assert.equal(accountSelection('gpt-native', 'high'), null, 'Native models outside this bridge are unchanged.');
+});
+
+test('the outgoing Web request guard rejects a different model and isolates simultaneous pane selections', async t => {
+  const directory = identityCatalog(t);
+  const { bindAccountSelection, assertAccountSelection } = require('../../backend/codexWebModelDiscovery.cjs');
+  function pageFor(slug) {
+    let handler;
+    const page = { on() {}, once() {}, context: () => ({ newCDPSession: async () => ({ send: async () => {}, on() {} }) }), route: async (_pattern, callback) => { handler = callback; }, setViewportSize: async () => {}, url: () => 'https://chatgpt.com/?model=' + slug };
+    return { page, async send(model, pathname = '/backend-api/f/conversation', extra = {}) {
+      let result;
+      await handler({ request: () => ({ method: () => 'POST', url: () => 'https://chatgpt.com' + pathname, postDataJSON: () => ({ model, ...extra }) }),
+        continue: async () => { result = 'sent'; }, abort: async () => { result = 'blocked'; } });
+      return result;
+    } };
+  }
+  const astra = pageFor('gpt-6-astra-wm'), sol = pageFor('gpt-5.6-sol-wm');
+  await bindAccountSelection(astra.page, 'chatgpt-account/gpt-6-astra-wm', 'high');
+  await bindAccountSelection(sol.page, 'chatgpt-account/gpt-5.6-sol-wm', 'medium');
+  assert.equal(await astra.send('gpt-5.6-sol-wm'), 'blocked');
+  assert.throws(() => assertAccountSelection(astra.page), /model_selection_failed/);
+  assert.equal(await sol.send('gpt-5.6-sol-wm'), 'sent');
+  assert.doesNotThrow(() => assertAccountSelection(sol.page));
+  await bindAccountSelection(astra.page, 'chatgpt-account/gpt-6-astra-wm', 'high');
+  assert.equal(await astra.send('gpt-6-astra-wm', '/backend-api/conversation'), 'sent');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(directory, 'lina-last-model-request.json'), 'utf8')).model, 'gpt-6-astra-wm');
+  assert.doesNotThrow(() => assertAccountSelection(astra.page));
+  assert.equal(await astra.send(undefined), 'blocked');
+  await bindAccountSelection(astra.page, 'chatgpt-account/gpt-6-astra-wm', 'high');
+  assert.equal(await astra.send('gpt-6-astra-wm', undefined, { history_and_training_disabled: true }), 'blocked');
+  assert.throws(() => assertAccountSelection(astra.page), /model_surface_mismatch/);
+  const catalogFile = path.join(directory, 'lina-account-models.json'), catalog = JSON.parse(fs.readFileSync(catalogFile, 'utf8'));
+  catalog.models[0].efforts[1].webEffort = 'extended'; fs.writeFileSync(catalogFile, JSON.stringify(catalog));
+  await bindAccountSelection(astra.page, 'chatgpt-account/gpt-6-astra-wm', 'high');
+  assert.equal(await astra.send('gpt-6-astra-wm', undefined, { thinking_effort: 'standard' }), 'blocked');
+  assert.throws(() => assertAccountSelection(astra.page), /model_effort_unavailable/);
+  await bindAccountSelection(astra.page, 'chatgpt-account/gpt-6-astra-wm', 'high');
+  assert.equal(await astra.send('gpt-6-astra-wm', undefined, { thinking_effort: 'extended' }), 'sent');
+});
+
+test('retained browser context cannot carry a previous model or reasoning selection into a new request', () => {
+  const parsed = toolRequest(); parsed.modelId = 'chatgpt-account/gpt-5-6-thinking'; parsed.options.reasoning = 'medium';
+  const first = guardedConversationKey(parsed, 'identity-thread');
+  assert.equal(guardedConversationKey(parsed, 'identity-thread'), first);
+  parsed.options.reasoning = 'high';
+  const higher = guardedConversationKey(parsed, 'identity-thread');
+  assert.notEqual(higher, first);
+  parsed.modelId = 'chatgpt-account/gpt-6-pro';
+  assert.notEqual(guardedConversationKey(parsed, 'identity-thread'), higher);
+});
+
+test('identity guidance never replaces or fabricates the model answer', async () => {
+  const previous = process.env.LINA_CODEX_WEB_HOST_MODULE; process.env.LINA_CODEX_WEB_HOST_MODULE = 'fixture';
+  try {
+    const answer = 'I am GPT-5.6 Sol.', events = [];
+    await createToolRelay({ name: 'fixture', async runTurn(_request, _input, emit) {
+      emit({ type: 'text_delta', text: answer, phase: 'final_answer' }); emit({ type: 'done' });
+    } }).runTurn(toolRequest(), {}, event => events.push(event));
+    assert.equal(events.filter(event => event.type === 'text_delta').map(event => event.text).join(''), answer);
+  } finally { if (previous === undefined) delete process.env.LINA_CODEX_WEB_HOST_MODULE; else process.env.LINA_CODEX_WEB_HOST_MODULE = previous; }
+});
+test('thinking-only picker keeps distinct reasoning routes and hides only non-reasoning choices', () => {
   const { buildNativeCatalog, filterNativeModelPicker } = require('../../backend/codexWebModelDiscovery.cjs');
   const { webModels, preferredWebModel } = require('../../backend/codexWebSupport.cjs');
   const catalog = { models: [
@@ -163,7 +268,7 @@ test('thinking-only picker hides non-reasoning and overlapping chat modes withou
     ['gpt-6-pro', 'GPT-6 Pro', false, 'pro'],
   ].map(([slug, title, workMode, reasoningType]) => ({ slug, title, workMode, reasoningType, maxTokens: 100000, defaultEffort: reasoningType === 'none' || reasoningType === 'auto' ? 'low' : 'medium', efforts: [{ effort: 'medium' }, { effort: 'high' }] })) };
   const rows = buildNativeCatalog({}, catalog).models;
-  assert.deepEqual(webModels(rows).map(model => model.id), ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-6-pro']);
+  assert.deepEqual(webModels(rows).map(model => model.id), ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-5.6-sol-thinking', 'gpt-5.6-luna-chat', 'gpt-6-pro']);
   assert.equal(rows.length, 8, 'Hidden choices remain in native metadata for resume and direct selection.');
   assert.equal(filterNativeModelPicker(rows), rows);
   const all = webModels(rows, { includePickerHidden: true });
@@ -201,7 +306,9 @@ test('ordinary replies stream before completion while tool envelopes stay buffer
 test('browser reuse requires the same native history prefix, model contract and tool inventory', () => {
   const parsed = toolRequest(); parsed.context.systemPrompt = ['system'];
   const first = guardedConversationKey(parsed, 'native-thread-a');
-  assert.equal(guardedConversationKey(parsed, 'native-thread-a', true), undefined, 'Work models must not inherit ChatGPT\'s reset slider selection.');
+  const work = guardedConversationKey(parsed, 'native-thread-a', true);
+  assert.equal(guardedConversationKey(parsed, 'native-thread-a', true), work);
+  assert.notEqual(work, first, 'A Work conversation must not reuse a Chat surface.');
   parsed._rawBody.input.push({ type: 'message', role: 'assistant', content: 'Created.' });
   assert.equal(guardedConversationKey(parsed, 'native-thread-a'), first);
   parsed._rawBody.input[0].content = 'A different request';
@@ -321,4 +428,110 @@ test('model response receipts handle complete and delta metadata without extract
     { v: [{ p: '/message/metadata/model_slug', o: 'replace', v: 'gpt-6-pro' }] },
   ].map(value => 'data: ' + JSON.stringify(value)).join('\n');
   assert.deepEqual(responseModelMetadata(response), ['gpt-6-astra-wm', 'gpt-6-pro']);
+});
+
+test('response verification reads resolved server models and ignores requested names and assistant prose', () => {
+  const { responseModels } = require('../../backend/codexWebModelVerification.cjs');
+  const response = [{ v: { message: { author: { role: 'assistant' }, metadata: { resolved_model_slug: 'gpt-5-6', model_slug: 'gpt-5-6', default_model_slug: 'gpt-6-astra-wm' }, content: { parts: ['I am GPT-6 Astra.', { model_slug: 'gpt-6-astra-wm' }] } } } }];
+  assert.deepEqual(responseModels(response), ['gpt-5-6']);
+  assert.deepEqual(responseModels([{ default_model_slug: 'gpt-6-astra-wm', intended_default_model_slug: 'gpt-6-astra-wm', model: 'gpt-6-astra-wm' }]), []);
+  assert.deepEqual(responseModels([{ message: { author: { role: 'user' }, metadata: { model_slug: 'gpt-user-claim' } } }]), []);
+  assert.deepEqual(responseModels([{ v: [{ p: '/message/metadata', v: { resolved_model_slug: 'gpt-5-5-thinking' } }] }]), ['gpt-5-5-thinking']);
+  assert.deepEqual(responseModels([{ p: '/message/metadata/model_slug', v: 'gpt-5-6-thinking' }]), ['gpt-5-6-thinking']);
+});
+
+test('WebSocket verification follows live stream items and subscription catchups without mixing topics', async () => {
+  const { EventEmitter } = require('node:events');
+  const { createResponseVerifier, topicModels } = require('../../backend/codexWebModelVerification.cjs');
+  const page = new EventEmitter(), session = new EventEmitter();
+  session.send = async () => {}; session.detach = async () => {};
+  page.context = () => ({ newCDPSession: async () => session });
+  const verifier = await createResponseVerifier(page), evidence = [];
+  const item = (topic, model) => ({ type: 'message', topic_id: topic, payload: { type: 'conversation-turn-stream', payload: { encoded_item: 'data: ' + JSON.stringify({ v: { message: { author: { role: 'assistant' }, metadata: { resolved_model_slug: model, default_model_slug: 'gpt-6-astra-wm' } } } }) + '\n\n' } } });
+  const received = value => session.emit('Network.webSocketFrameReceived', { response: { payloadData: JSON.stringify(value) } });
+  const handoff = topic => 'data: ' + JSON.stringify({ type: 'stream_handoff', options: [{ type: 'subscribe_ws_topic', topic_id: topic }] });
+  const request = {};
+  verifier.begin(request, model => model === 'gpt-6-astra-wm', value => evidence.push(value));
+  received([item('other-pane', 'gpt-5-6')]);
+  assert.equal(verifier.isVerified(), false);
+  page.emit('response', { request: () => request, text: async () => handoff('owned') });
+  await new Promise(resolve => setImmediate(resolve));
+  received([{ type: 'reply', reply: { type: 'subscribe', catchups: [item('owned', 'gpt-5-6')] } }]);
+  await assert.rejects(verifier.verify(), /model_response_mismatch/);
+  assert.equal(evidence.at(-1).responseVerified, false);
+  assert.deepEqual(evidence.at(-1).responseModels, ['gpt-5-6']);
+  assert.throws(() => verifier.isVerified(), /model_response_mismatch/);
+  assert.deepEqual(topicModels(JSON.stringify([{ type: 'message', topic_id: 'owned', payload: { type: 'conversation-created', payload: { model_slug: 'gpt-6-astra-wm' } } }])), []);
+  const next = {};
+  verifier.begin(next, model => model === 'gpt-5-6', value => evidence.push(value));
+  // A delayed completion belonging to the previous request cannot verify this one.
+  page.emit('response', { request: () => request, text: async () => handoff('owned') });
+  received([item('owned', 'gpt-6-astra-wm')]);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(verifier.isVerified(), false);
+  received([item('new-owned', 'gpt-5-6')]);
+  page.emit('response', { request: () => next, text: async () => handoff('new-owned') });
+  await verifier.verify();
+  assert.equal(verifier.isVerified(), true);
+  assert.equal(evidence.at(-1).responseVerified, true);
+  const aliasRequest = {};
+  verifier.begin(aliasRequest, model => model === 'gpt-5-6', value => evidence.push(value));
+  page.emit('response', { request: () => aliasRequest, text: async () => handoff('alias-owned') });
+  await new Promise(resolve => setImmediate(resolve));
+  const preliminary = item('alias-owned', 'gpt-5-6');
+  preliminary.payload.payload.encoded_item = 'data: ' + JSON.stringify({ v: { message: { author: { role: 'assistant' }, metadata: { model_slug: 'gpt-5-6-auto-thinking' } } } });
+  received([preliminary]);
+  assert.equal(verifier.isVerified(), false, 'A preliminary routing alias cannot release response text.');
+  received([item('alias-owned', 'gpt-5-6')]);
+  await verifier.verify(); assert.equal(verifier.isVerified(), true);
+  assert.deepEqual(evidence.at(-1).responseModels, ['gpt-5-6'], 'The resolved backend overrides the preliminary model alias.');
+});
+
+test('HTTP SSE verifies a reported model but requested-only and missing metadata fail closed', async () => {
+  const { EventEmitter } = require('node:events');
+  const { createResponseVerifier } = require('../../backend/codexWebModelVerification.cjs');
+  const page = new EventEmitter(), session = new EventEmitter(); session.send = async () => {}; session.detach = async () => {};
+  page.context = () => ({ newCDPSession: async () => session });
+  const verifier = await createResponseVerifier(page), request = {};
+  verifier.begin(request, model => model === 'gpt-5-5-thinking', () => {});
+  page.emit('response', { request: () => request, text: async () => 'data: ' + JSON.stringify({ default_model_slug: 'gpt-5-5-thinking' }) });
+  await assert.rejects(verifier.verify(5), /model_response_unverified/);
+  page.emit('response', { request: () => request, text: async () => 'data: ' + JSON.stringify({ v: { message: { author: { role: 'assistant' }, metadata: { model_slug: 'gpt-5-5-thinking' } } } }) });
+  await verifier.verify(); assert.equal(verifier.isVerified(), true);
+});
+
+test('Work requires the actual Work model and cannot accept a Chat or Instant fallback', t => {
+  const directory = identityCatalog(t);
+  const { accountModel, responseModelSlugs } = require('../../backend/codexWebModelDiscovery.cjs');
+  const file = path.join(directory, 'lina-account-models.json'), catalog = JSON.parse(fs.readFileSync(file, 'utf8'));
+  catalog.models.push({ slug: 'gpt-5-6', title: 'GPT-5.6 Sol', reasoningType: 'auto' }, { slug: 'gpt-5-6-instant', title: 'GPT-5.6 Sol', reasoningType: 'none' });
+  fs.writeFileSync(file, JSON.stringify(catalog));
+  const astra = responseModelSlugs(accountModel('gpt-6-astra')), sol = responseModelSlugs(accountModel('gpt-5.6-sol'));
+  assert.equal(astra.has('gpt-5-6'), false); assert.equal(astra.has('gpt-6-astra-wm'), true);
+  assert.equal(sol.has('gpt-5-6'), false); assert.equal(sol.has('gpt-5-6-instant'), false);
+  assert.equal(astra.has('gpt-5-6-auto-thinking'), false); assert.equal(sol.has('gpt-5-6-auto-thinking'), false);
+  assert.equal(responseModelSlugs(accountModel('gpt-5.6-sol-thinking')).has('gpt-5-6-auto-thinking'), true);
+});
+
+test('HTTP model metadata is available before SSE closes and CDP chunks stay bound to the exact routed request', async () => {
+  const { EventEmitter } = require('node:events');
+  const { createResponseVerifier } = require('../../backend/codexWebModelVerification.cjs');
+  const page = new EventEmitter(), session = new EventEmitter(); let release;
+  session.send = async method => method === 'Network.streamResourceContent' ? new Promise(resolve => { release = resolve; }) : {};
+  session.detach = async () => {}; page.context = () => ({ newCDPSession: async () => session });
+  const verifier = await createResponseVerifier(page), body = '{"model":"gpt-5-5-thinking","messages":[{"id":"owned"}]}';
+  const request = { postData: () => body };
+  session.emit('Network.requestWillBeSent', { requestId: 'http-owned', request: { method: 'POST', url: 'https://chatgpt.com/backend-api/f/conversation', postData: body } });
+  verifier.begin(request, slug => slug === 'gpt-5-5-thinking', () => {});
+  page.emit('response', { request: () => request, text: () => new Promise(() => {}) });
+  session.emit('Network.responseReceived', { requestId: 'http-owned' });
+  const event = 'data: ' + JSON.stringify({ v: { message: { author: { role: 'assistant' }, metadata: { model_slug: 'gpt-5-5-thinking' } } } }) + '\n\n';
+  // A new chunk may arrive before streamResourceContent returns its old buffer.
+  session.emit('Network.dataReceived', { requestId: 'http-owned', data: Buffer.from(event.slice(40)).toString('base64') });
+  release({ bufferedData: Buffer.from(event.slice(0, 40)).toString('base64') });
+  await verifier.verify(); assert.equal(verifier.isVerified(), true);
+  verifier.begin({ postData: () => body.replace('owned', 'next') }, slug => slug === 'gpt-5-5-thinking', () => {});
+  session.emit('Network.responseReceived', { requestId: 'http-owned' });
+  session.emit('Network.dataReceived', { requestId: 'http-owned', data: Buffer.from(event).toString('base64') });
+  await assert.rejects(verifier.verify(5), /model_response_unverified/);
 });

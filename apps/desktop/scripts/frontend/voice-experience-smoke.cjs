@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const Module = require('node:module');
 const ts = require('typescript');
+const { Mic, MicOff, Send, Square } = require('lucide-react');
 for (const file of ['VoiceIndicator.tsx', 'components/OrchestratorSettings.tsx']) {
   const source = new TextDecoder('utf-8', { fatal: true }).decode(fs.readFileSync(path.resolve(__dirname, '../../frontend', file)));
   assert.ok(!source.includes('\r\r\n'), `${file} contains doubled carriage returns`);
@@ -131,6 +132,43 @@ async function flush() { for (let i = 0; i < 12; i++) await Promise.resolve(); }
   assert.match(nodes(tree).find(node => node.props?.className === 'voice-mic').props['aria-label'], /Hold to talk/);
   assert.deepEqual(events.slice(beforeIndicator), ['state-listener'], 'Main indicator must not own audio or issue rendererReady');
   assert.equal(captures, 1); assert.equal(players, 1);
+  const hud = nodes(tree).find(node => node.props?.className === 'voice-hud');
+  assert.equal(hud.props['aria-hidden'], 'true', 'HUD geometry is decorative');
+  assert.equal(nodes(hud).filter(node => node.props?.className === 'voice-hud-segment').length, 4);
+  assert.equal(nodes(hud).filter(node => node.props?.className?.startsWith('voice-hud-tick ')).length, 4);
+  for (const [phase, visual, Icon] of [
+    ['off', 'muted', MicOff], ['listening', 'listening', Mic],
+    ['awaiting-answer', 'listening', Mic], ['recording', 'recording', Mic],
+    ['transcribing', 'thinking', Square], ['thinking', 'thinking', Square],
+    ['speaking', 'speaking', Mic], ['microphone-error', 'error', MicOff],
+  ]) {
+    stateListener({ phase, listening: !['off', 'microphone-error'].includes(phase), indicatorVisible: true });
+    tree = indicator.render();
+    assert.ok(tree.props.className.split(' ').includes(`voice-${visual}`), `${phase} has its intended visual state`);
+    const control = nodes(tree).find(node => node.props?.className === 'voice-mic');
+    assert.ok(nodes(control).some(node => node.type === Icon), `${phase} has the correct action icon`);
+  }
+  let cancelledTurns = 0;
+  const originalCancelSpeech = voice.cancelSpeech;
+  voice.cancelSpeech = async () => { cancelledTurns++; return { ok: true }; };
+  for (const phase of ['transcribing', 'thinking']) {
+    stateListener({ phase, listening: true, indicatorVisible: true }); tree = indicator.render();
+    const control = nodes(tree).find(node => node.props?.className === 'voice-mic').props;
+    assert.match(control['aria-label'], /Stop current voice turn/);
+    const eventsBeforeStop = events.length;
+    const cancelsBeforeStop = cancelledTurns;
+    control.onKeyDown({ key: 'Enter', repeat: false });
+    control.onKeyDown({ key: 'Enter', repeat: true });
+    await flush();
+    assert.equal(cancelledTurns, cancelsBeforeStop + 1, 'Enter cancels once, ignoring key repeats');
+    control.onPointerDown({ button: 0, preventDefault() {} });
+    control.onPointerUp({ button: 0 });
+    await flush();
+    assert.equal(cancelledTurns, cancelsBeforeStop + 2, 'Pointer activates the same stop action');
+    assert.equal(events.length, eventsBeforeStop, 'Stopping never starts or submits a recording');
+  }
+  voice.cancelSpeech = originalCancelSpeech;
+  assert.equal(captures, 1); assert.equal(players, 1);
   stateListener({ phase: 'listening', listening: true, indicatorVisible: true, handsFreeStatus: 'ready' }); tree = indicator.render();
   assert.match(text(tree), /Say Hey Lina/);
   stateListener({ phase: 'speaking', listening: true, indicatorVisible: true, handsFreeStatus: 'ready', wakeInterruptReady: true }); tree = indicator.render();
@@ -142,6 +180,7 @@ async function flush() { for (let i = 0; i < 12; i++) await Promise.resolve(); }
   stateListener({ phase: 'awaiting-answer', listening: true, indicatorVisible: true, handsFreeStatus: 'unavailable' }); tree = indicator.render();
   assert.match(text(tree), /Automatic listening unavailable.*Space to answer/);
   stateListener({ phase: 'recording', listening: true, indicatorVisible: true, recordingSource: 'wake', recordingId: 31 }); tree = indicator.render();
+  assert.ok(nodes(nodes(tree).find(node => node.props?.className === 'voice-mic')).some(node => node.type === Send), 'Automatic recording preserves the Send icon');
   assert.match(text(tree), /speak naturally/); assert.doesNotMatch(text(tree), /release Space/);
   assert.equal(nodes(tree).find(node => node.props?.role === 'status').props.className, 'voice-status');
   const mic = () => nodes(tree).find(node => node.props?.className === 'voice-mic').props;

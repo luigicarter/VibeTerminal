@@ -82,7 +82,9 @@ test('fresh Codex reads unknown state, sends a composed task, then verifies with
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(f.reads, 2);
   assert.equal(f.bodies.length, 4, 'Read, send, read, finish use four execution fetches instead of five with a redundant final reply.');
-  assert.equal(result.text, 'done');
+  // Delivery is confirmed; the agent's own result is not, so the acknowledgment
+  // reports the pending task instead of claiming the coding work finished.
+  assert.match(result.text, /Input was sent to Work.*result is still pending/s);
   assert.deepEqual(f.effects.map(action => action.kind), ['send_prompt']);
   assert.equal(f.effects[0].text, 'Review the latest changes. Report concrete defects.');
   assert.ok(f.effects[0].requestId, 'Delivery must be attributed to the application request.');
@@ -103,7 +105,8 @@ test('two targets require both post-action finishes and combine their receipts w
   assert.equal(f.bodies.length, 8, 'Both read-send-read-finish sequences need eight fetches; a ninth reply rewrite is redundant.');
   assert.equal(f.reads, 4);
   assert.deepEqual(f.effects.map(action => action.target.id), ['pane', 'second']);
-  assert.equal(result.text, 'done');
+  // Both deliveries are confirmed and both agent results are still pending.
+  assert.match(result.text, /Input was sent to Work.*result is still pending.*Input was sent to Second.*result is still pending/s);
   assert.equal(result.actions.filter(action => action.status === 'interaction-complete').length, 2);
 });
 
@@ -216,11 +219,20 @@ test('a definitely not-dispatched failure can recover with a new observed step a
 
 test('omitting the grant ID never bypasses operator observation authority', async t => {
   const f = await fixture(t);
+  // No grant ID, no token and no model read: the application takes the terminal
+  // observation itself, binds it to this write and still resolves the grant.
   const result = await f.run([call({ kind: 'send_prompt', targetId: 'pane', stepId: 'unobserved', text: 'Review the latest changes.' }),
-    body => { assert.equal(latest(body).ok, false); assert.equal(f.effects.length, 0); return read(); },
-    body => { const action = JSON.parse(operation(body, 'send_prompt', { text: 'Review the latest changes.' }).choices[0].message.tool_calls[0].function.arguments); delete action.grantId; return call(action); },
-    read(), finish]);
+    body => { assert.equal(latest(body).ok, true); assert.equal(f.effects.length, 1); assert.equal(f.reads, 1); return read(); }, finish]);
   assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(f.effects.length, 1); assert.equal(f.effects[0].operator, true);
+  assert.equal(typeof f.effects[0].grantId, 'string'); assert.equal(f.effects[0].observationSequence, 10); assert.equal(f.effects[0].inputRevision, 2);
+});
+
+test('a native control with no read is still refused; only observed operations are supplied for', async t => {
+  const f = await fixture(t);
+  const result = await f.run([call({ kind: 'terminal_interact', targetId: 'pane', stepId: 'unobserved', keys: ['down'], inputPurpose: 'interaction', observationSequence: 10, inputRevision: 2 }),
+    body => { assert.equal(latest(body).ok, false); assert.match(latest(body).error, /[Rr]ead this terminal/); assert.equal(f.effects.length, 0); assert.equal(f.reads, 0); return read(); },
+    body => operation(body, 'terminal_interact', { keys: ['down'], inputPurpose: 'interaction' }), read(), finish]);
+  assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(f.effects.length, 1);
 });
 
 test('an older unused structured token cannot act after a different observed token was consumed', async t => {
@@ -333,9 +345,11 @@ test('a same-response batched read cannot supply implicit evidence to its alread
   const batched = read();
   batched.choices[0].message.tool_calls.push(...call({ kind: 'send_prompt', targetId: 'pane', text: 'Review the latest changes.' }).choices[0].message.tool_calls);
   const result = await f.run([batched, body => {
-    assert.equal(latest(body).ok, false); assert.match(latest(body).error, /observation|read|token/i); assert.equal(f.effects.length, 0);
-    return call({ kind: 'send_prompt', targetId: 'pane', text: 'Review the latest changes.' });
-  }, read(), implicitFinish]);
+    // The model's same-response read is still not implicit evidence: the write
+    // was authorized by the application's own newer observation, not by it.
+    assert.equal(latest(body).ok, true); assert.equal(f.effects.length, 1); assert.equal(f.reads, 2);
+    return read();
+  }, implicitFinish]);
   assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(f.effects.length, 1);
 });
 
@@ -348,7 +362,8 @@ test('a failed current read prevents implicit fallback to an earlier successful 
   assert.equal(result.upstreamError, undefined, JSON.stringify(result)); assert.equal(f.effects.length, 1);
 });
 
-for (const invalid of [{ stepId: '' }, { stepId: null }, { observationToken: '' }, { observationToken: null }]) {
+// An explicitly supplied token is never replaced by an application observation.
+for (const invalid of [{ stepId: '' }, { stepId: null }, { observationToken: '' }, { observationToken: null }, { observationToken: 'not-a-real-token' }]) {
   test(`supplied invalid ${Object.keys(invalid)[0]}=${JSON.stringify(Object.values(invalid)[0])} is not silently replaced`, async t => {
     const f = await fixture(t);
     const result = await f.run([read(), () => call({ kind: 'send_prompt', targetId: 'pane', text: 'Review the latest changes.', ...invalid }),
@@ -372,3 +387,47 @@ for (const kind of ['fusion', 'openfusion']) for (const answerMode of ['supplied
     assert.deepEqual(f.effects[0].answers, { database: 'PostgreSQL', checks: ['Unit', 'Smoke'] });
   });
 }
+
+// Application-supplied observation: the fence is unchanged, only its supplier.
+test('a task with no read at all is observed by the application and then written', async t => {
+  const f = await fixture(t);
+  const result = await f.run([call({ kind: 'send_prompt', targetId: 'pane', text: 'Review the latest changes.' }),
+    body => { assert.equal(latest(body).ok, true); assert.equal(f.reads, 1); assert.equal(f.effects.length, 1); return read(); }, implicitFinish]);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(f.effects.length, 1); assert.equal(f.effects[0].observationSequence, 10); assert.equal(f.effects[0].inputRevision, 2);
+});
+
+test('an earlier-round read still supplies the observation and no extra read is taken', async t => {
+  const f = await fixture(t);
+  const result = await f.run([read(), () => call({ kind: 'send_prompt', targetId: 'pane', text: 'Review the latest changes.' }),
+    body => { assert.equal(latest(body).ok, true); assert.equal(f.reads, 1, 'The model read is used; the application does not read again.'); return read(); },
+    implicitFinish]);
+  assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(f.effects.length, 1); assert.equal(f.reads, 2);
+});
+
+test('an operator answer with no read is observed by the application before it is delivered', async t => {
+  const f = await fixture(t, 'fusion');
+  f.relay.ingestInteraction({ id: 'setup', sessionId: 'pane', generation: 'g1', revision: 3, kind: 'question',
+    questions: [{ id: 'database', question: 'Database?', custom: true, options: [{ label: 'SQLite' }] }] });
+  const result = await f.run([call({ kind: 'answer_question', targetId: 'pane', requestId: 'setup', revision: 3, answerTexts: { database: 'PostgreSQL' } }),
+    body => { assert.equal(latest(body).ok, true); assert.equal(f.reads, 1); return read(); }, finish, reply('Setup answered.')], { answerMode: 'delegated' });
+  assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(f.effects.length, 1);
+  assert.equal(f.effects[0].requestId, 'setup'); assert.deepEqual(f.effects[0].answers, { database: 'PostgreSQL' });
+});
+
+test('an application-supplied observation keeps the drift and after-action rules', () => {
+  let clock = 1000;
+  const observations = createOperatorObservations({ now: () => clock });
+  const target = { id: 'pane', generation: 'g1', kind: 'codex', provider: 'codex', agentPid: 7, processState: 'running', agentProcessState: 'running' };
+  // Exactly the executor's auto-observation sequence for the current round.
+  observations.invalidate('pane');
+  const readId = observations.beginRead(target, 2);
+  const token = observations.observe(target, { ok: true, id: 'pane', generation: 'g1', sequence: 10, inputRevision: 2 }, [], { readId, modelRound: 2 });
+  assert.equal(observations.latest(target, 2), undefined, 'A same-round read is still never implicit evidence.');
+  const send = { kind: 'send_prompt', text: 'Review the latest changes.' };
+  assert.throws(() => observations.authorize(token, { ...target, pendingInput: true }, send), /The terminal changed after the last observation/);
+  assert.throws(() => observations.authorize('not-a-real-token', target, send), /missing, used, or stale/);
+  const record = observations.authorize(token, target, send);
+  observations.consume(record, target, send);
+  assert.throws(() => observations.authorize(token, target, send), /missing, used, or stale/);
+});

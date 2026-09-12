@@ -164,6 +164,46 @@ test('retention applies on load, rejects oversized/malformed files, and tolerate
   fs.writeFileSync(file, 'x'.repeat(MAX_BYTES + 1)); assert.equal(store.load().messages.length, 0);
   for (const value of [null, 42, { messages: {}, tasks: [null, false, { at: now, targets: [null, { id: 'valid', secret: 'oops' }], dependsOn: [null, 'a'] }] }]) { await store.save(value); assert.ok(Array.isArray(store.load().tasks)); }
 });
+test('records saved by an older dual-harness build load and resume on the single agent harness', async t => {
+  const { store, now, file, dir } = fixture(t);
+  // Written the way an older build wrote it, including the retired marker.
+  fs.writeFileSync(file, JSON.stringify({ tasks: [
+    { id: 'old', requestId: 'old', status: 'running', harnessVersion: 'legacy', text: 'Fix checkout.', origin: 'text', sequence: 1, updatedAt: now },
+    { id: 'newer', requestId: 'newer', status: 'waiting-results', harnessVersion: 'agents-v1', text: 'Review search.', origin: 'text', sequence: 2, updatedAt: now } ] }));
+  const loaded = store.load();
+  assert.deepEqual(loaded.tasks.map(task => task.requestId), ['old', 'newer']);
+  for (const task of loaded.tasks) assert.equal(Object.hasOwn(task, 'harnessVersion'), false, 'no restored record can select a harness generation');
+  assert.deepEqual(loaded.tasks.map(task => task.status), ['paused', 'paused']);
+  assert.equal(loaded.tasks[0].text, 'Fix checkout.');
+
+  const { createOrchestrator } = require('../../backend/orchestrator.cjs');
+  const bodies = [];
+  const app = createOrchestrator({ userDataPath: dir, secureStorage: { isEncryptionAvailable: () => false },
+    getSessions: () => [], getRoots: () => ({ documents: dir, projects: [] }),
+    interpretIntent: () => ({ goal: 'Continue the restored request.', actions: [] }),
+    fetch: async (url, options) => {
+      if (url.endsWith('/key')) return new Response(JSON.stringify({ data: {} }));
+      if (url.endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'fixture', context_length: 128000, supported_parameters: ['tools'] }] }));
+      bodies.push(JSON.parse(options.body));
+      return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: 'Restored request acknowledged.' } }] }));
+    } });
+  t.after(async () => { await app.dispose(); });
+  await app.configure({ apiKey: 'fixture-only', model: 'fixture', sessionOnly: true });
+  assert.equal((await app.setEnabled(true)).ok, true);
+  assert.deepEqual(app.getState().tasks.map(task => task.requestId), ['old', 'newer']);
+  assert.equal(Object.hasOwn(app.getState(), 'harnessVersion'), false);
+  const resumed = await app.send({ text: 'Continue the restored request.', origin: 'text', replyToRequestId: 'old' });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed));
+  assert.ok(bodies.length, 'the restored request reaches the executor');
+  // Named workspace tools and the agent system contract are the agents-v1 shape;
+  // the retired single `workspace` tool would appear here instead.
+  assert.equal(bodies[0].tools.some(item => item.function.name === 'workspace'), false);
+  assert.ok(bodies[0].tools.some(item => item.function.name === 'find_agents'));
+  assert.ok(bodies[0].tools.some(item => item.function.name === 'respond'));
+  assert.match(bodies[0].messages[0].content, /find_agents/);
+  assert.equal(JSON.parse(bodies[0].messages[1].content).sessionDirectory.unaddressedOmitted, true);
+});
+
 test('snapshot projects context, redacts secrets, expires old data, and pauses unfinished tasks', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-store-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const now = Date.now(); const store = createConversationStore({ userDataPath: dir, now: () => now, getSecrets: () => ['secret-token'] });

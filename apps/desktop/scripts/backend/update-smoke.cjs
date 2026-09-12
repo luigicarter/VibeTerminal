@@ -63,57 +63,103 @@ assert(
   "electron-builder NSIS config should wire up the custom installer hook"
 );
 
-async function verifyInstallerLaunch(fail) {
+function updateHarness({ packaged = true, checkError, downloadError } = {}) {
   const vm = require("vm");
   const { EventEmitter } = require("events");
   const states = [];
-  const timers = [];
-  let unreferenced = false;
-  const child = new EventEmitter();
-  child.unref = () => { unreferenced = true; };
+  const restarts = [];
+  const pendingRestarts = [];
+  const handlers = new Map();
+  const updater = new EventEmitter();
+  let downloads = 0;
+  updater.checkForUpdates = async () => {
+    updater.emit("checking-for-update");
+    if (checkError) throw new Error(checkError);
+    updater.emit("update-available", { version: "1.2.3" });
+  };
+  updater.downloadUpdate = async () => {
+    downloads++;
+    if (downloadError) throw new Error(downloadError);
+    updater.emit("download-progress", { percent: 50, transferred: 5, total: 10 });
+    updater.emit("update-downloaded", { version: "1.2.3" });
+  };
+  updater.quitAndInstall = (...args) => restarts.push(args);
   const context = {
-    normalizeReleaseVersion: (value) => value,
-    app: { isPackaged: true, getPath: () => "mock-temp", quit() {} },
-    versionInstallInFlight: false,
-    publishUpdateState: (state) => states.push(state),
-    listAppVersions: async () => ({ ok: true, versions: [{
-      version: "1.2.3", downloadUrl: "https://example.invalid/installer.exe",
-      assetName: "installer.exe"
-    }] }),
-    path,
-    fs: { mkdirSync() {}, createWriteStream: () => new EventEmitter() },
-    httpsGet: async () => ({
-      headers: {}, on() {}, pipe: (file) => file.emit("finish")
-    }),
-    spawn: (_file, args, options) => {
-      assert.deepStrictEqual(Array.from(args), ["/S", "--force-run"]);
-      assert.strictEqual(options.windowsHide, true);
-      process.nextTick(() => fail
-        ? child.emit("error", new Error("spawn EACCES"))
-        : child.emit("spawn"));
-      return child;
-    },
-    setTimeout: (callback, delay) => timers.push({ callback, delay })
+    app: { isPackaged: packaged },
+    autoUpdaterConfigured: false,
+    checkedForUpdatesOnLaunch: false,
+    updateDownloadRequested: false,
+    manualUpdateCheckRequested: false,
+    updateState: { status: "idle", currentVersion: "1.2.2" },
+    getAutoUpdater: () => updater,
+    BrowserWindow: { getAllWindows: () => [{ webContents: {
+      send: (channel, state) => {
+        assert.strictEqual(channel, "updates:event");
+        states.push(state);
+      }
+    } }] },
+    ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
+    setImmediate: (callback) => pendingRestarts.push(callback),
+    console: { error() {} }
   };
   vm.createContext(context);
-  const start = mainSource.indexOf("async function installAppVersion(");
-  const end = mainSource.indexOf("\nasync function checkForAppUpdates(", start);
+  const start = mainSource.indexOf("function serializeUpdateInfo(");
+  const end = mainSource.indexOf("\nasync function findLatestAgentThread(", start);
   assert(start >= 0 && end > start);
   vm.runInContext(mainSource.slice(start, end), context);
-  const result = await context.installAppVersion("1.2.3");
-  assert.strictEqual(result.ok, !fail);
-  assert.strictEqual(unreferenced, !fail);
-  assert.strictEqual(timers.length, fail ? 0 : 1);
-  assert.strictEqual(states.at(-1).status, fail ? "error" : "switching");
-  if (fail) assert.match(result.message, /EACCES/);
-  else assert.strictEqual(timers[0].delay, 1200);
-  assert.strictEqual(context.versionInstallInFlight, false);
+  const ipcStart = mainSource.indexOf('ipcMain.handle("updates:get-state",');
+  const ipcEnd = mainSource.indexOf('\nipcMain.handle("workspace:select-folder",', ipcStart);
+  assert(ipcStart >= 0 && ipcEnd > ipcStart);
+  vm.runInContext(mainSource.slice(ipcStart, ipcEnd), context);
+  assert.deepStrictEqual([...handlers.keys()].sort(), [
+    "updates:check", "updates:download", "updates:get-state", "updates:restart"
+  ]);
+  return { context, updater, states, restarts, pendingRestarts,
+    downloads: () => downloads, invoke: (channel) => handlers.get(channel)() };
 }
 
 (async () => {
-  await verifyInstallerLaunch(true);
-  await verifyInstallerLaunch(false);
-  console.log("update smoke passed (installer launch failure and success)");
+  const flow = updateHarness();
+  assert.strictEqual(flow.invoke("updates:restart"), false);
+  assert.strictEqual((await flow.invoke("updates:download")).ok, false);
+  assert.strictEqual((await flow.invoke("updates:check")).ok, true);
+  assert.strictEqual(flow.invoke("updates:get-state").status, "available");
+  assert.strictEqual(flow.downloads(), 0, "checking must not start a download");
+  assert.strictEqual(flow.updater.autoDownload, false);
+  assert.strictEqual(flow.updater.autoInstallOnAppQuit, false);
+  assert.strictEqual((await flow.invoke("updates:download")).ok, true);
+  assert.strictEqual(flow.invoke("updates:get-state").status, "downloaded");
+  assert.strictEqual(flow.invoke("updates:get-state").info.version, "1.2.3");
+  assert(flow.states.some(state => state.progress?.percent === 50));
+  assert.strictEqual(flow.pendingRestarts.length, 0, "downloading must not restart");
+  assert.strictEqual((await flow.invoke("updates:download")).ok, true);
+  assert.strictEqual(flow.downloads(), 1, "a staged update must not download again");
+  assert.strictEqual(flow.invoke("updates:restart"), true);
+  assert.strictEqual(flow.pendingRestarts.length, 1);
+  flow.pendingRestarts[0]();
+  assert.deepStrictEqual(flow.restarts, [[true, true]]);
+
+  const failedCheck = updateHarness({ checkError: "network unavailable" });
+  assert.strictEqual((await failedCheck.invoke("updates:check")).ok, false);
+  assert.strictEqual(failedCheck.invoke("updates:get-state").status, "error");
+  assert.strictEqual(failedCheck.context.manualUpdateCheckRequested, false);
+  const launchCheck = updateHarness({ checkError: "network unavailable" });
+  await launchCheck.context.checkForUpdatesOnLaunch();
+  assert.strictEqual(launchCheck.invoke("updates:get-state").status, "idle");
+
+  const failedDownload = updateHarness({ downloadError: "download interrupted" });
+  await failedDownload.invoke("updates:check");
+  assert.strictEqual((await failedDownload.invoke("updates:download")).ok, false);
+  assert.strictEqual(failedDownload.invoke("updates:get-state").status, "error");
+  assert.strictEqual(failedDownload.invoke("updates:restart"), false);
+  assert.strictEqual(failedDownload.pendingRestarts.length, 0);
+
+  const development = updateHarness({ packaged: false });
+  assert.strictEqual((await development.invoke("updates:check")).ok, false);
+  assert.strictEqual(development.invoke("updates:get-state").status, "disabled");
+  assert.strictEqual((await development.invoke("updates:download")).ok, false);
+  assert.strictEqual(development.invoke("updates:restart"), false);
+  console.log("update smoke passed (check, download, explicit restart, failures and IPC surface)");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

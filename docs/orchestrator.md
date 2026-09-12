@@ -16,7 +16,10 @@ The submitted project stays attached to the request if you change views. Termina
 and chat panes remain the interface. Small agent records expose work, activity,
 attention and notes on demand; unrelated transcripts are omitted from the initial
 context. **Clear history** also clears these Orchestrator notes, while preserving
-active task ownership. See the [agent harness review](orchestrator-agent-harness-progress.md)
+active task ownership. This scoped agent harness is the only coordinator
+generation; the constructor takes no harness option, `LINA_ORCHESTRATOR_HARNESS`
+is ignored, and a saved request that recorded an older harness generation loads
+and resumes here. See the [agent harness review](orchestrator-agent-harness-progress.md)
 for verification and the source/installed-build boundary.
 
 For the reading/voice follow-up, see [progressive context and local error audio](orchestrator-context-and-audio.md).
@@ -334,6 +337,10 @@ become a permanent archive. Existing engine-owned transcript storage is separate
 
 Private error diagnostics persist in `<userData>/logs/orchestrator-errors.jsonl`
 (normally `%APPDATA%\vibe-terminal\logs\orchestrator-errors.jsonl` on Windows).
+High-rate voice inference timing (`voice_inference` stream, completion and
+inference records) is written to the sibling `logs/voice-inference.jsonl` with the
+same bounds and rotation, so it cannot rotate request failures out of the error
+log; voice inference errors stay in the error log.
 They stay outside normal chat, speech, model context, and renderer state. Rejected
 tools, failed or unconfirmed delivery, connection/settings failures, inventory and
 monitor errors, and transcription/speech/playback/microphone failures record

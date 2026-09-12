@@ -42,12 +42,18 @@ async function fixture(t, { separate = false, readOnly = false, explicitOrder, s
       const body = JSON.parse(options.body), context = JSON.parse(body.messages.find(message => message.role === 'user').content);
       const tools = body.messages.filter(message => message.role === 'tool'), last = tools.length ? JSON.parse(tools.at(-1).content) : null;
       const previous = f.lastAction.get(context.instruction);
-      if (last?.validationFailure && previous?.kind === 'send_prompt') {
+      // A stale observation is refused whether the model or the application's own
+      // bound handoff issued the write; either way the next attempt must reread.
+      if (last?.validationFailure && (previous?.kind === 'send_prompt' || /Read it again/.test(String(last.error || '')))) {
         assert.equal(++f.recovered, 1, 'Only the deliberately stale token requires recovery');
-        f.phases.set(previous.grantId, 0);
+        if (previous?.kind === 'send_prompt') f.phases.set(previous.grantId, 0);
       }
-      const grant = context.authorizedCommands.grants.find(grant => (f.phases.get(grant.id) || 0) < 4);
-      assert.ok(grant, 'All granted operators must converge');
+      // The application delivers bound task handoffs itself; this model only owns
+      // the grants it has not already submitted through its own handoff steps.
+      const handled = new Set(f.effects.filter(action => String(action.stepId || '').startsWith('agent-handoff-')).map(action => action.grantId));
+      const pending = context.authorizedCommands.grants.filter(grant => !handled.has(grant.id));
+      const grant = pending.find(grant => (f.phases.get(grant.id) || 0) < 4);
+      if (!grant) { assert.deepEqual(pending, [], 'All granted operators must converge'); return response({ choices: [{ finish_reason: 'stop', message: { content: 'The authorized work is submitted.' } }] }); }
       const phase = f.phases.get(grant.id) || 0; f.phases.set(grant.id, phase + 1);
       const targetId = grant.targets[0].id;
       let action;
@@ -115,7 +121,7 @@ for (const options of [{ separate: true }, { readOnly: true }]) test(`bundled ${
 for (const secondControls of [...[' Enter ', ' CTRL-M ', 'Ctrl-J'].map(key => ({ keys: [key] })),
   ...['click', 'up'].map(action => ({ mouse: { x: 2, y: 2, button: 'left', action } }))]) {
   test(`native task submission controls cannot bypass sibling parking: ${JSON.stringify(secondControls)}`, { timeout: 5000 }, async t => {
-    const f = await fixture(t, { secondControls }); await until(() => f.parked());
+    const f = await fixture(t, { secondControls, explicitOrder: 'second' }); await until(() => f.parked());
     assert.equal(f.sent().length, 1); await f.finishFirst();
     const result = await f.pending; assert.equal(result.ok, true, JSON.stringify(result));
     assert.deepEqual(f.sent().map(action => action.kind), ['send_prompt', 'terminal_interact']);

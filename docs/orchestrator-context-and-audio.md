@@ -73,8 +73,9 @@ revision are discarded when a new snapshot is displayed.
 
 Every brain/monitor request passes a serialized UTF-8 byte guard. The model's
 advertised context length reserves output and protocol space; an application
-ceiling of 48,000 input bytes applies. This is deliberately conservative, not an
-exact tokenizer calculation. An unknown context window uses a conservative
+ceiling of 48,000 input bytes applies, or 96,000 for models advertising at least
+131,072 context tokens (September 11, 2026). This is deliberately conservative,
+not an exact tokenizer calculation. An unknown context window uses a conservative
 fallback. The current user instruction, authority rules and tool schema are
 never silently shortened; impossible fits fail locally before an API call.
 

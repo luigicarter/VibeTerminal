@@ -46,7 +46,14 @@ test('delegated task preserves the complete objective and operator modes without
   assert.match(INTENT_SYSTEM, /Do not ask which terminal merely because no terminal was named/);
   const schema = INTENT_TOOL.function.parameters.properties.actions.items.anyOf.find(item => item.properties.kind.enum[0] === 'delegate_task');
   assert.equal(schema.properties.targetIds, undefined);
-  assert.deepEqual(schema.properties.assignmentMode.enum, ['auto', 'new']);
+  assert.deepEqual(schema.properties.assignmentMode.enum, ['auto', 'new', 'existing']);
+});
+
+test('existing-owner continuation cannot claim a replacement but can bind its observed owner', () => {
+  const plan = compile({ assignmentMode: 'existing' });
+  assert.throws(() => claimDelegatedTaskCreation(plan, plan.grants[0].id, { kindOfSession: 'codex' }), /existing owner/);
+  const bound = bind(plan);
+  assert.equal(bound.grants[0].targets[0].id, 'a');
 });
 
 test('delegated scope rejects missing, relative, unknown and traversed projects and unsupported launchers', () => {
@@ -251,6 +258,43 @@ test('consumed or uncertain creation cannot be resurrected through a selector cl
   }
   assert.throws(() => continueTask(compile(), { kindOfSession: 'codex' }, {}, { consumed: true }), /consumed user instruction/);
   assert.throws(() => claimDelegatedTaskCreation(initial, creation.grantId, { kindOfSession: 'codex' }), /already claimed/);
+});
+
+const deferredFix = 'tell Atlas to fix the findings from that review without changing public APIs';
+const fixTask = 'Fix the findings from that review without changing public APIs.';
+const pendingContext = extra => context({ requestId: 'user-2', instruction: `After that review finishes, ${deferredFix}.`,
+  pendingCommands: [{ requestId: 'pending-review', queued: true, instruction: 'Tell Atlas in Alpha to review the fixture for bugs and report findings.' }],
+  tasks: [{ requestId: 'pending-review' }], ...extra });
+
+test('a deferral with no task of its own is steered onto the pending request it names', () => {
+  const deferralOnly = { goal: 'Fix after the pending review finishes.', actions: [], afterResults: { instruction: deferredFix } };
+  assert.throws(() => normalizeIntent(deferralOnly, pendingContext()), error =>
+    /initial terminal task in this same request/.test(error.message) &&
+    /set dependsOnRequestIds to that request's requestId from pendingCommands/.test(error.message) &&
+    /put the complete task in actions, and omit afterResults/.test(error.message));
+  assert.throws(() => normalizeIntent(deferralOnly, pendingContext({ pendingCommands: undefined })),
+    error => error.message === 'A deferred instruction requires an initial terminal task.');
+});
+
+test('a deferred instruction repeating its own initial task is rejected, unlike a genuine review-then-fix', () => {
+  assert.throws(() => normalizeIntent({ goal: 'Fix the findings.', afterResults: { instruction: deferredFix },
+    actions: [{ kind: 'delegate_task', cwd, text: fixTask }] }, pendingContext()), error =>
+    /deferred instruction duplicates the initial task/.test(error.message) && /Never both/.test(error.message));
+  const reviewThenFix = normalizeIntent({ goal: 'Review, then fix.', afterResults: { instruction: 'fix the findings from that review' },
+    actions: [{ kind: 'delegate_task', cwd, text: 'Review the fixture for bugs and report findings.' }] },
+  pendingContext({ instruction: 'Review the fixture for bugs and report findings, then fix the findings from that review.' }));
+  assert.deepEqual(reviewThenFix.afterResults, { instruction: 'fix the findings from that review' });
+  assert.equal(reviewThenFix.grants[0].text, 'Review the fixture for bugs and report findings.');
+});
+
+test('the same follow-up runs once when it depends on the pending request instead of deferring', () => {
+  const plan = normalizeIntent({ goal: 'Fix the findings after the pending review.', dependsOnRequestIds: ['pending-review'],
+    actions: [{ kind: 'delegate_task', cwd, text: fixTask }] }, pendingContext());
+  assert.deepEqual(plan.dependsOnRequestIds, ['pending-review']);
+  assert.equal(plan.afterResults, undefined);
+  assert.equal(plan.grants.length, 1);
+  assert.equal(plan.grants[0].text, fixTask);
+  assert.match(INTENT_SYSTEM, /When the earlier task is a separate pending request in pendingCommands, do not defer/);
 });
 
 test('selector refinement does not widen a bound operator or legacy creation continuation', () => {

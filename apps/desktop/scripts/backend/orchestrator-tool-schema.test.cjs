@@ -48,8 +48,16 @@ test('operator descriptions make redundant metadata optional without changing le
   for (const kind of ['send_prompt', 'interrupt', 'terminal_interact']) {
     assert.match(branch(kind).description, /observationSequence and inputRevision are optional/);
     assert.match(branch(kind).description, /copy exactly observation.sequence and observation.inputRevision/);
-    assert.match(branch(kind).description, /earlier tool round.*stepId may be omitted.*observationToken may be omitted/);
+    assert.match(branch(kind).description, /are observed for you.*focus_session, terminal_interact and finish_terminal still need your own earlier read_session round/);
     for (const name of ['stepId', 'observationToken', 'inputRevision']) assert.equal(branch(kind).required.includes(name), false);
+  }
+  // The application observes and identifies these operations itself, so neither
+  // field is model-facing; the operations it cannot observe for still carry both.
+  for (const kind of ['send_prompt', 'interrupt', 'answer_question', 'permission']) {
+    for (const name of ['stepId', 'observationToken']) assert.equal(Object.hasOwn(branch(kind).properties, name), false, `${kind}.${name}`);
+  }
+  for (const kind of ['focus_session', 'terminal_interact', 'finish_terminal']) {
+    for (const name of ['stepId', 'observationToken']) assert.equal(Object.hasOwn(branch(kind).properties, name), true, `${kind}.${name}`);
   }
   assert.equal(branch('terminal_interact').required.includes('observationSequence'), true);
   assert.equal(branch('send_prompt').required.includes('text'), false);

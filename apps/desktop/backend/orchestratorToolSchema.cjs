@@ -4,6 +4,9 @@
 // and runtime validators. Do not advertise unrelated fields on every operation.
 const target = ['grantId', 'targetId'];
 const observed = [...target, 'stepId', 'observationToken'];
+// The application observes these operations itself when no eligible read exists,
+// and generates their step identity, so neither field is model-facing.
+const autoObserved = [...target];
 const native = ['observationSequence', 'inputRevision'];
 const agentTools = require('../shared/orchestratorAgentTools.cjs');
 const fields = {
@@ -19,15 +22,15 @@ const fields = {
   open_folder: ['grantId', 'path'], remove_project: ['grantId', 'path'],
   search_files: ['root', 'query', 'limit'], create_project: ['grantId', 'parent', 'name'],
   focus_session: observed, stage_draft: [...target, 'text'],
-  send_prompt: [...observed, 'text', ...native, 'editInput'],
-  interrupt: [...observed, ...native], restart: target, close: target,
+  send_prompt: [...autoObserved, 'text', ...native, 'editInput'],
+  interrupt: [...autoObserved, ...native], restart: target, close: target,
   create_session: ['grantId', 'cwd', 'kindOfSession', 'text'], add_project: ['grantId', 'path'],
   list_setups: [], read_setup: ['name'], launch_setup: ['grantId', 'name'], save_setup: ['grantId', 'name'],
   list_preferences: [], remember_preference: ['grantId', 'text'], forget_preference: ['grantId', 'preferenceId'],
   ask_user: ['text', 'reference', 'grantId'], respond: ['text', 'speechText', 'responseTurn'],
   list_work: ['cwd', 'query', 'offset', 'limit'],
-  answer_question: [...observed, 'requestId', 'revision', 'answerText', 'answerTexts'],
-  permission: [...observed, 'requestId', 'revision', 'answerText', 'answerTexts', 'decision'],
+  answer_question: [...autoObserved, 'requestId', 'revision', 'answerText', 'answerTexts'],
+  permission: [...autoObserved, 'requestId', 'revision', 'answerText', 'answerTexts', 'decision'],
   terminal_interact: [...observed, 'text', 'keys', 'mouse', 'inputPurpose', 'submit', ...native, 'editInput'],
   finish_terminal: [...observed, 'text', 'outcome'],
 };
@@ -37,7 +40,7 @@ const required = {
   read_conversation: ['reference'], search_conversation: ['reference'],
   terminal_interact: ['observationSequence'], finish_terminal: ['text', 'outcome'],
 };
-const operator = 'For operate_terminal grants, read this terminal in an earlier tool round before acting. stepId may be omitted to use this tool call identity; observationToken may be omitted only for the latest unused read already returned to you for this terminal. Supplied step IDs cannot change their input or replay dispatched work. ';
+const operator = 'For operate_terminal grants, send_prompt, answer_question, permission and interrupt are observed for you, while focus_session, terminal_interact and finish_terminal still need your own earlier read_session round, an omitted stepId to use this tool call identity, and observationToken only from the latest unused read already returned to you for this terminal. ';
 const nativeEvidence = 'Native operator observationSequence and inputRevision are optional when bound by that read token; if supplied, copy exactly observation.sequence and observation.inputRevision from the same read. ';
 const descriptions = {
   send_prompt: operator + nativeEvidence + 'Supply the task text for composed operator work; omit text for an already bound legacy prompt. Fusion/OpenFusion do not need native input revisions.',
@@ -62,9 +65,8 @@ function buildWorkspaceParameters(flat) {
 const readKinds = ['read_file', 'read_workspace', 'list_roots', 'list_sessions', 'read_session', 'list_conversations', 'read_conversation', 'search_conversation', 'search_files', 'list_setups', 'read_setup', 'list_preferences', 'list_work'];
 const operatorKinds = ['send_prompt', 'terminal_interact', 'answer_question', 'permission', 'interrupt', 'focus_session', 'finish_terminal'];
 const inspectionKinds = ['terminal_interact', 'focus_session', 'finish_terminal'];
-function scopedWorkspaceTool(tool, grants = [], { agentHarness = false } = {}) {
-  const allowed = new Set([...readKinds, 'respond', 'ask_user']);
-  if (agentHarness) for (const name of Object.keys(agentTools.OPERATIONS)) allowed.add(name);
+function scopedWorkspaceTool(tool, grants = []) {
+  const allowed = new Set([...readKinds, 'respond', 'ask_user', ...Object.keys(agentTools.OPERATIONS)]);
   const operatorGrants = grants.filter(grant => grant.kind === 'operate_terminal');
   const inspectionOnly = operatorGrants.length > 0 && operatorGrants.every(grant => grant.inspection === true);
   // An unresolved delegated task permits routing reads only. Application code

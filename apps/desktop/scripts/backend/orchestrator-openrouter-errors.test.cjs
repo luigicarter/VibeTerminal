@@ -59,7 +59,7 @@ function fixture(t) {
   const instance = createOrchestrator({ interpretIntent: interpretTestIntent, userDataPath: dir, onUpstreamError: e => events.push(e), readSession: async () => ({ text: 'working' }), getSessions: async () => [{ id: 's', generation: 1, status: 'running' }], fetch: async (url, options) => {
     if (fail) return fail(url, options);
     if (url.endsWith('/key')) return response(200, { data: {} });
-    if (url.includes('/models')) return response(200, { data: [{ id: 'brain', supported_parameters: ['tools'] }] });
+    if (url.includes('/models')) return response(200, { data: [{ id: 'brain', context_length: 128000, supported_parameters: ['tools'] }] });
     return chat ? chat(options) : response(402, { error: { code: 402, message: 'SECRET' } });
   } });
   t.after(async () => { await instance.dispose(); fs.rmSync(dir, { recursive: true, force: true }); });

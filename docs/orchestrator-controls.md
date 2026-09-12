@@ -6,11 +6,22 @@ allowlisted Orchestrator configuration and capability limits, and live reads
 revalidate pane/conversation ownership after awaiting output. Free-form product
 answers and missing child-approval identity remain demonstrated reliability gaps.
 
-The [scoped agent harness](orchestrator-agent-harness-progress.md) adds automatic
-project assignment, verified task continuation and on-demand agent records. It
-also repairs the demonstrated Claude missing-ID approval disappearing after an
-unrelated tool return; unresolved identity is retained explicitly. The review
-distinguishes current source tests from the installed build.
+The [scoped agent harness](orchestrator-agent-harness-progress.md) is the
+Orchestrator's only coordinator generation: there is no second harness, no
+rollback mode and no per-request harness selection, and `LINA_ORCHESTRATOR_HARNESS`
+is ignored. It supplies automatic project assignment, verified task continuation
+and on-demand agent records. It also repairs the demonstrated Claude missing-ID
+approval disappearing after an unrelated tool return; unresolved identity is
+retained explicitly. The review distinguishes current source tests from the
+installed build.
+
+Every request therefore uses the same contract: named workspace operations
+instead of one combined `workspace` tool, `find_agents`/`read_agent`/
+`read_work_item` discovery during assignment, work items filtered to the
+addressed binding, and an application-owned observe/send/observe handoff for a
+bound task, so an ordinary delegation needs no executor model round. Saved
+requests written by an older build that recorded a harness generation load and
+resume on this harness; the recorded marker is discarded.
 
 The current [harness overhaul](orchestrator-harness-overhaul.md) adds semantic
 inspection and folder controls, application-managed inspection completion, and

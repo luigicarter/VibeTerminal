@@ -5,11 +5,26 @@ const { createDiagnostics } = require('../../backend/orchestratorDiagnostics.cjs
 function fixture(t, options = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-diagnostics-'));
   const loggers = [];
-  const open = () => { const logger = createDiagnostics({ userDataPath: root, ...options }); loggers.push(logger); return logger; };
+  const open = (extra = {}) => { const logger = createDiagnostics({ userDataPath: root, ...options, ...extra }); loggers.push(logger); return logger; };
   t.after(async () => { await Promise.all(loggers.map(logger => logger.flush())); assert(path.resolve(root).startsWith(path.join(os.tmpdir(), 'vibe-diagnostics-'))); fs.rmSync(root, { recursive: true, force: true }); });
   const filename = path.join(root, 'logs', 'orchestrator-errors.jsonl');
-  return { root, filename, open, read: () => fs.readFileSync(filename, 'utf8').trim().split('\n').map(JSON.parse) };
+  const readFile = name => fs.readFileSync(path.join(root, 'logs', name), 'utf8').trim().split('\n').map(JSON.parse);
+  return { root, filename, open, readFile, read: () => readFile('orchestrator-errors.jsonl') };
 }
+test('an explicit filename writes a separate log beside the default one', async t => {
+  const f = fixture(t, { now: () => 0 });
+  const errors = f.open(), voice = f.open({ filename: 'voice-inference.jsonl' });
+  errors.record({ event: 'voice_inference', stage: 'error' }); voice.record({ event: 'voice_inference', stage: 'stream', processingMs: 4 });
+  await Promise.all([errors.flush(), voice.flush()]);
+  assert.deepEqual(f.read().map(record => record.stage), ['error']);
+  assert.deepEqual(f.readFile('voice-inference.jsonl').map(record => record.stage), ['stream']);
+  assert.equal(f.readFile('voice-inference.jsonl')[0].processingMs, 4);
+  assert.deepEqual(fs.readdirSync(path.join(f.root, 'logs')).sort(), ['orchestrator-errors.jsonl', 'voice-inference.jsonl']);
+  // A name is only ever a file inside the private logs folder.
+  const escaped = f.open({ filename: '../../escaped.jsonl' }); escaped.record({ event: 'contained' }); await escaped.flush();
+  assert.equal(fs.existsSync(path.join(f.root, 'logs', 'escaped.jsonl')), true);
+  assert.equal(fs.existsSync(path.join(f.root, '..', '..', 'escaped.jsonl')), false);
+});
 test('diagnostics persist across reopen with one JSON object per line and only approved metadata', async t => {
   const f = fixture(t, { now: () => 0 }); const first = f.open();
   first.record({ event: 'failure', requestId: 'one', generation: 3, httpStatus: 503, error: new Error('line one\nline two'), prompt: 'private prompt', output: 'private output', body: 'private body', audio: 'private audio', apiKey: 'private key' });

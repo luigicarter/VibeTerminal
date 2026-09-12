@@ -68,7 +68,9 @@ function createConversationStore({ userDataPath, getSecrets = () => [], now = Da
       if (kind === 'messages' && source.question && typeof source.question === 'object') item.question = pick(source.question, ['id', 'requestId', 'text']);
       if (kind === 'tasks') {
         // Routing describes a past decision; it cannot restore execution authority.
-        if (['legacy', 'agents-v1'].includes(source.harnessVersion)) item.harnessVersion = source.harnessVersion;
+        // A record saved by an older build may carry harnessVersion legacy or
+        // agents-v1; the field is dropped, and the task resumes on the single
+        // scoped agent harness.
         if (typeof source.projectPath === 'string' && source.projectPath.length <= 32768) item.projectPath = clean(source.projectPath);
         const routingText = (value, limit) => typeof value === 'string' ? clean(value).slice(0, limit) : undefined;
         if (typeof source.workItemId === 'string') item.workItemId = routingText(source.workItemId, 500);

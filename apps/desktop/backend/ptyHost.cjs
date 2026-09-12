@@ -1,6 +1,7 @@
 const readline = require("readline");
 const { encodeTerminalControls } = require('../shared/terminalControls.cjs');
 const { createTerminalHistory } = require('./terminalHistory.cjs');
+const { windowsPtyHostOptions, describePtyHost, spawnPty } = require('./ptyHostOptions.cjs');
 const sessions = new Map();
 let transportBlocked = false;
 const outgoingEvents = [];
@@ -242,17 +243,22 @@ function disposeSession(session) {
 }
 
 function createSession(payload) {
-  debug({
+  const hostOptions = windowsPtyHostOptions();
+  // Logged once the console host is known, so `host` is the host actually used
+  // (spawnPty can fall back to the inbox conhost).
+  const logCreate = (host) => debug({
     type: "create",
     id: payload.id,
     command: payload.command,
     cwd: payload.cwd,
     launchToken: payload.launchToken,
     cols: payload.cols,
-    rows: payload.rows
+    rows: payload.rows,
+    host
   });
 
   if (!pty) {
+    logCreate(describePtyHost(hostOptions));
     emit({
       id: payload.id,
       type: "error",
@@ -304,6 +310,7 @@ function createSession(payload) {
         emitSnapshot(payload.id, existingSession);
       }
 
+      logCreate(describePtyHost(hostOptions));
       return;
     }
   }
@@ -348,13 +355,17 @@ function createSession(payload) {
       session.historyBlocked = blocked;
       updateSessionFlow(session);
     } });
-    const terminal = pty.spawn(shell.file, shell.args, {
+    const { terminal, host, fallbackError } = spawnPty(pty, shell.file, shell.args, {
       name: "xterm-256color",
       cols,
       rows,
       cwd,
       env: terminalEnvironment(instrumentationEnv, instrumentationStripEnv)
-    });
+    }, hostOptions);
+    logCreate(host);
+    if (fallbackError) {
+      debug({ type: "host-fallback", id: payload.id, error: String(fallbackError.message || fallbackError) });
+    }
 
     session.terminal = terminal;
     sessions.set(payload.id, session);
@@ -436,6 +447,7 @@ function createSession(payload) {
       }, 250);
     }
   } catch (error) {
+    logCreate(describePtyHost(hostOptions));
     disposeSession(session);
     emit({
       id: payload.id,

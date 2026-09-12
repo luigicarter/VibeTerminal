@@ -6,7 +6,8 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const { planTaskRoute } = require('../../backend/orchestratorRoutePlanner.cjs');
 const { fitMessages } = require('../../backend/orchestratorBudget.cjs');
-const endToEnd = process.argv.includes('--end-to-end');
+const existingOwner = process.argv.includes('--existing-owner');
+const endToEnd = process.argv.includes('--end-to-end') || existingOwner;
 const cwd = 'C:/DisposableRoutingFixture';
 const pane = (id, objective, patch = {}) => ({ id, generation: `generation-${id}`, launchToken: 1, provider: 'codex', kind: 'codex', cwd, conversationId: `thread-${id}`, name: objective, observation: 'observed', processState: 'running', turnState: 'completed', ...patch });
 const owner = pane('task-a-owner', 'Repair billing invoices');
@@ -46,7 +47,7 @@ if (process.argv.includes('--self-test')) {
   (async () => { for (const name of ['new-task', 'reply-a-after-b', 'idle-unrelated', 'busy-same-task', 'explicit-fresh', 'paged-owner']) { const f = fixture(name); assert.ok(f.context.scope.cwd); if (name === 'paged-owner') { const p = await f.read({ kind: 'list_sessions', offset: 200, limit: 40 }); assert.ok(p.sessions.some(s => s.id === owner.id)); await f.read({ kind: 'read_session', targetId: owner.id }); f.check({ decision: 'reuse', targetId: owner.id }); } } console.log('Routing fixture self-test passed; no network or credentials.'); })().catch(error => { console.error(error.message); process.exitCode = 1; });
 } else if (!process.versions.electron) {
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
-  const child = spawnSync(require('electron'), [__filename, '--live-child', ...(endToEnd ? ['--end-to-end'] : [])], { env, windowsHide: true, stdio: 'inherit', timeout: 300000 }); process.exitCode = child.status ?? 1;
+  const child = spawnSync(require('electron'), [__filename, '--live-child', ...(endToEnd ? ['--end-to-end'] : []), ...(existingOwner ? ['--existing-owner'] : [])], { env, windowsHide: true, stdio: 'inherit', timeout: 300000 }); process.exitCode = child.status ?? 1;
 } else {
   const { app, safeStorage } = require('electron');
   const run = path.resolve(__dirname, '../../.tmp/orchestrator-routing-live', `${Date.now()}-${process.pid}`);
@@ -71,6 +72,13 @@ if (process.argv.includes('--self-test')) {
       const project = path.join(run, 'checkout-project'), independent = path.join(run, 'docs-project');
       fs.mkdirSync(project, { recursive: true }); fs.mkdirSync(independent, { recursive: true });
       const sessions = [], effects = [], reads = [];
+      if (existingOwner) for (const [index, title] of ['Fix Open Codex startup', 'Investigate terminal performance', 'Add project chat section', 'Overhaul terminal colors'].entries()) {
+        const id = `fixture-existing-${index}`;
+        sessions.push({ id, name: title, cwd: project, kind: 'codex', provider: 'codex', generation: `generation-${id}`, launchToken: 1,
+          conversationId: `conversation-${id}`, started: true, status: 'idle', observation: 'observed', processState: 'running',
+          agentProcessState: 'running', agentPid: 9000 + index, turnState: 'completed', revision: 1, sequence: 1, inputRevision: 0,
+          existingOutput: index === 2 ? 'Implemented the sidebar navigation and conversation list. Remaining: connect the message composer and test sending messages. Ready for a follow-up.' : `Working on ${title}. Ready for a follow-up.` });
+      }
       let scenarioSignal, scenarioName;
       const request = async (url, options = {}) => {
         const body = options.body ? JSON.parse(options.body) : null;
@@ -88,12 +96,13 @@ if (process.argv.includes('--self-test')) {
         return response;
       };
       relay = require('../../backend/orchestrator.cjs').createOrchestrator({ userDataPath: path.join(run, 'fixture-profile'), fetch: request,
-        getRoots: () => ({ documents: run, projects: [{ name: 'CheckoutFixture', path: project }, { name: 'DocsFixture', path: independent }] }),
+        ...(existingOwner && { getWorkspaceState: async () => ({ ok: true, view: 'project', cwd: project }) }),
+        getRoots: () => ({ documents: run, projects: [{ name: existingOwner ? 'vibeTerminal' : 'CheckoutFixture', path: project }, { name: 'DocsFixture', path: independent }] }),
         getSessions: () => sessions.map(s => ({ ...s })), getLaunchers: () => [{ kind: 'codex', label: 'Codex', available: true, configured: true }],
         readSession: async target => {
           const s = sessions.find(item => item.id === target.id && item.generation === target.generation); assert.ok(s, 'Unknown fixture target'); reads.push({ id: s.id, sequence: s.sequence, afterEffects: effects.length });
           return { ok: true, id: s.id, generation: s.generation, turnId: s.turnId, turnState: s.turnState, sequence: s.sequence, observationSequence: s.sequence, inputRevision: s.inputRevision,
-            inputState: { kind: 'empty', hasText: false }, text: s.turnState === 'running' ? `Codex is actively working on the submitted task: ${s.lastPrompt}. Input was accepted. Empty root task composer can accept a follow-up while tools continue. No permission or question is pending. Task execution is still in progress.` : 'Codex is idle at an empty root task composer. No task has been submitted. Ready to receive a task.' };
+            inputState: { kind: 'empty', hasText: false }, text: s.turnState === 'running' ? `Codex is actively working on the submitted task: ${s.lastPrompt}. Input was accepted. Empty root task composer can accept a follow-up while tools continue. No permission or question is pending. Task execution is still in progress.` : s.existingOutput || 'Codex is idle at an empty root task composer. No task has been submitted. Ready to receive a task.' };
         },
         dispatchAction: async action => {
           if (action.kind === 'create_session') {
@@ -121,16 +130,22 @@ if (process.argv.includes('--self-test')) {
         { name: 'e2e-related-busy-followup', input: () => ({ text: 'Also cover expired coupons in that checkout validation fix.', replyToRequestId: first.requestId, origin: 'text' }), check: result => { assert.equal(effects.filter(e => e.kind === 'create_session').length, 1); const sends = effects.filter(e => e.kind === 'send_prompt'); assert.equal(sends.length, 2); assert.equal(sends[1].targetId, sends[0].targetId); assert.equal(sends[1].wasBusy, true); assert.equal(relay.getState().tasks.find(t => t.requestId === result.requestId)?.workItemId, relay.getState().tasks.find(t => t.requestId === first.requestId)?.workItemId); } },
         { name: 'e2e-independent-project', input: () => ({ text: `Update deployment documentation in ${independent}.`, origin: 'text' }), check: () => { assert.equal(effects.filter(e => e.kind === 'create_session').length, 2); const sends = effects.filter(e => e.kind === 'send_prompt'); assert.equal(sends.length, 3); assert.notEqual(sends[2].targetId, sends[0].targetId); } }
       ];
-      const selectedEndToEnd = process.env.VIBE_LIVE_CASES ? cases.filter(scenario => process.env.VIBE_LIVE_CASES.split(',').includes(scenario.name)) : cases.slice(0, 2);
-      assert.ok(selectedEndToEnd.length && selectedEndToEnd[0].name === 'e2e-targetless-create', 'End-to-end cases must start with targetless creation to establish the reply fixture.');
+      // A uniquely titled owner must be reached deterministically: interpretation
+      // and handoff only, with no routing or affinity round trip.
+      const continuationCase = { name: 'e2e-existing-chat-owner', callBudget: 3, input: () => ({ text: 'Hey Lena. Can you tell the agent working on the project chat section in Vibe terminal to continue its work.', origin: 'text' }),
+        check: () => { assert.deepEqual(effects.map(e => e.kind), ['send_prompt']); assert.equal(effects[0].targetId, 'fixture-existing-2'); } };
+      const selectedEndToEnd = existingOwner ? [continuationCase] : process.env.VIBE_LIVE_CASES ? cases.filter(scenario => process.env.VIBE_LIVE_CASES.split(',').includes(scenario.name)) : cases.slice(0, 2);
+      assert.ok(selectedEndToEnd.length && (existingOwner || selectedEndToEnd[0].name === 'e2e-targetless-create'), 'End-to-end cases must start with targetless creation to establish the reply fixture.');
       for (const scenario of selectedEndToEnd) {
         scenarioName = scenario.name; const row = { name: scenario.name }, started = Date.now(); const controller = new AbortController(); scenarioSignal = controller.signal;
         const timer = setTimeout(() => { controller.abort(); void relay.cancel(); }, 70000);
-        try { const result = await relay.send(scenario.input()); row.result = result; assert.equal(result.ok, true, clean(result.error || result.text)); scenario.check(result); row.ok = true; }
+        const caseCalls = () => report.calls.filter(call => call.name === scenario.name).length;
+        try { const result = await relay.send(scenario.input()); row.result = result; assert.equal(result.ok, true, clean(result.error || result.text)); scenario.check(result);
+          assert.ok(!scenario.callBudget || caseCalls() <= scenario.callBudget, `${scenario.name} used ${caseCalls()} model calls; its budget is ${scenario.callBudget}`); row.ok = true; }
         catch (error) { row.ok = false; row.error = clean(error.message); if (report.budgetBlock) { row.skipped = true; row.runtimeError = row.error; row.error = 'Local QA budget stopped further model requests; this is not evidence of a provider/network or routing failure.'; } }
-        finally { clearTimeout(timer); scenarioSignal = undefined; }
+        finally { clearTimeout(timer); scenarioSignal = undefined; row.calls = caseCalls(); if (scenario.callBudget) row.callBudget = scenario.callBudget; }
         row.elapsedMs = Date.now() - started; row.effects = structuredClone(effects); row.tasks = relay.getState().tasks.map(({ requestId, status, workItemId }) => ({ requestId, status, workItemId })); report.cases.push(row);
-        console.log(JSON.stringify({ name: row.name, ok: row.ok, effects: effects.map(e => e.kind), error: row.error }));
+        console.log(JSON.stringify({ name: row.name, ok: row.ok, calls: row.calls, budget: row.callBudget, effects: effects.map(e => e.kind), error: row.error }));
         if (!row.ok) break;
       }
       report.reads = reads; report.confirmedUsageCost = report.calls.reduce((sum, call) => sum + (call.cost || 0), 0); report.ok = report.cases.length === selectedEndToEnd.length && report.cases.every(c => c.ok); return;

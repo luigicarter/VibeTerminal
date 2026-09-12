@@ -264,3 +264,35 @@ test('completed turn stays silent through replacement and late waits while a new
   assert.match(next[0].text, /requested outcome is not independently verified/);
   assert.deepEqual(f.collect(), []);
 });
+
+test('composer-observed acceptance replaces the unconfirmed-start warning and hooks still win', () => {
+  const f = fixture();
+  Object.assign(f.job.waits[0], { submittedAt: 1000, observedState: 'submitted-observed', observedAt: 2000 });
+  const accepted = collectTaskReports(f.job, f.sessions, { now: () => 5000 });
+  assert.equal(accepted.length, 1);
+  assert.equal(accepted[0].status, 'delivered');
+  assert.match(accepted[0].text, /^Pane 0: the prompt was accepted; the result is pending\.$/);
+  assert.deepEqual(collectTaskReports(f.job, f.sessions, { now: () => 5001 }), [], 'Reported once');
+  const diagnostics = [];
+  assert.deepEqual(collectTaskReports(f.job, f.sessions, { now: () => 620000, recordDiagnostic: entry => diagnostics.push(entry) }), []);
+  assert.deepEqual(diagnostics, [], 'The delayed unconfirmed-start path never fires for an accepted prompt');
+  Object.assign(f.job.waits[0], { done: true, observedState: 'completed' });
+  assert.equal(collectTaskReports(f.job, f.sessions, { now: () => 621000 })[0].status, 'completed');
+});
+
+test('an unconfirmed start records bounded private startup telemetry once and no text', () => {
+  const f = fixture();
+  f.job.task.requestId = 'request-1';
+  f.sessions[0] = { ...f.sessions[0], provider: 'codex', turnState: 'idle', turnStartedAt: 400, telemetryHealth: 'healthy' };
+  Object.assign(f.job.waits[0], { submittedAt: 1000 });
+  const diagnostics = [];
+  const recordDiagnostic = entry => diagnostics.push(entry);
+  const reports = collectTaskReports(f.job, f.sessions, { now: () => 61000, recordDiagnostic });
+  assert.equal(reports.length, 1);
+  assert.deepEqual(diagnostics, [{ event: 'request_stage', stage: 'unconfirmed_start', requestId: 'request-1',
+    targetId: 's0', generation: 'g', actionKind: 'send_prompt', provider: 'codex', turnState: 'idle', hasTurnId: false,
+    telemetryHealth: 'healthy', turnStartedOffsetMs: -600 }]);
+  assert.doesNotMatch(JSON.stringify(diagnostics), /Pane 0|input was sent|could not confirm/);
+  collectTaskReports(f.job, f.sessions, { now: () => 122000, recordDiagnostic });
+  assert.equal(diagnostics.length, 1, 'The record follows the single warning, not every collection');
+});

@@ -8,7 +8,7 @@ const waitingStates = new Set(['waiting', 'waiting-for-input', 'needs-answer', '
 const runningStates = new Set(['running', 'busy', 'starting']);
 const turnKey = wait => !wait.attributionAmbiguous && wait.turnId && wait.targetId && wait.generation != null
   ? JSON.stringify([wait.targetId, wait.generation, wait.turnId]) : null;
-function collectTaskReports(job, sessions = [], { now = Date.now } = {}) {
+function collectTaskReports(job, sessions = [], { now = Date.now, recordDiagnostic = () => {} } = {}) {
   if (!job || (!job.executionDone && !job.reportingReady) || job.restored || job.task?.status === 'cancelled' || job.controller?.signal.aborted) return [];
   let state = reported.get(job);
   if (!state) { state = { waits: new WeakMap(), turns: new Map(), final: false }; reported.set(job, state); }
@@ -88,8 +88,24 @@ function collectTaskReports(job, sessions = [], { now = Date.now } = {}) {
       add('unknown', 'unverified', 'delivery is unconfirmed. I am waiting for a confirmed task result and will not resend the prompt automatically.');
       continue;
     }
+    // Composer evidence that the prompt was taken. It replaces the delayed
+    // unconfirmed-start report; it never claims the task started or finished.
+    if (wait.source !== 'watch' && wait.observedState === 'submitted-observed') {
+      add('submitted-observed', 'delivered', 'the prompt was accepted; the result is pending.');
+      continue;
+    }
     if (wait.source !== 'watch' && wait.inputDisposition !== 'submitted-while-running' && !wait.observedState && Number.isFinite(wait.submittedAt) && now() - wait.submittedAt >= 60000) {
+      const seenBefore = seen.has('unconfirmed-start');
       add('unconfirmed-start', 'unverified', 'input was sent, but I could not confirm that the agent started this task. Completion remains unverified.');
+      // Private startup telemetry for the unexplained gap. No text of any kind.
+      if (!seenBefore && seen.has('unconfirmed-start')) {
+        const session = sessions.find(item => item.id === wait.targetId && item.generation === wait.generation);
+        recordDiagnostic({ event: 'request_stage', stage: 'unconfirmed_start', requestId: job.task?.requestId,
+          targetId: wait.targetId, generation: wait.generation, actionKind: 'send_prompt',
+          provider: session?.provider || session?.kind, turnState: session?.turnState, hasTurnId: Boolean(session?.turnId),
+          ...(typeof session?.telemetryHealth === 'string' && { telemetryHealth: session.telemetryHealth }),
+          ...(Number.isFinite(session?.turnStartedAt) && { turnStartedOffsetMs: session.turnStartedAt - wait.submittedAt }) });
+      }
       continue;
     }
     if (['running', 'busy', 'starting'].includes(wait.observedState)) {

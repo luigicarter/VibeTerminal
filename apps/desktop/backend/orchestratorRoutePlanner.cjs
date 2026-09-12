@@ -92,14 +92,6 @@ class RoutingError extends Error {
     this.grantId = grantId; this.assignmentState = 'not-assigned'; this.delivery = 'not-dispatched';
   }
 }
-const AGENT_ROUTING_TOOL = structuredClone(ROUTING_TOOL);
-const agentReads = new Set(['find_agents', 'read_agent', 'read_work_item']);
-ROUTING_TOOL.function.parameters.properties.kind.enum = ROUTING_TOOL.function.parameters.properties.kind.enum.filter(k => !agentReads.has(k));
-ROUTING_TOOL.function.parameters.anyOf = ROUTING_TOOL.function.parameters.anyOf.filter(branch => !agentReads.has(branch.properties.kind.enum[0]));
-const ROUTING_CHOOSE_TOOL = structuredClone(ROUTING_TOOL);
-ROUTING_CHOOSE_TOOL.function.parameters.properties.kind.enum = ['choose'];
-ROUTING_CHOOSE_TOOL.function.parameters.anyOf = ROUTING_CHOOSE_TOOL.function.parameters.anyOf.filter(item => item.properties.kind.enum[0] === 'choose');
-
 function namedAgentRoutingTools(final = false) {
   const tool = (name, description, props, required = []) => ({ type: 'function', function: { name, description,
     parameters: { type: 'object', additionalProperties: false, properties: props, required } } });
@@ -140,17 +132,17 @@ function decodeAgentRoute(name, args, context) {
   throw new Error('Unknown routing tool.');
 }
 
-async function planTaskRoute({ context, complete, read, check = () => {}, maxRounds = 8, resetReadBudget = () => {}, grantId, onEvent = () => {} }) {
+async function planTaskRoute({ context, complete, read, validateChoice = choice => choice, check = () => {}, maxRounds = 8, resetReadBudget = () => {}, grantId, onEvent = () => {} }) {
   const messages = [{ role: 'system', content: ROUTING_SYSTEM }, { role: 'user', content: JSON.stringify(context) }];
-  const routingTool = context?.harnessVersion === 'agents-v1' ? AGENT_ROUTING_TOOL : ROUTING_TOOL;
-  if (context?.harnessVersion === 'agents-v1') messages[0].content += ' Use find_agents for compact project/task discovery and read_agent/read_work_item for selected records before opening native output. The task and project are already authorized. Choose a fresh configured agent when ownership is uncertain; do not ask the user to pick a terminal or provider merely because several are available.';
+  messages[0].content += ' Use find_agents for compact project/task discovery and read_agent/read_work_item for selected records before opening native output. The task and project are already authorized. Independent tasks can use a fresh configured agent; uncertainty about a requested existing owner requires more evidence or clarification. Never put a surfaceId or native conversation ID in agentId.';
+  messages[0].content += ' Preserve currentInstruction as the original user selection context even when instruction is only the shorter worker prompt. assignmentMode:existing forbids creation, including when the owner is missing, paused, ambiguous, or has no recorded work item. Find the live owner and read its task evidence, or choose clarify with the unresolved fact. A rejected choice may be repaired using fresh directory evidence; never invent an ID.';
   const seen = new Set(); let stagnantRounds = 0;
   const emit = event => { try { onEvent({ event: 'routing_progress', grantId, ...event }); } catch { /* Telemetry cannot change routing. */ } };
   for (let round = 0; round < maxRounds; round++) {
     check();
     const finalRound = round === maxRounds - 1;
     if (finalRound) messages.push({ role: 'system', content: 'This is the final routing call. Return one standalone choose using existing evidence. If evidence is insufficient, choose clarify with the specific unresolved fact. Do not invent a suitable worker or perform more reads.' });
-    const response = await complete(messages, context?.harnessVersion === 'agents-v1' ? namedAgentRoutingTools(finalRound) : [finalRound ? ROUTING_CHOOSE_TOOL : routingTool]);
+    const response = await complete(messages, namedAgentRoutingTools(finalRound));
     check();
     const choice = response?.choices?.[0], reply = choice?.message;
     if (choice?.finish_reason && !['stop', 'tool_calls'].includes(choice.finish_reason)) throw new Error('Routing interpretation was incomplete; no terminal was assigned.');
@@ -164,13 +156,15 @@ async function planTaskRoute({ context, complete, read, check = () => {}, maxRou
       check();
       let result;
       try {
-        if (context?.harnessVersion !== 'agents-v1' && call.function?.name !== ROUTING_TOOL.function.name) throw new Error('Unknown routing tool.');
         const parsed = JSON.parse(call.function.arguments);
-        const args = validateRouteCall(context?.harnessVersion === 'agents-v1' ? decodeAgentRoute(call.function?.name, parsed, context) : parsed);
+        const args = validateRouteCall(decodeAgentRoute(call.function?.name, parsed, context));
         if (args.kind === 'choose') {
           if (calls.length !== 1) throw new Error('An assignment proposal must be its own single tool call after evidence reads.');
+          if (context.scope?.assignmentMode === 'existing' && args.decision === 'create') throw new Error('This continuation requires its existing owner. Discover that agent or clarify the unresolved owner; do not create a replacement.');
+          const validated = await validateChoice(args);
+          check();
           emit({ round: round + 1, decision: args.decision, stage: 'routing_choice', stagnantRounds });
-          return args;
+          return validated;
         }
         if (finalRound) throw new Error('The final routing call permits only one standalone choose; no more reads.');
         result = await read(args);
@@ -195,4 +189,4 @@ async function planTaskRoute({ context, complete, read, check = () => {}, maxRou
   emit({ stage: 'routing_exhausted', assignmentState: 'not-assigned', delivery: 'not-dispatched', stagnantRounds });
   throw new RoutingError(grantId);
 }
-module.exports = { ROUTING_TOOL, AGENT_ROUTING_TOOL, ROUTING_CHOOSE_TOOL, ROUTING_SYSTEM, validateRouteCall, planTaskRoute, deterministicNewTaskRoute, RoutingError };
+module.exports = { ROUTING_TOOL, ROUTING_SYSTEM, validateRouteCall, planTaskRoute, deterministicNewTaskRoute, namedAgentRoutingTools, RoutingError };

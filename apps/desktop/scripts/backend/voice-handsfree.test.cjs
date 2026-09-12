@@ -217,11 +217,11 @@ test('playback detects current wake frames, fences old ones and resolution cance
   f.relayState.requests = []; f.controller.resolveInteraction(interaction);
   assert.equal(f.controller.getState().phase, 'listening'); assert.equal(f.controller.getState().recordingSource, undefined); assert.equal(f.uploads.length, 0); assert.equal(f.dispatched.length, 0);
 });
-test('manual transcripts retain a spoken wake prefix, and capture supports arbitrary packet sizes', async t => {
+test('manual transcripts also drop a spoken wake prefix, and capture supports arbitrary packet sizes', async t => {
   const f = fixture(); t.after(() => f.controller.dispose()); await f.activate();
   f.capture(13, .1); f.capture(37, .1); f.controller.configure({ pushToTalk: 'start', holdId: 1 }); f.capture(251, .1);
   f.controller.configure({ pushToTalk: 'stop', holdId: 1 }); await until(() => f.sent.length);
-  assert.equal(f.sent[0].text, 'Hey Lina, show my agents'); assert.equal(Buffer.from(f.uploads[0].input_audio.data, 'base64').length, 44 + 301 * 16 * 2);
+  assert.equal(f.sent[0].text, 'show my agents'); assert.equal(Buffer.from(f.uploads[0].input_audio.data, 'base64').length, 44 + 301 * 16 * 2);
 });
 test('adopted short tap and resumed speech cannot schedule concurrent completion', async t => {
   let settle;
@@ -476,14 +476,27 @@ test('off and busy push-to-talk refusals publish authoritative voice feedback', 
   await until(() => f.sent.length);
 });
 
-for (const [text, expected] of [
+// Every pronunciation the wake verifier accepts, and every spelling the cloud
+// transcription returns for it, must leave the command text.
+const WAKE_PREFIX_CASES = [
   ['Hey Lina, show my agents', 'show my agents'],
-  ['HEY LENA! show my agents', 'HEY LENA! show my agents'],
+  ['HEY LENA! show my agents', 'show my agents'],
+  ['He Lena, show my agents', 'show my agents'],
+  ['Hey Alina, show my agents', 'show my agents'],
+  ['Hey, Elena show my agents', 'show my agents'],
+  ['Here, Lina, show my agents', 'show my agents'],
   ['Hey Linaria, show my agents', 'Hey Linaria, show my agents'],
   ['Show Hey Lina in the terminal', 'Show Hey Lina in the terminal'],
-]) test(`wake transcript removes only a complete leading wake phrase: ${text}`, async t => {
+];
+for (const [text, expected] of WAKE_PREFIX_CASES) test(`wake transcript removes only a complete leading wake phrase: ${text}`, async t => {
   const f = fixture({ text }); t.after(() => f.controller.dispose()); await f.activate();
   f.frame(100, true, true); f.frame(100, true); f.frame(1200); await until(() => f.sent.length);
+  assert.equal(f.sent[0].text, expected);
+});
+for (const [text, expected] of WAKE_PREFIX_CASES) test(`held transcript removes the same leading wake phrase: ${text}`, async t => {
+  const f = fixture({ text }); t.after(() => f.controller.dispose()); await f.activate();
+  f.controller.configure({ pushToTalk: 'start', holdId: 1 }); f.capture(300, .1);
+  f.controller.configure({ pushToTalk: 'stop', holdId: 1 }); await until(() => f.sent.length);
   assert.equal(f.sent[0].text, expected);
 });
 

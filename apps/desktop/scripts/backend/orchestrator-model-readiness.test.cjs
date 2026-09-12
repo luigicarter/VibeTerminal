@@ -23,7 +23,17 @@ test('readiness and production interpretation share the current planning envelop
   assert.equal(calls, 1); assert.equal(plan.grants.length, 0);
 });
 
-for (const [contextLength, expected] of [[16384, false], [24064, true], [128000, true]]) {
+test('a saved context whose concurrent pending command was cleared still plans with the surviving command only', () => {
+  const command = { requestId: 'live', instruction: 'Review the checkout flow; do not edit.', queued: true,
+    grants: [{ kind: 'operate_terminal', targets: [{ id: 'pane', generation: 'g1' }], text: 'Review the checkout flow; do not edit.' }] };
+  const { messages } = createPlanningInput({ instruction: 'What is still running?', requestId: 'next', sessions: [], pendingCommands: [null, command, null] });
+  const payload = JSON.parse(messages[1].content);
+  assert.deepEqual(payload.pendingCommands.map(item => item.requestId), ['live']);
+  assert.equal(payload.pendingCommands[0].instruction, command.instruction);
+  assert.deepEqual(payload.pendingCommands[0].grants, [{ kind: 'operate_terminal', targets: command.grants[0].targets, textPreview: command.grants[0].text }]);
+});
+
+for (const [contextLength, expected] of [[16384, false], [25600, true], [128000, true]]) {
   test(`model readiness uses the current minimum planner at ${contextLength} context`, async t => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lina-planner-readiness-'));
     const app = createOrchestrator({ userDataPath: root, fetch: async url => {

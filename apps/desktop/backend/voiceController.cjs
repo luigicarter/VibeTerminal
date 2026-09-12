@@ -6,6 +6,7 @@ const { matchAnswer, questionSpeech } = require('./voiceAnswers.cjs');
 const { spokenText } = require('./voiceText.cjs');
 const { createCompletionAudio } = require('./voiceCompletionAudio.cjs');
 const { isVoiceDismissal } = require('../shared/voiceDismissal.cjs');
+const { stripWakePrefix } = require('../shared/voiceWakePhrase.cjs');
 const { OpenRouterError, readOpenRouterResponse, classifyTransportError, upstreamErrorInfo } = require('./openRouterErrors.cjs');
 const { STT_MODEL, TTS_MODEL, TTS_VOICE, TTS_VOICES } = require('../shared/voiceConfig.cjs');
 // A push-to-talk hold shorter than this carries no command; it is a tap, not speech.
@@ -453,7 +454,10 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       if (typeof data.text !== 'string') throw new OpenRouterError('upstream', response.status);
       sttElapsedMs = Math.max(0, Math.round(monotonicNow() - sttStartedAt));
       const rawText = data.text.split(key).join('[REDACTED]').trim();
-      const text = recordingSource === 'wake' ? rawText.replace(/^\s*hey[\s,!.:;—-]+lina\b[\s,!.:;—-]*/i, '').trim() : rawText;
+      // Speakers repeat the wake greeting on held and answer captures too, and
+      // the transcription spells it several ways. Strip it on every path so the
+      // wake words never become part of the command.
+      const text = stripWakePrefix(rawText).trim();
       if (isVoiceDismissal(text)) return dismiss();
       if (recordingSource === 'wake' && !/[\p{L}\p{N}]/u.test(text)) {
         update({ phase: answerContext && currentInteraction(answerContext) ? 'awaiting-answer' : idlePhase(), transcript: '', error: 'No command heard. Say Hey Lina and your command, or hold Space.' });

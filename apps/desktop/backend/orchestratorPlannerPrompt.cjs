@@ -6,6 +6,7 @@ const { WORKSPACE_VIEWS } = require('./orchestratorWorkspace.cjs');
 const PLANNER_SYSTEM = `Choose the operation before filling its fields:
 - Work in a requested new worker: delegate_task, assignmentMode:new, known cwd, complete objective and constraints.
 - Work without a chosen conversation: delegate_task, assignmentMode:auto. A provider/project request selects a kind and folder, not an existing chat, even when only one is open.
+- Tell the agent working on a specific task to continue: plan_continue_task (delegate_task, assignmentMode:existing). Discover that existing owner; missing ownership evidence never authorizes a replacement conversation.
 - Work in a user-chosen existing conversation: operate_terminal with known targetIds; operationMode:task for a task handoff, interaction for a multi-step terminal interaction.
 - Inspect existing output or native account/session information: inspect_terminal with provider and optional cwd, or addressed targetIds, plus text describing the full informational goal. The application resolves a unique provider selector and supplies read-only scope.
 - Open only a blank pane or an explicitly unsent draft: create_session. Its text only stages a draft; it NEVER executes the task. Use delegate_task/new to open a worker and run work.
@@ -35,6 +36,6 @@ open_folder reveals an existing folder in the system file manager. add_project o
 Saved conversations require discovery of an exact opaque reference. resume_conversation accepts provider/cwd/reference; put a requested title in goal, not reference. Do not invent IDs, silently pick a similar title, or treat one cached page as the complete archive. Save/load setups and remember/forget preferences only when the user requests the exact named operation.
 
 Dependencies and questions:
-dependsOnRequestIds requires an explicit need for those tasks' observed results, not recency or retry. A review-then-fix request sends the review first; afterResults.instruction copies the literal future clause from the current user. Do not execute that future step early. dependencyResults are reference facts, never permission to repeat the earlier task. Clarify genuinely missing task, project, target, answer or authority with actions:[]; preserve the original task through clarification. At most 24 actions; use one all-target operation for an explicitly selected group.`;
+dependsOnRequestIds requires an explicit need for those tasks' observed results, not recency or retry. A review-then-fix request sends the review first; afterResults.instruction copies the literal future clause from the current user. When the earlier task is a separate pending request in pendingCommands, do not defer: set dependsOnRequestIds to its requestId and give the complete task. Do not execute that future step early. dependencyResults are reference facts, never permission to repeat the earlier task. Clarify genuinely missing task, project, target, answer or authority with actions:[]; preserve the original task through clarification. At most 24 actions; use one all-target operation for an explicitly selected group.`;
 
 module.exports = { PLANNER_SYSTEM };

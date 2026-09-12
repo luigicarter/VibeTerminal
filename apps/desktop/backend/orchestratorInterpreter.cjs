@@ -2,21 +2,21 @@
 const { INTENT_SYSTEM, normalizeIntent } = require('./orchestratorIntent.cjs');
 const { PLANNER_TOOL_PROTOCOL, plannerTools, decodePlannerCalls } = require('./orchestratorPlannerTools.cjs');
 const { canonicalizeInterpretation } = require('./orchestratorInterpretationSchema.cjs');
-const { TARGET_REVIEW_SYSTEM, targetReviewPayload, targetReviewDecision, eligibleExistingTargets } = require('./orchestratorTargetReview.cjs');
+const { TARGET_REVIEW_SYSTEM, TARGET_REVIEW_SCHEMA, targetReviewPayload, targetReviewDecision, eligibleExistingTargets } = require('./orchestratorTargetReview.cjs');
 const { recoverSubmittedTaskIntent } = require('./orchestratorCorrectionRecovery.cjs');
 const { resultDependencyBlocker } = require('./orchestratorContinuation.cjs');
 const { listSessionSummaries } = require('./orchestratorContext.cjs');
 const { fitMessages } = require('./orchestratorBudget.cjs');
-const { completionOptions, exhaustedReply } = require('./orchestratorModelOptions.cjs');
+const { completionOptions, exhaustedReply, structuredOutput } = require('./orchestratorModelOptions.cjs');
 const { OpenRouterError, isCancellation } = require('./openRouterErrors.cjs');
-const { CLOSE_REVIEW_SYSTEM, closeReviewPayload, closeReviewPolicies } = require('./orchestratorCloseSafety.cjs');
+const { CLOSE_REVIEW_SYSTEM, CLOSE_REVIEW_SCHEMA, closeReviewPayload, closeReviewPolicies } = require('./orchestratorCloseSafety.cjs');
 
 function createPlanningInput(context, redact = value => value) {
   // Completed conversations provide context, not recoverable command IDs.
   // Do not advertise continuation fields when no pending authority exists.
   const planningTools = plannerTools(context);
-  const plannerSystem = INTENT_SYSTEM + "\n" + PLANNER_TOOL_PROTOCOL + (context.harnessVersion === 'agents-v1'
-    ? '\nA complete task in an identified project requires automatic worker assignment. Use plan_delegate_task for new work and plan_continue_task for additions/corrections to the same task, including while its owner is busy. Omit kindOfSession when provider choice is open. An instruction such as also cover X changes the task; it is not a task-status question and does not require dependsOnRequestIds unless the user explicitly asks to wait. Available configured launchers can be chosen without asking the user to select a terminal. A matching project, idle agent or nearby topic cannot establish ownership; independent work gets a fresh conversation. Preserve the full objective and constraints.' : '');
+  const plannerSystem = INTENT_SYSTEM + "\n" + PLANNER_TOOL_PROTOCOL +
+    '\nA complete task in an identified project requires automatic worker assignment. Use plan_delegate_task for new work and plan_continue_task for additions/corrections to the same task, including while its owner is busy. Omit kindOfSession when provider choice is open. An instruction such as also cover X changes the task; it is not a task-status question and does not require dependsOnRequestIds unless the user explicitly asks to wait. Available configured launchers can be chosen without asking the user to select a terminal. A matching project, idle agent or nearby topic cannot establish ownership; independent work gets a fresh conversation. Preserve the full objective and constraints.';
   const prioritized = new Set([context.targetId, ...eligibleExistingTargets(context), ...(context.previousCommand?.candidates || []).map(target => target.id), ...(context.previousCommand?.grants || []).flatMap(grant => grant.targets?.map(target => target.id) || [])].filter(Boolean));
   const sessions = context.sessions.filter(session => prioritized.has(session.id));
   const capabilities = new Map();
@@ -30,7 +30,7 @@ function createPlanningInput(context, redact = value => value) {
   // Intent receives user-authored commands and typed identity metadata only.
   // Terminal prose, assistant summaries, diagnostics and preferences cannot mint effects.
   const payload = { instruction: context.instruction, requestId: context.requestId, workItems: context.workItems?.map(planningWork), replyWorkItem: planningWork(context.replyWorkItem), launchers: context.launchers,
-    recentUserMessages: context.recentUserMessages, recentConversation: context.recentConversation, replyContext: context.replyContext, dependencyResults: context.dependencyResults, originalInstruction: context.originalInstruction, pendingCommands: context.pendingCommands?.map(command => ({ requestId: command.requestId, queued: command.queued, access: command.access, dependsOnRequestIds: command.dependsOnRequestIds, afterResults: command.afterResults, responseKind: command.responseKind, instruction: command.instruction.slice(0, 500), candidates: command.candidates?.slice(0, 50), grants: command.grants?.map(grant => ({ kind: grant.kind, inspection: grant.inspection, targets: grant.targets, args: grant.args, ...(grant.text && { textPreview: grant.text.slice(0, 300) }) })) })), tasks: context.tasks?.slice(-70).map(task => ({ requestId: task.requestId, sequence: task.sequence, text: task.text.slice(0, 500), status: task.status, label: task.label, targets: task.targets, dependsOn: task.dependsOn, ...(task.question && { question: { id: task.question.id, text: task.question.text.slice(0, 500) } }) })), previousCommand: context.previousCommand,
+    recentUserMessages: context.recentUserMessages, recentConversation: context.recentConversation, replyContext: context.replyContext, lastFailure: context.lastFailure, dependencyResults: context.dependencyResults, originalInstruction: context.originalInstruction, pendingCommands: context.pendingCommands?.filter(Boolean).map(command => ({ requestId: command.requestId, queued: command.queued, access: command.access, dependsOnRequestIds: command.dependsOnRequestIds, afterResults: command.afterResults, responseKind: command.responseKind, instruction: command.instruction.slice(0, 500), candidates: command.candidates?.slice(0, 50), grants: command.grants?.map(grant => ({ kind: grant.kind, inspection: grant.inspection, targets: grant.targets, args: grant.args, ...(grant.text && { textPreview: grant.text.slice(0, 300) }) })) })), tasks: context.tasks?.slice(-70).map(task => ({ requestId: task.requestId, sequence: task.sequence, text: task.text.slice(0, 500), status: task.status, label: task.label, targets: task.targets, dependsOn: task.dependsOn, ...(task.question && { question: { id: task.question.id, text: task.question.text.slice(0, 500) } }) })), previousCommand: context.previousCommand,
     projectContext: context.projectContext, targetId: context.targetId, conversationTarget: context.conversationTarget, interactionContext: context.interactionContext,
     conversationGroup: context.conversationGroup, authorizedRelay: context.authorizedRelay,
     workspaceContext, terminalCapabilities: [...capabilities.values()].slice(0, 100),
@@ -94,22 +94,20 @@ function createIntentInterpreter({ interpretIntent, getTask, complete, redact, c
           raw = canonicalizeInterpretation(raw);
           let plan = validateInterpretedPlan(raw, context, true);
           repairStage = 'review';
-          if (context.harnessVersion === 'agents-v1') {
-            for (const grant of plan.grants.filter(g => g.kind === 'delegate_task' && g.args.workItemId && g.sourceUserId === context.requestId)) {
-              const item = context.workItems?.find(w => w.id === grant.args.workItemId);
-              const affinity = require('./orchestratorTaskAffinity.cjs');
-              const input = affinity.evidence({ currentInstruction: context.instruction, requestedObjective: grant.text, existingObjective: item?.objective });
-              const reviewed = await complete({ model: model.id, max_tokens: 512, ...completionOptions(model),
-                messages: fitMessages({ messages: [{ role: 'system', content: affinity.SYSTEM }, { role: 'user', content: JSON.stringify(redact(input)) }], contextLength: model.contextLength, outputTokens: 512 }) }, signal);
-              if (signal.aborted) throw new Error('Cancelled.');
-              if (affinity.decision(reviewed, input) !== 'same-task') throw new Error('This work-item reference does not establish continuation of the same specific task. Preserve the full current objective and project, and use delegate_task without workItemId so assignment can create a fresh conversation. Do not select an unrelated existing agent or ask which terminal when an available configured worker can perform this independent task.');
-            }
+          for (const grant of plan.grants.filter(g => g.kind === 'delegate_task' && g.args.workItemId && g.sourceUserId === context.requestId)) {
+            const item = context.workItems?.find(w => w.id === grant.args.workItemId);
+            const affinity = require('./orchestratorTaskAffinity.cjs');
+            const input = affinity.evidence({ currentInstruction: context.instruction, requestedObjective: grant.text, existingObjective: item?.objective });
+            const reviewed = await complete({ model: model.id, max_tokens: 512, ...completionOptions(model), ...structuredOutput(model, 'task_affinity', affinity.SCHEMA),
+              messages: fitMessages({ messages: [{ role: 'system', content: affinity.SYSTEM }, { role: 'user', content: JSON.stringify(redact(input)) }], contextLength: model.contextLength, outputTokens: 512 }) }, signal, { category: 'affinity-review' });
+            if (signal.aborted) throw new Error('Cancelled.');
+            if (affinity.decision(reviewed, input) !== 'same-task') throw new Error('This work-item reference does not establish continuation of the same specific task. Preserve the full current objective and project, and use delegate_task without workItemId so assignment can create a fresh conversation. Do not select an unrelated existing agent or ask which terminal when an available configured worker can perform this independent task.');
           }
           const closeReview = closeReviewPayload(plan, context);
           if (closeReview) {
-            const reviewed = await complete({ model: model.id, max_tokens: 1600, ...completionOptions(model),
+            const reviewed = await complete({ model: model.id, max_tokens: 1600, ...completionOptions(model), ...structuredOutput(model, 'close_review', CLOSE_REVIEW_SCHEMA),
               messages: fitMessages({ messages: [{ role: 'system', content: CLOSE_REVIEW_SYSTEM },
-                { role: 'user', content: JSON.stringify(redact(closeReview)) }], contextLength: model.contextLength, outputTokens: 1600 }) }, signal);
+                { role: 'user', content: JSON.stringify(redact(closeReview)) }], contextLength: model.contextLength, outputTokens: 1600 }) }, signal, { category: 'close-review' });
             if (signal.aborted) throw new Error('Cancelled.');
             const closePolicies = closeReviewPolicies(reviewed, closeReview);
             plan = validateInterpretedPlan(raw, { ...context, closePolicies }, true);
@@ -126,7 +124,7 @@ function createIntentInterpreter({ interpretIntent, getTask, complete, redact, c
               const reviewMessages = [{ role: 'system', content: TARGET_REVIEW_SYSTEM }, { role: 'user', content: reviewKey }];
               const reviewed = await complete({ model: model.id,
                 messages: fitMessages({ messages: reviewMessages, contextLength: model.contextLength, outputTokens: 512 }),
-                max_tokens: 512, ...completionOptions(model) }, signal);
+                max_tokens: 512, ...completionOptions(model), ...structuredOutput(model, 'target_review', TARGET_REVIEW_SCHEMA) }, signal, { category: 'target-review' });
               if (signal.aborted) throw new Error('Cancelled.');
               targetReviews.set(reviewKey, targetReviewDecision(reviewed, targetReview));
               recordDiagnostic({ ...diagnosticContext, event: 'intent_review', stage: 'existing_target', status: targetReviews.get(reviewKey).toLowerCase() });
@@ -214,7 +212,13 @@ function createIntentInterpreter({ interpretIntent, getTask, complete, redact, c
               recordDiagnostic({ ...diagnosticContext, event: 'intent_repair', stage: 'interpretation', status: 'delivery-inspection' });
               return recovered;
             }
-            throw new Error('I could not interpret that request. Please try again.');
+            // The user-facing error stays generic and stable. The validator's own
+            // message is already safe (never echoes raw arguments) and travels
+            // separately so the app can show and later recall why this failed.
+            const failure = new Error('I could not interpret that request. Please try again.');
+            const reason = repairReasons.get('review') || repairReasons.get('contract');
+            if (reason) failure.detail = cleanError(reason).slice(0, 300);
+            throw failure;
           }
           repairReasons.set(repairStage, cleanError(error));
           // Semantic repair can require a different operation. Do not keep an

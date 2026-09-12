@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { outputTokensFor, completionOptions } = require('../../backend/orchestratorModelOptions.cjs');
+const { outputTokensFor, completionOptions, structuredOutput } = require('../../backend/orchestratorModelOptions.cjs');
 
 test('output reservation preserves context scaling, minimum and caller ceiling', () => {
   assert.equal(outputTokensFor(undefined, 4000), 1200);
@@ -26,6 +26,25 @@ test('temperature is sent only when explicitly supported', () => {
   assert.deepEqual(completionOptions(undefined), {});
   assert.deepEqual(completionOptions({ supportedParameters: ['tools'] }), {});
   assert.deepEqual(completionOptions({ supportedParameters: ['tools', 'temperature'] }), { temperature: 0 });
+});
+
+test('a strict reviewer schema is requested only from a model advertising structured outputs', () => {
+  const schema = { type: 'object', additionalProperties: false, required: ['relation'], properties: { relation: { type: 'string' } } };
+  for (const model of [undefined, {}, { supportedParameters: [] }, { supportedParameters: ['tools', 'response_format'] },
+    { supportedParameters: 'structured_outputs' }, { supportedParameters: { structured_outputs: true } }]) {
+    assert.deepEqual(structuredOutput(model, 'task_affinity', schema), {}, JSON.stringify(model));
+  }
+  assert.deepEqual(structuredOutput({ supportedParameters: ['tools', 'response_format', 'structured_outputs'] }, 'task_affinity', schema),
+    { response_format: { type: 'json_schema', json_schema: { name: 'task_affinity', strict: true, schema } } });
+});
+
+test('the requested schema is the caller schema itself, unmodified', () => {
+  const schema = { type: 'object', additionalProperties: false, required: ['decision'], properties: { decision: { type: 'string', enum: ['ASSIGN', 'DIRECT'] } } };
+  const before = structuredClone(schema);
+  const options = structuredOutput({ supportedParameters: ['structured_outputs'] }, 'target_review', schema);
+  assert.deepEqual(schema, before);
+  assert.equal(options.response_format.json_schema.schema, schema);
+  assert.equal(options.response_format.json_schema.strict, true);
 });
 
 test('reasoning requires capability and preserves low effort without effort metadata', () => {

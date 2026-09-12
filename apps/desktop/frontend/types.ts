@@ -487,11 +487,6 @@ export type UpdateStatus =
   | "available"
   | "downloading"
   | "downloaded"
-  // A user-chosen version switch has finished downloading and its installer is
-  // running. Deliberately NOT "downloaded": that status means electron-updater
-  // has a staged update and offers a Restart button wired to its
-  // quitAndInstall — which would be called with nothing staged.
-  | "switching"
   | "error";
 
 export interface UpdateInfo {
@@ -518,27 +513,6 @@ export interface UpdateState {
 export interface UpdateActionResult {
   ok: boolean;
   message?: string;
-}
-
-// One published release the user can switch to. `installable` is false when a
-// release carries no Windows installer asset — those are still listed, because
-// a version you can see but not install is less confusing than one that
-// silently does not appear.
-export interface AppVersion {
-  version: string;
-  name?: string;
-  publishedAt?: string;
-  prerelease: boolean;
-  installable: boolean;
-  assetName?: string;
-  downloadUrl?: string;
-}
-
-export interface AppVersionList {
-  ok: boolean;
-  message?: string;
-  versions: AppVersion[];
-  currentVersion?: string;
 }
 
 export type TerminalEvent = (

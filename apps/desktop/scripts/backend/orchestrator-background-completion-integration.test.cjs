@@ -18,15 +18,15 @@ function chat(kind, cwd = process.cwd()) {
 
 async function fixture(t, kind) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-background-completion-'));
-  const f = { ...chat(kind, root), root, native: [], effects: [], plans: [], phases: new Map(), followContexts: [], intentContexts: [] };
+  const f = { ...chat(kind, root), root, native: [], effects: [], plans: [], phases: new Map(), reads: [], followContexts: [], intentContexts: [] };
   let callId = 0;
   f.relay = createOrchestrator({ userDataPath: root, secureStorage: { isEncryptionAvailable: () => false },
     getRoots: () => ({ documents: root, projects: [root] }), getSessions: () => [...f.directory.list(), ...f.native],
     getLaunchers: () => [{ kind: 'codex', available: true, configured: true }],
     interpretIntent: context => { f.intentContexts.push(context); const plan = f.plans.shift(); assert.ok(plan); return plan; },
     routeTask: () => ({ kind: 'choose', decision: 'create', kindOfSession: 'codex', reason: 'Use an independent worker.' }),
-    readSession: async target => f.directory.get(target.id) ? f.directory.readChat(target)
-      : { ok: true, id: target.id, generation: target.generation, sequence: 1, inputRevision: 0, text: '> ' },
+    readSession: async target => (f.reads.push(target), f.directory.get(target.id) ? f.directory.readChat(target)
+      : { ok: true, id: target.id, generation: target.generation, sequence: 1, inputRevision: 0, text: '> ' }),
     dispatchAction: action => {
       f.effects.push(action);
       if (action.kind === 'create_session') {
@@ -91,7 +91,9 @@ for (const kind of ['fusion', 'openfusion']) test(`${kind}: dependent creation w
   const result = await pending; assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(f.task(f.first).status, 'finished');
   assert.deepEqual(f.effects.map(action => action.kind), ['send_prompt', 'create_session', 'send_prompt']);
-  assert.equal(f.followContexts[0].dependencyResults[0].result.turnId, 'root-turn');
+  // The bound handoff is delivered by the application, so the attribution
+  // evidence is the prerequisite turn result it read before creating the worker.
+  assert.ok(f.reads.some(target => target.completedTurnId === 'root-turn'), 'The prerequisite root turn result was read');
   f.emit('background-task', { phase: 'settled', taskId: 'two' }); await f.relay.refresh();
   assert.equal(f.effects.filter(action => action.kind === 'send_prompt').length, 2);
 });
@@ -122,7 +124,7 @@ for (const cancel of [false, true]) test(`failed foreground retains child worksp
   await f.relay.clearHistory(); assert.equal(f.task(f.first).status, 'failed');
   const pending = f.follow(false);
   await until(() => f.relay.getState().tasks.some(task => task.requestId !== f.first.requestId && task.targetIds.length && task.status === 'queued'));
-  assert.ok(f.intentContexts.at(-1).workItems.some(item => item.id === ownerId), 'Explicit work-item affinity survives history clearing with live children');
+  assert.equal(f.task(f.first).workItemId, ownerId, 'Explicit work-item ownership survives history clearing with live children');
   assert.deepEqual(f.effects.map(action => action.kind), ['send_prompt', 'create_session']);
   f.emit('background-task', { phase: 'settled', taskId: 'editing-child' }); await f.relay.refresh();
   const result = await pending; assert.equal(result.ok, true, JSON.stringify(result));

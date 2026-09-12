@@ -338,7 +338,21 @@ test('the connection manager writes the Web catalog and lets native config own m
   result = await f.action('status'); assert.equal(result.state.model, config.model); assert.equal(result.state.effort, 'medium');
   assert.equal(fs.existsSync(path.join(f.root, 'codex-web/sessions')), false, 'Lina must not create duplicate conversation history.');
 });
-test('cached picker filtering preserves the exact hidden selection, effort and resume metadata', async t => {
+test('catalog refresh preserves an active route when user agent settings differ from the setup journal', async () => {
+  const { ensureActiveBridgeRoute } = require('../../backend/codexWebLauncher.cjs');
+  let connections = 0;
+  const host = { run: async () => ({ stdout: JSON.stringify({ installed: true, active: true, errors: ["Codex [agents].max_depth changed after Compatibility V1 setup; refusing to overwrite the user's newer value"] }) }), connectBridgeRoute: async () => { connections++; } };
+  await ensureActiveBridgeRoute(host); assert.equal(connections, 0);
+  host.run = async () => ({ stdout: JSON.stringify({ installed: true, active: false, errors: [] }) });
+  await ensureActiveBridgeRoute(host); assert.equal(connections, 1, 'A disconnected route still requires reconnection.');
+  host.run = async () => ({ stdout: JSON.stringify({ installed: true, active: true, errors: ['The managed route was changed.'] }) });
+  await ensureActiveBridgeRoute(host); assert.equal(connections, 2, 'Other integration errors retain strict route validation.');
+  host.run = async () => ({ stdout: 'invalid' });
+  await assert.rejects(ensureActiveBridgeRoute(host), /bridge_config_out_of_sync/);
+  assert.equal(connections, 2, 'Unreadable route status cannot trigger a blind configuration rewrite.');
+});
+
+test('cached picker restores a hidden Thinking route and preserves the exact selection, effort and resume metadata', async t => {
   const f = await fixture(t); await f.action('refresh'); await f.host.shutdown();
   const catalogFile = path.join(f.home, 'lina-model-catalog.json'), cached = JSON.parse(fs.readFileSync(catalogFile, 'utf8'));
   const { buildNativeCatalog } = require('../../backend/codexWebModelDiscovery.cjs');
@@ -346,8 +360,8 @@ test('cached picker filtering preserves the exact hidden selection, effort and r
     { slug: 'gpt-5.6-sol-wm', title: 'GPT-5.6 Sol', workMode: true, reasoningType: 'reasoning', maxTokens: 100000, defaultEffort: 'medium', efforts: [{ effort: 'medium' }, { effort: 'high' }] },
     { slug: 'gpt-5-6-thinking', title: 'GPT-5.6 Sol', workMode: false, reasoningType: 'reasoning', maxTokens: 100000, defaultEffort: 'medium', efforts: [{ effort: 'medium' }, { effort: 'high' }] },
   ] }).models;
-  // Reproduce a catalog written before the picker policy existed.
-  for (const row of cached.models) { row.visibility = 'list'; delete row._lina_web_picker_hidden; }
+  // Reproduce the old policy that hid Thinking when a Work model was listed.
+  cached.models[1].visibility = 'hide'; cached.models[1]._lina_web_picker_hidden = true;
   fs.writeFileSync(catalogFile, JSON.stringify(cached));
   const configFile = path.join(f.home, 'config.toml'), config = TOML.parse(fs.readFileSync(configFile, 'utf8'));
   config.model = 'chatgpt-web/gpt-5-6-thinking'; config.model_reasoning_effort = 'high';
@@ -356,9 +370,9 @@ test('cached picker filtering preserves the exact hidden selection, effort and r
   await host.action({ id: 'filtered-pane', launchToken: 1, action: 'start', cwd: f.root });
   const result = await host.action({ id: 'filtered-pane', launchToken: 1, action: 'terminal-status' });
   assert.equal(result.state.model, 'gpt-5.6-sol-thinking'); assert.equal(result.state.effort, 'high');
-  assert.equal(result.state.models.find(model => model.id === result.state.model).hidden, true);
+  assert.equal(result.state.models.find(model => model.id === result.state.model).hidden, undefined);
   const saved = JSON.parse(fs.readFileSync(catalogFile, 'utf8'));
-  assert.equal(saved.models.length, 2); assert.equal(saved.models.filter(row => row.visibility === 'list').length, 1);
+  assert.equal(saved.models.length, 2); assert.equal(saved.models.filter(row => row.visibility === 'list').length, 2);
   assert.equal(TOML.parse(fs.readFileSync(configFile, 'utf8')).model, config.model);
 });
 test('logout clears the Web connection without a second Codex authentication process', async t => {

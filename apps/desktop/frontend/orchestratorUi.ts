@@ -57,7 +57,6 @@ export interface RelayInput {
 }
 export interface RelayTask {
     projectPath?: string;
-    harnessVersion?: "legacy" | "agents-v1";
     id: string;
     requestId: string;
     sequence: number;
@@ -83,7 +82,6 @@ export interface RelayTask {
     assignment?: { decision: "create" | "reuse"; reason?: string; workItemId?: string };
 }
 export interface RelayState {
-    harnessVersion?: "legacy" | "shadow" | "agents-v1";
     publicationRevision?: number;
     enabled: boolean;
     ready: boolean;

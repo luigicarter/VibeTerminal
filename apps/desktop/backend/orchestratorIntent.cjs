@@ -66,7 +66,7 @@ const INTENT_TOOL = { type: 'function', function: { name: 'interpret_workspace',
         operationMode: { type: 'string', enum: ['task', 'interaction'], description: 'task only for handing the complete objective to a coding agent; interaction for menus, configuration, editing or a workflow with further terminal steps.' }, lifecycleMode: { type: 'string', enum: ['preserve', 'interrupt', 'exit'] }, promptMode: { type: 'string', enum: ['compose', 'literal'] }, answerMode: { type: 'string', enum: ['supplied', 'delegated'] }, permissionMode: { type: 'string', enum: ['none', 'supplied', 'delegated'] },
         answerTexts: { type: 'object', minProperties: 1, maxProperties: 32, additionalProperties: stringProperty(16000) },
         requestId: stringProperty(256), sourceUserId: stringProperty(256),
-        workItemId: stringProperty(256), assignmentMode: { type: 'string', enum: ['auto', 'new'] },
+        workItemId: stringProperty(256), assignmentMode: { type: 'string', enum: ['auto', 'new', 'existing'] },
         view: { type: 'string', enum: WORKSPACE_VIEWS },
         ...Object.fromEntries(['cwd', 'path', 'parent', 'name', 'kindOfSession', 'provider', 'reference', 'preferenceId'].map(key => [key, stringProperty(4000)])),
       },
@@ -81,7 +81,7 @@ INTENT_TOOL.function.parameters.properties.actions.items = {
   anyOf: INTENT_KINDS.map(kind => ({
     type: 'object', additionalProperties: false, required: kind === 'close' ? ['kind', 'scope'] : ['kind'],
     ...(kind === 'create_session' ? { description: 'Open a blank pane or explicitly unsent draft only. text stages a draft and does not run it. To open a worker and perform work, use delegate_task with assignmentMode new.' }
-      : kind === 'delegate_task' ? { description: 'Perform the complete authorized task in a selected or new worker. Use assignmentMode new for a requested fresh worker; otherwise auto. Preserve the full objective and constraints.' } : {}),
+      : kind === 'delegate_task' ? { description: 'Perform the complete authorized task. Use assignmentMode existing to continue an existing agent, new for a requested fresh worker, or auto for independent work without a chosen conversation. Preserve the full objective and constraints.' } : {}),
     properties: Object.fromEntries([...commandFields(kind)].filter(field => kind !== 'close' || !['targetIds', 'selection'].includes(field)).map(field => [field,
       field === 'kind' ? { type: 'string', enum: [kind] } : kind === 'create_session' && field === 'kindOfSession' ? { type: 'string', enum: [...taskLaunchers] } : actionSchema.properties[field],
     ])),
@@ -136,6 +136,19 @@ function sourceAnswer(value, source, label) {
   string(value, label, 16000);
   if (!source.text.includes(value)) throw new Error('Answers must be literal text supplied by the identified user instruction.');
   return value;
+}
+// A deferred clause that merely repeats its own initial task would run that work
+// twice: immediately, and again after its own result. Compare the normalized
+// text, ignoring case, spacing, a leading ordering word and trailing punctuation.
+function deferralText(value) {
+  return String(value ?? '').toLowerCase().replace(/\s+/g, ' ').trim()
+    .replace(/^(?:and\s+)?(?:then|after\s+that)\b[\s,:;.-]*/, '').replace(/[\s.,;:!?-]+$/, '').trim();
+}
+function duplicateDeferral(instruction, text) {
+  const deferred = deferralText(instruction), initial = deferralText(text);
+  if (!deferred || !initial) return false;
+  const [shorter, longer] = deferred.length <= initial.length ? [deferred, initial] : [initial, deferred];
+  return shorter === longer || longer.includes(shorter) && shorter.length >= longer.length * 0.8;
 }
 function snapshotInteraction(request, target) {
   if (!generation(request.generation) || request.generation !== target.generation) throw new Error('The pending interaction has a stale or missing session generation.');
@@ -226,7 +239,21 @@ function normalizeIntent(raw, context = {}) {
   const semanticInspectionOnly = raw.actions.length > 0 && raw.actions.every(action => action?.kind === 'inspect_terminal');
   const inspection = semanticInspectionOnly || raw.responseKind === 'terminal-inspection' || Boolean(continuedInspection);
   if (inspection && (raw.statusTargetIds !== undefined || raw.statusRequestId !== undefined || raw.afterResults !== undefined || raw.dependsOnRequestIds?.length || raw.access === 'mutation')) throw new Error('Terminal inspection permits read-only informational navigation, without task status fields, dependencies or future work.');
-  if (raw.afterResults !== undefined) { keys(raw.afterResults, new Set(['instruction']), 'deferred instruction'); sourceAnswer(raw.afterResults.instruction, continuationSource?.afterResults ? sourceFor({ sourceUserId: continuationSource.requestId }, context) : sourceUser, 'deferred user instruction'); if (!raw.actions.some(action => ['send_prompt', 'operate_terminal', 'delegate_task'].includes(action.kind)) && !continuationSource?.grants?.some(grant => ['send_prompt', 'operate_terminal', 'delegate_task'].includes(grant.kind)) && !(continuationSource?.unboundCreation === true && continuationSource.afterResults && !raw.actions.length && typeof raw.clarification === 'string' && raw.clarification.trim() && raw.continuationOf === continuationSource.requestId)) throw new Error('A deferred instruction requires an initial terminal task.'); }
+  if (raw.afterResults !== undefined) {
+    keys(raw.afterResults, new Set(['instruction']), 'deferred instruction');
+    sourceAnswer(raw.afterResults.instruction, continuationSource?.afterResults ? sourceFor({ sourceUserId: continuationSource.requestId }, context) : sourceUser, 'deferred user instruction');
+    const taskKinds = ['send_prompt', 'operate_terminal', 'delegate_task'];
+    const initialTasks = raw.actions.filter(action => taskKinds.includes(action?.kind));
+    // A deferral with no task of its own cannot run. When another request is
+    // still pending, the user's "after that finishes" clause names that request,
+    // so the repair is a dependency on it, never a second copy of this work.
+    if (!initialTasks.length && !continuationSource?.grants?.some(grant => taskKinds.includes(grant.kind)) && !(continuationSource?.unboundCreation === true && continuationSource.afterResults && !raw.actions.length && typeof raw.clarification === 'string' && raw.clarification.trim() && raw.continuationOf === continuationSource.requestId)) {
+      throw new Error(context.pendingCommands?.length
+        ? "A deferred instruction requires an initial terminal task in this same request. To run this task after a pending request instead, set dependsOnRequestIds to that request's requestId from pendingCommands, put the complete task in actions, and omit afterResults."
+        : 'A deferred instruction requires an initial terminal task.');
+    }
+    if (initialTasks.some(action => duplicateDeferral(raw.afterResults.instruction, action.text))) throw new Error('The deferred instruction duplicates the initial task. Run it once: either now with no deferral, or after the pending request via dependsOnRequestIds. Never both.');
+  }
   const sessions = Array.isArray(context.sessions) ? context.sessions : [];
   let statusTargets, statusRequestId;
   if (!inspection && (raw.responseKind !== undefined || raw.statusTargetIds !== undefined || raw.statusRequestId !== undefined)) {
@@ -342,7 +369,7 @@ function normalizeIntent(raw, context = {}) {
       const addition = raw.actions.findIndex(action => action?.kind === 'add_project' && sameFolder(action));
       if (addition > commandIndex) throw new Error('Add the requested project before assigning its terminal task. Preserve both operations and the full task objective.');
       args.assignmentMode ||= 'auto';
-      if (!['auto', 'new'].includes(args.assignmentMode)) throw new Error('Invalid task assignment mode.');
+      if (!['auto', 'new', 'existing'].includes(args.assignmentMode)) throw new Error('Invalid task assignment mode.');
       if (args.kindOfSession !== undefined && !taskLaunchers.has(args.kindOfSession)) {
         const error = new Error('Specify a supported task launcher. Preserve all requested work and original constraints; clarify the unknown terminal meaning instead of substituting a provider, dropping a sibling task, or assigning work.');
         error.code = 'ORCHESTRATOR_UNKNOWN_LAUNCHER';
@@ -587,6 +614,7 @@ function delegatedGrant(plan, grantId) {
 function claimDelegatedTaskCreation(plan, grantId, options = {}) {
   keys(options, new Set(['kindOfSession']), 'delegated creation');
   const { grant, entry } = delegatedGrant(plan, grantId);
+  if (grant.args.assignmentMode === 'existing') throw new Error('This continuation requires its existing owner; a replacement conversation is not authorized.');
   if (entry.creation || entry.consumed.size || entry.stepClaims.size) throw new Error('This delegated task already claimed its terminal assignment.');
   const kindOfSession = options.kindOfSession ?? grant.args.kindOfSession;
   if (!taskLaunchers.has(kindOfSession) || grant.args.kindOfSession && kindOfSession !== grant.args.kindOfSession) throw new Error('Creation must use an authorized supported launcher.');

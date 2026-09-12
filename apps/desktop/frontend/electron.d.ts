@@ -1,6 +1,5 @@
 import type { TerminalRuntimeSnapshot } from "./terminalRuntime";
 import type {
-  AppVersionList,
   AgentThreadListResult,
   AgentThreadLookupPayload,
   AgentThreadLookupResult,
@@ -119,8 +118,6 @@ declare global {
         check: () => Promise<UpdateActionResult>;
         download: () => Promise<UpdateActionResult>;
         restart: () => Promise<boolean>;
-        listVersions: () => Promise<AppVersionList>;
-        installVersion: (version: string) => Promise<UpdateActionResult>;
         onEvent: (callback: (state: UpdateState) => void) => () => void;
       };
       workspace: {

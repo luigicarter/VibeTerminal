@@ -738,7 +738,6 @@ function installOrchestrator(options) {
     throw new Error(`Unsupported action: ${kind}`);
   }
   const relay = createOrchestrator({ userDataPath: app.getPath("userData"), secureStorage: safeStorage, fetch: options.fetch, interpretIntent: options.interpretIntent,
-    agentHarness: options.agentHarness || process.env.LINA_ORCHESTRATOR_HARNESS || 'agents-v1',
     resolveWorkspaceIdentity: createWorkspaceIdentity(),
     getSessions: async () => {
       const result = await inventoryReader.refresh();

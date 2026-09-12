@@ -2,6 +2,7 @@
 // Converts the Web model's structured answer into native Codex tool events.
 // This module never executes tools or owns a conversation/approval loop.
 const { createHash } = require('node:crypto');
+const { accountSelection } = require('./codexWebModelDiscovery.cjs');
 const nameOf = tool => tool.namespace ? `${tool.namespace}__${tool.name}` : tool.name;
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 function roundToken(parsed) {
@@ -19,6 +20,14 @@ function availableTools(parsed) {
 }
 function toolContract(parsed) {
   const tools = availableTools(parsed), imageTool = tools.find(tool => tool.name === 'generate_image' && /lina_images/.test(nameOf(tool)));
+  const selection = accountSelection(parsed.modelId, parsed.options.reasoning);
+  const modelGuidance = selection ? [
+    '<lina_model_selection>',
+    JSON.stringify(selection),
+    '</lina_model_selection>',
+    'This metadata identifies the model and reasoning effort selected for the current native Codex request. For a model-identity question, report this current selection in plain language, for example: "This session is set to <name> (<reasoning_effort> reasoning)." Do not infer the current selection from an earlier assistant reply, an old model name in the task history, or a remembered default identity.',
+    'The bridge requires the outgoing ChatGPT request to match this selection. This verifies the requested model, not the identity of the server that generated the answer. Do not claim independent backend verification or a fallback to another model without evidence. If asked to verify the actual backend model, explain that limitation. Mention model-selection metadata only when relevant to the user\'s question.',
+  ] : [];
   const editingGuidance = tools.some(tool => tool.name === 'apply_patch') ? [
     'For an existing file, use apply_patch Update File hunks with enough matching context. Do not delete a file just to recreate it in a later call. After a rejected patch, correct its format or context without first deleting the file. Preserve unrelated edits.',
     'File edits belong in native tool calls. Let Codex display their native diffs; do not repeat whole files, patches, tool arguments, or tool results as chat prose unless the user asks to see them. Keep progress and completion messages concise and distinguish static checks from successful browser or runtime verification.',
@@ -27,6 +36,7 @@ function toolContract(parsed) {
     : tools.some(tool => tool.name === 'tool_search') ? ['Some native tools are discoverable with tool_search. Search for generate_image before deciding image generation is unavailable. Temporary Chat limitations apply to its built-in tools, not to the external native tool inventory.'] : [];
   if (parsed._linaResume) return [
     'Continue the same native Codex task. Only new messages/results follow; earlier instructions and the tool inventory remain in this conversation.',
+    ...modelGuidance,
     'Answer normally in Markdown. For local tool calls, start with LINA-TOOL-CALL: ' + roundToken(parsed) + ' and then a fenced JSON block {"codex_web":1,"round":"' + roundToken(parsed) + '","calls":[{"name":"exact_inventory_name","arguments":{}}],"answer":null}.',
     'Use the actual native tool results as evidence, respect permission denials, and finish the task before giving its final answer.',
     'A native browser security-policy rejection is not a connection error. Never rehost the blocked page, switch browser surfaces, or use shell/CDP to perform the rejected browser action. Explain the blocked verification and continue only with independent allowed work.',
@@ -35,6 +45,7 @@ function toolContract(parsed) {
   ];
   return [
     'The native Codex CLI on the user\'s computer is connected to this response. It executes local tools, enforces its configured permissions and returns tool results in the next request.',
+    ...modelGuidance,
     'For local work, select tools from the exact inventory below. Return tool requests using this JSON response protocol; do not use a ChatGPT connector or claim that local access is unavailable.',
     'For an ordinary final reply, answer directly in Markdown or the requested output format. Do not wrap ordinary replies in transport JSON.',
     'Only when requesting local tools, start with LINA-TOOL-CALL: ' + roundToken(parsed) + ' on its own line, then one fenced ```json code block containing {"codex_web":1,"round":"' + roundToken(parsed) + '","calls":[{"name":"exact_inventory_name","arguments":{}}],"answer":null}.',

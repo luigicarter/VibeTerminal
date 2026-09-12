@@ -21,8 +21,16 @@ function completionOptions(model) {
   return options;
 }
 
+// A strict JSON schema keeps the reviewer reply in message.content, so the
+// existing parse and validation path is unchanged. Only a model that advertises
+// structured outputs receives it; every other model keeps today's prose reply.
+function structuredOutput(model, name, schema) {
+  if (!Array.isArray(model?.supportedParameters) || !model.supportedParameters.includes('structured_outputs')) return {};
+  return { response_format: { type: 'json_schema', json_schema: { name, strict: true, schema } } };
+}
+
 // A reasoning model can exhaust its output budget before producing a tool call.
 const exhaustedReply = response => response?.choices?.[0]?.finish_reason === 'length'
   && !String(response.choices[0].message?.content || '').trim() && !response.choices[0].message?.tool_calls?.length;
 
-module.exports = { outputTokensFor, completionOptions, exhaustedReply };
+module.exports = { outputTokensFor, completionOptions, structuredOutput, exhaustedReply };

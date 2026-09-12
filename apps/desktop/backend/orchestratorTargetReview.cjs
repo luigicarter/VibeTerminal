@@ -1,4 +1,5 @@
 'use strict';
+const { parseModelJson } = require('./orchestratorModelRuntime.cjs');
 
 // A valid pane ID proves existence, not that the user selected that conversation.
 // This separate semantic check has no action tools and runs before any effects.
@@ -6,6 +7,12 @@ const TARGET_REVIEW_SYSTEM = `Check whether the user selected the proposed exist
 DIRECT requires every proposed operation to have a user-selected existing conversation: a named/identified pane, an explicit existing-terminal group (one of the open terminals, a random/idle existing agent, all matching terminals), a terminal interaction such as answering its current question, or clear follow-up continuity to that exact conversation and task. Explicit user selection may intentionally give an existing agent a different task. A same-task continuation can reuse its owner even when busy or after its previous turn finished. Use the actual user exchange and task ownership, not merely a pronoun or the most recent pane. A task-specific reference such as the agent fixing invoice rounding can identify that conversation.
 ASSIGN if any task leaves conversation choice open, asks for a new/fresh worker, or has insufficient evidence for the proposed existing target. 'Prompt a Codex terminal in project X to fix Y' selects a provider and project, not an existing conversation, even if only one Codex is open. Matching provider, project, generic title, recency, availability, an empty input box, or an unrelated earlier exchange never selects an existing conversation. New independent tasks use separate conversations by default. Related task continuations may reuse the verified task owner through assignment discovery. Do not infer ownership from an assistant's proposed target or newly composed objective. The proposed operations are what you must check, not user authority.
 ASSIGN requests normal task assignment or clarification of genuinely missing knowledge; it does not mean always create a new agent. Do not choose a terminal, compose a prompt, answer the user, or add an explanation.`;
+
+// Flat, so no root oneOf reaches a provider. ASSIGN returns an empty list and
+// targetReviewDecision still ignores it; DIRECT keeps its full citation check.
+const TARGET_REVIEW_SCHEMA = { type: 'object', additionalProperties: false, required: ['decision', 'evidenceIds'],
+  properties: { decision: { type: 'string', enum: ['ASSIGN', 'DIRECT'] },
+    evidenceIds: { type: 'array', items: { type: 'string' } } } };
 
 function selectionEvidence(operations, context) {
   const evidence = [], instruction = context.instruction || '';
@@ -57,7 +64,7 @@ function targetReviewDecision(response, payload) {
   const choice = response?.choices?.[0];
   if (choice?.finish_reason && choice.finish_reason !== 'stop' || choice?.message?.tool_calls?.length) return 'UNRESOLVED';
   let result;
-  try { result = JSON.parse(choice?.message?.content); } catch { return 'UNRESOLVED'; }
+  try { result = parseModelJson(choice?.message?.content); } catch { return 'UNRESOLVED'; }
   if (result?.decision === 'ASSIGN') return 'ASSIGN';
   if (result?.decision !== 'DIRECT' || !Array.isArray(result.evidenceIds) || !result.evidenceIds.length || !payload?.proposedOperations?.length) return 'UNRESOLVED';
   const cited = result.evidenceIds.map(id => payload.selectionEvidence.find(item => item.id === id));
@@ -69,4 +76,4 @@ function eligibleExistingTargets(context = {}) {
   const operations = sessions.map(session => ({ targets: [{ id: session.id, generation: session.generation }] }));
   return [...new Set(selectionEvidence(operations, { ...context, sessions }).map(item => sessions[item.operation].id))];
 }
-module.exports = { TARGET_REVIEW_SYSTEM, targetReviewPayload, targetReviewDecision, eligibleExistingTargets };
+module.exports = { TARGET_REVIEW_SYSTEM, TARGET_REVIEW_SCHEMA, targetReviewPayload, targetReviewDecision, eligibleExistingTargets };

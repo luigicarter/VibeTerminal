@@ -117,6 +117,9 @@ jobs:
       - name: Exercise packaged voice inference before publication
         run: node scripts/qa/voice-packaged-smoke.cjs
 
+      - name: Verify packaged Open Codex console input and model routing
+        run: npm run smoke:open-codex:packaged
+
       - name: Exercise packaged workspace and task interfaces
         run: node scripts/qa/orchestrator-smoke.cjs --packaged --hidden
 
@@ -210,3 +213,4 @@ jobs:
             apps/desktop/.tmp/orchestrator-background-launch-smoke/**/electron.log
             apps/desktop/.tmp/codex-web-tui-*/results.json
             apps/desktop/.tmp/open-codex/electron-*/electron.log
+            apps/desktop/.tmp/open-codex/packaged-*/**

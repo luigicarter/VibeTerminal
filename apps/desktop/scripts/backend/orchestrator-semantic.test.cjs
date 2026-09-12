@@ -18,10 +18,10 @@ const executeGrant = (body, kind = 'send_prompt') => {
   assert.ok(grant, kind);
   return tools(...grant.targets.map(target => ({ kind, grantId: grant.id, targetId: target.id })));
 };
-async function fixture(t) {
+async function fixture(t, supportedParameters = ['tools', 'tool_choice']) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-semantic-test-'));
   const projects = [{ name: 'vibeTerminal', path: root }, { name: 'Other', path: path.join(root, 'other') }];
-  const f = { root, projects, plans: [], steps: [], compiler: [], executor: [], effects: [], reads: 0 };
+  const f = { root, projects, plans: [], steps: [], compiler: [], executor: [], reviews: [], effects: [], reads: 0 };
   f.sessions = Array.from({ length: 6 }, (_, i) => ({ id: `c${i + 1}`, name: `Codex ${i + 1}`, kind: 'codex', provider: 'codex', generation: `g${i + 1}`, cwd: root, projectName: 'vibeTerminal', status: 'running' }));
   f.sessions.push({ id: 'other', name: 'Other Codex', kind: 'codex', generation: 'other-g', cwd: projects[1].path, projectName: 'Other' });
   f.relay = createOrchestrator({ userDataPath: root, secureStorage: { isEncryptionAvailable: () => false },
@@ -30,11 +30,11 @@ async function fixture(t) {
     dispatchAction: async action => { f.effects.push(action); const result = f.effect ? await f.effect(action) : { ok: true, status: 'written' }; if (action.kind === 'send_prompt' && result.ok) { const session = f.sessions.find(session => session.id === action.targetId); Object.assign(session, { turnId: action.actionId, turnState: 'running', turnStartedAt: Date.now(), actionId: action.actionId }); } return result; },
     fetch: async (url, options) => {
       if (url.endsWith('/key')) return new Response(JSON.stringify({ data: {} }));
-      if (url.endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'scripted-brain', context_length: 128000, supported_parameters: ['tools', 'tool_choice'] }] }));
+      if (url.endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'scripted-brain', context_length: 128000, supported_parameters: supportedParameters }] }));
       assert.ok(url.endsWith('/chat/completions'));
       const body = JSON.parse(options.body), compiler = body.tools?.[0]?.function?.name === 'interpret_workspace';
       // These transport fixtures script user-selected targets; semantic veto cases have a separate suite.
-      if (body.messages[0].content === require('../../backend/orchestratorTargetReview.cjs').TARGET_REVIEW_SYSTEM) return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ decision: 'DIRECT', evidenceIds: JSON.parse(body.messages[1].content).selectionEvidence.map(item => item.id) }) } }] }));
+      if (body.messages[0].content === require('../../backend/orchestratorTargetReview.cjs').TARGET_REVIEW_SYSTEM) { f.reviews.push(body); return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ decision: 'DIRECT', evidenceIds: JSON.parse(body.messages[1].content).selectionEvidence.map(item => item.id) }) } }] })); }
       if (compiler && f.rejectNamedChoice && typeof body.tool_choice === 'object') { f.namedRejections = (f.namedRejections || 0) + 1; return new Response(JSON.stringify({ error: { message: 'Request contains an invalid argument.' } }), { status: 400 }); }
       const queue = compiler ? f.plans : f.steps;
       assert.ok(queue.length, `Unexpected ${compiler ? 'compiler' : 'executor'} request`);
@@ -94,7 +94,7 @@ test('interpretation cannot spend on repair after its previous response reaches 
   assert.deepEqual(f.effects, []);
 });
 
-test('opaque provider reasoning survives prose repair and tool exchanges only within its request', async t => {
+test('opaque provider reasoning is replayed with the model turns that produced it, only within its request', async t => {
   const f = await fixture(t);
   const proseDetails = [{ type: 'reasoning.encrypted', data: 'PRIVATE_PROSE_REASONING_MARKER', id: 'reasoning-1', format: 'provider-v1', index: 0 }];
   const toolDetails = [
@@ -108,13 +108,15 @@ test('opaque provider reasoning survives prose repair and tool exchanges only wi
   toolReply.choices[0].message.tool_calls[0].extra_content = { google: { thought_signature: 'PRIVATE_TOOL_SIGNATURE_MARKER' } };
   const result = await f.run('Show Codex 1.', { goal: 'Show Codex 1.', actions: [{ kind: 'focus_session', targetIds: ['c1'] }] }, premature,
     body => {
-      const prior = body.messages.find(message => message.role === 'assistant' && message.content === 'I will show Codex 1.');
-      assert.deepEqual(prior?.reasoning_details, proseDetails);
+      // The unfinished reply is quoted as application context, not replayed as a
+      // model turn, so the continued conversation never ends with one.
+      assert.deepEqual(body.messages.filter(message => message.role === 'assistant'), []);
+      assert.match(body.messages.at(-1).content, /Your last reply was: "I will show Codex 1\."/);
       assert.match(body.messages.at(-1).content, /unfinished work/);
       return toolReply;
     }, body => {
       const assistant = body.messages.filter(message => message.role === 'assistant');
-      assert.deepEqual(assistant.map(message => message.reasoning_details), [proseDetails, toolDetails]);
+      assert.deepEqual(assistant.map(message => message.reasoning_details), [toolDetails]);
       assert.deepEqual(assistant.at(-1).tool_calls, toolReply.choices[0].message.tool_calls);
       assert.equal(body.messages.at(-1).tool_call_id, toolReply.choices[0].message.tool_calls[0].id);
       return reply('Codex 1 is open.');
@@ -135,6 +137,50 @@ test('opaque provider reasoning survives prose repair and tool exchanges only wi
   for (const file of files) assert.doesNotMatch(fs.readFileSync(file, 'utf8'), privateMarker, file);
 });
 
+// A provider signature is only valid for a history the model itself authored,
+// and a conversation that ends with a model turn is rejected outright by
+// providers that carry application notes as an instruction rather than a turn.
+// The application's continuation is therefore a note about the reply, never a
+// replayed model turn; the model's own turns stay exactly as it produced them.
+test('an application continuation is a note, not a model turn, and leaves the model turns untouched', async t => {
+  const f = await fixture(t);
+  const sentDetails = [{ type: 'reasoning.encrypted', data: 'PRIVATE_SEND_SIGNATURE_MARKER', id: 'send-0', format: 'google-gemini-v1', index: 0 }];
+  const answerDetails = [{ type: 'reasoning.encrypted', data: 'PRIVATE_ANSWER_SIGNATURE_MARKER', id: 'respond-0', format: 'google-gemini-v1', index: 0 }];
+  const sendReply = tools({ kind: 'send_prompt', targetId: 'c1' });
+  sendReply.choices[0].message.reasoning_details = sentDetails;
+  const answerReply = calls('respond', { text: 'Sent the review to Codex 1.', responseTurn: 'complete' });
+  answerReply.choices[0].message.reasoning_details = answerDetails;
+  let continued;
+  const result = await f.run('Ask Codex 1 and Codex 2 to review the last changes.',
+    { goal: 'Request two reviews.', actions: [{ kind: 'send_prompt', targetIds: ['c1', 'c2'], selection: 'all', text: 'Review the last changes.' }] },
+    body => { assert.deepEqual(body.messages.filter(message => message.reasoning_details), []); return sendReply; },
+    body => {
+      // One model turn, entirely the model's: its own signature is still replayed.
+      assert.deepEqual(body.messages.filter(message => message.reasoning_details).map(message => message.reasoning_details), [sentDetails]);
+      return answerReply;
+    },
+    body => {
+      continued = body;
+      const assistants = body.messages.filter(message => message.role === 'assistant');
+      // Only the two turns the model produced, each with its own signature and
+      // its own tool call. The application added no turn of its own.
+      assert.deepEqual(assistants.map(message => message.reasoning_details), [sentDetails, answerDetails]);
+      assert.deepEqual(assistants[0].tool_calls, sendReply.choices[0].message.tool_calls);
+      assert.deepEqual(assistants[1].tool_calls, answerReply.choices[0].message.tool_calls);
+      assert.equal(body.messages.at(-1).role, 'system');
+      assert.match(body.messages.at(-1).content, /Your last reply was: "Sent the review to Codex 1\."/);
+      assert.match(body.messages.at(-1).content, /unfinished work/);
+      // The last conversation turn is the tool receipt, never a model turn.
+      assert.equal(body.messages.filter(message => message.role !== 'system').at(-1).role, 'tool');
+      return executeGrant(body);
+    }, reply('Both reviews are sent.'));
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(f.effects.map(effect => effect.targetId), ['c1', 'c2']);
+  assert.equal(continued.messages.filter(message => message.role === 'assistant').length, 2);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_(?:SEND|ANSWER)_SIGNATURE_MARKER/);
+  assert.doesNotMatch(JSON.stringify(f.relay.getState()), /PRIVATE_(?:SEND|ANSWER)_SIGNATURE_MARKER/);
+});
+
 test('persistent invalid interpretation and unknown targets fail closed after one repair', async t => {
   for (const invalid of [{ ...none, unexpected: true }, { goal: 'Close target.', actions: [{ kind: 'close', targetIds: ['missing'] }] },
     { choices: [{ message: { tool_calls: [{ function: { name: 'interpret_workspace', arguments: '{broken' } }] } }] }]) {
@@ -145,6 +191,35 @@ test('persistent invalid interpretation and unknown targets fail closed after on
     const events = fs.readFileSync(path.join(f.root, 'logs', 'orchestrator-errors.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
     assert.equal(events.some(event => event.stage === 'interpretation' && event.status === 'retry-failed' && event.error.message !== result.error), true);
   }
+});
+
+test('a failed interpretation shows the validator reason and a later turn can recall it', async t => {
+  const f = await fixture(t);
+  const invalid = { ...none, unexpected: true };
+  const result = await f.run('Hello.', [invalid, invalid]);
+  // The returned error stays the stable generic text; only the message explains.
+  assert.equal(result.error, 'I could not interpret that request. Please try again.');
+  const system = f.relay.getState().messages.filter(message => message.role === 'system').at(-1);
+  assert.equal(system.text.startsWith(`${result.error} Reason: `), true, system.text);
+  const reason = system.text.slice(`${result.error} Reason: `.length);
+  assert.match(reason, /unexpected intent fields/i);
+  assert.ok(reason.length > 0 && reason.length <= 300);
+
+  await f.run('What went wrong?', none, reply('The previous request could not be compiled.'));
+  const planning = metadata(f.compiler.at(-1));
+  assert.equal(planning.lastFailure.stage, 'interpretation');
+  assert.equal(planning.lastFailure.reason, reason);
+  assert.equal(planning.lastFailure.requestId, result.requestId);
+  assert.equal(typeof planning.lastFailure.at, 'number');
+  assert.equal(JSON.parse(f.executor.at(-1).messages[1].content).lastFailure.reason, reason);
+});
+
+test('a conversation without a failed interpretation carries no recalled failure', async t => {
+  const f = await fixture(t);
+  await f.run('Hello.', none, reply('Hello.'));
+  await f.run('How are you?', none, reply('Fine.'));
+  assert.equal(metadata(f.compiler.at(-1)).lastFailure, undefined);
+  assert.equal(JSON.parse(f.executor.at(-1).messages[1].content).lastFailure, undefined);
 });
 
 test('cancellation during interpretation repair prevents executor and dispatch', async t => {
@@ -341,4 +416,26 @@ test('an equivalent answer retry returns its receipt after the question resolves
   const result = await f.run('Use Small.', { goal: 'Submit the supplied answer.', actions: [{ kind: 'answer_question', targetIds: ['c1'], answerText: 'Small' }] }, tools({ kind: 'answer_question' }), tools({ kind: 'answer_question' }), reply('Answer submitted.'));
   assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(f.effects.length, 1); assert.equal(result.actions.length, 2);
   assert.ok(result.actions.every(action => action.status === 'submitted'));
+});
+
+test('a reviewer schema is requested only from a model that advertises structured outputs', async t => {
+  const { TARGET_REVIEW_SCHEMA } = require('../../backend/orchestratorTargetReview.cjs');
+  const instruction = 'Please have Codex 1 review the patch.';
+  const plan = () => ({ goal: 'Review patch.', actions: [{ kind: 'send_prompt', targetIds: ['c1'], text: 'Review the patch.' }] });
+  const plain = await fixture(t);
+  assert.equal((await plain.run(instruction, plan(), tools({ kind: 'send_prompt' }), reply('Review requested.'))).ok, true);
+  assert.equal(plain.reviews.length, 1);
+  assert.equal(plain.reviews[0].response_format, undefined);
+  const structured = await fixture(t, ['tools', 'tool_choice', 'structured_outputs']);
+  assert.equal((await structured.run(instruction, plan(), tools({ kind: 'send_prompt' }), reply('Review requested.'))).ok, true);
+  assert.equal(structured.reviews.length, 1);
+  assert.equal(structured.reviews[0].response_format.type, 'json_schema');
+  assert.equal(structured.reviews[0].response_format.json_schema.name, 'target_review');
+  assert.equal(structured.reviews[0].response_format.json_schema.strict, true);
+  assert.deepEqual(structured.reviews[0].response_format.json_schema.schema, TARGET_REVIEW_SCHEMA);
+  // Only the reviewers gain a schema; the planner keeps its unchanged tool contract.
+  assert.ok(structured.compiler.length);
+  assert.ok(structured.compiler.every(body => body.response_format === undefined && body.tools?.length));
+  assert.ok(structured.executor.every(body => body.response_format === undefined));
+  assert.deepEqual(structured.effects.map(effect => effect.kind), plain.effects.map(effect => effect.kind));
 });

@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { createAdapter, toChatRequest, sseData } = require('../../backend/openCodexAdapter.cjs');
-const { modelCatalog, createRuntimeManager } = require('../../backend/openCodexRuntime.cjs');
+const { modelCatalog, createRuntimeManager, resolveCliHost } = require('../../backend/openCodexRuntime.cjs');
 const { launchSpec } = require('../../backend/openCodexCli.cjs');
 const providers = require('../../backend/openCodexProviders.cjs');
 const { findLatestAgentThread } = require('../../backend/agentThreadHost.cjs');
@@ -145,6 +145,17 @@ test('dedicated CLI requires its own bundle and overrides global Codex auth/conf
   assert.ok(!spec.args.join(' ').includes('local-token')); assert.ok(!spec.args.join(' ').includes('personal-key'));
   assert.throws(() => launchSpec({ ...env, LINA_OPEN_CODEX_BIN: undefined }), /missing its bundled/);
 });
+test('packaged Windows uses the bundled console host and refuses a missing runtime', () => {
+  const resourcesPath = path.join(fixtureRoot, 'console host resources');
+  const options = { packaged: true, resourcesPath, nodeCommand: 'LinaTerminal.exe', platform: 'win32' };
+  assert.throws(() => resolveCliHost(options), /missing its bundled console runtime/);
+  const command = path.join(resourcesPath, 'codex-web/runtime/runtime/bun.exe');
+  fs.mkdirSync(path.dirname(command), { recursive: true }); fs.writeFileSync(command, 'fixture');
+  assert.deepEqual(resolveCliHost(options), { command, env: {} });
+  assert.deepEqual(resolveCliHost({ ...options, packaged: false, nodeCommand: 'node' }), { command: 'node', env: {} });
+  assert.deepEqual(resolveCliHost({ ...options, platform: 'linux' }), { command: 'LinaTerminal.exe', env: { ELECTRON_RUN_AS_NODE: '1' } });
+});
+
 test('Open Codex listing, confirmation, and discovery stay in its separate history', async () => {
   const old = process.env.LINA_OPEN_CODEX_HOME, global = process.env.CODEX_HOME;
   const home = path.join(fixtureRoot, 'separate'), personal = path.join(fixtureRoot, 'personal'), cwd = path.join(fixtureRoot,'workspace');

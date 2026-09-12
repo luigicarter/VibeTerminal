@@ -20,7 +20,7 @@ async function fixture(t) {
     const body = options?.body ? JSON.parse(options.body) : undefined;
     calls.push({ url, body });
     if (url.endsWith('/key')) return json({ data: {} });
-    if (url.includes('/models')) return json({ data: [{ id: 'brain', supported_parameters: ['tools'] }] });
+    if (url.includes('/models')) return json({ data: [{ id: 'brain', context_length: 128000, supported_parameters: ['tools'] }] });
     if (url.endsWith('/transcriptions')) return json({ text: transcript });
     if (url.endsWith('/chat/completions')) return failure ? failure() : json({ choices: [{ finish_reason: 'stop', message: { content: 'Hello! How can I help?' } }] });
     if (url.endsWith('/speech')) {

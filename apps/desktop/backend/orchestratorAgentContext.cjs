@@ -15,7 +15,7 @@ function buildAgentContext({ records = [], targets = [], targetId, conversationT
     if (Buffer.byteLength(JSON.stringify(agents.concat(next))) > LIMITS.bootstrapBytes - 500) break;
     agents.push(next);
   }
-  return { harnessVersion: 'agents-v1', agents,
+  return { agents,
     agentDirectory: { total: records.length, relevant: relevant.length, included: agents.length, truncated: agents.length < relevant.length,
       active: records.filter(r => ['running', 'busy', 'working', 'waiting'].includes(r.activity.status)).length,
       needsInput: records.filter(r => r.attention.required).length, discovery: 'find_agents', details: 'read_agent',

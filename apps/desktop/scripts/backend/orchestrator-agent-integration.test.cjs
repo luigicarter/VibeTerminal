@@ -6,20 +6,21 @@ const { agent } = require('./orchestrator-agent-fixtures.cjs');
 let serial = 0;
 const response = body => new Response(JSON.stringify(body));
 const tool = action => ({ choices: [{ finish_reason: 'tool_calls', message: { tool_calls: [{ id: `agent-call-${++serial}`, type: 'function', function: { name: 'workspace', arguments: JSON.stringify(action) } }] } }] });
-async function fixture(t, count = 0) {
+async function fixture(t, count = 0, nativePipeline = false) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lina-agent-integration-'));
   const f = { root, plans: [], interpretations: [], phases: new Map(), effects: [], reads: [], contexts: [], routes: [], sessions:
     Array.from({length: count}, (_, i) => agent(`unrelated-${i}`, { cwd: root, name: `Unrelated job ${i}` })),
     launchers: [{ kind: 'claude', available: true, configured: true }, { kind: 'codex', available: true, configured: true }] };
-  f.app = createOrchestrator({ userDataPath: root, agentHarness: 'agents-v1',
+  f.app = createOrchestrator({ userDataPath: root,
     getSessions: () => f.sessions, getRoots: () => ({ documents: root, projects: f.projects || [{name:'Project',path:root}] }),
     getWorkspaceState: async () => f.workspaceState || ({ok:true,view:'project',cwd:root}), getLaunchers: () => f.launchers,
-    interpretIntent: async context => { f.interpretations.push(context); return f.interpret ? f.interpret(context) : { goal: context.instruction, actions: f.plans.shift() || [] }; },
+    interpretIntent: nativePipeline ? undefined : async context => { f.interpretations.push(context); return f.interpret ? f.interpret(context) : { goal: context.instruction, actions: f.plans.shift() || [] }; },
     reviewTaskAffinity: input => f.affinity ? f.affinity(input) : 'independent',
-    routeTask: async (context, api) => { f.routes.push(context); return f.route ? f.route(context,api) : {kind:'choose',decision:'create',kindOfSession:'codex',reason:'Independent task.'}; },
+    routeTask: nativePipeline ? undefined : async (context, api) => { f.routes.push(context); return f.route ? f.route(context,api) : {kind:'choose',decision:'create',kindOfSession:'codex',reason:'Independent task.'}; },
     readSession: async target => {
       f.reads.push(target.id); const s = f.sessions.find(item => item.id === target.id);
-      return { ok:true,id:s.id,generation:s.generation,text:'Observed composer',sequence:10,inputRevision:2 };
+      if (f.observe) return f.observe(target, s);
+      return { ok:true,id:s.id,generation:s.generation,text:f.output || 'Observed composer',sequence:10,inputRevision:2 };
     },
     dispatchAction: async action => {
       f.effects.push(action);
@@ -32,7 +33,9 @@ async function fixture(t, count = 0) {
     fetch: async (url, options) => {
       if (url.endsWith('/key')) return response({data:{}});
       if (url.endsWith('/models')) return response({data:[{id:'fixture',context_length:128000,supported_parameters:['tools','tool_choice']}]});
-      const body=JSON.parse(options.body), metadata=JSON.parse(body.messages.find(m=>m.role==='user').content);
+      const body=JSON.parse(options.body);
+      if (f.model) return response(await f.model(body));
+      const metadata=JSON.parse(body.messages.find(m=>m.role==='user').content);
       f.contexts.push(metadata);
       if (f.answer) return response(tool(await f.answer(body,metadata)));
       const grant=metadata.authorizedCommands?.grants.find(g=>g.kind==='operate_terminal');
@@ -107,6 +110,177 @@ test('verified same-task continuation reuses its busy owner and leaves unrelated
   assert.equal(next.ok,true,JSON.stringify(next));
   assert.equal(f.effects.filter(e=>e.kind==='create_session').length,created);
   assert(f.effects.filter(e=>e.kind==='send_prompt').every(e=>e.target.id===owner.id));
+});
+
+for (const relation of ['unclear', 'independent']) test(`existing-agent continuation never creates a replacement after ${relation} ownership review`, async t => {
+  const f = await fixture(t, 2), owner = f.sessions[0];
+  // A title the instruction only partly names keeps the deterministic
+  // titled-owner shortcut out of this case; the model router is the subject.
+  owner.name = 'Add the project chat section to the sidebar dock';
+  f.output = 'Implementing the project chat section. Continue from the saved plan.';
+  f.affinity = () => relation;
+  f.route = async (_context, api) => {
+    const found = await api.read({ kind: 'find_agents', query: 'chat section' });
+    await api.read({ kind: 'read_session', targetId: owner.id });
+    return { kind: 'choose', decision: 'reuse', agentId: found.agents[0].agentId, reason: 'Candidate for the existing chat task.' };
+  };
+  const result = await f.run('Tell the agent working on the project chat section to continue.', { assignmentMode: 'existing' });
+  assert.equal(f.task(result).status, 'needs-answer', JSON.stringify(result));
+  assert.deepEqual(f.effects, []);
+  assert.equal(f.routes[0].currentInstruction, 'Tell the agent working on the project chat section to continue.');
+});
+
+for (const decision of ['create', 'clarify']) test(`existing-agent continuation preserves the missing owner when routing proposes ${decision}`, async t => {
+  const f = await fixture(t, 2);
+  f.route = () => decision === 'create' ? { kind: 'choose', decision, kindOfSession: 'codex', reason: 'No verified owner.' }
+    : { kind: 'choose', decision, reason: 'Missing owner.', text: 'What is the title of the chat agent?' };
+  const result = await f.run('Tell the chat-section agent to continue.', { assignmentMode: 'existing' });
+  assert.equal(f.task(result).status, 'needs-answer', JSON.stringify(result));
+  assert.deepEqual(f.effects, []);
+  if (decision === 'clarify') assert.equal(f.task(result).question.text, 'What is the title of the chat agent?');
+});
+
+test('uncertain ownership in automatic routing does not turn a reuse proposal into creation', async t => {
+  const f = await fixture(t, 1);
+  f.route = async (_context, api) => {
+    await api.read({ kind: 'read_session', targetId: f.sessions[0].id });
+    return { kind: 'choose', decision: 'reuse', targetId: f.sessions[0].id, reason: 'Possible task owner.' };
+  };
+  f.affinity = () => 'unclear';
+  const result = await f.run('Continue the project chat task.');
+  assert.equal(f.task(result).status, 'needs-answer', JSON.stringify(result));
+  assert.deepEqual(f.effects, []);
+});
+
+test('a directly started task with verified continuity reuses its discovered agent without a work-item record', async t => {
+  const f = await fixture(t, 2), owner = f.sessions[0];
+  // A title the instruction only partly names keeps the deterministic
+  // titled-owner shortcut out of this case; the model router is the subject.
+  owner.name = 'Add the project chat section to the sidebar dock';
+  f.output = 'Implement the project chat section. Remaining work: wire up the composer.';
+  f.affinity = input => { assert.match(input.existingObjective, /wire up the composer/); return 'same-task'; };
+  f.route = async (_context, api) => {
+    const found = await api.read({ kind: 'find_agents', query: 'chat section' });
+    await api.read({ kind: 'read_agent', agentId: found.agents[0].agentId, sections: ['identity', 'work'] });
+    await api.read({ kind: 'read_session', targetId: owner.id });
+    return { kind: 'choose', decision: 'reuse', agentId: found.agents[0].agentId, reason: 'Observed the same task and remaining work.' };
+  };
+  const result = await f.run('Tell the agent working on the project chat section to continue.', { assignmentMode: 'existing' });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(f.effects.map(e => [e.kind, e.target?.id]), [['send_prompt', owner.id]]);
+});
+
+test('actual planning and routing repair a pane-ID mistake and continue the discovered chat agent once', async t => {
+  const f = await fixture(t, 2, true), owner = f.sessions[0];
+  // A title the instruction only partly names keeps the deterministic
+  // titled-owner shortcut out of this case; the model router is the subject.
+  owner.name = 'Add the project chat section to the sidebar dock';
+  f.output = 'Task: add the project chat section. Remaining work: connect the composer.';
+  f.affinity = input => {
+    assert(f.reads.includes(owner.id), 'Native evidence must precede the ownership review.');
+    assert.equal(input.existingTitle, owner.name);
+    assert.equal(input.existingObjective, f.output);
+    return 'same-task';
+  };
+  let round = 0, selected;
+  const named = (name, args) => ({ choices: [{ finish_reason: 'tool_calls', message: { tool_calls: [
+    { id: `pipeline-${++serial}`, type: 'function', function: { name, arguments: JSON.stringify(args) } }
+  ] } }] });
+  const original = 'Tell the agent working on the project chat section to continue its work.';
+  f.model = body => {
+    assert.equal(f.effects.length, 0, 'All model planning and reference repair precedes input.');
+    if (body.tools.some(t => t.function.name === 'plan_continue_task')) return named('plan_continue_task', { cwd: f.root, text: 'Continue work on the chat section.' });
+    const context = JSON.parse(body.messages.find(m => m.role === 'user').content);
+    assert.equal(context.scope.assignmentMode, 'existing');
+    assert.equal(context.currentInstruction, original);
+    if (++round === 1) return named('choose_existing_agent', { agentId: owner.id, reason: 'Candidate from the pane directory.' });
+    const last = JSON.parse(body.messages.filter(m => m.role === 'tool').at(-1).content);
+    if (round === 2) { assert.match(last.error, /exact agentId/); return named('find_agents', { query: 'chat section' }); }
+    if (round === 3) { selected = last.agents[0].agentId; return named('read_agent', { agentId: selected, sections: ['identity', 'work'] }); }
+    return named('choose_existing_agent', { agentId: selected, reason: 'Observed the existing chat task.' });
+  };
+  const result = await f.app.send({ text: original, origin: 'text' });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(round, 4);
+  assert(f.reads.includes(owner.id), 'The application obtains native evidence even when the router only reads metadata.');
+  assert.deepEqual(f.effects.map(e => [e.kind, e.target?.id]), [['send_prompt', owner.id]]);
+  assert.equal(f.effects[0].text, 'Continue work on the chat section.');
+});
+
+test('a uniquely titled agent named in a continuation is continued without any model routing', async t => {
+  const f = await fixture(t, 2), owner = f.sessions[0];
+  owner.name = 'Add project chat section';
+  f.output = 'Implementing the project chat section. Remaining: connect the composer.';
+  f.route = () => assert.fail('A unique in-project title match needs no routing model.');
+  f.affinity = () => assert.fail('An adopted verified binding replaces the ownership reviewer.');
+  const result = await f.run('Tell the agent working on the project chat section to continue.', { assignmentMode: 'existing' });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(f.effects.map(e => [e.kind, e.target?.id]), [['send_prompt', owner.id]]);
+  assert.equal(f.routes.length, 0);
+  assert.equal(f.contexts.length, 0, 'The deterministic owner shortcut costs no model call at all.');
+  const workItemId = f.task(result).workItemId;
+  assert.ok(workItemId);
+  const found = await f.app.dispatch({ kind: 'find_agents' });
+  const agentId = found.agents.find(a => a.surfaceId === owner.id).agentId;
+  const record = await f.app.dispatch({ kind: 'read_agent', agentId, sections: ['work'] });
+  assert.deepEqual(record.sections.work.items.map(w => [w.id, w.requiresRevalidation]), [[workItemId, false]],
+    'The adopted work item is bound to that pane.');
+
+  const second = await f.run('Tell the agent working on the project chat section to continue.', { assignmentMode: 'existing' });
+  assert.equal(second.ok, true, JSON.stringify(second));
+  assert.equal(f.task(second).workItemId, workItemId, 'The second continuation reuses the adopted work item.');
+  assert.deepEqual(f.effects.map(e => [e.kind, e.target?.id]), [['send_prompt', owner.id], ['send_prompt', owner.id]]);
+  assert.equal(f.routes.length, 0);
+  assert.equal(f.contexts.length, 0);
+});
+
+test('two agents sharing the named words still route through the model', async t => {
+  const f = await fixture(t, 2), owner = f.sessions[0];
+  owner.name = 'Add project chat section';
+  f.sessions[1].name = 'Chat section polish';
+  f.output = 'Implementing the project chat section. Remaining: connect the composer.';
+  f.affinity = () => 'same-task';
+  f.route = async (_context, api) => {
+    await api.read({ kind: 'read_session', targetId: owner.id });
+    return { kind: 'choose', decision: 'reuse', targetId: owner.id, reason: 'Observed the same chat task.' };
+  };
+  const result = await f.run('Tell the agent working on the project chat section to continue.', { assignmentMode: 'existing' });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(f.routes.length, 1, 'An ambiguous title match falls through to the router unchanged.');
+  assert.deepEqual(f.effects.map(e => [e.kind, e.target?.id]), [['send_prompt', owner.id]]);
+});
+
+test('a titled owner that disappears before its read asks for the terminal title', async t => {
+  const f = await fixture(t, 2), owner = f.sessions[0];
+  owner.name = 'Add project chat section';
+  f.observe = target => {
+    f.sessions = f.sessions.filter(item => item.id !== target.id);
+    return { ok: false, status: 'unavailable', error: 'Native output unavailable.' };
+  };
+  const result = await f.run('Tell the agent working on the project chat section to continue.', { assignmentMode: 'existing' });
+  assert.equal(f.task(result).status, 'needs-answer', JSON.stringify(result));
+  assert.match(f.task(result).question.text, /terminal title/i);
+  assert.deepEqual(f.effects, []);
+  assert.equal(f.task(result).workItemId, undefined, 'No work item is adopted without verified evidence.');
+});
+
+for (const failure of ['unavailable', 'changed']) test(`metadata-only routing stops without input if its required native read is ${failure}`, async t => {
+  const f = await fixture(t, 1), owner = f.sessions[0];
+  f.route = async (_context, api) => {
+    const found = await api.read({ kind: 'find_agents' });
+    await api.read({ kind: 'read_agent', agentId: found.agents[0].agentId, sections: ['identity', 'work'] });
+    return { kind: 'choose', decision: 'reuse', agentId: found.agents[0].agentId, reason: 'Candidate for the existing task.' };
+  };
+  f.affinity = () => assert.fail('Missing or stale native evidence cannot reach the reviewer.');
+  f.observe = (_target, session) => {
+    if (failure === 'unavailable') return { ok: false, status: 'unavailable', error: 'Native output unavailable.' };
+    const generation = session.generation;
+    session.generation = 'replacement-run';
+    return { ok: true, id: session.id, generation, text: 'Old task text.', sequence: 10, inputRevision: 2 };
+  };
+  const result = await f.run('Tell the existing task agent to continue.', { assignmentMode: 'existing' });
+  assert.equal(f.task(result).status, 'needs-answer', JSON.stringify(result));
+  assert.deepEqual(f.effects, []);
 });
 
 test('on-demand record and scoped note tools work through the actual model execution loop without terminal reads', async t => {

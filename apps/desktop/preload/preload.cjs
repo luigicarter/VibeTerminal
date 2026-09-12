@@ -146,9 +146,6 @@ contextBridge.exposeInMainWorld("vibe", {
     check: () => ipcRenderer.invoke("updates:check"),
     download: () => ipcRenderer.invoke("updates:download"),
     restart: () => ipcRenderer.invoke("updates:restart"),
-    listVersions: () => ipcRenderer.invoke("updates:list-versions"),
-    installVersion: (version) =>
-      ipcRenderer.invoke("updates:install-version", { version }),
     onEvent: (callback) => {
       const listener = (_event, payload) => callback(payload);
       ipcRenderer.on("updates:event", listener);

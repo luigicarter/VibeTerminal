@@ -53,6 +53,20 @@ function runtimeConnection(runtimeHost, state) {
     automatic: config.config?.browserInteractionMode !== 'manual' };
 }
 
+async function ensureActiveBridgeRoute(runtimeHost) {
+  // A model refresh reads the account catalog. An already-active native route
+  // must not be reconfigured just because shared user settings (for example
+  // agents.max_depth) differ from the old integration installation journal.
+  const result = await runtimeHost.run('lina-route-status', ['route', 'status'], {
+    embedded: true, message: 'Checking the local Web route', successMessage: 'Local Web route checked', timeoutMs: 15000,
+  });
+  let status;
+  try { status = JSON.parse(result.stdout); } catch { throw new Error('bridge_config_out_of_sync'); }
+  const sharedDepthChange = "Codex [agents].max_depth changed after Compatibility V1 setup; refusing to overwrite the user's newer value";
+  if (status.installed === true && status.active === true && Array.isArray(status.errors) && status.errors.every(error => error === sharedDepthChange)) return;
+  await runtimeHost.connectBridgeRoute();
+}
+
 function bootstrap() {
   require('./codexWebChannel.cjs').attachBridgeChannel();
   const { app } = require('electron');
@@ -163,7 +177,7 @@ function attach({ app, browserHost, runtimeHost, runtimeSupervisor, stateStore, 
           else {
             const runtime = await runtimeSupervisor.startIfConfigured();
             if (runtime.status !== 'ready') throw new Error('bridge_config_out_of_sync');
-            await runtimeHost.connectBridgeRoute();
+            await ensureActiveBridgeRoute(runtimeHost);
           }
           stateStore.update({ coreSetupComplete: true, codexCatalogVerified: false });
           if (browserHost.linaValidation) browserHost.linaValidation.error = null;
@@ -196,4 +210,4 @@ function attach({ app, browserHost, runtimeHost, runtimeSupervisor, stateStore, 
   browserHost.linaOnValidationComplete = () => send({ event: 'validation-complete', state: snapshot(), error: browserHost.linaValidation?.error?.code });
   if (browserHost.linaValidation && !browserHost.linaValidation.pending) browserHost.linaOnValidationComplete();
 }
-module.exports = { bootstrap, attach, runtimeConnection, refreshStartupAuthentication, bundledRuntime, beginStartupValidation, validatedSession };
+module.exports = { bootstrap, attach, runtimeConnection, refreshStartupAuthentication, bundledRuntime, beginStartupValidation, validatedSession, ensureActiveBridgeRoute };

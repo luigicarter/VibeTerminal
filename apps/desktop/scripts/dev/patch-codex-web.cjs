@@ -2,8 +2,9 @@
 const fs = require('node:fs');
 const path = require('node:path');
 function patchUpstream(root) {
-  fs.copyFileSync(path.join(__dirname, '../../backend/codexWebModelDiscovery.cjs'), path.join(root, 'src/lina-account-models.cjs'));
-  fs.copyFileSync(path.join(__dirname, '../../backend/codexWebToolRelay.cjs'), path.join(root, 'src/lina-tool-relay.cjs'));
+  fs.writeFileSync(path.join(root, 'src/lina-account-models.cjs'), fs.readFileSync(path.join(__dirname, '../../backend/codexWebModelDiscovery.cjs'), 'utf8').replace("require('./codexWebModelVerification.cjs')", "require('./lina-model-verification.cjs')"));
+  fs.copyFileSync(path.join(__dirname, '../../backend/codexWebModelVerification.cjs'), path.join(root, 'src/lina-model-verification.cjs'));
+  fs.writeFileSync(path.join(root, 'src/lina-tool-relay.cjs'), fs.readFileSync(path.join(__dirname, '../../backend/codexWebToolRelay.cjs'), 'utf8').replace("require('./codexWebModelDiscovery.cjs')", "require('./lina-account-models.cjs')"));
   fs.copyFileSync(path.join(__dirname, '../../backend/codexWebStartup.cjs'), path.join(root, 'src/lina-startup.cjs'));
   fs.copyFileSync(path.join(__dirname, '../../backend/codexWebImages.cjs'), path.join(root, 'src/lina-images.cjs'));
   fs.copyFileSync(path.join(__dirname, '../../backend/codexWebNativeCancellation.cjs'), path.join(root, 'src/lina-native-cancellation.cjs'));
@@ -70,6 +71,12 @@ function patchUpstream(root) {
   edit('src/config.ts', text => replace(text, 'port: 17841,', 'port: Number(process.env.LINA_CODEX_WEB_PORT || 17841),'));
   edit('src/types.ts', text => replace(text, '  freeform?: boolean;', '  freeform?: boolean;\n  format?: Record<string, unknown>;'));
   edit('src/responses/parser.ts', text => replace(text, '      freeform: true,', '      freeform: true,\n      ...(process.env.LINA_CODEX_WEB_HOST_MODULE && isObj(t.format) ? { format: t.format } : {}),'));
+  edit('src/bridge.ts', text => replace(text, '              const failure = adapterFailureFromEvent(event);', `              const failure = adapterFailureFromEvent(event);
+              // Native Codex 0.154 retries unknown response.failed codes even
+              // with retryable:false. Use its terminal InvalidRequest code for
+              // these invalid model selections; retain the actual reason in
+              // the message and Lina's per-request verification receipt.
+              if (process.env.LINA_CODEX_WEB_HOST_MODULE && ['model_response_mismatch', 'model_response_unverified', 'model_surface_mismatch', 'model_selection_failed', 'model_effort_unavailable', 'model_unavailable'].includes(event.code || '')) failure.error.code = 'invalid_prompt';`));
   edit('src/chatgpt-web-models.ts', text => {
     text = 'import { accountRoutes, resolveAccountRoute, modelContextLimits } from "./lina-account-models.cjs";\n' + text;
     text = replace(text, '  return modelId.startsWith(CHATGPT_WEB_MODEL_PREFIX);', '  if (process.env.LINA_CODEX_WEB_HOST_MODULE) return Boolean(resolveAccountRoute(modelId));\n  return modelId.startsWith(CHATGPT_WEB_MODEL_PREFIX);');
@@ -106,6 +113,8 @@ function patchUpstream(root) {
     text = replace(text, '      && mode.localTools\n      && retainedLauncherDescriptor', '      && (mode.localTools || process.env.LINA_CODEX_WEB_HOST_MODULE)\n      && retainedLauncherDescriptor');
     text = replace(text, '? chatGptConversationKey(checkpointInput.parsed, executionNamespace)', '? (process.env.LINA_CODEX_WEB_HOST_MODULE ? guardedConversationKey(checkpointInput.parsed, chatGptConversationKey(checkpointInput.parsed, executionNamespace), accountModel(checkpointInput.parsed.modelId).workMode) : chatGptConversationKey(checkpointInput.parsed, executionNamespace))');
     text = replace(text, '  if (normalized instanceof ChatGptWebAdapterError) return normalized;', `  if (normalized instanceof ChatGptWebAdapterError) return normalized;
+  if (process.env.LINA_CODEX_WEB_HOST_MODULE && ['model_surface_mismatch', 'model_effort_unavailable', 'model_unavailable'].includes(normalized.message)) return new ChatGptWebAdapterError(normalized.message === 'model_surface_mismatch' ? 'ChatGPT did not open Work mode for the selected model. No request was sent through Temporary Chat. Restart the pane or choose another model with /model.' : 'ChatGPT did not confirm the requested model and reasoning level. Refresh Web models, then select an available model and effort.', { status: 400, errorType: 'invalid_request_error', code: normalized.message, retryable: false });
+  if (process.env.LINA_CODEX_WEB_HOST_MODULE && ['model_response_mismatch', 'model_response_unverified'].includes(normalized.message)) return new ChatGptWebAdapterError(normalized.message === 'model_response_mismatch' ? 'ChatGPT answered with a different model than the one selected. Lina blocked that response. Choose another model with /model; the requested model may not be available through ChatGPT Web.' : 'ChatGPT did not provide a verifiable model identity for this response. Lina blocked the unverified response. Choose another model with /model.', { status: 400, errorType: 'invalid_request_error', code: normalized.message, retryable: false });
   if (process.env.LINA_CODEX_WEB_HOST_MODULE && normalized.message === 'model_selection_failed') return new ChatGptWebAdapterError('ChatGPT changed the selected Web model. No request was sent to the other model. Refresh Web models from the pane menu, then retry.', { status: 400, errorType: 'invalid_request_error', code: 'model_selection_failed', retryable: false });`);
     text = replace(text, '? retainedConversationResumeRequest(checkpointInput.parsed)', '? (process.env.LINA_CODEX_WEB_HOST_MODULE ? linaResumeRequest(checkpointInput.parsed) : retainedConversationResumeRequest(checkpointInput.parsed))');
     text = replace(text, '        capabilities: turnCapabilities,\n        prepare: async () => ({', `        capabilities: turnCapabilities,
@@ -179,10 +188,10 @@ function linaRememberModel(label: string, effort: string) {
     text = replace(text, '    captureDiagnostic?: (checkpoint: string) => Promise<void>,\n  ): Promise<Locator> {', '    captureDiagnostic?: (checkpoint: string) => Promise<void>,\n    modelId?: string,\n  ): Promise<Locator> {');
     text = replace(text, '    if (page.url() !== CHATGPT_TEMPORARY_CHAT_URL) {\n      await page.goto(CHATGPT_TEMPORARY_CHAT_URL, {', '    const targetUrl = process.env.LINA_CODEX_WEB_HOST_MODULE && modelId?.startsWith("chatgpt-account/") ? accountChatUrl(modelId) : CHATGPT_TEMPORARY_CHAT_URL;\n    if (page.url() !== targetUrl) {\n      await page.goto(targetUrl, {');
     text = replace(text, '          () => this.prepareTemporaryChatSurface(\n            page,\n            checkpoint => diagnostics.capture(page, checkpoint),\n          ),', '          () => this.prepareTemporaryChatSurface(\n            page,\n            checkpoint => diagnostics.capture(page, checkpoint),\n            turn.modelId,\n          ),');
-    text = replace(text, '    await assertTemporaryChatPage(page);\n    await captureDiagnostic?.("session-verified");', '    await assertTemporaryChatPage(page);\n    if (process.env.LINA_CODEX_WEB_HOST_MODULE && modelId?.startsWith("chatgpt-account/")) noteAccountNavigation(page, modelId);\n    await captureDiagnostic?.("session-verified");');
+    text = replace(text, '    await assertTemporaryChatPage(page);\n    await captureDiagnostic?.("session-verified");', '    const linaWork = process.env.LINA_CODEX_WEB_HOST_MODULE && modelId?.startsWith("chatgpt-account/") && accountModel(modelId).workMode;\n    if (!linaWork) await assertTemporaryChatPage(page);\n    if (process.env.LINA_CODEX_WEB_HOST_MODULE && modelId?.startsWith("chatgpt-account/")) noteAccountNavigation(page, modelId);\n    await captureDiagnostic?.("session-verified");');
     text = replace(text, '      prepared.release();\n      if (turnConnection)', '      if (process.env.LINA_CODEX_WEB_HOST_MODULE && turn.abortSignal?.aborted && diagnosticPage && !diagnosticPage.isClosed()) await linaStopPage(diagnosticPage);\n      prepared.release();\n      if (turnConnection)');
     text = `import { stopImagePage as linaStopPage } from '../../lina-images.cjs';
-import { selectAccountModel, assertAccountSelection, accountChatUrl, noteAccountNavigation } from '../../lina-account-models.cjs';
+import { accountModel, selectAccountModel, assertAccountSelection, accountResponseVerified, requireAccountResponse, accountChatUrl, noteAccountNavigation } from '../../lina-account-models.cjs';
 import { readFileSync as linaReadBinding, existsSync as linaHasBinding } from 'node:fs';
 import { join as linaBindingPath } from 'node:path';
 async function linaCheckModel(page: import('playwright-core').Page, effort: string) {
@@ -223,6 +232,19 @@ async function linaCheckModel(page: import('playwright-core').Page, effort: stri
 }
 ` + text;
     text = replace(text, 'export async function throwIfChatGptSessionFailureAlert(page: Page): Promise<void> {', 'export async function throwIfChatGptSessionFailureAlert(page: Page): Promise<void> {\n  assertAccountSelection(page);');
+    text = replace(text, '      const emitMarkdownDelta = (delta: string): void => {', `      const linaPendingOutput: (() => void)[] = [];
+      const linaEmit = (emit: () => void): void => {
+        if (!turn.modelId.startsWith('chatgpt-account/')) { emit(); return; }
+        linaPendingOutput.push(emit);
+        if (!accountResponseVerified(page)) return;
+        for (const output of linaPendingOutput.splice(0)) output();
+      };
+      const emitMarkdownDelta = (delta: string): void => {`);
+    text = replace(text, 'if (visible) turn.onTextDelta(visible);', 'if (visible) linaEmit(() => turn.onTextDelta(visible));');
+    text = replace(text, 'if (completed.visibleRemainder) turn.onTextDelta(completed.visibleRemainder);', 'if (completed.visibleRemainder) linaEmit(() => turn.onTextDelta(completed.visibleRemainder));');
+    text = replace(text, 'if (trace.kind === "commentary") turn.onCommentary?.(trace.text, trace.continuation === true);', 'if (trace.kind === "commentary") linaEmit(() => turn.onCommentary?.(trace.text, trace.continuation === true));');
+    text = replace(text, 'else turn.onReasoningSummary?.(trace.text, trace.continuation === true);', 'else linaEmit(() => turn.onReasoningSummary?.(trace.text, trace.continuation === true));');
+    text = replace(text, '      return finalText;', '      await requireAccountResponse(page, turn.modelId);\n      linaEmit(() => {});\n      return finalText;');
     text = replace(text, 'modelId !== CHATGPT_WEB_MODEL_ID && modelId !== CHATGPT_WEB_LUNA_MODEL_ID', 'modelId !== CHATGPT_WEB_MODEL_ID && modelId !== CHATGPT_WEB_LUNA_MODEL_ID && !modelId.startsWith("chatgpt-account/")');
     return replace(text, 'const mode = resolveChatGptWebModelMode(modelId, reasoning, capabilities);\n    const composer = await this.activeComposer(page);', 'const mode = resolveChatGptWebModelMode(modelId, reasoning, capabilities);\n    if (modelId.startsWith("chatgpt-account/")) { await selectAccountModel(page, modelId, reasoning, activateChatGptEffortMenu, preserveConversation); return mode; }\n    await linaCheckModel(page, mode.effort);\n    const composer = await this.activeComposer(page);');
   });

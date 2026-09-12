@@ -26,7 +26,36 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function main() {
   await app.whenReady();
   const { createSettings } = require('../../backend/orchestratorSettings.cjs');
+  // Record what the application's delegated-finish predicate was given, before
+  // the orchestrator binds it. A pass-through wrapper: it changes no decision,
+  // it only writes the exact session, wait and receipt fields the predicate
+  // reads into this probe's own report, so a fixture gap is distinguishable
+  // from a product gap without reading backend diagnostics.
+  const fastPath = require('../../backend/orchestratorFastPath.cjs');
+  const delegatedFinishes = fastPath.delegatedSubmissionFinishes;
+  const finishDecisions = [];
+  fastPath.delegatedSubmissionFinishes = input => {
+    const produced = delegatedFinishes(input);
+    const targetIds = new Set((input?.plan?.grants || []).flatMap(grant => (grant.targets || []).map(target => target.id)));
+    if (finishDecisions.length < 40) finishDecisions.push({ at: Date.now(), produced: produced.length, modelRound: input?.modelRound,
+      responseKind: input?.plan?.responseKind, clarification: Boolean(input?.plan?.clarification),
+      grants: (input?.plan?.grants || []).map(grant => ({ kind: grant.kind, inspection: Boolean(grant.inspection), operationMode: grant.operationMode,
+        routingCwd: grant.routing?.cwd, kindOfSession: grant.routing?.kindOfSession, binding: Boolean(grant.routing?.binding), targets: (grant.targets || []).map(target => target.id) })),
+      sessions: (input?.sessions || []).filter(session => targetIds.has(session.id)).map(session => ({ id: session.id, generation: session.generation,
+        kind: session.kind, provider: session.provider, started: session.started, status: session.status, processState: session.processState,
+        agentProcessState: session.agentProcessState, agentPid: session.agentPid, observation: session.observation, turnState: session.turnState,
+        launchState: session.launchState, selection: session.selection?.status, pendingInput: session.pendingInput, cwd: session.cwd,
+        observationToken: (() => { try { return Boolean(input?.observations?.latest?.(session, input.modelRound)); } catch { return 'error'; } })() })),
+      waits: (input?.waits || []).filter(wait => targetIds.has(wait.targetId)).map(wait => ({ targetId: wait.targetId, generation: wait.generation, source: wait.source,
+        delivered: wait.delivered, deliveryStatus: wait.deliveryStatus, staged: wait.staged, failed: wait.failed, done: wait.done,
+        observedState: wait.observedState, nativeShell: wait.nativeShell, attributionAmbiguous: wait.attributionAmbiguous,
+        actionId: wait.actionId ? 'present' : 'missing', nativeIdentity: wait.nativeIdentity ? 'present' : 'missing' })),
+      outcomes: (input?.outcomes || []).map(outcome => ({ kind: outcome.kind, ok: outcome.ok, status: outcome.status, targetId: outcome.targetId,
+        delivery: outcome.delivery, actionId: outcome.actionId ? 'present' : 'missing' })) });
+    return produced;
+  };
   const { createOrchestrator } = require('../../backend/orchestrator.cjs');
+  report.finishDecisions = finishDecisions;
   const installed = createSettings({ userDataPath: path.join(process.env.APPDATA, 'vibe-terminal'), secureStorage: safeStorage });
   secret = installed.getKey(); const model = installed.getSettings().model;
   assert(secret && model, 'Installed model/key unavailable through safeStorage');
@@ -34,7 +63,15 @@ async function main() {
   fs.mkdirSync(run, { recursive: true });
   const sessions = ['Atlas', 'Beacon', 'Cedar', 'Delta', 'Ember'].map((name, i) => {
     const cwd = path.join(run, ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon'][i]); fs.mkdirSync(cwd);
-    return { id: `fixture-${name.toLowerCase()}`, name, title: name, cwd, generation: 1, kind: 'codex', status: 'running', turnState: 'idle', lastActivityAt: Date.now() };
+    // Native input authority is evidence-bound: a codex pane only accepts a write
+    // whose observation carries this pane's screen sequence and input revision.
+    // Report the same liveness and identity a running Codex pane reports, so the
+    // application's own delegated-finish and readiness predicates see a real pane
+    // instead of failing closed on fields this fixture simply never set.
+    return { id: `fixture-${name.toLowerCase()}`, name, title: name, cwd, generation: 1, kind: 'codex', provider: 'codex',
+      started: true, launchToken: 1, conversationId: `fixture-conversation-${name.toLowerCase()}`,
+      status: 'running', processState: 'running', agentProcessState: 'running', agentPid: 9000 + i, observation: 'observed', turnState: 'idle',
+      revision: 1, sequence: 1, inputRevision: 0, lastActivityAt: Date.now() };
   });
   if (process.env.VIBE_LIVE_PROBE === '1') {
     const { INTENT_SYSTEM, INTENT_TOOL } = require('../../backend/orchestratorIntent.cjs');
@@ -75,10 +112,12 @@ async function main() {
     getRoots: () => ({ documents: run, projects: sessions.map(s => ({ name: path.basename(s.cwd), path: s.cwd })) }),
     getSessions: () => sessions.map(s => ({ ...s })),
     readSession: async input => {
-      assert(sessions.some(s => s.id === input.id), 'Read escaped fixture sessions');
+      const session = sessions.find(s => s.id === input.id); assert(session, 'Read escaped fixture sessions');
       const result = outputs.get(input.id) || { text: 'Fixture is ready and idle.' };
       readEvents.push({ targetId: input.id, at: Date.now(), completedTurnId: result.completedResult?.turnId });
-      return { ok: true, ...result };
+      return { ok: true, id: session.id, generation: session.generation, turnId: session.turnId, turnState: session.turnState,
+        sequence: session.sequence, observationSequence: session.sequence, inputRevision: session.inputRevision,
+        inputState: { kind: 'empty', hasText: false }, ...result };
     },
     dispatchAction: async action => {
       assert.equal(action.kind, 'send_prompt', 'Only send_prompt fixture effects are allowed');
@@ -87,7 +126,8 @@ async function main() {
       const turnId = `fixture-turn-${actions.length + 1}`;
       const row = { targetId: session.id, prompt: action.text, actionId: action.actionId, turnId, at: Date.now() };
       actions.push(row);
-      Object.assign(session, { turnId, turnState: 'running', turnStartedAt: Date.now(), actionId: action.actionId });
+      Object.assign(session, { turnId, turnState: 'running', turnStartedAt: Date.now(), actionId: action.actionId,
+        sequence: session.sequence + 1, inputRevision: session.inputRevision + 1, revision: session.revision + 1 });
       const timer = setTimeout(async () => {
         timers.delete(timer);
         const text = /review/i.test(action.text) ? 'Review complete: fixture bug ALPHA-17. Fix the missing empty-input guard.' : 'Fixture task complete.';

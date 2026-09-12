@@ -37,6 +37,11 @@ async function fixture(t) {
   await f.app.configure({ apiKey: 'fixture-secret', sessionOnly: true, model: 'brain' });
   assert.equal((await f.app.setEnabled(true)).ok, true);
   f.reports = requestId => f.app.getState().messages.filter(message => message.origin === 'task' && (!requestId || message.requestId === requestId));
+  f.diagnostics = async () => {
+    await f.app.flushDiagnostics();
+    const file = path.join(root, 'logs', 'orchestrator-errors.jsonl');
+    return fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim().split('\n').map(line => JSON.parse(line)) : [];
+  };
   f.finish = async (id, status = 'completed') => {
     const session = f.sessions.find(session => session.id === id);
     Object.assign(session, { turnState: status, completedTurnId: session.turnId, completedActionId: session.actionId, turnEndedAt: Date.now() });
@@ -104,11 +109,13 @@ test('written completion reports remain request-owned without repeating command 
   await f.app.configure({ spendingLimit: 0 });
   await f.finish('a');
   assert.equal(f.reports(first.requestId).filter(report => report.status === 'completed').length, 1);
-  const spoken = f.speech.filter(event => event.completionCue);
+  // The command is acknowledged once, by its own request. A delegated agent
+  // result is still pending, so that acknowledgment is not a completion cue.
+  const spoken = f.speech.filter(event => !event.kind);
   assert.equal(spoken.length, 1);
   assert.equal(spoken[0].requestId, first.requestId);
   assert.equal(spoken[0].responseTurn, 'complete');
-  assert.equal(spoken[0].text, 'done');
+  assert.match(spoken[0].text, /result is still pending/);
   await f.app.refresh(); await tick();
   assert.equal(f.reports(first.requestId).filter(report => report.status === 'completed').length, 1);
   assert.equal(f.models.length, 0, 'outcome reporting requires no model request');
@@ -136,9 +143,11 @@ test('overlapping submission and watch keep completion chats and acknowledge eac
   f.plan = submissionPlan;
   const next = await f.app.send({ text: 'Review A again', targetId: 'a', origin: 'voice' });
   await f.finish('a');
-  const spoken = f.speech.filter(event => event.completionCue);
-  assert.equal(spoken.length, 3);
-  assert.equal(spoken[2].requestId, next.requestId);
+  // Each submission is acknowledged exactly once with its pending agent result;
+  // the watch speaks its listening reply and then the one completion cue.
+  const spoken = f.speech.filter(event => !event.kind);
+  assert.deepEqual(spoken.map(event => event.requestId), [first.requestId, watcher.requestId, watcher.requestId, next.requestId]);
+  assert.deepEqual(spoken.filter(event => event.completionCue).map(event => event.requestId), [watcher.requestId]);
 });
 
 test('text completion does not consume the voice acknowledgment for a matching watch', async t => {
@@ -173,7 +182,10 @@ test('overlapping voice requests retain written result details without routine r
   assert.deepEqual(new Set(resultDetails().map(message => message.requestId)), new Set([first.requestId, watcher.requestId]));
   assert.equal(f.speech.filter(event => event.kind === 'task-result').length, 0);
   assert.equal(f.speech.filter(event => event.kind === 'task-report').length, 0);
-  assert.equal(f.speech.filter(event => event.completionCue).length, 2);
+  // Both requests are acknowledged once; only the watch, which owns no pending
+  // agent result of its own, can cue completion.
+  assert.deepEqual(f.speech.filter(event => !event.kind).map(event => event.requestId), [first.requestId, watcher.requestId, watcher.requestId]);
+  assert.deepEqual(f.speech.filter(event => event.completionCue).map(event => event.requestId), [watcher.requestId]);
 });
 
 test('one target failure is reported immediately while its sibling is still running', async t => {
@@ -252,6 +264,30 @@ test('unchanged inventories warn once if accepted input never gains start eviden
   assert.equal(f.reports(request.requestId).length, 1);
   assert.equal(f.app.getState().tasks.find(task => task.requestId === request.requestId).status, 'waiting-results');
   assert.equal(f.effects.length, 1);
+});
+
+test('the single no-start warning also records bounded private startup telemetry', async t => {
+  const f = await fixture(t); f.now = Date.now();
+  f.dispatch = () => ({ ok: true, status: 'written' });
+  const request = await f.app.send({ text: 'Review A', targetId: 'a', origin: 'text' });
+  assert.deepEqual((await f.diagnostics()).filter(record => record.stage === 'unconfirmed_start'), []);
+  f.now += 60000;
+  await f.app.refresh(); await tick();
+  assert.match(f.reports(request.requestId).at(-1).text, /could not confirm that the agent started/);
+  const records = (await f.diagnostics()).filter(record => record.stage === 'unconfirmed_start');
+  assert.equal(records.length, 1);
+  const [record] = records;
+  assert.equal(record.event, 'request_stage');
+  assert.equal(record.requestId, request.requestId);
+  assert.equal(record.targetId, 'a'); assert.equal(record.generation, 'g');
+  assert.equal(record.actionKind, 'send_prompt'); assert.equal(record.provider, 'fusion');
+  assert.equal(record.turnState, 'idle'); assert.equal(record.hasTurnId, false);
+  // Operational metadata only: no report text, prompt, output or error detail.
+  for (const key of Object.keys(record)) assert.ok(['time', 'event', 'stage', 'model', 'requestId', 'targetId', 'generation', 'actionKind', 'provider', 'turnState', 'hasTurnId', 'telemetryHealth', 'turnStartedOffsetMs'].includes(key), key);
+  assert.doesNotMatch(JSON.stringify(record), /Review A|could not confirm|fixture-secret/);
+  // The warning is reported once, so the record follows it once.
+  f.now += 60000; await f.app.refresh(); await tick();
+  assert.equal((await f.diagnostics()).filter(record => record.stage === 'unconfirmed_start').length, 1);
 });
 
 test('ambiguous results report uncertainty and do not unlock a dependent prompt', async t => {

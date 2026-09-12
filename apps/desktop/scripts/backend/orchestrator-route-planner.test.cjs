@@ -1,13 +1,46 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { planTaskRoute, validateRouteCall, ROUTING_TOOL, ROUTING_CHOOSE_TOOL, deterministicNewTaskRoute, RoutingError } = require('../../backend/orchestratorRoutePlanner.cjs');
+const { planTaskRoute, validateRouteCall, ROUTING_TOOL, namedAgentRoutingTools, deterministicNewTaskRoute, RoutingError } = require('../../backend/orchestratorRoutePlanner.cjs');
 const call = (args, id = 'call', name = 'route_workspace_task') => ({ id, type: 'function', function: { name, arguments: typeof args === 'string' ? args : JSON.stringify(args) } });
 const response = (...calls) => ({ choices: [{ message: { tool_calls: calls } }] });
 const choose = { kind: 'choose', decision: 'reuse', targetId: 'owner-237', workItemId: 'work-a', reason: 'Observed continuation of task A.' };
 
+test('invalid agent references can be repaired inside discovery before any choice is accepted', async () => {
+  let round = 0;
+  const checked = [];
+  const result = await planTaskRoute({ context: { scope: { assignmentMode: 'existing' } },
+    validateChoice: choice => {
+      checked.push(choice.agentId);
+      if (choice.agentId !== 'agent-owner') throw new Error('Use the exact agentId from find_agents, not surfaceId.');
+      return { kind: 'choose', decision: 'reuse', targetId: 'pane-owner', reason: choice.reason };
+    },
+    read: async () => ({ ok: true, agents: [{ agentId: 'agent-owner', surfaceId: 'pane-owner' }] }),
+    complete: async messages => {
+      round++;
+      if (round === 1) return response(call({ agentId: 'pane-owner', reason: 'Continue.' }, 'bad', 'choose_existing_agent'));
+      if (round === 2) { assert.match(messages.at(-1).content, /exact agentId/); return response(call({}, 'find', 'find_agents')); }
+      return response(call({ agentId: 'agent-owner', reason: 'Discovered exact owner.' }, 'good', 'choose_existing_agent'));
+    } });
+  assert.deepEqual(checked, ['pane-owner', 'agent-owner']);
+  assert.equal(result.targetId, 'pane-owner');
+  assert.equal(round, 3);
+});
+
+test('existing-owner routing refuses a new-agent proposal and preserves clarification', async () => {
+  let round = 0;
+  const result = await planTaskRoute({ context: { scope: { assignmentMode: 'existing' },
+    launchers: [{ kind: 'codex', configured: true, available: true }] }, read: async () => assert.fail(),
+    complete: async messages => {
+      if (!round++) return response(call({ reason: 'Owner uncertain.' }, 'new', 'choose_new_agent'));
+      assert.match(messages.at(-1).content, /do not create a replacement/);
+      return response(call({ reason: 'Owner unavailable.', text: 'What is the existing agent title?' }, 'clarify', 'clarify_assignment'));
+    } });
+  assert.equal(result.decision, 'clarify');
+});
+
 test('named agent routing separates record discovery from choices and refuses changed task text', async () => {
-  const reads = [], context = { harnessVersion: 'agents-v1', instruction: 'Fix checkout.', launchers: [{ kind: 'codex', available: true, configured: true }] };
+  const reads = [], context = { instruction: 'Fix checkout.', launchers: [{ kind: 'codex', available: true, configured: true }] };
   let round = 0;
   const result = await planTaskRoute({ context, read: async input => { reads.push(input); return { ok: true, agents: [{ agentId: 'agent-owner' }] }; },
     complete: async (_messages, tools) => {
@@ -29,7 +62,7 @@ test('read-only loop pages beyond 200 initial candidates then reads the selected
   const result = await planTaskRoute({ context: { sessions: sessions.slice(0, 20), sessionDirectory: { total: 240, truncated: true } },
     resetReadBudget: () => resets++,
     complete: async (messages, tools) => {
-      assert.deepEqual(tools, [round === 7 ? ROUTING_CHOOSE_TOOL : ROUTING_TOOL]);
+      assert.deepEqual(tools, namedAgentRoutingTools(round === 7));
       if (round < 6) return response(call({ kind: 'list_sessions', offset: round++ * 40, limit: 40 }, `page-${round}`));
       if (round++ === 6) { assert.ok(messages.some(m => m.role === 'tool' && m.content.includes('owner-237'))); return response(call({ kind: 'read_session', targetId: 'owner-237' })); }
       assert.match(messages.filter(message => message.role === 'tool').at(-1).content, /task A/); return response(call(choose));
@@ -138,7 +171,7 @@ test('timestamp-only repeated reads trigger correction and final call cannot rea
     complete: async (messages, tools) => {
       rounds++;
       if (rounds === 4) assert.match(messages.at(-1).content, /no new usable evidence/);
-      if (rounds === 8) assert.deepEqual(tools, [ROUTING_CHOOSE_TOOL]);
+      if (rounds === 8) assert.deepEqual(tools, namedAgentRoutingTools(true));
       return response(call({ kind: 'read_session', targetId: 'same' }));
     }, read: async () => ({ ok: true, text: 'same output', timestamp: ++reads, observation: { sequence: reads, revision: reads } })
   }), error => error instanceof RoutingError && error.code === 'ROUTING_EXHAUSTED' && error.grantId === 'grant-only' && error.delivery === 'not-dispatched');

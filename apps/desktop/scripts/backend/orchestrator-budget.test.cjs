@@ -4,8 +4,11 @@ const assert = require('node:assert/strict');
 const { modelInputBudget, fitMessages, createReadBudget } = require('../../backend/orchestratorBudget.cjs');
 const size = value => Buffer.byteLength(JSON.stringify(value));
 
-test('model input budget reserves output and protocol, has fallback and hard ceiling', () => {
-  assert.equal(modelInputBudget(1000000), 48000);
+test('model input budget reserves output and protocol, has fallback and a context-scaled ceiling', () => {
+  assert.equal(modelInputBudget(1000000), 96000);
+  assert.equal(modelInputBudget(131072), 96000);
+  assert.equal(modelInputBudget(131071), 48000);
+  assert.equal(modelInputBudget(32768), 30544);
   assert.equal(modelInputBudget(undefined), 14160);
   assert.equal(modelInputBudget(4096), 1872);
   assert.equal(modelInputBudget(100), 0);

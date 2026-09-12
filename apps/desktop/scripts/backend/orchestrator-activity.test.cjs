@@ -17,7 +17,7 @@ async function fixture(t) {
     dispatchAction: args => f.effect?.(args) || { ok: true },
     fetch: async url => ({ ok: true, json: async () => {
       if (url.endsWith('/key')) return { data: {} };
-      if (url.endsWith('/models')) return { data: [{ id: 'brain', supported_parameters: ['tools'] }] };
+      if (url.endsWith('/models')) return { data: [{ id: 'brain', context_length: 128000, supported_parameters: ['tools'] }] };
       const response = f.responses.shift(); return typeof response === 'function' ? response() : response || reply('Done.');
     } }) });
   t.after(async () => { await relay.dispose(); assert(path.resolve(root).startsWith(path.join(os.tmpdir(), 'vibe-activity-'))); fs.rmSync(root, { recursive: true, force: true }); });

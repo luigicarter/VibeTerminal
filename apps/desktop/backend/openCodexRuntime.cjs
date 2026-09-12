@@ -41,6 +41,17 @@ function resolveBinary({ isPackaged, resourcesPath, root }) {
   return binary;
 }
 function shellQuote(value) { return `'${String(value).replace(/['‘’‚‛]/g, quote => process.platform === 'win32' ? quote + quote : "'\\''")}'`; }
+function resolveCliHost({ packaged, resourcesPath, nodeCommand, platform = process.platform }) {
+  if (packaged && platform === 'win32') {
+    // Electron's GUI executable loses the ConPTY console when PowerShell runs
+    // it as Node. Use Lina's already bundled console runtime (also used by
+    // Codex Web), without requiring Node or Bun on the user's PATH.
+    const command = path.join(resourcesPath, 'codex-web', 'runtime', 'runtime', 'bun.exe');
+    if (!fs.existsSync(command)) throw new Error('Open Codex is missing its bundled console runtime. Reinstall Lina Terminal.');
+    return { command, env: {} };
+  }
+  return { command: nodeCommand, env: packaged ? { ELECTRON_RUN_AS_NODE: '1' } : {} };
+}
 function createRuntimeManager({ userData, binaryOptions, cliPath, nodeCommand, packaged = false, providerStore = providers }) {
   const sessions = new Map(), pending = new Map();
   async function release(id, generation) {
@@ -54,6 +65,7 @@ function createRuntimeManager({ userData, binaryOptions, cliPath, nodeCommand, p
   }
   async function prepare(payload) {
     const binary = resolveBinary(binaryOptions);
+    const host = resolveCliHost({ packaged, resourcesPath: binaryOptions.resourcesPath, nodeCommand });
     const configured = providerStore.listProfiles();
     const selected = payload.openCodexModel || configured.defaultModel;
     if (!configured.models.length) throw new Error('Add a provider and models in Settings → Models & providers before launching.');
@@ -83,13 +95,13 @@ function createRuntimeManager({ userData, binaryOptions, cliPath, nodeCommand, p
       // stay in the main process and never enter argv, files, or renderer IPC.
       const env = { LINA_OPEN_CODEX_BIN: binary, LINA_OPEN_CODEX_HOME: home, LINA_OPEN_CODEX_CATALOG: catalogPath,
         LINA_OPEN_CODEX_MODEL: exposed.find(row=>row.key===selected).cliId, LINA_OPEN_CODEX_BASE_URL: adapter.baseUrl, LINA_OPEN_CODEX_TOKEN: adapter.token,
-        ...(packaged ? { ELECTRON_RUN_AS_NODE: '1' } : {}) };
+        ...host.env };
       const resumeId = payload.resumeId;
       if (resumeId && !/^[a-zA-Z0-9_-]{1,100}$/.test(resumeId)) throw new Error('Invalid Open Codex conversation ID.');
-      const command = `${process.platform === 'win32' ? '& ' : ''}${shellQuote(nodeCommand)} ${shellQuote(cliPath)}${resumeId ? ` resume ${shellQuote(resumeId)}` : ''}`;
-      return { env, command, selectedModel: selected, stripEnv: ['CODEX_HOME', 'CODEX_API_KEY', 'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'OPENAI_ORG_ID', 'OPENAI_ORGANIZATION', 'OPENAI_PROJECT_ID'] };
+      const command = `${process.platform === 'win32' ? '& ' : ''}${shellQuote(host.command)} ${shellQuote(cliPath)}${resumeId ? ` resume ${shellQuote(resumeId)}` : ''}`;
+      return { env, command, selectedModel: selected, stripEnv: ['ELECTRON_RUN_AS_NODE', 'CODEX_HOME', 'CODEX_API_KEY', 'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'OPENAI_ORG_ID', 'OPENAI_ORGANIZATION', 'OPENAI_PROJECT_ID'] };
     } catch (error) { await adapter.close(); try { fs.unlinkSync(catalogPath); fs.rmdirSync(runDir); } catch {} if (sessions.get(payload.id)?.adapter === adapter) sessions.delete(payload.id); throw error; }
   }
   return { prepare, release, close: () => { pending.clear(); return Promise.all([...sessions.keys()].map(id => release(id))); }, home: resolveHome(userData) };
 }
-module.exports = { createRuntimeManager, modelCatalog, cliModels, resolveBinary, resolveHome };
+module.exports = { createRuntimeManager, modelCatalog, cliModels, resolveBinary, resolveHome, resolveCliHost };

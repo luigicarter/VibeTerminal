@@ -3,6 +3,30 @@ const { randomUUID } = require('node:crypto');
 const { sessionIdentity } = require('./orchestratorRouting.cjs');
 const { routingBindingMatches } = require('./orchestratorLaunchers.cjs');
 const { resultDependencyBlocker, transferredStatus } = require('./orchestratorContinuation.cjs');
+const { assessNativePromptReadiness } = require('./orchestratorPromptReadiness.cjs');
+
+// Submitted prompt text is startup evidence only. Keep it out of the wait record
+// so no report, receipt, snapshot or diagnostic can ever serialize it.
+const submittedPrompts = new WeakMap();
+// Composer evidence that a submitted prompt left the root composer: its text is
+// no longer at the input cursor and the composer is not sitting empty and ready.
+// This is not completion and not attribution; hook evidence still replaces it.
+function composerAcceptedPrompt(session, observation, text) {
+  const kind = session?.provider || session?.kind;
+  const provider = kind === 'claude-custom' ? 'claude' : kind;
+  if (!['codex', 'claude'].includes(provider)) return false;
+  if (!observation?.ok || observation.exited || observation.id !== session.id || observation.generation !== session.generation) return false;
+  if (typeof observation.text !== 'string' || !Number.isSafeInteger(observation.cursor?.y) || observation.cursor.y < 0) return false;
+  // Compare with all whitespace removed: a hard wrap inside a long token (a path,
+  // URL or identifier) inserts a break the submitted text never had, and a probe
+  // that kept its spaces would miss a prompt still sitting in the composer.
+  const probe = String(text || '').replace(/\s+/g, '').slice(0, 48);
+  if (probe.length < 8) return false;
+  const lines = observation.text.split('\n');
+  const composer = lines.slice(Math.max(0, observation.cursor.y - 8), observation.cursor.y + 1).join('').replace(/\s+/g, '');
+  if (composer.includes(probe)) return false;
+  return assessNativePromptReadiness(session, observation).ready !== true;
+}
 
 // FIFO capacity limits. Aborted waiters leave the queue without taking a slot.
 function createSemaphore(limit) {
@@ -290,6 +314,7 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
       wait = { actionId: action.actionId, operator: action.operator === true, targetId: action.targetId || result.target?.id || result.id, generation: action.generation ?? result.target?.generation ?? result.generation, submittedAt: baseline?.submittedAt ?? now(), nativeShell: baseline?.kind === 'terminal', baselineTurnId: baseline?.turnId, baselineIdle: !['running', 'busy', 'starting'].includes(baseline?.turnState), nativeIdentity: sessionIdentity(baseline || {}), done: false };
       job.waits.push(wait);
     }
+    if (typeof action.text === 'string' && action.text.trim()) submittedPrompts.set(wait, action.text);
     wait.targetId ||= result.target?.id || result.id; wait.generation ??= result.target?.generation ?? result.generation;
     deliveryEvidence(wait, result);
     if (eligibleResultTurn(wait, result.turnId)) wait.turnId ||= result.turnId;
@@ -314,7 +339,7 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
     reconcile([session], { partial: true });
     return { ok: !wait.failed, status: wait.done ? wait.failed ? 'blocked' : mode === 'ready' ? 'ready' : 'already-completed' : 'watching', targetId: target.id, generation: target.generation, turnId: wait.turnId, ...(wait.error && { error: wait.error }) };
   }
-  function reconcile(sessions, { partial = false } = {}) {
+  function reconcile(sessions, { partial = false, observations = [] } = {}) {
     if (!partial) currentSessions = sessions;
     let dirty = false;
     for (const job of jobs.values()) {
@@ -391,6 +416,15 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
           continue;
         }
         if (wait.source === 'watch' && session.observation !== 'observed') { failStopped(); continue; }
+        // Startup evidence only, and only briefly after the write: the submitted
+        // prompt is no longer in the root composer. It says the prompt was taken,
+        // never that work started or finished; hook attribution below replaces it.
+        if (!wait.observedState && wait.source !== 'watch' && observations.length && Number.isFinite(wait.submittedAt) && now() - wait.submittedAt <= 10000) {
+          const evidence = observations.find(item => item?.session?.id === wait.targetId && item.session.generation === wait.generation);
+          if (evidence && composerAcceptedPrompt(session, evidence.observation, submittedPrompts.get(wait))) {
+            wait.observedState = 'submitted-observed'; wait.observedAt = now(); dirty = true;
+          }
+        }
         // Completed identity can remain cached while a newer turn runs. Its
         // current state must never be assigned to that older completed task.
         const completedIsCurrent = !session.turnId || session.completedTurnId === session.turnId;
