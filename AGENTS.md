@@ -45,7 +45,7 @@ Lina Terminal is an Electron + React desktop workspace for running local termina
 
 - `docs/release-0.1.118-review.md` - Complete pending-work release: terminal Chats/recovery, Orchestrator overhaul, read-only phone bridge, mobile/server/account-preview source, release-review fixes, all-app acceptance and installer/publication evidence.
 
-- `docs/chat-section-implementation-2026-09-13.md` - Implemented terminal-format Chats directly below Projects: durable SQLite catalog/workspace and app-owned drafts, exact native resume, private Codex Web history, shutdown/crash/renderer-reload recovery, bounded history copies and backups, reviewed bugs, source/package verification and prioritized remaining edge cases. No release or installation.
+- `docs/chat-section-implementation-2026-09-13.md` - Implemented terminal-format Chats directly below Projects: durable SQLite catalog/workspace and app-owned drafts, exact native resume, private Codex Web history, shutdown/crash/renderer-reload recovery, bounded history copies and backups, reviewed bugs, source/package verification and prioritized remaining edge cases. Published in v0.1.121; installation remains explicit.
 
 - `docs/chat-section-plan-2026-09-13.md` - Broader Chats design and recovery roadmap: source audit, persistent chat versus pane identity, storage, native history, draft/send recovery, shutdown/updates, provider support, migration/backups and acceptance matrix. Links to the precise implemented scope; remaining hardening is not a shipped guarantee.
 

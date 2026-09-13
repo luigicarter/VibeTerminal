@@ -4,10 +4,10 @@ Lina Terminal ships to Windows users as an Electron Builder NSIS installer hoste
 
 ## Current Public Release
 
-The current Windows release is `v0.1.117`:
+The current Windows release is `v0.1.121`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.117`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.117/LinaTerminal-Setup-0.1.117.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.121`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.121/LinaTerminal-Setup-0.1.121.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -66,13 +66,12 @@ The compiled `dist/` renderer is still included because it is the UI Electron di
 
 ## Local Build
 
-Version `0.1.117` de-serializes the Orchestrator, spawns every Windows pane on
-node-pty's bundled ConPTY, and opens genuine Work sessions for Codex Web Work
-models with response-model verification. It repairs the packaged Open Codex
-launcher, redesigns the voice indicator with a Stop control for the current
-voice turn, and removes the in-app version switcher.
-See [the release review](release-0.1.117-review.md) for verification and
-remaining boundaries.
+Version `0.1.121` adds terminal-format Chats, local workspace/history recovery,
+Orchestrator dispatch/memory/voice improvements, and the opt-in read-only phone
+bridge. It also includes startup ownership, compact-sidebar and Windows
+atomic-save reliability repairs found during release verification.
+See [the release review](release-0.1.121-review.md) for source, CI, packaged and
+public-feed verification and the remaining boundaries.
 Installed applications apply updates through the user's Update/Restart action;
 publication does not restart an active workspace.
 

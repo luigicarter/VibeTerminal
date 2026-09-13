@@ -1,6 +1,6 @@
 # Terminal-format Chats implementation
 
-Chats now appears directly below Projects in the desktop sidebar. Opening a chat reveals its existing terminal, or resumes its exact saved native conversation in a terminal pane. The core feature is implemented in source and verified locally. Additional hardening from the [design and recovery plan](chat-section-plan-2026-09-13.md) remains open as listed below; the full roadmap is not a claim of completed implementation.
+Chats now appears directly below Projects in the desktop sidebar. Opening a chat reveals its existing terminal, or resumes its exact saved native conversation in a terminal pane. The core feature is published in [v0.1.121](release-0.1.121-review.md). Additional hardening from the [design and recovery plan](chat-section-plan-2026-09-13.md) remains open as listed below; the full roadmap is not a claim of completed implementation.
 
 ## Implemented behavior
 
@@ -80,7 +80,7 @@ All tests use isolated fixture directories. Live provider-account turns were not
 | Packaged-source resume fixture | 30 panes across two processes passed using the final packaged modules/renderer. Run: `apps/desktop/.tmp/session-resume-smoke/1789286010400-31220`. Provider starts are fixture boundaries. |
 | Packaged SQLite and file parity | The final packaged Electron executable recovered an acknowledged draft using Node 24.19.0 / SQLite 3.53.3. Sixteen files matched source/build, including both compiled JS/CSS bundles and the backend/shared/preload/HTML files. Report: `apps/desktop/.tmp/chat-package-verification.json`. |
 
-The packaged checks do not certify an installed live-account session. No release was published, and the installed application was not replaced. The package also contains the other pre-existing working-tree changes; it is a local acceptance artifact, not a reviewed release candidate for those unrelated changes.
+These initial packaged checks did not certify an installed live-account session, and the installed application was not replaced. The later complete-work release, its clean-runner checks and verified public assets are recorded in [the v0.1.121 release review](release-0.1.121-review.md).
 
 ## Remaining edge cases and follow-up plan
 
