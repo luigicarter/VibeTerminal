@@ -52,6 +52,22 @@ function harness(create, options = {}) {
   return { coordinator, calls, errors, reconcile(next) { sessions = next; coordinator.reconcile(next); } };
 }
 
+test('strict saved-chat recovery keeps missing native history instead of creating a replacement', async () => {
+  const h = harness(undefined, { strictResume: true, confirmThread: async () => ({ status: 'missing' }) });
+  h.reconcile([session('missing', { kind: 'codex', nextLaunchMode: 'resume', threadRef: { provider: 'codex', id: 'exact-missing' } })]);
+  await flush(); assert.equal(h.calls.length, 0); assert.match(h.errors[0].message, /kept/);
+});
+test('bounded startup admits two preparations and skips a cancelled queued pane', async () => {
+  const completions = [];
+  const h = harness(() => new Promise(resolve => completions.push(resolve)), { concurrency: 2 });
+  const panes = [session('first'), session('second'), session('cancelled'), session('fourth')];
+  h.reconcile(panes); await flush(); assert.equal(h.calls.length, 2);
+  h.coordinator.cancel('cancelled', panes[2].launchToken);
+  completions.shift()({ ok: true }); await flush();
+  assert.deepEqual(h.calls.map(call => call.id), ['first', 'second', 'fourth']);
+  for (const complete of completions) complete({ ok: true }); await flush();
+});
+
 test("started sessions launch across hidden projects, Multi and maximized peers without a pane", async () => {
   const h = harness();
   h.reconcile([session("inactive-project"), session("hidden-multi"), session("maximized-peer"),
@@ -160,7 +176,8 @@ test("confirmation preserves exact saved IDs for every threaded provider", async
     gemini: "gemini --resume gemini-saved", kimi: "kimi --session kimi-saved",
     "kimi-custom": "kimi-custom --session kimi-custom-saved", qwen: "qwen --resume qwen-saved",
     grok: "grok --resume grok-saved",
-    'open-codex': 'open-codex resume open-codex-saved'
+    'open-codex': 'open-codex resume open-codex-saved',
+    'codex-web': 'codex-web resume codex-web-saved'
   };
   const providers = Object.entries(require("../../shared/providerCapabilities.json"))
     .filter(([, capability]) => capability.threaded).map(([kind]) => kind);

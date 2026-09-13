@@ -63,7 +63,7 @@ assert(
   "electron-builder NSIS config should wire up the custom installer hook"
 );
 
-function updateHarness({ packaged = true, checkError, downloadError } = {}) {
+function updateHarness({ packaged = true, checkError, downloadError, prepareShutdown = async () => true } = {}) {
   const vm = require("vm");
   const { EventEmitter } = require("events");
   const states = [];
@@ -100,6 +100,7 @@ function updateHarness({ packaged = true, checkError, downloadError } = {}) {
     } }] },
     ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
     setImmediate: (callback) => pendingRestarts.push(callback),
+    prepareChatShutdown: prepareShutdown,
     console: { error() {} }
   };
   vm.createContext(context);
@@ -136,8 +137,18 @@ function updateHarness({ packaged = true, checkError, downloadError } = {}) {
   assert.strictEqual(flow.downloads(), 1, "a staged update must not download again");
   assert.strictEqual(flow.invoke("updates:restart"), true);
   assert.strictEqual(flow.pendingRestarts.length, 1);
-  flow.pendingRestarts[0]();
+  await flow.pendingRestarts[0]();
   assert.deepStrictEqual(flow.restarts, [[true, true]]);
+
+  let finishSaving;
+  const saving = new Promise(resolve => { finishSaving = resolve; });
+  const delayed = updateHarness({ prepareShutdown: () => saving });
+  await delayed.invoke('updates:check'); await delayed.invoke('updates:download');
+  assert.strictEqual(delayed.invoke('updates:restart'), true);
+  const pendingRestart = delayed.pendingRestarts[0]();
+  await Promise.resolve(); assert.strictEqual(delayed.restarts.length, 0, 'installer must wait for the workspace save/shutdown barrier');
+  finishSaving(true); await pendingRestart;
+  assert.deepStrictEqual(delayed.restarts, [[true, true]]);
 
   const failedCheck = updateHarness({ checkError: "network unavailable" });
   assert.strictEqual((await failedCheck.invoke("updates:check")).ok, false);

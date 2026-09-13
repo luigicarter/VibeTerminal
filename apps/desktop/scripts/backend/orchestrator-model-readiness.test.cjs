@@ -33,7 +33,9 @@ test('a saved context whose concurrent pending command was cleared still plans w
   assert.deepEqual(payload.pendingCommands[0].grants, [{ kind: 'operate_terminal', targets: command.grants[0].targets, textPreview: command.grants[0].text }]);
 });
 
-for (const [contextLength, expected] of [[16384, false], [25600, true], [128000, true]]) {
+// The gated prompt and the slimmed tool schemas brought the minimum planner
+// call to about 11,500 bytes, so 16,384 now fits where it previously did not.
+for (const [contextLength, expected] of [[12288, false], [16384, true], [25600, true], [128000, true]]) {
   test(`model readiness uses the current minimum planner at ${contextLength} context`, async t => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lina-planner-readiness-'));
     const app = createOrchestrator({ userDataPath: root, fetch: async url => {

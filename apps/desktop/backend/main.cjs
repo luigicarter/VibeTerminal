@@ -19,6 +19,51 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 let codexWebHost;
+let chatService;
+let chatExitPrepared = false;
+let chatShutdownPromise;
+const chatFlushes = new Map();
+function getChatService() {
+  return chatService ||= require('./chatService.cjs').createChatService({ directory: app.getPath('userData'),
+    getHistoryConfig: savedConversationConfig, confirm: confirmSavedChat,
+    notify: value => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('chats:changed', value); } });
+}
+function chatCaller(event) { if (!mainWindow || event.sender !== mainWindow.webContents) throw new Error('Chats are available only in the workspace window.'); return getChatService(); }
+for (const method of ['bootstrap', 'checkpoint', 'list', 'refresh', 'update', 'open', 'draft', 'read']) ipcMain.handle('chats:' + method, (event, input) => chatCaller(event)[method](input));
+ipcMain.on('chats:flushed', (event, payload) => { if (mainWindow && event.sender === mainWindow.webContents) chatFlushes.get(payload?.id)?.(payload.error); });
+async function prepareChatShutdown() {
+  if (chatShutdownPromise) return chatShutdownPromise;
+  chatShutdownPromise = (async () => {
+    let clean = true;
+    if (chatService && mainWindow && !mainWindow.isDestroyed()) {
+      const id = require('node:crypto').randomUUID();
+      try { await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => { chatFlushes.delete(id); reject(new Error('Renderer did not finish saving.')); }, 1200);
+        chatFlushes.set(id, error => { clearTimeout(timer); chatFlushes.delete(id); error ? reject(new Error(error)) : resolve(); });
+        mainWindow.webContents.send('chats:flush', { id });
+      }); } catch { clean = false; }
+    }
+    orchestratorIntegration?.dispose();
+    chatLaunchPreparation.cancelAll();
+    // Hosts acknowledge completion by exiting; only force a host after its deadline.
+    await Promise.all([ptyHost, agentThreadHost, fusionChatHost, openFusionChatHost].filter(Boolean).map(host => new Promise(resolve => {
+      if (host.exitCode !== null || host.killed) return resolve();
+      const timer = setTimeout(() => { clean = false; try { host.kill(); } catch {} resolve(); }, 2200);
+      host.once('close', () => { clearTimeout(timer); resolve(); });
+      try { host.stdin.write(JSON.stringify({ type: 'shutdown' }) + '\n'); } catch { clearTimeout(timer); clean = false; resolve(); }
+    })));
+    if (chatService) {
+      let timer;
+      try { await Promise.race([chatService.finish(clean), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Storage shutdown deadline exceeded.')), 900); })]); }
+      catch { clean = false; }
+      finally { clearTimeout(timer); }
+    }
+    chatExitPrepared = true;
+    return clean;
+  })();
+  return chatShutdownPromise;
+}
+app.on('before-quit', event => { if (!chatExitPrepared && chatService) { event.preventDefault(); void prepareChatShutdown().finally(() => app.quit()); } });
 function getCodexWebHost() {
   return codexWebHost ||= require('./codexWebHost.cjs').createCodexWebHost({
     app, shell, clipboard, resolveCodexBin: () => require('./codexWebNative.cjs').resolveNativeBinary({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, root: path.join(__dirname, '..') }),
@@ -29,7 +74,7 @@ ipcMain.handle('codex-web:action', async (event, payload) => {
   if (!mainWindow || event.sender !== mainWindow.webContents) throw new Error('Codex Web is available only in Lina.');
   return getCodexWebHost().action(payload);
 });
-app.on('before-quit', () => { void codexWebHost?.shutdown(); });
+app.on('before-quit', () => { if (chatExitPrepared || !chatService) void codexWebHost?.shutdown(); });
 
 // Keep the existing profile when changing the display name: workspaces,
 // connected providers, and voice settings already live in this directory.
@@ -55,7 +100,7 @@ const providerProfiles = require("./providerProfiles.cjs");
 const openCodexProviders = require('./openCodexProviders.cjs');
 const modelProviders = require('./modelProviders.cjs');
 const claudeProviderGateways = require('./claudeProviderGateway.cjs').createGatewayManager();
-app.on('before-quit', () => { void claudeProviderGateways.close(); });
+app.on('before-quit', () => { if (chatExitPrepared || !chatService) void claudeProviderGateways.close(); });
 const { createRuntimeManager: createOpenCodexRuntime, resolveHome: openCodexHome, resolveBinary: resolveOpenCodexBinary } = require('./openCodexRuntime.cjs');
 let openCodexRuntime;
 function getOpenCodexRuntime() {
@@ -63,7 +108,7 @@ function getOpenCodexRuntime() {
     binaryOptions: { isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, root: path.join(__dirname, '..') },
     cliPath: getHelperHostPath('openCodexCli.cjs'), nodeCommand: getNodeHostCommand(), packaged: app.isPackaged });
 }
-app.on('before-quit', () => { void openCodexRuntime?.close(); });
+app.on('before-quit', () => { if (chatExitPrepared || !chatService) void openCodexRuntime?.close(); });
 const claudeCustomHome = require("./claudeCustomHome.cjs");
 const chatLaunchPreparation = require("./chatLaunchPreparation.cjs").createChatLaunchPreparation();
 const { createObservedLaunchFence, createObservedStopBroker } = require('./observedStop.cjs');
@@ -188,8 +233,14 @@ if (isScreenshotMode) {
   app.setPath("documents", fixtureDocuments);
 }
 
+if (!isScreenshotMode && typeof app.requestSingleInstanceLock === 'function') {
+  if (!app.requestSingleInstanceLock()) { app.quit(); return; }
+  app.on('second-instance', () => { if (mainWindow && !mainWindow.isDestroyed()) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.show(); mainWindow.focus(); } });
+}
+
 let mainWindow = null;
 let orchestratorIntegration = null;
+let mobileBridge = null;
 let ptyHost = null;
 let ptyHostBuffer = "";
 let ptyHostDecoder = new StringDecoder("utf8");
@@ -512,6 +563,7 @@ function getNodeHostEnv() {
   // this var; claudeCustomHome falls back to electron/tmp when it is absent.
   const customClaudeHome = {
     LINA_OPEN_CODEX_HOME: openCodexHome(app.getPath('userData')),
+    LINA_CODEX_WEB_HISTORY_HOME: path.join(app.getPath('userData'), 'codex-web', 'codex-home'),
     VIBE_CLAUDE_CUSTOM_HOME: claudeCustomHome.resolveCustomClaudeHome()
   };
   if (!app.isPackaged) {
@@ -551,9 +603,13 @@ function getTerminalRuntime() {
     terminalRuntime = createTerminalRuntime({
       lookup: requestAgentThreadLookup,
       capabilities: (provider) => providerCapabilities[provider] || {},
-      emit: (snapshot) => BrowserWindow.getAllWindows().forEach((window) => {
-        window.webContents.send("terminal:runtime", snapshot);
-      })
+      emit: (snapshot) => {
+        chatService?.observe(snapshot);
+        mobileBridge?.notify();
+        BrowserWindow.getAllWindows().forEach((window) => {
+          window.webContents.send("terminal:runtime", snapshot);
+        });
+      }
     });
     terminalRuntime.start();
   }
@@ -561,8 +617,8 @@ function getTerminalRuntime() {
 }
 
 function ingestTelemetryEvent(event) {
-  if (event?.provider === 'codex' && terminalRuntime?.getRecord(event.id)?.snapshot.provider === 'open-codex') {
-    event = { ...event, provider: 'open-codex' };
+  if (event?.provider === 'codex' && ['open-codex', 'codex-web'].includes(terminalRuntime?.getRecord(event.id)?.snapshot.provider)) {
+    event = { ...event, provider: terminalRuntime.getRecord(event.id).snapshot.provider };
   }
   if (event?.type === "fusion.interaction-resolved" || event?.type === "fusion-interaction-resolved") {
     const generation = orchestratorIntegration?.directory.get(event.id)?.generation;
@@ -849,7 +905,8 @@ function restartAndInstallUpdate() {
     return false;
   }
 
-  setImmediate(() => {
+  setImmediate(async () => {
+    await prepareChatShutdown();
     getAutoUpdater().quitAndInstall(true, true);
   });
   return true;
@@ -859,8 +916,19 @@ async function findLatestAgentThread(payload) {
   return requestAgentThreadLookup(payload);
 }
 
+function confirmSavedChat(payload) {
+  if (payload.openFusion) {
+    try {
+      const home = getAgentTelemetry().getOpenFusionOpencodeHome();
+      payload = { ...payload, opencodeEnv: { XDG_DATA_HOME: home.dataDir, XDG_CONFIG_HOME: home.configDir } };
+    } catch { return Promise.resolve({ status: 'failed', message: 'The original Open Fusion store is unavailable.' }); }
+  }
+  return requestAgentThreadLookup(payload);
+}
+
 function broadcastTerminalEvent(event) {
   orchestratorIntegration?.incoming("terminal", event);
+  mobileBridge?.ingest(event);
   if (
     event?.type === "fusion-activity" &&
     event.id &&
@@ -963,6 +1031,7 @@ function broadcastTerminalEvent(event) {
 }
 
 function sendToPtyHost(message) {
+  if (chatShutdownPromise && (['create', 'input'].includes(message.type) || message.type === 'action' && !['kill', 'interrupt'].includes(message.payload?.kind))) return false;
   if (!ptyHost || !ptyHost.stdin.writable) {
     broadcastTerminalEvent({
       type: "host-error",
@@ -1115,6 +1184,7 @@ function startPtyHost() {
 
 function broadcastFusionChatEvent(event) {
   if (orchestratorIntegration?.incoming("fusion", event) === false) return;
+  chatService?.observeChat(event);
   BrowserWindow.getAllWindows().forEach((window) => {
     window.webContents.send("fusion-chat:event", event);
   });
@@ -1195,6 +1265,7 @@ function startFusionChatHost() {
 }
 
 function sendToFusionChatHost(message) {
+  if (chatShutdownPromise && ['start', 'input', 'steer', 'background-request'].includes(message.type)) return false;
   if (message.type === 'start' && !observedLaunches.canSend('fusion', message.payload)) return false;
   if (!fusionChatHost || !fusionChatHost.stdin.writable) {
     return false;
@@ -1207,6 +1278,7 @@ function sendToFusionChatHost(message) {
 
 function broadcastOpenFusionChatEvent(event) {
   if (orchestratorIntegration?.incoming("openfusion", event) === false) return;
+  chatService?.observeChat(event);
   BrowserWindow.getAllWindows().forEach((window) => {
     window.webContents.send("openfusion-chat:event", event);
   });
@@ -1274,6 +1346,7 @@ function startOpenFusionChatHost() {
 }
 
 function sendToOpenFusionChatHost(message) {
+  if (chatShutdownPromise && ['start', 'input', 'steer', 'background-request'].includes(message.type)) return false;
   if (message.type === 'start' && !observedLaunches.canSend('openfusion', message.payload)) return false;
   if (!openFusionChatHost || !openFusionChatHost.stdin.writable) {
     return false;
@@ -1727,9 +1800,11 @@ function createMainWindow() {
 let installedClisPromise = null;
 
 function refreshInstalledClis() {
+  let codexWebBin = null;
+  try { codexWebBin = require('./codexWebNative.cjs').resolveNativeBinary({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, root: path.join(__dirname, '..') }); } catch {}
   let openCodexBin = null;
   try { openCodexBin = resolveOpenCodexBinary({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, root: path.join(__dirname, '..') }); } catch {}
-  installedClisPromise = probeInstalledClis(undefined, { kimiCustomDir: resolveKimiCustomDir(), openCodexBin }).catch((error) => ({
+  installedClisPromise = probeInstalledClis(undefined, { kimiCustomDir: resolveKimiCustomDir(), openCodexBin, codexWebBin }).catch((error) => ({
     probedAt: Date.now(),
     durationMs: 0,
     timedOut: false,
@@ -1739,6 +1814,42 @@ function refreshInstalledClis() {
   }));
   return installedClisPromise;
 }
+
+// App-owned homes and the Open Fusion store binding for saved native
+// conversations. Shared by the Orchestrator and the read-only mobile bridge.
+function savedConversationConfig() {
+  let openFusion = null;
+  try { const telemetry = getAgentTelemetry(), home = telemetry.getOpenFusionOpencodeHome(); openFusion = { env: { XDG_DATA_HOME: home.dataDir, XDG_CONFIG_HOME: home.configDir }, after: telemetry.getOpenFusionThreadCutoffMs() }; } catch {}
+  return { homes: { claudeCustom: claudeCustomHome.resolveCustomClaudeHome(), openCodex: openCodexHome(app.getPath('userData')), codexWeb: path.join(app.getPath('userData'), 'codex-web', 'codex-home') }, openFusion };
+}
+
+// Opt-in, read-only phone bridge. It observes; it never writes to a terminal.
+function startMobileBridge() {
+  if (mobileBridge) return mobileBridge.start();
+  const { createMobileBridge } = require("./mobileBridge.cjs");
+  const { createMobileBridgeSettings } = require("./mobileBridgeSettings.cjs");
+  mobileBridge = createMobileBridge({
+    settings: createMobileBridgeSettings({ userDataPath: app.getPath("userData") }),
+    getDirectory: () => orchestratorIntegration?.directory,
+    refreshInventory: () => orchestratorIntegration?.refreshInventory(),
+    getOrchestratorState: () => orchestratorIntegration?.getState(),
+    getHistoryConfig: savedConversationConfig,
+    version: app.getVersion(),
+    onStatus: status => BrowserWindow.getAllWindows().forEach(window => window.webContents.send("mobile-bridge:state", status)),
+    onPairRequest: request => BrowserWindow.getAllWindows().forEach(window => window.webContents.send("mobile-bridge:pair-request", request))
+  });
+  return mobileBridge.start();
+}
+// Only the workspace window may open or close the listener or rotate its code.
+const mobileBridgeCaller = event => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) throw new Error("Phone connections are configured only in Lina.");
+  return startMobileBridge().then(() => mobileBridge);
+};
+ipcMain.handle("mobile-bridge:get-state", event => mobileBridgeCaller(event).then(bridge => bridge.getStatus()));
+ipcMain.handle("mobile-bridge:set-enabled", (event, payload) => mobileBridgeCaller(event).then(bridge => bridge.setEnabled(payload?.enabled === true)));
+ipcMain.handle("mobile-bridge:regenerate-code", event => mobileBridgeCaller(event).then(bridge => bridge.regenerateCode()));
+ipcMain.handle("mobile-bridge:pair-respond", (event, payload) => mobileBridgeCaller(event).then(bridge => bridge.respondPair(payload?.requestId, payload?.approve === true)));
+app.on("before-quit", () => { void mobileBridge?.close(); });
 
 app.whenReady().then(() => {
   getAgentTelemetry();
@@ -1758,12 +1869,10 @@ app.whenReady().then(() => {
     sendPty: sendToPtyHost, sendFusion: sendToFusionChatHost, sendOpenFusion: sendToOpenFusionChatHost,
     getTelemetry: getAgentTelemetry, getChanges: getCodeChangeSummary,
     observeStoppedSession: payload => stopSessionObserved({ ...payload, observeOnly: true }),
-    getHistoryConfig: () => {
-      let openFusion = null;
-      try { const telemetry = getAgentTelemetry(), home = telemetry.getOpenFusionOpencodeHome(); openFusion = { env: { XDG_DATA_HOME: home.dataDir, XDG_CONFIG_HOME: home.configDir }, after: telemetry.getOpenFusionThreadCutoffMs() }; } catch {}
-      return { homes: { claudeCustom: claudeCustomHome.resolveCustomClaudeHome(), openCodex: openCodexHome(app.getPath('userData')) }, openFusion };
-    } });
-  mainWindow.on("close", () => orchestratorIntegration?.dispose());
+    getHistoryConfig: savedConversationConfig });
+  mainWindow.on('close', event => { if (!chatExitPrepared && chatService) { event.preventDefault(); void prepareChatShutdown().finally(() => app.quit()); } else orchestratorIntegration?.dispose(); });
+  mainWindow.on('query-session-end', () => { void prepareChatShutdown(); });
+  startMobileBridge();
   setTimeout(checkForUpdatesOnLaunch, 1500);
 
   app.on("activate", () => {
@@ -1774,6 +1883,7 @@ app.whenReady().then(() => {
 });
 
 app.on("window-all-closed", () => {
+  if (chatService && !chatExitPrepared) { void prepareChatShutdown().finally(() => app.quit()); return; }
   chatLaunchPreparation.cancelAll();
   orchestratorIntegration?.dispose();
   terminalRuntime?.dispose();
@@ -1809,6 +1919,7 @@ app.on("window-all-closed", () => {
   }
 
   if (process.platform !== "darwin") {
+    chatService?.close();
     app.quit();
   }
 });
@@ -2074,6 +2185,7 @@ ipcMain.handle("agent-thread:list", (_event, payload) => {
 });
 
 ipcMain.handle("terminal:create", (_event, payload) => observedLaunches.run('terminal', payload, async () => {
+  if (chatShutdownPromise) return { ok: false, error: 'Lina is shutting down.' };
   const launchCwd = resolveLaunchCwd(payload?.cwd, getDefaultRuntimeCwd());
   const standalone = payload?.id && !payload.fusion && !payload.openFusion;
   const runtime = standalone ? getTerminalRuntime() : null;
@@ -2121,7 +2233,7 @@ ipcMain.handle("terminal:create", (_event, payload) => observedLaunches.run('ter
     admission ? { generation: admission.generation, provider: payload.provider === 'open-codex' ? 'codex' : payload.provider } : {});
   if (payload?.provider === 'codex-web') {
     const web = await getCodexWebHost().prepareTerminal({ id: payload.id, cwd: launchCwd.cwd, launchToken: payload.launchToken });
-    payload = { ...payload, command: web.command };
+    payload = { ...payload, command: require('./codexWebNative.cjs').preparedTerminalCommand(web.command, payload.command, payload.threadRef) };
     instrumentation = { ...instrumentation, env: { ...instrumentation?.env, ...web.env },
       stripEnv: [...(instrumentation?.stripEnv || []), 'OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENAI_BASE_URL'] };
     const pathKey = Object.keys(instrumentation.env).find(key => key.toLowerCase() === 'path') || 'PATH';
@@ -2338,6 +2450,7 @@ ipcMain.handle("terminal:attach", (_event, payload) => {
 });
 
 ipcMain.handle("fusion-chat:start", (_event, payload) => observedLaunches.run('fusion', payload, async () => {
+  if (chatShutdownPromise) return { ok: false, error: 'Lina is shutting down.' };
   const id = payload?.id;
   if (!id) {
     return { ok: false, error: "missing session id" };
@@ -2727,6 +2840,7 @@ ipcMain.on("fusion-chat:steer", (_event, payload) => {
 });
 
 ipcMain.handle("openfusion-chat:start", (_event, payload) => observedLaunches.run('openfusion', payload, async () => {
+  if (chatShutdownPromise) return { ok: false, error: 'Lina is shutting down.' };
   const id = payload?.id;
   if (!id) {
     return { ok: false, error: "missing session id" };
@@ -3233,6 +3347,7 @@ async function stopSessionObserved(payload) {
     if (snapshot?.launchToken === payload.launchToken && (payload.generation === undefined || snapshot.generation === payload.generation)) {
       releaseTerminalResources(payload.id, snapshot.generation);
       orchestratorIntegration?.forgetTerminal(payload.id, snapshot.generation);
+      mobileBridge?.forget(payload.id, snapshot.generation);
     }
   }
   return stopped;
@@ -3243,6 +3358,7 @@ ipcMain.handle("terminal:kill", (_event, payload) => {
   const scoped = scopedTerminalPayload(payload);
   if (!scoped) return false;
   orchestratorIntegration?.forgetTerminal(scoped.id, scoped.generation);
+  mobileBridge?.forget(scoped.id, scoped.generation);
   if (scoped?.id) {
     terminalRuntime?.stop(scoped);
     releaseTerminalResources(scoped.id, scoped.generation);

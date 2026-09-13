@@ -1,8 +1,8 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
-const {createModelRuntime,parseModelJson}=require('../../backend/orchestratorModelRuntime.cjs');
+const {createModelRuntime,parseModelJson,MODEL_DEADLINES,modelDeadlineMs}=require('../../backend/orchestratorModelRuntime.cjs');
 const {OpenRouterError}=require('../../backend/openRouterErrors.cjs');
-function fixture(sequence){const calls=[],events=[];let usage=0;const runtime=createModelRuntime({request:async(_url,options)=>{calls.push(JSON.parse(options.body));const next=sequence.shift();if(next instanceof Error)throw next;return next;},getContext:()=>undefined,assertBudget(){},recordUsage:cost=>{usage+=cost;},recordDiagnostic:event=>events.push(event)});return {runtime,calls,events,usage:()=>usage};}
+function fixture(sequence,fallback){const calls=[],events=[];let usage=0;const runtime=createModelRuntime({request:async(_url,options)=>{calls.push(JSON.parse(options.body));const next=sequence.shift();if(next instanceof Error)throw next;return next;},getContext:()=>undefined,assertBudget(){},recordUsage:cost=>{usage+=cost;},recordDiagnostic:event=>events.push(event),getFallbackModel:()=>fallback});return {runtime,calls,events,usage:()=>usage};}
 test('transient HTTP failure and request-option repair have independent bounded allowances',async()=>{
   const f=fixture([new OpenRouterError('upstream',502),new OpenRouterError('upstream',400),{choices:[],usage:{cost:0.02}}]);
   const result=await f.runtime.complete({model:'fixture',reasoning:{effort:'low'},messages:[]});
@@ -133,10 +133,84 @@ test('a configured debug directory captures the rejected body and the earlier ac
     assert.equal(fs.readdirSync(dir).length,2);
   } finally { if(previous===undefined) delete process.env.LINA_MODEL_DEBUG_DIR; else process.env.LINA_MODEL_DEBUG_DIR=previous; fs.rmSync(dir,{recursive:true,force:true}); }
 });
+// A plan the provider returned with HTTP 200 and the application then refused
+// is invisible to the 4xx capture above. LINA_MODEL_DEBUG_ALL widens the same
+// capture to accepted calls so that reply can be read exactly as written.
+test('the opt-in all-call capture records accepted replies and still writes nothing without a directory',async()=>{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'model-debug-all-')),previousDir=process.env.LINA_MODEL_DEBUG_DIR,previousAll=process.env.LINA_MODEL_DEBUG_ALL;
+  const restore=()=>{for(const [name,value] of [['LINA_MODEL_DEBUG_DIR',previousDir],['LINA_MODEL_DEBUG_ALL',previousAll]]) if(value===undefined) delete process.env[name]; else process.env[name]=value;};
+  try{
+    process.env.LINA_MODEL_DEBUG_ALL='1';
+    delete process.env.LINA_MODEL_DEBUG_DIR;
+    const off=fixture([{choices:[{message:{content:'ok'}}]}]);
+    await off.runtime.complete({model:'fixture',messages:[{role:'user',content:'hello'}]});
+    assert.deepEqual(fs.readdirSync(dir),[],'The opt-in flag alone never writes a file.');
+    process.env.LINA_MODEL_DEBUG_DIR=dir;
+    const f=fixture([{choices:[{message:{tool_calls:[{id:'c',type:'function',function:{name:'plan_operate_terminal',arguments:'{"targetAvailability":"idle"}'}}]}}]}]);
+    await f.runtime.complete({model:'fixture',messages:[{role:'user',content:'accepted sk-or-v1-0123456789abcdef'}]});
+    const files=fs.readdirSync(dir);
+    assert.equal(files.length,1,files.join(','));
+    assert.match(files[0],/-1-ok\.json$/);
+    const captured=JSON.parse(fs.readFileSync(path.join(dir,files[0]),'utf8'));
+    assert.equal(captured.status,200);
+    assert.equal(captured.body.messages[0].content,'accepted [REDACTED]');
+    assert.equal(captured.response.choices[0].message.tool_calls[0].function.arguments,'{"targetAvailability":"idle"}');
+  } finally { restore(); fs.rmSync(dir,{recursive:true,force:true}); }
+});
 test('a fenced reply parses exactly like the bare JSON it wraps',()=>{
   const value={relation:'same-task'},body=JSON.stringify(value);
   for(const content of [body,'```json\n'+body+'\n```','```JSON\n'+body+'\n```','```\n'+body+'\n```','```json\r\n'+body+'\r\n```\r\n','  ```json\n'+body+'\n```  \n'])
     assert.deepEqual(parseModelJson(content),value,JSON.stringify(content));
+});
+// A deadline and a second brain: the shared table decides how long a stage may
+// wait, and a transport failure the primary cannot recover from is offered once
+// to the configured fallback. Nothing the request itself got wrong changes model.
+const FALLBACK={id:'fallback/brain',supportedParameters:['tools','temperature'],contextLength:64000,maxCompletionTokens:8000,reasoning:false};
+const deadline=()=>{const error=new OpenRouterError('timeout');error.reason='client-deadline';return error;};
+const started=f=>f.events.filter(e=>e.stage==='model_started');
+test('each stage waits its own deadline from the shared table',async()=>{
+  const f=fixture([{choices:[{message:{content:'ok'}}]},{choices:[{message:{content:'ok'}}]},{choices:[{message:{content:'ok'}}]}]);
+  await f.runtime.complete({model:'fixture',messages:[]},undefined,{category:'interpretation'});
+  await f.runtime.complete({model:'fixture',messages:[],tools:[{type:'function',function:{name:'workspace'}}]});
+  await f.runtime.complete({model:'fixture',messages:[]},undefined,{category:'close-review'});
+  assert.deepEqual(started(f).map(e=>[e.category,e.deadlineMs]),[['interpretation',25000],['execution',45000],['close-review',20000]]);
+  assert.deepEqual(MODEL_DEADLINES.execution,45000);assert.equal(modelDeadlineMs('unknown-stage'),MODEL_DEADLINES.default);
+  // Every recorded attempt states the deadline it actually ran under.
+  assert.deepEqual(f.events.filter(e=>e.stage==='model_complete').map(e=>e.deadlineMs),[25000,45000,20000]);
+});
+test('a primary that misses its deadline is retried once on the fallback brain',async()=>{
+  const f=fixture([deadline(),{choices:[{message:{content:'ok'}}]}],FALLBACK);
+  const result=await f.runtime.complete({model:'primary/brain',messages:[],max_tokens:20000,reasoning:{effort:'low'}},undefined,{category:'interpretation'});
+  assert(result);assert.equal(f.calls.length,2);
+  assert.deepEqual(f.calls.map(c=>c.model),['primary/brain','fallback/brain']);
+  // The fallback is sent the options it advertises, not the primary's.
+  assert.equal(f.calls[1].reasoning,undefined);assert.equal(f.calls[1].temperature,0);assert.equal(f.calls[1].max_tokens,8000);
+  assert.deepEqual(started(f).map(e=>[e.model,e.modelFallback,e.fallbackFrom]),[['primary/brain',undefined,undefined],['fallback/brain',true,'primary/brain']]);
+  const complete=f.events.filter(e=>e.stage==='model_complete');
+  assert.deepEqual(complete.map(e=>[e.status,e.modelFallback]),[['failed',undefined],['complete',true]]);
+});
+test('a rejected request never changes model and a missing or identical fallback changes nothing',async()=>{
+  const rejected=fixture([new OpenRouterError('request',400)],FALLBACK);
+  await assert.rejects(()=>rejected.runtime.complete({model:'primary/brain',messages:[]}),/HTTP 400/);
+  assert.equal(rejected.calls.length,1);
+  const unset=fixture([deadline()]);
+  await assert.rejects(()=>unset.runtime.complete({model:'primary/brain',messages:[]}),/timed out/);
+  assert.equal(unset.calls.length,1);
+  const same=fixture([deadline()],{...FALLBACK,id:'primary/brain'});
+  await assert.rejects(()=>same.runtime.complete({model:'primary/brain',messages:[]}),/timed out/);
+  assert.equal(same.calls.length,1);
+  assert.deepEqual(started(same).map(e=>e.modelFallback),[undefined]);
+});
+test('a server failure spends the transport retry first and the fallback second',async()=>{
+  const f=fixture([new OpenRouterError('upstream',503),new OpenRouterError('upstream',503),{choices:[{message:{content:'ok'}}]}],FALLBACK);
+  const result=await f.runtime.complete({model:'primary/brain',messages:[]});
+  assert(result);assert.equal(f.calls.length,3);
+  assert.deepEqual(f.calls.map(c=>c.model),['primary/brain','primary/brain','fallback/brain']);
+  assert.deepEqual(started(f).map(e=>e.attempt),[1,2,3]);
+  // One fallback attempt only: a fallback that also fails is not retried again.
+  const exhausted=fixture([new OpenRouterError('upstream',503),new OpenRouterError('upstream',503),deadline()],FALLBACK);
+  await assert.rejects(()=>exhausted.runtime.complete({model:'primary/brain',messages:[]}),/timed out/);
+  assert.equal(exhausted.calls.length,3);
 });
 test('non-string input and prose around JSON still fail closed',()=>{
   for(const content of [undefined,{},[],'Here is the answer: '+JSON.stringify({relation:'same-task'}),JSON.stringify({relation:'same-task'})+' — also note this','```json\nnot json\n```','```json {"relation":"same-task"} ```'])

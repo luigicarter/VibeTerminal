@@ -79,7 +79,11 @@ function createReadBudget({ maxBytes = 12000, perReadBytes = 4000 } = {}) {
 // them even when the directory page itself must shrink for a smaller model.
 // Retire historical routing candidates before the recent exchange that explains
 // a follow-up. replyWorkItem/replyContext and executable authority stay protected.
-const CONTEXT_KEYS = new Set(['tasks', 'workItems', 'terminalCapabilities', 'recentActions', 'preferences', 'observations', 'observedReads', 'readBookmarks', 'roots', 'sessions', 'agents', 'pendingCommands', 'recentConversation', 'recentUserMessages']);
+// ledger and roster are the code-built memory tiers. They already arrive inside
+// their own byte budgets, so they are the last context to shrink here, and they
+// shrink newest-first: the ledger drops its oldest rows, the roster its least
+// recently touched panes, so "that one" and "the last prompt" never move.
+const CONTEXT_KEYS = new Set(['tasks', 'workItems', 'terminalCapabilities', 'recentActions', 'observations', 'observedReads', 'readBookmarks', 'roots', 'sessions', 'agents', 'pendingCommands', 'recentConversation', 'recentUserMessages', 'preferences', 'roster', 'ledger']);
 function compactTool(content) {
   let value;
   try { value = JSON.parse(content); } catch { return JSON.stringify({ truncated: true, contextNote: 'Earlier tool output omitted for context. Never repeat an effect because its receipt was shortened.' }); }
@@ -130,7 +134,7 @@ function fitMessages({ messages, tools = [], contextLength, outputTokens = 1200,
             const others = payload[key].filter(item => !protectedIds.has(item.id));
             if (!others.length) break;
             payload[key] = [...protectedEntries, ...others.slice(0, Math.floor(others.length / 2))];
-          } else payload[key] = ['recentConversation', 'recentActions', 'recentUserMessages'].includes(key) ? payload[key].slice(1) : payload[key].slice(0, Math.floor(payload[key].length / 2));
+          } else payload[key] = ['recentConversation', 'recentActions', 'recentUserMessages', 'ledger'].includes(key) ? payload[key].slice(1) : payload[key].slice(0, Math.floor(payload[key].length / 2));
           if (key === 'sessions' && payload[key].length < original.length && payload.sessionDirectory) payload.sessionDirectory = { ...payload.sessionDirectory, truncated: true };
           payload.contextNote = 'Workspace context shortened to fit this model. Use bounded directory or status reads for omitted context.';
           result[currentUser].content = JSON.stringify(payload);

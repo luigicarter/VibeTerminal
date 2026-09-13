@@ -28,7 +28,12 @@ async function run(name, audio, commandStart, commandEnd) {
     const report = { name, wakes, commandStartMs: commandStart == null ? null : commandStart / 16, commandEndMs: commandEnd == null ? null : commandEnd / 16, uploads, sent: sent.length, events, predictions, lastSpeechMs: speech.at(-1), phase: controller.getState().phase, handsFreeStatus: controller.getState().handsFreeStatus };
     console.log(JSON.stringify(report));
     assert.equal(wakes.length, 1); assert.equal(uploads.length, 1);
-    if (commandEnd != null) { assert.ok(uploads[0].atMs >= commandEnd / 16, 'uploaded before command ended'); assert.ok(uploads[0].atMs <= commandEnd / 16 + 3500, 'completion exceeded 3.5 seconds'); assert.equal(sent.length, 1); }
+    // The upload must carry every speech frame the detector classified. The
+    // scenario's nominal end is the fixture's own offset and includes its
+    // trailing padding, so the boundary that proves nothing was cut is the last
+    // classified speech, not that offset: a 600ms pause legitimately closes the
+    // recording inside a clip's silent tail.
+    if (commandEnd != null) { assert.ok(uploads[0].atMs >= speech.at(-1), 'uploaded before the command stopped'); assert.ok(uploads[0].wavMs >= speech.at(-1) - (uploads[0].atMs - uploads[0].wavMs), 'uploaded audio is missing classified speech'); assert.ok(uploads[0].atMs <= commandEnd / 16 + 3500, 'completion exceeded 3.5 seconds'); assert.equal(sent.length, 1); }
     else assert.equal(sent.length, 0);
     return report;
   } finally { controller.dispose(); }

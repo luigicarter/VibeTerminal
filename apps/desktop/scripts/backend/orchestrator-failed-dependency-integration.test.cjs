@@ -137,8 +137,8 @@ for (const ending of ['completed', 'failed']) test(`explicit ${ending} updates p
   assert.equal(task.status, status);
   assert.equal(task.waitingReason, undefined);
   const saved = await savedWorkItem(f, first.requestId, status);
-  assert.match(saved.summary, ending === 'completed' ? /turn.*ended/ : /could not be verified as complete/);
-  assert.doesNotMatch(saved.summary, /is running|result is still pending/);
+  assert.match(saved.summary, ending === 'completed' ? /finished its turn/ : /The terminal task failed[.]/);
+  assert.doesNotMatch(saved.summary, /is working on it|haven't seen it start yet/);
   const stamp = saved.updatedAt;
   await f.app.refresh(); await f.app.refresh(); await f.app.dispose(); await f.commits.verifyDisk();
   assert.equal((await savedWorkItem(f, first.requestId, status)).updatedAt, stamp, 'Unchanged refreshes must not rewrite historical activity');
@@ -152,10 +152,10 @@ test('an explicit continuation replaces finished historical state with current r
   const second = await f.app.send({ text: 'Continue the review', origin: 'text', targetId: 'a', replyToRequestId: first.requestId });
   const active = await savedWorkItem(f, second.requestId, 'waiting-results');
   assert.equal(active.id, saved.id);
-  assert.match(active.summary, /task is running/);
-  assert.doesNotMatch(active.summary, /turn.*ended/);
+  assert.match(active.summary, /is working on it/);
+  assert.doesNotMatch(active.summary, /finished its turn/);
   await f.finish('a');
-  assert.match((await savedWorkItem(f, second.requestId, 'finished')).summary, /turn.*ended/);
+  assert.match((await savedWorkItem(f, second.requestId, 'finished')).summary, /finished its turn/);
   await f.app.dispose(); await f.commits.verifyDisk();
 });
 

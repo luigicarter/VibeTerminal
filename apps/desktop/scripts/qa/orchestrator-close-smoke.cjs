@@ -40,6 +40,7 @@ const screenshot = async name => { let timer; try { const shot = await Promise.r
   // Seed the replacement document before React reads storage. Writing into the
   // first document after preload can race its initial persistence effects and
   // leave the replacement document with an empty workspace on a fast CI runner.
+  await cdp.eval(require('./workspace-fixture.cjs').checkpoint({workspaces:[workspace],multiSessions:[],activeWorkspaceId:'close-qa-project',activeView:'project'}));
   const seed = await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: `localStorage.setItem('vibe-terminal:workspaces:v2',${JSON.stringify(JSON.stringify([workspace]))});localStorage.setItem('vibe-terminal:active-workspace:v1','close-qa-project');localStorage.setItem('vibe-terminal:active-view:v1','project');localStorage.setItem('vibe-terminal:multi-sessions:v1','[]');` });
   await cdp.send('Page.reload');
   await until(async () => (await inventory()).filter(item => item.visiblePane && item.projectId === workspace.id).length === 4, 'four dormant inventory panes');

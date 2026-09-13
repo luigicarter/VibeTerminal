@@ -3,7 +3,9 @@ const { isBusyPromptSubmission } = require('./orchestratorBusyInput.cjs');
 const { validateTerminalControls } = require('../shared/terminalControls.cjs');
 const { projectInputAuthority, sameInputAuthority } = require('./orchestratorInputAuthority.cjs');
 const { routingBindingMatches, isInitialNativePrompt, supportsNativePromptReadiness, waitForNativePromptReady } = require('./orchestratorLaunchers.cjs');
-function createTerminalInput({ getSession, readSession, write, onBeforeWrite = () => {}, now = Date.now, startupTimeoutMs = 20000, startupPollMs = 100 }) {
+const { paneLabel } = require('./orchestratorFailureText.cjs');
+function createTerminalInput({ getSession, readSession, write, onBeforeWrite = () => {}, onStartupScreen, isRegisteredProject,
+  now = Date.now, startupTimeoutMs = 20000, startupPollMs = 100 }) {
   const results = new Map(), locks = new Set(), startupReady = new Map(), startupLaunches = new Map();
   let disposed = false;
   const lifetime = new AbortController();
@@ -24,6 +26,29 @@ function createTerminalInput({ getSession, readSession, write, onBeforeWrite = (
     if (Number.isSafeInteger(rootPid(session)) && rootPid(session) > 0) tracked.pid ??= rootPid(session);
     const retained = startupReady.get(session?.id);
     return isInitialNativePrompt(session) && !(retained && routingBindingMatches(retained.binding, session) && retained.pid === rootPid(session));
+  }
+  const startupScreenReport = screen => `${paneLabel(screen.session)} is showing a startup screen: ${screen.detail || 'startup onboarding'}.`;
+  // The folder trust prompt of a registered Lina project is answered with the
+  // affirmative default the screen already highlights, through the same guarded
+  // transport as any other terminal control: the pane, generation, recipient and
+  // the exact observed screen and input revision all fence the write. Every
+  // other startup screen — sandbox, sign-in, hooks, theme, model, permission —
+  // is only reported and waited on, never answered.
+  function startupTrustAnswer(action, id, generation) {
+    if (typeof isRegisteredProject !== 'function') return undefined;
+    let attempted = false;
+    return async ({ session, observation }) => {
+      if (attempted || disposed || action.signal?.aborted) return { ok: false };
+      attempted = true;
+      const pid = rootPid(session);
+      if (!Number.isSafeInteger(pid) || pid <= 0) return { ok: false };
+      const response = await write({ kind: 'interaction', id, generation, actionId: `${action.actionId}:startup-trust`,
+        signal: AbortSignal.any([lifetime.signal, ...(action.signal ? [action.signal] : [])]),
+        keys: ['enter'], submit: false, requestId: action.requestId, expectedAgentPid: pid,
+        interactionEvidence: { id, generation, pid, sequence: observation.sequence, revision: session.revision, observedAt: now(),
+          shell: false, cols: observation.cols, rows: observation.rows, inputRevision: observation.inputRevision } });
+      return { ok: response?.ok === true && response.delivery !== 'not-dispatched' };
+    };
   }
   function handle(action) {
     const id = action?.target?.id, generation = action?.target?.generation;
@@ -52,13 +77,20 @@ function createTerminalInput({ getSession, readSession, write, onBeforeWrite = (
       if (locks.has(id)) return result('interaction-busy', 'Another terminal interaction is in flight.');
       locks.add(id);
       try {
-        let startupBinding, startupObservation;
+        let startupBinding, startupObservation, startupAnswered;
         const initial = getSession(id);
         if (!action.editInput && (action.promptSubmission || action.inputPurpose === 'task') && needsStartupReadiness(initial)) {
           if (startupLaunches.get(id)?.pid && startupLaunches.get(id).pid !== rootPid(initial)) return result('recipient-unavailable', 'The tracked startup recipient changed before input.');
           if (action.inputAuthority && !sameInputAuthority(action.inputAuthority, projectInputAuthority(initial))) return result('stale-observation', 'The terminal input authority changed before the startup wait.');
           const startup = await waitForNativePromptReady({ action, getSession, readSession,
-            signal: AbortSignal.any([lifetime.signal, ...(action.signal ? [action.signal] : [])]), timeoutMs: startupTimeoutMs, pollMs: startupPollMs });
+            signal: AbortSignal.any([lifetime.signal, ...(action.signal ? [action.signal] : [])]), timeoutMs: startupTimeoutMs, pollMs: startupPollMs,
+            // A startup screen is published as soon as it is seen, so the user
+            // hears why nothing has been typed yet instead of silence.
+            onTransient: screen => onStartupScreen?.({ id, generation, actionId: action.actionId, requestId: action.requestId,
+              prompt: screen.prompt, text: startupScreenReport(screen) }),
+            isRegisteredProject, answerStartupPrompt: startupTrustAnswer(action, id, generation),
+          });
+          startupAnswered = startup.startupAnswered;
           if (!startup.ok) return { ...result(startup.status, startup.error), ...startup };
           // The wait retained the original input revision and recipient. Only
           // read-only output changes may refresh the request's screen evidence.
@@ -118,7 +150,10 @@ function createTerminalInput({ getSession, readSession, write, onBeforeWrite = (
             startupReady.set(id, startupBinding);
             if (startupReady.size > 1000) startupReady.delete(startupReady.keys().next().value);
           }
-          return response && typeof response.ok === 'boolean' ? { ...response, id, generation, actionId: action.actionId, ...(response.delivery !== 'not-dispatched' && (response.ok || response.status === 'unknown') ? deliveryMetadata : {}) } : { ...result('unknown', 'No terminal transport acknowledgment.'), ...deliveryMetadata };
+          // An answered trust prompt is part of what happened to this pane, so
+          // the receipt the user reads says so beside the delivery itself.
+          const answered = startupAnswered ? { startupAnswered, message: 'Answered the folder trust prompt.' } : {};
+          return response && typeof response.ok === 'boolean' ? { ...response, id, generation, actionId: action.actionId, ...answered, ...(response.delivery !== 'not-dispatched' && (response.ok || response.status === 'unknown') ? deliveryMetadata : {}) } : { ...result('unknown', 'No terminal transport acknowledgment.'), ...answered, ...deliveryMetadata };
         } catch (error) { return { ...result('unknown', String(error?.message || error)), ...deliveryMetadata }; }
       } catch (error) { return result('rejected', String(error?.message || error)); }
       finally { locks.delete(id); }

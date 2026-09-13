@@ -10,10 +10,13 @@ function checkTiming(entry) {
   const base = ['time', 'event', 'stage', 'requestId', 'origin', 'model', 'elapsedMs'];
   const stages = {
     routing_started: [], routing_acquired: [], routing: ['status'], execution: ['status'], executor_reply: ['status'], final_text: ['status'],
+    memory_fast_path: ['status'],
+    compiled: ['status', 'reason', 'shape'],
+    dispatch: ['status', 'handledCount', 'fallbackCount'],
     harness_progress: ['round', 'stagnantRounds', 'progress'],
-    model_started: ['modelCallId', 'category', 'attempt', 'deadlineMs', 'toolChoice', 'optionRepair', 'reasoningReplay'],
-    model_headers: ['modelCallId', 'category', 'attempt', 'deadlineMs', 'toolChoice', 'optionRepair', 'reasoningReplay', 'headersMs', 'httpStatus'],
-    model_complete: ['modelCallId', 'category', 'status', 'totalMs', 'httpStatus', 'attempt', 'deadlineMs', 'toolChoice', 'optionRepair', 'reasoningReplay', 'headersMs', 'bodyMs', 'provider', 'generationId', 'promptTokens', 'completionTokens', 'reasoningTokens', 'reason', 'requestPhase'],
+    model_started: ['modelCallId', 'category', 'attempt', 'deadlineMs', 'toolChoice', 'optionRepair', 'reasoningReplay', 'modelFallback', 'fallbackFrom'],
+    model_headers: ['modelCallId', 'category', 'attempt', 'deadlineMs', 'toolChoice', 'optionRepair', 'reasoningReplay', 'modelFallback', 'fallbackFrom', 'headersMs', 'httpStatus'],
+    model_complete: ['modelCallId', 'category', 'status', 'totalMs', 'httpStatus', 'attempt', 'deadlineMs', 'toolChoice', 'optionRepair', 'reasoningReplay', 'modelFallback', 'fallbackFrom', 'headersMs', 'bodyMs', 'provider', 'generationId', 'promptTokens', 'completionTokens', 'reasoningTokens', 'reason', 'requestPhase'],
     tool_started: ['toolCallId', 'actionKind', 'targetId'], tool_complete: ['toolCallId', 'actionId', 'actionKind', 'targetId', 'generation', 'grantId', 'status', 'totalMs'],
     first_effect: ['actionKind', 'targetId', 'generation', 'status'],
     auto_observation: ['actionKind', 'targetId'],
@@ -57,7 +60,7 @@ test('unbound selection rejection keeps private diagnostics and a bounded later 
   await f.instance.send({ text: 'Bye. Can you prompt one of them to do a review? on the last changes.', origin: 'text' });
   f.responses.push(tool({ kind: 'send_prompt', targetId: 'vyp-1', text: 'PRIVATE_PROMPT_SENTINEL' }), reply('I could not send that request.'));
   const failed = await f.instance.send({ text: "They're empty right now, so just pick a random one.", origin: 'text' });
-  assert.equal(failed.ok, false); assert.equal(failed.text, "I couldn't complete the request for Codex 1."); assert.equal(f.actions.length, 0);
+  assert.equal(failed.ok, false); assert.equal(failed.text, "I couldn't do that in Codex 1."); assert.equal(f.actions.length, 0);
   assert.doesNotMatch(failed.text, /grant|PRIVATE_PROMPT_SENTINEL/);
   const [entry] = await f.read();
   assert.equal(entry.error.message, 'This effect needs one matching user command grant.');
@@ -119,7 +122,11 @@ test('provider failures keep classified HTTP details and exclude response bodies
   f.responses.push(...Array.from({ length: 2 }, () => () => ({ ok: false, status: 503, json: async () => ({ error: { message: 'PRIVATE_PROVIDER_BODY private-configured-key' } }) })));
   assert.equal((await f.instance.send({ text: 'PRIVATE_USER_COMMAND', origin: 'text' })).ok, false);
   const [entry] = await f.read(); assert.equal(entry.stage, 'brain'); assert.equal(entry.httpStatus, 503); assert.equal(entry.category, 'upstream'); assert(entry.error.stack);
-  assert.doesNotMatch(fs.readFileSync(f.filename, 'utf8'), /PRIVATE_PROVIDER_BODY|PRIVATE_USER_COMMAND|private-configured-key/);
+  // The provider's own sentence is the fact that explains the failure, so it is
+  // retained here, bounded and secret-redacted. The user's instruction and any
+  // credential in that body still never reach the log.
+  assert.equal(entry.providerMessage, 'PRIVATE_PROVIDER_BODY [REDACTED]');
+  assert.doesNotMatch(fs.readFileSync(f.filename, 'utf8'), /PRIVATE_USER_COMMAND|private-configured-key/);
 });
 
 test('malformed tool JSON cannot copy its argument payload into diagnostics', async t => {
@@ -172,7 +179,7 @@ test('spoken replies carry the same diagnostic request ID as the failed action',
   f.responses.push(tool({ kind: 'send_prompt', targetId: 'vyp-1' }), reply('Unable to send.'));
   const result = await f.instance.send({ text: 'pick a random one', origin: 'voice' });
   const [entry] = await f.read(); assert.equal(spoken.length, 1); assert.equal(spoken[0].requestId, entry.requestId);
-  assert.equal(spoken[0].text, result.text); assert.equal(result.text, "I couldn't complete the request for Codex 1.");
+  assert.equal(spoken[0].text, result.text); assert.equal(result.text, "I couldn't do that in Codex 1.");
   assert.equal(f.actions.length, 0);
 });
 
@@ -186,7 +193,7 @@ test('cancelled requests stay out of error logs and an unwritable log cannot pre
   fs.writeFileSync(path.join(f.root, 'logs'), 'This fixture prevents directory creation.');
   f.responses.push(tool({ kind: 'send_prompt', targetId: 'vyp-1' }), reply('Unable to send.'));
   const result = await f.instance.send({ text: 'pick a random one', origin: 'text' });
-  assert.equal(result.ok, false); assert.equal(result.text, "I couldn't complete the request for Codex 1.");
+  assert.equal(result.ok, false); assert.equal(result.text, "I couldn't do that in Codex 1.");
   assert.equal(f.actions.length, 0);
   await assert.doesNotReject(f.instance.flushDiagnostics()); assert.equal(fs.existsSync(f.filename), false);
 });

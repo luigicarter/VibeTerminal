@@ -1,37 +1,20 @@
-import { ArrowUpRight, Check, Layers3, Route, SquareTerminal } from "lucide-react";
+import { ArrowUpRight, Check, Layers3, Route } from "lucide-react";
 
 const plans = [
   {
-    id: "base",
-    name: "Base",
-    eyebrow: "THE CORE WORKSPACE",
-    icon: SquareTerminal,
-    description: "A focused home for your local terminals and projects.",
-    includes: "Your everyday workspace",
-    features: [
-      "Local terminal sessions",
-      "Project folders and Multi mode",
-      "Split, resize, and arrange your panes",
-      "Git branches and change summaries",
-      "Your shell and local development tools"
-    ],
-    link: "/agents",
-    linkLabel: "Explore the workspace"
-  },
-  {
-    id: "terminals",
-    name: "All Terminals",
+    id: "full-access",
+    name: "Full Access",
     eyebrow: "THE FULL TERMINAL TOOLKIT",
     icon: Layers3,
-    description: "Every terminal and agent mode, together in one workspace.",
-    includes: "Everything in Base, plus",
+    description: "Every terminal and agent mode, with the complete workspace to make them your own.",
+    includes: "The full workspace and all agent modes",
     features: [
+      "Local terminals, projects, and flexible pane layouts",
+      "Multi mode, Git branches, and change summaries",
       "Fusion and Open Fusion",
       "Codex, Open Codex, and Codex Web",
-      "Claude and Open Claude Code",
-      "Cursor, Gemini, and OpenCode",
-      "Kimi, Kimi + CC, Qwen, and Grok Build",
-      "Provider connections and model choices"
+      "Claude, Cursor, Gemini, and every supported agent",
+      "Your providers, accounts, and model choices"
     ],
     link: "/agents#agent-catalog",
     linkLabel: "Meet the agent workflows"
@@ -42,7 +25,7 @@ const plans = [
     eyebrow: "THE CONNECTED WORKSPACE",
     icon: Route,
     description: "Bring your agents together with a workspace you can talk to.",
-    includes: "Everything in All Terminals, plus",
+    includes: "Everything in Full Access, plus",
     features: [
       "The workspace-wide Orchestrator",
       "Task routing and agent assignment",
@@ -60,12 +43,12 @@ export const PricingSection = () => <div className="pricing-page section-shell" 
   <section className="pricing-heading section-heading">
     <p className="eyebrow">PRICING</p>
     <h1>Your workspace.<br /><span>Your way to build.</span></h1>
-    <p>Start with the essentials. Add every terminal.<br className="desktop-break" /> Bring it all together with the Orchestrator.</p>
+    <p>Two plans. Every terminal and agent mode in both.<br className="desktop-break" /> Choose Orchestrator to add voice and task coordination.</p>
     <span className="pricing-preview-label">Plan preview · prices coming soon</span>
   </section>
   <section className="pricing-grid" aria-label="Lina Terminal plans">
     {plans.map((plan, index) => <article className={`pricing-card ${plan.id === "orchestrator" ? "pricing-card--complete" : ""}`} key={plan.id} aria-labelledby={`plan-${plan.id}`}>
-      <div className="pricing-card__top"><plan.icon size={23} strokeWidth={1.5} /><span>0{index + 1}</span></div>
+      <div className="pricing-card__top"><span className="pricing-card__icon"><plan.icon size={23} strokeWidth={1.5} /></span><span className="pricing-card__edition">{index === 0 ? "YOUR WORKSPACE" : "YOUR WORKSPACE + LINA"}</span></div>
       <p className="pricing-card__eyebrow">{plan.eyebrow}</p>
       <h2 id={`plan-${plan.id}`}>{plan.name}</h2>
       <p className="pricing-card__description">{plan.description}</p>

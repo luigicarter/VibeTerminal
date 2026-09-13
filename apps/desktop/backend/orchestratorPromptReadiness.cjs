@@ -1,5 +1,31 @@
 'use strict';
 
+// A startup onboarding screen is transient: it is the pane finishing its own
+// launch, not the user's pending decision about the task. Such a screen keeps
+// the startup wait polling (and, for a folder trust prompt in a registered Lina
+// project, may be answered) instead of failing the send at once. A pending
+// question, permission request or human draft remains blocked, as before.
+const STARTUP_SCREENS = Object.freeze([
+  { prompt: 'folder-trust', pattern: /\b(?:Do you trust|Trust (?:this|the) (?:directory|folder|workspace))\b/i,
+    reason: 'it is asking whether to trust the files in this folder' },
+  { prompt: 'codex-sandbox', pattern: /\bSet up the Codex agent sandbox\b/i,
+    reason: 'it is asking to set up the Codex agent sandbox' },
+  { prompt: 'sign-in', pattern: /\bSign in to (?:Codex|ChatGPT)\b/i, reason: 'it is asking to sign in' },
+  { prompt: 'startup-hooks', pattern: /\bReview startup hooks\b/i, reason: 'it is asking to review its startup hooks' },
+  { prompt: 'selection', pattern: /\b(?:Select|Choose) (?:a |your )?(?:theme|model|login|account)\b/i,
+    reason: 'it is asking to choose a theme, model or login' },
+  { prompt: 'credentials', pattern: /\bEnter (?:your )?(?:API key|authentication code)\b/i,
+    reason: 'it is asking for an API key or authentication code' },
+]);
+// The affirmative option must already be the highlighted default. A screen whose
+// pointer rests anywhere else is never answered automatically.
+const AFFIRMATIVE_DEFAULT = /^[ \t]*[❯>›*][ \t]*1[.)][ \t]*Yes\b/im;
+function startupScreen(text) {
+  const found = STARTUP_SCREENS.find(screen => screen.pattern.test(text));
+  return found && { prompt: found.prompt, reason: found.reason,
+    affirmativeDefault: found.prompt === 'folder-trust' && AFFIRMATIVE_DEFAULT.test(text) };
+}
+
 // Startup input evidence only. Callers retain ownership of lifecycle, launch
 // identity, cancellation and the final generation/PID/sequence write fence.
 // A process-start event, idle metadata or elapsed time cannot establish this.
@@ -27,8 +53,9 @@ function assessNativePromptReadiness(session, observation) {
   const text = observation.text;
   // Agent onboarding prose can also occur in a valid shell directory name or
   // prior command output. Shell readiness is established by its prompt below.
-  if (provider !== 'terminal' && /\b(?:Do you trust|Set up the Codex agent sandbox|Sign in to (?:Codex|ChatGPT)|Trust this (?:directory|folder)|Review startup hooks)\b/i.test(text))
-    return result('blocked', 'The terminal is displaying startup onboarding or a permission screen.');
+  const startup = provider !== 'terminal' ? startupScreen(text) : undefined;
+  if (startup) return { ...result('transient', `The terminal is showing a startup screen: ${startup.reason}.`),
+    prompt: startup.prompt, detail: startup.reason, affirmativeDefault: startup.affirmativeDefault };
   if (provider !== 'terminal' && /\bmodel:\s*loading\b|\bInput disabled\b|\bShutting down\b|\bConnecting to (?:the )?(?:server|agent)\b/i.test(text))
     return result('starting', 'The native composer is still loading or disabled.');
   const cursor = observation.cursor;
@@ -59,8 +86,10 @@ function assessNativePromptReadiness(session, observation) {
   }
   if (typeof line !== 'string') return result('starting', 'The current input cursor is outside the decoded screen text.');
   if (provider === 'claude') {
-    if (/\b(?:Do you want to proceed|Allow Claude to|Select (?:a |your )?(?:theme|model|login|account)|Choose (?:a |your )?(?:theme|model|login|account)|Enter (?:your )?(?:API key|authentication code)|Trust (?:this|the) (?:folder|workspace))\b/i.test(text))
-      return result('blocked', 'Claude is displaying onboarding, a modal, or a permission request.');
+    // Onboarding forms are classified as transient above; what remains here is
+    // an actual decision the user owns, which no startup wait may sit through.
+    if (/\b(?:Do you want to proceed|Allow Claude to)\b/i.test(text))
+      return result('blocked', 'Claude is displaying a modal or a permission request.');
     const border = value => /^[╭┌╰└]?[─━-]{3,}[╮┐╯┘]?$/.test((value || '').trim());
     // Claude's main input uses pointer + NBSP (ASCII > fallback), horizontal
     // boundaries, and the shortcut footer. isLoading only dims the pointer:
@@ -82,4 +111,4 @@ function assessNativePromptReadiness(session, observation) {
   return result('ready', 'The loaded Codex root composer is visible at its empty input cursor.');
 }
 
-module.exports = { assessNativePromptReadiness };
+module.exports = { assessNativePromptReadiness, startupScreen };

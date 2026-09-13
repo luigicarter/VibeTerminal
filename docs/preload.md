@@ -2,6 +2,11 @@
 
 The `preload/` folder contains the context-isolated bridge between the renderer and Electron main process.
 
+`window.vibe.chats` exposes workspace-only bootstrap/checkpoint, catalog
+list/refresh/update, exact open, native/cached history read, draft persistence,
+change notifications and shutdown-flush acknowledgment. See the
+[Chats implementation](chat-section-implementation-2026-09-13.md) for recovery boundaries.
+
 ## Files
 
 - `preload/preload.cjs` - Exposes `window.vibe` through `contextBridge` and forwards renderer calls to IPC channels.
@@ -34,3 +39,9 @@ The `preload/` folder contains the context-isolated bridge between the renderer 
 - Terminal input, resize, and kill accept optional `{ generation, launchToken }` scope; kill also accepts the close/restart reason. Scope prevents delayed commands from affecting replacement sessions.
 - `window.vibe.terminal.onEvent(callback)` - Subscribes to PTY host, terminal, snapshot, error, and exit events.
 - `window.vibe.orchestrator.onActivity(callback)` - Receives redacted `{ publicationRevision, sessions, activeTargets }` patches without conversation history. Subscribe alongside `onState`; `getState()` still returns a complete snapshot. Merge by publication revision, including when activity races the initial state read. See [performance repairs](performance-orchestrator-overhaul-2026-09-10.md).
+- `window.vibe.mobileBridge.getState()` / `onState(callback)` - The read-only phone bridge's status: `{ enabled, listening, host, port, addresses, code, desktopId, devices, pending, autoApprove, error }`. `addresses` are the machine's non-internal IPv4 addresses excluding `169.254.*`; `devices` are the approved phones (`{ deviceName, platform, approvedAt }`, at most 20, newest last); `pending` are the unanswered pair offers; `error` carries a listen failure such as a port already in use. Main pushes the same shape on every change.
+- `window.vibe.mobileBridge.setEnabled(enabled)` - Turns the LAN listener on or off and persists the preference. Returns the new status.
+- `window.vibe.mobileBridge.regenerateCode()` - Rotates the pairing code, invalidating every paired phone and clearing the device list. Returns the new status.
+- `window.vibe.mobileBridge.onPairRequest(callback)` - Fires when a phone asks to pair: `{ requestId, deviceName, platform, remoteAddress, expiresAt }`. `PhonePairPrompt` (mounted at the app root) and Settings → Phone both render these; the pairing code is never handed to the network until one of them approves.
+- `window.vibe.mobileBridge.respondPair(requestId, approve)` - Allows or denies one pair offer. Approving records the device and releases the phone's long poll with the code; denying records nothing. Returns `{ ok, status }`, or `{ ok: false, error }` for an unknown or already-settled offer.
+- The four `mobile-bridge:*` invoke channels are refused for any sender that is not the workspace window, so no other surface can open the port or approve a phone. Nothing in this namespace carries terminal input in either direction, and nothing here reaches the live frame stream — that is HTTP only. See [mobile bridge](mobile-bridge.md).

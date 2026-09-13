@@ -96,12 +96,17 @@ test("new pane creation uses the same launch-bound follow-up selection", async t
   f.sessions[1] = f.b(); await f.run("Tell it: begin", { kind: "send_prompt" }); assert.equal(f.sends()[0].targetId, "b");
 });
 
-test("initial context carries only twelve recent relay messages and no native transcript body", async t => {
+test("initial context carries the action ledger instead of relay prose and no native transcript body", async t => {
   const f = await fixture(t); f.sessions[0].transcript = "PROVIDER_TRANSCRIPT_PRIVATE_BODY";
   f.sessions[0].conversation = { id: "native-a", title: "Native title", body: "PROVIDER_TRANSCRIPT_PRIVATE_BODY" };
   for (let i = 0; i < 7; i++) await f.run(`Relay message ${i}`);
   const request = f.requests.at(-1), initial = JSON.parse(request.messages[1].content);
-  assert.equal(initial.recentConversation.length, 12); assert.equal(initial.recentConversation[0].text, "Relay message 0");
+  // Migrated from recentConversation: the executor reads what Lina did, as typed
+  // ledger rows, never the prose of earlier replies.
+  assert.equal(initial.recentConversation, undefined);
+  assert.equal(initial.ledger.length, 6);
+  assert.ok(initial.ledger.every(entry => entry.verb === "ask" && entry.outcome === "replied" && entry.typedText === null));
+  assert.equal(JSON.stringify(initial.ledger).includes("Relay message 0"), false);
   // Unaddressed panes are omitted from the executor context. The addressed pane
   // still carries its native identity, and never its transcript body.
   assert.deepEqual(initial.sessions, []); assert.equal(initial.sessionDirectory.unaddressedOmitted, true);

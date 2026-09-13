@@ -15,7 +15,7 @@ async function until(fn, label) {
 }
 
 function fixture(cwd) {
-  const kinds = ['claude', 'codex', 'open-codex', 'cursor', 'gemini', 'grok', 'opencode', 'kimi', 'kimi-custom', 'qwen'];
+  const kinds = ['claude', 'codex', 'open-codex', 'codex-web', 'cursor', 'gemini', 'grok', 'opencode', 'kimi', 'kimi-custom', 'qwen'];
   const declared = Object.entries(require('../../shared/providerCapabilities.json')).filter(([, c]) => c.threaded).map(([k]) => k);
   assert.deepEqual([...kinds].sort(), declared.sort(), 'Add resume expectations for any new threaded provider');
   const specs = kinds.map(kind => ({ id: kind, kind }));
@@ -36,7 +36,7 @@ function fixture(cwd) {
 }
 
 function verify(sessions, persisted, calls) {
-  const prefixes = { claude: 'claude --resume', codex: 'codex resume', 'open-codex': 'open-codex resume', cursor: 'cursor-agent --resume', gemini: 'gemini --resume', grok: 'grok --resume', opencode: 'opencode --session', kimi: 'kimi --session', 'kimi-custom': 'kimi-custom --session', qwen: 'qwen --resume' };
+  const prefixes = { claude: 'claude --resume', codex: 'codex resume', 'open-codex': 'open-codex resume', 'codex-web': 'codex-web resume', cursor: 'cursor-agent --resume', gemini: 'gemini --resume', grok: 'grok --resume', opencode: 'opencode --session', kimi: 'kimi --session', 'kimi-custom': 'kimi-custom --session', qwen: 'qwen --resume' };
   for (const session of sessions) {
     const saved = persisted.flatMap(w => w.sessions).find(s => s.id === session.id);
     assert(saved, `${session.id}: persisted pane`);
@@ -107,6 +107,7 @@ if (!process.versions.electron) {
         const hidden = s => ['claude', 'codex', 'open-codex'].includes(s.id);
         const workspaces = [{ id: 'resume-qa', name: 'Resume QA', path: output, sessions: sessions.filter(s => !hidden(s)) },
           { id: 'hidden-resume-qa', name: 'Hidden resume QA', path: output, sessions: sessions.filter(hidden) }];
+        await win.webContents.executeJavaScript(`window.vibe.chats.checkpoint({clientId:'fixture-seed',sequence:1,workspace:${JSON.stringify({ workspaces, multiSessions: [], activeWorkspaceId: 'resume-qa', activeView: 'project' })}})`);
         await win.webContents.executeJavaScript(`localStorage.setItem(${JSON.stringify(storageKey)}, ${JSON.stringify(JSON.stringify(workspaces))}); localStorage.setItem('vibe-terminal:active-workspace:v1', 'resume-qa'); localStorage.setItem('vibe-terminal:active-view:v1', 'project');`);
         calls.length = 0; testing = false; win.reload(); return;
       }

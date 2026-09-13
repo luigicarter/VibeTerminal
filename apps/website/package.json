@@ -14,6 +14,9 @@
     "typecheck": "npm run typecheck --workspace backend && npm run typecheck --workspace frontend",
     "dev:backend": "npm run dev --workspace backend",
     "dev:frontend": "npm run dev --workspace frontend",
+    "preview:account": "npm run preview:account --workspace frontend",
+    "build:account-preview": "npm run build:account-preview --workspace frontend",
+    "test:account-preview": "node --import tsx --test scripts/account-preview.test.mjs",
     "prebuild": "node ../../scripts/sync-brand.cjs website"
   }
 }

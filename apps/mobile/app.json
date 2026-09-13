@@ -1,0 +1,57 @@
+{
+  "expo": {
+    "name": "Lina Terminal",
+    "slug": "lina-terminal",
+    "scheme": "lina",
+    "version": "0.1.0",
+    "orientation": "default",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "icon": "./assets/brand/icon.png",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.linaterminal.mobile"
+    },
+    "android": {
+      "package": "com.linaterminal.mobile",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/brand/adaptive-icon.png",
+        "backgroundColor": "#111216"
+      },
+      "predictiveBackGestureEnabled": false,
+      "softwareKeyboardLayoutMode": "resize"
+    },
+    "web": {
+      "favicon": "./assets/brand/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/brand/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#111216"
+        }
+      ],
+      "expo-secure-store",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#FFC466",
+          "defaultChannel": "terminals"
+        }
+      ],
+      "expo-background-task"
+    ]
+  }
+}

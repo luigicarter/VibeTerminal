@@ -22,14 +22,14 @@ test('per-target completion is prompt and final target ends multi-target request
   Object.assign(f.job.waits[0], { done: true, observedState: 'completed' });
   let reports = f.collect();
   assert.equal(reports.length, 1);
-  assert.match(reports[0].text, /Pane 0: the agent turn completed.*not independently verified/);
+  assert.equal(reports[0].text, "Pane 0 finished its turn; I haven't checked what it changed.");
   assert.doesNotMatch(reports[0].text, /All requested/);
   Object.assign(f.job.waits[1], { done: true, failed: true, observedState: 'failed' });
   f.job.task.status = 'failed';
   reports = f.collect();
   assert.equal(reports.length, 1);
   assert.equal(reports[0].status, 'failed');
-  assert.match(reports[0].text, /ended with an error.*All requested terminal turns have ended/);
+  assert.match(reports[0].text, /ended its turn with an error.*All the terminal turns I started for this have ended/);
   assert.deepEqual(f.collect(), []);
 });
 test('failed relay retains reports for live terminal work; cancelled and restored never report', () => {
@@ -51,7 +51,7 @@ test('queued delivery reports dispatch transition without duplicated acknowledge
   assert.equal(f.collect()[0].status, 'queued');
   assert.deepEqual(f.collect(), []);
   Object.assign(f.job.waits[0], { delivered: true, deliveryStatus: 'sent' });
-  assert.match(f.collect()[0].text, /queued prompt was sent/);
+  assert.equal(f.collect()[0].text, 'Typed the task into Pane 0; waiting for it to start.');
   assert.deepEqual(f.collect(), []);
 });
 test('shell and uncertain delivery explicitly preserve uncertainty, without output or prompt text', () => {
@@ -61,8 +61,8 @@ test('shell and uncertain delivery explicitly preserve uncertainty, without outp
   f.job.waits[1].deliveryStatus = 'unknown';
   const reports = f.collect();
   assert.equal(reports.length, 2);
-  assert.match(reports[0].text, /plain shell.*Completion is unverified/);
-  assert.match(reports[1].text, /delivery is unconfirmed/);
+  assert.match(reports[0].text, /Typed the command into Pane 0\. It is a plain shell, so I can't tell you when the command finishes\./);
+  assert.match(reports[1].text, /couldn't confirm that Pane 1 took the prompt/);
   assert.doesNotMatch(JSON.stringify(reports), /PRIVATE/);
   assert.deepEqual(f.collect(), []);
 });
@@ -73,9 +73,11 @@ test('changed generation, interruptions, and drafts retain distinct explanations
   Object.assign(f.job.waits[1], { done: true, failed: true, observedState: 'interrupted' });
   f.job.waits[2].staged = true;
   const reports = f.collect();
-  assert.match(reports[0].text, /terminal changed.*Completion is unverified/);
+  // The fixture's task targets alias the session array, so the replaced pane
+  // keeps no retained title here; production targets are a frozen snapshot.
+  assert.equal(reports[0].text, 'Terminal was restarted before I could confirm its result; check the pane.');
   assert.match(reports[1].text, /interrupted/);
-  assert.match(reports[2].text, /draft.*not been sent/);
+  assert.match(reports[2].text, /draft in Pane 2; nothing was sent/);
   assert.doesNotMatch(JSON.stringify(reports), /All requested/);
 });
 test('reports wait until relay execution ends', () => {
@@ -104,8 +106,8 @@ test('attributed activity supersedes uncertain delivery and uncertain shells do 
   const reports = f.collect();
   assert.equal(reports[0].status, 'needs-answer');
   assert.doesNotMatch(reports[0].text, /unconfirmed/);
-  assert.match(reports[1].text, /delivery.*unconfirmed.*cannot verify automatically/);
-  assert.doesNotMatch(reports[1].text, /was sent/);
+  assert.match(reports[1].text, /couldn't confirm that Pane 1 took the prompt, and I haven't typed it again\./);
+  assert.doesNotMatch(reports[1].text, /was sent|Typed the command/);
 });
 test('queued delivery failures explain the bounded obstacle', () => {
   const f = fixture();
@@ -123,7 +125,7 @@ test('missing start attribution warns once at 60 seconds and later completion st
   const reports = collectTaskReports(f.job, f.sessions, { now: () => 61000 });
   assert.equal(reports.length, 1);
   assert.equal(reports[0].status, 'unverified');
-  assert.match(reports[0].text, /input was sent.*could not confirm.*started.*Completion remains unverified/);
+  assert.equal(reports[0].text, "Typed the task into Pane 0, but I haven't seen it start yet. I'll tell you when it does.");
   assert.deepEqual(f.job.waits[0], before, 'Warning must not fail, release, or replay the wait');
   assert.deepEqual(collectTaskReports(f.job, f.sessions, { now: () => 121000 }), []);
   Object.assign(f.job.waits[0], { done: true, observedState: 'completed' });
@@ -136,12 +138,12 @@ test('no-start warning excludes missing timestamps and known or undelivered work
   for (const patch of patches) {
     const f = fixture(); Object.assign(f.job.waits[0], patch);
     const reports = collectTaskReports(f.job, f.sessions, { now: () => 60000 });
-    assert.doesNotMatch(JSON.stringify(reports), /could not confirm that the agent started/);
+    assert.doesNotMatch(JSON.stringify(reports), /haven't seen it start yet/);
   }
   const f = fixture(); Object.assign(f.job.waits[0], { submittedAt: 0, deliveryStatus: 'unknown' });
   const reports = collectTaskReports(f.job, f.sessions, { now: () => 60000 });
-  assert.match(reports[0].text, /delivery is unconfirmed/);
-  assert.doesNotMatch(reports[0].text, /was sent/);
+  assert.match(reports[0].text, /couldn't confirm that Pane 0 took the prompt/);
+  assert.doesNotMatch(reports[0].text, /was sent|Typed the task/);
 });
 test('ambiguous attribution warns once even after running then permits a verified result', () => {
   const f = fixture(); Object.assign(f.job.waits[0], { observedState: 'running', submittedAt: 0 });
@@ -149,7 +151,7 @@ test('ambiguous attribution warns once even after running then permits a verifie
   f.job.waits[0].attributionAmbiguous = true;
   const reports = f.collect();
   assert.equal(reports.length, 1);
-  assert.match(reports[0].text, /could not reliably match.*Completion remains unverified/);
+  assert.match(reports[0].text, /can't tell yet which of Pane 0's turns is the one I started, so I'm still watching it\./);
   assert.deepEqual(f.collect(), []);
   Object.assign(f.job.waits[0], { attributionAmbiguous: false, observedState: 'completed', done: true });
   assert.equal(f.collect()[0].status, 'completed');
@@ -159,20 +161,21 @@ test('watch reports never imply prompt delivery and ready is not task completion
   assert.deepEqual(collectTaskReports(f.job, f.sessions, { now: () => 120000 }), []);
   Object.assign(f.job.waits[0], { observedState: 'running', turnId: 'watched', actionId: 'a' });
   const running = f.collect()[0];
-  assert.match(running.text, /watched turn/);
+  assert.equal(running.text, 'Pane 0 is working on it.');
+  assert.doesNotMatch(running.text, /Typed|sent/);
   assert.equal(running.source, 'watch'); assert.equal(running.turnId, 'watched'); assert.equal(running.actionId, 'a');
   Object.assign(f.job.waits[0], { done: true, observedState: 'ready' });
   const ready = f.collect()[0];
   assert.equal(ready.status, 'ready');
-  assert.match(ready.text, /does not establish that any task was completed/);
-  assert.doesNotMatch(ready.text, /was sent|agent turn completed/);
+  assert.equal(ready.text, 'Pane 0 is ready.');
+  assert.doesNotMatch(ready.text, /was sent|finished its turn/);
   assert.deepEqual(f.collect(), []);
 });
 test('watched shell uncertainty never claims input was sent', () => {
   const f = fixture(); Object.assign(f.job.waits[0], { source: 'watch', deliveryStatus: 'watching', nativeShell: true });
   const report = f.collect()[0];
-  assert.match(report.text, /watching this plain shell/);
-  assert.doesNotMatch(report.text, /was sent/);
+  assert.equal(report.text, "I'm watching Pane 0 and I'll tell you what changes.");
+  assert.doesNotMatch(report.text, /was sent|Typed/);
 });
 
 test('prompt and Enter waits attributed to one turn report once across polls', () => {
@@ -250,7 +253,7 @@ test('completed turn stays silent through replacement and late waits while a new
   Object.assign(f.job.waits[0], { turnId: 'finished-turn', observedState: 'completed', done: true });
   const first = f.collect();
   assert.equal(first.length, 1);
-  assert.match(first[0].text, /requested outcome is not independently verified/);
+  assert.match(first[0].text, /finished its turn; I haven't checked what it changed\./);
 
   f.job.waits = f.job.waits.map(wait => ({ ...wait }));
   f.job.waits.push({ ...f.job.waits[0], source: 'watch', actionId: 'late-watch' });
@@ -261,7 +264,7 @@ test('completed turn stays silent through replacement and late waits while a new
   const next = f.collect();
   assert.equal(next.length, 1);
   assert.equal(next[0].turnId, 'next-turn');
-  assert.match(next[0].text, /requested outcome is not independently verified/);
+  assert.match(next[0].text, /finished its turn; I haven't checked what it changed\./);
   assert.deepEqual(f.collect(), []);
 });
 
@@ -271,7 +274,7 @@ test('composer-observed acceptance replaces the unconfirmed-start warning and ho
   const accepted = collectTaskReports(f.job, f.sessions, { now: () => 5000 });
   assert.equal(accepted.length, 1);
   assert.equal(accepted[0].status, 'delivered');
-  assert.match(accepted[0].text, /^Pane 0: the prompt was accepted; the result is pending\.$/);
+  assert.equal(accepted[0].text, "Pane 0 took the prompt; I'm waiting for its result.");
   assert.deepEqual(collectTaskReports(f.job, f.sessions, { now: () => 5001 }), [], 'Reported once');
   const diagnostics = [];
   assert.deepEqual(collectTaskReports(f.job, f.sessions, { now: () => 620000, recordDiagnostic: entry => diagnostics.push(entry) }), []);

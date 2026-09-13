@@ -23,6 +23,7 @@ test('Lina app readiness schedules Codex Web prewarm without waiting for a pane 
     require: name => { assert.equal(name, './orchestratorIntegration.cjs'); return { installOrchestrator: () => ({}) }; },
     BrowserWindow: {}, Menu: {}, ipcMain: {}, screen: {}, shell: {}, safeStorage: {}, dialog: {}, systemPreferences: {},
     getTerminalRuntime: noop, sendToPtyHost: noop, sendToFusionChatHost: noop, sendToOpenFusionChatHost: noop, getCodeChangeSummary: noop,
+    savedConversationConfig: () => ({}), startMobileBridge: noop,
   };
   require('node:vm').runInNewContext(source.slice(start, end), context);
   assert.equal(warmed, 0); ready(); assert.equal(painted, true); assert.equal(warmed, 0);

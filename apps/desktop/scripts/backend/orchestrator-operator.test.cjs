@@ -34,8 +34,6 @@ async function fixture(t, kind = 'codex') {
       if (url.endsWith('/key')) return new Response(JSON.stringify({ data: {} }));
       if (url.endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'scripted', context_length: 128000, supported_parameters: ['tools', 'tool_choice'] }] }));
       const body = JSON.parse(options.body);
-      // These transport fixtures script user-selected targets; semantic veto cases have a separate suite.
-      if (body.messages[0].content === require('../../backend/orchestratorTargetReview.cjs').TARGET_REVIEW_SYSTEM) return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ decision: 'DIRECT', evidenceIds: JSON.parse(body.messages[1].content).selectionEvidence.map(item => item.id) }) } }] }));
       if (body.tools?.[0]?.function?.name === 'interpret_workspace') return new Response(JSON.stringify(call(f.plan, 'interpret_workspace')));
       f.bodies.push(body);
       assert.ok(f.steps.length, 'Unexpected extra model request: ' + JSON.stringify(body.messages.at(-1)));
@@ -84,7 +82,7 @@ test('fresh Codex reads unknown state, sends a composed task, then verifies with
   assert.equal(f.bodies.length, 4, 'Read, send, read, finish use four execution fetches instead of five with a redundant final reply.');
   // Delivery is confirmed; the agent's own result is not, so the acknowledgment
   // reports the pending task instead of claiming the coding work finished.
-  assert.match(result.text, /Input was sent to Work.*result is still pending/s);
+  assert.match(result.text, /Typed the task into Work, but I haven't seen it start yet[.]/s);
   assert.deepEqual(f.effects.map(action => action.kind), ['send_prompt']);
   assert.equal(f.effects[0].text, 'Review the latest changes. Report concrete defects.');
   assert.ok(f.effects[0].requestId, 'Delivery must be attributed to the application request.');
@@ -106,7 +104,7 @@ test('two targets require both post-action finishes and combine their receipts w
   assert.equal(f.reads, 4);
   assert.deepEqual(f.effects.map(action => action.target.id), ['pane', 'second']);
   // Both deliveries are confirmed and both agent results are still pending.
-  assert.match(result.text, /Input was sent to Work.*result is still pending.*Input was sent to Second.*result is still pending/s);
+  assert.match(result.text, /Typed the task into Work, but I haven't seen it start yet[.].*Typed the task into Second, but I haven't seen it start yet[.]/s);
   assert.equal(result.actions.filter(action => action.status === 'interaction-complete').length, 2);
 });
 

@@ -40,7 +40,7 @@ export const Header = () => {
       </div>
     </div>
     <nav id="mobile-nav" className="mobile-nav" aria-label="Mobile navigation" hidden={!open}>
-      {navigation.map(({ href, label }) => <a key={href} href={href} onClick={() => setOpen(false)}>{label}</a>)}
+      {navigation.map(({ href, label }) => <a key={href} href={href} aria-current={path === href || (isDocs && href === "/docs") ? "page" : undefined} onClick={() => setOpen(false)}>{label}</a>)}
       <a href="/#download" onClick={() => setOpen(false)}>Download for Windows</a>
       <a href="/#waitlist" onClick={() => setOpen(false)}>Release updates</a>
     </nav>

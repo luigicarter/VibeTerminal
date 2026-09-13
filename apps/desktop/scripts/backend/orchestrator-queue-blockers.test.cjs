@@ -34,7 +34,7 @@ test('workspace queue names actual old request and target, updates unverified re
   tasks.reconcile(sessions);
   await tick();
   assert.equal(admitted, false, 'idle is not completion');
-  assert.match(next.task.waitingReason, /result remains unverified/);
+  assert.match(next.task.waitingReason, /it has not finished yet/);
   sessions[0].turnState = 'completed';
   sessions[0].turnId = 'other-turn';
   tasks.reconcile(sessions);
@@ -119,7 +119,7 @@ test('prerequisite blockers name their owning request and clear after success', 
   next.task.dependsOn = [prior.task.requestId];
   const pending = tasks.waitForDependencies(next);
   assert.match(next.task.waitingReason, /prerequisite request "Repair the old project"/);
-  assert.match(next.task.waitingReason, /result remains unverified/);
+  assert.match(next.task.waitingReason, /it has not finished yet/);
   tasks.update(prior, { status: 'finished' });
   await pending;
   assert.equal(next.task.waitingReason, undefined);
@@ -129,18 +129,18 @@ test('prerequisite blockers name their owning request and clear after success', 
 test('status recognizes admission queue without claiming delivery or accepting a replacement pane', () => {
   const { formatTaskStatus } = require('../../backend/orchestratorTaskStatus.cjs');
   const target = { id: 'empty', generation: 1, name: 'Empty agent' };
-  const queued = { task: { requestId: 'queued', sequence: 1, status: 'queued', targets: [target], waitingReason: 'Waiting for earlier project work; its result remains unverified.' }, waits: [] };
+  const queued = { task: { requestId: 'queued', sequence: 1, status: 'queued', targets: [target], waitingReason: 'Waiting for the earlier task in this project to finish first.' }, waits: [] };
   const status = { task: { requestId: 'status', sequence: 2 }, waits: [], intent: { commandPlan: { responseKind: 'task-status', statusRequestId: 'queued' } } };
   const jobs = [queued, status];
   for (const requestId of [undefined, 'queued', 'status']) {
     const text = formatTaskStatus({ targets: [target], sessions: [target], jobs, requestId });
-    assert.match(text, /request.*queued; no prompt delivery has been recorded/);
-    assert.match(text, /earlier project work; its result remains unverified/);
-    assert.doesNotMatch(text, /Input was sent|task is running|don't have a tracked/);
+    assert.match(text, /The prompt for Empty agent is queued; nothing has been typed yet/);
+    assert.match(text, /Waiting for the earlier task in this project to finish first[.]/);
+    assert.doesNotMatch(text, /Typed the task|is working on it|don't have a tracked/);
   }
   const changed = formatTaskStatus({ targets: [target], sessions: [{ ...target, generation: 2 }], jobs, requestId: 'status' });
-  assert.match(changed, /changed.*delivery is unverified/);
-  assert.doesNotMatch(changed, /Input was sent|task is running/);
+  assert.match(changed, /Empty agent changed, so I can't tell you where this task stands/);
+  assert.doesNotMatch(changed, /Typed the task|is working on it/);
   const newTarget = formatTaskStatus({ targets: [{ ...target, generation: 2 }], sessions: [{ ...target, generation: 2 }], jobs, requestId: 'queued' });
   assert.match(newTarget, /don't have a tracked task/);
 });
@@ -154,6 +154,6 @@ test('new admission queue remains status subject over older submissions and late
     { task: { requestId: 'queued', sequence: 2, status: 'queued', targets: [target] }, waits: [] },
     { task: { requestId: 'watch', sequence: 3 }, waits: [{ ...wait, source: 'watch' }] }
   ];
-  assert.match(formatTaskStatus({ targets: [target], sessions: [target], jobs }), /request.*queued/);
-  assert.match(formatTaskStatus({ targets: [target], sessions: [target], jobs, requestId: 'old' }), /task is running/);
+  assert.match(formatTaskStatus({ targets: [target], sessions: [target], jobs }), /is queued; nothing has been typed yet/);
+  assert.match(formatTaskStatus({ targets: [target], sessions: [target], jobs, requestId: 'old' }), /is working on it/);
 });

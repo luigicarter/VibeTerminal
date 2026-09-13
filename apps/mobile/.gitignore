@@ -1,0 +1,26 @@
+node_modules/
+.expo/
+.expo-shared/
+dist/
+web-build/
+expo-env.d.ts
+.metro-health-check*
+# Generated native projects; `npx expo prebuild` is not part of this workflow.
+ios/
+android/
+.kotlin/
+*.orig.*
+*.keystore
+*.jks
+*.p8
+*.p12
+*.mobileprovision
+*.pem
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+*.log
+npm-debug.log*
+.tmp/
+.DS_Store

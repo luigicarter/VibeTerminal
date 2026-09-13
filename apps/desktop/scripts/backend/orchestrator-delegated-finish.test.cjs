@@ -40,7 +40,7 @@ for (const kind of ['codex', 'fusion', 'openfusion']) test(`${kind} delegated de
   assert.ok(action); assert.equal(f.finish().length, 1);
   assert.equal(action.kind, 'finish_terminal'); assert.equal(action.grantId, f.grant.id); assert.equal(action.targetId, f.session.id);
   assert.equal(action.observationToken, f.postActionToken); assert.equal(action.outcome, 'completed');
-  assert.equal(action.text, formatTaskWait(f.wait, f.session)); assert.match(action.text, /result is still pending/);
+  assert.equal(action.text, formatTaskWait(f.wait, f.session)); assert.match(action.text, /haven't seen it start yet/);
   assert.deepEqual(f.finish(), [action], 'Unchanged evidence gives the same immutable step');
   assert.deepEqual({ plan: f.input.plan, outcomes: f.input.outcomes, waits: f.input.waits, session: f.session }, snapshot);
   assert.equal(f.observations.latest(f.session, 2), f.postActionToken, 'Only the dispatcher may consume evidence');

@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { buildWorkspaceParameters, scopedWorkspaceTool } = require('../../backend/orchestratorToolSchema.cjs');
-const { workspaceToolGuide } = require('../../backend/orchestratorToolGuide.cjs');
+const { workspaceToolGuide, MEMORY_OPERATIONS } = require('../../backend/orchestratorToolGuide.cjs');
 
 // Exercise the full schema catalog, including grants unavailable in read-only requests.
 const kinds = 'watch_terminal navigate list_roots list_sessions read_session list_conversations read_conversation search_conversation resume_conversation search_files create_project focus_session stage_draft send_prompt interrupt restart close create_session add_project list_setups read_setup launch_setup save_setup list_preferences remember_preference forget_preference ask_user respond list_work answer_question permission terminal_interact finish_terminal'.split(' ');
@@ -15,7 +15,9 @@ test('guide covers exactly exposed operations and rejects unclassified future to
     const scoped = scopedWorkspaceTool(tool, grants);
     const guide = workspaceToolGuide(scoped);
     const documented = guide.split('\n').slice(2).map(line => line.split(':')[0]);
-    assert.deepEqual(documented, scoped.function.parameters.properties.kind.enum);
+    // Memory retrieval needs no grant, so it is documented on every request
+    // after the scoped operations rather than inside them.
+    assert.deepEqual(documented, [...scoped.function.parameters.properties.kind.enum, ...MEMORY_OPERATIONS]);
     assert.ok(Buffer.byteLength(guide) < 4800, 'Keep full tool guidance bounded.');
   }
   assert.throws(() => workspaceToolGuide({ function: { parameters: { properties: { kind: { enum: ['new_tool'] } } } } }), /Missing workspace tool guidance/);
@@ -29,7 +31,9 @@ test('guide explains existing batching without authorizing guessed evidence or p
 
 test('read-only guidance reserves space for source excerpts in constrained contexts', () => {
   const guide = workspaceToolGuide(scopedWorkspaceTool(tool));
-  assert.ok(Buffer.byteLength(guide) < 1600);
+  // Raised from 1600 when memory retrieval joined the always-offered surface:
+  // three ungranted read operations and their one-line policy cost ~330 bytes.
+  assert.ok(Buffer.byteLength(guide) < 1980, `read-only guidance is ${Buffer.byteLength(guide)} bytes`);
   assert.doesNotMatch(guide, /Batch authorized actions/);
   assert.match(guide, /fresh action evidence/);
   assert.match(guide, /provider navigation guide/);

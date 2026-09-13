@@ -40,6 +40,7 @@ function fixture({ cleanup } = {}) {
     sendToOpenFusionChatHost: message => { effects.push(message); return true; },
     app: { on(name, fn) { handlers[name] = fn; }, quit() {} },
     orchestratorIntegration: null, terminalRuntime: null, agentTelemetry: null, buildSupervisor: null,
+    chatService: null, chatExitPrepared: false, chatShutdownPromise: null,
     ptyHost: null, agentThreadHost: null, fusionChatHost: null, openFusionChatHost: null,
     process: { env: {}, platform: 'win32' }, Promise, Map
   };

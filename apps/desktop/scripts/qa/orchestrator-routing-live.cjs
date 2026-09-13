@@ -1,50 +1,59 @@
 'use strict';
-// Actual configured Brain; only in-memory routing evidence. No terminal effects.
+// Assignment costs no model call: the routing rounds and the ownership reviewer
+// are retired, and `fixture()` below now checks the deterministic resolver
+// itself. The live Brain is still exercised, but only end to end
+// (--end-to-end / --existing-owner), where interpretation is the model's part.
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
-const { planTaskRoute } = require('../../backend/orchestratorRoutePlanner.cjs');
-const { fitMessages } = require('../../backend/orchestratorBudget.cjs');
+const { resolveAssignment } = require('../../backend/orchestratorResolver.cjs');
 const existingOwner = process.argv.includes('--existing-owner');
 const endToEnd = process.argv.includes('--end-to-end') || existingOwner;
 const cwd = 'C:/DisposableRoutingFixture';
-const pane = (id, objective, patch = {}) => ({ id, generation: `generation-${id}`, launchToken: 1, provider: 'codex', kind: 'codex', cwd, conversationId: `thread-${id}`, name: objective, observation: 'observed', processState: 'running', turnState: 'completed', ...patch });
-const owner = pane('task-a-owner', 'Repair billing invoices');
-const other = pane('task-b-owner', 'Update documentation');
-const work = (id, objective, target) => ({ id, objective, cwd, requestIds: [`request-${id}`], requiresRevalidation: false, binding: { target: { id: target.id, generation: target.generation, launchToken: 1 }, nativeIdentity: { provider: 'codex', home: 'global', workspace: cwd, id: target.conversationId } } });
+const sameCwd = (a, b) => Boolean(a && b && String(a).toLowerCase() === String(b).toLowerCase());
+const pane = (id, objective, patch = {}) => ({ id, generation: `generation-${id}`, launchToken: 1, provider: 'codex', kind: 'codex', cwd, conversationId: `thread-${id}`, name: objective, observation: 'observed', processState: 'running', turnState: 'completed', started: true, status: 'idle', lastActivityAt: 1000, ...patch });
+const owner = pane('task-a-owner', 'Repair billing invoices', { lastActivityAt: 3000 });
+const other = pane('task-b-owner', 'Update documentation', { lastActivityAt: 2000 });
+const rival = pane('task-c-owner', 'Repair billing exports', { lastActivityAt: 1500 });
+const idle = pane('idle-pane', 'Codex 4', { lastActivityAt: 4000 });
+const work = (id, objective, target) => ({ id, objective, title: objective, cwd, requestIds: [`request-${id}`], requiresRevalidation: false, binding: { target: { id: target.id, generation: target.generation, launchToken: 1 }, nativeIdentity: { provider: 'codex', home: 'global', workspace: cwd, id: target.conversationId } } });
 const workA = work('work-a', 'Repair billing invoices', owner), workB = work('work-b', 'Update documentation', other);
+const workC = work('work-c', 'Repair billing exports', rival);
+const FIXTURE_CASES = {
+  'new-task': { instruction: 'Fix invoice rounding in this project.', sessions: [], workItems: [], expected: 'create' },
+  'named-title': { instruction: 'Tell the agent working on the billing invoices repair to add regression tests.', sessions: [other, owner], workItems: [workB, workA], expected: 'reuse', target: owner.id },
+  'two-similar-titles': { instruction: 'Tell the agent working on the billing repair to continue.', sessions: [owner, rival], workItems: [workA, workC], expected: 'ask', names: ['Repair billing invoices', 'Repair billing exports'] },
+  'busy-same-task': { instruction: 'Tell the agent working on the billing invoices repair to also cover negative totals.', sessions: [{ ...owner, turnState: 'running', pendingInput: true }], workItems: [workA], expected: 'reuse', target: owner.id },
+  'idle-reuse': { instruction: 'Use one of the empty Codex terminals to review invoice rounding.', sessions: [other, idle], workItems: [workB], expected: 'reuse', target: idle.id },
+  'idle-none': { instruction: 'Use one of the empty Codex terminals to review invoice rounding.', sessions: [other], workItems: [workB], expected: 'ask', question: 'No idle Codex pane is free in DisposableRoutingFixture. Open a new one?' },
+  'just-opened': { instruction: 'Put that prompt in the Codex terminal you just created.', sessions: [other, idle], workItems: [workB], created: idle, expected: 'reuse', target: idle.id },
+  'explicit-fresh': { instruction: 'Start a fresh independent agent to review invoice rounding.', sessions: [owner], workItems: [workA], assignmentMode: 'new', expected: 'create' },
+  'unowned-directory': { instruction: 'Continue the invoice rounding repair already in progress; add its regression tests.', sessions: [...Array.from({ length: 220 }, (_, i) => pane(`unrelated-${i}`, `Unrelated archived task ${i}`)), pane('rounding', 'Repair invoice rounding', { lastActivityAt: 9000 })], workItems: [], expected: 'reuse', target: 'rounding' },
+};
 function fixture(name) {
-  const cases = {
-    'new-task': { instruction: 'Fix invoice rounding in this project.', sessions: [], workItems: [], expected: 'create' },
-    'reply-a-after-b': { instruction: 'Continue that billing fix by adding regression tests.', sessions: [other, owner], workItems: [workB, workA], replyWorkItem: workA, expected: 'reuse', target: owner.id },
-    'idle-unrelated': { instruction: 'Implement invoice rounding validation.', sessions: [other], workItems: [workB], expected: 'create' },
-    'busy-same-task': { instruction: 'Also cover negative invoice totals in the billing fix.', sessions: [{ ...owner, turnState: 'running', pendingInput: true }], workItems: [workA], replyWorkItem: workA, expected: 'reuse', target: owner.id },
-    'explicit-fresh': { instruction: 'Start a fresh independent agent to review invoice rounding.', sessions: [owner], workItems: [workA], assignmentMode: 'new', expected: 'create' },
-    'paged-owner': { instruction: 'Continue the invoice rounding repair already in progress; add its regression tests.', sessions: [...Array.from({ length: 220 }, (_, i) => pane(`unrelated-${i}`, `Unrelated archived task ${i}`)), owner], workItems: [], expected: 'reuse', target: owner.id, requireRead: true }
-  };
-  const selected = cases[name]; assert.ok(selected, `Unknown fixture ${name}`);
-  const reads = [];
-  const context = { instruction: selected.instruction, scope: { cwd, assignmentMode: selected.assignmentMode || 'auto' }, sessions: selected.sessions.slice(0, 20), workItems: selected.workItems, replyWorkItem: selected.replyWorkItem,
-    sessionDirectory: { total: selected.sessions.length, truncated: selected.sessions.length > 20 }, reservations: [],
-    launchers: [{ kind: 'codex', available: true, configured: true, launchReady: true, default: true }] };
-  const page = (values, args) => { const query = String(args.query || '').toLowerCase(); const filtered = values.filter(v => !query || JSON.stringify(v).toLowerCase().includes(query)); const offset = args.offset || 0, limit = args.limit || 20; return { values: filtered.slice(offset, offset + limit), total: filtered.length, nextOffset: offset + limit < filtered.length ? offset + limit : null }; };
-  return { context, reads,
-    async read(args) {
-      reads.push({ ...args });
-      if (args.kind === 'list_sessions') { const p = page(selected.sessions, args); return { ok: true, sessions: p.values, total: p.total, nextOffset: p.nextOffset, truncated: p.nextOffset !== null }; }
-      if (args.kind === 'list_work_items') { const p = page(selected.workItems, args); return { ok: true, items: p.values, total: p.total, nextOffset: p.nextOffset }; }
-      if (args.kind === 'read_session') { const target = selected.sessions.find(s => s.id === args.targetId); assert.ok(target, 'Unknown disposable terminal'); return { ok: true, observation: { id: target.id, generation: target.generation, sequence: 1, text: target.id === owner.id ? 'User task: Repair invoice rounding in the billing module. Agent: I have fixed rounding and am adding regression coverage. This conversation is exclusively working on that billing fix.' : 'This conversation contains an unrelated documentation task and is not an unused composer.' } }; }
-      if (args.kind === 'list_work') return { ok: true, items: [], nextOffset: null };
-      if (args.kind === 'list_conversations') return { ok: true, conversations: [], nextOffset: null };
-      if (args.kind === 'read_conversation') return { ok: false, error: 'No saved fixture reference was listed.' };
-      assert.fail(`Effect or unsupported fixture operation: ${args.kind}`);
-    },
-    check(result) { assert.equal(result.decision, selected.expected); if (selected.target) assert.equal(result.targetId, selected.target); if (selected.expected === 'create') assert.equal(result.kindOfSession, 'codex'); if (selected.requireRead) { assert.ok(reads.some(r => r.kind === 'list_sessions')); assert.ok(reads.some(r => r.kind === 'read_session' && r.targetId === selected.target)); } }
-  };
+  const selected = FIXTURE_CASES[name]; assert.ok(selected, `Unknown fixture ${name}`);
+  const run = () => resolveAssignment({ instruction: selected.instruction,
+    grant: { args: { cwd, assignmentMode: selected.assignmentMode || 'auto' } },
+    sessions: selected.sessions, workItems: selected.workItems, launchers: [{ kind: 'codex', label: 'Codex', available: true, configured: true }],
+    cwd, projectName: 'DisposableRoutingFixture', sameCwd,
+    history: { lastCreatedPane: () => selected.created, lastTargetPane: () => undefined, recentPanes: () => [] } });
+  return { name, instruction: selected.instruction, run,
+    check(result) {
+      assert.equal(result.decision, selected.expected, `${name}: ${JSON.stringify(result)}`);
+      if (selected.target) assert.equal(result.targetId, selected.target, name);
+      if (selected.expected === 'create') assert.equal(result.kindOfSession, 'codex', name);
+      if (selected.question) assert.equal(result.question, selected.question, name);
+      if (selected.names) assert.deepEqual(result.candidates.map(item => item.label), selected.names, name);
+      // Nothing here may touch a terminal, a store or the network.
+      assert.equal(result.decision === 'create' || Boolean(result.targetId) || Boolean(result.question), true, name);
+    } };
 }
 if (process.argv.includes('--self-test')) {
-  (async () => { for (const name of ['new-task', 'reply-a-after-b', 'idle-unrelated', 'busy-same-task', 'explicit-fresh', 'paged-owner']) { const f = fixture(name); assert.ok(f.context.scope.cwd); if (name === 'paged-owner') { const p = await f.read({ kind: 'list_sessions', offset: 200, limit: 40 }); assert.ok(p.sessions.some(s => s.id === owner.id)); await f.read({ kind: 'read_session', targetId: owner.id }); f.check({ decision: 'reuse', targetId: owner.id }); } } console.log('Routing fixture self-test passed; no network or credentials.'); })().catch(error => { console.error(error.message); process.exitCode = 1; });
+  try {
+    for (const name of Object.keys(FIXTURE_CASES)) { const f = fixture(name); f.check(f.run()); }
+    console.log(`Resolver fixture self-test passed for ${Object.keys(FIXTURE_CASES).length} cases; no network, credentials or model call.`);
+  } catch (error) { console.error(error.message); process.exitCode = 1; }
 } else if (!process.versions.electron) {
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
   const child = spawnSync(require('electron'), [__filename, '--live-child', ...(endToEnd ? ['--end-to-end'] : []), ...(existingOwner ? ['--existing-owner'] : [])], { env, windowsHide: true, stdio: 'inherit', timeout: 300000 }); process.exitCode = child.status ?? 1;
@@ -56,8 +65,8 @@ if (process.argv.includes('--self-test')) {
   const statePath = path.join(installedRoot, 'Local State');
   if (fs.existsSync(statePath)) { const { os_crypt } = JSON.parse(fs.readFileSync(statePath, 'utf8')); if (os_crypt) { fs.mkdirSync(path.join(run, 'electron'), { recursive: true }); fs.writeFileSync(path.join(run, 'electron', 'Local State'), JSON.stringify({ os_crypt })); } }
   const budget = Math.min(endToEnd ? 0.08 : 0.25, Math.max(0.01, Number(process.env.VIBE_LIVE_BUDGET) || (endToEnd ? 0.08 : 0.15)));
-  const report = { boundary: 'Configured Brain and actual read-only route planner; in-memory disposable terminal/history evidence only. No intent-compiler, terminal creation, prompt delivery or native terminal UI validation. Ambiguous project resolution belongs upstream and is outside this harness.', budget, calls: [], cases: [] };
-  if (endToEnd) report.boundary = 'Actual configured Brain through default intent compiler, route planner and operator; only disposable in-memory native terminal adapters and .tmp profile/project folders. No interpretation/routing injection, real terminal process, or installed profile mutation.';
+  const report = { boundary: 'Configured Brain key, model and pricing are verified, then the deterministic resolver is checked against in-memory disposable evidence with no model call: assignment costs none. No intent-compiler, terminal creation, prompt delivery or native terminal UI validation. Ambiguous project resolution belongs upstream and is outside this harness.', budget, calls: [], cases: [] };
+  if (endToEnd) report.boundary = 'Actual configured Brain through the default intent compiler, the deterministic resolver and the operator; only disposable in-memory native terminal adapters and .tmp profile/project folders. No interpretation or assignment injection, real terminal process, or installed profile mutation.';
   let secret = '', spent = 0, relay;
   const clean = value => String(value || '').split(secret || '\0').join('[REDACTED]');
   async function main() {
@@ -131,8 +140,9 @@ if (process.argv.includes('--self-test')) {
         { name: 'e2e-independent-project', input: () => ({ text: `Update deployment documentation in ${independent}.`, origin: 'text' }), check: () => { assert.equal(effects.filter(e => e.kind === 'create_session').length, 2); const sends = effects.filter(e => e.kind === 'send_prompt'); assert.equal(sends.length, 3); assert.notEqual(sends[2].targetId, sends[0].targetId); } }
       ];
       // A uniquely titled owner must be reached deterministically: interpretation
-      // and handoff only, with no routing or affinity round trip.
-      const continuationCase = { name: 'e2e-existing-chat-owner', callBudget: 3, input: () => ({ text: 'Hey Lena. Can you tell the agent working on the project chat section in Vibe terminal to continue its work.', origin: 'text' }),
+      // only, with no routing or affinity round trip and no second reply call
+      // before the effect.
+      const continuationCase = { name: 'e2e-existing-chat-owner', callBudget: 2, input: () => ({ text: 'Hey Lena. Can you tell the agent working on the project chat section in Vibe terminal to continue its work.', origin: 'text' }),
         check: () => { assert.deepEqual(effects.map(e => e.kind), ['send_prompt']); assert.equal(effects[0].targetId, 'fixture-existing-2'); } };
       const selectedEndToEnd = existingOwner ? [continuationCase] : process.env.VIBE_LIVE_CASES ? cases.filter(scenario => process.env.VIBE_LIVE_CASES.split(',').includes(scenario.name)) : cases.slice(0, 2);
       assert.ok(selectedEndToEnd.length && (existingOwner || selectedEndToEnd[0].name === 'e2e-targetless-create'), 'End-to-end cases must start with targetless creation to establish the reply fixture.');
@@ -150,27 +160,17 @@ if (process.argv.includes('--self-test')) {
       }
       report.reads = reads; report.confirmedUsageCost = report.calls.reduce((sum, call) => sum + (call.cost || 0), 0); report.ok = report.cases.length === selectedEndToEnd.length && report.cases.every(c => c.ok); return;
     }
-    const selected = (process.env.VIBE_LIVE_CASES || 'new-task,reply-a-after-b,busy-same-task').split(',');
+    // Assignment itself no longer reaches the provider, so this mode is now a
+    // zero-cost contract check of the resolver against the same disposable
+    // evidence. The Brain key/model/pricing above were still verified, which is
+    // what distinguishes a configured environment from an unconfigured one.
+    const selected = (process.env.VIBE_LIVE_CASES || Object.keys(FIXTURE_CASES).join(',')).split(',');
     for (const name of selected) {
-      const f = fixture(name), row = { name }, started = Date.now(), signal = AbortSignal.timeout(70000);
-      try {
-        row.result = await planTaskRoute({ context: f.context, read: f.read, maxRounds: 8, check: () => signal.throwIfAborted(), complete: async (messages, tools) => {
-          const outputTokens = 2200; const fitted = fitMessages({ messages, tools, contextLength: model.context_length, outputTokens });
-          const body = { model: modelId, messages: fitted, tools, max_tokens: outputTokens, temperature: 0, ...(model.supported_parameters?.includes('reasoning') && { reasoning: { effort: 'low' } }) };
-          const reservation = (Buffer.byteLength(JSON.stringify(body)) + 4096) * prices[0] + outputTokens * prices[1] + prices[2];
-          assert.ok(spent + reservation <= budget, 'Conservative next-call reservation exceeds remaining live budget'); spent += reservation;
-          const response = await fetch('https://openrouter.ai/api/v1/chat/completions', { method: 'POST', headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal });
-          const data = await response.json(); const cost = Number(data.usage?.cost);
-          if (!response.ok) throw Error(`Provider response ${response.status}: ${clean(data.error?.message).slice(0, 300)}`);
-          if (!Number.isFinite(cost)) { spent = budget; throw Error('Provider omitted usage cost; stopped to protect budget'); }
-          spent += cost - reservation;
-          report.calls.push({ name, model: data.model || modelId, cost, finishReason: data.choices?.[0]?.finish_reason }); return data;
-        } });
-        f.check(row.result); row.ok = true;
-      } catch (error) { row.ok = false; row.error = clean(error.message); }
-      row.reads = f.reads; row.elapsedMs = Date.now() - started; report.cases.push(row);
-      console.log(JSON.stringify({ name, ok: row.ok, decision: row.result?.decision, reads: row.reads.length, error: row.error }));
-      if (spent >= budget) break;
+      const f = fixture(name), row = { name }, started = Date.now();
+      try { row.result = f.run(); f.check(row.result); row.ok = true; }
+      catch (error) { row.ok = false; row.error = clean(error.message); }
+      row.elapsedMs = Date.now() - started; report.cases.push(row);
+      console.log(JSON.stringify({ name, ok: row.ok, decision: row.result?.decision, target: row.result?.targetId, calls: 0, error: row.error }));
     }
     report.ok = report.cases.length === selected.length && report.cases.every(c => c.ok);
   }

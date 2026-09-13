@@ -722,4 +722,8 @@ rl.on("line", (line) => {
   }
 });
 
+// The pipe closes when Electron dies. Retire owned PTYs instead of leaving
+// detached agents running and competing with recovered conversations.
+rl.on('close', () => handleMessage({ type: 'shutdown' }));
+
 emit({ type: "ready" });

@@ -3412,7 +3412,7 @@ button {
 .settings-dialog {
   display: flex;
   width: min(560px, calc(100vw - 32px));
-  max-height: calc(100vh - 64px);
+  height: min(760px, calc(100vh - 64px));
   flex-direction: column;
   gap: 0;
   padding: 0;
@@ -3498,8 +3498,10 @@ button {
 }
 
 .settings-body {
+  flex: 1;
   min-height: 0;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   padding: var(--space-4) var(--space-5) var(--space-5);
 }
 

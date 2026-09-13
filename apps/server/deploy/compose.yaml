@@ -1,0 +1,88 @@
+name: lina-account
+x-server: &server
+  image: lina-account-server:local
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
+  restart: unless-stopped
+  env_file: ../data/server.env
+  environment: &environment
+    HOST: 0.0.0.0
+    PORT: 3002
+    DATABASE_URL_FILE: /run/secrets/runtime-db-url
+    AUTH_SECRET_FILE: /run/secrets/auth-secret
+    OUTBOX_KEY_FILE: /run/secrets/outbox-key
+    METRICS_TOKEN_FILE: /run/secrets/metrics-token
+    SMTP_PASSWORD_FILE: /run/secrets/smtp-password
+  logging:
+    driver: json-file
+    options: {max-size: "10m", max-file: "3"}
+  secrets: &server-secrets
+    - runtime-db-url
+    - auth-secret
+    - outbox-key
+    - metrics-token
+    - smtp-password
+services:
+  db:
+    image: postgres:17.6
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
+    secrets: [postgres-password]
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  provision:
+    <<: *server
+    profiles: [setup]
+    restart: "no"
+    command: [bun, --no-env-file, scripts/provision-db.ts]
+    depends_on: {db: {condition: service_healthy}}
+    environment:
+      <<: *environment
+      MIGRATION_DATABASE_URL_FILE: /run/secrets/migration-db-url
+      DATABASE_ADMIN_URL_FILE: /run/secrets/admin-db-url
+      JOBS_DATABASE_URL_FILE: /run/secrets/jobs-db-url
+    secrets: [runtime-db-url, migration-db-url, admin-db-url, jobs-db-url, auth-secret, outbox-key, metrics-token, smtp-password]
+  migrate:
+    <<: *server
+    restart: "no"
+    command: [bun, --no-env-file, scripts/migrate.ts]
+    depends_on: {db: {condition: service_healthy}}
+    environment:
+      <<: *environment
+      MIGRATION_DATABASE_URL_FILE: /run/secrets/migration-db-url
+    secrets: [runtime-db-url, migration-db-url, auth-secret, outbox-key, metrics-token, smtp-password]
+  api:
+    <<: *server
+    depends_on: {migrate: {condition: service_completed_successfully}}
+    ports: ["127.0.0.1:3002:3002"]
+    healthcheck:
+      test: [CMD, bun, --no-env-file, -e, "const r=await fetch('http://127.0.0.1:3002/health/ready');process.exit(r.ok?0:1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+  jobs:
+    <<: *server
+    depends_on: {migrate: {condition: service_completed_successfully}}
+    command: [bun, --no-env-file, scripts/jobs.ts]
+    environment:
+      <<: *environment
+      DATABASE_URL_FILE: /run/secrets/jobs-db-url
+    secrets: [jobs-db-url, auth-secret, outbox-key, metrics-token, smtp-password]
+secrets:
+  postgres-password: {file: ../data/secrets/postgres-password}
+  admin-db-url: {file: ../data/secrets/admin-db-url}
+  migration-db-url: {file: ../data/secrets/migration-db-url}
+  runtime-db-url: {file: ../data/secrets/runtime-db-url}
+  jobs-db-url: {file: ../data/secrets/jobs-db-url}
+  auth-secret: {file: ../data/secrets/auth-secret}
+  outbox-key: {file: ../data/secrets/outbox-key}
+  metrics-token: {file: ../data/secrets/metrics-token}
+  smtp-password: {file: ../data/secrets/smtp-password}
+volumes:
+  postgres-data:

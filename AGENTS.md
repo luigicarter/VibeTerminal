@@ -6,12 +6,60 @@ Lina Terminal is an Electron + React desktop workspace for running local termina
 
 - Desktop source, vendor resources, and app-specific scripts live in `apps/desktop`.
 - Website frontend/API and user-guide content live in `apps/website`.
+- The Expo/React Native iOS and Android app lives in `apps/mobile`.
+- The independent Bun + TypeScript account backend lives in `apps/server`: login, account/tier management, activity intake, database, and monitoring. It is locally verified; live Google deployment is pending.
 - Shared brand source lives in `packages/brand`; root scripts synchronize exports.
 - Engineering docs stay in root `docs`. Historical desktop paths in these docs are relative to `apps/desktop`.
 - Each app owns its dependency lockfile and build output. Root npm scripts forward to the appropriate app.
 - Local root-level compatibility junctions are ignored; edit the canonical `apps/` paths.
 
+## Required directory ownership for agents
+
+- Before creating or moving files, read this guide and the destination app's
+  `AGENTS.md`. Place each change in the app that owns its responsibility.
+- All hosted account-server implementation belongs in `apps/server`: login and
+  session services, PostgreSQL schema/migrations, account/tier policy, activity
+  intake, administration APIs, monitoring, server tests, and VM deployment files.
+- `apps/desktop/backend` owns Electron, local terminals/agents, and the desktop's
+  local mobile bridge. `apps/website/backend` owns marketing APIs. Neither is a
+  location for the hosted account server.
+- Keep client screens, HTTPS clients, and client-side activity emitters with
+  their desktop, website, or mobile app. Clients must not import server runtime
+  code or receive database credentials, migration code, or server dependencies.
+- Keep each app's dependencies, lockfile, scripts, fixtures, and build output in
+  its own folder. Root scripts and `.github/workflows` may coordinate apps;
+  shared brand assets belong in `packages/brand`, engineering docs in `docs`.
+- Do not create duplicate root-level source folders or use compatibility
+  junctions as canonical edit paths. Update ownership documentation when a
+  responsibility actually moves, preserving unrelated work in this checkout.
+- Treat the [repository layout](docs/repository-layout.md) and the owning app's
+  guide as required placement rules for future implementation and refactoring.
+
 ## Docs Index
+
+- `docs/release-0.1.118-review.md` - Complete pending-work release: terminal Chats/recovery, Orchestrator overhaul, read-only phone bridge, mobile/server/account-preview source, release-review fixes, all-app acceptance and installer/publication evidence.
+
+- `docs/chat-section-implementation-2026-09-13.md` - Implemented terminal-format Chats directly below Projects: durable SQLite catalog/workspace and app-owned drafts, exact native resume, private Codex Web history, shutdown/crash/renderer-reload recovery, bounded history copies and backups, reviewed bugs, source/package verification and prioritized remaining edge cases. No release or installation.
+
+- `docs/chat-section-plan-2026-09-13.md` - Broader Chats design and recovery roadmap: source audit, persistent chat versus pane identity, storage, native history, draft/send recovery, shutdown/updates, provider support, migration/backups and acceptance matrix. Links to the precise implemented scope; remaining hardening is not a shipped guarantee.
+
+- `docs/account-phase-2-previews.md` - Disconnected desktop personal-account and web account/admin interfaces, local preview commands, sample interactions, 11 state/boundary tests, build evidence and verification limits. The user explicitly requires no wiring yet and web-only administration; preserve those boundaries.
+
+- `docs/server-phase-1-implementation.md` - Bun/TypeScript backend implementation, database/auth/MFA/account/activity/monitoring and deployment tooling, 40 Linux integration tests, real HTTP restart and PostgreSQL restore evidence, native Windows test limitation, and pending live Google/email/alert acceptance.
+
+- `docs/server-phase-1-plan.md` - Requirements for the first backend phase: isolated Bun/TypeScript server/PostgreSQL, migrations, login/session APIs, account types and administration, activity/health monitoring, Google VM checks, and end-to-end acceptance before screens; links to the local implementation record.
+
+- `docs/login-access-plan-2026-09-12.md` - Backend-first architecture: dedicated Bun/TypeScript `apps/server`, PostgreSQL, login/session APIs, two tiers and account states, protected management, activity and monitoring, Google VM deployment, acceptance gates, and deferred screens/billing.
+
+- `docs/mobile-bridge.md` - The opt-in, read-only LAN bridge the phone app pairs with, built for a phone on a cellular connection: what it exposes (projects, terminals-as-chats with normalized live status, a pane's ANSI-stripped screen text, a live **changed-rows frame stream** that renders the pane in a real xterm with bounded scrollback, structured `needsInput` prompt detection for one-tap chips, an agent pane's paginated saved transcript, the Orchestrator's saved history), the full API contract v1 covering both the unauthenticated discovery/pairing routes (`/api/discover`, `POST /api/pair`, the approval long-poll that delivers the code exactly once) and the bearer-authorized read routes, with rate limiting, CORS, long-poll revision semantics, gzip on every response over 512 bytes; **frame protocol v2** behind `/api/sessions/:id/stream` (gzip-encoded SSE, `hello`/`scrollback`/`screen`/`frame`/`resize`/`exit`, the self-contained ANSI row format and how a phone draws it, row hashing and diffing off the bridge's own headless decoder, twelve frames a second, the eight-stream ceiling, and the retired raw-byte ring and `since` replay), the `metrics` counters behind it, the slimmer `/api/state` and paginated `transcript`, the self-contained `/terminal/:id` page (no horizontal scroll at any width, no font floor, pinch-zoom and pan instead, hidden scrollbars with a 2 px position rail), the credential-free content-hashed `/vendor/<hash>/*` xterm assets cached immutable for a year and why they are outside both limiters, and the `?code=` query credential the stream and the page accept and what it costs; the discovery-plus-one-tap-approval pairing flow where nobody types an address or a code (desktop prompt and Settings list, three pending offers, 120 s expiry, device records, rotation signing every phone out) and the hidden manual fallback; the reserved-but-deliberately-absent write endpoints (input, interrupt, request) and the blast-radius reason they were left out of this build; security boundaries (off by default and writing nothing while off, a person approves every phone, LAN only, no TLS, 0600 preference store, the `LINA_MOBILE_BRIDGE_AUTO_APPROVE` fixture override, Windows Firewall prompt, workspace-window-only IPC); the verification commands and the measured redraw-storm numbers (66,950 PTY bytes in, 4,871 compressed out, 13.7×, 10.1 fps); and an explicit not-verified list covering real devices, touch gestures, a real TUI, scrollback while attached, real agent transcripts, off-machine access and the phone-side discovery mechanism.
+
+- `docs/mobile-app.md` - Expo SDK 57 React Native companion client: pairing/discovery, project and terminal screens, terminal-format WebView and history, read-only bridge capability handling, notifications and background limits, Windows development/build workflow, and device/store acceptance boundaries.
+
+- `docs/orchestrator-overhaul-2026-09-12-implementation.md` - Implementation record of the overhaul on the finished (uncommitted) tree: results against every target (1 model call per start/follow-up/named pane, interpretation 44,474 to 23,284 chars, live-tasks 4/4, suite 2,323), what each phase changed (normalizer, fallback brain, tool gating, resolver, dispatcher, prefetch, deterministic target review, ledger/pane memory/memory store with recall tools and a no-model fast path, 62-sentence conversation catalogue with progress rows and tone lint, retired reviewers, measurement script), Phase 5 (command compiler with a golden corpus, adaptive voice endpointing with early transcription and a Whisper vocabulary prompt, warm spare pane, optional interpretation model, fidelity harness), product-visible changes, and what is still open.
+
+- `docs/orchestrator-overhaul-plan-2026-09-12.md` - Five-phase execution plan for the Orchestrator overhaul: hotfix 0.1.118 (valid tool calls, 4xx diagnostics, idle-pane reuse, transient trust screens, orphan retry, specific failures), two-call pipeline (vocabulary normalizer, slim interpretation, deterministic resolver, code-owned dispatcher, overlap), three-tier memory (action ledger, pane memory, preferences/aliases) with byte budgets replacing the raw 12-message window, reply contract, scope gating and a measurement script; targets, done-when checks and effort per phase.
+
+- `docs/orchestrator-intent-and-repair-2026-09-12.md` - What the Orchestrator exists to do (128 saved requests classified: start, follow up, report, tidy), how well 0.1.117 serves that (58% finished, usage 48 to 1 requests/day, one request in six checking whether the prompt landed), the September 12 chain of five bugs with the reproduced HTTP 400 root cause (app-authored tool calls without `type: "function"`), the structural diagnosis, and the ranked repair packages A to E with the product decisions they need.
 
 - `docs/codex-cursor-flicker-2026-09-11.md` - Codex-pane cursor flicker root cause: the inbox conhost ConPTY (node-pty default) splits Codex >=0.152's per-frame cursor-style repair so the parked cursor renders for a frame; bundled/newer OpenConsole keeps the frame intact; byte captures per host and Codex version, renderer replay counts, ruled-out causes, probe boundaries, and the implemented, smoke-verified repair: every Windows pane now spawns on node-pty's bundled ConPTY (`useConptyDll`), which also ends the per-exited-pane conhost leak, with `LINA_CONPTY_HOST=system` as the escape hatch and `npm run smoke:backend:conpty-host` as the lock.
 

@@ -12,7 +12,14 @@ test('HTTP status and error envelopes classify without leaking provider bodies',
   for (const [status, category] of [[402, 'credits'], [401, 'auth'], [403, 'request'], [408, 'timeout'], [429, 'rate-limit'], [503, 'upstream'], [400, 'request']]) {
     for (const httpStatus of [status, 200]) {
       await assert.rejects(readOpenRouterResponse(response(httpStatus, { error: { code: status, message: 'SECRET api-key', metadata: {} } })), error => {
-        assert.equal(error.category, category); assert.equal(error.status, status); assert.ok(!JSON.stringify(upstreamErrorInfo(error)).includes('SECRET')); return true;
+        assert.equal(error.category, category); assert.equal(error.status, status);
+        // The upstream sentence now travels in providerMessage alone, for the
+        // local diagnostics record and this request's own failure text. No
+        // other field may repeat it, and reportUpstream withholds it entirely.
+        const { providerMessage, ...announced } = upstreamErrorInfo(error);
+        assert.ok(!JSON.stringify(announced).includes('SECRET'));
+        assert.equal(providerMessage, 'SECRET api-key');
+        return true;
       });
     }
   }
@@ -44,9 +51,10 @@ test('client deadlines and upstream timeouts retain distinct safe reasons', asyn
   assert.equal(classifyTransportError(new DOMException('SECRET', 'TimeoutError')).reason, 'client-deadline');
   for (const status of [200, 408]) {
     await assert.rejects(readOpenRouterResponse(response(status, { error: { code: 408, message: 'SECRET provider body', metadata: { raw: 'SECRET', provider_name: 'SECRET' } } })), error => {
-      const info = upstreamErrorInfo(classifyTransportError(error));
+      const { providerMessage, ...info } = upstreamErrorInfo(classifyTransportError(error));
       assert.equal(info.category, 'timeout'); assert.equal(info.status, 408); assert.equal(info.reason, 'upstream-timeout');
-      assert.doesNotMatch(JSON.stringify(info), /SECRET|metadata|provider_name/); return true;
+      assert.doesNotMatch(JSON.stringify(info), /SECRET|metadata|provider_name/);
+      assert.match(providerMessage, /SECRET provider body/); return true;
     });
   }
   const cancelled = new AbortController(); cancelled.abort();
@@ -73,6 +81,9 @@ test('voice and text failures preserve error string and emit exactly once', asyn
     assert.equal(f.events.at(-1).origin, origin); assert.equal(f.events.at(-1).operation, 'brain');
   }
   assert.equal(f.events.length, 2); assert.ok(!JSON.stringify(f.events).includes('SECRET'));
+  // The announcement surface carries application wording only; the provider's
+  // own sentence stays in diagnostics and in the request's failure text.
+  assert.ok(f.events.every(event => event.providerMessage === undefined));
 });
 test('monitor failure notifies once', async t => {
   const f = fixture(t); await f.ready(); await f.instance.configure({ monitoringEnabled: true }); await f.instance.refresh({ monitor: true });

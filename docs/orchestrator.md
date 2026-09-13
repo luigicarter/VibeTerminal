@@ -10,8 +10,11 @@ Brain interprets natural language; application code binds operations to current
 terminal identities and validates delivery. See [semantic commands and terminal
 controls](orchestrator-controls.md) for the current operating contract.
 
-Project tasks now use **Auto-assign**: the Orchestrator finds the verified owner
-of a continuation or creates a separate configured agent for independent work.
+Project tasks now use **Auto-assign**: the application resolves the owner of a
+continuation deterministically from pane titles, status, ownership and its own
+recent actions, or creates a separate configured agent for independent work, and
+asks which agent you meant when two panes match. No model round decides where a
+task goes.
 The submitted project stays attached to the request if you change views. Terminals
 and chat panes remain the interface. Small agent records expose work, activity,
 attention and notes on demand; unrelated transcripts are omitted from the initial
@@ -39,6 +42,10 @@ For the reading/voice follow-up, see [progressive context and local error audio]
 5. For activation without a key press, check **Hands-free voice – Hey Lina** and
    choose **Save changes**. Wait for the runtime's ready message, then say the
    wake phrase followed by your request. See [hands-free voice](voice-handsfree.md).
+
+An optional **Interpretation model** runs only the call that understands what you
+said, so a faster model can shorten every request while replies and results stay
+on the brain; left empty, the brain interprets as before.
 
 A saved key is greyed out with a **Change** button. Enabling saves and verifies
 the draft; later edits require **Save changes**. Public model browsing works
@@ -153,6 +160,19 @@ the source selection cancels stale reads. Staging never sends bytes to a termina
   effect gate.
 - `backend/orchestratorTerminalInput.cjs` bridges fresh native terminal screen
   observations to bounded, generation-checked text/key input.
+- `backend/orchestratorSparePane.cjs` keeps one warm spare pane so "open" and
+  "start" do not pay for pane creation. The setting "Keep a spare agent ready in
+  the active project" (`spareAgent`, on by default) lets the keeper open a single
+  idle pane of the last started project's default agent, bounded to one per
+  project and one for the whole app, never within ten seconds of the previous
+  one, never while the Orchestrator is off or the system has under 15% of its
+  memory free, and never when an idle pane nobody owns is already free there. The
+  spare is an ordinary pane: the resolver reuses it for the next task with no
+  routing change, and once a task owns it the keeper forgets it. Only a pane the
+  keeper itself created, still idle and still unowned, is closed again — when a
+  start moves the work to another project, after thirty unused minutes, or
+  immediately when the setting is turned off. Each decision is recorded privately
+  as a `spare_pane` diagnostic.
 - `frontend/sessionDrafts.ts` keeps drafts and revisions in RAM independently of
   mounted pane components.
 

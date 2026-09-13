@@ -6,6 +6,8 @@
   "scripts": {
     "build": "tsc -b && vite build",
     "dev": "vite --host 127.0.0.1",
+    "preview:account": "vite --config vite.account-preview.config.ts",
+    "build:account-preview": "tsc -b && vite build --config vite.account-preview.config.ts",
     "preview": "vite preview --host 127.0.0.1",
     "typecheck": "tsc -b"
   },

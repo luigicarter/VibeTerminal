@@ -41,11 +41,42 @@ for (const [name, change] of [
   assert.equal(assess(session, observation).ready, false);
 });
 
-for (const text of ['Do you trust this directory?', 'Set up the Codex agent sandbox', 'Sign in to ChatGPT'])
+// Startup onboarding is transient: never ready, never sent into, but the wait
+// keeps polling and reports the screen instead of failing the prompt at once.
+for (const [text, prompt] of [['Do you trust this directory?', 'folder-trust'], ['Set up the Codex agent sandbox', 'codex-sandbox'],
+  ['Sign in to ChatGPT', 'sign-in'], ['Review startup hooks', 'startup-hooks']])
   test(`onboarding cannot reuse a retained composer: ${text}`, () => {
     const { session, observation } = fixture(); observation.text += `\n${text}`;
-    assert.equal(assess(session, observation).status, 'blocked');
+    const readiness = assess(session, observation);
+    assert.equal(readiness.status, 'transient');
+    assert.equal(readiness.ready, false);
+    assert.equal(readiness.prompt, prompt);
+    assert.equal(readiness.affirmativeDefault, false, 'no highlighted affirmative option is visible in this capture');
   });
+
+test('only a folder trust screen with its affirmative default highlighted is answerable', () => {
+  const { session, observation } = fixture();
+  const trust = '\nDo you trust the files in this folder?\n\n❯ 1. Yes, proceed\n  2. No, exit';
+  observation.text += trust;
+  const readiness = assess(session, observation);
+  assert.equal(readiness.status, 'transient');
+  assert.equal(readiness.prompt, 'folder-trust');
+  assert.equal(readiness.affirmativeDefault, true);
+  // The pointer resting on the refusal, and a sandbox screen, are never answered.
+  assert.equal(assess(session, { ...observation, text: observation.text.replace('❯ 1. Yes, proceed\n  2. No, exit', '  1. Yes, proceed\n❯ 2. No, exit') }).affirmativeDefault, false);
+  const sandbox = assess(session, { ...observation, text: `${fixture().observation.text}\nSet up the Codex agent sandbox\n\n❯ 1. Yes, proceed` });
+  assert.equal(sandbox.prompt, 'codex-sandbox');
+  assert.equal(sandbox.affirmativeDefault, false);
+});
+
+test('a pending decision stays blocked and never becomes a transient startup screen', () => {
+  const { session, observation } = fixture(); session.provider = 'claude';
+  for (const text of ['Do you want to proceed?', 'Allow Claude to edit files?']) {
+    const readiness = assess(session, { ...observation, cursor: { x: 0, y: 2 }, text: `Claude Code\n? for shortcuts\n${text}` });
+    assert.equal(readiness.status, 'blocked');
+    assert.equal(readiness.ready, false);
+  }
+});
 
 for (const field of ['manualInputPending', 'interactionInputPending']) test(`${field} blocks startup submission`, () => {
   const { session, observation } = fixture(); observation[field] = true;

@@ -21,8 +21,6 @@ async function fixture(t) {
       if (url.endsWith('/key')) return new Response(JSON.stringify({ data: {} }));
       if (url.endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'model', context_length: 128000, supported_parameters: ['tools'] }] }));
       const body = JSON.parse(options.body);
-      // These transport fixtures script user-selected targets; semantic veto cases have a separate suite.
-      if (body.messages[0].content === require('../../backend/orchestratorTargetReview.cjs').TARGET_REVIEW_SYSTEM) return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ decision: 'DIRECT', evidenceIds: JSON.parse(body.messages[1].content).selectionEvidence.map(item => item.id) }) } }] }));
       if (body.tools?.[0]?.function.name === 'interpret_workspace') {
         const context = JSON.parse(body.messages[1].content); f.contexts.push(context);
         return new Response(JSON.stringify(tool('interpret_workspace', f.plan(context))));
@@ -94,7 +92,7 @@ test('long ordinary failed summary stays brief without changing the written resp
   f.reply = body => body.tools ? respond(full) : { choices: [{ finish_reason: 'length', message: { content: 'Incomplete summary' } }] };
   const result = await f.app.send({ text: 'Give me the result', origin: 'voice' });
   assert.equal(result.text, full);
-  assert.match(f.spoken.at(-1).speechText, /could not prepare a reliable spoken summary/);
+  assert.match(f.spoken.at(-1).speechText, /couldn't put a spoken summary together/);
   assert.equal(f.calls.filter(body => !body.tools).length, 1);
 });
 
@@ -206,10 +204,10 @@ test('respond complete cannot bypass an unfinished terminal grant and must conti
   assert.equal(f.calls.length, 3); assert.equal(f.spoken.length, 1); assert.equal(f.spoken[0].text, result.text);
   // A plain shell cannot attribute a task result, so the acknowledgment states
   // the verified delivery instead of claiming the work itself completed.
-  assert.match(result.text, /Input was sent to Project Alpha.*cannot be verified automatically/s);
-  assert.equal(f.spoken[0].completionCue, undefined, 'an unverified terminal result is never a completion cue');
+  assert.match(result.text, /Typed the command into Project Alpha[.] It is a plain shell, so I can't tell you when the command finishes[.]/s);
+  assert.equal(f.spoken[0].completionCue, undefined, 'an unconfirmed terminal result is never a completion cue');
   assert.equal(f.spoken[0].speechText, result.text, 'current delivery evidence replaces an unsupported model speech summary');
-  assert(f.app.getState().messages.some(message => message.origin === 'task' && /plain shell.*Completion is unverified/.test(message.text || message.content)));
+  assert(f.app.getState().messages.some(message => message.origin === 'task' && /plain shell, so I can't tell you when the command finishes/.test(message.text || message.content)));
 });
 
 test('a rejected response cannot make a later complete bypass unfinished authorized work', async t => {
@@ -231,5 +229,5 @@ test('a rejected response cannot make a later complete bypass unfinished authori
   assert.equal(f.calls.length, 4); assert.equal(result.actions[0].status, 'rejected');
   assert.equal(f.spoken.length, 2); assert.notEqual(f.spoken[0].text, 'All done.');
   assert.equal(f.spoken[1].kind, 'task-report'); assert.equal(f.spoken[1].requestId, result.requestId);
-  assert.match(f.spoken[1].text, /plain shell.*Completion is unverified/);
+  assert.match(f.spoken[1].text, /plain shell, so I can't tell you when the command finishes/);
 });

@@ -1,10 +1,11 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const {createOrchestrator}=require('../../backend/orchestrator.cjs');
-const {TARGET_REVIEW_SYSTEM,TARGET_REVIEW_SCHEMA,targetReviewPayload,targetReviewDecision}=require('../../backend/orchestratorTargetReview.cjs');
+const {reviewExistingTargets}=require('../../backend/orchestratorTargetReview.cjs');
+const {extractSelector}=require('../../backend/orchestratorResolver.cjs');
 async function fixture(t){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'vibe-target-review-'));
-  const f={root,sessions:[],effects:[],plans:[],markers:[],checks:[],affinities:[],interpretations:[],executions:[],phases:new Map()};let sequence=0;
+  const f={root,sessions:[],effects:[],plans:[],completions:[],interpretations:[],executions:[],phases:new Map()};let sequence=0;
   const response=body=>new Response(JSON.stringify(body));
   const tool=(name,args)=>response({choices:[{finish_reason:'tool_calls',message:{tool_calls:[{id:`call-${++sequence}`,type:'function',function:{name,arguments:JSON.stringify(args)}}]}}]});
   f.operation=(text,targetId='existing')=>({kind:'operate_terminal',targetIds:[targetId],text});
@@ -25,23 +26,13 @@ async function fixture(t){
     },fetch:async(url,options)=>{try{
       if(url.endsWith('/key'))return response({data:{}});
       if(url.endsWith('/models'))return response({data:[{id:'scripted',context_length:128000,supported_parameters:['tools','tool_choice']}]});
-      const body=JSON.parse(options.body);
+      const body=JSON.parse(options.body);f.completions.push(body);
       if (body.messages[0].content === require('../../backend/orchestratorGoalReview.cjs').INSPECTION_GOAL_REVIEW) {
         const evidence = JSON.parse(body.messages[1].content).evidence;
         return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ decision: 'complete', evidenceIds: [evidence.at(-1).id] }) } }] }));
       }
 
       if(body.messages[0].content.startsWith('Classify the ORIGINAL user request')) return response({choices:[{finish_reason:'stop',message:{content:f.inspectionDecision}}]});
-      if(body.messages[0].content===require('../../backend/orchestratorTaskAffinity.cjs').SYSTEM){
-        const input=JSON.parse(body.messages[1].content);f.affinities.push(input);
-        return response({choices:[{finish_reason:'stop',message:{content:JSON.stringify({relation:f.affinity||'same-task',
-          userEvidence:input.currentInstruction,workEvidence:input.existingObjective})}}]});
-      }
-      if(body.messages[0].content===TARGET_REVIEW_SYSTEM){
-        assert(!body.tools?.length);f.checks.push(JSON.parse(body.messages[1].content));
-        let marker=f.markers.shift();assert.notEqual(marker,undefined,'Every target review is scripted');if(typeof marker==='function')marker=await marker(options);if(marker instanceof Error)throw marker;
-        return response(marker?.choices?marker:{choices:[{finish_reason:'stop',message:{content:JSON.stringify(marker==='DIRECT'?{decision:'DIRECT',evidenceIds:JSON.parse(body.messages[1].content).selectionEvidence.map(item=>item.id)}:{decision:'ASSIGN'})}}]});
-      }
       if(body.tools?.some(tool=>tool.function.name==='interpret_workspace')){
         f.interpretations.push(body);const plan=f.plans.shift();assert(plan,'Every interpretation is scripted');return tool('interpret_workspace',typeof plan==='function'?plan(body):plan);
       }
@@ -64,8 +55,17 @@ async function fixture(t){
     }catch(error){f.fetchError=error;throw error;}}});
   t.after(async()=>{await f.relay.cancel();await f.relay.dispose();assert.equal(path.dirname(root),os.tmpdir());fs.rmSync(root,{recursive:true,force:true});});
   await f.relay.configure({apiKey:'fixture-secret-never-in-task-text',model:'scripted',sessionOnly:true});assert.equal((await f.relay.setEnabled(true)).ok,true);
-  f.run=(text,extra={})=>f.relay.send({text,origin:'text',...extra});return f;
+  f.run=(text,extra={})=>f.relay.send({text,origin:'text',...extra});
+  f.events=async()=>{await f.relay.flushDiagnostics();const file=path.join(root,'logs','orchestrator-errors.jsonl');
+    return fs.existsSync(file)?fs.readFileSync(file,'utf8').trim().split('\n').filter(Boolean).map(line=>JSON.parse(line)):[];};
+  f.selections=async()=>(await f.events()).filter(event=>event.event==='intent_review'&&event.stage==='existing_target');
+  return f;
 }
+// The selection check is code, so an existing-target plan costs no model call of
+// its own: every completion this fixture sees is an interpretation or an
+// execution round.
+const noReviewCall=f=>assert.equal(f.completions.length,f.interpretations.length+f.executions.length,
+  'the existing-target check must not spend a model call');
 
 test('provider/project request misbound to an unrelated conversation repairs before any input', async t => {
   const f = await fixture(t), objective = 'Fix full-screen pane height; preserve width and verify the change.';
@@ -74,16 +74,14 @@ test('provider/project request misbound to an unrelated conversation repairs bef
     assert.deepEqual(f.effects, []);
     return f.plan([f.work(objective)]);
   });
-  f.markers.push('ASSIGN');
   const result = await f.run(`Prompt a Codex terminal in ${f.root} to ${objective}`);
   assert.equal(result.ok, true, f.fetchError?.stack || JSON.stringify(result));
   assert.deepEqual(f.effects.map(effect => effect.kind), ['create_session', 'send_prompt']);
   assert.notEqual(f.effects[1].targetId, 'existing');
   assert.equal(f.effects[1].text, objective);
-  assert.equal(f.checks.length, 0, 'no target-selection evidence means no model can approve the unrelated pane');
-  await f.relay.flushDiagnostics();
+  noReviewCall(f);
+  assert.deepEqual((await f.selections()).map(event => [event.status, event.strategy]), [['assign', 'deterministic']]);
   const log = fs.readFileSync(path.join(f.root, 'logs', 'orchestrator-errors.jsonl'), 'utf8');
-  assert.ok(log.trim().split('\n').map(JSON.parse).some(event => event.stage === 'existing_target' && event.status === 'assign'));
   assert.equal(log.includes(objective), false);
 });
 
@@ -92,7 +90,6 @@ test('assignment repair can discover the same task started directly in an existi
   f.sessions[0].name = 'Fix full-screen pane height';
   f.readText = 'User task: fix full-screen pane height. Agent: I am repairing that height constraint and adding regression coverage.';
   f.plans.push(f.plan([f.operation(objective)]), f.plan([f.work(objective)]));
-  f.markers.push('ASSIGN');
   f.route = async (context, api) => {
     assert.equal(context.instruction, objective);
     const observed = await api.read({ kind: 'read_session', targetId: 'existing' });
@@ -105,36 +102,65 @@ test('assignment repair can discover the same task started directly in an existi
   assert.equal(f.effects[0].targetId, 'existing');
 });
 
-for (const instruction of ['Ask Unrelated product discussion to fix the pane height.', 'Prompt one of the existing Codex terminals to check the height.']) {
-  test(`explicit existing selection remains valid: ${instruction}`, async t => {
-    const f = await fixture(t);
-    f.plans.push(f.plan([f.operation('Check the pane height.')])); f.markers.push('DIRECT');
-    const result = await f.run(instruction);
-    assert.equal(result.ok, true, f.fetchError?.stack || JSON.stringify(result));
-    assert.deepEqual(f.effects.map(effect => effect.kind), ['send_prompt']);
-    assert.equal(f.effects[0].targetId, 'existing');
-  });
-}
-
-test('same-task follow-up retains the existing busy owner and the prior exchange in the review', async t => {
+test('a named pane still sends directly', async t => {
   const f = await fixture(t);
-  f.plans.push(f.plan([f.operation('Fix the pane height.')])); f.markers.push('DIRECT');
+  f.plans.push(f.plan([f.operation('Check the pane height.')]));
+  const result = await f.run('Ask Unrelated product discussion to fix the pane height.');
+  assert.equal(result.ok, true, f.fetchError?.stack || JSON.stringify(result));
+  assert.deepEqual(f.effects.map(effect => effect.kind), ['send_prompt']);
+  assert.equal(f.effects[0].targetId, 'existing');
+  assert.equal(f.interpretations.length, 1, 'a selected pane is interpreted once and dispatched');
+  noReviewCall(f);
+  assert.deepEqual((await f.selections()).map(event => [event.status, event.strategy]), [['direct', 'deterministic']]);
+});
+
+// The measurement this change exists for: "tell <pane> to <task>" used to cost
+// an interpretation plus a 2.4 s target-review round before anything was typed.
+test('a named-pane send costs exactly one model call end to end', async t => {
+  const f = await fixture(t), objective = 'Investigate the full-screen pane height.';
+  f.plans.push(f.plan([{ ...f.operation(objective), operationMode: 'task' }]));
+  const result = await f.run('Ask Unrelated product discussion to investigate the full-screen pane height.');
+  assert.equal(result.ok, true, f.fetchError?.stack || JSON.stringify(result));
+  assert.deepEqual(f.effects.map(effect => [effect.kind, effect.targetId]), [['send_prompt', 'existing']]);
+  assert.equal(f.effects[0].text, objective);
+  assert.equal(f.completions.length, 1, JSON.stringify(f.completions.map(body => String(body.messages[0].content).slice(0, 70))));
+  assert.equal(f.interpretations.length, 1);
+  assert.equal(f.executions.length, 0);
+});
+
+// A group phrase names a kind of pane, not a conversation. It is assignment's
+// question now: the resolver knows which panes are idle and unowned.
+test('a group phrase goes to assignment, which reuses the idle pane', async t => {
+  const f = await fixture(t), objective = 'Check the pane height.';
+  f.plans.push(f.plan([f.operation(objective)]), f.plan([f.work(objective)]));
+  f.route = async () => ({ kind: 'choose', decision: 'reuse', targetId: 'existing', reason: 'Idle pane with no task owner.' });
+  const result = await f.run('Prompt one of the existing Codex terminals to check the height.');
+  assert.equal(result.ok, true, f.fetchError?.stack || JSON.stringify(result));
+  assert.deepEqual(f.effects.map(effect => effect.kind), ['send_prompt']);
+  assert.equal(f.effects[0].targetId, 'existing');
+  assert.deepEqual((await f.selections()).map(event => event.status), ['assign']);
+});
+
+test('same-task follow-up retains the existing busy owner through the prior exchange', async t => {
+  const f = await fixture(t);
+  f.plans.push(f.plan([f.operation('Fix the pane height.')]));
   const first = await f.run('Ask Unrelated product discussion to fix the pane height.');
   assert.equal(first.ok, true, JSON.stringify(first));
   Object.assign(f.sessions[0], { turnState: 'running', status: 'running', turnId: 'active-fix', turnStartedAt: Date.now(), actionId: f.effects[0].actionId });
   await f.relay.refresh();
-  f.plans.push(f.plan([f.operation('Also add regression coverage for that fix.')])); f.markers.push('DIRECT');
+  f.plans.push(f.plan([f.operation('Also add regression coverage for that fix.')]));
+  // "that agent" names nothing; the pane comes from the exchange this answers.
   const second = await f.run('Tell that agent to also add regression coverage for that fix.', { replyToRequestId: first.requestId });
   assert.equal(second.ok, true, f.fetchError?.stack || JSON.stringify(second));
   assert.deepEqual(f.effects.map(effect => effect.targetId), ['existing', 'existing']);
-  assert.ok(f.checks[1].replyContext);
+  assert.deepEqual((await f.selections()).map(event => event.status), ['direct', 'direct']);
+  assert.equal(f.interpretations.length, 2, 'neither request needed a second round');
 });
 
 test('mixed requests retain the explicitly selected sibling when unassigned work is repaired', async t => {
   const f = await fixture(t);
   const named = f.operation('Continue the product discussion.');
   f.plans.push(f.plan([named, f.operation('Fix full-screen height.')]), f.plan([named, f.work('Fix full-screen height.')]));
-  f.markers.push('ASSIGN', 'DIRECT');
   const result = await f.run('Continue the product discussion in Unrelated product discussion and get a Codex in this project to fix full-screen height.');
   assert.equal(result.ok, true, f.fetchError?.stack || JSON.stringify(result));
   assert.equal(f.effects.filter(effect => effect.kind === 'create_session').length, 1);
@@ -147,17 +173,9 @@ test('mixed requests retain the explicitly selected sibling when unassigned work
 for (const replacement of ['same-target', 'drop-task', 'empty-pane']) test(`assignment veto cannot be bypassed by ${replacement}`, async t => {
   const f = await fixture(t), operation = f.operation('Fix pane height.');
   f.plans.push(f.plan([operation]), f.plan(replacement === 'same-target' ? [operation] : replacement === 'empty-pane' ? [{ kind: 'create_session', kindOfSession: 'codex', cwd: f.root }] : []));
-  f.markers.push('ASSIGN');
   const result = await f.run(`Prompt a Codex in ${f.root} to fix pane height.`);
   assert.equal(result.ok, false); assert.deepEqual(f.effects, []);
-  assert.equal(f.checks.length, 0, 'unsupported target selection cannot reach model approval');
-});
-
-test('incomplete, malformed and tool-bearing review replies cannot approve an existing target', () => {
-  for (const choice of [undefined, { message: { content: 'DIRECT but also create' } }, { finish_reason: 'length', message: { content: 'DIRECT' } },
-    { finish_reason: 'content_filter', message: { content: 'DIRECT' } }, { message: { content: 'DIRECT', tool_calls: [{}] } }]) {
-    assert.equal(targetReviewDecision({ choices: [choice] }), 'UNRESOLVED');
-  }
+  assert.deepEqual((await f.selections()).map(event => event.status), replacement === 'same-target' ? ['assign', 'assign'] : ['assign']);
 });
 
 for (const order of ['schema-first', 'selection-first']) test(`schema and selection repairs compose before dispatch: ${order}`, async t => {
@@ -179,9 +197,8 @@ for (const order of ['schema-first', 'selection-first']) test(`schema and select
   assert.deepEqual(f.effects.map(effect => effect.kind), ['create_session', 'send_prompt']);
   assert.notEqual(f.effects[1].targetId, 'existing');
   assert.equal(f.effects[1].text, objective);
-  assert.equal(f.checks.length, 0);
-  await f.relay.flushDiagnostics();
-  const events = fs.readFileSync(path.join(f.root, 'logs', 'orchestrator-errors.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  noReviewCall(f);
+  const events = await f.events();
   assert.equal(events.filter(event => event.stage === 'interpretation' && event.status === 'retry').length, 2);
   assert.ok(events.some(event => event.event === 'intent_repair' && event.status === 'repaired'));
   assert.equal(JSON.stringify(events).includes('PRIVATE_INVALID_ARGUMENT'), false);
@@ -208,96 +225,44 @@ test('a repaired schema cannot drop an assignment veto on the final interpretati
   assert.deepEqual(f.effects, []);
 });
 
-test('DIRECT requires actual application evidence covering every operation', () => {
-  const payload = { proposedOperations: [{}, {}], selectionEvidence: [{ id: 'named-0', operation: 0 }, { id: 'reply-1', operation: 1 }] };
-  const response = evidenceIds => ({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ decision: 'DIRECT', evidenceIds }) } }] });
-  for (const ids of [[], ['named-0'], ['named-0', 'invented'], ['named-0', 'named-0']]) assert.equal(targetReviewDecision(response(ids), payload), 'UNRESOLVED');
-  assert.equal(targetReviewDecision(response(['named-0', 'reply-1']), payload), 'DIRECT');
-});
-
-test('a fenced review reply is read exactly like the bare JSON it wraps', () => {
-  const payload = { proposedOperations: [{}], selectionEvidence: [{ id: 'named-0', operation: 0 }] };
-  const fenced = text => ({ choices: [{ finish_reason: 'stop', message: { content: text } }] });
-  assert.equal(targetReviewDecision(fenced('```json\n' + JSON.stringify({ decision: 'DIRECT', evidenceIds: ['named-0'] }) + '\n```'), payload), 'DIRECT');
-  assert.equal(targetReviewDecision(fenced('```json\n' + JSON.stringify({ decision: 'ASSIGN' }) + '\n```'), payload), 'ASSIGN');
-  assert.equal(targetReviewDecision(fenced('```json\nDIRECT, use the named pane.\n```'), payload), 'UNRESOLVED');
-});
-
-test('generic provider/project and creation wording cannot mint existing-selection evidence', () => {
-  const session = { id: 'pane', generation: 'g1', name: 'Unrelated discussion', kind: 'codex', cwd: 'C:/QA' };
-  const plan = { grants: [{ sourceUserId: 'r', kind: 'operate_terminal', targets: [{ id: 'pane', generation: 'g1' }], text: 'Fix full-screen height.' }] };
-  for (const instruction of ['Prompt a Codex terminal in QA to fix full-screen height.', 'Open a Codex terminal in QA to fix full-screen height.']) {
-    const payload = targetReviewPayload(plan, { requestId: 'r', instruction, sessions: [session] });
-    assert.deepEqual(payload.selectionEvidence, []);
-  }
-  const payload = targetReviewPayload(plan, { requestId: 'r', instruction: 'Tell that agent to also test its fix.', sessions: [session],
-    replyContext: { requestId: 'old', conversationTarget: { id: 'pane', generation: 'replaced-generation' } } });
-  assert.deepEqual(payload.selectionEvidence, [], 'a replaced reply target cannot supply selection evidence');
-  plan.grants[0].targets = [];
-  assert.doesNotThrow(() => targetReviewPayload(plan, { requestId: 'r', instruction: 'Prompt an idle Codex terminal.', sessions: [session] }));
-});
-
-test('target review network failure stops before effects', async t => {
-  const f = await fixture(t);
-  f.plans.push(f.plan([f.operation('Fix the height.')])); f.markers.push(new TypeError('Synthetic network unavailable'));
-  const result = await f.run('Ask the existing agent to fix the height.');
-  assert.equal(result.ok, false); assert.ok(result.upstreamError); assert.deepEqual(f.effects, []);
-  assert.equal(f.interpretations.length, 1);
-});
-
-test('an inconclusive review cannot reroute an explicitly selected conversation', async t => {
-  const f = await fixture(t);
-  f.plans.push(f.plan([f.operation('Fix the height.')]));
-  f.markers.push({ choices: [{ finish_reason: 'length', message: { content: '{"decision":"DIRECT"}' } }] });
-  const result = await f.run('Ask Unrelated product discussion to fix the height.');
-  assert.equal(result.ok, false); assert.match(result.error, /selection could not be verified/);
-  assert.deepEqual(f.effects, []); assert.equal(f.interpretations.length, 1);
-});
-
-test('cancelling while reviewing target selection cannot send input', async t => {
-  const f = await fixture(t); let entered = false;
-  f.plans.push(f.plan([f.operation('Fix the height.')]));
-  f.markers.push(options => new Promise((resolve, reject) => { entered = true; options.signal.addEventListener('abort', () => reject(Object.assign(new Error('Cancelled'), { name: 'AbortError' })), { once: true }); }));
-  const pending = f.run('Ask the existing agent to fix the height.');
-  const deadline = Date.now() + 1000;
-  while (!entered) { assert.ok(Date.now() < deadline); await new Promise(resolve => setImmediate(resolve)); }
-  await f.relay.cancel(); assert.equal((await pending).ok, false); assert.deepEqual(f.effects, []);
-});
-
 test('explicit existing task handoff completes after one send when the model omits read and finish', async t => {
   const f = await fixture(t); f.omitFinish = true;
   const objective = 'Investigate full-screen height without editing files.';
   f.plans.push(f.plan([{ ...f.operation(objective), operationMode: 'task' }]));
-  f.markers.push('DIRECT');
   const result = await f.run('Ask Unrelated product discussion to investigate full-screen height without editing files.');
   assert.equal(result.ok, true, f.fetchError?.stack || JSON.stringify(result));
   assert.deepEqual(f.effects.map(effect => effect.kind), ['send_prompt']);
   assert.equal(f.effects[0].targetId, 'existing');
   assert.equal(f.effects[0].text, objective);
-  assert.equal(f.executions.length, 3);
+  // A bound task handoff is application logic: the executor model is not asked
+  // at all, so there is no round in which it could omit the read or the finish.
+  assert.equal(f.executions.length, 0);
   const task = f.relay.getState().tasks.find(task => task.requestId === result.requestId);
   assert.equal(task.status, 'waiting-results');
 });
 
 test('general interaction still needs its own finish after sending a task', async t => {
   const f = await fixture(t); f.omitFinish = true;
-  f.plans.push(f.plan([f.operation('Send the investigation and then inspect the model menu.')])); f.markers.push('DIRECT');
+  f.plans.push(f.plan([f.operation('Send the investigation and then inspect the model menu.')]));
   const result = await f.run('Use Unrelated product discussion to send an investigation and inspect its model menu.');
   assert.equal(result.ok, false);
-  assert.match(result.error, /unfinished/);
+  // The stage that gave up is internal. What the user reads is the account of
+  // the pane: what was typed there and what Lina is waiting on.
+  assert.match(result.error, /Typed the task into Unrelated product discussion, but I haven't seen it start yet/);
+  assert.doesNotMatch(result.error, /unfinished|action receipts/);
   assert.equal(f.effects.length, 1);
 });
 
 test('fresh follow-up repairs an expired source ID without replaying the earlier task', async t => {
   const f = await fixture(t); f.omitFinish = true;
-  f.plans.push(f.plan([{ ...f.operation('Investigate the height.'), operationMode: 'task' }])); f.markers.push('DIRECT');
+  f.plans.push(f.plan([{ ...f.operation('Investigate the height.'), operationMode: 'task' }]));
   const first = await f.run('Ask Unrelated product discussion to investigate the height.');
   assert.equal(first.ok, true, JSON.stringify(first));
   const next = { ...f.operation('Also verify narrow windows.'), operationMode: 'task' };
   f.plans.push(f.plan([{ ...next, sourceUserId: first.requestId }]), body => {
     assert.match(body.messages[0].content, /new follow-up instruction.*omit both fields/);
     return f.plan([next]);
-  }); f.markers.push('DIRECT');
+  });
   const follow = await f.run('Tell that agent to also verify narrow windows.', { replyToRequestId: first.requestId });
   assert.equal(follow.ok, true, f.fetchError?.stack || JSON.stringify(follow));
   assert.deepEqual(f.effects.map(effect => effect.text), ['Investigate the height.', 'Also verify narrow windows.']);
@@ -314,22 +279,96 @@ for (const decision of ['INSPECTION', 'TASK', 'UNCLEAR']) test(`inspection repai
   if (result.ok) assert.match(result.text, /23%/);
 });
 
-test('the exported target-review schema is flat, strict-mode friendly and enumerates both decisions',()=>{
-  assert.equal(TARGET_REVIEW_SCHEMA.type,'object');
-  assert.equal(TARGET_REVIEW_SCHEMA.additionalProperties,false);
-  assert.equal(TARGET_REVIEW_SCHEMA.oneOf,undefined);assert.equal(TARGET_REVIEW_SCHEMA.anyOf,undefined);
-  assert.deepEqual([...TARGET_REVIEW_SCHEMA.required].sort(),Object.keys(TARGET_REVIEW_SCHEMA.properties).sort());
-  assert.deepEqual(TARGET_REVIEW_SCHEMA.required,['decision','evidenceIds']);
-  assert.deepEqual(TARGET_REVIEW_SCHEMA.properties.decision.enum,['ASSIGN','DIRECT']);
-  assert.equal(TARGET_REVIEW_SCHEMA.properties.evidenceIds.type,'array');
-  assert.equal(TARGET_REVIEW_SCHEMA.properties.evidenceIds.items.type,'string');
+// ---------------------------------------------------------------------------
+// The deterministic contract itself. No transport, no fixture: the decision is
+// a function of the sentence, the roster and what the application already holds.
+// ---------------------------------------------------------------------------
+const ALPHA = 'C:/work/alpha';
+const pane = (id, name, extra = {}) => ({ id, generation: `g-${id}`, name, kind: 'codex', provider: 'codex', cwd: ALPHA, ...extra });
+const atlas = pane('atlas', 'Atlas', { conversationTitle: 'Atlas memory store rewrite' });
+const beta = pane('beta', 'Beta', { conversationTitle: 'Beta invoice rounding fix' });
+const target = session => ({ id: session.id, generation: session.generation });
+const operation = (targets, text = 'Do the work.') => ({ sourceUserId: 'r', kind: 'operate_terminal', targets, text });
+const review = (operations, context) => reviewExistingTargets({ grants: operations }, { requestId: 'r', ...context });
+const project = { path: ALPHA, name: 'alpha' };
+
+test('a plan proposing no existing target is not reviewed at all', () => {
+  assert.equal(review([{ sourceUserId: 'r', kind: 'delegate_task', args: { cwd: ALPHA }, text: 'Fix it.' }],
+    { instruction: 'Get a Codex in alpha to fix the header.', sessions: [atlas] }), null);
+  assert.equal(review([{ ...operation([target(atlas)]), inspection: true }],
+    { instruction: 'What is Atlas showing?', sessions: [atlas] }), null);
 });
 
-test('the required evidence list the schema forces on ASSIGN changes nothing, and DIRECT still needs real citations',()=>{
-  const reply=value=>({choices:[{finish_reason:'stop',message:{content:JSON.stringify(value)}}]});
-  const payload={proposedOperations:[{kind:'send_prompt'}],selectionEvidence:[{id:'selection-0',operation:0,basis:'named'}]};
-  assert.equal(targetReviewDecision(reply({decision:'ASSIGN',evidenceIds:[]}),payload),'ASSIGN');
-  assert.equal(targetReviewDecision(reply({decision:'DIRECT',evidenceIds:[]}),payload),'UNRESOLVED');
-  assert.equal(targetReviewDecision(reply({decision:'DIRECT',evidenceIds:['selection-9']}),payload),'UNRESOLVED');
-  assert.equal(targetReviewDecision(reply({decision:'DIRECT',evidenceIds:['selection-0']}),payload),'DIRECT');
+for (const [label, expected, basis, context] of [
+  ['a provider and a project select neither conversation', 'ASSIGN', 'unselected',
+    { instruction: 'Prompt a Codex terminal in alpha to fix the header.', sessions: [atlas], projectContext: project }],
+  ['the pane the sentence names is sent to directly', 'DIRECT', 'named',
+    { instruction: 'Tell Atlas in the alpha project to inspect the memory store.', sessions: [atlas, beta], projectContext: project }],
+  ['a pronoun continues the pane of the exchange it answers', 'DIRECT', 'continuation',
+    { instruction: 'Tell it to also add regression coverage.', sessions: [atlas, beta], projectContext: project,
+      replyContext: { requestId: 'p', conversationTarget: target(atlas) } }],
+  ['a replaced generation is no longer that conversation', 'ASSIGN', 'unselected',
+    { instruction: 'Tell that agent to also test its fix.', sessions: [atlas], projectContext: project,
+      replyContext: { requestId: 'p', conversationTarget: { id: 'atlas', generation: 'replaced' } } }],
+  ['a new independent sentence keeps the pane the user selected in the UI', 'DIRECT', 'user-selected',
+    { instruction: 'Run the unit tests and report back.', sessions: [atlas, beta], projectContext: project, targetId: 'atlas' }],
+  ['a selected pane loses to another pane the sentence names', 'ASSIGN', 'unselected',
+    { instruction: 'Have Beta invoice rounding look at the totals.', sessions: [atlas, beta], projectContext: project, targetId: 'atlas' }],
+  ['the pane answering its own question is the one the answer goes to', 'DIRECT', 'user-selected',
+    { instruction: 'Yes, approve that.', sessions: [atlas], projectContext: project,
+      interactionContext: { id: 'q1', sessionId: 'atlas', generation: 'g-atlas', revision: 2 } }],
+  ['a definite provider phrase selects the only pane of that family', 'DIRECT', 'provider-project',
+    { instruction: 'Tell the Codex terminal in alpha to run the tests.', sessions: [atlas], projectContext: project }],
+  ['a second pane of that family makes the provider phrase ambiguous', 'ASSIGN', 'unselected',
+    { instruction: 'Tell the Codex terminal in alpha to run the tests.', sessions: [atlas, beta], projectContext: project }],
+  ['a group phrase is a kind of pane, not a conversation', 'ASSIGN', 'unselected',
+    { instruction: 'Prompt one of the existing Codex terminals to check the height.', sessions: [atlas], projectContext: project }],
+  ['a request to open one is assignment, not selection', 'ASSIGN', 'selector-new',
+    { instruction: 'Open a new Codex terminal and have it check the height.', sessions: [atlas], projectContext: project }],
+]) test(`existing-target review: ${label}`, () => {
+  const decision = review([operation([target(atlas)])], context);
+  assert.deepEqual([decision.decision, decision.operations[0].basis], [expected, basis], JSON.stringify(decision));
+});
+
+test('two similar titles and an ambiguous phrase go to assignment, which asks', () => {
+  const first = pane('t1', 'chat section integration'), second = pane('t2', 'chat section styling');
+  const decision = review([operation([target(first)])], { instruction: 'Ask the chat section agent to run the tests.', sessions: [first, second], projectContext: project });
+  assert.deepEqual([decision.decision, decision.operations[0].basis], ['ASSIGN', 'unselected']);
+});
+
+test('a pane in another project than the one the sentence names is never the selection', () => {
+  const elsewhere = pane('gamma', 'Gamma', { cwd: 'C:/work/other', conversationTitle: 'Gamma header work' });
+  const decision = review([operation([target(elsewhere)])],
+    { instruction: 'Tell Gamma header work in alpha to run the tests.', sessions: [atlas, elsewhere], projectContext: project });
+  assert.deepEqual([decision.decision, decision.operations[0].basis], ['ASSIGN', 'outside-addressed-project']);
+});
+
+test('one sentence addressing two panes keeps each named sibling and assigns the rest', () => {
+  const both = review([operation([target(atlas)], 'Inspect the memory store.'), operation([target(beta)], 'Fix invoice rounding.')],
+    { instruction: 'Tell Atlas to inspect the memory store and Beta invoice rounding to fix the rounding.', sessions: [atlas, beta], projectContext: project });
+  assert.deepEqual([both.decision, ...both.operations.map(item => item.basis)], ['DIRECT', 'named', 'named']);
+  const mixed = review([operation([target(atlas)], 'Inspect the memory store.'), operation([target(atlas)], 'Fix the header.')],
+    { instruction: 'Tell Atlas to inspect the memory store and get a Codex in this project to fix the header.', sessions: [atlas], projectContext: project });
+  assert.deepEqual([mixed.decision, ...mixed.operations.map(item => item.basis)], ['ASSIGN', 'named', 'unselected']);
+});
+
+// The 128 saved utterances are the regression corpus. Every row whose selector
+// is a pane the user identified - by title, or as the pane the last exchange
+// used - must reach that pane without a model round when the roster holds one
+// matching pane. Rows 9 and 10 are resume requests, which never produce a
+// terminal operation, and their titles survive only as garbled speech.
+test('the saved utterance corpus resolves its title and last-target rows deterministically', () => {
+  const rows = require('./fixtures/orchestrator-utterances.json')
+    .filter(row => ['title', 'last_target'].includes(row.selector) && row.verb !== 'resume');
+  assert.equal(rows.length, 11);
+  const decoy = pane('decoy', 'Invoice rounding repair', { kind: 'claude', provider: 'claude', conversationTitle: 'Invoice rounding repair' });
+  for (const row of rows) {
+    const selector = extractSelector(row.text, { launchers: [] });
+    const named = row.selector === 'title';
+    if (named) assert.equal(selector.kind, 'title', `row ${row.n} carries no title phrase`);
+    const chosen = pane('chosen', 'Codex 3', { conversationTitle: named ? selector.text : 'Orchestrator wake word work' });
+    const decision = review([operation([target(chosen)], 'Continue.')], { instruction: row.text, sessions: [chosen, decoy],
+      ...(named ? {} : { replyContext: { requestId: 'p', conversationTarget: target(chosen) } }) });
+    assert.equal(decision.decision, 'DIRECT', `row ${row.n} (${row.selector}): ${JSON.stringify(decision)}`);
+  }
 });

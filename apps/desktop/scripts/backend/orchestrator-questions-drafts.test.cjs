@@ -7,7 +7,8 @@ const source = fs.readFileSync(require("node:path").join(__dirname, "../../front
 const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 const window = new EventTarget();
 const exportsObject = {};
-vm.runInNewContext(output, { require, exports: exportsObject, window, CustomEvent });
+const imports = { './chatPersistence': { chatBootstrap: () => undefined }, './orchestratorHistory': { conversationKey: value => JSON.stringify([value.provider, value.cwd, value.id]) } };
+vm.runInNewContext(output, { require: name => imports[name] || require(name), exports: exportsObject, window, CustomEvent, setTimeout, clearTimeout });
 const { readSessionDraft, writeSessionDraft } = exportsObject;
 test("Drafts stay in RAM across composer readers, use revisions, and do not cross sessions", () => {
   writeSessionDraft("one", "First draft");

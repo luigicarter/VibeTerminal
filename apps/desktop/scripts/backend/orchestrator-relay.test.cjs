@@ -86,7 +86,10 @@ test('monitor excludes clipped summaries and does not contaminate conversational
   f.sessions[0].lastActivityAt++; f.responses(reply('Monitor-only update.')); await f.instance.refresh({ monitor: true });
   f.responses(reply('Hello!')); await f.instance.send({ text: 'Hello', origin: 'text' });
   const body = JSON.parse(f.requests.at(-1).options.body);
-  assert.ok(!JSON.parse(body.messages[1].content).recentConversation.some(m => m.text.includes('Monitor-only')));
+  // Migrated from recentConversation: no prior prose reaches model context at
+  // all, so a monitor summary cannot leak through it either.
+  assert.equal(JSON.parse(body.messages[1].content).recentConversation, undefined);
+  assert.equal(body.messages[1].content.includes('Monitor-only'), false);
   assert.match(body.messages[0].content, /Greetings need no scans/);
 });
 
@@ -144,9 +147,9 @@ test('speech failure preserves successful text and delivered action without repl
     });
     await f.ready(); f.responses(tool({ kind: 'send_prompt', targetId: 'a' }), reply('Delivered.'));
     const result = await f.instance.send({ text: 'I want you to tell Worker A to fix the bug', origin: 'voice' });
-    // The delegated agent result is still pending, so the reply reports the
-    // running task instead of claiming the coding work itself is done.
-    assert.equal(result.ok, true); assert.match(result.text, /running in Worker A.*still pending/); assert.equal(result.speech.ok, false);
+    // The agent was seen starting, so the command itself is cued as done; the
+    // reply never claims the coding work is finished.
+    assert.equal(result.ok, true); assert.equal(result.text, 'done'); assert.equal(result.speech.ok, false);
     assert.equal(result.actions.length, 1); assert.equal(result.actions[0].status, 'delivered'); assert.equal(f.actions.length, 1);
     const state = f.instance.getState(), delivered = state.receipts[0];
     assert.equal(state.receipts.length, 1); assert.equal(f.actions[0].kind, 'send_prompt');
@@ -301,7 +304,7 @@ test('save setup tool requires the complete exact explicitly chosen name', async
   const f = fixture(t); await f.ready(); f.responses(tool({ kind: 'save_setup', name: 'Daily Coding' }), reply('Saved.')); await f.instance.send({ text: 'Save this setup as Daily Coding', origin: 'voice' }); assert.equal(f.actions.length, 1); assert.equal(f.actions[0].kind, 'save_setup'); assert.equal(f.actions[0].name, 'Daily Coding'); f.responses(tool({ kind: 'save_setup', name: 'Coding' }), reply('Need the full name.')); await f.instance.send({ text: 'Save this setup as Daily Coding', origin: 'text' }); assert.equal(f.actions.length, 1);
 });
 test('unique user-identified read establishes generation-bound cross-turn pronoun context', async t => {
-  const f = fixture(t); await f.ready(); f.responses(tool({ kind: 'read_session', targetId: 'a' }), reply('Worker A is running.')); await f.instance.send({ text: 'What is Worker A doing?', origin: 'text' }); f.responses(tool({ kind: 'send_prompt', targetId: 'a', text: 'rerun tests' }), reply('Delivered.')); await f.instance.send({ text: 'Tell it to rerun tests', origin: 'text' }); assert.equal(f.actions.length, 1); assert.equal(f.actions[0].target.generation, 1); const body = JSON.parse(f.requests.filter(r => r.url.endsWith('/chat/completions')).at(-1).options.body); const context = JSON.parse(body.messages[1].content); assert.ok(context.recentConversation.some(m => m.text === 'What is Worker A doing?')); assert.deepEqual(context.conversationTarget, { id: 'a', generation: 1 });
+  const f = fixture(t); await f.ready(); f.responses(tool({ kind: 'read_session', targetId: 'a' }), reply('Worker A is running.')); await f.instance.send({ text: 'What is Worker A doing?', origin: 'text' }); f.responses(tool({ kind: 'send_prompt', targetId: 'a', text: 'rerun tests' }), reply('Delivered.')); await f.instance.send({ text: 'Tell it to rerun tests', origin: 'text' }); assert.equal(f.actions.length, 1); assert.equal(f.actions[0].target.generation, 1); const body = JSON.parse(f.requests.filter(r => r.url.endsWith('/chat/completions')).at(-1).options.body); const context = JSON.parse(body.messages[1].content); /* Migrated from recentConversation: the sentence the pronoun refers back to now reaches the executor through replyContext, and the pane through the ledger. */ assert.equal(context.recentConversation, undefined); assert.equal(context.replyContext.instruction, 'What is Worker A doing?'); assert.equal(context.ledger.at(-1).outcome, 'replied'); assert.deepEqual(context.conversationTarget, { id: 'a', generation: 1 });
   f.sessions[0].generation = 2; f.responses(tool({ kind: 'send_prompt', targetId: 'a', text: 'rerun tests' }), reply('Select the restarted session.')); await f.instance.send({ text: 'Send that terminal: rerun tests', origin: 'text' }); assert.equal(f.actions.length, 1);
 });
 test('arbitrary model reads and external output cannot retarget a bound conversation', async t => {
@@ -428,7 +431,7 @@ test('a rejected request that never carried the reasoning parameter is not retri
   const f = fixture(t); await f.ready(); const before = f.requests.length;
   f.responses(rejected(400, 'Bad request'));
   const result = await f.instance.send({ text: 'Status', origin: 'text' });
-  assert.equal(result.ok, false); assert.match(result.error, /HTTP 400/);
+  assert.equal(result.ok, false); assert.match(result.error, /couldn't get a plan from the brain/);
   assert.equal(completions(f, before).length, 1);
 });
 test('a reasoning model that spends its budget thinking gets exactly one wider retry', async t => {

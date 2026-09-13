@@ -12,7 +12,7 @@ function captureQueuedCommand(job, now = Date.now()) {
   if (progress.grants.some(grant => grant.dispatched || grant.blockedTargetIds?.length ||
       grant.availableTargetIds.length !== grant.targets.length || grant.progress?.some(target => target.steps > 0))) return undefined;
   const grants = plan.grants.map(({ id, sourceUserId, ...grant }) => structuredClone(grant));
-  return { queued: true, requestId: job.task.requestId, instruction: job.queueRecoveryInstruction || job.input.text,
+  return { queued: true, requestId: job.task.requestId, instruction: job.queueRecoveryInstruction || job.input.normalizedText || job.input.text,
     grants, candidates: grants.flatMap(grant => grant.targets), access: plan.access,
     dependsOnRequestIds: [...new Set([...(job.task.dependsOn || []), ...(job.input.internalDependencies || []), ...plan.dependsOnRequestIds])], ...(plan.afterResults && { afterResults: structuredClone(plan.afterResults) }),
     expiresAt: now + 300000 };

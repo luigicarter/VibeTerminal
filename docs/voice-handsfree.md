@@ -101,6 +101,16 @@ turn and speech revisions and wait for queued VAD classifications before commitm
 Only one completion check runs per unchanged speech revision/pause. Speech
 resuming before commitment invalidates the completion result.
 
+The pause is adaptive: a complete turn the model scores at 0.9 or above, with at
+least 250 ms of command speech, ends after 600 ms of trailing silence, while a
+less certain completion keeps the 1,200 ms pause and the three-second fallback is
+unchanged. The threshold sits above the model's own 0.5 boundary because the
+offline workflow smoke scores real command endings at 0.94 to 0.98 and a
+mid-command pause at 0.06. On the long pause the audio recorded so far is transcribed at 800 ms
+while the recording stays open; a resumed word aborts that request silently and
+the finished recording is uploaded whole, and when nothing more is said its
+transcript is used instead of a second upload.
+
 The microphone now shows its status as visible text. During an automatic
 recording it becomes a **Send** button: click to send immediately, or keep
 speaking and let the pause end the recording. Leaving/cancelling a click does

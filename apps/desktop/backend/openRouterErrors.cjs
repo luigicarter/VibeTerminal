@@ -40,7 +40,11 @@ function classifyTransportError(error, { signal, timeoutSignal } = {}) {
   if (isCancellation(error) || error instanceof OpenRouterError) return error;
   return new OpenRouterError('network');
 }
-function upstreamErrorInfo(error) { return error instanceof OpenRouterError ? { category: error.category, status: error.status, message: error.message, ...(error.reason && { reason: error.reason }) } : undefined; }
+// The provider's own sentence is the only fact that explains a 4xx. It travels
+// with the classification so the local diagnostics record and the request's own
+// failure text can state it; reportUpstream still withholds it from the voice
+// and upstream-notification surface, which presents application wording only.
+function upstreamErrorInfo(error) { return error instanceof OpenRouterError ? { category: error.category, status: error.status, message: error.message, ...(error.reason && { reason: error.reason }), ...(error.providerMessage && { providerMessage: error.providerMessage }) } : undefined; }
 async function readBoundedError(response) {
   const limit = 65536;
   if (response.body?.getReader) {

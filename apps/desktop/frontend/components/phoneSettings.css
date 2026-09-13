@@ -1,0 +1,165 @@
+/* Read-only phone bridge panel in Settings. Tokens only, no new palette. */
+.phone-settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.phone-check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+
+.phone-check input {
+  accent-color: var(--accent);
+}
+
+.phone-details {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+}
+
+.phone-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.phone-label {
+  font-size: var(--text-2xs);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.phone-details code {
+  font-family: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, monospace;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+
+.phone-addresses {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.phone-code-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.phone-code {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-element);
+  /* A pairing code is read aloud and retyped: keep the groups apart. */
+  letter-spacing: 0.16em;
+  user-select: all;
+}
+
+.phone-status {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.phone-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+
+.phone-pending-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.phone-pending-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.phone-fallback-toggle {
+  align-self: flex-start;
+  font-size: var(--text-sm);
+}
+
+.phone-fallback {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-hairline);
+}
+
+/* The approval prompt. It sits above the workspace because nothing on the
+   network can read anything until somebody here answers it. */
+.phone-pair-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-5);
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.phone-pair-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: min(420px, 100%);
+  padding: var(--space-5);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  color: var(--text-primary);
+}
+
+.phone-pair-prompt h2 {
+  margin: 0;
+  font-size: var(--text-lg);
+}
+
+.phone-pair-device {
+  margin: 0;
+  font-size: var(--text-base);
+  color: var(--text-primary);
+}
+
+.phone-pair-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  padding-top: var(--space-2);
+}
+
+.phone-pair-allow {
+  border-color: var(--accent);
+  color: var(--text-primary);
+  background: var(--bg-element-hover);
+}

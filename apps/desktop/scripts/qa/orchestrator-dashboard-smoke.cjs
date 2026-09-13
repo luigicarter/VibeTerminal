@@ -107,7 +107,7 @@ function smooth(values, low, high, label) { assert(values.some(v=>v.scale>low+.0
   await until(()=>cdp.eval(`Boolean(window.vibe?.terminal && document.querySelector('.orchestrator-nav-button'))`),'dashboard build');
   const seededAt=Date.now()-60000;
   const sessions=[{id:'real-shell',name:'Real PowerShell',kind:'terminal',command:'',cwd:output,createdAt:Date.now(),started:true,nextLaunchMode:'new',launchToken:1,status:'idle',layout:{x:0,y:10,w:70,h:350,unit:'fluid'}}];
-  await cdp.eval(`(()=>{localStorage.setItem('vibe-terminal:workspaces:v2',${JSON.stringify(JSON.stringify([{id:'qa',name:'Dashboard QA',path:output,sessions}]))});localStorage.setItem('vibe-terminal:active-workspace:v1','qa');localStorage.setItem('vibe-terminal:active-view:v1','project');localStorage.setItem('vibe-terminal.session-recency.v1',${JSON.stringify(JSON.stringify({'fixture-2':seededAt,'real-shell':seededAt-300000}))});location.reload()})()`);
+  await cdp.eval(`(async()=>{localStorage.setItem('vibe-terminal:workspaces:v2',${JSON.stringify(JSON.stringify([{id:'qa',name:'Dashboard QA',path:output,sessions}]))});localStorage.setItem('vibe-terminal:active-workspace:v1','qa');localStorage.setItem('vibe-terminal:active-view:v1','project');localStorage.setItem('vibe-terminal.session-recency.v1',${JSON.stringify(JSON.stringify({'fixture-2':seededAt,'real-shell':seededAt-300000}))});await ${require('./workspace-fixture.cjs').checkpointFromStorage};location.reload()})()`);
   await until(()=>cdp.eval(`document.querySelector('[data-session-id="real-shell"] .xterm-rows')?.textContent.length>0`),'actual PowerShell PTY',30000);
   await wait(800);
   // Observe the saved 70% board layout after initial measurement/transition,

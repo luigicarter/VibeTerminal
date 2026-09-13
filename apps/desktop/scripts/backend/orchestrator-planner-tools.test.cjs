@@ -18,7 +18,9 @@ test('agent continuation binds an explicitly addressed work item without redisco
   assert.equal(decodePlannerCalls([call('plan_continue_task', request)], otherTools, request.text).actions[0].workItemId, undefined);
 });
 test('planner calls separate blank opening, unsent drafts, task assignment and request metadata',()=>{
-  const tools=plannerTools({sessions:[]});
+  // Drafts and project registration are offered only to an instruction that
+  // asks for them, so this case states both requests.
+  const tools=plannerTools({sessions:[],instruction:'Add the project folder, open a terminal and stage a draft there.'});
   const blank=tools.find(tool=>tool.function.name==='plan_open_blank_terminal');
   const draft=tools.find(tool=>tool.function.name==='plan_prepare_terminal_draft');
   assert.equal(blank.function.parameters.properties.text,undefined);assert(draft.function.parameters.required.includes('text'));
@@ -27,7 +29,7 @@ test('planner calls separate blank opening, unsent drafts, task assignment and r
   assert.equal(result.goal,'Add and review.');assert.equal(result.access,'read-only');assert.deepEqual(result.actions.map(action=>action.kind),['add_project','delegate_task']);
 });
 test('planner decoder rejects unoffered functions, discriminator overrides and mixed authority formats',()=>{
-  const tools=plannerTools({sessions:[]});
+  const tools=plannerTools({sessions:[],instruction:'Add the project folder and review it.'});
   for(const calls of [[call('plan_operate_terminal',{targetIds:['invented'],text:'Work'})],
     [call('plan_open_blank_terminal',{text:'Run work.'})], [call('plan_add_project',{kind:'remove_project',path:'C:/App'})],
     [call('interpret_workspace',{goal:'Mixed',actions:[]}),call('plan_add_project',{path:'C:/App'})]])assert.throws(()=>decodePlannerCalls(calls,tools,'Original request'));

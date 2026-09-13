@@ -1,7 +1,7 @@
 'use strict';
 
-const SPEECH_FALLBACK = 'The detailed response is available on screen, but I could not prepare a reliable spoken summary.';
-const RESULT_SPEECH_FALLBACK = 'The agent turn ended. A reliable spoken summary is unavailable; check the written details for the outcome.';
+const SPEECH_FALLBACK = "I couldn't put a spoken summary together. The full reply is in the conversation.";
+const RESULT_SPEECH_FALLBACK = "The turn ended, but I couldn't put a spoken summary together. The details are in the conversation.";
 const normalizeSpeech = value => typeof value === 'string' && value.trim() || undefined;
 function summaryMessages(text) {
   return [

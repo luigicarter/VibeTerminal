@@ -45,9 +45,9 @@ function buildResultSummaryMessages(evidence) {
 function fallbackResultSummary(evidence) {
   if (evidence?.source === 'chat-events' && typeof evidence.text === 'string' && evidence.text.trim()) {
     const excerpt = bounded(evidence.text.trim().replace(/[\r\n\t]+/g, ' '), 700);
-    return `Agent output excerpt: ${JSON.stringify(excerpt)}. These claims have not been independently verified.`;
+    return `here is what it printed: ${JSON.stringify(excerpt)}. I haven't checked those claims myself.`;
   }
-  return 'The agent turn ended; result details are unavailable for a reliable summary. The outcome has not been independently verified.';
+  return "the turn ended, but I couldn't read a clear result from it. Have a look at the pane.";
 }
 
 function buildProgressSummaryMessages({ targetId, generation, turnId, name, status, lastTool, lastActivityAt, text, pendingQuestions } = {}) {

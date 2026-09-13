@@ -13,7 +13,7 @@
     "finalCompletion": "unsupported",
     "childTracking": "unsupported",
     "titleSource": "unsupported",
-    "threaded": false
+    "threaded": true
   },
   "codex": {
     "command": "codex",

@@ -17,9 +17,10 @@ installed build.
 
 Every request therefore uses the same contract: named workspace operations
 instead of one combined `workspace` tool, `find_agents`/`read_agent`/
-`read_work_item` discovery during assignment, work items filtered to the
-addressed binding, and an application-owned observe/send/observe handoff for a
-bound task, so an ordinary delegation needs no executor model round. Saved
+`read_work_item` reads performed by the application while it resolves an
+assignment, work items filtered to the addressed binding, and an
+application-owned observe/send/observe handoff for a bound task, so an ordinary
+delegation needs no routing, review or executor model round. Saved
 requests written by an older build that recorded a harness generation load and
 resume on this harness; the recorded marker is discarded.
 
@@ -154,10 +155,14 @@ vocabulary. See [the terminal exit review](orchestrator-exit-review.md) for the
 recorded incident, evidence limits and regression coverage.
 
 For a task without an explicit terminal, `delegate_task` authorizes bounded
-assignment in a known project. Read-only discovery selects a suitable conversation
-or configured new agent before an application-only transition creates the frozen
-`operate_terminal` grant. Exact target, random/all selection and ordinary controls
-retain their existing contracts. See [automatic assignment](orchestrator-routing-deep-dive.md).
+assignment in a known project. A deterministic resolver, not a model, selects a
+suitable conversation or a configured new agent from pane titles, status,
+ownership and Lina's own recent actions; it reads the chosen pane before an
+application-only transition creates the frozen `operate_terminal` grant, and asks
+one question naming the candidates when two panes match. The routing model rounds
+and the ownership reviewer that preceded it are retired. Exact target, random/all
+selection and ordinary controls retain their existing contracts.
+See [automatic assignment](orchestrator-routing-deep-dive.md).
 
 The selected Brain returns an `interpret_workspace` plan. Invalid tool envelopes,
 JSON or plans receive one repair attempt against the original context and strict

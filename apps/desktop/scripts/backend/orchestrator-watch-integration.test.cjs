@@ -98,7 +98,7 @@ test('model failure preserves completion and falls back to an attributed structu
   f.reply = body => { if (body.messages[0].content.startsWith('Summarize')) throw new Error('Fixture model unavailable.'); return 'NO_UPDATE'; };
   const response = await f.app.send({ text: 'Watch a.', targetId: 'a', origin: 'voice' });
   f.end('a', 'Changed the parser; 7 checks passed. watch-fixture-secret');
-  await until(() => f.details(response.requestId).some(item => /Agent output excerpt/.test(item.text)));
+  await until(() => f.details(response.requestId).some(item => /here is what it printed/.test(item.text)));
   assert.match(f.details(response.requestId).at(-1).text, /7 checks passed/);
   assert.ok(!JSON.stringify(f.app.getState()).includes('watch-fixture-secret'));
   assert.ok(!JSON.stringify(f.modelCalls).includes('watch-fixture-secret'));

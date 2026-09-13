@@ -68,6 +68,7 @@ if (!process.versions.electron) {
         fs.writeFileSync(path.join(home,'config.toml'),`sandbox_mode = "danger-full-access"\napproval_policy = "never"\n[projects.${JSON.stringify(workspace)}]\ntrust_level = "trusted"\n`);
         const sessions=[{id:'open-codex-fixture',name:'Open Codex',kind:'open-codex',command:'open-codex',openCodexModel:selected,cwd:workspace,createdAt:Date.now(),started:true,launchToken:1,status:'idle',nextLaunchMode:'new',layout:{x:0,y:0,w:100,h:650,unit:'fluid'}}];
         await js(`localStorage.setItem('vibe-terminal:workspaces:v2',${JSON.stringify(JSON.stringify([{id:'open-codex-project',name:'Open Codex QA',path:workspace,sessions}]))});localStorage.setItem('vibe-terminal:active-workspace:v1','open-codex-project');localStorage.setItem('vibe-terminal:active-view:v1','project');`);
+        await js(require('./workspace-fixture.cjs').checkpointFromStorage);
         inspecting=false;window.reload();return;
       }
       await js(`window.__openCodexEvents=[];window.vibe.terminal.onEvent(event=>window.__openCodexEvents.push(event));true;`);
@@ -97,7 +98,7 @@ if (!process.versions.electron) {
       await js(`Array.from(document.querySelectorAll('.settings-navigation button')).find(button=>button.textContent==='Models & providers').click()`);
       await until(()=>js('document.querySelector(".model-provider-settings")?.textContent.includes("QA Provider")'),'Open Codex settings');
       const panels=await js(`Array.from(document.querySelectorAll('.settings-navigation button')).map(button=>button.textContent)`);
-      assert.deepEqual(panels,['Orchestrator & voice','Models & providers','Appearance']);
+      assert.deepEqual(panels,['Orchestrator & voice','Models & providers','Appearance','Phone']);
       await wait(250);
       await capture('settings.png');
       await js(`document.querySelector('[aria-label="Edit QA Provider"]').click()`);

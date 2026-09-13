@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const selected = process.argv[2];
-if (selected && !['desktop', 'website'].includes(selected)) throw new Error('Expected desktop or website.');
+if (selected && !['desktop', 'website', 'mobile'].includes(selected)) throw new Error('Expected desktop, website or mobile.');
 const copies = {
   desktop: {
     'lina-mark.svg': ['frontend/assets/lina-logo.svg'],
@@ -15,6 +15,11 @@ const copies = {
     'lina-symbol.svg': ['frontend/public/brand/lina-symbol.svg'],
     'lina-logo.png': ['frontend/public/brand/lina-logo.png', 'frontend/public/vibeterminal-logo.png', 'frontend/public/vibeterminal-logo-source.png'],
     'lina-logo.ico': ['frontend/public/brand/lina-logo.ico', 'frontend/public/favicon.ico']
+  },
+  mobile: {
+    'lina-logo-1024.png': ['assets/brand/icon.png', 'assets/brand/splash-icon.png'],
+    'lina-logo-adaptive-1024.png': ['assets/brand/adaptive-icon.png'],
+    'lina-logo.png': ['assets/brand/favicon.png']
   }
 };
 for (const app of selected ? [selected] : Object.keys(copies)) {

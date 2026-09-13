@@ -105,7 +105,7 @@ test('redaction lookup failures skip writes and fail closed on load', async t =>
   const { dir, file, now } = fixture(t);
   const store = createConversationStore({ userDataPath: dir, getSecrets: () => { throw new Error('unavailable'); } });
   await store.save({ messages: [{ id: 'm', role: 'user', at: now, text: 'credential' }] }); assert.equal(fs.existsSync(file), false);
-  fs.writeFileSync(file, JSON.stringify({ messages: [{ id: 'm', role: 'user', at: now, text: 'credential' }] })); assert.deepEqual(store.load(), { messages: [], receipts: [], tasks: [] });
+  fs.writeFileSync(file, JSON.stringify({ messages: [{ id: 'm', role: 'user', at: now, text: 'credential' }] })); assert.deepEqual(store.load(), { messages: [], receipts: [], tasks: [], ledger: [] });
 });
 test('invalid required fields are removed and two instances use independent temporary files', async t => {
   const { dir, now, store } = fixture(t); const other = createConversationStore({ userDataPath: dir });
@@ -113,7 +113,7 @@ test('invalid required fields are removed and two instances use independent temp
   fs.promises.writeFile = async (...args) => { if (String(args[0]).startsWith(dir)) names.add(args[0]); return original(...args); };
   t.after(() => { fs.promises.writeFile = original; });
   await Promise.all([store.save({ messages: [{ at: now, text: 'missing id' }, { id: 'm', role: {}, text: 'bad', at: now }], tasks: [{ at: now }, { requestId: {}, status: 'running', at: now }] }), other.save({})]);
-  assert.equal(names.size, 2); assert.deepEqual(store.load(), { messages: [], receipts: [], tasks: [] });
+  assert.equal(names.size, 2); assert.deepEqual(store.load(), { messages: [], receipts: [], tasks: [], ledger: [] });
 });
 test('structured historical associations survive restart without executable state', async t => {
   const { store, now, file } = fixture(t);
@@ -210,7 +210,7 @@ test('snapshot projects context, redacts secrets, expires old data, and pauses u
   await store.save({ messages: [{ id: 'a', at: now, text: 'hello secret-token', role: 'user', apiKey: 'oops' }, { id: 'm', role: 'user', at: now - MAX_AGE - 1, text: 'old' }], tasks: [{ id: 't', requestId: 't', at: now, status: 'running', instruction: 'hello', grants: ['execute'], controller: {} }], receipts: [] });
   const loaded = store.load(); assert.equal(loaded.messages.length, 1); assert.equal(loaded.messages[0].text, 'hello [redacted]'); assert.equal(loaded.messages[0].apiKey, undefined);
   assert.equal(loaded.tasks[0].status, 'paused'); assert.equal(loaded.tasks[0].grants, undefined);
-  store.save({ messages: [{ id: 'm', role: 'user', at: now, text: 'pending' }] }); await store.clear(); await store.flush(); assert.deepEqual(store.load(), { messages: [], receipts: [], tasks: [] });
+  store.save({ messages: [{ id: 'm', role: 'user', at: now, text: 'pending' }] }); await store.clear(); await store.flush(); assert.deepEqual(store.load(), { messages: [], receipts: [], tasks: [], ledger: [] });
   fs.writeFileSync(path.join(dir, 'orchestrator-conversation.json'), '{partial'); assert.equal(store.load().messages.length, 0);
   await store.save({ messages: Array.from({ length: 190 }, (_, i) => ({ role: 'user', at: now, id: String(i), text: 'x'.repeat(64000) })) });
   assert.ok(fs.statSync(path.join(dir, 'orchestrator-conversation.json')).size <= MAX_BYTES); assert.ok(store.load().messages.length < 190);

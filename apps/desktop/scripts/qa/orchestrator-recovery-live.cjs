@@ -23,9 +23,9 @@ caseNames.push('unselected-existing-codex', 'unselected-existing-codex-guard', '
 caseNames.push('inactive-close-guard', 'inactive-close-history', 'ordinary-behavior-question', 'ordinary-error-question');
 const caseArgs = process.argv.slice(2).filter(arg => arg.startsWith('--case='));
 const selectedCase = caseArgs[0]?.slice('--case='.length);
-const report = { boundary: 'Configured live model; synthetic project, pane inventory and effects only. The recovery case scripts only its initial intent and initial routing failure; its retry interpretation, routing and execution use the configured live model. The two purpose-guard cases script only their initial unintended draft proposal; purpose review and subsequent repair/execution use the live model. Other cases use the live model from their initial intent. No installed conversation/history, native terminals or microphone used.', initialFailureScripted: false, initialProposalScripted: false, budget, maxCallsPerCase: 24, selectedCase: selectedCase === undefined ? 'all' : caseNames.includes(selectedCase) ? selectedCase : 'invalid', cases: [], startedAt: new Date().toISOString() };
-report.boundary += ' The existing-codex guard case scripts only the initial wrong existing-target proposal; target review, repair, routing and execution use the live model.';
-report.boundary += ' The schema-guard case scripts a malformed interpretation followed by a wrong-target proposal; the third interpretation, routing and execution use the live model.';
+const report = { boundary: 'Configured live model; synthetic project, pane inventory and effects only. Assignment is the deterministic resolver in every case and costs no model call. The recovery case scripts only its initial intent and one injected assignment failure; its retry interpretation and execution use the configured live model. The two purpose-guard cases script only their initial unintended draft proposal; purpose review and subsequent repair/execution use the live model. Other cases use the live model from their initial intent. No installed conversation/history, native terminals or microphone used.', initialFailureScripted: false, initialProposalScripted: false, budget, maxCallsPerCase: 24, selectedCase: selectedCase === undefined ? 'all' : caseNames.includes(selectedCase) ? selectedCase : 'invalid', cases: [], startedAt: new Date().toISOString() };
+report.boundary += ' The existing-codex guard case scripts only the initial wrong existing-target proposal; target review, repair and execution use the live model.';
+report.boundary += ' The schema-guard case scripts a malformed interpretation followed by a wrong-target proposal; the third interpretation and execution use the live model.';
 const recoveryObjective = 'Investigate the partial terminal closure in Recovery QA; do not edit files.';
 const purposeTask = 'investigate the partial terminal closure; do not edit files.';
 const purposeObjectives = {
@@ -71,7 +71,7 @@ async function main() {
   if (caseArgs.length > 1 || selectedCase !== undefined && !caseNames.includes(selectedCase)) fail('invalid-case-filter');
   const { createSettings } = require('../../backend/orchestratorSettings.cjs');
   const { createOrchestrator } = require('../../backend/orchestrator.cjs');
-  const { planTaskRoute, RoutingError } = require('../../backend/orchestratorRoutePlanner.cjs');
+  const { RoutingError } = require('../../backend/orchestratorRoutePlanner.cjs');
   const installed = createSettings({ userDataPath: installedPath, secureStorage: safeStorage });
   secret = installed.getKey(); model = installed.getSettings().model;
   if (!secret || !model) fail('configured-model-or-key-unavailable'); report.model = model;
@@ -129,9 +129,9 @@ async function main() {
           return new Response(JSON.stringify({ choices: [{ finish_reason: 'tool_calls', message: { role: 'assistant', content: null, tool_calls: [call] } }], usage: { cost: 0 } }),
             { status: 200, headers: { 'Content-Type': 'application/json' } });
         }
-        // Establish the exact app-owned failed-routing state once. An unrelated
-        // live parser failure must not pass as the intended routing failure and
-        // leave the one-shot route injection armed for the retry itself.
+        // Establish the exact app-owned unassigned state once. An unrelated live
+        // parser failure must not pass as the intended assignment failure and
+        // leave the one-shot injection armed for the retry itself.
         if (name === 'natural-failed-route-recovery' && induceFailure && !seededInitialIntent
             && body.tools?.some(tool => tool.function?.name === 'interpret_workspace')) {
           seededInitialIntent = true; row.initialFailureScripted = true; report.initialFailureScripted = true;
@@ -158,7 +158,6 @@ async function main() {
         const purposeReview = body.messages?.some(message => message.role === 'system' && typeof message.content === 'string'
           && message.content.startsWith('Check the purpose of proposed new-terminal drafts before any action.')) === true;
         if (purposeReview) row.purposeReview = true;
-        if (body.messages?.[0]?.content === require('../../backend/orchestratorTargetReview.cjs').TARGET_REVIEW_SYSTEM) row.targetReview = true;
         if (body.messages?.[0]?.content === require('../../backend/orchestratorCloseSafety.cjs').CLOSE_REVIEW_SYSTEM) row.closeReview = true;
         row.calls.push({ stage: metadataName(body.tools?.[0]?.function?.name || 'model'), status: 'started', toolErrors, purposeReview,
           inputBytes: Buffer.byteLength(JSON.stringify({ messages: body.messages, tools: body.tools || [] })) });
@@ -253,17 +252,16 @@ async function main() {
       getRoots: () => ({ documents: root, projects: projectAdded ? [{ id: 'recovery-project', name: 'Recovery QA', path: cwd }] : [] }),
       getSessions: () => structuredClone(sessions), getLaunchers: () => [{ kind: 'codex', label: 'Codex', available: true, configured: true },
         ...(name === 'fullscreen-history' ? [{ kind: 'claude', label: 'Claude Code', available: true, configured: true }] : [])],
-      // Ownership cases exercise production routing, including its real model
-      // allowance and compaction. The older recovery fixture injects failures.
-      routeTask: ['unselected-existing-codex', 'unselected-existing-codex-guard', 'unselected-existing-codex-schema-guard', 'related-agent-continuation', 'explicit-existing-other-task'].includes(name) ? undefined : async (context, { read }) => {
+      // Assignment is deterministic: every case reaches the production resolver,
+      // which costs no model call. The only injected adapter belongs to the
+      // recovery fixture, and its whole job is to make one assignment fail; once
+      // that one-shot failure is spent it returns the same new-conversation
+      // choice the resolver would make for this single-launcher fixture.
+      routeTask: name === 'natural-failed-route-recovery' ? async () => {
         row.routeCalls++;
         if (induceFailure) { induceFailure = false; throw new RoutingError('synthetic-route-failure'); }
-        return planTaskRoute({ context, read, complete: async (messages, tools) => {
-          const response = await request('https://openrouter.ai/api/v1/chat/completions', { method: 'POST', headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model, messages, tools, max_tokens: 1024 }) });
-          return response.json();
-        } });
-      },
+        return { kind: 'choose', decision: 'create', kindOfSession: 'codex', reason: 'The recovered task needs its own conversation.' };
+      } : undefined,
       readSession: target => { const current = sessions.find(item => item.id === target.id && item.generation === target.generation); if (!current) fail('read-outside-fixture');
         const input = composer(current); input.sequence++;
         return { ok: true, id: current.id, generation: current.generation, sequence: input.sequence, observationSequence: input.sequence, inputRevision: input.revision,
@@ -400,7 +398,7 @@ async function main() {
   await scenario('natural-failed-route-recovery', 0, async f => {
     f.failNextRoute(); const first = await f.send(recoveryObjective);
     assert.equal(first.ok, false); assert.equal(f.row.effects.create, 0); assert.equal(f.row.effects.send, 0);
-    assert.equal(f.row.initialFailureScripted, true); assert.equal(f.row.routeCalls, 1, 'the first request must reach the deliberately failed normal route path');
+    assert.equal(f.row.initialFailureScripted, true); assert.equal(f.row.routeCalls, 1, 'the first request must reach the deliberately failed assignment');
     const second = await f.send('Look at my last request and action it.', { replyToRequestId: first.requestId });
     assert.equal(second.ok, true); assert.equal(f.row.effects.create, 1); assert.equal(f.row.effects.send, 1);
     assert.ok(!f.statuses.some(item => item.requestId === first.requestId && item.status === 'finished'));
@@ -452,7 +450,9 @@ async function main() {
     f.row.controlCompleted = result.ok;
     if (!result.ok) { assert.match(result.error, /^The terminal operation is unfinished\./); f.row.controlFailure = 'operator-finish-unverified'; }
     assert.equal(f.row.effects.create, 0); assert.equal(f.row.effects.send, 1);
-    assert.equal(f.sends[0].targetId, 'worker-1'); assert.equal(f.row.targetReview, true);
+    // The pane the user named by its exact title is selected in code now, so
+    // this scenario proves the send reached it without any reviewer round.
+    assert.equal(f.sends[0].targetId, 'worker-1'); assert.equal(f.row.targetReview, undefined);
   });
   await scenario('creation-purpose-guard', 0, async f => {
     const result = await f.send(purposeObjectives['creation-purpose-guard']);

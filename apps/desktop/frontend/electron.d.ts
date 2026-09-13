@@ -65,6 +65,7 @@ export interface InstalledCliReport {
 declare global {
   interface Window {
     vibe?: {
+      chats?: import('./chatTypes').ChatsApi;
       orchestrator: import("./orchestratorUi").RelayApi & {
         openMain(): Promise<{ ok: boolean }>;
         getChanges(payload: { id?: string; cwd?: string }): Promise<CodeChangeSummary>;

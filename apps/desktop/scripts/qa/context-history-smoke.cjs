@@ -6,6 +6,7 @@ const fs = require('node:fs'), path = require('node:path'), net = require('node:
 const { createHash } = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
 const root = path.resolve(__dirname, '../..');
+const hidden = process.argv.includes('--hidden');
 const output = path.join(root, '.tmp', 'context-history-smoke', `${Date.now()}-${process.pid}`);
 fs.mkdirSync(output, { recursive: true });
 const result = { output, checks: [], limits: ['Provider requests are blocked; model context selection is covered by backend tests.', 'Voice remains disabled; this does not test microphone capture or playback.'] };
@@ -37,12 +38,13 @@ require(${JSON.stringify(path.join(root, 'backend/main.cjs'))});
 let child, cdp;
 const button = text => cdp.eval(`(()=>{const e=[...document.querySelectorAll('button')].find(e=>e.textContent===${JSON.stringify(text)});if(!e||e.disabled)return false;e.click();return true})()`);
 const reader = () => cdp.eval(`Array.from(document.querySelector('[aria-label="Saved conversation messages"]')?.children||[]).filter(e=>e.tagName==='DIV').map(e=>e.lastElementChild.textContent)`);
-async function screenshot(client, name) { const s = await client.send('Page.captureScreenshot', { format: 'png' }); fs.writeFileSync(path.join(output, name), Buffer.from(s.data, 'base64')); }
+async function screenshot(client, name) { if (hidden) { result.skippedScreenshots ||= []; result.skippedScreenshots.push(name); return; } const s = await client.send('Page.captureScreenshot', { format: 'png' }); fs.writeFileSync(path.join(output, name), Buffer.from(s.data, 'base64')); }
 const rows = file => fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map(s => JSON.parse(s)) : [];
 (async () => { try {
   assert.equal(process.platform, 'win32');
   const port = await new Promise(resolve => { const server = net.createServer(); server.listen(0, '127.0.0.1', () => { const port = server.address().port; server.close(() => resolve(port)); }); });
   const env = { ...process.env, VIBE_SCREENSHOT_MODE: '1', VIBE_INTERNAL_SCREENSHOT: '0', VIBE_SCREENSHOT_USER_DATA: userData, VIBE_AGENT_SHIM_BASE_DIR: path.join(output, 'shims'), CODEX_HOME: path.join(output, 'codex'), CLAUDE_CONFIG_DIR: path.join(output, 'claude'), XDG_CONFIG_HOME: path.join(output, 'config'), XDG_DATA_HOME: path.join(output, 'data'), KIMI_CODE_HOME: path.join(output, 'kimi'), QWEN_HOME: path.join(output, 'qwen'), GEMINI_CLI_HOME: path.join(output, 'gemini'), CURSOR_CONFIG_DIR: path.join(output, 'cursor'), VIBE_CLAUDE_CUSTOM_HOME: path.join(output, 'claude-custom') };
+  if (hidden) env.VIBE_SCREENSHOT_HIDDEN = '1';
   for (const key of Object.keys(env)) if (/API_KEY|AUTH_TOKEN/.test(key) || ['ELECTRON_RUN_AS_NODE', 'VITE_DEV_SERVER_URL'].includes(key) || key.toLowerCase() === 'path') delete env[key];
   env.PATH = [path.join(process.env.SystemRoot, 'System32'), process.env.SystemRoot, path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0')].join(path.delimiter);
   env.VIBE_NODE_PATH = process.execPath;

@@ -4,6 +4,7 @@ const { sessionIdentity } = require('./orchestratorRouting.cjs');
 const { routingBindingMatches } = require('./orchestratorLaunchers.cjs');
 const { resultDependencyBlocker, transferredStatus } = require('./orchestratorContinuation.cjs');
 const { assessNativePromptReadiness } = require('./orchestratorPromptReadiness.cjs');
+const { paneLabel, failureSentence } = require('./orchestratorFailureText.cjs');
 
 // Submitted prompt text is startup evidence only. Keep it out of the wait record
 // so no report, receipt, snapshot or diagnostic can ever serialize it.
@@ -187,7 +188,7 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
       : waits.some(wait => !wait.delivered) ? 'its prompt is still awaiting delivery'
         : waits.some(wait => wait.attributionAmbiguous) ? 'its result cannot yet be attributed to that request'
           : waits.some(wait => ['running', 'busy', 'starting'].includes(currentSessions.find(session => session.id === wait.targetId)?.turnState)) ? 'work is still active'
-            : waits.length ? 'its result remains unverified'
+            : waits.length ? 'it has not finished yet'
               : owner.admitted ? 'its control loop is still active' : 'it is ahead in the queue';
     return `Waiting for ${requestName(owner)}${targets} in ${location}: ${state}.`;
   }
@@ -195,7 +196,7 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
     for (const id of job.task.dependsOn) {
       const prior = jobs.get(id);
       if (!prior || prior.task.status !== 'finished') return prior
-        ? `Waiting for prerequisite ${requestName(prior)}: ${prior.task.status === 'waiting-results' ? 'its result remains unverified' : prior.task.status}.`
+        ? `Waiting for prerequisite ${requestName(prior)}: ${prior.task.status === 'waiting-results' ? 'it has not finished yet' : prior.task.status}.`
         : 'Waiting for a prerequisite request: its result is unavailable.';
     }
     if (dependenciesOnly) return undefined;
@@ -319,7 +320,7 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
     deliveryEvidence(wait, result);
     if (eligibleResultTurn(wait, result.turnId)) wait.turnId ||= result.turnId;
     wait.staged = result.status === 'staged'; wait.delivered = !['queued', 'staged'].includes(result.status);
-    if (rejected) { wait.done = true; wait.failed = true; wait.delivered = false; wait.error = result.error || result.reason; }
+    if (rejected) { wait.done = true; wait.failed = true; wait.delivered = false; wait.error = result.error || result.reason; if (Number.isFinite(result.timeoutMs)) wait.timeoutMs = result.timeoutMs; }
   }
   function watch(job, action, session) {
     const target = action.watchTarget;
@@ -351,7 +352,9 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
         // the full readiness inventory or implying unrelated panes vanished.
         if (partial && (!session || session.generation !== wait.generation)) continue;
         if (!session || session.generation !== wait.generation) {
-          if (!wait.done) { wait.done = true; wait.failed = true; wait.error = 'The terminal changed before its result could be verified.'; }
+          // The pane the user is looking at is named, and the cause is the
+          // restart or replacement itself, not an unexplained "change".
+          if (!wait.done) { wait.done = true; wait.failed = true; wait.error = failureSentence('generation-changed', { pane: paneLabel(job.task?.targets?.find(target => target.id === wait.targetId) || currentSessions.find(item => item.id === wait.targetId)) }); }
           wait.backgroundPending = false; dirty = true; continue;
         }
         if (!wait.delivered || wait.nativeShell) continue;
@@ -478,7 +481,7 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
       if (!wait) continue;
       deliveryEvidence(wait, result);
       if (wait.operator && result.delivery === 'not-dispatched') { job.waits.splice(job.waits.indexOf(wait), 1); continue; }
-      if (result.delivery === 'not-dispatched' || ['cancelled', 'rejected', 'stale', 'stale-generation', 'not-running'].includes(result.status) || (result.ok === false && !result.status)) { wait.done = true; wait.failed = true; wait.delivered = false; wait.error = result.error || result.reason; }
+      if (result.delivery === 'not-dispatched' || ['cancelled', 'rejected', 'stale', 'stale-generation', 'not-running'].includes(result.status) || (result.ok === false && !result.status)) { wait.done = true; wait.failed = true; wait.delivered = false; wait.error = result.error || result.reason; if (Number.isFinite(result.timeoutMs)) wait.timeoutMs = result.timeoutMs; }
       else { wait.staged = result.status === 'staged'; wait.delivered = !['queued', 'staged'].includes(result.status); if (result.turnId && eligibleResultTurn(wait, result.turnId)) wait.turnId = result.turnId; }
     }
   }

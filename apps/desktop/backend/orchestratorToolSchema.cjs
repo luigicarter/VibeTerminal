@@ -109,9 +109,25 @@ function scopedWorkspaceTool(tool, grants = []) {
           : name === 'limit' && branch.properties.kind.enum[0] === 'search_conversation' ? { maximum: 8 } : {}])) })) }
   } };
 }
+// Retrieval over Lina's own memory store. These are reads with no target, no
+// grant and no effect, so they are offered on every request rather than scoped
+// by the plan: they only ever return bounded citations of what the application
+// already recorded about its own actions.
+const MEMORY_TOOLS = Object.freeze([
+  { name: 'recall', required: [], properties: { query: { type: 'string' }, targetId: { type: 'string' },
+    cwd: { type: 'string' }, since: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 10 } } },
+  { name: 'recall_pane', required: ['targetId'], properties: { targetId: { type: 'string' } } },
+  { name: 'recall_project', required: ['name'], properties: { name: { type: 'string' } } },
+]);
+const MEMORY_KINDS = MEMORY_TOOLS.map(tool => tool.name);
+function memoryTools() {
+  return MEMORY_TOOLS.map(tool => ({ type: 'function', function: { name: tool.name,
+    description: require('./orchestratorToolGuide.cjs').workspaceOperationGuide(tool.name) || `Read Lina's memory with ${tool.name}.`,
+    parameters: { type: 'object', additionalProperties: false, required: [...tool.required], properties: structuredClone(tool.properties) } } }));
+}
 function namedWorkspaceTools(tool) {
   const root = tool.function.parameters;
-  return root.anyOf.map(branch => {
+  return [...root.anyOf.map(branch => {
     const kind = branch.properties.kind.enum[0];
     return { type: 'function', function: { name: kind,
       description: require('./orchestratorToolGuide.cjs').workspaceOperationGuide(kind) || `Perform the scoped ${kind} operation.`,
@@ -119,6 +135,6 @@ function namedWorkspaceTools(tool) {
         required: (branch.required || []).filter(name => name !== 'kind'),
         properties: Object.fromEntries(Object.keys(branch.properties).filter(name => name !== 'kind').map(name => [name,
           { ...structuredClone(root.properties[name]), ...structuredClone(branch.properties[name]) }])) } } };
-  });
+  }), ...memoryTools()];
 }
-module.exports = { buildWorkspaceParameters, scopedWorkspaceTool, namedWorkspaceTools };
+module.exports = { buildWorkspaceParameters, scopedWorkspaceTool, namedWorkspaceTools, memoryTools, MEMORY_KINDS };

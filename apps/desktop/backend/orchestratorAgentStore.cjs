@@ -4,6 +4,7 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { VERSION, LIMITS, id } = require('../shared/orchestratorAgentContract.cjs');
 const { nativeKey } = require('./orchestratorRouting.cjs');
+const { sanitizePaneMemory, validPaneMemory } = require('./orchestratorPaneMemory.cjs');
 const kinds = new Set(['finding', 'decision', 'open-question', 'handoff']);
 const clone = value => structuredClone(value);
 const bytes = value => Buffer.byteLength(typeof value === 'string' ? value : JSON.stringify(value), 'utf8');
@@ -23,7 +24,11 @@ function createAgentStore({ userDataPath, getSecrets = () => [], now = Date.now,
   };
   function valid(value) {
     const fields = (v, keys) => v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).every(k => keys.includes(k));
-    return fields(value, ['version', 'revision', 'identities', 'notes']) && value.version === VERSION && Number.isSafeInteger(value.revision) && value.revision >= 0 &&
+    // paneMemory is its own top-level key with its own validator. It is never
+    // folded into an identity: an identity's field list is exact, so widening it
+    // would make every existing store file unreadable.
+    return fields(value, ['version', 'revision', 'identities', 'notes', 'paneMemory']) && value.version === VERSION && Number.isSafeInteger(value.revision) && value.revision >= 0 &&
+      validPaneMemory(value.paneMemory) &&
       Array.isArray(value.identities) && value.identities.length <= LIMITS.identities &&
       value.identities.every(v => fields(v, ['agentId', 'nativeIdentity', 'name', 'kind']) && id(v.agentId) &&
         fields(v.nativeIdentity, ['provider', 'home', 'workspace', 'id']) &&
@@ -40,6 +45,12 @@ function createAgentStore({ userDataPath, getSecrets = () => [], now = Date.now,
     if (fs.statSync(file).size > maxBytes) throw new Error('Agent record store exceeds its size limit.');
     const value = JSON.parse(fs.readFileSync(file, 'utf8'));
     if (value.version !== VERSION) { blocked = true; status = 'unsupported-version'; throw new Error(status); }
+    // Drop unusable pane records one by one before validation: a bad memory row
+    // is not a reason to lose every identity in the file.
+    if (value.paneMemory !== undefined) {
+      const cleaned = sanitizePaneMemory(value.paneMemory);
+      if (Object.keys(cleaned).length) value.paneMemory = cleaned; else delete value.paneMemory;
+    }
     if (!valid(value)) throw new Error('Invalid agent record store.');
     return value;
   }
@@ -121,6 +132,18 @@ function createAgentStore({ userDataPath, getSecrets = () => [], now = Date.now,
       });
     },
     clearNotes(agentId) { return enqueue(next => { next.notes = agentId ? next.notes.filter(n => n.agentId !== agentId) : []; return { value: { ok: true, status: 'cleared' } }; }); },
+    paneMemory: () => clone(state.paneMemory || {}),
+    // One writer, whole-map replacement: the caller owns merge order, so a burst
+    // of prompt and result updates cannot interleave into a half-written record.
+    savePaneMemory(value) {
+      return enqueue(next => {
+        const cleaned = sanitizePaneMemory(Object.fromEntries(Object.entries(value && typeof value === 'object' ? value : {}).map(([agentId, record]) =>
+          [agentId, record && typeof record === 'object' ? Object.fromEntries(Object.entries(record).map(([field, entry]) => [field, typeof entry === 'string' ? clean(entry) : entry])) : record])));
+        if (JSON.stringify(next.paneMemory || {}) === JSON.stringify(cleaned)) return { unchanged: true, value: { ok: true, status: 'unchanged' } };
+        if (Object.keys(cleaned).length) next.paneMemory = cleaned; else delete next.paneMemory;
+        return { value: { ok: true, status: 'saved' } };
+      });
+    },
     flush: () => chain
   };
 }

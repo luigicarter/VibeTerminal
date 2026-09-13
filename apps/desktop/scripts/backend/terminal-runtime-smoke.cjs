@@ -397,6 +397,7 @@ async function mainChecks() {
   const telemetry = { prepareSession: () => { preparations++; return new Promise((resolve) => { finishPreparation = resolve; }); },
     releaseSession: (...args) => releases.push(args) };
   const context = vm.createContext({ ipcMain: { handle: (name, fn) => { handlers[name] = fn; }, on() {} },
+    chatShutdownPromise: null, mobileBridge: null,
     observedLaunches: require('../../backend/observedStop.cjs').createObservedLaunchFence(),
     terminalRuntime: runtime, orchestratorIntegration: null, ptyHost: null, getTerminalRuntime: () => runtime,
     resolveLaunchCwd: (cwd) => cwd === "missing-folder" ?

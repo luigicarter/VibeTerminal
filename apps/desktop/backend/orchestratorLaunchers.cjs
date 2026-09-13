@@ -1,5 +1,6 @@
 'use strict';
 const kinds = new Set([...Object.keys(require('../shared/providerCapabilities.json')), 'claude-custom', 'fusion', 'openfusion']);
+const { paneLabel, failureSentence } = require('./orchestratorFailureText.cjs');
 const bounded = value => typeof value === 'string' ? value.slice(0, 240) : undefined;
 function launcherCatalog(items = []) {
   return (Array.isArray(items) ? items : []).filter(item => kinds.has(item?.kind)).slice(0, 40).map(item => {
@@ -88,7 +89,8 @@ function supportsNativePromptReadiness(session) {
 // A running process is enough to inspect onboarding, but not to paste a task.
 // Wait on decoded composer evidence without sending anything or changing the
 // request's target. Output may advance; human input and recipient changes may not.
-function waitForNativePromptReady({ action, getSession, readSession, signal, timeoutMs = 20000, pollMs = 100 }) {
+function waitForNativePromptReady({ action, getSession, readSession, signal, timeoutMs = 20000, pollMs = 100,
+  onTransient, answerStartupPrompt, isRegisteredProject }) {
   const { sessionIdentity } = require('./orchestratorRouting.cjs');
   const { assessNativePromptReadiness } = require('./orchestratorPromptReadiness.cjs');
   const initial = getSession(action.target.id);
@@ -98,16 +100,20 @@ function waitForNativePromptReady({ action, getSession, readSession, signal, tim
   const rootPid = session => shell ? session?.pid || session?.terminalPid : session?.agentPid;
   let pid = rootPid(initial), inputRevision = action.inputRevision;
   return new Promise(resolve => {
-    let settled = false, polling, readinessReason;
+    let settled = false, polling, readinessReason, startupScreen, startupAnswered = false, answering = false;
     const finish = value => {
       if (settled) return;
       settled = true; clearTimeout(deadline); clearTimeout(polling);
       signal?.removeEventListener('abort', abort);
-      resolve(value);
+      resolve({ ...value, ...(startupScreen && { startupScreen }), ...(startupAnswered && { startupAnswered: 'folder-trust' }) });
     };
     const fail = (status, error, reason) => finish({ ok: false, status, error, ...(reason && { reason }), delivery: 'not-dispatched' });
     const abort = () => fail('cancelled', 'Cancelled while waiting for the native input composer. No prompt was sent.');
-    const deadline = setTimeout(() => fail('launch-timeout', `The native input composer was not ready before the startup deadline. No prompt was sent.${readinessReason ? ` ${readinessReason}` : ''}`), timeoutMs);
+    // Failure text names the pane the user is looking at and what its screen
+    // actually showed, so it reads as an account rather than a status code.
+    const pane = () => paneLabel(getSession(target.id) || initial);
+    const deadline = setTimeout(() => finish({ ok: false, status: 'launch-timeout', delivery: 'not-dispatched', timeoutMs,
+      error: `${failureSentence('launch-timeout', { pane: pane(), seconds: timeoutMs / 1000 })}${readinessReason ? ` ${readinessReason}` : ''}` }), timeoutMs);
     if (signal?.aborted) return abort();
     if (action.target.launchToken !== undefined && action.target.launchToken !== initial?.launchToken) return fail('stale-generation', 'The requested launch changed before the startup wait.');
     signal?.addEventListener('abort', abort, { once: true });
@@ -132,11 +138,33 @@ function waitForNativePromptReady({ action, getSession, readSession, signal, tim
         const session = current(); if (!session) return;
         if (Number.isSafeInteger(observation?.inputRevision)) {
           inputRevision ??= observation.inputRevision;
-          if (observation.inputRevision !== inputRevision) return fail('stale-observation', 'Terminal input changed during startup; the prompt was not sent.', 'input-revision-changed');
+          if (observation.inputRevision !== inputRevision) return fail('stale-observation', failureSentence('stale-observation', { pane: pane() }), 'input-revision-changed');
         }
         const readiness = assessNativePromptReadiness(session, observation);
         readinessReason = readiness.reason;
-        if (['blocked', 'unsupported'].includes(readiness.status)) return fail('input-surface-unverified', readiness.reason);
+        if (['blocked', 'unsupported'].includes(readiness.status)) return fail('input-surface-unverified',
+          readiness.status === 'blocked' ? `${failureSentence('input-surface-unverified', { pane: pane() })} ${readiness.reason}` : readiness.reason);
+        // A startup screen is the pane still launching. Report it once, answer
+        // only a folder trust prompt for a registered project, and keep polling
+        // to the same deadline; nothing is typed until the composer is ready.
+        if (readiness.status === 'transient') {
+          if (!startupScreen) {
+            startupScreen = { prompt: readiness.prompt, reason: readiness.reason, detail: readiness.detail, text: String(observation.text || '').slice(0, 400) };
+            try { onTransient?.({ ...startupScreen, session }); } catch { /* a report must never fail a wait */ }
+          }
+          if (answerStartupPrompt && !startupAnswered && !answering && readiness.prompt === 'folder-trust' &&
+              readiness.affirmativeDefault === true && isRegisteredProject?.(session.cwd) === true) {
+            answering = true;
+            let answered;
+            try { answered = await answerStartupPrompt({ session, observation }); } catch { /* keep polling; nothing was typed */ }
+            if (settled) return;
+            if (!current()) return;
+            // The PTY host counts our own answer as an input change. Re-baseline
+            // the retained revision from the next read; the composer, draft and
+            // recipient guards below still decide whether anything may be typed.
+            if (answered?.ok === true) { startupAnswered = true; inputRevision = undefined; }
+          }
+        }
         if (readiness.ready && session.launchState !== 'pending' && session.processState === 'running' &&
             (shell || session.agentProcessState === 'running') && Number.isSafeInteger(pid) && pid > 0 && session.binding?.status !== 'ambiguous') {
           return finish({ ok: true, session, observation, inputRevision, routingBinding: { target, nativeIdentity: { ...identity } } });

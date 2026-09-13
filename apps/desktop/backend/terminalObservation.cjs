@@ -2,12 +2,16 @@ const { Terminal } = require('@xterm/headless');
 
 // Screen samples are evidence of what was displayed, not a reconstructed transcript.
 // Keep the parser alive from launch; replaying clipped ANSI tails cannot recover a TUI.
-function createTerminalObservation({ maxHistoryBytes = 1024 * 1024, globalHistoryBytes = 32 * 1024 * 1024 } = {}) {
+// `scrollback` is how many lines above the viewport each decoder keeps. One is
+// the default because a screen sample only ever reads the viewport; the mobile
+// bridge asks for more because it ships the lines above it to a phone.
+function createTerminalObservation({ maxHistoryBytes = 1024 * 1024, globalHistoryBytes = 32 * 1024 * 1024, scrollback = 1 } = {}) {
   const panes = new Map();
   let bytes = 0;
   let order = 0;
   maxHistoryBytes = Math.max(0, Math.min(1024 * 1024, Number(maxHistoryBytes) || 0));
   globalHistoryBytes = Math.max(0, Math.min(32 * 1024 * 1024, Number(globalHistoryBytes) || 0));
+  scrollback = Math.max(1, Math.min(5000, Number(scrollback) || 1));
   function forget(id, generation) {
     if (id && typeof id === 'object') ({ id, generation } = id);
     const pane = panes.get(id);
@@ -116,7 +120,7 @@ function createTerminalObservation({ maxHistoryBytes = 1024 * 1024, globalHistor
       // narrows with zero scrollback. A later grow/redraw then crashes lineFeed.
       // One spare row satisfies that reflow invariant; reads still expose only
       // the visible screen and the separately bounded display-sample history.
-      pane = { generation: event.generation, terminal: new Terminal({ ...dimensions(event), scrollback: 1, allowProposedApi: true }), pending: Promise.resolve(), waiters: new Set(), queue: [], sequence: 0, acceptedSequence: 0, history: [], bytes: 0, truncated: false, outputAt: null, metadataAt: event.at || Date.now(), fromLaunch: true };
+      pane = { generation: event.generation, terminal: new Terminal({ ...dimensions(event), scrollback, allowProposedApi: true }), pending: Promise.resolve(), waiters: new Set(), queue: [], sequence: 0, acceptedSequence: 0, history: [], bytes: 0, truncated: false, outputAt: null, metadataAt: event.at || Date.now(), fromLaunch: true };
       // Observe the same decoded stream as xterm, including split sequences.
       // Return false so mode changes/reset still reach xterm's own handlers.
       // A displayed prompt marker with a hidden cursor can be a disabled TUI.
@@ -222,6 +226,19 @@ function createTerminalObservation({ maxHistoryBytes = 1024 * 1024, globalHistor
     return { ok: true, id, generation, inputRevision: pane.inputRevision,
       manualInputPending: pane.manualInputPending, interactionInputPending: pane.interactionInputPending };
   }
-  return { ingest, read, inputState, forget, dispose() { for (const id of panes.keys()) forget(id); } };
+  // Read-only handle on a live decoder, for a caller that needs the buffer
+  // itself rather than a text sample — the mobile bridge renders changed rows
+  // straight off `terminal.buffer.active`. Nothing here writes: the returned
+  // terminal is the decoder this module already owns and disposes.
+  function inspect(target) {
+    const { id, generation } = (target && typeof target === 'object') ? target : { id: target };
+    const pane = panes.get(id);
+    if (!pane || pane.disposed || (generation !== undefined && pane.generation !== generation)) return null;
+    return { id, generation: pane.generation, terminal: pane.terminal, cols: pane.terminal.cols,
+      rows: pane.terminal.rows, cursorVisible: pane.cursorVisible !== false, exited: Boolean(pane.exited),
+      alternateScreen: pane.terminal.buffer.active.type === 'alternate', sequence: pane.sequence,
+      settled: () => pane.pending };
+  }
+  return { ingest, read, inputState, inspect, forget, dispose() { for (const id of panes.keys()) forget(id); } };
 }
 module.exports = { createTerminalObservation };

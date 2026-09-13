@@ -278,11 +278,12 @@ test('confident completion waits through a short thinking pause and restarts whe
   const f = fixture(); t.after(() => f.controller.dispose()); await f.activate();
   f.frame(100, true, true); f.frame(500, true); f.frame(200); await tick();
   assert.equal(f.analyses.length, 1); assert.equal(f.uploads.length, 0, '200ms pause must not send');
-  f.frame(800); assert.equal(f.uploads.length, 0, 'one-second thinking pause must not send');
+  f.frame(300); assert.equal(f.uploads.length, 0, 'half a second of thinking must not send');
   f.frame(300, true); f.frame(200); await tick();
-  assert.equal(f.analyses.length, 2); f.frame(999); assert.equal(f.uploads.length, 0);
+  assert.equal(f.analyses.length, 2); f.frame(399); assert.equal(f.uploads.length, 0);
   f.frame(1); await until(() => f.sent.length);
-  assert.equal(f.diagnostics.filter(x => x.event === 'voice_recording' && x.stage === 'finish').at(-1).reason, 'semantic');
+  const finish = f.diagnostics.filter(x => x.event === 'voice_recording' && x.stage === 'finish').at(-1);
+  assert.equal(finish.reason, 'semantic'); assert.equal(finish.pauseMs, 600); assert.equal(finish.turnConfidence, .99);
 });
 
 test('uncertain semantic result finishes after three seconds quiet and preserves queued speech', async t => {

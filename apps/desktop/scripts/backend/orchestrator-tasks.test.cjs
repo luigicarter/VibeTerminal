@@ -85,6 +85,16 @@ const { fitMessages } = require('../../backend/orchestratorBudget.cjs');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 async function until(fn) { for (let i = 0; i < 300; i++) { if (fn()) return; await tick(); } assert.fail('Condition was not reached.'); }
 const reply = text => ({ choices: [{ finish_reason: 'stop', message: { content: text } }] });
+// A store's write chain can still hold its .tmp open for a moment after dispose
+// resolves, and Windows answers that with ENOTEMPTY. Retry briefly, then let
+// rmSync do its own retrying, so teardown never fails a passing test.
+async function remove(root) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try { return fs.rmSync(root, { recursive: true, force: true }); }
+    catch { await new Promise(resolve => setTimeout(resolve, 20)); }
+  }
+  fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+}
 async function fixture(t, overrides = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-tasks-'));
   const f = { root, contexts: [], effects: [], executorCalls: 0, activeCalls: 0, maxCalls: 0, sessions: Array.from({ length: 5 }, (_, i) => ({ id: `s${i}`, generation: `g${i}`, name: `Agent ${i}`, kind: 'fusion', cwd: path.join(root, `p${i}`), turnState: 'idle' })) };
@@ -101,7 +111,7 @@ async function fixture(t, overrides = {}) {
       try { return new Response(JSON.stringify(f.respond ? await f.respond(JSON.parse(options.body)) : reply('Done.'))); } finally { f.activeCalls--; }
     }, ...overrides });
   await f.app.configure({ apiKey: 'fixture', sessionOnly: true, model: 'model' }); await f.app.setEnabled(true);
-  t.after(async () => { await f.app.dispose(); fs.rmSync(root, { recursive: true, force: true }); });
+  t.after(async () => { await f.app.dispose(); await f.app.flushDiagnostics(); await remove(root); });
   return f;
 }
 
@@ -190,7 +200,11 @@ test('structured clarification survives unrelated work and assistant context is 
   assert.equal(pending.status, 'needs-answer'); assert.equal(pending.question.text, 'Which agent?');
   await f.app.send({ text: 'Hello', origin: 'text' });
   await f.app.send({ text: 's0', origin: 'text', replyToRequestId: result.requestId, questionId: pending.question.id });
-  assert.equal(f.effects.length, 1); assert.ok(f.contexts.at(-1).recentConversation.some(message => message.role === 'assistant' && message.text === 'Which agent?'));
+  // Migrated from recentConversation: the question the user is answering now
+  // reaches the planner through its explicit replyContext, not a shared window.
+  assert.equal(f.effects.length, 1); assert.equal(f.contexts.at(-1).recentConversation, undefined);
+  assert.equal(f.contexts.at(-1).replyContext.question.text, 'Which agent?');
+  assert.ok(f.contexts.at(-1).replyContext.recentMessages.some(message => message.role === 'assistant' && message.text === 'Which agent?'));
   assert.equal(f.app.enqueue({ text: 's0', origin: 'text', replyToRequestId: result.requestId, questionId: pending.question.id }).ok, false);
 });
 
@@ -198,7 +212,7 @@ test('staged transport never satisfies a result dependency', async t => {
   const f = await fixture(t); f.dispatch = () => ({ ok: true, status: 'staged', reason: 'Agent input readiness is not observed.' });
   const first = await f.app.send({ text: 'Review', targetId: 's0', origin: 'text' });
   assert.equal(f.app.getState().tasks.find(task => task.id === first.requestId).status, 'paused');
-  assert.match(first.text, /has not been sent.*Agent input readiness is not observed.*Open the terminal/s);
+  assert.match(first.text, /nothing was sent[.] Agent input readiness is not observed[.] Open the pane to review and send it[.]/s);
   f.plan = () => ({ goal: 'Fix', dependsOnRequestIds: [first.requestId], actions: [] });
   const dependent = f.app.enqueue({ text: 'Fix results', origin: 'text' });
   await until(() => f.app.getState().tasks.find(task => task.id === dependent.requestId)?.status === 'paused'); assert.equal(f.executorCalls, 0);

@@ -7,7 +7,7 @@ const { createConversationReader } = require('./conversationReader.cjs');
 const { locateCodexRollout, parseCodexSessionMeta } = require('./agentThreads.cjs');
 const { readGrokConversation } = require('./grokThreads.cjs');
 
-const PROVIDERS = new Set(['codex', 'open-codex', 'claude', 'cursor', 'gemini', 'grok', 'kimi', 'kimi-custom', 'qwen', 'opencode', 'openfusion', 'fusion', 'claude-custom']);
+const PROVIDERS = new Set(['codex', 'open-codex', 'codex-web', 'claude', 'cursor', 'gemini', 'grok', 'kimi', 'kimi-custom', 'qwen', 'opencode', 'openfusion', 'fusion', 'claude-custom']);
 const SAFE_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,199}$/;
 const MAX_BYTES = 2 * 1024 * 1024;
 function rootThread(thread) { return thread && !thread.parentID && !thread.parentId && !thread.parent_id && !thread.parentSessionId && !thread.parent_session_id && !thread.parent_thread_id && !thread.isSidechain && thread.kind !== 'subagent'; }
@@ -47,7 +47,7 @@ function messagesFrom(records, provider) {
     }
     const value = record.message || record.payload || record;
     let role = value.role || record.role || record.type;
-    if (provider === 'codex' || provider === 'open-codex') {
+    if (provider === 'codex' || provider === 'open-codex' || provider === 'codex-web') {
       // response_item is canonical; event_msg user_message would duplicate it.
       if (record.type !== 'response_item' || value.type !== 'message') continue;
       role = value.role;
@@ -186,9 +186,10 @@ function createOrchestratorHistory(options = {}) {
     const request = payload(identity);
     const provider = request.provider;
     let root; let file;
-    if (provider === 'codex' || provider === 'open-codex') {
+    if (provider === 'codex' || provider === 'open-codex' || provider === 'codex-web') {
+      if (provider === 'codex-web' && !homes.codexWeb) return null;
       if (provider === 'open-codex' && !homes.openCodex && !process.env.LINA_OPEN_CODEX_HOME) return null;
-      root = path.join(provider === 'open-codex' ? homes.openCodex || process.env.LINA_OPEN_CODEX_HOME : homes.codex || process.env.CODEX_HOME || path.join(home, '.codex'), 'sessions');
+      root = path.join(provider === 'codex-web' ? homes.codexWeb : provider === 'open-codex' ? homes.openCodex || process.env.LINA_OPEN_CODEX_HOME : homes.codex || process.env.CODEX_HOME || path.join(home, '.codex'), 'sessions');
       file = locateCodexRollout(root, identity.id).path;
       const metadata = file && parseCodexSessionMeta(file);
       if (!metadata || metadata.id !== identity.id || !host.isSamePath(metadata.cwd, identity.cwd)) return null;

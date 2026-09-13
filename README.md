@@ -1,14 +1,23 @@
 # Lina Terminal
 
-This repository contains the desktop app and its website as independent applications:
+This repository contains the desktop app, its website, and a mobile app as
+independent applications:
 
 | Location | Responsibility |
 | --- | --- |
 | `apps/desktop/` | Electron app, renderer, terminals, agent integrations, and Windows packaging |
 | `apps/website/` | Marketing site, public user documentation, pricing, and website API |
+| `apps/server/` | Bun/TypeScript account backend: login, PostgreSQL, tiers, activity and monitoring ([implementation](docs/server-phase-1-implementation.md); locally verified, live deployment pending) |
+| `apps/mobile/` | Expo/React Native iOS and Android app (scaffold; see [mobile app](docs/mobile-app.md)) |
 | `packages/brand/` | Shared logo source and exports |
 | `docs/` | Engineering documentation |
 | `scripts/` | Repository commands and shared tooling |
+
+Agents and contributors must follow the directory ownership rules in
+[AGENTS.md](AGENTS.md), the destination app's guide, and the
+[repository layout](docs/repository-layout.md). Hosted server implementation
+belongs in `apps/server`; client screens and local desktop services stay in
+their respective apps.
 
 From the repository root:
 
@@ -22,10 +31,24 @@ For desktop development, use `npm run setup:desktop` then `npm run dev:desktop`
 (renderer port 5173). Use `npm run build:website`, `npm run build:desktop`, and
 `npm test` for the corresponding builds and repository/website checks.
 
+For mobile development, use `npm run setup:mobile` then `npm run dev:mobile`
+(Metro on 8081); `npm run typecheck:mobile`, `npm run test:mobile`, and
+`npm run build:mobile` cover its checks and bundle export.
+
 Each app owns its own dependency lockfile. Root `npm ci` only installs root
-tooling; use `npm run setup` to install both apps. Existing desktop npm command
-names continue to work through root forwarding scripts. See
+tooling; use `npm run setup` to install all three apps. Existing desktop npm
+command names continue to work through root forwarding scripts. See
 [repository layout](docs/repository-layout.md) for migration and release details.
+
+The server owns `bun.lock` and pins Bun in `apps/server/.bun-version`. Use
+`npm run setup:server`, `npm run build:server`, and `npm run test:server` for its
+independent setup/build and Linux Docker integration tests. Server configuration,
+database roles, and startup are described in [its README](apps/server/README.md).
+
+Disconnected account previews are available through `npm run preview:account:web`
+and `npm run preview:account:desktop`. Administration is web-only. These previews
+use sample data and do not change normal startup or connect to the backend; see
+[phase 2 previews](docs/account-phase-2-previews.md).
 
 Lina Terminal is a Windows desktop app for keeping local terminals and coding
 agents in one organized workspace.

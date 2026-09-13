@@ -531,10 +531,9 @@ body { background: var(--bg); }
 .pricing-heading h1 span { color: #9da6ba; }
 .pricing-heading > p:not(.eyebrow) { margin: 20px auto 0; max-width: 620px; }
 .pricing-preview-label { display: inline-flex; align-items: center; padding: 6px 12px; margin-top: 22px; border: 1px solid #343b47; border-radius: 30px; background: #ffffff03; color: #b6c0d1; font-size: .75rem; }
-.pricing-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 20px; align-items: stretch; }
+.pricing-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); max-width: 960px; margin-inline: auto; gap: 20px; align-items: stretch; }
 .pricing-card { display: flex; flex-direction: column; padding: 30px; border: 1px solid #363b46; border-radius: 14px; background: linear-gradient(145deg,#171a21,#111318 70%); }
 .pricing-card:nth-child(2) { transition-delay: .08s; }
-.pricing-card:nth-child(3) { transition-delay: .16s; }
 .pricing-card--complete { border-color: #788398; background: radial-gradient(ellipse at top right,#8aabef0e,transparent 65%),linear-gradient(145deg,#1b202a,#13161d 70%); box-shadow: 0 0 45px #8faae90a; }
 .pricing-card__top { display: flex; align-items: center; justify-content: space-between; color: #c1cde1; margin-bottom: 26px; }
 .pricing-card__top > span { font: .75rem var(--font-mono); color: #77869e; }
@@ -559,3 +558,81 @@ body { background: var(--bg); }
 @media (max-width: 600px) { .pricing-page { padding-block: 43px 50px; } .pricing-heading { margin-bottom: 30px; } .pricing-card { padding: 27px; } .pricing-heading h1 { font-size: 2.85rem; } .pricing-notes { text-align: left; font-size: .8125rem; } }
 /* Keep the expanded product navigation usable before the documentation chunk loads. */
 @media (max-width: 1100px) { .site-nav { display: none; } .menu-toggle { display: inline-flex; } .mobile-nav:not([hidden]) { display: block !important; } }
+
+/* Silver light, graphite surfaces, and a quieter frame for the product. */
+body { background: radial-gradient(ellipse 900px 650px at 50% 0, #52617c16, transparent 80%), var(--bg); }
+.site-header { background: #0b0c0fd9; border-bottom-color: #ffffff0c; box-shadow: 0 8px 30px #00000012; backdrop-filter: blur(24px); }
+.button { border-radius: 10px; }
+.button:active { transform: translateY(0); }
+.button--secondary { background: linear-gradient(180deg, #242730, #191c23); border-color: #ffffff20; box-shadow: inset 0 1px 0 #ffffff06; }
+.button--quiet:hover { background: #ffffff05; }
+.hero { padding-top: clamp(64px, 7vw, 102px); }
+.hero h1 { max-width: 1000px; font-size: clamp(3rem, 6.7vw, 5.8rem); letter-spacing: -.065em; line-height: 1.06; margin-block: 28px; }
+.hero h1 > span { color: #b2bacb; background: linear-gradient(115deg, #d8deea 15%, #939cad 85%); background-clip: text; -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.hero__lede { color: #b0b5c1; font-size: 1.125rem; }
+.hero__actions { gap: 12px; margin-top: 32px; }
+.hero__note { margin-top: 22px; font-size: .8125rem; color: #969eae; }
+.release-badge { padding: 8px 14px; box-shadow: inset 0 1px 0 #ffffff08; background: linear-gradient(120deg, #ffffff08, #ffffff02); }
+.workspace-preview { margin-top: 64px; border-radius: 18px; border-color: #ffffff25; box-shadow: 0 40px 100px -35px #000b, 0 0 100px -50px #a3b8e34a, inset 0 1px 0 #ffffff12; }
+.preview-toolbar { padding: 10px 16px; background: linear-gradient(180deg, #1b1e26, #14171d); }
+.preview-tabs button { border: 1px solid transparent; border-radius: 8px; }
+.preview-tabs button[aria-selected="true"] { border-color: #ffffff16; background: linear-gradient(180deg, #343945, #252a34); box-shadow: 0 2px 6px #0003; }
+.preview-caption { padding-block: 17px; font-size: .8125rem; }
+.agent-strip { padding-block: 44px 54px; border-bottom-color: #ffffff0d; }
+.agent-strip > div { gap: clamp(20px, 3.5vw, 46px); }
+.agent-name { color: #c5cad4; }
+.feature-grid { border-radius: 18px; border-color: #ffffff15; background: linear-gradient(140deg, #191c2480, #111318); }
+.feature-icon { width: 46px; height: 46px; align-items: center; justify-content: center; border: 1px solid #ffffff14; border-radius: 12px; background: linear-gradient(135deg, #ffffff09, #ffffff02); margin-bottom: 28px; }
+.mode-card, .mode-card--open { border-radius: 18px; background: radial-gradient(ellipse at top left, #66738c16, transparent 70%), linear-gradient(145deg, #191c24, #101216); box-shadow: inset 0 1px 0 #ffffff05; }
+.orchestrator-spotlight, .voice-spotlight { border-radius: 20px; box-shadow: inset 0 1px 0 #ffffff05, 0 20px 50px -35px #0009; }
+.product-shot, .product-page--open .product-shot { border-radius: 18px; box-shadow: 0 28px 70px -35px #000b; }
+.product-crosslink { border-radius: 16px; background: linear-gradient(120deg, #1c2029, #13161c); }
+.download-card { border-radius: 22px; background: radial-gradient(ellipse at 85% 0, #7e92bc20, transparent 65%), linear-gradient(140deg, #1b1f29, #111318); border-color: #ffffff24; box-shadow: inset 0 1px 0 #ffffff0b, 0 30px 60px -40px #000a; }
+.download-spec { background: #0c0f1670; border-color: #ffffff1a; border-radius: 14px; }
+.waitlist-form input { border-radius: 10px; background: #11141b; border-color: #ffffff20; transition: border-color .2s, box-shadow .2s; }
+.waitlist-form input:focus { border-color: #9baed1; box-shadow: 0 0 0 4px #a6bdff0d; }
+.waitlist-form button { border-radius: 10px; }
+.site-footer { border-color: #ffffff0d; background: #090b0e55; }
+.footer-inner { padding-block: 36px; }
+.footer-links a { padding-block: 8px; transition: color .2s; }
+.mobile-nav { background: #101319; padding-top: 14px; }
+.mobile-nav a { padding: 12px 14px; border-radius: 8px; }
+.mobile-nav a:hover, .mobile-nav a[aria-current="page"] { color: #edf0f5; background: #ffffff07; }
+.pricing-page { padding-top: 80px; }
+.pricing-heading { margin-bottom: 52px; }
+.pricing-heading h1 { font-size: clamp(2.85rem, 5.5vw, 4.6rem); }
+.pricing-grid { gap: 24px; }
+.pricing-card { padding: 36px; border-radius: 20px; border-color: #ffffff1c; background: linear-gradient(150deg, #1c2029, #11141a 65%); box-shadow: inset 0 1px 0 #ffffff08, 0 20px 50px -30px #0008; }
+.pricing-card--complete { border-color: #8898b566; background: radial-gradient(ellipse at top right, #8faee721, transparent 60%), linear-gradient(150deg, #202735, #13171f 70%); box-shadow: inset 0 1px 0 #d3e0ff15, 0 24px 60px -30px #000a; }
+.pricing-card__top { margin-bottom: 30px; gap: 16px; }
+.pricing-card__icon { display: inline-flex; align-items: center; justify-content: center; width: 48px; height: 48px; border: 1px solid #ffffff1a; border-radius: 13px; background: #ffffff05; color: #cfdaee; }
+.pricing-card__top > .pricing-card__edition { font: .75rem var(--font-mono); letter-spacing: .04em; color: #aab6cb; text-align: right; }
+.pricing-card h2 { font-size: 2.35rem; }
+.pricing-card__description { min-height: 78px; line-height: 1.7; }
+.pricing-card__price { padding-block: 28px; }
+.pricing-card__price > strong { font-size: 2rem; letter-spacing: -.04em; }
+.pricing-card__features h3 { min-height: 28px; }
+.pricing-card li { font-size: .9375rem; }
+.pricing-card li svg { margin-top: 5px; color: #b8c8e5; }
+.pricing-card__learn { padding-top: 36px; }
+.pricing-notes { margin-top: 32px; line-height: 1.8; }
+@media (min-width: 821px) { .content-band { padding-block: 112px; } .feature-card { padding: 36px; } .waitlist-section { padding-block: 96px; } }
+@media (max-width: 900px) { .pricing-card__description { min-height: auto; } }
+@media (max-width: 600px) {
+  .hero { padding-top: 48px; }
+  .hero h1 { font-size: clamp(2.55rem, 10vw, 3.7rem); letter-spacing: -.055em; margin-block: 24px; }
+  .hero__lede { font-size: 1rem; }
+  .hero__note { font-size: .75rem; line-height: 1.9; }
+  .hero__note span { margin-inline: 4px; }
+  .workspace-preview { margin-top: 38px; border-radius: 12px; }
+  .preview-toolbar { padding: 10px; }
+  .preview-caption { padding: 12px; font-size: .75rem; }
+  .agent-strip { padding-block: 32px 38px; }
+  .download-card { border-radius: 16px; }
+  .pricing-page { padding-top: 48px; }
+  .pricing-heading { margin-bottom: 34px; }
+  .pricing-card { padding: 26px; border-radius: 16px; }
+  .pricing-card h2 { font-size: 2rem; }
+  .pricing-card__top > .pricing-card__edition { max-width: 150px; }
+}
+@media (forced-colors: active) { .hero h1 > span { background: none; -webkit-text-fill-color: currentColor; } }

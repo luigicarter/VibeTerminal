@@ -34,7 +34,7 @@ const path = require("path");
 // that launch real claude/opencode sessions, so they are covered by those two).
 const PROBED_AGENT_COMMANDS = Object.freeze(Object.fromEntries(
   Object.entries(require("../shared/providerCapabilities.json"))
-    .filter(([provider, capabilities]) => capabilities.command && !["kimi-custom", "open-codex"].includes(provider))
+    .filter(([provider, capabilities]) => capabilities.command && !["kimi-custom", "open-codex", "codex-web"].includes(provider))
     .map(([provider, capabilities]) => [provider, capabilities.command])
 ));
 
@@ -199,6 +199,10 @@ async function probeInstalledClis(commands = PROBED_AGENT_COMMANDS, options = {}
   if (Object.hasOwn(options, 'openCodexBin')) {
     const available = Boolean(options.openCodexBin && fs.existsSync(options.openCodexBin));
     clis['open-codex'] = { command: 'open-codex', available, path: available ? options.openCodexBin : null };
+  }
+  if (Object.hasOwn(options, 'codexWebBin')) {
+    const available = Boolean(options.codexWebBin && fs.existsSync(options.codexWebBin));
+    clis['codex-web'] = { command: 'codex-web', available, path: available ? options.codexWebBin : null };
   }
   return {
     probedAt: Date.now(),

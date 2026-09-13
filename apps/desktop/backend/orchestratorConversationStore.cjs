@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { randomUUID } = require('crypto');
+const { LEDGER_LIMIT, VERBS, OUTCOMES } = require('./orchestratorLedger.cjs');
 const MAX_BYTES = 10 * 1024 * 1024;
 const MAX_AGE = 30 * 24 * 60 * 60 * 1000;
 const fields = {
@@ -8,8 +9,11 @@ const fields = {
     'reportKind', 'status', 'targetId', 'generation', 'turnId', 'actionId', 'completionCue'],
   receipts: ['id', 'kind', 'targetId', 'generation', 'launchToken', 'actionId', 'grantId', 'cwd', 'status', 'text', 'at', 'requestId', 'taskId'],
   tasks: ['id', 'requestId', 'text', 'instruction', 'originalInstruction', 'status', 'phase', 'at', 'createdAt', 'updatedAt', 'targetId', 'generation', 'projectId', 'cwd', 'terminalId', 'question', 'questionId', 'result', 'error', 'replyToId', 'replyToRequestId', 'sequence', 'label', 'summary', 'outcome', 'origin'],
+  // Tier 1 of the brain's memory. Typed application facts about Lina's own
+  // actions, never prose: verb and outcome are closed enumerations.
+  ledger: ['requestId', 'at', 'verb', 'project', 'cwd', 'typedText', 'outcome', 'error'],
 };
-const empty = () => ({ messages: [], receipts: [], tasks: [] });
+const empty = () => ({ messages: [], receipts: [], tasks: [], ledger: [] });
 function createConversationStore({ userDataPath, getSecrets = () => [], now = Date.now }) {
   const file = path.join(userDataPath, 'orchestrator-conversation.json');
   const temporary = `${file}.${randomUUID()}.tmp`;
@@ -36,6 +40,7 @@ function createConversationStore({ userDataPath, getSecrets = () => [], now = Da
       if (kind === 'messages' && (typeof source.id !== 'string' || !source.id || !['user', 'assistant', 'system'].includes(source.role) || typeof source.text !== 'string')) continue;
       if (kind === 'tasks' && (typeof source.requestId !== 'string' || !source.requestId || typeof source.status !== 'string' || !source.status)) continue;
       if (kind === 'receipts' && (typeof source.id !== 'string' || !source.id || typeof source.status !== 'string' || typeof source.text !== 'string')) continue;
+      if (kind === 'ledger' && (typeof source.requestId !== 'string' || !source.requestId || !VERBS.includes(source.verb) || !OUTCOMES.includes(source.outcome))) continue;
       const at = Number(source.updatedAt ?? source.at ?? source.createdAt);
       if (!Number.isFinite(at) || at < cutoff || at > now() + 60000) continue;
       const item = pick(source, fields[kind]);
@@ -64,6 +69,20 @@ function createConversationStore({ userDataPath, getSecrets = () => [], now = Da
           if (Number.isSafeInteger(value[key]) && value[key] >= 0 && value[key] <= 20000) close[key] = value[key];
         }
         if (Object.keys(close).length) item.close = close;
+      }
+      // A ledger pane reference is identity metadata only; nested objects never
+      // reach the generic leaf projection, so it is spelled out here.
+      if (kind === 'ledger') {
+        item.pane = null;
+        if (source.pane && typeof source.pane === 'object' && typeof source.pane.id === 'string' && source.pane.id) {
+          const pane = { id: clean(source.pane.id.slice(0, 200)), name: null, provider: null };
+          for (const [key, cap] of [['name', 120], ['provider', 40]]) if (typeof source.pane[key] === 'string' && source.pane[key]) pane[key] = clean(source.pane[key].slice(0, cap));
+          item.pane = pane;
+        }
+        for (const [key, cap] of [['project', 120], ['typedText', 300], ['error', 200], ['cwd', 1024]]) {
+          if (item[key] === undefined) item[key] = null; else item[key] = String(item[key]).slice(0, cap);
+        }
+        if (item.cwd === null) delete item.cwd;
       }
       if (kind === 'messages' && source.question && typeof source.question === 'object') item.question = pick(source.question, ['id', 'requestId', 'text']);
       if (kind === 'tasks') {
@@ -104,6 +123,9 @@ function createConversationStore({ userDataPath, getSecrets = () => [], now = Da
       }
       result[kind].push(item);
     }
+    // The ledger is a fixed-length tail: the newest requests are the ones a
+    // follow-up refers to, so older rows retire before any size pressure.
+    if (result.ledger.length > LEDGER_LIMIT) result.ledger = result.ledger.slice(-LEDGER_LIMIT);
     // Evict oldest records together rather than favoring one history category.
     const stamp = item => Number(item.updatedAt ?? item.at ?? item.createdAt);
     const records = Object.entries(result).flatMap(([kind, items]) => items.map(item => ({ kind, item, size: Buffer.byteLength(JSON.stringify(item)) + 1 }))).sort((a, b) => stamp(a.item) - stamp(b.item));

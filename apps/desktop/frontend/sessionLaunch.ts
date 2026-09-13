@@ -105,7 +105,10 @@ export function buildLaunchCommand(
   const mode = options.mode ?? session.nextLaunchMode ?? "new";
   const { platform } = options;
 
-  if (session.kind === 'codex-web') return 'codex-web';
+  if (session.kind === 'codex-web') {
+    const ref = resumeArg(session);
+    return mode === 'resume' && ref ? `codex-web resume ${commandArg(ref, platform)}` : 'codex-web';
+  }
 
   if (session.kind === 'open-codex') {
     const ref = resumeArg(session);

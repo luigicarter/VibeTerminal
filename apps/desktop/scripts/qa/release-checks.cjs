@@ -2,6 +2,7 @@
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 const checks = [
+  'test:chats', 'smoke:chats',
   'test:model-providers', 'test:codex-web', 'smoke:open-codex', 'smoke:codex-web',
   'smoke:electron:git-branches', 'smoke:electron:fusion-menus', 'smoke:electron:session-resume',
   'smoke:backend:codex-discovery', 'smoke:backend:claude-discovery',

@@ -63,4 +63,10 @@ function nativeArgs(state, args = []) {
   }
   return ['--no-alt-screen', ...forwarded, ...flags, ...overrides, ...tail];
 }
-module.exports = { nativeArgs, privateNativeEnv, resolveNativeBinary };
+function preparedTerminalCommand(base, requested, threadRef) {
+  if (requested === 'codex-web' || !requested) return base;
+  const resume = /^codex-web resume ([a-zA-Z0-9_-]+)$/.exec(requested);
+  if (!resume || resume[1] !== threadRef?.id || threadRef.provider !== 'codex-web') throw new Error('The requested Codex Web chat identity does not match its saved conversation.');
+  return `${base} resume ${resume[1]}`;
+}
+module.exports = { nativeArgs, privateNativeEnv, resolveNativeBinary, preparedTerminalCommand };

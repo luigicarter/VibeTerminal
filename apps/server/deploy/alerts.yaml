@@ -1,0 +1,29 @@
+# Import into an existing Prometheus-compatible monitor; configure its destination separately.
+groups:
+  - name: lina-account
+    rules:
+      - alert: LinaAccountUnavailable
+        expr: up{job="lina-account"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations: {summary: "Lina account metrics endpoint is unavailable"}
+      - alert: LinaAccountErrors
+        expr: rate(lina_errors_total[5m]) / clamp_min(rate(lina_requests_total[5m]), 0.001) > 0.05 and increase(lina_requests_total[5m]) > 20
+        for: 5m
+        labels: {severity: critical}
+        annotations: {summary: "Lina account API is returning service errors"}
+      - alert: LinaBackupOverdue
+        expr: time() - lina_job_last_success_seconds{job="backup"} > 93600 or absent(lina_job_last_success_seconds{job="backup"})
+        for: 5m
+        labels: {severity: critical}
+        annotations: {summary: "Lina database backup is missing or overdue"}
+      - alert: LinaEmailBacklog
+        expr: lina_email_oldest_seconds > 300
+        for: 2m
+        labels: {severity: warning}
+        annotations: {summary: "Lina account emails are not being delivered promptly"}
+      - alert: LinaRetentionOverdue
+        expr: time() - lina_job_last_success_seconds{job="retention"} > 7200 or absent(lina_job_last_success_seconds{job="retention"})
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "Lina account data retention job is overdue"}

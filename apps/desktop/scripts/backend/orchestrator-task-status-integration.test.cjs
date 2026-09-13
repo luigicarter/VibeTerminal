@@ -64,7 +64,7 @@ for (const replacement of [false, true]) test(`status of a submitted task remain
   f.setMode('status');
   const status = await f.app.send({ text: 'Did that task finish?', origin: 'text', replyToRequestId: sent.requestId });
   assert.equal(status.ok, true, JSON.stringify(status));
-  assert.match(status.text, /terminal.*changed.*unverified/i);
+  assert.match(status.text, /changed, so I can't tell you where this task stands/i);
   assert.match(status.text, /Codex/);
   assert.equal(f.effects.length, 1, 'Historical status never resubmits work');
   const task = f.app.getState().tasks.find(task => task.requestId === status.requestId);
@@ -87,15 +87,15 @@ for (const priorCompleted of [false, true]) test(`written input with live idle a
   const f = await fixture(t, { priorCompleted, finishRespond: true });
   const sent = await f.app.send({ text: 'Send the bubble-label task to Codex.', origin: 'text' });
   assert.equal(sent.ok, true, JSON.stringify(sent));
-  assert.match(sent.text, /haven't confirmed that the task started.*result is still pending/s);
-  assert.doesNotMatch(sent.text, /accepted|is running|task.*ended/);
+  assert.match(sent.text, /haven't seen it start yet.*I'll tell you when it does/s);
+  assert.doesNotMatch(sent.text, /accepted|is working on it|finished its turn/);
   const finish = f.app.getState().receipts.find(receipt => receipt.kind === 'finish_terminal');
-  assert.match(finish.text, /haven't confirmed that the task started/);
+  assert.match(finish.text, /haven't seen it start yet/);
   f.setMode('status');
   const status = await f.app.send({ text: 'Did it really start?', origin: 'text', replyToRequestId: sent.requestId });
   assert.equal(status.ok, true, JSON.stringify(status));
-  assert.match(status.text, /haven't confirmed that the task started/);
-  assert.doesNotMatch(status.text, /accepted|is running/);
+  assert.match(status.text, /haven't seen it start yet/);
+  assert.doesNotMatch(status.text, /accepted|is working on it/);
   assert.equal(f.effects.length, 1, 'Read-only status never replays the input');
   const projection = JSON.parse(f.requests.at(-1).messages.find(message => message.role === 'user').content).authorizedCommands;
   assert.equal(projection.responseKind, 'task-status');
@@ -106,7 +106,7 @@ for (const priorCompleted of [false, true]) test(`written input with live idle a
   Object.assign(f.session, { turnId: 'later-turn', turnStartedAt: 1000, turnState: 'running', actionId: f.effects[0].actionId });
   f.setMode('status');
   const running = await f.app.send({ text: 'Has that task started now?', origin: 'text', replyToRequestId: status.requestId });
-  assert.match(running.text, /task is running/);
+  assert.match(running.text, /Codex is working on it[.]/);
   assert.equal(f.effects.length, 1, 'New evidence changes status without another input write');
 });
 
@@ -119,18 +119,19 @@ for (const sameBatch of [false, true]) for (const delivery of [
   const sent = await f.app.send({ text: 'Send the bubble-label task to Codex.', origin: 'text' });
   assert.equal(f.effects.length, 1, JSON.stringify(sent));
   assert.doesNotMatch(sent.text, /accepted|definitely running/);
-  assert.match(sent.text, delivery.status === 'written' ? /^Input was sent to Codex; I haven't confirmed that the task started\. The agent result is still pending\.$/ : /couldn't confirm|could not be verified|Transport unavailable/);
+  assert.match(sent.text, delivery.status === 'written' ? /^Typed the task into Codex, but I haven't seen it start yet\. I'll tell you when it does\.$/ : /couldn't confirm|couldn't do that|Transport unavailable/);
 });
 
 test('new attributed turn acknowledges the command and retains running evidence in status responses', async t => {
   const f = await fixture(t, { started: true, priorCompleted: true });
   const sent = await f.app.send({ text: 'Send the bubble-label task to Codex.', origin: 'text' });
   assert.equal(sent.ok, true, JSON.stringify(sent));
-  assert.equal(sent.text, 'The task is running in Codex. The agent result is still pending.');
+  // The agent was seen starting, so this command is cued as done.
+  assert.equal(sent.text, 'done');
   f.setMode('status');
   const status = await f.app.send({ text: 'Did it start?', origin: 'text', replyToRequestId: sent.requestId });
   assert.equal(status.ok, true, JSON.stringify(status));
-  assert.match(status.text, /task is running/);
+  assert.match(status.text, /Codex is working on it[.]/);
   assert.equal(f.effects.length, 1);
 });
 
@@ -139,7 +140,7 @@ for (const statusTurn of ['listen', 'dismiss']) test(`task-status respond ${stat
   const sent = await f.app.send({ text: 'Send the bubble-label task to Codex.', origin: 'text' });
   f.setMode('status');
   const status = await f.app.send({ text: 'Did it start?', origin: 'text', replyToRequestId: sent.requestId });
-  assert.match(status.text, /haven't confirmed that the task started/);
+  assert.match(status.text, /haven't seen it start yet/);
   assert.equal(status.responseTurn, statusTurn === 'dismiss' ? 'dismiss' : 'complete');
   assert.equal(f.app.getState().tasks.find(task => task.requestId === status.requestId).question, undefined);
 });

@@ -1,40 +1,42 @@
 'use strict';
 
+const { sentence } = require('./orchestratorFailureText.cjs');
+
 const completed = new Set(['completed', 'complete', 'finished', 'succeeded']);
 const uncertain = new Set(['unknown', 'unconfirmed', 'uncertain', 'write-failed']);
 
 // Waits are owned by the scheduler: turn identity is attributed to this input,
 // not inferred from a live process, terminal prose, or a model's finish summary.
-function formatTaskWait(wait, session, name = session?.name || session?.conversationTitle || 'the terminal') {
-  if (!session || session.generation !== wait.generation) return `The terminal for ${name} changed; this task's status is unverified.`;
-  if (wait.failed) return `The task in ${name} could not be verified as complete.${wait.error ? ` ${wait.error}` : ''}`;
+// Every branch answers the same two questions in the user's words: what Lina did
+// with this pane, and what she is waiting on next.
+function taskWaitSentence(wait, session, name = session?.name || session?.conversationTitle || 'the terminal') {
+  const say = (key, context = {}) => sentence(key, { pane: name, ...context });
+  if (!session || session.generation !== wait.generation) return say('pane-changed');
+  if (wait.failed) return wait.error ? { text: String(wait.error), speech: String(wait.error) } : say('turn-unconfirmed');
   if (wait.nativeIdentity && !require('./orchestratorLaunchers.cjs').routingBindingMatches({ target: { id: wait.targetId, generation: wait.generation }, nativeIdentity: wait.nativeIdentity }, session)) {
-    return wait.done && completed.has(wait.observedState || wait.resultStatus)
-      ? "The recorded agent turn for this task ended; the pane's current conversation no longer matches it. Its work has not been independently verified."
-      : "The pane's current conversation no longer matches this task; its progress and result are unverified.";
+    return say(wait.done && completed.has(wait.observedState || wait.resultStatus) ? 'turn-ended-elsewhere' : 'conversation-moved');
   }
-  if (wait.staged || wait.deliveryStatus === 'staged') return `The prompt in ${name} is saved as a draft; it has not been sent.${wait.deliveryReason ? ` ${wait.deliveryReason}` : ''} Open the terminal to review and send it.`;
-  if (wait.deliveryStatus === 'queued' && !wait.delivered) return `The prompt for ${name} is queued and has not been sent yet.`;
-  if (wait.attributionAmbiguous) return `I can't reliably attribute the agent's work in ${name} to this ${wait.source === 'watch' ? 'watch' : 'request'} yet.`;
-  if (wait.source === 'watch' && wait.watchUntil === 'ready') {
-    return wait.done && wait.observedState === 'ready' ? `${name} is ready.` : `I'm watching ${name}; readiness has not been confirmed yet.`;
+  if (wait.staged || wait.deliveryStatus === 'staged') {
+    return wait.deliveryReason ? { text: say('staged', { reason: wait.deliveryReason }).text, speech: say('staged').speech } : say('staged');
   }
-  if (wait.nativeShell) return uncertain.has(wait.deliveryStatus)
-    ? `I couldn't confirm whether ${name} received the prompt. I haven't sent it again.`
-    : `Input was sent to ${name}; task completion cannot be verified automatically.`;
+  if (wait.deliveryStatus === 'queued' && !wait.delivered) return say('queued');
+  if (wait.attributionAmbiguous) return say('attribution-ambiguous');
+  if (wait.source === 'watch' && wait.watchUntil === 'ready') return say(wait.done && wait.observedState === 'ready' ? 'ready' : 'watching-ready');
+  if (wait.nativeShell) return say(uncertain.has(wait.deliveryStatus) ? 'delivery-unknown' : 'native-shell');
   const attributedTurn = wait.turnId && (wait.inputDisposition !== 'submitted-while-running'
     || wait.baselineTurnId && wait.turnId !== wait.baselineTurnId);
-  if (attributedTurn && wait.done && completed.has(wait.observedState || wait.resultStatus)) return `The agent turn for this task in ${name} ended. Its work has not been independently verified.`;
+  if (attributedTurn && wait.done && completed.has(wait.observedState || wait.resultStatus)) return say('turn-ended');
   const currentTurn = attributedTurn && session.turnId === wait.turnId && session.completionAttribution !== 'ambiguous'
     && !['exited', 'failed'].includes(session.processState) && !['exited', 'failed'].includes(session.agentProcessState);
-  if (currentTurn && wait.observedState === 'waiting' && session.turnState === 'waiting') return `The task in ${name} needs input before it can continue. The agent result is still pending.`;
-  if (currentTurn && ['running', 'busy'].includes(wait.observedState) && ['running', 'busy'].includes(session.turnState)) return `The task is running in ${name}. The agent result is still pending.`;
-  if (wait.source === 'watch') return `I'm watching the task in ${name}, but its current progress and result are unverified.`;
-  if (uncertain.has(wait.deliveryStatus)) return `I couldn't confirm whether ${name} received the prompt. I haven't sent it again.`;
-  if (attributedTurn) return `The task started in ${name}, but its current progress and result are unverified.`;
-  if (wait.inputDisposition === 'submitted-while-running') return `Input was sent to ${name} while the agent was working; I haven't confirmed that it started this request.`;
-  return `Input was sent to ${name}; I haven't confirmed that the task started. The agent result is still pending.`;
+  if (currentTurn && wait.observedState === 'waiting' && session.turnState === 'waiting') return say('needs-input');
+  if (currentTurn && ['running', 'busy'].includes(wait.observedState) && ['running', 'busy'].includes(session.turnState)) return say('running');
+  if (wait.source === 'watch') return say('watching');
+  if (uncertain.has(wait.deliveryStatus)) return say('delivery-unknown');
+  if (attributedTurn) return say('turn-started-unknown');
+  if (wait.inputDisposition === 'submitted-while-running') return say('delivered-while-running');
+  return say('delivered-unconfirmed');
 }
+function formatTaskWait(wait, session, name) { return taskWaitSentence(wait, session, name).text; }
 
 function formatTaskStatus({ targets, jobs, sessions, requestId }) {
   return targets.map(target => {
@@ -65,11 +67,12 @@ function formatTaskStatus({ targets, jobs, sessions, requestId }) {
     const matching = chosen?.waits?.filter(wait => wait.targetId === target.id && wait.generation === target.generation) || [];
     const wait = matching.filter(wait => wait.source !== 'watch').at(-1) || matching.at(-1);
     if (!wait && chosen && pendingTarget(chosen)) {
-      if (!session) return `The terminal for ${name} changed; the queued request's delivery is unverified.`;
-      return `The request for ${name} is queued; no prompt delivery has been recorded.${chosen.task.waitingReason ? ` ${chosen.task.waitingReason}` : ''}`;
+      if (!session) return sentence('pane-changed', { pane: name }).text;
+      return `${sentence('queued', { pane: name }).text}${chosen.task.waitingReason ? ` ${chosen.task.waitingReason}` : ''}`;
     }
-    return wait ? formatTaskWait(wait, session, name) : `I don't have a tracked task for ${name}${requestId ? ' in that request' : ''}; its task status is unverified.`;
+    return wait ? formatTaskWait(wait, session, name)
+      : `${sentence('no-tracked-task', { pane: name }).text}${requestId ? ' Nothing in that request reached it.' : ''}`;
   }).join('\n\n');
 }
 
-module.exports = { formatTaskWait, formatTaskStatus };
+module.exports = { taskWaitSentence, formatTaskWait, formatTaskStatus };

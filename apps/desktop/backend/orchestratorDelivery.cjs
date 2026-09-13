@@ -1,4 +1,5 @@
 "use strict";
+const { paneLabel, failureSentence } = require("./orchestratorFailureText.cjs");
 
 // In-memory command delivery only. Readiness is observed, never inferred from
 // silence or terminal output. Transport acceptance does not prove consumption.
@@ -42,7 +43,7 @@ function createOrchestratorDelivery({ getSession, write, writeBusyPrompt, reserv
   async function deliver(a, s, entry) {
     if (disposed || a.signal?.aborted) return receipt(a, "cancelled", false);
     const latest = getSession(s.id);
-    if (classify(latest, a) === "conversation-changed") return blockedDelivery(a, "conversation-changed");
+    if (classify(latest, a) === "conversation-changed") return blockedDelivery(a, failureSentence("conversation-changed", { pane: paneLabel(latest) }));
     const state = classify(latest, a);
     const busy = Boolean(entry && state === 'busy' && busyEligible(a, latest));
     if ((state !== 'ready' && !busy) || blocked(latest) || inFlight.has(key(latest)) || inFlight.size >= capacity) return null;
@@ -86,7 +87,7 @@ function createOrchestratorDelivery({ getSession, write, writeBusyPrompt, reserv
       if (!require("./orchestratorLaunchers.cjs").routingBindingMatches(a.routingBinding, getSession(latest.id))) {
         locks.delete(key(latest));
         if (typeof rollback === "function") rollback();
-        return blockedDelivery(a, "conversation-changed");
+        return blockedDelivery(a, failureSentence("conversation-changed", { pane: paneLabel(latest) }));
       }
       // From this boundary cancellation cannot retract the transport call.
       // Keep the entry until its actual acknowledgment (or unknown) arrives.
@@ -102,7 +103,9 @@ function createOrchestratorDelivery({ getSession, write, writeBusyPrompt, reserv
         locks.delete(key(latest));
         if (typeof rollback === "function") rollback();
         if (["needs-staging", "input-buffer-occupied", "input-surface-unverified", "recipient-unavailable"].includes(result?.status)) {
-          if (!entry?.cancelRequested) return blockedDelivery(a, result.error || result.status);
+          // A bare transport status is not an explanation. Name the pane and the
+          // reason the prompt was never typed.
+          if (!entry?.cancelRequested) return blockedDelivery(a, result.error || failureSentence(result.status, { pane: paneLabel(latest) }) || result.status);
           return receipt(a, result.status, false, { ...result, delivery: "not-dispatched" });
         }
       }

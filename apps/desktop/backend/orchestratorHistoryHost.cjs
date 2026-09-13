@@ -47,6 +47,9 @@ function createHostService() {
     for (const key of Object.keys(homes)) delete homes[key];
     if (typeof config.homes?.claudeCustom === 'string') homes.claudeCustom = config.homes.claudeCustom;
     if (typeof config.homes?.openCodex === 'string') homes.openCodex = config.homes.openCodex;
+    if (typeof config.homes?.codexWeb === 'string') homes.codexWeb = config.homes.codexWeb;
+    if (homes.codexWeb) process.env.LINA_CODEX_WEB_HISTORY_HOME = homes.codexWeb;
+    else delete process.env.LINA_CODEX_WEB_HISTORY_HOME;
     if (homes.openCodex) process.env.LINA_OPEN_CODEX_HOME = homes.openCodex;
     else delete process.env.LINA_OPEN_CODEX_HOME;
     if (homes.claudeCustom) process.env.VIBE_CLAUDE_CUSTOM_HOME = homes.claudeCustom;

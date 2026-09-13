@@ -8,11 +8,24 @@ const { createCompletionAudio } = require('./voiceCompletionAudio.cjs');
 const { isVoiceDismissal } = require('../shared/voiceDismissal.cjs');
 const { stripWakePrefix } = require('../shared/voiceWakePhrase.cjs');
 const { OpenRouterError, readOpenRouterResponse, classifyTransportError, upstreamErrorInfo } = require('./openRouterErrors.cjs');
-const { STT_MODEL, TTS_MODEL, TTS_VOICE, TTS_VOICES } = require('../shared/voiceConfig.cjs');
+const { STT_MODEL, STT_PROMPT_NAMES, STT_PROMPT_MAX_CHARS, TTS_MODEL, TTS_VOICE, TTS_VOICES } = require('../shared/voiceConfig.cjs');
 // A push-to-talk hold shorter than this carries no command; it is a tap, not speech.
 const MIN_VOICED_MS = 250;
 const AUTOMATIC_PAUSE_MS = 1200;
+// The turn model is a binary classifier over [0,1] whose own decision boundary
+// is 0.5, and completion is already accepted just above it. The short pause is
+// reserved for the top of that range: at 0.9 the model's remaining doubt is a
+// fifth of what it is at the accept boundary, so a sentence it is sure has ended
+// costs 600 ms, while everything merely probable keeps the full 1,200 ms in
+// which a resumed word can still contradict it.
+const TURN_CONFIDENT_PROBABILITY = 0.9;
+const AUTOMATIC_PAUSE_CONFIDENT_MS = 600;
+// Transcription of the audio so far starts before the long pause ends. It is
+// only spent on a turn the model already called complete, and it is abandoned
+// the moment speech resumes, so it never shortens a sentence.
+const EARLY_TRANSCRIPTION_MS = 800;
 const AUTOMATIC_FALLBACK_MS = 3000;
+const TRANSCRIPTION_ENDPOINT = 'https://openrouter.ai/api/v1/audio/transcriptions';
 // A question left unanswered this long gets the missed-speech alert, as before.
 const ANSWER_SILENCE_MS = 15000;
 // Microphone history kept while idle so the first syllable after the key survives.
@@ -31,11 +44,12 @@ function answerContextFor(interaction) {
   }
   return context;
 }
-function createVoiceController({ orchestrator, getKey, getSettings = () => ({}), emit = () => {}, onAudio = () => {}, fetch: request = globalThis.fetch, modelPath = path.join(__dirname, '../vendor/voice'), recordingOptions, errorAudio, now = Date.now, monotonicNow = () => performance.now(), recoveryTimers = globalThis, inferenceFactory = options => require('./voiceInferenceService.cjs').createVoiceInferenceService(options) } = {}) {
+function createVoiceController({ orchestrator, getKey, getSettings = () => ({}), emit = () => {}, onAudio = () => {}, fetch: request = globalThis.fetch, modelPath = path.join(__dirname, '../vendor/voice'), recordingOptions, errorAudio, now = Date.now, monotonicNow = () => performance.now(), recoveryTimers = globalThis, getVocabulary = () => [], inferenceFactory = options => require('./voiceInferenceService.cjs').createVoiceInferenceService(options) } = {}) {
   let state = { phase: 'off', muted: true, ready: false, listening: false, transcript: '', reply: '', error: null, microphoneId: '', handsFreeStatus: 'off', handsFreeError: null, recordingSource: undefined, finishHint: false };
   let epoch = 0, recording = null, requestAbort = null, disposed = false, playbackTimer = null, playbackResolve = null, activeReply = null, activeInteraction = null, activeAnswerContext = null, playbackTiming = null;
   let turn = null, turnSequence = 0, inference = null, inferenceGeneration = 0, streamId = 0, detectionMode = null, captureToken, samplePosition = 0, startupPromise = null, activeAnalysis = null;
   let inferenceRetryTimer = null, inferenceFailures = [];
+  let earlyTranscription = null, vocabularyPromptSupported = true;
   let speechQueue = Promise.resolve(), answerContext = null, announcementPending = null, recentAudio = [], answerSilenceMs = 0, deferredTimer = null; const resolvedInteractions = new Set(), legacyResolvedIds = new Set(), announcedInteractions = new Set(), deferredInteractions = new Map();
   const alerts = errorAudio || createLocalErrorAudio({ directory: path.join(modelPath, 'alerts') });
   const lastErrorAudio = new Map();
@@ -76,21 +90,108 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       Promise.resolve(result).catch(() => {});
     } catch { /* Logging must not affect the voice lifecycle. */ }
   }
+  // A complete sentence the model is sure of ends on the short pause; anything
+  // less certain keeps the long one. A turn with less voiced audio than a tap
+  // never takes the short pause, so the fast path cannot fire inside MIN_VOICED_MS.
+  const pauseFor = current => current && !current.manual && current.turnConfidence >= TURN_CONFIDENT_PROBABILITY && current.voicedMs >= MIN_VOICED_MS
+    ? AUTOMATIC_PAUSE_CONFIDENT_MS : AUTOMATIC_PAUSE_MS;
   function captureDiagnostic(stage, reason) {
     if (!turn?.source) return;
-    try { Promise.resolve(orchestrator?.recordDiagnostic?.({ event: 'voice_recording', origin: 'voice', stage, reason, recordingSource: turn.source, recordingId: turn.id, elapsedMs: turn.elapsedMs || 0, voicedMs: turn.voicedMs || 0, silenceMs: turn.silenceMs || 0 })).catch(() => {}); } catch { /* Best effort. */ }
+    // The pause actually in force and the score that chose it: enough to tell a
+    // fast ending from a slow one after the fact, and never any recorded content.
+    const endpointing = stage === 'finish' && !turn.manual
+      ? { pauseMs: pauseFor(turn), ...(Number.isFinite(turn.turnConfidence) && { turnConfidence: turn.turnConfidence }) } : {};
+    try { Promise.resolve(orchestrator?.recordDiagnostic?.({ event: 'voice_recording', origin: 'voice', stage, reason, recordingSource: turn.source, recordingId: turn.id, elapsedMs: turn.elapsedMs || 0, voicedMs: turn.voicedMs || 0, silenceMs: turn.silenceMs || 0, ...endpointing })).catch(() => {}); } catch { /* Best effort. */ }
   }
   function timingDiagnostic(stage, startedAt, details = {}) {
     try { Promise.resolve(orchestrator?.recordDiagnostic?.({ event: 'request_stage', origin: 'voice', stage,
       model: stage.startsWith('stt_') ? getSettings().sttModel || STT_MODEL : getSettings().ttsModel || TTS_MODEL,
       elapsedMs: Math.max(0, Math.round(monotonicNow() - startedAt)), ...details })).catch(() => {}); } catch { /* Best effort. */ }
   }
-  function resetRecording(reason = 'cancelled', stage = reason === 'cancelled' ? 'cancel' : 'finish') { captureDiagnostic(stage, reason); recording = null; turn = null; activeAnalysis = null; state.recordingSource = undefined; state.recordingId = undefined; state.finishHint = false; }
+  function resetRecording(reason = 'cancelled', stage = reason === 'cancelled' ? 'cancel' : 'finish') { captureDiagnostic(stage, reason); abortEarlyTranscription(); recording = null; turn = null; activeAnalysis = null; state.recordingSource = undefined; state.recordingId = undefined; state.finishHint = false; }
+  // An early transcription belongs to one turn at one revision of its speech.
+  // Abandoning it is silent by construction: the request is aborted, its promise
+  // is already caught, and no caller ever reads its result.
+  function abortEarlyTranscription() {
+    const pending = earlyTranscription; earlyTranscription = null;
+    try { pending?.abort.abort(); } catch { /* Already finished. */ }
+  }
+  function claimEarlyTranscription(finishedTurn) {
+    const pending = earlyTranscription;
+    if (!pending || !finishedTurn || pending.turnId !== finishedTurn.id || pending.captureToken !== captureToken || pending.speechRevision !== finishedTurn.speechRevision) return null;
+    earlyTranscription = null; return pending;
+  }
+  // Whisper is told the names this workspace can be commanded with. Fixed product
+  // and launcher names come first because they decide the provider; registered
+  // project names follow while the cap allows.
+  function vocabularyPrompt() {
+    if (!vocabularyPromptSupported) return '';
+    let names = [];
+    try { names = getVocabulary() || []; } catch { names = []; }
+    const clean = value => typeof value === 'string' ? value.replace(/[\x00-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40) : '';
+    const seen = new Set(); let prompt = '';
+    for (const name of [...STT_PROMPT_NAMES, ...(Array.isArray(names) ? names : [])].map(clean)) {
+      const key = name.toLowerCase();
+      if (!name || seen.has(key)) continue;
+      const next = prompt ? `${prompt}, ${name}` : name;
+      if (next.length > STT_PROMPT_MAX_CHARS) continue;
+      seen.add(key); prompt = next;
+    }
+    return prompt;
+  }
+  // One transcription request, with the vocabulary prompt when the endpoint takes
+  // it. A refusal of that field costs the speaker one silent retry and is never
+  // sent again this session; every other failure is the caller's to classify.
+  async function transcribe({ audioBase64, format, key, settings, abort }) {
+    for (let attempt = 0; ; attempt++) {
+      const prompt = attempt ? '' : vocabularyPrompt();
+      const response = await requestAudio(TRANSCRIPTION_ENDPOINT, { method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+        signal: AbortSignal.any([abort.signal, AbortSignal.timeout(60000)]),
+        body: JSON.stringify({ model: settings.sttModel || STT_MODEL, input_audio: { data: audioBase64, format },
+          ...(settings.language && settings.language !== 'auto' ? { language: settings.language } : {}), ...(prompt && { prompt }) }) }, abort);
+      try { return { data: await audioJson(response, abort), status: response.status, prompt: Boolean(prompt) }; }
+      catch (error) {
+        if (!prompt || attempt || error?.name !== 'OpenRouterError' || ![400, 422].includes(error.status)) throw error;
+        vocabularyPromptSupported = false;
+      }
+    }
+  }
+  // Transcription of everything recorded so far, started while the pause is still
+  // running. Only a turn the model has already called complete earns one.
+  function startEarlyTranscription(current) {
+    let audioBase64;
+    try { audioBase64 = wavFromSamples(recording.tail(RATE * 61)).toString('base64'); } catch { return; }
+    if (audioBase64.length < 60 || audioBase64.length > 2600000) return;
+    const abort = new AbortController();
+    const pending = { turnId: current.id, speechRevision: current.speechRevision, captureToken, abort, startedAt: monotonicNow() };
+    earlyTranscription = pending;
+    pending.promise = (async () => {
+      try {
+        const key = await getKey();
+        if (!key || abort.signal.aborted) return { aborted: true };
+        const settings = getSettings();
+        checkSpending();
+        // The relay's workspace reads start with the audio, exactly as they do
+        // for a recording that was finished first.
+        try { orchestrator.prefetch?.(); } catch { /* Prewarming never fails a turn. */ }
+        return { ...(await transcribe({ audioBase64, format: 'wav', key, settings, abort })), key };
+      } catch (error) { return { error, aborted: abort.signal.aborted || error?.name === 'AbortError' }; }
+    })();
+  }
+  function maybeTranscribeEarly() {
+    const current = turn;
+    if (!current || current.manual || !current.completionReady || earlyTranscription || !recording || !state.listening || !enabled()) return;
+    // All received audio must be classified first: the same rule that lets a
+    // queued word veto the ending keeps it from being cut out of the upload.
+    if (current.voicedMs < MIN_VOICED_MS || current.silenceMs < EARLY_TRANSCRIPTION_MS || current.lastFrameEnd < samplePosition) return;
+    startEarlyTranscription(current);
+  }
   function syncDetectionMode(force = false) {
     const mode = state.listening && state.handsFreeStatus === 'ready' ? (recording ? turn?.manual ? null : 'vad' : ['listening', 'speaking'].includes(state.phase) && getSettings().handsFreeEnabled ? 'wake' : state.phase === 'awaiting-answer' ? 'vad' : null) : null;
     if (force || mode !== detectionMode) { streamId++; detectionMode = mode; }
   }
   function stopInference() {
+    abortEarlyTranscription();
     if (inferenceRetryTimer !== null) recoveryTimers.clearTimeout(inferenceRetryTimer);
     inferenceRetryTimer = null;
     inferenceGeneration++; const service = inference; inference = null; startupPromise = null; activeAnalysis = null;
@@ -193,10 +294,14 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     const duration = (event.sampleEnd - Math.max(event.sampleStart, turn.lastFrameEnd)) / RATE * 1000;
     turn.lastFrameEnd = event.sampleEnd;
     if (event.speech) {
-      turn.voicedMs += duration; turn.silenceMs = 0; turn.commandSpeech = true; turn.speechRevision++; turn.completionReady = false;
+      turn.voicedMs += duration; turn.silenceMs = 0; turn.commandSpeech = true; turn.speechRevision++; turn.completionReady = false; turn.turnConfidence = undefined;
+      // The sentence is still going, so anything transcribed from its middle is
+      // already wrong. Drop it and let the finished recording be sent whole.
+      abortEarlyTranscription();
       if (state.finishHint) update({ finishHint: false });
     } else turn.silenceMs += duration;
     if (finishAnalyzedTurn()) return;
+    maybeTranscribeEarly();
     if (turn.commandSpeech && turn.silenceMs >= AUTOMATIC_FALLBACK_MS && turn.lastFrameEnd >= samplePosition) {
       if (turn.voicedMs >= MIN_VOICED_MS) finishRecording('silence-fallback');
       else {
@@ -223,7 +328,10 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     try {
       const result = await service.analyze({ samples: recording.tail(), ...identity });
       if (generation !== inferenceGeneration || turn !== currentTurn || currentTurn.manual || currentTurn.speechRevision !== identity.speechRevision || captureToken !== identity.captureToken || result.captureToken !== identity.captureToken || result.turnId !== identity.turnId || result.speechRevision !== identity.speechRevision) return;
-      if (result.probability > 0.5 && result.complete !== false && currentTurn.silenceMs >= 200) { currentTurn.completionReady = true; finishAnalyzedTurn(); }
+      if (result.probability > 0.5 && result.complete !== false && currentTurn.silenceMs >= 200) {
+        currentTurn.turnConfidence = result.probability; currentTurn.completionReady = true;
+        if (!finishAnalyzedTurn()) maybeTranscribeEarly();
+      }
     } catch (error) {
       if (error?.name === 'CompletionUnavailableError') {
         // Keyword/VAD stays healthy. Retain this analyzed revision and use the
@@ -236,7 +344,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
   function finishAnalyzedTurn() {
     // Microphone delivery can outrun VAD. Drain all received speech classifications
     // before accepting completion, so speech queued during inference can veto it.
-    if (!turn?.completionReady || turn.manual || turn.lastFrameEnd < samplePosition || turn.silenceMs < AUTOMATIC_PAUSE_MS) return false;
+    if (!turn?.completionReady || turn.manual || turn.lastFrameEnd < samplePosition || turn.silenceMs < pauseFor(turn)) return false;
     finishRecording('semantic'); return true;
   }
   function accountAnswerSilence(duration) {
@@ -364,13 +472,16 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
   function finishRecording(reason = 'manual') {
     const finishedTurn = turn;
     const voiced = recording.voicedMs + recording.preRollVoicedMs, data = recording.finish();
+    // Nothing has been said since the early request went out, so its audio is
+    // this recording. Claim it before the reset, which abandons whatever is left.
+    const early = claimEarlyTranscription(finishedTurn);
     resetRecording(reason);
     if (!finishedTurn?.source && voiced < MIN_VOICED_MS) {
       answerContext = null; answerSilenceMs = 0; update({ transcript: '' });
       void announceError({ category: 'not-understood', origin: 'voice', operation: 'transcription' });
       return { ok: true, status: 'empty' };
     }
-    void sendAudio({ audioBase64: wavFromSamples(data).toString('base64'), format: 'wav', recordingSource: finishedTurn?.source, recordingId: finishedTurn?.id });
+    void sendAudio({ audioBase64: wavFromSamples(data).toString('base64'), format: 'wav', recordingSource: finishedTurn?.source, recordingId: finishedTurn?.id, early });
     return { ok: true, status: 'sent' };
   }
   function pushToTalk(action, holdId) {
@@ -381,7 +492,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       if (turn?.holdId !== undefined && holdId !== turn.holdId) return { ok: true, status: 'stale-hold', recordingSource: state.recordingSource };
       if (action === 'stop') return finishRecording();
       if (turn?.adopted) {
-        turn.manual = false; turn.adopted = false; turn.holdId = undefined; turn.speechRevision++; turn.completionReady = false;
+        turn.manual = false; turn.adopted = false; turn.holdId = undefined; turn.speechRevision++; turn.completionReady = false; turn.turnConfidence = undefined;
         // Audio captured during the hold has no VAD classifications. Begin a
         // fresh pause window rather than inheriting quiet from before the hold.
         turn.silenceMs = 0; turn.lastFrameEnd = samplePosition;
@@ -395,7 +506,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     if (!state.listening || !enabled()) { const error = 'Enable Orchestrator and the microphone first.'; update({ error }); return { ok: false, error }; }
     if (['transcribing', 'thinking'].includes(state.phase)) { const error = 'Wait for the current reply before talking again.'; update({ error }); return { ok: false, status: 'busy', error }; }
     if (recording) {
-      if (turn && !turn.manual) { turn.manual = true; turn.adopted = true; turn.holdId = holdId; turn.speechRevision++; turn.completionReady = false; update({ recordingSource: 'ptt', finishHint: false }); syncDetectionMode(true); }
+      if (turn && !turn.manual) { turn.manual = true; turn.adopted = true; turn.holdId = holdId; turn.speechRevision++; turn.completionReady = false; turn.turnConfidence = undefined; abortEarlyTranscription(); update({ recordingSource: 'ptt', finishHint: false }); syncDetectionMode(true); }
       else if (turn) turn.holdId = holdId;
       return { ok: true, status: 'recording', recordingSource: 'ptt' };
     }
@@ -434,26 +545,40 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     }
     return { ok: true };
   }
-  async function sendAudio({ audioBase64, format = 'wav', recordingSource, recordingId = turn?.id } = {}) {
+  async function sendAudio({ audioBase64, format = 'wav', recordingSource, recordingId = turn?.id, early } = {}) {
     if (!enabled() || !state.listening) return { ok: false, error: 'Voice is off.' };
     if (typeof audioBase64 !== 'string' || audioBase64.length < 60 || audioBase64.length > 2600000 || format !== 'wav') return { ok: false, error: 'Expected a WAV recording of at most 60 seconds.' };
     resetRecording();
     const current = ++epoch; requestAbort?.abort(); const abort = requestAbort = new AbortController();
-    let key, operation = 'transcription', sttElapsedMs, transcriptionRequestId;
-    const sttStartedAt = monotonicNow(), recordingCaptureToken = captureToken;
+    let key, operation = 'transcription', sttElapsedMs, transcriptionRequestId, sttPrompt, sttReused = false;
+    const sttStartedAt = early ? early.startedAt : monotonicNow(), recordingCaptureToken = captureToken;
     update({ phase: 'transcribing', error: null, errorOperation: null });
     try {
       key = await getKey(); if (!key) throw Error('OpenRouter key is missing.');
       const settings = getSettings();
       if (current !== epoch) return { ok: false, status: 'cancelled' };
       checkSpending();
-      const response = await requestAudio('https://openrouter.ai/api/v1/audio/transcriptions', { method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, signal: AbortSignal.any([abort.signal, AbortSignal.timeout(60000)]), body: JSON.stringify({ model: settings.sttModel || STT_MODEL, input_audio: { data: audioBase64, format }, ...(settings.language && settings.language !== 'auto' ? { language: settings.language } : {}) }) }, abort);
-      const data = await audioJson(response, abort);
+      // The relay's workspace reads take about as long as transcription does.
+      // Warm them as the audio goes out, so the transcript arrives to an
+      // inventory, root list and launcher catalog that are already in hand.
+      try { orchestrator.prefetch?.(); } catch { /* Prewarming never fails a turn. */ }
+      // Nothing was said after the early request, so its transcript is this
+      // recording's. An early request that failed on its own is retried whole
+      // rather than charged to the speaker, and cancelling this turn cancels it.
+      if (early) abort.signal.addEventListener('abort', () => { try { early.abort.abort(); } catch { /* Already finished. */ } }, { once: true });
+      const earlyResult = early ? await early.promise : null;
+      if (current !== epoch || !enabled()) return { ok: false, status: 'cancelled' };
+      const transcription = earlyResult?.data ? (sttReused = true, earlyResult)
+        : await transcribe({ audioBase64, format, key, settings, abort });
+      const { data } = transcription; sttPrompt = transcription.prompt;
       if (current !== epoch || !enabled()) return { ok: false, status: 'cancelled' };
       orchestrator.recordSpeechUsage?.('transcription', data.usage?.cost);
-      if (typeof data.text !== 'string') throw new OpenRouterError('upstream', response.status);
+      if (typeof data.text !== 'string') throw new OpenRouterError('upstream', transcription.status);
       sttElapsedMs = Math.max(0, Math.round(monotonicNow() - sttStartedAt));
-      const rawText = data.text.split(key).join('[REDACTED]').trim();
+      // A reused transcript was fetched with the key of its own moment; redact
+      // that one too when a rotation has replaced it since.
+      const rawText = (transcription.key && transcription.key !== key ? [key, transcription.key] : [key])
+        .reduce((text, secret) => text.split(secret).join('[REDACTED]'), data.text).trim();
       // Speakers repeat the wake greeting on held and answer captures too, and
       // the transcription spells it several ways. Strip it on every path so the
       // wake words never become part of the command.
@@ -497,6 +622,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     finally {
       if (sttElapsedMs !== undefined) timingDiagnostic('stt_complete', sttStartedAt, { elapsedMs: sttElapsedMs,
         ...(Number.isSafeInteger(recordingId) && { recordingId }), ...(Number.isSafeInteger(recordingCaptureToken) && { captureToken: recordingCaptureToken }),
+        sttEarly: Boolean(early), sttReused, ...(sttPrompt !== undefined && { sttPrompt }),
         ...(transcriptionRequestId && { requestId: transcriptionRequestId }) });
       if (requestAbort === abort) requestAbort = null;
     }
@@ -860,7 +986,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     announcementPending = context;
     update({ request: interaction }); return askQuestion(context).finally(() => { if (announcementPending === context) announcementPending = null; });
   }
-  function dispose() { disposed = true; state.listening = false; clearTimeout(deferredTimer); deferredTimer = null; deferredInteractions.clear(); stopInference(); cancelSpeech(); }
+  function dispose() { disposed = true; state.listening = false; clearTimeout(deferredTimer); deferredTimer = null; deferredInteractions.clear(); stopInference(); abortEarlyTranscription(); cancelSpeech(); }
   return { getState: snapshot, configure, setListening, failPushToTalk, frames, sendAudio, cancelSpeech, speak, announceError, announceInteraction, resolveInteraction, reconcileTaskQuestions, dispose };
 }
 module.exports = { createVoiceController };

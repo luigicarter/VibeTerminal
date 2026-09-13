@@ -50,9 +50,8 @@ test('historical completion remains distinct from the pane current conversation 
   const { scheduler, job } = tracked();
   scheduler.reconcile([{ ...session, ...ending }]);
   const text = formatTaskWait(job.waits[0], { ...session, conversationId: 'replacement', name: 'Unrelated work' });
-  assert.match(text, /recorded agent turn.*ended/);
-  assert.match(text, /current conversation no longer matches/);
-  assert.doesNotMatch(text, /in Unrelated work/);
+  assert.match(text, /That turn ended, but the pane has moved to another conversation since/);
+  assert.doesNotMatch(text, /Unrelated work/);
 });
 
 for (const watchUntil of ['ready', 'completion']) test(`${watchUntil} watch cannot follow a different native conversation`, () => {

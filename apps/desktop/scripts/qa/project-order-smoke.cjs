@@ -46,7 +46,7 @@ async function drag(id,target,position,scrollTest=false){
 
  await until(()=>cdp.eval(`Boolean(window.vibe&&document.querySelector('.workspace-list'))`),'UI');
  const workspaces=['alpha','beta','gamma'].map(id=>({id,name:id,path:output,sessions:[]}));
- await cdp.eval(`localStorage.setItem('vibe-terminal:workspaces:v2',${JSON.stringify(JSON.stringify(workspaces))});localStorage.setItem('vibe-terminal:active-workspace:v1','beta');localStorage.setItem('vibe-terminal:active-view:v1','project');location.reload()`);
+ await cdp.eval(`(async()=>{localStorage.setItem('vibe-terminal:workspaces:v2',${JSON.stringify(JSON.stringify(workspaces))});localStorage.setItem('vibe-terminal:active-workspace:v1','beta');localStorage.setItem('vibe-terminal:active-view:v1','project');await ${require('./workspace-fixture.cjs').checkpointFromStorage};location.reload()})()`);
  await until(async()=> (await order()).length===3,'projects');
  await cdp.eval(`document.querySelector('[data-launcher-kind="terminal"]').click()`);
  const runtime=await until(()=>cdp.eval(`window.vibe.terminal.getRuntimeSnapshots().then(s=>s.find(s=>s.processState==='running'))`),'live local terminal');
@@ -61,7 +61,7 @@ async function drag(id,target,position,scrollTest=false){
  assert.deepEqual(await cdp.eval(`JSON.parse(localStorage.getItem('vibe-terminal:workspaces:v2')).map(w=>w.id)`),['alpha','gamma','beta']);
  await cdp.send('Page.reload');await until(async()=>JSON.stringify(await order())===JSON.stringify(['alpha','gamma','beta']),'persisted order');assert.equal(await cdp.eval(`localStorage.getItem('vibe-terminal:active-workspace:v1')`),'beta');check('order-persisted-after-reload',await order());await shot('final');
  const longOrder=['alpha','gamma','beta',...Array.from({length:20},(_,i)=>'extra-'+i)];
- await cdp.eval(`(()=>{const w=JSON.parse(localStorage.getItem('vibe-terminal:workspaces:v2'));for(let i=0;i<20;i++)w.push({id:'extra-'+i,name:'Extra project '+i,path:${JSON.stringify(output)},sessions:[]});localStorage.setItem('vibe-terminal:workspaces:v2',JSON.stringify(w));location.reload();})()`);
+ await cdp.eval(`(async()=>{const w=JSON.parse(localStorage.getItem('vibe-terminal:workspaces:v2'));for(let i=0;i<20;i++)w.push({id:'extra-'+i,name:'Extra project '+i,path:${JSON.stringify(output)},sessions:[]});localStorage.setItem('vibe-terminal:workspaces:v2',JSON.stringify(w));await ${require('./workspace-fixture.cjs').checkpointFromStorage};location.reload();})()`);
  await until(async()=> (await order()).length===23,'long project list');await drag('alpha','gamma','after',true);assert.deepEqual(await order(),longOrder);assert(!await cdp.eval(`Boolean(document.querySelector('.workspace-row.dragging,.workspace-row.drop-before,.workspace-row.drop-after'))`),'cancel clears drag state');check('cancel-preserves-long-order',true);result.pass=true;
 }catch(error){result.pass=false;result.error=error.stack;if(cdp)try{result.events=await cdp.eval('window.__dragEvents');console.log(result.events);}catch{}console.error(error.stack);process.exitCode=1;if(cdp)try{await shot('failure');}catch{}}
 finally{fs.writeFileSync(path.join(output,'results.json'),JSON.stringify(result,null,2));cdp?.ws.close();if(child?.pid)spawnSync('taskkill',['/pid',String(child.pid),'/t','/f'],{windowsHide:true,stdio:'ignore'});console.log(`Artifacts: ${output}`);}})();

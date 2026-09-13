@@ -6,7 +6,10 @@ const { createOrchestrator } = require('../../backend/orchestrator.cjs');
 async function fixture(t) {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-unknown-launcher-')));
   const f = { root, plans: [], calls: [], effects: [], sessions: [], spoken: [] };
-  f.app = createOrchestrator({ userDataPath: root, secureStorage: { isEncryptionAvailable: () => false },
+  // These cases are about what the Brain does with a creation request it got
+  // wrong, so the deterministic compiler - which would take the plainest of
+  // them before any model call - is off for this fixture.
+  f.app = createOrchestrator({ userDataPath: root, commandCompiler: false, secureStorage: { isEncryptionAvailable: () => false },
     getRoots: () => ({ documents: root, projects: [{ id: 'qa', name: 'Recovery QA', path: root }] }),
     getSessions: () => f.sessions,
     getLaunchers: () => [{ kind: 'codex', label: 'Codex', available: true, configured: true }],

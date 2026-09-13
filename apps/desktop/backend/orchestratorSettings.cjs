@@ -2,7 +2,17 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { STT_MODEL, TTS_MODEL, TTS_VOICE } = require('../shared/voiceConfig.cjs');
-const DEFAULTS = { model: '', sttModel: STT_MODEL, ttsModel: TTS_MODEL, voice: TTS_VOICE, language: 'en', monitoringEnabled: false, monitoringIntervalSeconds: 30, enabledOnLaunch: false, handsFreeEnabled: false };
+// fallbackModel is optional and empty by default: the second brain is only used
+// when the primary fails its deadline or the provider does, and no configuration
+// silently sends work to a model the user did not choose.
+// interpretationModel is optional and empty by default: understanding the
+// sentence is the one call every request makes, so it may run on a faster model
+// than the brain that writes the prose. Empty means "the same model as the
+// brain", so an unconfigured relay behaves exactly as it always has.
+// spareAgent is on by default: one idle unowned pane of the active project's
+// default agent is what makes "open" and "start" instant, and the keeper closes
+// it again when nobody wants it.
+const DEFAULTS = { model: '', fallbackModel: '', interpretationModel: '', sttModel: STT_MODEL, ttsModel: TTS_MODEL, voice: TTS_VOICE, language: 'en', monitoringEnabled: false, monitoringIntervalSeconds: 30, enabledOnLaunch: false, handsFreeEnabled: false, spareAgent: true };
 // A malformed saved file must never reach the list/map/push callers in the relay,
 // the policy check or the settings panel. Only well-formed entries survive.
 const normalizePreferences = list => (Array.isArray(list) ? list : []).filter(item => item && typeof item.id === 'string' && typeof item.text === 'string');
@@ -12,6 +22,7 @@ function createSettings({ userDataPath, secureStorage }) {
   try { const disk = JSON.parse(fs.readFileSync(filename, 'utf8')); data = { ...data, ...disk, settings: { ...DEFAULTS, ...disk.settings } }; } catch {}
   data.preferences = normalizePreferences(data.preferences);
   data.settings.handsFreeEnabled = data.settings.handsFreeEnabled === true;
+  data.settings.spareAgent = data.settings.spareAgent !== false;
   // The old default never had a published OpenRouter speech route. Migrate that
   // known configuration; other custom selections remain visible for correction.
   if (['openai/gpt-4o-mini-tts-2025-12-15', 'openai/gpt-4o-mini-tts'].includes(data.settings.ttsModel)) {
@@ -38,10 +49,10 @@ function createSettings({ userDataPath, secureStorage }) {
           next.encryptedKey = nextKey && !patch.sessionOnly ? secureStorage.encryptString(nextKey).toString('base64') : '';
         } else if (name === 'sessionOnly') {
           // This controls key storage only and never persists the key itself.
-        } else if (['model', 'sttModel', 'ttsModel', 'voice', 'language', 'microphoneId'].includes(name)) {
+        } else if (['model', 'fallbackModel', 'interpretationModel', 'sttModel', 'ttsModel', 'voice', 'language', 'microphoneId'].includes(name)) {
           if (typeof value !== 'string' || value.length > 512) throw new Error(`Invalid ${name}.`);
           next.settings[name] = value.trim();
-        } else if (['monitoringEnabled', 'enabledOnLaunch', 'handsFreeEnabled'].includes(name)) {
+        } else if (['monitoringEnabled', 'enabledOnLaunch', 'handsFreeEnabled', 'spareAgent'].includes(name)) {
           if (typeof value !== 'boolean') throw new Error(`Invalid ${name}.`);
           next.settings[name] = value;
         } else if (name === 'monitoringIntervalSeconds') {

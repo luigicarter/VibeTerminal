@@ -4,12 +4,12 @@ const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const root = path.resolve(__dirname, '..');
 const [app, command, ...forwarded] = process.argv.slice(2);
-if (!['desktop', 'website'].includes(app) || !command) throw new Error('Usage: node scripts/run-app.cjs <desktop|website> <script|--install> [arguments]');
+if (!['desktop', 'website', 'mobile', 'server'].includes(app) || !command) throw new Error('Usage: node scripts/run-app.cjs <desktop|website|mobile|server> <script|--install> [arguments]');
 const appRoot = path.join(root, 'apps', app);
 const npmCli = process.env.npm_execpath || path.join(path.dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js');
-if (!fs.existsSync(npmCli)) throw new Error('Run this command through npm, or install npm beside Node.');
+if (app !== 'server' && !fs.existsSync(npmCli)) throw new Error('Run this command through npm, or install npm beside Node.');
 const args = command === '--install' ? ['ci', ...forwarded] : ['run', command, ...(forwarded.length ? ['--', ...forwarded] : [])];
-const child = spawn(process.execPath, [npmCli, ...args], { cwd: appRoot, stdio: 'inherit', windowsHide: true });
+const child = spawn(process.execPath, app === 'server' ? [path.join(appRoot,'scripts','run.cjs'),command,...forwarded] : [npmCli, ...args], { cwd: appRoot, stdio: 'inherit', windowsHide: true });
 let stopping = false;
 function stop() {
   if (stopping || !child.pid || child.exitCode !== null) return;

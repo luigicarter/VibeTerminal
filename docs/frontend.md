@@ -1,5 +1,11 @@
 # Frontend
 
+`components/ChatsSection.tsx` renders terminal-format Chats directly below
+Projects, with filtering, search, archive/rename, and a terminal-style history
+viewer. `chatPersistence.ts` hydrates the workspace from desktop SQLite before
+App mounts; `sessionDrafts.ts` saves app-owned drafts by conversation identity.
+See the [implementation and recovery limits](chat-section-implementation-2026-09-13.md).
+
 `components/ModelProviderSettings.tsx` manages the shared provider and model
 catalog for Open Claude Code and Open Codex. `App.tsx` exposes one configured-model
 list with a choice of CLI;

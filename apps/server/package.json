@@ -1,0 +1,42 @@
+{
+  "name": "@lina/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.4.2",
+  "scripts": {
+    "dev": "bun --no-env-file --watch src/server.ts",
+    "start": "bun --no-env-file src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write src scripts tests --ignore-unknown",
+    "format:check": "prettier --check src scripts tests --ignore-unknown",
+    "build": "bun run typecheck && bun build src/server.ts --target=bun --packages=external --outdir=dist",
+    "test": "bun --no-env-file test --timeout 30000",
+    "test:container": "bun --no-env-file scripts/test-container.cjs",
+    "backup": "bun --no-env-file scripts/backup.ts",
+    "restore:check": "bun --no-env-file scripts/restore-check.ts",
+    "secrets:create": "bun --no-env-file scripts/create-secrets.ts",
+    "db:provision": "bun --no-env-file scripts/provision-db.ts",
+    "contracts": "bun --no-env-file scripts/contracts.ts",
+    "db:migrate": "bun --no-env-file scripts/migrate.ts",
+    "db:status": "bun --no-env-file scripts/migrate.ts --status",
+    "owner:bootstrap": "bun --no-env-file scripts/owner.ts",
+    "jobs": "bun --no-env-file scripts/jobs.ts"
+  },
+  "dependencies": {
+    "@better-auth/core": "1.7.4",
+    "better-auth": "1.7.4",
+    "dotenv": "17.4.2",
+    "hono": "4.13.7",
+    "nodemailer": "10.0.9",
+    "pg": "8.23.0",
+    "zod": "4.6.4"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.2",
+    "@types/nodemailer": "8.0.1",
+    "@types/pg": "8.23.1",
+    "prettier": "3.9.6",
+    "typescript": "7.0.2"
+  }
+}

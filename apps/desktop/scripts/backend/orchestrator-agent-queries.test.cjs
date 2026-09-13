@@ -82,3 +82,17 @@ test('clearing archived records frees capacity without changing current agent id
   assert.equal(f.directory.forSurface('worker-1').agentId, current.agentId);
   assert.equal(f.directory.all().length, 1);
 });
+
+test('a retriable work item stays readable as retriable, and nothing else is invented', () => {
+  const items = new Map([['work-1', { id: 'work-1', title: 'Investigate performance', status: 'failed', cwd: 'C:/project',
+    objective: 'Investigate the performance of the orchestrator.', requiresRevalidation: false, retriable: true,
+    binding: { target: { id: 'pane-1', generation: 'g1' } }, updatedAt: 10 }]]);
+  const queries = createAgentQueries({ directory: createAgentDirectory({}), workItems: { get: id => items.get(id) } });
+  const read = queries.readWork({ workItemId: 'work-1' });
+  assert.equal(read.ok, true);
+  assert.equal(read.workItem.retriable, true);
+  assert.equal(read.workItem.binding.target.id, 'pane-1', 'the pane it opened stays bound for the retry');
+  assert.equal(read.authority, 'historical-reference-only');
+  items.get('work-1').retriable = false;
+  assert.equal(queries.readWork({ workItemId: 'work-1' }).workItem.retriable, undefined);
+});

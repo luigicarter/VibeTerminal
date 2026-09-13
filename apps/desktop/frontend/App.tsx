@@ -121,6 +121,10 @@ import VoicePushToTalk from "./VoicePushToTalk";
 import { NewProjectDialog } from "./components/NewProjectDialog";
 import { BoardHeading } from "./components/WorkspaceChrome";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { PhonePairPrompt } from "./components/PhonePairPrompt";
+import { ChatsSection } from './components/ChatsSection';
+import { checkpointWorkspace, flushChatWorkspace } from './chatPersistence';
+import { configureChatDrafts, flushChatDrafts } from './sessionDrafts';
 import type { InstalledCliReport } from "./electron";
 import type {
   AgentAttentionEvent,
@@ -1442,11 +1446,29 @@ export default function App() {
     ...multiSessions,
     ...workspaces.flatMap((workspace) => workspace.sessions)
   ].map(withRuntime);
+  // Make every pane's intent durable before launch effects admit its process.
+  const chatWorkspace = { workspaces: workspaces.map(project => ({ ...project, sessions: project.sessions.map(serializeSession) })), multiSessions: multiSessions.map(serializeSession), activeWorkspaceId, activeView };
+  const chatWorkspaceRef = useRef(chatWorkspace);
+  chatWorkspaceRef.current = chatWorkspace;
+  useLayoutEffect(() => {
+    configureChatDrafts(allSessions);
+    void checkpointWorkspace(chatWorkspaceRef.current).catch(() => {});
+  }, [workspaces, multiSessions, activeWorkspaceId, activeView]);
+  useEffect(() => {
+    const saveError = (event: Event) => setShellMessage(`Chat recovery: ${(event as CustomEvent).detail}`);
+    window.addEventListener('vibe:chat-save-error', saveError);
+    const unsubscribe = window.vibe?.chats?.onFlush(({ id }) => {
+      void Promise.all([flushChatWorkspace(), flushChatDrafts()]).then(() => window.vibe?.chats?.flushed(id), error => window.vibe?.chats?.flushed(id, String(error)));
+    });
+    return () => { window.removeEventListener('vibe:chat-save-error', saveError); unsubscribe?.(); };
+  }, []);
   const closeSessionsRef = useRef(allSessions);
   closeSessionsRef.current = allSessions;
   const [terminalLaunchCoordinator] = useState(() => createTerminalLaunchCoordinator({
     platform: window.vibe?.platform,
-    create: payload => window.vibe?.terminal.create(payload) ?? Promise.resolve(false),
+    create: async payload => { await flushChatWorkspace(); return window.vibe?.terminal.create(payload) ?? false; },
+    strictResume: true,
+    concurrency: 2,
     confirmThread: payload => window.vibe?.agentThreads.findLatest(payload) ?? Promise.reject(new Error("Thread discovery unavailable")),
     onFreshLaunchFallback: (session, freshSession) => {
       updateAnySession(session.id, current => {
@@ -2592,6 +2614,11 @@ export default function App() {
         const configured = await window.vibe?.modelProviders?.list();
         if (!configured?.models.length) throw new Error('Add a provider and models below, then choose Open Claude Code or Open Codex.');
         if (kind === 'open-codex') options = { ...options, openCodexModel: options?.openCodexModel || configured.defaultModel || undefined };
+        if (kind === 'claude-custom' && !options?.providerProfileId) {
+          const selected = configured.models.find(model => model.key === configured.defaultModel);
+          if (!selected) throw new Error('Choose a default provider model in Settings before starting a chat.');
+          options = { ...options, providerProfileId: selected.providerId, providerModelOverride: selected.id };
+        }
       } catch (error) {
         setSettingsHint(error instanceof Error ? error.message : 'Configure shared providers and models below.');
         setSettingsPanel('providers'); setSettingsOpen(true); return;
@@ -2681,7 +2708,7 @@ export default function App() {
   }
 
   function removeClosedSession(scope: SessionScope, session: AgentSession) {
-    forgetSessionDraft(session.id);
+    // Closing a terminal keeps its chat-owned draft available for recovery.
     closedRuntimeIdsRef.current.add(session.id);
     if (runtimeSnapshotsRef.current[session.id]) {
       const next = { ...runtimeSnapshotsRef.current };
@@ -2721,7 +2748,7 @@ export default function App() {
       cancelLaunch: () => terminalLaunchCoordinator.cancel(target.id, target.launchToken),
       stop: () => relayApi()?.stopSessionObserved({ ...target, operationId, observeOnly, kind: session.fusion ? "fusion" : session.openFusion ? "openfusion" : session.kind })
         ?? Promise.resolve({ ok: false, operationId, process: "unknown", launchSettled: false, error: "Observed process stop is unavailable." }),
-      remove: () => { flushSync(() => removeClosedSession(scope, session)); }
+      remove: async () => { flushSync(() => removeClosedSession(scope, session)); await flushChatWorkspace(); }
     });
   }
 
@@ -4190,7 +4217,9 @@ export default function App() {
       section: "agents",
       label: profile.label,
       hint: agentCliMissing(profile.kind)
-        ? `${profile.label} was not found on your PATH — click to launch anyway`
+        ? ['codex-web', 'open-codex', 'kimi-custom'].includes(profile.kind)
+          ? `${profile.label}'s bundled runtime was not found — click to launch anyway`
+          : `${profile.label} was not found on your PATH — click to launch anyway`
         : undefined,
       profile,
       missing: agentCliMissing(profile.kind),
@@ -4777,6 +4806,19 @@ export default function App() {
         </div>
         <span id="workspace-reorder-help" className="workspace-reorder-sr-only">Drag to reorder projects, or use Up and Down arrow keys on a reorder button.</span>
         <span className="workspace-reorder-sr-only" role="status" aria-live="polite">{workspaceOrderAnnouncement}</span>
+        <ChatsSection project={activeWorkspace} projects={workspaces} sessions={allSessions} multi={activeView === 'multi'} profiles={launcherAgentProfiles}
+          onNew={async kind => { setOrchestratorViewOpen(false); await addSession(kind); }}
+          onFocus={id => { setOrchestratorViewOpen(false); focusRelaySession(id); }}
+          onOpen={async row => {
+            const pane = row.paneId && allSessions.find(session => session.id === row.paneId);
+            if (pane && !conversationNeedsResume(pane, runtimeSnapshotsRef.current[pane.id])) { setOrchestratorViewOpen(false); focusRelaySession(pane.id); return; }
+            await flushChatWorkspace();
+            const conversation = await window.vibe?.chats?.open(row.chatId);
+            if (!conversation) throw new Error('Saved chat service is unavailable.');
+            const result = await relayActionHandler.current('resume_conversation', { conversation });
+            if (!result.ok) throw new Error(String(result.error || 'Could not open this chat.'));
+            await flushChatWorkspace();
+          }} />
         <footer className="sidebar-footer"><button className="workspace-settings-button" title="Workspace settings" aria-label="Workspace settings" onClick={() => setSettingsOpen(true)}><Settings size={17} aria-hidden="true"/><span>Settings</span></button></footer>
       </aside>
 
@@ -5373,6 +5415,9 @@ export default function App() {
           }}
         />
       )}
+
+      {/* Read-only phone bridge: renders only while a phone is asking to pair. */}
+      <PhonePairPrompt />
     </div>
   );
 }

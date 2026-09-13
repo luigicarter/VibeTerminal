@@ -1355,13 +1355,13 @@ async function findLatestAgentThread(payload) {
   if (payload.provider === "gemini") return lookupGeminiThread(payload);
   if (payload.provider === "grok") return lookupGrokThread(payload);
 
-  if (payload.provider === 'open-codex') {
-    const home = process.env.LINA_OPEN_CODEX_HOME;
+  if (payload.provider === 'open-codex' || payload.provider === 'codex-web') {
+    const home = payload.provider === 'codex-web' ? process.env.LINA_CODEX_WEB_HISTORY_HOME : process.env.LINA_OPEN_CODEX_HOME;
     if (!home) return { status: 'failed', message: 'Open Codex conversation storage is unavailable.' };
     const options = { ...payload, provider: 'codex', codexHome: home };
     const result = payload.confirmId ? confirmCodexThread(cwd, payload.confirmId, options)
       : payload.list ? listCodexThreads(options, { codexHome: home }) : findCodexThread(options, { codexHome: home });
-    const remap = ref => ref ? { ...ref, provider: 'open-codex' } : ref;
+    const remap = ref => ref ? { ...ref, provider: payload.provider } : ref;
     return { ...result, ...(result.threadRef ? { threadRef: remap(result.threadRef) } : {}),
       ...(result.threads ? { threads: result.threads.map(remap) } : {}) };
   }

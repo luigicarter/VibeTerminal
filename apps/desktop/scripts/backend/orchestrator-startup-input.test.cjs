@@ -170,6 +170,96 @@ test('ready startup uses its bounded observation without a second possibly hung 
   assert.equal(result.ok, true); assert.equal(reads, 1); assert.equal(f.writes.length, 1);
 });
 
+// A trust or onboarding screen is the pane still launching. The wait polls
+// through it to the same deadline, reports it once, and only ever answers the
+// folder trust prompt of a registered Lina project.
+function trustFixture(t, options = {}) {
+  const screens = [];
+  const f = {};
+  Object.assign(f, fixture(t, { onStartupScreen: report => screens.push(report),
+    write: async action => { f.writes.push(action); if (String(action.actionId).endsWith(':startup-trust')) f.answerWrite?.(); return { ok: true, status: 'written' }; },
+    ...options }));
+  f.screens = screens;
+  Object.assign(f.session, { kind: 'claude', provider: 'claude', name: 'Open Claude Code 11', cwd: 'C:/project' });
+  f.trust = () => Object.assign(f.observation, { sequence: f.observation.sequence + 1, cursor: { x: 0, y: 1 },
+    text: 'Claude Code\nDo you trust the files in this folder?\n\n\u276f 1. Yes, proceed\n  2. No, exit' });
+  f.claudeReady = () => Object.assign(f.observation, { sequence: f.observation.sequence + 1, cursor: { x: 2, y: 2 },
+    text: 'Claude Code\n────────────────────\n\u276f\u00a0\n────────────────────\n? for shortcuts' });
+  return f;
+}
+
+test('a startup trust screen is reported once, waited through, and never typed into', async t => {
+  const f = trustFixture(t);
+  f.trust();
+  const pending = f.input.handle(f.action());
+  await f.waitForReads(2);
+  assert.equal(f.writes.length, 0, 'nothing may be typed while a startup screen is up');
+  assert.equal(f.screens.length, 1, 'the startup screen is reported once per wait, not once per poll');
+  assert.equal(f.screens[0].text, 'Open Claude Code 11 is showing a startup screen: it is asking whether to trust the files in this folder.');
+  assert.equal(f.screens[0].prompt, 'folder-trust');
+  f.claudeReady();
+  const result = await pending;
+  assert.equal(result.status, 'written');
+  assert.equal(result.startupAnswered, undefined, 'no trust answer is possible without a registered project predicate');
+  assert.equal(f.writes.length, 1);
+  assert.equal(f.writes[0].text, 'Implement the feature');
+});
+
+test('the folder trust prompt of a registered project is answered once, then the prompt is typed', async t => {
+  const asked = [];
+  const f = trustFixture(t, { isRegisteredProject: cwd => { asked.push(cwd); return cwd === 'C:/project'; } });
+  f.trust();
+  const pending = f.input.handle(f.action());
+  await f.waitForReads(3);
+  assert.deepEqual(asked, ['C:/project']);
+  assert.equal(f.writes.length, 1, 'exactly one Enter answers the highlighted affirmative option');
+  assert.deepEqual(f.writes[0].keys, ['enter']);
+  assert.equal(f.writes[0].text, undefined);
+  assert.equal(f.writes[0].actionId, 'first:startup-trust');
+  assert.equal(f.writes[0].interactionEvidence.inputRevision, 0);
+  f.claudeReady();
+  const result = await pending;
+  assert.equal(result.status, 'written');
+  assert.equal(result.startupAnswered, 'folder-trust');
+  assert.equal(result.message, 'Answered the folder trust prompt.');
+  assert.equal(f.writes.length, 2);
+  assert.equal(f.writes[1].text, 'Implement the feature');
+});
+
+test('the input revision our own trust answer bumps does not abandon the task', async t => {
+  // The PTY host counts every guarded interaction as an input change, including
+  // this one; a human draft is still caught by the composer and draft guards.
+  const f = trustFixture(t, { isRegisteredProject: () => true });
+  f.trust();
+  f.answerWrite = () => { f.observation.inputRevision += 1; };
+  const pending = f.input.handle(f.action());
+  await f.waitForReads(3);
+  assert.equal(f.writes.length, 1);
+  f.claudeReady();
+  const result = await pending;
+  assert.equal(result.status, 'written');
+  assert.equal(result.startupAnswered, 'folder-trust');
+  assert.equal(f.writes.at(-1).text, 'Implement the feature');
+  assert.equal(f.writes.at(-1).interactionEvidence.inputRevision, 1);
+});
+
+for (const [name, patch] of [
+  ['an unregistered folder', f => { f.session.cwd = 'C:/elsewhere'; }],
+  ['a sandbox screen', f => { f.trust(); f.observation.text = 'OpenAI Codex\nSet up the Codex agent sandbox\n\n\u276f 1. Yes, proceed'; }],
+  ['a refusal-highlighted trust screen', f => { f.trust(); f.observation.text = f.observation.text.replace('\u276f 1. Yes, proceed\n  2. No, exit', '  1. Yes, proceed\n\u276f 2. No, exit'); }],
+]) test(`the startup trust answer is withheld for ${name}`, async t => {
+  const f = trustFixture(t, { isRegisteredProject: cwd => cwd === 'C:/project' });
+  f.trust(); patch(f);
+  const pending = f.input.handle(f.action());
+  await f.waitForReads(3);
+  assert.equal(f.writes.length, 0);
+  f.claudeReady();
+  const result = await pending;
+  assert.equal(result.startupAnswered, undefined);
+  assert.equal(f.writes.length, 1);
+  assert.equal(f.writes[0].text, 'Implement the feature');
+});
+
 test('cancellation of the bounded startup read releases the pane lock for a later control', async t => {
   let first = true;
   const f = fixture(t, { readSession: async () => { if (first) { first = false; return new Promise(() => {}); } return { ...f.observation }; } });

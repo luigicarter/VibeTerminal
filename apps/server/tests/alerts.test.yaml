@@ -1,0 +1,66 @@
+rule_files:
+  - /rules/alerts.yaml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'up{job="lina-account"}'
+        values: '0+0x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: LinaAccountUnavailable
+        exp_alerts:
+          - exp_labels: { job: lina-account, severity: critical }
+            exp_annotations:
+              { summary: 'Lina account metrics endpoint is unavailable' }
+  - interval: 1m
+    input_series:
+      - series: 'lina_requests_total{job="lina-account"}'
+        values: '0+100x12'
+      - series: 'lina_errors_total{job="lina-account"}'
+        values: '0+10x12'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: LinaAccountErrors
+        exp_alerts:
+          - exp_labels: { job: lina-account, severity: critical }
+            exp_annotations:
+              { summary: 'Lina account API is returning service errors' }
+  - interval: 1m
+    input_series:
+      - series: 'lina_requests_total{job="lina-account"}'
+        values: '0+1x12'
+      - series: 'lina_errors_total{job="lina-account"}'
+        values: '0+1x12'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: LinaAccountErrors
+        exp_alerts: []
+  - interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: LinaBackupOverdue
+        exp_alerts:
+          - exp_labels: { job: backup, severity: critical }
+            exp_annotations:
+              { summary: 'Lina database backup is missing or overdue' }
+      - eval_time: 6m
+        alertname: LinaRetentionOverdue
+        exp_alerts:
+          - exp_labels: { job: retention, severity: warning }
+            exp_annotations:
+              { summary: 'Lina account data retention job is overdue' }
+  - interval: 1m
+    input_series:
+      - series: 'lina_email_oldest_seconds{job="lina-account"}'
+        values: '301+0x5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: LinaEmailBacklog
+        exp_alerts:
+          - exp_labels: { job: lina-account, severity: warning }
+            exp_annotations:
+              {
+                summary: 'Lina account emails are not being delivered promptly',
+              }

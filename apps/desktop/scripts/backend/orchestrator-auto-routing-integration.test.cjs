@@ -18,7 +18,7 @@ async function until(predicate) {
 
 async function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-auto-routing-'));
-  const f = { root, projects: [{ name: 'Project', path: root }], sessions: [], effects: [], contexts: [], routes: [], reads: [], plans: [], affinities: [], phases: new Map(),
+  const f = { root, projects: [{ name: 'Project', path: root }], sessions: [], effects: [], contexts: [], routes: [], reads: [], plans: [], phases: new Map(),
     launchers: [{ kind: 'codex', label: 'Codex', available: true, configured: true }] };
   f.commits = observeWorkItemCommits(t, path.join(root, 'orchestrator-work-items.json'), () => f.relay?.getState().tasks);
   f.session = (id = 'pane', cwd = root) => ({ id, name: id, cwd, kind: 'codex', provider: 'codex', generation: `generation-${id}`,
@@ -71,13 +71,11 @@ async function fixture(t) {
       if (url.endsWith('/models')) return jsonResponse({ data: [{ id: 'scripted', context_length: 128000, supported_parameters: ['tools', 'tool_choice'] }] });
       const body = JSON.parse(options.body);
       const metadata = JSON.parse(body.messages.find(message => message.role === 'user').content);
-      // Reusing a conversation without a recorded work item asks for an
-      // ownership judgement before anything is bound.
-      if (body.messages[0].content === require('../../backend/orchestratorTaskAffinity.cjs').SYSTEM) {
-        f.affinities.push(metadata);
-        return jsonResponse({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ relation: f.affinity || 'same-task',
-          userEvidence: metadata.currentInstruction, workEvidence: metadata.existingObjective }) } }] });
-      }
+      // Assignment costs no model round at all now: the ownership reviewer is
+      // deleted and the routing rounds are replaced by the resolver, so any
+      // completion reaching here belongs to the execution loop and carries its
+      // tools. A tool-less two-message completion would be a revived reviewer.
+      assert.ok(body.tools?.length, 'Assignment must reach no tool-less ownership reviewer');
       const grant = metadata.authorizedCommands?.grants.find(g => g.kind === 'operate_terminal');
       if (!grant) return jsonResponse({ choices: [{ message: { content: 'No terminal work submitted.' }, finish_reason: 'stop' }] });
       const phase = f.phases.get(grant.id) || 0; f.phases.set(grant.id, phase + 1);
@@ -190,14 +188,20 @@ test('unowned reuse requires candidate read evidence before binding', { timeout:
   assert.ok(f.reads.length >= 3, 'Discovery plus pre/post submission observations');
 });
 
-test('unverified unowned reuse and missing configured launchers never dispatch', { timeout: 2000 }, async t => {
-  const f = await fixture(t); f.sessions.push(f.session());
-  // The application reads the candidate itself, so the remaining gate on an
-  // unowned reuse is the ownership review of that evidence.
-  f.affinity = 'unclear';
+// An unowned pane that is working is a legitimate follow-up target: the
+// application reads it, verifies its native identity, and the prompt queues
+// behind the running turn. No model judges continuity any more.
+test('a read-verified unowned busy pane is reused with no ownership model round', { timeout: 2000 }, async t => {
+  const f = await fixture(t); f.sessions.push(Object.assign(f.session(), { status: 'running', turnState: 'running', turnId: 'existing-turn' }));
   f.route = () => ({ kind: 'choose', decision: 'reuse', targetId: 'pane', reason: 'Title only.' });
-  await f.run('Review checkout.'); assert.equal(f.effects.length, 0);
-  f.sessions = []; f.launchers = [{ kind: 'codex', available: false, configured: false }];
+  const result = await f.run('Review checkout.');
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(f.effects.map(action => action.kind), ['send_prompt']);
+  assert.equal(f.effects[0].targetId, 'pane');
+});
+
+test('missing configured launchers never dispatch', { timeout: 2000 }, async t => {
+  const f = await fixture(t); f.launchers = [{ kind: 'codex', available: false, configured: false }];
   f.route = () => ({ kind: 'choose', decision: 'create', kindOfSession: 'codex', reason: 'Needs worker.' });
   await f.run('Fix checkout.'); assert.equal(f.effects.length, 0);
 });
@@ -495,14 +499,14 @@ test('routed history tracks completion and an active continuation after reservat
   Object.assign(session, { turnState: 'completed', completedTurnId: session.turnId, completedActionId: session.actionId, turnEndedAt: Date.now() });
   await f.relay.refresh();
   const finished = await saved('finished');
-  assert.match(finished.summary, /turn.*ended/);
+  assert.match(finished.summary, /finished its turn/);
   f.route = () => ({ kind: 'choose', decision: 'reuse', workItemId: finished.id, targetId: session.id, reason: 'Continue the same review.' });
   const second = await f.run('Continue the review.', {}, { replyToRequestId: first.requestId });
   assert.equal(second.ok, true, JSON.stringify(second));
   const active = await saved('waiting-results');
   assert.ok(active.requestIds.includes(second.requestId));
-  assert.match(active.summary, /task is running/);
-  assert.doesNotMatch(active.summary, /turn.*ended/);
+  assert.match(active.summary, /is working on it/);
+  assert.doesNotMatch(active.summary, /finished its turn/);
   await f.relay.dispose(); await f.commits.verifyDisk();
 });
 
@@ -525,6 +529,6 @@ test('a finished newer continuation cannot hide an older outstanding work-item r
   assert.equal(f.task(first).status, 'waiting-results');
   const item = await f.commits.waitFor(value => value.requestIds.includes(second.requestId) && value.status === 'waiting-results', 'both request owners with the older result still pending');
   assert.equal(item.status, 'waiting-results');
-  assert.doesNotMatch(item.summary, /turn.*ended/);
+  assert.doesNotMatch(item.summary, /finished its turn/);
   await f.relay.dispose(); await f.commits.verifyDisk();
 });

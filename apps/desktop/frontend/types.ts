@@ -29,7 +29,7 @@ export type AgentKind =
   // pane-scoped OpenCode config.
   | "openfusion";
 
-export type AgentThreadProvider = "codex" | "open-codex" | "claude" | "opencode" | "cursor" | "gemini" | "kimi" | "kimi-custom" | "qwen" | "grok";
+export type AgentThreadProvider = "codex" | "open-codex" | "codex-web" | "claude" | "opencode" | "cursor" | "gemini" | "kimi" | "kimi-custom" | "qwen" | "grok";
 
 export interface OpenCodexModel { id: string; label: string; contextWindow: number; reasoning: boolean; imageInput: boolean; }
 export interface OpenCodexConfiguredModel extends OpenCodexModel { key: string; providerId: string; providerName: string; }

@@ -4,6 +4,7 @@ const { WORKSPACE_VIEWS } = require('./orchestratorWorkspace.cjs');
 
 const { randomUUID } = require("node:crypto");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 // Display activity is distinct from the raw turn evidence used by task proofs.
@@ -346,9 +347,18 @@ function installOrchestrator(options) {
   const routedInputBindings = new Map();
   const idleInputActions = new Set();
   const queuedInputAttempts = require('./orchestratorQueuedInputAttempts.cjs').createQueuedInputAttempts();
+  // The project registry is the user's own trust evidence: a folder they added
+  // to Lina Terminal is a folder they have already decided to work in.
+  const projectKey = value => { const text = String(value || ''); if (!text) return ''; const windows = process.platform === 'win32' || /^[A-Za-z]:[\\/]/.test(text); const normalized = (windows ? path.win32 : path.posix).normalize(text).replace(/\\/g, '/').replace(/\/+$/, ''); return windows ? normalized.toLowerCase() : normalized; };
+  const isRegisteredProject = cwd => {
+    const key = projectKey(cwd);
+    return Boolean(key) && [...directory.projects().map(project => project.path), ...directory.projectPaths()].some(item => projectKey(item) === key);
+  };
   const terminalInput = createTerminalInput({ getSession: inputSession, readSession: target => observations.read(target),
     startupTimeoutMs: options.startupTimeoutMs ?? options.launchTimeoutMs ?? 60000, startupPollMs: options.startupPollMs ?? 100,
     onBeforeWrite: metadata => relay.prepareDelivery(queuedInputAttempts.correlate(metadata)),
+    onStartupScreen: report => { if (!disposed) relay.recordStartupScreen?.(report); },
+    isRegisteredProject,
     write: ({ signal, ...payload }) => {
       if (!require("./orchestratorLaunchers.cjs").routingBindingMatches(routedInputBindings.get(payload.actionId), directory.get(payload.id))) return { ok: false, status: "blocked", delivery: "not-dispatched", error: "The routed conversation changed before dispatch." };
       if (idleInputActions.has(payload.actionId) && !require('./orchestratorTargetAvailability.cjs').isIdleTarget(inputSession(payload.id))) return unavailableIdleTarget();
@@ -380,7 +390,7 @@ function installOrchestrator(options) {
       routedInputBindings.delete(actionId); queuedInputAttempts.complete(actionId);
     }
   }
-  let disposed = false, inventoryTimer = null, publicationTimer = null, voice, activation = 0;
+  let disposed = false, inventoryTimer = null, publicationTimer = null, spareTimer = null, voice, activation = 0;
   function inputSession(id) {
     const session = directory.get(id);
     if (!session) return;
@@ -520,7 +530,7 @@ function installOrchestrator(options) {
     if (!control?.controlUrl) return { ok: false, error: "Fusion answer bridge unavailable." };
     return sendCurrent(sendFusion, { ...base, ...control }, "answer-question");
   }
-  async function dispatchAction(action) {
+  async function dispatchWorkspaceAction(action) {
     const kind = action.kind;
     let effectBinding = action.routingBinding;
     const check = () => { if (disposed || action.signal?.aborted) throw new Error("Cancelled."); };
@@ -737,6 +747,21 @@ function installOrchestrator(options) {
     }
     throw new Error(`Unsupported action: ${kind}`);
   }
+  // Every workspace effect passes here, so this is where the spare-pane keeper
+  // learns that a project is the one being worked in. Only the keeper's own
+  // creations are excluded, by object identity, so it cannot answer itself.
+  const spareCreations = new WeakSet();
+  async function dispatchAction(action) {
+    const result = await dispatchWorkspaceAction(action);
+    if (result?.ok === true && !spareCreations.has(action)) {
+      if (action.kind === 'create_session') sparePanes.noteStart({ cwd: action.cwd, provider: action.kindOfSession || action.agentKind || action.launcherKind });
+      else if (action.kind === 'send_prompt') {
+        const started = directory.get(action.target?.id || action.targetId || action.id);
+        if (started) sparePanes.noteStart({ cwd: started.cwd, provider: started.provider || started.kind });
+      }
+    }
+    return result;
+  }
   const relay = createOrchestrator({ userDataPath: app.getPath("userData"), secureStorage: safeStorage, fetch: options.fetch, interpretIntent: options.interpretIntent,
     resolveWorkspaceIdentity: createWorkspaceIdentity(),
     getSessions: async () => {
@@ -780,7 +805,66 @@ function installOrchestrator(options) {
   });
   voice = (options.voiceFactory || createVoiceController)({ orchestrator: relay, getKey: () => relay.getKey(), getSettings: () => relay.getSettings(), fetch: options.fetch,
     modelPath: app.isPackaged ? path.join(process.resourcesPath, "voice") : path.join(__dirname, "..", "vendor", "voice"),
+    // The names the user actually says. Whisper recognizes a registered project
+    // by name far more reliably when the prompt already contains it.
+    getVocabulary: () => directory.projects().map(project => project?.name).filter(Boolean),
     emit: state => broadcast("voice:state", { ...state, captureToken, captureRecovering, indicatorVisible }), onAudio: chunk => surface.send("voice:audio", chunk) });
+
+  // The relay publishes no work-item or project-memory reader, and both stores
+  // persist their own bounded JSON beside the settings. The keeper only needs
+  // to know which panes a task owns and what a project's default agent is, so
+  // those two files are read here, briefly cached, and never written.
+  const stateFiles = new Map();
+  function savedState(name) {
+    const cached = stateFiles.get(name);
+    if (cached && Date.now() - cached.at < 5000) return cached.value;
+    let value = null;
+    try {
+      const file = path.join(app.getPath("userData"), name);
+      if (fs.statSync(file).size <= 4 * 1024 * 1024) value = JSON.parse(fs.readFileSync(file, "utf8"));
+    } catch { /* an unavailable or invalid store grants nothing and reads as empty */ }
+    stateFiles.set(name, { at: Date.now(), value });
+    return value;
+  }
+  // No live memory-pressure gauge exists in the app; the September 10 audit
+  // measured retention rather than publishing one. Electron's own reading is
+  // preferred, with Node's as the fallback: below 15% free the keeper opens
+  // nothing speculative.
+  function systemMemoryPressure() {
+    const { MEMORY_FREE_FRACTION } = require("./orchestratorSparePane.cjs");
+    try {
+      const info = typeof process.getSystemMemoryInfo === "function" ? process.getSystemMemoryInfo() : null;
+      if (info && Number.isFinite(info.total) && info.total > 0 && Number.isFinite(info.free)) return info.free / info.total < MEMORY_FREE_FRACTION;
+    } catch { /* fall through to the portable reading */ }
+    const total = os.totalmem(), free = os.freemem();
+    return Number.isFinite(total) && total > 0 && Number.isFinite(free) ? free / total < MEMORY_FREE_FRACTION : false;
+  }
+  const sparePanes = require("./orchestratorSparePane.cjs").createSparePaneKeeper({
+    getSessions: () => directory.list(),
+    getWorkItems: () => savedState("orchestrator-work-items.json")?.items || [],
+    getLaunchers: () => directory.launchers(),
+    getProjectFact: cwd => (savedState("orchestrator-memory-v1.json")?.projectFacts || []).find(fact => fact?.cwd && projectKey(fact.cwd) === projectKey(cwd)) || null,
+    getSetting: () => relay.getSettings().spareAgent !== false,
+    isEnabled: () => relay.isEnabled(),
+    memoryPressure: systemMemoryPressure,
+    createSession: ({ cwd, kindOfSession, waitForReady }) => {
+      const action = { kind: "create_session", cwd, kindOfSession, waitForReady };
+      spareCreations.add(action);
+      return dispatchWorkspaceAction(action);
+    },
+    // The ordinary close path: its own scope review verifies the pane is still
+    // inactive and holds no staged input before anything is stopped.
+    closeSession: async target => {
+      const current = directory.get(target.id);
+      if (!current || current.generation !== target.generation) return { ok: false, status: "close-partial" };
+      let closeScope;
+      try { closeScope = { ...require("./orchestratorCloseScope.cjs").resolveCloseScope({ scope: { type: "explicit", targetIds: [target.id] } }, { sessions: directory.list() }), condition: "inactive" }; }
+      catch { return { ok: false, status: "close-partial" }; }
+      return dispatchWorkspaceAction({ kind: "close", actionId: randomUUID(), targetId: target.id, generation: current.generation,
+        target: { id: target.id, generation: current.generation, launchToken: current.launchToken }, closeScope });
+    },
+    log: event => { if (!disposed) relay.recordDiagnostic({ event: "spare_pane", ...event }); },
+  });
 
   const snapshot = () => { const state = relay.getState(); return { ...state, ready: state.ready && voiceReady, voiceReady }; };
   const voiceSnapshot = () => ({ ...voice.getState(), captureToken, captureRecovering, indicatorVisible });
@@ -1045,6 +1129,9 @@ function installOrchestrator(options) {
   });
   ipcMain.on("orchestrator:ui-result", (event, p) => { if (allowed(event, true)) pendingUi.get(p.id)?.(p.result); });
   inventoryTimer = setInterval(() => { if (relay.isEnabled()) void refreshInventory(); }, 4000); inventoryTimer.unref?.();
+  // The spare's own clock: it ages out an unwanted pane and notices the setting
+  // being turned off without waiting for the next request.
+  spareTimer = setInterval(() => { if (!disposed) void sparePanes.tick(); }, require("./orchestratorSparePane.cjs").TICK_MS); spareTimer.unref?.();
   // Restore only the user's explicit startup preference: open the microphone at launch.
   if (relay.getKey() && relay.getSettings().model) {
     if (relay.getSettings().enabledOnLaunch) void setEnabled(true, { interactive: false });
@@ -1126,7 +1213,8 @@ function installOrchestrator(options) {
   }
   let disposal;
   function dispose() {
-    if (disposed) return disposal || Promise.resolve(); disposed = true; activation++; clearInterval(inventoryTimer); clearTimeout(publicationTimer);
+    if (disposed) return disposal || Promise.resolve(); disposed = true; activation++; clearInterval(inventoryTimer); clearInterval(spareTimer); clearTimeout(publicationTimer);
+    sparePanes.dispose();
     permissionLifetime.abort(); permissionActivation?.abort(); permissionActivation = null;
     launchLifetime.abort();
     clearTimeout(captureHeartbeatTimer); clearTimeout(captureRecoveryTimer); captureRecovering = false;

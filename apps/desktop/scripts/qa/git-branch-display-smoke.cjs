@@ -66,6 +66,7 @@ async function screenshot(name) {
   await until(() => cdp.eval("Boolean(window.vibe?.workspace)"), "preload");
   const workspaces = [{ id: "a", name: "Branch QA A", path: repo, sessions: [] }, { id: "b", name: "Branch QA B", path: repoB, sessions: [] }];
   await cdp.eval(`localStorage.setItem('vibe-terminal:workspaces:v2',${JSON.stringify(JSON.stringify(workspaces))});localStorage.setItem('vibe-terminal:active-workspace:v1','a');localStorage.setItem('vibe-terminal:active-view:v1','project');`);
+  await cdp.eval(require('./workspace-fixture.cjs').checkpointFromStorage);
   await cdp.send("Page.reload"); await until(() => cdp.eval("document.querySelector('.diff-branch-button')?.textContent==='main'"), "main branch");
   await cdp.eval("document.querySelector('.diff-branch-button').click()"); await until(() => cdp.eval("document.querySelectorAll('.branch-picker-row').length===20"), "branches");
   const initial = await geometry(); inViewport(initial); assert.equal(initial.role, "dialog"); assert.equal(initial.expanded, "true"); assert.equal(initial.focused, "branch-picker-list");

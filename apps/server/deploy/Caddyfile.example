@@ -1,0 +1,15 @@
+YOUR-DOMAIN {
+    @accounts path /api/auth/* /api/v1/* /health/live /health/ready
+    handle @accounts {
+        reverse_proxy 127.0.0.1:3002 {
+            header_up X-Real-IP {remote_host}
+        }
+    }
+    handle /internal/* {
+        respond 404
+    }
+    handle {
+        reverse_proxy 127.0.0.1:3001
+    }
+    # Do not enable raw request/URL logging: verification links contain tokens.
+}

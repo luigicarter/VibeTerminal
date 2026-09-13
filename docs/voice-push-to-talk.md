@@ -67,7 +67,13 @@ matching hold; a stale failure cannot cancel or report an error on a later hold.
 
 `backend/voiceController.cjs` owns the recent-audio ring and turn state.
 `backend/voiceAudio.cjs` records held turns with silence endpointing disabled;
-manual release or the maximum length ends them. Optional hands-free inference
+manual release or the maximum length ends them. A manual release still uploads
+immediately: only automatic turns may start transcription before their pause
+ends, and taking an automatic recording by hand abandons any early request
+already in flight. Every transcription request carries an initial Whisper prompt
+of the wake and product names, the launcher labels and the registered project
+names, capped at 200 characters; an endpoint that refuses the field costs one
+silent retry without it and is not asked again that session. Optional hands-free inference
 uses the current bundled models and separate helpers described in its guide.
 
 ## Verification and limitations

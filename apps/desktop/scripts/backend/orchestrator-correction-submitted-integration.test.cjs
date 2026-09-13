@@ -18,8 +18,6 @@ for (const explicit of [false, true]) for (const composed of [false, true]) test
       if (url.endsWith('/key')) return new Response(JSON.stringify({ data: {} }));
       if (url.endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'fixture', context_length: 128000, supported_parameters: ['tools'] }] }));
       const body = JSON.parse(options.body), context = JSON.parse(body.messages.find(message => message.role === 'user').content);
-      // These transport fixtures script user-selected targets; semantic veto cases have a separate suite.
-      if (body.messages[0].content === require('../../backend/orchestratorTargetReview.cjs').TARGET_REVIEW_SYSTEM) return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ decision: 'DIRECT', evidenceIds: JSON.parse(body.messages[1].content).selectionEvidence.map(item => item.id) }) } }] }));
       if (body.tools[0].function.name === 'interpret_workspace') {
         interpretations.push({ mode, context, system: body.messages[0].content });
         if (mode === 'submit') return call('interpret_workspace', { goal: 'Send the requested task.', actions: [{ kind: 'operate_terminal', targetIds: ['pane'], text: composed ? 'Investigate the bubble issue carefully.' : 'Fix bubble labels.', promptMode: composed ? 'compose' : 'literal' }] });
@@ -50,13 +48,13 @@ for (const explicit of [false, true]) for (const composed of [false, true]) test
   const corrected = await app.send({ text: "You didn't paste that prompt.", origin: explicit ? 'voice' : 'text', ...(explicit && { replyToRequestId: sentId }) });
   assert.equal(corrected.ok, true, JSON.stringify(corrected)); assert.equal(correctionAttempt, 2);
   assert.match(interpretations.at(-1).system, /Validation failure:.*literal text supplied/);
-  assert.match(corrected.text, /haven't confirmed that the task started/);
+  assert.match(corrected.text, /haven't seen it start yet/);
   assert.doesNotMatch(corrected.text, /Accepted|working|could not interpret/i);
   assert.equal(executions.at(-1).context.authorizedCommands.statusRequestId, sentId);
   assert.deepEqual(executions.at(-1).context.authorizedCommands.grants, []);
   mode = 'followup';
   const followed = await app.send({ text: 'That prompt.', origin: explicit ? 'voice' : 'text', ...(explicit && { replyToRequestId: corrected.requestId }) });
-  assert.equal(followed.ok, true, JSON.stringify(followed)); assert.match(followed.text, /haven't confirmed that the task started/);
+  assert.equal(followed.ok, true, JSON.stringify(followed)); assert.match(followed.text, /haven't seen it start yet/);
   assert.equal(executions.at(-1).context.authorizedCommands.statusRequestId, sentId);
   assert.equal(effects.length, 1, 'Corrections must not replay written input');
   mode = 'unrelated';

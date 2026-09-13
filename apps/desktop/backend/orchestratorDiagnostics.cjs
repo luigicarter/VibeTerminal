@@ -25,14 +25,19 @@ function createDiagnostics({ userDataPath, getSecrets = () => [], now = Date.now
       return text.slice(0, limit);
     };
     const result = { time: new Date(now()).toISOString() };
-    for (const key of ['event', 'stage', 'requestId', 'workItemId', 'decision', 'modelCallId', 'toolCallId', 'receiptId', 'replyId', 'actionId', 'origin', 'model', 'actionKind', 'targetId', 'generation', 'status', 'category', 'reason', 'endpoint', 'provider', 'generationId', 'toolChoice', 'grantId', 'reservationId', 'predecessorRequestId', 'successorRequestId', 'operationId', 'inventoryRevision', 'strategy', 'assignmentState', 'delivery', 'scopeKind', 'controlDisposition', 'previousStatus', 'newStatus', 'validationCategory', 'turnState', 'telemetryHealth', 'optionRepair', 'reasoningReplay']) {
+    for (const key of ['event', 'stage', 'requestId', 'workItemId', 'decision', 'modelCallId', 'toolCallId', 'receiptId', 'replyId', 'actionId', 'origin', 'model', 'actionKind', 'targetId', 'generation', 'status', 'category', 'reason', 'endpoint', 'provider', 'generationId', 'toolChoice', 'grantId', 'reservationId', 'predecessorRequestId', 'successorRequestId', 'operationId', 'inventoryRevision', 'strategy', 'assignmentState', 'delivery', 'scopeKind', 'controlDisposition', 'previousStatus', 'newStatus', 'validationCategory', 'turnState', 'telemetryHealth', 'optionRepair', 'reasoningReplay', 'fallbackFrom', 'selectorKind']) {
       const value = redact(input?.[key], 256); if (value !== undefined) result[key] = value;
     }
-    for (const key of ['resultScopeTransferred', 'paginationAdvanced', 'progress', 'hasTurnId']) if (typeof input?.[key] === 'boolean') result[key] = input[key];
+    // Voice transcription overlap: whether the audio went out before the pause
+    // ended, whether that result was the one used, and whether the vocabulary
+    // prompt was attached. Never the audio, the transcript or the prompt itself.
+    for (const key of ['resultScopeTransferred', 'paginationAdvanced', 'progress', 'hasTurnId', 'modelFallback', 'sttEarly', 'sttReused', 'sttPrompt']) if (typeof input?.[key] === 'boolean') result[key] = input[key];
     // Signed operational offsets: a turn that started before its own submission
     // is exactly the misattribution these records exist to show.
     for (const key of ['turnStartedOffsetMs']) if (Number.isFinite(input?.[key])) result[key] = Math.max(-1e9, Math.min(input[key], 1e9));
-    for (const key of ['round', 'readCount', 'candidateCount', 'stagnantRounds', 'targetCount', 'confirmedCount', 'remainingCount', 'failedCount', 'transferredCount', 'newTargetCount', 'closedCount', 'supersededCount', 'inventoryCount']) {
+    // Vocabulary normalization records how many names it rewrote, per kind, and
+    // never a rewritten word: the instruction text stays out of the log.
+    for (const key of ['round', 'readCount', 'candidateCount', 'stagnantRounds', 'targetCount', 'confirmedCount', 'remainingCount', 'failedCount', 'transferredCount', 'newTargetCount', 'closedCount', 'supersededCount', 'inventoryCount', 'wakeCount', 'providerCount', 'projectCount', 'productCount', 'handledCount', 'fallbackCount']) {
       if (Number.isSafeInteger(input?.[key]) && input[key] >= 0) result[key] = Math.min(input[key], 1e9);
     }
     if (Number.isFinite(input?.generation)) result.generation = input.generation;
@@ -43,13 +48,28 @@ function createDiagnostics({ userDataPath, getSecrets = () => [], now = Date.now
     for (const key of ['processState', 'agentProcessState']) if (['starting', 'running', 'exited', 'failed', 'unknown'].includes(input?.[key])) result[key] = input[key];
     // Keep voice and model timing evidence without recording their content. Unknown
     // fields still stay out of the log, and every numeric metric is bounded.
-    for (const key of ['processingMs', 'queuedSamples', 'droppedSamples', 'totalMs', 'preprocessingMs', 'inferenceMs', 'elapsedMs', 'inputBytes', 'silenceMs', 'voicedMs', 'recordingId', 'captureToken', 'headersMs', 'bodyMs', 'deadlineMs', 'attempt', 'promptTokens', 'completionTokens', 'reasoningTokens']) {
+    for (const key of ['processingMs', 'queuedSamples', 'droppedSamples', 'totalMs', 'preprocessingMs', 'inferenceMs', 'elapsedMs', 'inputBytes', 'silenceMs', 'voicedMs', 'pauseMs', 'recordingId', 'captureToken', 'headersMs', 'bodyMs', 'deadlineMs', 'attempt', 'promptTokens', 'completionTokens', 'reasoningTokens']) {
       if (Number.isFinite(input?.[key]) && input[key] >= 0) result[key] = Math.min(input[key], 1e9);
     }
     if (Number.isFinite(input?.probability) && input.probability >= 0 && input.probability <= 1) result.probability = input.probability;
+    // The completion score that chose the endpointing pause, on the model's own
+    // 0 to 1 scale.
+    if (Number.isFinite(input?.turnConfidence) && input.turnConfidence >= 0 && input.turnConfidence <= 1) result.turnConfidence = input.turnConfidence;
+    // Deterministic assignment scores are fractions of a candidate's own title
+    // words, never the words themselves.
+    if (Number.isFinite(input?.score) && input.score >= 0 && input.score <= 1) result.score = input.score;
     if (['wake', 'answer', 'ptt'].includes(input?.recordingSource)) result.recordingSource = input.recordingSource;
     if (['keyword', 'completion'].includes(input?.helper)) result.helper = input.helper;
     if (Number.isInteger(input?.httpStatus) && input.httpStatus >= 100 && input.httpStatus <= 599) result.httpStatus = input.httpStatus;
+    // The provider's own sentence and the shape of the transcript it rejected
+    // are the only facts that explain a 4xx after the fact. Roles and tool-call
+    // identities only: no instruction, terminal or message content.
+    const providerMessage = redact(input?.providerMessage, 1000); if (providerMessage !== undefined) result.providerMessage = providerMessage;
+    if (Array.isArray(input?.transcriptShape)) result.transcriptShape = input.transcriptShape.slice(0, 60).map(entry => ({
+      ...(typeof entry?.role === 'string' && { role: redact(entry.role, 32) }),
+      ...(Array.isArray(entry?.toolCalls) && { toolCalls: entry.toolCalls.slice(0, 8).map(call => ({
+        id: redact(call?.id, 120) ?? null, type: redact(call?.type, 32) ?? null, name: redact(call?.name, 80) ?? null })) }),
+      ...(typeof entry?.toolCallId === 'string' && { toolCallId: redact(entry.toolCallId, 120) }) }));
     const error = typeof input?.error === 'string' ? { message: input.error } : input?.error;
     if (error && typeof error === 'object') {
       result.error = {};

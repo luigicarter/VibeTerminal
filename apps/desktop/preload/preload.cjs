@@ -76,6 +76,19 @@ contextBridge.exposeInMainWorld("vibe", {
   // the login shell on POSIX), so the renderer needs the platform to quote args
   // for the right shell.
   platform: process.platform,
+  chats: {
+    bootstrap: legacy => ipcRenderer.invoke('chats:bootstrap', legacy),
+    checkpoint: payload => ipcRenderer.invoke('chats:checkpoint', payload),
+    list: () => ipcRenderer.invoke('chats:list'),
+    refresh: payload => ipcRenderer.invoke('chats:refresh', payload),
+    update: payload => ipcRenderer.invoke('chats:update', payload),
+    open: chatId => ipcRenderer.invoke('chats:open', chatId),
+    read: chatId => ipcRenderer.invoke('chats:read', chatId),
+    draft: payload => ipcRenderer.invoke('chats:draft', payload),
+    onChanged: callback => subscribe('chats:changed', callback),
+    onFlush: callback => subscribe('chats:flush', callback),
+    flushed: (id, error) => ipcRenderer.send('chats:flushed', { id, error })
+  },
   orchestrator: {
     stopSessionObserved: payload => ipcRenderer.invoke('orchestrator:stop-session-observed', payload),
     getState: () => ipcRenderer.invoke("orchestrator:get-state"),
@@ -99,6 +112,16 @@ contextBridge.exposeInMainWorld("vibe", {
     readChange: payload => ipcRenderer.invoke("orchestrator:change-read", payload),
     onUiAction: callback => subscribe("orchestrator:ui-action", callback),
     completeUiAction: (id, result) => ipcRenderer.send("orchestrator:ui-result", { id, result })
+  },
+  // Read-only LAN bridge for the phone app. The renderer only reads and toggles
+  // its status; no terminal input crosses this namespace in either direction.
+  mobileBridge: {
+    getState: () => ipcRenderer.invoke("mobile-bridge:get-state"),
+    setEnabled: enabled => ipcRenderer.invoke("mobile-bridge:set-enabled", { enabled }),
+    regenerateCode: () => ipcRenderer.invoke("mobile-bridge:regenerate-code"),
+    respondPair: (requestId, approve) => ipcRenderer.invoke("mobile-bridge:pair-respond", { requestId, approve }),
+    onState: callback => subscribe("mobile-bridge:state", callback),
+    onPairRequest: callback => subscribe("mobile-bridge:pair-request", callback)
   },
   setups: {
     list: payload => ipcRenderer.invoke("orchestrator:setups-list", payload),

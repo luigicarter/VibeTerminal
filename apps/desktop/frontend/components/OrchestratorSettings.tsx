@@ -3,9 +3,9 @@ import { relayApi, useOrchestrator, type RelayState } from '../orchestratorUi';
 import type { VoiceApi, VoiceState } from '../voice/types';
 import './orchestratorSettings.css';
 type Model = { id: string; name?: string; label?: string; voices?: { id: string; name: string }[] };
-type Draft = { model: string; sttModel: string; ttsModel: string; voice: string; language: string; microphoneId: string; handsFreeEnabled: boolean; monitoringEnabled: boolean; enabledOnLaunch: boolean; monitoringIntervalSeconds: string; spendingLimit: string };
+type Draft = { model: string; fallbackModel: string; interpretationModel: string; sttModel: string; ttsModel: string; voice: string; language: string; microphoneId: string; handsFreeEnabled: boolean; spareAgent: boolean; monitoringEnabled: boolean; enabledOnLaunch: boolean; monitoringIntervalSeconds: string; spendingLimit: string };
 function draftFrom(settings: RelayState['settings']): Draft {
-  return { model: settings.model || '', sttModel: settings.sttModel || '', ttsModel: settings.ttsModel || '', voice: settings.voice || '', language: settings.language || '', microphoneId: settings.microphoneId || '', handsFreeEnabled: !!settings.handsFreeEnabled, monitoringEnabled: !!settings.monitoringEnabled, enabledOnLaunch: !!settings.enabledOnLaunch, monitoringIntervalSeconds: String(settings.monitoringIntervalSeconds ?? 30), spendingLimit: settings.spendingLimit == null ? '' : String(settings.spendingLimit) };
+  return { model: settings.model || '', fallbackModel: settings.fallbackModel || '', interpretationModel: settings.interpretationModel || '', sttModel: settings.sttModel || '', ttsModel: settings.ttsModel || '', voice: settings.voice || '', language: settings.language || '', microphoneId: settings.microphoneId || '', handsFreeEnabled: !!settings.handsFreeEnabled, spareAgent: settings.spareAgent !== false, monitoringEnabled: !!settings.monitoringEnabled, enabledOnLaunch: !!settings.enabledOnLaunch, monitoringIntervalSeconds: String(settings.monitoringIntervalSeconds ?? 30), spendingLimit: settings.spendingLimit == null ? '' : String(settings.spendingLimit) };
 }
 export function OrchestratorSettings() {
   const state = useOrchestrator(), api = relayApi();
@@ -42,7 +42,7 @@ export function OrchestratorSettings() {
     const interval = Number(draft.monitoringIntervalSeconds), spending = draft.spendingLimit === '' ? null : Number(draft.spendingLimit);
     if (!Number.isFinite(interval) || interval < 5) throw new Error('Monitoring interval must be at least 5 seconds.');
     if (spending !== null && (!Number.isFinite(spending) || spending < 0)) throw new Error('Spending limit must be zero or greater.');
-    const result = await api.configure({ ...draft, model: draft.model.trim(), monitoringIntervalSeconds: interval, spendingLimit: spending, ...(apiKey ? { apiKey, sessionOnly } : {}) });
+    const result = await api.configure({ ...draft, model: draft.model.trim(), fallbackModel: draft.fallbackModel.trim(), interpretationModel: draft.interpretationModel.trim(), monitoringIntervalSeconds: interval, spendingLimit: spending, ...(apiKey ? { apiKey, sessionOnly } : {}) });
     if (!result.ok) throw new Error(result.error || 'Could not save settings.');
     setKey(''); setChangingKey(false); setDirty(false);
     const connection = await api.testConnection();
@@ -68,8 +68,14 @@ export function OrchestratorSettings() {
       <div className="assistant-device-row"><label>OpenRouter API key<input type="password" autoComplete="off" disabled={keyLocked} value={apiKey} placeholder={keyLocked ? 'Saved securely' : 'sk-or-…'} onChange={event => { setKey(event.target.value); setNote(''); }}/></label>{keyLocked && <button type="button" onClick={() => setChangingKey(true)}>Change</button>}{changingKey && <button type="button" onClick={() => { setChangingKey(false); setKey(''); }}>Cancel</button>}</div>
       <label>Assistant model<input list="orchestrator-models" value={draft.model} onChange={event => edit('model', event.target.value)} placeholder="Choose or enter an OpenRouter model ID"/><datalist id="orchestrator-models">{models.map(item => <option key={item.id} value={item.id}>{item.name || item.label || item.id}</option>)}</datalist></label>
       <button className="assistant-browse" type="button" disabled={!api} onClick={() => void action(async () => { setModels(await api!.models('brain')); setNote('Assistant models refreshed.'); })}>Browse models</button>
+      <label>Fallback brain (optional)<input list="orchestrator-models" value={draft.fallbackModel} onChange={event => edit('fallbackModel', event.target.value)} placeholder="None"/></label>
+      <p className="settings-description">Used once when the brain times out or the provider fails.</p>
+      <label>Interpretation model (optional)<input list="orchestrator-models" value={draft.interpretationModel} onChange={event => edit('interpretationModel', event.target.value)} placeholder="Same as the brain"/></label>
+      <p className="settings-description">A faster model for understanding what you said; replies and results still use the brain.</p>
       <div className="assistant-enable"><label className="assistant-check"><input type="checkbox" checked={!!state?.enabled} disabled={busy || !api || (!state?.enabled && ((!state?.settings.hasKey && !apiKey.trim()) || !draft.model.trim()))} onChange={event => void action(() => toggle(event.target.checked))}/> Enable Orchestrator</label></div>
       <label className="assistant-check"><input type="checkbox" checked={draft.handsFreeEnabled} onChange={event => edit('handsFreeEnabled', event.target.checked)}/> Hands-free voice - Hey Lina (English)</label>
+      <label className="assistant-check"><input type="checkbox" checked={draft.spareAgent} onChange={event => edit('spareAgent', event.target.checked)}/> Keep a spare agent ready in the active project</label>
+      <p className="settings-description">One idle agent waits in the project you are working in, so "open" and "start" are instant; it closes itself after 30 unused minutes.</p>
       {voiceState?.handsFreeStatus === 'loading' && <p className="settings-description" role="status">Starting hands-free voice... Hold Space to talk.</p>}
       {voiceState?.handsFreeStatus === 'ready' && <p className="settings-description" role="status">Say Hey Lina or hold Space to talk.</p>}
       {voiceState?.handsFreeStatus === 'unavailable' && <p className="settings-description" role="status">{voiceState.handsFreeError || 'Hands-free voice is unavailable.'} Hold Space to talk. Turn hands-free voice off and on to retry.</p>}

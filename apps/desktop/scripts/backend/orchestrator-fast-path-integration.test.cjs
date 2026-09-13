@@ -64,7 +64,7 @@ for (const lateStatus of ['rejected', 'unknown']) test(`late queued delivery ${l
   const result = await f.app.send({ text: 'Use Fixture to review changes.', origin: 'text' });
   assert(f.injected(), 'Late receipt must occur after validated finish and before finalization');
   assert.equal(result.ok, false, JSON.stringify(result));
-  assert.match(result.text, lateStatus === 'unknown' ? /couldn't confirm.*haven't sent it again/ : /couldn't complete.*Fixture late rejected/);
+  assert.match(result.text, lateStatus === 'unknown' ? /couldn't confirm that Fixture took the prompt.*haven't typed it again/ : /couldn't do that in Fixture: Fixture late rejected/);
   assert.doesNotMatch(result.text, /accepted|is working/);
   assert.equal(f.executor.length, 5);
   assert.deepEqual(f.effects.map(effect => effect.kind), ['send_prompt']);
@@ -76,7 +76,7 @@ test('clean completed operation acknowledges the submission without a final mode
   const result = await f.app.send({ text: 'Use Fixture to review changes.', origin: 'text' });
   assert.equal(result.ok, true, JSON.stringify(result));
   // The delivery is verified; the delegated agent result is not yet.
-  assert.match(result.text, /Input was sent to Fixture.*result is still pending/s);
+  assert.match(result.text, /Typed the task into Fixture, but I haven't seen it start yet\./s);
   assert.equal(f.executor.length, 4);
   assert.deepEqual(f.effects.map(effect => effect.kind), ['send_prompt']);
 });
@@ -85,7 +85,7 @@ test('same-batch respond listen cannot bypass submitted-task status synthesis or
   const f = await fixture(t, { explicitListen: true });
   const result = await f.app.send({ text: 'Use Fixture to review changes.', origin: 'text' });
   assert.equal(result.ok, true, JSON.stringify(result));
-  assert.match(result.text, /Input was sent to Fixture.*result is still pending/s);
+  assert.match(result.text, /Typed the task into Fixture, but I haven't seen it start yet\./s);
   assert.equal(result.responseTurn, 'complete');
   assert.equal(f.app.getState().tasks.find(task => task.requestId === result.requestId).status, 'waiting-results');
   assert.equal(f.executor.length, 4);

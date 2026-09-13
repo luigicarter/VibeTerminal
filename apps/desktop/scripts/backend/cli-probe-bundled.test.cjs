@@ -4,8 +4,23 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { probeInstalledClis } = require('../../backend/cliProbe.cjs');
+const { PROBED_AGENT_COMMANDS, probeInstalledClis } = require('../../backend/cliProbe.cjs');
 const { launcherCatalog } = require('../../backend/orchestratorLaunchers.cjs');
+
+test('Codex Web availability follows its bundled binary, not a PATH command', async t => {
+  assert.equal(PROBED_AGENT_COMMANDS['codex-web'], undefined);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lina-web-probe-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const codexWebBin = path.join(root, 'codex.exe');
+  fs.writeFileSync(codexWebBin, '');
+  const present = await probeInstalledClis({}, { codexWebBin });
+  assert.deepEqual(present.clis['codex-web'], { command: 'codex-web', available: true, path: codexWebBin });
+  fs.unlinkSync(codexWebBin);
+  const absent = await probeInstalledClis({}, { codexWebBin });
+  assert.equal(absent.clis['codex-web'].available, false);
+  const unresolved = await probeInstalledClis({}, { codexWebBin: null });
+  assert.equal(unresolved.clis['codex-web'].available, false);
+});
 
 test('bundled Kimi readiness follows its entrypoint and supports automatic launcher selection', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-kimi-probe-'));

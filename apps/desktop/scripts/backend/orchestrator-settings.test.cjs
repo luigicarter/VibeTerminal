@@ -47,6 +47,36 @@ test('partly malformed preference entries are dropped instead of poisoning the l
   assert.deepEqual(JSON.parse(fs.readFileSync(filename, 'utf8')).preferences, [{ id: 'a', text: 'Keep me' }]);
 });
 
+test('the optional fallback brain is empty by default, round-trips, and is validated like the model', t => {
+  const { store, filename } = fixture(t, { settings: { model: 'user/brain' }, preferences: [] });
+  assert.equal(store.getSettings().fallbackModel, '');
+  store.configure({ fallbackModel: '  standby/brain  ' });
+  assert.equal(store.getSettings().fallbackModel, 'standby/brain');
+  assert.equal(createSettings({ userDataPath: path.dirname(filename) }).getSettings().fallbackModel, 'standby/brain');
+  const before = fs.readFileSync(filename, 'utf8');
+  assert.throws(() => store.configure({ fallbackModel: 7 }), /Invalid fallbackModel/);
+  assert.throws(() => store.configure({ model: 'changed', fallbackModel: 'x'.repeat(513) }), /Invalid fallbackModel/);
+  assert.equal(fs.readFileSync(filename, 'utf8'), before, 'a rejected fallback must not half-apply the patch');
+  assert.equal(store.getSettings().model, 'user/brain');
+  store.configure({ fallbackModel: '' });
+  assert.equal(store.getSettings().fallbackModel, '');
+});
+
+test('the optional interpretation model is empty by default, round-trips, and is validated like the model', t => {
+  const { store, filename } = fixture(t, { settings: { model: 'user/brain' }, preferences: [] });
+  assert.equal(store.getSettings().interpretationModel, '');
+  store.configure({ interpretationModel: '  fast/interpreter  ' });
+  assert.equal(store.getSettings().interpretationModel, 'fast/interpreter');
+  assert.equal(createSettings({ userDataPath: path.dirname(filename) }).getSettings().interpretationModel, 'fast/interpreter');
+  const before = fs.readFileSync(filename, 'utf8');
+  assert.throws(() => store.configure({ interpretationModel: 7 }), /Invalid interpretationModel/);
+  assert.throws(() => store.configure({ model: 'changed', interpretationModel: 'x'.repeat(513) }), /Invalid interpretationModel/);
+  assert.equal(fs.readFileSync(filename, 'utf8'), before, 'a rejected interpretation model must not half-apply the patch');
+  assert.equal(store.getSettings().model, 'user/brain');
+  store.configure({ interpretationModel: '' });
+  assert.equal(store.getSettings().interpretationModel, '');
+});
+
 test('hands-free is opt-in, persists explicitly, and rejects malformed settings atomically', t => {
   const { store, filename } = fixture(t, { settings: { handsFreeEnabled: 'true', microphoneId: 'saved-device' }, preferences: [] });
   assert.equal(store.getSettings().handsFreeEnabled, false);

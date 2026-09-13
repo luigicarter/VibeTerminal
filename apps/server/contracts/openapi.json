@@ -1,0 +1,4982 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Lina account API",
+    "version": "0.1.0",
+    "description": "Bun + TypeScript account service. All mutating API calls require an exact trusted Origin header, including CLI clients. Session cookies are HTTP-only. This contract contains no server credentials. Email verification links and reset callbacks are handled by Better Auth 1.7.4; use links from email as opaque values."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:3002",
+      "description": "Local development; configure HTTPS in production"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Secure-better-auth.session_token"
+      },
+      "developmentSessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "better-auth.session_token"
+      }
+    }
+  },
+  "paths": {
+    "/api/v1/me": {
+      "get": {
+        "summary": "Read your identity and access",
+        "tags": [
+          "Accounts"
+        ],
+        "parameters": [],
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "developmentSessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "user": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "email": {
+                          "type": "string",
+                          "format": "email"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "emailVerified": {
+                          "type": "boolean"
+                        },
+                        "role": {
+                          "type": "string",
+                          "enum": [
+                            "member",
+                            "admin",
+                            "owner"
+                          ]
+                        },
+                        "twoFactorEnabled": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "email",
+                        "name",
+                        "emailVerified",
+                        "role",
+                        "twoFactorEnabled"
+                      ]
+                    },
+                    "access": {
+                      "type": "object",
+                      "properties": {
+                        "allowed": {
+                          "type": "boolean"
+                        },
+                        "reason": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "tier": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "full_access",
+                                "orchestrator"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "features": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "expiresAt": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "revision": {
+                          "type": "integer"
+                        },
+                        "accountStatus": {
+                          "type": "string"
+                        },
+                        "serverTime": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      },
+                      "required": [
+                        "allowed",
+                        "reason",
+                        "tier",
+                        "features",
+                        "expiresAt",
+                        "revision",
+                        "accountStatus",
+                        "serverTime"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "user",
+                    "access"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/access": {
+      "get": {
+        "summary": "Read effective server-authorized product access",
+        "tags": [
+          "Accounts"
+        ],
+        "parameters": [],
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "developmentSessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "allowed": {
+                      "type": "boolean"
+                    },
+                    "reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "tier": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "full_access",
+                            "orchestrator"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "features": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "expiresAt": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "revision": {
+                      "type": "integer"
+                    },
+                    "accountStatus": {
+                      "type": "string"
+                    },
+                    "serverTime": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "required": [
+                    "allowed",
+                    "reason",
+                    "tier",
+                    "features",
+                    "expiresAt",
+                    "revision",
+                    "accountStatus",
+                    "serverTime"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/sessions": {
+      "get": {
+        "summary": "List your sanitized sessions",
+        "tags": [
+          "Accounts"
+        ],
+        "parameters": [],
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "developmentSessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "sessions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "created_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "expires_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "device_id": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "uuid"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "platform": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "app_version": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "last_seen_at": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "recently_seen": {
+                            "type": [
+                              "boolean",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "created_at",
+                          "expires_at",
+                          "device_id",
+                          "platform",
+                          "app_version",
+                          "last_seen_at",
+                          "recently_seen"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "sessions"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/sessions/{id}": {
+      "delete": {
+        "summary": "Revoke an owned session with recent authentication",
+        "tags": [
+          "Accounts"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "developmentSessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/devices/register": {
+      "post": {
+        "summary": "Bind this session to an installation",
+        "tags": [
+          "Accounts"
+        ],
+        "parameters": [],
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "developmentSessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "deviceId": {
+                      "type": "string",
+                      "format": "uuid"
+                    }
+                  },
+                  "required": [
+                    "deviceId"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "installationId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "platform": {
+                    "type": "string",
+                    "enum": [
+                      "windows",
+                      "macos",
+                      "linux",
+                      "ios",
+                      "android",
+                      "web"
+                    ]
+                  },
+                  "appVersion": {
+                    "type": "string",
+                    "maxLength": 60,
+                    "pattern": "^\\d+\\.\\d+\\.\\d+(?:[-+][a-zA-Z0-9.-]+)?$"
+                  }
+                },
+                "required": [
+                  "installationId",
+                  "platform",
+                  "appVersion"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/activity/heartbeat": {
+      "post": {
+        "summary": "Record current connectivity",
+        "tags": [
+          "Activity"
+        ],
+        "parameters": [],
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "developmentSessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "lastSeenAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "required": [
+                    "lastSeenAt"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "deviceId": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                },
+                "required": [
+                  "deviceId"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/activity/events": {
+      "post": {
+        "summary": "Submit allowlisted client-reported usage",
+        "tags": [
+          "Activity"
+        ],
+        "parameters": [],
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "developmentSessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "accepted": {
+                      "type": "integer"
+                    },
+                    "duplicates": {
+                      "type": "integer"
+                    },
+                    "source": {
+                      "const": "client_reported"
+                    }
+                  },
+                  "required": [
+                    "accepted",
+                    "duplicates",
+                    "source"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "deviceId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "events": {
+                    "minItems": 1,
+                    "maxItems": 50,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "eventId": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "schemaVersion": {
+                          "type": "number",
+                          "const": 1
+                        },
+                        "event": {
+                          "type": "string",
+                          "enum": [
+                            "terminal.started",
+                            "agent.started",
+                            "orchestrator.started",
+                            "orchestrator.completed",
+                            "orchestrator.failed"
+                          ]
+                        },
+                        "occurredAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                        },
+                        "properties": {
+                          "type": "object",
+                          "properties": {
+                            "agent": {
+                              "type": "string",
+                              "enum": [
+                                "codex",
+                                "claude",
+                                "gemini",
+                                "opencode",
+                                "fusion",
+                                "openfusion",
+                                "other"
+                              ]
+                            },
+                            "durationMs": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 86400000
+                            },
+                            "outcome": {
+                              "type": "string",
+                              "enum": [
+                                "completed",
+                                "failed",
+                                "canceled"
+                              ]
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "eventId",
+                        "schemaVersion",
+                        "event",
+                        "occurredAt",
+                        "properties"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "deviceId",
+                  "events"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/users": {
+      "get": {
+        "summary": "Search accounts by email, status and assigned tier",
+        "tags": [
+          "Administration"
+        ],
+        "parameters": [
+          {
+            "name": "search",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 100
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "active",
+                "suspended",
+                "closed"
+              ]
+            }
+          },
+          {
+            "name": "tier",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "full_access",
+                "orchestrator"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 25
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000,
+              "default": 0
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "developmentSessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "users": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    },
+                    "limit": {
+                      "type": "integer"
+                    },
+                    "offset": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "users",
+                    "limit",
+                    "offset"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "description": "Requires an active admin/owner account and verified MFA on this session. Mutations require session creation and MFA within five minutes. Role changes and changes to privileged users require owner authority."
+      }
+    },
+    "/api/v1/admin/users/{id}": {
+      "get": {
+        "summary": "Read account details, effective access, grants and sessions",
+        "tags": [
+          "Administration"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "developmentSessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "user": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "access": {
+                      "type": "object",
+                      "properties": {
+                        "allowed": {
+                          "type": "boolean"
+                        },
+                        "reason": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "tier": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "full_access",
+                                "orchestrator"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "features": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "expiresAt": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "revision": {
+                          "type": "integer"
+                        },
+                        "accountStatus": {
+                          "type": "string"
+                        },
+                        "serverTime": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      },
+                      "required": [
+                        "allowed",
+                        "reason",
+                        "tier",
+                        "features",
+                        "expiresAt",
+                        "revision",
+                        "accountStatus",
+                        "serverTime"
+                      ]
+                    },
+                    "sessions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "created_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "expires_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "device_id": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "uuid"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "platform": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "app_version": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "last_seen_at": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "recently_seen": {
+                            "type": [
+                              "boolean",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "created_at",
+                          "expires_at",
+                          "device_id",
+                          "platform",
+                          "app_version",
+                          "last_seen_at",
+                          "recently_seen"
+                        ]
+                      }
+                    },
+                    "grants": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  },
+                  "required": [
+                    "user",
+                    "access",
+                    "sessions",
+                    "grants"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "description": "Requires an active admin/owner account and verified MFA on this session. Mutations require session creation and MFA within five minutes. Role changes and changes to privileged users require owner authority."
+      }
+    },
+    "/api/v1/admin/users/{id}/approve": {
+      "post": {
+        "summary": "Approve a pending verified user and assign their tier",
+        "tags": [
+          "Administration"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "developmentSessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedRevision": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 500
+                  },
+                  "tier": {
+                    "type": "string",
+                    "enum": [
+                      "full_access",
+                      "orchestrator"
+                    ]
+                  },
+                  "expiresAt": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "expectedRevision",
+                  "reason",
+                  "tier"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "description": "Requires an active admin/owner account and verified MFA on this session. Mutations require session creation and MFA within five minutes. Role changes and changes to privileged users require owner authority."
+      }
+    },
+    "/api/v1/admin/users/{id}/access": {
+      "put": {
+        "summary": "Replace an administrative tier assignment",
+        "tags": [
+          "Administration"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "developmentSessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedRevision": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 500
+                  },
+                  "tier": {
+                    "type": "string",
+                    "enum": [
+                      "full_access",
+                      "orchestrator"
+                    ]
+                  },
+                  "expiresAt": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "expectedRevision",
+                  "reason",
+                  "tier"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "description": "Requires an active admin/owner account and verified MFA on this session. Mutations require session creation and MFA within five minutes. Role changes and changes to privileged users require owner authority."
+      }
+    },
+    "/api/v1/admin/users/{id}/status": {
+      "patch": {
+        "summary": "Suspend, reactivate, close, or reopen through allowed transitions",
+        "tags": [
+          "Administration"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "developmentSessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedRevision": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 500
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "pending",
+                      "active",
+                      "suspended",
+                      "closed"
+                    ]
+                  }
+                },
+                "required": [
+                  "expectedRevision",
+                  "reason",
+                  "status"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "description": "Requires an active admin/owner account and verified MFA on this session. Mutations require session creation and MFA within five minutes. Role changes and changes to privileged users require owner authority."
+      }
+    },
+    "/api/v1/admin/users/{id}/role": {
+      "patch": {
+        "summary": "Change role; revokes existing sessions",
+        "tags": [
+          "Administration"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "developmentSessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedRevision": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 500
+                  },
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "member",
+                      "admin",
+                      "owner"
+                    ]
+                  }
+                },
+                "required": [
+                  "expectedRevision",
+                  "reason",
+                  "role"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "description": "Requires an active admin/owner account and verified MFA on this session. Mutations require session creation and MFA within five minutes. Role changes and changes to privileged users require owner authority."
+      }
+    },
+    "/api/v1/admin/users/{id}/revoke-access": {
+      "post": {
+        "summary": "revoke-access",
+        "tags": [
+          "Administration"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "developmentSessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedRevision": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "expectedRevision",
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "description": "Requires an active admin/owner account and verified MFA on this session. Mutations require session creation and MFA within five minutes. Role changes and changes to privileged users require owner authority."
+      }
+    },
+    "/api/v1/admin/users/{id}/revoke-sessions": {
+      "post": {
+        "summary": "revoke-sessions",
+        "tags": [
+          "Administration"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "developmentSessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedRevision": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "expectedRevision",
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "description": "Requires an active admin/owner account and verified MFA on this session. Mutations require session creation and MFA within five minutes. Role changes and changes to privileged users require owner authority."
+      }
+    },
+    "/api/v1/admin/users/{id}/activity": {
+      "get": {
+        "summary": "Read server/client event provenance and daily summaries",
+        "tags": [
+          "Administration"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 25
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000,
+              "default": 0
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "developmentSessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "description": "Requires an active admin/owner account and verified MFA on this session. Mutations require session creation and MFA within five minutes. Role changes and changes to privileged users require owner authority."
+      }
+    },
+    "/api/v1/admin/overview": {
+      "get": {
+        "summary": "Count accounts, current tiers and recently connected users",
+        "tags": [
+          "Administration"
+        ],
+        "parameters": [],
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "developmentSessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "description": "Requires an active admin/owner account and verified MFA on this session. Mutations require session creation and MFA within five minutes. Role changes and changes to privileged users require owner authority."
+      }
+    },
+    "/api/v1/admin/audit": {
+      "get": {
+        "summary": "Read privileged change history",
+        "tags": [
+          "Administration"
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 25
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000,
+              "default": 0
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "developmentSessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "description": "Requires an active admin/owner account and verified MFA on this session. Mutations require session creation and MFA within five minutes. Role changes and changes to privileged users require owner authority."
+      }
+    },
+    "/api/auth/sign-up/email": {
+      "post": {
+        "summary": "Register a pending member; requires enabled signup and email delivery",
+        "tags": [
+          "Authentication"
+        ],
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "format": "email"
+                  },
+                  "password": {
+                    "type": "string",
+                    "minLength": 12,
+                    "maxLength": 128
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80
+                  },
+                  "callbackURL": {
+                    "type": "string",
+                    "format": "uri"
+                  }
+                },
+                "required": [
+                  "email",
+                  "password",
+                  "name"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/sign-in/email": {
+      "post": {
+        "summary": "Sign in, or receive a two-factor challenge",
+        "tags": [
+          "Authentication"
+        ],
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "format": "email"
+                  },
+                  "password": {
+                    "type": "string",
+                    "minLength": 12,
+                    "maxLength": 128
+                  }
+                },
+                "required": [
+                  "email",
+                  "password"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/get-session": {
+      "get": {
+        "summary": "Read/renew a session; token fields are stripped",
+        "tags": [
+          "Authentication"
+        ],
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/sign-out": {
+      "post": {
+        "summary": "End the current session",
+        "tags": [
+          "Authentication"
+        ],
+        "parameters": [],
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "developmentSessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/send-verification-email": {
+      "post": {
+        "summary": "Request verification email without account enumeration",
+        "tags": [
+          "Authentication"
+        ],
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "format": "email"
+                  }
+                },
+                "required": [
+                  "email"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/request-password-reset": {
+      "post": {
+        "summary": "Request a reset email without account enumeration",
+        "tags": [
+          "Authentication"
+        ],
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "format": "email"
+                  },
+                  "redirectTo": {
+                    "type": "string",
+                    "format": "uri"
+                  }
+                },
+                "required": [
+                  "email"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/reset-password": {
+      "post": {
+        "summary": "Use a single-use reset token; revokes prior sessions",
+        "tags": [
+          "Authentication"
+        ],
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "token": {
+                    "type": "string"
+                  },
+                  "newPassword": {
+                    "type": "string",
+                    "minLength": 12,
+                    "maxLength": 128
+                  }
+                },
+                "required": [
+                  "token",
+                  "newPassword"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/change-password": {
+      "post": {
+        "summary": "Change password after current-password verification",
+        "tags": [
+          "Authentication"
+        ],
+        "parameters": [],
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "developmentSessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "currentPassword": {
+                    "type": "string"
+                  },
+                  "newPassword": {
+                    "type": "string",
+                    "minLength": 12,
+                    "maxLength": 128
+                  },
+                  "revokeOtherSessions": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "currentPassword",
+                  "newPassword"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/two-factor/enable": {
+      "post": {
+        "summary": "Begin TOTP enrollment; returns secret and backup codes to this user",
+        "tags": [
+          "Authentication"
+        ],
+        "parameters": [],
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "developmentSessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "password": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "password"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/two-factor/verify-totp": {
+      "post": {
+        "summary": "Verify MFA challenge and establish session-bound factor evidence",
+        "tags": [
+          "Authentication"
+        ],
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "code"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/two-factor/verify-backup-code": {
+      "post": {
+        "summary": "Verify MFA challenge and establish session-bound factor evidence",
+        "tags": [
+          "Authentication"
+        ],
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "code"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/two-factor/disable": {
+      "post": {
+        "summary": "Disable MFA for a member account; privileged accounts cannot disable it",
+        "tags": [
+          "Authentication"
+        ],
+        "parameters": [],
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "developmentSessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "password": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "password"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/live": {
+      "get": {
+        "summary": "Process liveness",
+        "tags": [
+          "Accounts"
+        ],
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "summary": "Actual database and migration readiness",
+        "tags": [
+          "Accounts"
+        ],
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "See stable error code; authentication library errors retain their own 4xx codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Database unavailable or migration state differs from this release",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

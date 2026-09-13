@@ -94,6 +94,8 @@ export interface RelayState {
     settings: {
         hasKey: boolean;
         model: string;
+        fallbackModel?: string;
+        interpretationModel?: string;
         sttModel?: string;
         ttsModel?: string;
         voice?: string;
@@ -104,6 +106,7 @@ export interface RelayState {
         spendingLimit?: number;
         microphoneId?: string;
         handsFreeEnabled?: boolean;
+        spareAgent?: boolean;
     };
     sessions: RelaySession[];
     messages: RelayMessage[];

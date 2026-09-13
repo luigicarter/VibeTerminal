@@ -141,3 +141,38 @@ task-UI and two-process session-resume smokes. See the
 - `npm run smoke:frontend:cwd-conflicts` - Frontend smoke test for the shared-working-folder chip helpers and wiring.
 - `npm run smoke:frontend:tiled-resize` - Frontend smoke test for tiled-board resize geometry and no-overlap release behavior.
 - `npm run smoke:codex-discovery` - Compatibility alias for the backend smoke test.
+
+## Orchestrator measurement
+
+`npm run measure:orchestrator` (from `apps/desktop`) prints the Orchestrator's
+real-world numbers from the installed profile, so every phase of the
+[overhaul plan](orchestrator-overhaul-plan-2026-09-12.md) can be compared against
+the September 12 baseline in the
+[intent and repair audit](orchestrator-intent-and-repair-2026-09-12.md). It is
+read-only and offline: `orchestrator-conversation.json` and
+`logs/orchestrator-errors.jsonl` with its `.1` and `.2` rotations are opened for
+reading only, and no PTY, provider or model request is opened at all.
+
+Flags: `--profile <dir>` (default: the installed user data directory),
+`--last <n>` for the rolling non-completion window (default 50),
+`--since <ISO date>` and `--json`. From the repository root the same report runs
+as `node scripts/run-app.cjs desktop measure:orchestrator`; the root
+`package.json` carries no `measure:*` forward yet.
+
+Reported per window: requests in total and per UTC day; the status distribution;
+the non-completion rate (paused, failed and cancelled) overall and over the last
+N; likely repeats (consecutive requests at most five minutes apart sharing three
+or more words of five or more letters) and "did you put it in" verification asks;
+write rejections per day and per receipt status; model calls per request with the
+category split; time to first effect from the request start and from the end of
+speech; prompt tokens per interpretation; the top ten request error texts with
+session ids collapsed to `S` and digits to `N`; the top ten diagnostics error
+reasons; and the provider 4xx count split by whether `providerMessage` survived
+into the record. Percentiles are nearest-rank. The diagnostics log rotates and the
+conversation store does not, so the report always states how many requests the
+diagnostics actually cover.
+
+`node --test scripts/backend/orchestrator-measure.test.cjs` checks every metric
+against the hand-computed synthetic profile in
+`scripts/backend/fixtures/orchestrator-measure`, the `--json` shape, and the
+zero-coverage path when the diagnostics log is missing.

@@ -13,6 +13,8 @@ interface LaunchEntry {
 }
 
 interface LaunchCoordinatorOptions {
+  strictResume?: boolean;
+  concurrency?: number;
   platform?: string;
   create: (payload: TerminalLaunchPayload) => Promise<LaunchResult>;
   isCurrent: (session: AgentSession) => boolean;
@@ -28,6 +30,14 @@ interface LaunchCoordinatorOptions {
 export function createTerminalLaunchCoordinator(options: LaunchCoordinatorOptions) {
   const launches = new Map<string, LaunchEntry>();
   let active = true;
+  let inFlight = 0;
+  const waiters: (() => void)[] = [];
+  const concurrency = Math.max(1, options.concurrency || Number.MAX_SAFE_INTEGER);
+  async function acquire() {
+    if (inFlight < concurrency) inFlight++;
+    else await new Promise<void>(resolve => waiters.push(resolve));
+    return () => { const next = waiters.shift(); if (next) next(); else inFlight--; };
+  }
   const current = (entry: LaunchEntry) => active && !entry.cancelled &&
     launches.get(entry.session.id) === entry && options.isCurrent(entry.session);
 
@@ -48,6 +58,8 @@ export function createTerminalLaunchCoordinator(options: LaunchCoordinatorOption
         const entry: LaunchEntry = { session, cancelled: false };
         launches.set(session.id, entry);
         void Promise.resolve().then(async () => {
+          const release = await acquire();
+          try {
           if (!current(entry)) return;
           let launchSession = session;
           if (session.threadSelectionPending && (!session.threadRef?.id || session.nextLaunchMode !== 'resume' || !options.confirmThread)) {
@@ -73,6 +85,10 @@ export function createTerminalLaunchCoordinator(options: LaunchCoordinatorOption
               return;
             }
             if (confirmation?.status === "missing") {
+              if (options.strictResume) {
+                options.onError(session, 'Saved chat history is missing. Its entry has been kept; choose New chat explicitly to start another conversation.');
+                return;
+              }
               launchSession = {
                 ...session, nextLaunchMode: "new",
                 threadSelectionPending: undefined,
@@ -100,6 +116,7 @@ export function createTerminalLaunchCoordinator(options: LaunchCoordinatorOption
           if (result === false || (typeof result === "object" && result.ok === false)) {
             options.onError(session, typeof result === "object" && result.error || "Terminal could not be started. Use Restart to retry.");
           }
+          } finally { release(); }
         }).catch(error => {
           if (current(entry)) options.onError(session, error instanceof Error ? error.message : String(error));
         });

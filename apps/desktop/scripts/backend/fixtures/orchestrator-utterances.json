@@ -1,0 +1,2562 @@
+[
+ {
+  "n": 1,
+  "at": "2026-09-07T03:45:28.152Z",
+  "text": "Can you prompt the Vibe terminal codex terminal to do a deep dive and review on what was the last commit?",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "provider",
+  "provider": "codex",
+  "notes": "any Codex pane in the project, idle preferred",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "provider",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": true,
+   "reason": "project, provider and a complete task in one clean sentence",
+   "compilableInWorkspace": true
+  }
+ },
+ {
+  "n": 2,
+  "at": "2026-09-07T03:45:52.950Z",
+  "text": "What was the last prompt you did?",
+  "verb": "verify",
+  "project": null,
+  "selector": "last_action",
+  "provider": null,
+  "notes": "what was the last prompt",
+  "expected": {
+   "verb": "verify",
+   "project": null,
+   "selector": "last_action",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "memory question about Lina, no command frame",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 3,
+  "at": "2026-09-07T03:46:10.345Z",
+  "text": "did you enter that prompt?",
+  "verb": "verify",
+  "project": null,
+  "selector": "last_action",
+  "provider": null,
+  "notes": "",
+  "expected": {
+   "verb": "verify",
+   "project": null,
+   "selector": "last_action",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "memory question about Lina, no command frame",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 4,
+  "at": "2026-09-07T03:46:42.375Z",
+  "text": "Have I entered our prompt into the codex terminal? and to tell it to review the last commit.",
+  "verb": "verify",
+  "project": null,
+  "selector": "last_action",
+  "provider": "codex",
+  "notes": "verify then repeat the send if not done",
+  "expected": {
+   "verb": "verify",
+   "project": null,
+   "selector": "last_action",
+   "provider": "codex",
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "verify then conditionally repeat a send",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 5,
+  "at": "2026-09-07T20:13:37.289Z",
+  "text": "Can you text the Vibe Terminal codec session to do a review of the commits. Thank you.",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "provider",
+  "provider": "codex",
+  "notes": "\"codec session\" = Codex",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "provider",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "garbled verb (\"text the ... session\")",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 6,
+  "at": "2026-09-07T20:14:17.955Z",
+  "text": "can you stop that last terminal you worked on?",
+  "verb": "interrupt",
+  "project": null,
+  "selector": "last_target",
+  "provider": null,
+  "notes": "stop the last pane Lina worked on",
+  "expected": {
+   "verb": "interrupt",
+   "project": null,
+   "selector": "last_target",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "stop a pane",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 7,
+  "at": "2026-09-07T20:14:41.024Z",
+  "text": "Can you close that terminal?",
+  "verb": "close",
+  "project": null,
+  "selector": "last_target",
+  "provider": null,
+  "notes": "",
+  "expected": {
+   "verb": "close",
+   "project": null,
+   "selector": "last_target",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "close a pane",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 8,
+  "at": "2026-09-07T20:15:34.605Z",
+  "text": "Can you look for a conversation I had in the Terranium model dev cloud code session? Okay.",
+  "verb": "history",
+  "project": "Ternary model dev",
+  "selector": "provider",
+  "provider": "claude",
+  "notes": "search saved conversations",
+  "expected": {
+   "verb": "history",
+   "project": "Ternary model dev",
+   "selector": "provider",
+   "provider": "claude",
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "search saved conversations",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 9,
+  "at": "2026-09-07T20:16:54.829Z",
+  "text": "Hey, but... Can you resume the mix to one... conversation.",
+  "verb": "resume",
+  "project": null,
+  "selector": "title",
+  "provider": null,
+  "notes": "garbled title",
+  "expected": {
+   "verb": "resume",
+   "project": null,
+   "selector": "title",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "garbled title, resume",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 10,
+  "at": "2026-09-07T20:17:31.008Z",
+  "text": "Can you resume the mix to one last attempt conversation?",
+  "verb": "resume",
+  "project": null,
+  "selector": "title",
+  "provider": null,
+  "notes": "",
+  "expected": {
+   "verb": "resume",
+   "project": null,
+   "selector": "title",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "resume a saved conversation",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 11,
+  "at": "2026-09-07T21:30:54.056Z",
+  "text": "open a open a cloud code terminal and lean a web app.",
+  "verb": "open",
+  "project": "lina web app",
+  "selector": "none",
+  "provider": "claude",
+  "notes": "\"cloud code\" = Claude Code",
+  "expected": {
+   "verb": "open",
+   "project": "lina web app",
+   "selector": "none",
+   "provider": "claude",
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "stuttered head (\"open a open a\")",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 12,
+  "at": "2026-09-07T21:31:34.825Z",
+  "text": "voices, voices, hey, vibe. Can you prompt it and ask it if the application is still paused?",
+  "verb": "follow_up",
+  "project": null,
+  "selector": "last_target",
+  "provider": null,
+  "notes": "\"prompt it\" refers to the pane just opened",
+  "expected": {
+   "verb": "follow_up",
+   "project": null,
+   "selector": "last_target",
+   "provider": null,
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "anaphoric \"prompt it\"",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 13,
+  "at": "2026-09-07T21:31:58.296Z",
+  "text": "the Cloud Code Terminal in the Lenaweb app.",
+  "verb": "fragment",
+  "project": "lina web app",
+  "selector": "provider",
+  "provider": "claude",
+  "notes": "continuation of 12",
+  "expected": {
+   "verb": "fragment",
+   "project": "lina web app",
+   "selector": "provider",
+   "provider": "claude",
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "sentence fragment continuing the previous turn",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 14,
+  "at": "2026-09-07T21:32:46.325Z",
+  "text": "should be able to hear me. - Hey, vibe. Can you monitor the cloud code terminal to tell me what's the response after it's done?",
+  "verb": "watch",
+  "project": null,
+  "selector": "provider",
+  "provider": "claude",
+  "notes": "report the response when done",
+  "expected": {
+   "verb": "watch",
+   "project": null,
+   "selector": "provider",
+   "provider": "claude",
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "watch and report later",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 15,
+  "at": "2026-09-07T21:34:14.389Z",
+  "text": "There's a terminal that needs me. Which one is it?",
+  "verb": "status",
+  "project": null,
+  "selector": "needs_me",
+  "provider": null,
+  "notes": "which pane needs me",
+  "expected": {
+   "verb": "status",
+   "project": null,
+   "selector": "needs_me",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "which pane needs me",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 16,
+  "at": "2026-09-07T21:34:46.830Z",
+  "text": "Is that application stopped paused and what would be needed to put it back online if I wanted to do that?",
+  "verb": "results",
+  "project": null,
+  "selector": "last_target",
+  "provider": null,
+  "notes": "question about what the pane reported",
+  "expected": {
+   "verb": "results",
+   "project": null,
+   "selector": "last_target",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "anaphoric question about a pane result",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 17,
+  "at": "2026-09-07T21:35:31.633Z",
+  "text": "it. Have a vibe. Are you ready to prompt one of the codex terminals in Vibe terminal project?",
+  "verb": "ask",
+  "project": "vibeTerminal",
+  "selector": "provider",
+  "provider": "codex",
+  "notes": "meta readiness question",
+  "expected": {
+   "verb": "ask",
+   "project": "vibeTerminal",
+   "selector": "provider",
+   "provider": "codex",
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "meta readiness question",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 18,
+  "at": "2026-09-07T21:36:22.374Z",
+  "text": "There's a few problems. First problem is every time I talk, I say, hey, vibe, and I say something, the model repeats what I said. That should not be the case. Second problem is that when I tell it to open a terminal, the terminal actually only opens and runs the command to open the terminal once I actually go in the pane. There's a problem in the sequence of terminal being opened remotely from the orchestrator, so there's a disconnect there. please have one of the codex terminals investigate this and come up with a solution.",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "provider",
+  "provider": "codex",
+  "notes": "long problem description becomes the prompt",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "provider",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "task is the preceding problem description, not the trailing clause",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 19,
+  "at": "2026-09-07T21:37:06.457Z",
+  "text": "Okay. Hey, Vibe. There's another terminal in Vibe terminal project. And I want you to prompt it there, are you ready?",
+  "verb": "ask",
+  "project": "vibeTerminal",
+  "selector": "idle",
+  "provider": null,
+  "notes": "meta: another pane, are you ready",
+  "expected": {
+   "verb": "ask",
+   "project": "vibeTerminal",
+   "selector": "idle",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "meta readiness question",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 20,
+  "at": "2026-09-07T21:38:04.850Z",
+  "text": "I want I want you to prompt that terminal. to investigate another issue I have with the orchestrator. and is that i want to be able to queue um look up so if i say hey prompted with this and then later and tell me when it's done or if any issues happens and i want to be able to queue low cups and basically... make sure the model can tell me or the orchestra that can tell me what something is done. from my command. Amen.",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "last_target",
+  "provider": null,
+  "notes": "\"that terminal\" from 19",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "last_target",
+   "provider": null,
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "anaphoric \"that terminal\", garbled task",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 21,
+  "at": "2026-09-07T21:39:00.696Z",
+  "text": "You're talking. Hey Vibe! There's a terminal that needs me. Which one is it?",
+  "verb": "status",
+  "project": null,
+  "selector": "needs_me",
+  "provider": null,
+  "notes": "",
+  "expected": {
+   "verb": "status",
+   "project": null,
+   "selector": "needs_me",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "which pane needs me",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 22,
+  "at": "2026-09-07T21:40:03.075Z",
+  "text": "Can you open another terminal in Vibe Terminal project to investigate the statuses? Because the Cloud Code Terminal and the Lina app It says it needs me and it's indicated blocked on the sidebar. But in reality, it doesn't need any questions answered or anything. There's a problem with the cloud code status monitoring. of within the Vype terminal. Can you make a codex terminal within Vype terminal project to investigate that?",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "new",
+  "provider": "codex",
+  "notes": "explicitly a new Codex pane",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "new",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "anaphoric \"that\", several sentences of preamble",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 23,
+  "at": "2026-09-07T21:40:50.448Z",
+  "text": "Make sure you put in that prompt. You didn't put in that prompt.",
+  "verb": "verify",
+  "project": null,
+  "selector": "last_action",
+  "provider": null,
+  "notes": "repeat if missing",
+  "expected": {
+   "verb": "verify",
+   "project": null,
+   "selector": "last_action",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "correction with a conditional repeat",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 24,
+  "at": "2026-09-07T21:43:53.002Z",
+  "text": "there's a terminal that's not doing anything in the terminal project can you see it",
+  "verb": "status",
+  "project": "vibeTerminal",
+  "selector": "idle",
+  "provider": null,
+  "notes": "\"can you see it\"",
+  "expected": {
+   "verb": "status",
+   "project": "vibeTerminal",
+   "selector": "idle",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "which pane is idle",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 25,
+  "at": "2026-09-07T21:45:03.945Z",
+  "text": "Can you have that terminal and investigate how I can get the hate vibe awake key or wake word to be better, better detected, and also investigate the conversation loop between me and and Vibe Terminal and also Um... Um, just overall fix that stuff. Like, I'm tired of this robotic back and forth, and I want this to be more agentic.",
+  "verb": "start",
+  "project": null,
+  "selector": "last_target",
+  "provider": null,
+  "notes": "\"that terminal\" from 24",
+  "expected": {
+   "verb": "start",
+   "project": null,
+   "selector": "last_target",
+   "provider": null,
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "anaphoric \"that terminal\"",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 26,
+  "at": "2026-09-07T21:45:53.924Z",
+  "text": "Hey, bye. There's a terminal that's done. Can you see that terminal?",
+  "verb": "status",
+  "project": null,
+  "selector": "done",
+  "provider": null,
+  "notes": "",
+  "expected": {
+   "verb": "status",
+   "project": null,
+   "selector": "done",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "which pane is done",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 27,
+  "at": "2026-09-07T21:46:23.014Z",
+  "text": "Oh, hey, Vibe. What is that investigation results or the results from the investigation?",
+  "verb": "results",
+  "project": null,
+  "selector": "done",
+  "provider": null,
+  "notes": "",
+  "expected": {
+   "verb": "results",
+   "project": null,
+   "selector": "done",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "anaphoric results question",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 28,
+  "at": "2026-09-07T21:47:24.490Z",
+  "text": "Yes. on both terminals that are currently done. Please push them to push the fixes. tested. and basically resolved both the issues.",
+  "verb": "follow_up",
+  "project": null,
+  "selector": "done",
+  "provider": null,
+  "notes": "both done panes: push the fixes",
+  "expected": {
+   "verb": "follow_up",
+   "project": null,
+   "selector": "done",
+   "provider": null,
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "two panes at once",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 29,
+  "at": "2026-09-07T21:48:17.426Z",
+  "text": "Are you able to go in the Cloud Code terminal and lean on a web app and change the model to Opus 5?",
+  "verb": "inspect",
+  "project": "lina web app",
+  "selector": "provider",
+  "provider": "claude",
+  "notes": "native command: change model to Opus 5",
+  "expected": {
+   "verb": "inspect",
+   "project": "lina web app",
+   "selector": "provider",
+   "provider": "claude",
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "native menu navigation inside a pane",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 30,
+  "at": "2026-09-07T22:00:06.349Z",
+  "text": "There's a terminal that's done. What's the result?",
+  "verb": "results",
+  "project": null,
+  "selector": "done",
+  "provider": null,
+  "notes": "",
+  "expected": {
+   "verb": "results",
+   "project": null,
+   "selector": "done",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "results of an unnamed pane",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 31,
+  "at": "2026-09-07T22:02:46.693Z",
+  "text": "There is a terminal that's another terminal that's done or maybe two. Can you tell me what was going on with her?",
+  "verb": "results",
+  "project": null,
+  "selector": "done",
+  "provider": null,
+  "notes": "one or two done panes",
+  "expected": {
+   "verb": "results",
+   "project": null,
+   "selector": "done",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "one or two unnamed panes",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 32,
+  "at": "2026-09-07T22:04:00.160Z",
+  "text": "for the one that q the the fix the q issue i won't uh prompt it and ask it can i tell vibe terminal to tell me when something is done and what it would include that uh Progress check? And when it's ready or the status changes, tell me what's been done.",
+  "verb": "follow_up",
+  "project": null,
+  "selector": "topic",
+  "provider": null,
+  "notes": "garbled; \"the q fix\" pane",
+  "expected": {
+   "verb": "follow_up",
+   "project": null,
+   "selector": "topic",
+   "provider": null,
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "garbled, anaphoric",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 33,
+  "at": "2026-09-07T22:30:41.647Z",
+  "text": "Hey, bye. I have a codex terminal that's not doing anything. Can you prompt it to review everything that's been done in the repo and push the production?",
+  "verb": "start",
+  "project": null,
+  "selector": "idle",
+  "provider": "codex",
+  "notes": "project implied by context",
+  "expected": {
+   "verb": "start",
+   "project": null,
+   "selector": "idle",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "cross-sentence anaphora (\"prompt it\")",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 34,
+  "at": "2026-09-07T22:31:43.333Z",
+  "text": "as Hey Vibe! Can you can't you clear that text or not?",
+  "verb": "ask",
+  "project": null,
+  "selector": null,
+  "provider": null,
+  "notes": "meta: can you clear that text",
+  "expected": {
+   "verb": "ask",
+   "project": null,
+   "selector": null,
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "meta capability question",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 35,
+  "at": "2026-09-07T22:32:30.486Z",
+  "text": "Yes, but you've literally exited out of the terminal. That's a problem. can you take what i'm asking you Put it to another codex terminal and and get it to review the issues you're experiencing right now and tell it to investigate the current issues in the orchestrator chat.",
+  "verb": "start",
+  "project": null,
+  "selector": "idle",
+  "provider": "codex",
+  "notes": "\"another codex terminal\"",
+  "expected": {
+   "verb": "start",
+   "project": null,
+   "selector": "idle",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "correction plus anaphora",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 36,
+  "at": "2026-09-07T22:35:25.324Z",
+  "text": "I'm going to figure out something for the Hive Vibes thing.",
+  "verb": "noise",
+  "project": null,
+  "selector": null,
+  "provider": null,
+  "notes": "",
+  "expected": {
+   "verb": "noise",
+   "project": null,
+   "selector": null,
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "not a request",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 37,
+  "at": "2026-09-07T22:45:13.366Z",
+  "text": "Let the Codex terminal that's currently working in Vibe terminal project that I, uh, when I asked you to clear the terminal, you literally quit at the codex terminal. which basically closed the codex session. Please let that terminal know that while it's currently working. That was one of the issues I reported. to continue its work that it's currently doing.",
+  "verb": "follow_up",
+  "project": "vibeTerminal",
+  "selector": "working",
+  "provider": "codex",
+  "notes": "the Codex pane currently working; continue",
+  "expected": {
+   "verb": "follow_up",
+   "project": "vibeTerminal",
+   "selector": "working",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "pane described as currently working",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 38,
+  "at": "2026-09-07T22:46:18.063Z",
+  "text": "Terminal. You see the issue you just had right now, where you couldn't prompt a terminal while it's currently working. add that problem as well and you should be able to do that so let love the codex terminal know that it should fix that issue too, where you should be able to to prompt a terminal even though it's working.",
+  "verb": "follow_up",
+  "project": null,
+  "selector": "last_target",
+  "provider": "codex",
+  "notes": "add to the same pane",
+  "expected": {
+   "verb": "follow_up",
+   "project": null,
+   "selector": "last_target",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "anaphoric addition to the last pane",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 39,
+  "at": "2026-09-07T22:47:52.919Z",
+  "text": "can you check the other codex terminals and let me know how much usage i have just do slash status and the usage will come up. Let me know how much I have left for the week.",
+  "verb": "inspect",
+  "project": null,
+  "selector": "all",
+  "provider": "codex",
+  "notes": "/status usage on the other Codex panes",
+  "expected": {
+   "verb": "inspect",
+   "project": null,
+   "selector": "all",
+   "provider": "codex",
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "native /status on several panes",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 40,
+  "at": "2026-09-07T22:50:23.697Z",
+  "text": "What are your acute... I promise.",
+  "verb": "noise",
+  "project": null,
+  "selector": null,
+  "provider": null,
+  "notes": "garbled 41",
+  "expected": {
+   "verb": "noise",
+   "project": null,
+   "selector": null,
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "garbled, not a request",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 41,
+  "at": "2026-09-07T22:50:35.139Z",
+  "text": "What are your queued prompts?",
+  "verb": "ask",
+  "project": null,
+  "selector": null,
+  "provider": null,
+  "notes": "what are your queued prompts",
+  "expected": {
+   "verb": "ask",
+   "project": null,
+   "selector": null,
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "question about Lina's queue",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 42,
+  "at": "2026-09-07T23:03:25.481Z",
+  "text": "Thank you. Hey, what was the last terminal that was done?",
+  "verb": "status",
+  "project": null,
+  "selector": "done",
+  "provider": null,
+  "notes": "last done pane",
+  "expected": {
+   "verb": "status",
+   "project": null,
+   "selector": "done",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "which pane finished last",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 43,
+  "at": "2026-09-07T23:04:04.809Z",
+  "text": "*sad* Tell me what it did and what was the result. And you had some queued prompts. Can you put that all one to? Together... The terminal?",
+  "verb": "results",
+  "project": null,
+  "selector": "done",
+  "provider": null,
+  "notes": "plus queued prompts",
+  "expected": {
+   "verb": "results",
+   "project": null,
+   "selector": "done",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "results plus queued prompts, garbled",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 44,
+  "at": "2026-09-07T23:04:35.175Z",
+  "text": "Thank you. Thank you. The last terminal that was done.",
+  "verb": "status",
+  "project": null,
+  "selector": "done",
+  "provider": null,
+  "notes": "fragment of 42",
+  "expected": {
+   "verb": "status",
+   "project": null,
+   "selector": "done",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "fragment of the previous question",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 45,
+  "at": "2026-09-07T23:05:37.578Z",
+  "text": "Thank you. put in another codec terminal within Vibe terminal, to identify a bug when the hands free is unavailable or when the voice um detection glitches i'm unable to use hey vibe as a wig for a phrase anymore",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "new",
+  "provider": "codex",
+  "notes": "\"put in another codex terminal\"",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "new",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": true,
+   "reason": "put-in idiom with provider, project and a complete task",
+   "compilableInWorkspace": true
+  }
+ },
+ {
+  "n": 46,
+  "at": "2026-09-07T23:06:27.844Z",
+  "text": "Thank you. Where did you put that... new issue that I have reported.",
+  "verb": "verify",
+  "project": null,
+  "selector": "last_action",
+  "provider": null,
+  "notes": "where did you put that issue",
+  "expected": {
+   "verb": "verify",
+   "project": null,
+   "selector": "last_action",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "memory question about Lina",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 47,
+  "at": "2026-09-07T23:06:52.620Z",
+  "text": "Bye. Don't put it in a new terminal. Just put it in a terminal that's not currently working.",
+  "verb": "redirect",
+  "project": null,
+  "selector": "idle",
+  "provider": null,
+  "notes": "not a new pane; an idle one",
+  "expected": {
+   "verb": "redirect",
+   "project": null,
+   "selector": "idle",
+   "provider": null,
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "correction of the previous request",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 48,
+  "at": "2026-09-07T23:07:28.928Z",
+  "text": "And another terminal that's not working. Can you put on the issue of speed? It takes a long time for the orchestrator to actually do anything.",
+  "verb": "start",
+  "project": null,
+  "selector": "idle",
+  "provider": null,
+  "notes": "another idle pane",
+  "expected": {
+   "verb": "start",
+   "project": null,
+   "selector": "idle",
+   "provider": null,
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "garbled (\"put on the issue of speed\")",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 49,
+  "at": "2026-09-08T01:12:50.175Z",
+  "text": "I'm going to try something right now. Hey, Vibe. Can you add one of the Vibe Terminal Codex terminals? that the bubbles in the orchestrator page should be able, should have the project they're working in because now it just says Vype terminal. or cloud code and stuff like that. I need to like, I want it to just be more descriptive of where the bubbles belong, which project do they belong to? Thank you.",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "provider",
+  "provider": "codex",
+  "notes": "\"add one of the codex terminals\" = prompt one",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "provider",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "garbled (\"add one of the ... terminals\")",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 50,
+  "at": "2026-09-08T01:13:39.030Z",
+  "text": "Did you send out a prompt or what's going on? Thank you.",
+  "verb": "verify",
+  "project": null,
+  "selector": "last_action",
+  "provider": null,
+  "notes": "",
+  "expected": {
+   "verb": "verify",
+   "project": null,
+   "selector": "last_action",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "verify question",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 51,
+  "at": "2026-09-08T01:14:07.293Z",
+  "text": "That's not true, though. The problem is just in the terminal, but it hasn't been entered.",
+  "verb": "verify",
+  "project": null,
+  "selector": "last_action",
+  "provider": null,
+  "notes": "dispute: not entered",
+  "expected": {
+   "verb": "verify",
+   "project": null,
+   "selector": "last_action",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "dispute about what happened",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 52,
+  "at": "2026-09-08T01:14:48.646Z",
+  "text": "You use another terminal from vibe terminal project. I to look at the current conversation I have, I had with the orchestrator.",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "idle",
+  "provider": null,
+  "notes": "\"another terminal\"",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "idle",
+   "provider": null,
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "garbled second sentence",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 53,
+  "at": "2026-09-08T01:15:25.956Z",
+  "text": "From the short project bubble name, can you tell me when that's done and tell me the result of the codec terminal? When that's done.",
+  "verb": "watch",
+  "project": null,
+  "selector": "title",
+  "provider": "codex",
+  "notes": "by bubble name; report result when done",
+  "expected": {
+   "verb": "watch",
+   "project": null,
+   "selector": "title",
+   "provider": "codex",
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "watch by bubble name and report",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 54,
+  "at": "2026-09-08T01:16:10.340Z",
+  "text": "Can you open a cloud code instance or terminal and Lina Mobile - Thank you.",
+  "verb": "open",
+  "project": "lina mobile",
+  "selector": "none",
+  "provider": "claude",
+  "notes": "",
+  "expected": {
+   "verb": "open",
+   "project": "lina mobile",
+   "selector": "none",
+   "provider": "claude",
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "\"instance or terminal\", trailing filler",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 55,
+  "at": "2026-09-08T01:17:04.612Z",
+  "text": "I'm going to try this, OK? Hey, Vibe. Never mind.",
+  "verb": "cancel",
+  "project": null,
+  "selector": null,
+  "provider": null,
+  "notes": "",
+  "expected": {
+   "verb": "cancel",
+   "project": null,
+   "selector": null,
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "cancellation",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 56,
+  "at": "2026-09-08T01:17:54.018Z",
+  "text": "Hey, vote. Thank you. you Can you are you able to cue prompts or are you able to tell me when things are done? Is that part of your ability?",
+  "verb": "ask",
+  "project": null,
+  "selector": null,
+  "provider": null,
+  "notes": "capability question",
+  "expected": {
+   "verb": "ask",
+   "project": null,
+   "selector": null,
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "meta capability question",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 57,
+  "at": "2026-09-08T01:18:29.141Z",
+  "text": "Thank you. Are you able to open projects and put them on the side panel?",
+  "verb": "ask",
+  "project": null,
+  "selector": null,
+  "provider": null,
+  "notes": "capability question",
+  "expected": {
+   "verb": "ask",
+   "project": null,
+   "selector": null,
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "meta capability question",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 58,
+  "at": "2026-09-08T01:19:58.951Z",
+  "text": "can you ask an empty terminal and vibe terminal project What would be a better name? for the wake freeze or is there a more organic way to get that compatibility or capability feel more organic.",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "empty",
+  "provider": null,
+  "notes": "\"an empty terminal\"",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "empty",
+   "provider": null,
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "no linking word before a two-sentence task",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 59,
+  "at": "2026-09-08T01:23:25.190Z",
+  "text": "Can you use one of the empty Vibe terminal codex terminals to investigate? why the orchestrator is reading out loud the, the, the result of the agent i would like it to just summarize some of the things give me a tldr Yeah. Yeah, prompt with that. *laughter*",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "empty",
+  "provider": "codex",
+  "notes": "",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "empty",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "trailing meta (\"prompt with that\")",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 60,
+  "at": "2026-09-08T01:25:30.862Z",
+  "text": "There is currently an empty codex terminal within Vibe terminal project. Please investigate. which type of agents should I use? If I should, I continue using Gemini 3.8 flash, or there's a cheaper, less intelligent model that can use that's very fast and reliable. for the orchestrator.",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "empty",
+  "provider": "codex",
+  "notes": "",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "empty",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "existence statement plus a question as the task",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 61,
+  "at": "2026-09-08T01:27:11.779Z",
+  "text": "Yeah. There is a codex terminal right now that's currently not doing anything in the Vibe terminal project. What I'd like you to do is prompted and to investigate the and to do a deep dive on the harness. So the orchestrator should be able to determine which terminal to actually assign which prompt. And if it needs to open one, then it needs to open one, or it can continue to prompt the same one that's already been working. There needs to be a metal ground and energetic work flow i don't want to always be telling it to to you to prompt a certain terminal and stuff like that so i want people to tell it to do the thing and it does the thing in the appropriate terminal or creates a new terminal because we need to be efficient on the conversations and keep agents on specific tasks.",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "idle",
+  "provider": "codex",
+  "notes": "\"not doing anything\"",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "idle",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "long, garbled speech",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 62,
+  "at": "2026-09-08T01:37:03.140Z",
+  "text": "Can you open a new Codex terminal and Vibe terminal project?",
+  "verb": "open",
+  "project": "vibeTerminal",
+  "selector": "none",
+  "provider": "codex",
+  "notes": "",
+  "expected": {
+   "verb": "open",
+   "project": "vibeTerminal",
+   "selector": "none",
+   "provider": "codex",
+   "promptPresent": false,
+   "compilable": true,
+   "reason": "open, provider and project, nothing else in the sentence",
+   "compilableInWorkspace": true
+  }
+ },
+ {
+  "n": 63,
+  "at": "2026-09-08T01:37:41.753Z",
+  "text": "that new terminal that you just opened. Can you prompt it to fix a bug that when I tell the orchestrator to open a terminal, It replies with a random C drive type of path. It's really weird.",
+  "verb": "start",
+  "project": null,
+  "selector": "just_opened",
+  "provider": null,
+  "notes": "\"that new terminal you just opened\"",
+  "expected": {
+   "verb": "start",
+   "project": null,
+   "selector": "just_opened",
+   "provider": null,
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "anaphoric \"that new terminal you just opened\"",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 64,
+  "at": "2026-09-08T01:38:41.098Z",
+  "text": "You didn't paste that... That prompt.",
+  "verb": "verify",
+  "project": null,
+  "selector": "last_action",
+  "provider": null,
+  "notes": "",
+  "expected": {
+   "verb": "verify",
+   "project": null,
+   "selector": "last_action",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "correction",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 65,
+  "at": "2026-09-08T01:43:07.490Z",
+  "text": "Hey, bye. Never mind.",
+  "verb": "cancel",
+  "project": null,
+  "selector": null,
+  "provider": null,
+  "notes": "",
+  "expected": {
+   "verb": "cancel",
+   "project": null,
+   "selector": null,
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "cancellation",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 66,
+  "at": "2026-09-08T01:50:21.422Z",
+  "text": "What did the review recent orchestrator messages terminal say? come back with.",
+  "verb": "results",
+  "project": null,
+  "selector": "title",
+  "provider": null,
+  "notes": "pane titled \"review recent orchestrator messages\"",
+  "expected": {
+   "verb": "results",
+   "project": null,
+   "selector": "title",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "garbled results question",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 67,
+  "at": "2026-09-08T01:55:14.291Z",
+  "text": "Can you tell it to fix those issues?",
+  "verb": "follow_up",
+  "project": null,
+  "selector": "last_target",
+  "provider": null,
+  "notes": "\"tell it\"",
+  "expected": {
+   "verb": "follow_up",
+   "project": null,
+   "selector": "last_target",
+   "provider": null,
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "anaphoric \"tell it\"",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 68,
+  "at": "2026-09-08T01:56:43.148Z",
+  "text": "Can you fail to tell that terminal to actually fix that recent issue? Can you tell that to fix that please?",
+  "verb": "follow_up",
+  "project": null,
+  "selector": "last_target",
+  "provider": null,
+  "notes": "",
+  "expected": {
+   "verb": "follow_up",
+   "project": null,
+   "selector": "last_target",
+   "provider": null,
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "garbled, anaphoric",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 69,
+  "at": "2026-09-08T01:58:11.334Z",
+  "text": "So you did not submit that last prompt, but I want you to change that. that prompt, the very last one you did. And the change is not what you said. It's just that I don't want... the okashore to repeat that C drive path when it creates a terminal. *sniff*",
+  "verb": "redirect",
+  "project": null,
+  "selector": "last_action",
+  "provider": null,
+  "notes": "change the last prompt then send",
+  "expected": {
+   "verb": "redirect",
+   "project": null,
+   "selector": "last_action",
+   "provider": null,
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "change the last prompt then send",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 70,
+  "at": "2026-09-08T01:59:37.219Z",
+  "text": "Can you open another codex terminal? to see if we can change the wake phrase and if adding making the word phrase a name is better than having it behave vibe. just because, hey, vibe all the time is annoying, versus if I say Lena or Michael or George, I think it's easier for the voice detector to pick that up. and might be more organic for users.",
+  "verb": "start",
+  "project": null,
+  "selector": "new",
+  "provider": "codex",
+  "notes": "\"open another codex terminal to ...\"",
+  "expected": {
+   "verb": "start",
+   "project": null,
+   "selector": "new",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "open plus \"to <task>\", provider named, project only from the addressed workspace",
+   "compilableInWorkspace": true
+  }
+ },
+ {
+  "n": 71,
+  "at": "2026-09-08T02:00:15.112Z",
+  "text": "You didn't put in that prompt. Thank you.",
+  "verb": "verify",
+  "project": null,
+  "selector": "last_action",
+  "provider": null,
+  "notes": "",
+  "expected": {
+   "verb": "verify",
+   "project": null,
+   "selector": "last_action",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "correction",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 72,
+  "at": "2026-09-08T02:27:52.712Z",
+  "text": "Can you tell me what's going on in the Vibe terminals and tell me the progress?",
+  "verb": "status",
+  "project": "vibeTerminal",
+  "selector": "all",
+  "provider": null,
+  "notes": "progress of all panes",
+  "expected": {
+   "verb": "status",
+   "project": "vibeTerminal",
+   "selector": "all",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "progress of every pane",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 73,
+  "at": "2026-09-08T02:54:04.001Z",
+  "text": "Can you open? five terminals and Lena web app project.",
+  "verb": "open",
+  "project": "lina web app",
+  "selector": "none",
+  "provider": null,
+  "notes": "count 5",
+  "expected": {
+   "verb": "open",
+   "project": "lina web app",
+   "selector": "none",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "garbled head (\"Can you open? five terminals\")",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 74,
+  "at": "2026-09-08T02:55:23.227Z",
+  "text": "Can you have one of the codex terminals in Vibe Terminal Project investigate the status of awaiting activity? Um... I don't understand what that means, and I think it's been misrepresented. Analyze those terminals and prompt a new codex terminal within that project to investigate that problem.",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "new",
+  "provider": "codex",
+  "notes": "\"prompt a new codex terminal\"",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "new",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "two commands in one request",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 75,
+  "at": "2026-09-08T02:57:17.188Z",
+  "text": "Look at my last request, why didn't you do it?",
+  "verb": "verify",
+  "project": null,
+  "selector": "last_action",
+  "provider": null,
+  "notes": "why didn't you do it",
+  "expected": {
+   "verb": "verify",
+   "project": null,
+   "selector": "last_action",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "question about a previous request",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 76,
+  "at": "2026-09-08T02:57:39.182Z",
+  "text": "Do that.",
+  "verb": "redo",
+  "project": null,
+  "selector": "last_action",
+  "provider": null,
+  "notes": "\"Do that.\"",
+  "expected": {
+   "verb": "redo",
+   "project": null,
+   "selector": "last_action",
+   "provider": null,
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "\"Do that.\"",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 77,
+  "at": "2026-09-08T20:55:58.200Z",
+  "text": "Bye. hey Open Codex Terminal in Vibe Terminal project.",
+  "verb": "open",
+  "project": "vibeTerminal",
+  "selector": "none",
+  "provider": "codex",
+  "notes": "ambiguous with the Open Codex launcher",
+  "expected": {
+   "verb": "open",
+   "project": "vibeTerminal",
+   "selector": "none",
+   "provider": "codex",
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "ambiguous with the Open Codex launcher name",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 78,
+  "at": "2026-09-09T01:05:06.251Z",
+  "text": ". Hey, bye. prompt a codex terminal that is currently empty in Vibe Terminal Project because when I give a command to the orchestrator, and it actually does the entire command like prompt the terminal or or I give it an instruction once it completes it. Instead of the orchestrator, coming back to me and saying, explain to you what they did I want to hear just a small little bing sound or a ding sound and the okushita says done.",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "empty",
+  "provider": "codex",
+  "notes": "",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "empty",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "task attached by \"because\"",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 79,
+  "at": "2026-09-09T01:06:22.574Z",
+  "text": "you Hey, vibe. - Yeah. I want you to create a new codex terminal in Vibre terminal. prompt it and tell it that I want to change the name of Vibe Terminal to Lina Terminal. And I want to change the wake phrase to Lena or Hey Lena. I think Hey Lena is better. So I want you to prompt... one of the codex terminals that's clearly free or make any terminal that's better",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "idle_or_new",
+  "provider": "codex",
+  "notes": "free pane or make one",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "idle_or_new",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "garbled, two alternatives offered",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 80,
+  "at": "2026-09-09T01:07:00.510Z",
+  "text": "You didn't put in that problem, by the way.",
+  "verb": "verify",
+  "project": null,
+  "selector": "last_action",
+  "provider": null,
+  "notes": "",
+  "expected": {
+   "verb": "verify",
+   "project": null,
+   "selector": "last_action",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "correction",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 81,
+  "at": "2026-09-09T01:07:28.844Z",
+  "text": "What was the last prompt I asked you to make? Yeah.",
+  "verb": "verify",
+  "project": null,
+  "selector": "last_action",
+  "provider": null,
+  "notes": "",
+  "expected": {
+   "verb": "verify",
+   "project": null,
+   "selector": "last_action",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "memory question about Lina",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 82,
+  "at": "2026-09-09T01:07:56.423Z",
+  "text": "Can you put in that? prompt in the codex terminal you just created.",
+  "verb": "redo",
+  "project": null,
+  "selector": "just_opened",
+  "provider": "codex",
+  "notes": "the pane just created",
+  "expected": {
+   "verb": "redo",
+   "project": null,
+   "selector": "just_opened",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "anaphoric \"that prompt\"",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 83,
+  "at": "2026-09-09T01:08:52.775Z",
+  "text": "There's another codex terminal that's currently empty. that I want you to prompt or it's not empty. Actually, it's just not busy. Just pick one that's not busy right now. I want you to prompt it. and report a bug that when I ask the orchestrator to open a terminal, the orchestrator tries to input the prompt while the terminal is still opening. So if the orchestrator tries to put in the prompt while it's still opening, then the prompt never gets pasted and the action fails. So I want one of the codec terminals to investigate that. Thank you.",
+  "verb": "start",
+  "project": null,
+  "selector": "idle",
+  "provider": "codex",
+  "notes": "\"pick one that's not busy\"",
+  "expected": {
+   "verb": "start",
+   "project": null,
+   "selector": "idle",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "self-correction mid-sentence",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 84,
+  "at": "2026-09-09T01:09:29.299Z",
+  "text": "Can you tell me the usage that we have in Codex?",
+  "verb": "inspect",
+  "project": null,
+  "selector": "provider",
+  "provider": "codex",
+  "notes": "usage",
+  "expected": {
+   "verb": "inspect",
+   "project": null,
+   "selector": "provider",
+   "provider": "codex",
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "native usage question",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 85,
+  "at": "2026-09-09T01:10:40.936Z",
+  "text": "can we report a bug in one of the codex terminals that's not working i just add the terminal code orchestrator to check the usage and the terminal orchestrator didn't know how to do that and told me to check my open air subscription. I think there is a disconnect of the orchestrator not knowing the commands in each terminal. The orchestrator should be able to look for each command of each terminal that we support in Vibe terminal and figure out how to how to navigate them. Report that bug into one of the codex terminals in Vibe terminal project.",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "idle",
+  "provider": "codex",
+  "notes": "",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "idle",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "garbled speech",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 86,
+  "at": "2026-09-09T01:11:23.085Z",
+  "text": "Can you send a prompt to a terminal that's not currently working and report the issue that you keep queuing prompts and not really sending them when I ask you to send them? Can you just put that in one of the codex terminals and the terminal that's not working?",
+  "verb": "start",
+  "project": null,
+  "selector": "idle",
+  "provider": "codex",
+  "notes": "",
+  "expected": {
+   "verb": "start",
+   "project": null,
+   "selector": "idle",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "two commands in one request",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 87,
+  "at": "2026-09-09T01:12:46.494Z",
+  "text": "So in one of the codex terminals that's not working in Vibe terminal, can you prompt It, um... To look into an issue where the orchestrator doesn't know the commands on how to navigate each uh coding terminal that we support like cloud code or codex and the others um it told me to refer to my open ai subscription to see my usage but vibe terminal orchestrator should be able to see my should be able to navigate a terminal and look at my usage so there is a disconnect from the agentic ability of the orchestrator and what it should be able to do it so please prompt one of the codex terminals or open a new codex terminal in a vibe terminal if you'd like whatever it's easiest for you.",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "idle_or_new",
+  "provider": "codex",
+  "notes": "",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "idle_or_new",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "garbled, two alternatives offered",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 88,
+  "at": "2026-09-09T01:13:12.458Z",
+  "text": "Can you put in that prompt now, please?",
+  "verb": "redo",
+  "project": null,
+  "selector": "last_action",
+  "provider": null,
+  "notes": "",
+  "expected": {
+   "verb": "redo",
+   "project": null,
+   "selector": "last_action",
+   "provider": null,
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "anaphoric \"that prompt\"",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 89,
+  "at": "2026-09-09T01:13:42.475Z",
+  "text": "I asked you to put in a prompt. What was the last prompt I asked you to put in? and ask me if you should put it in now",
+  "verb": "verify",
+  "project": null,
+  "selector": "last_action",
+  "provider": null,
+  "notes": "and ask before sending",
+  "expected": {
+   "verb": "verify",
+   "project": null,
+   "selector": "last_action",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "memory question plus a request to ask first",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 90,
+  "at": "2026-09-09T01:14:13.285Z",
+  "text": "Yes, please put in the codex terminal. That's not working.",
+  "verb": "redo",
+  "project": null,
+  "selector": "idle",
+  "provider": "codex",
+  "notes": "answer: yes, the idle Codex pane",
+  "expected": {
+   "verb": "redo",
+   "project": null,
+   "selector": "idle",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "answer to Lina's question",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 91,
+  "at": "2026-09-09T01:15:28.336Z",
+  "text": "Hey, bye. can you start a codex terminal and have it investigate performance issues.",
+  "verb": "start",
+  "project": null,
+  "selector": "new",
+  "provider": "codex",
+  "notes": "",
+  "expected": {
+   "verb": "start",
+   "project": null,
+   "selector": "new",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "start plus \"and have it <task>\", provider named, project only from the addressed workspace",
+   "compilableInWorkspace": true
+  }
+ },
+ {
+  "n": 92,
+  "at": "2026-09-09T01:18:16.203Z",
+  "text": "Okay. Hey, can you Let me know when the terminals were done working.",
+  "verb": "watch",
+  "project": null,
+  "selector": "all",
+  "provider": null,
+  "notes": "tell me when done",
+  "expected": {
+   "verb": "watch",
+   "project": null,
+   "selector": "all",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "watch every pane",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 93,
+  "at": "2026-09-09T01:23:25.665Z",
+  "text": "Can you open a codex terminal in Vibe terminal? and have it investigate the efficiency of um the orchestrator and how we can make it more efficient smarter and actually investigate the tools it has and make sure the agent actually knows its tools to minimize as many multi-turns we need but also make sure that the agent can continue tasks to completion and still be very intelligent and smart.",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "new",
+  "provider": "codex",
+  "notes": "",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "new",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": true,
+   "reason": "open head plus \"and have it <task>\", project named",
+   "compilableInWorkspace": true
+  }
+ },
+ {
+  "n": 94,
+  "at": "2026-09-09T01:24:08.726Z",
+  "text": "Hey, bye. Can you put in the prompt I just asked you to put in the new codex terminal and Vibre terminal?",
+  "verb": "redo",
+  "project": "vibeTerminal",
+  "selector": "just_opened",
+  "provider": "codex",
+  "notes": "",
+  "expected": {
+   "verb": "redo",
+   "project": "vibeTerminal",
+   "selector": "just_opened",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "anaphoric \"the prompt I just asked you to put in\"",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 95,
+  "at": "2026-09-09T01:42:55.280Z",
+  "text": "There was a terminal codex that was deployed to change the name of the application to a Lina terminal and change the wakefrize to a HeyLina. Can you look for the terminal, environmental project, and let me know if it changed the actual application name and not only the weak phrase. If you don't know, prompt it and ask it.",
+  "verb": "results",
+  "project": "vibeTerminal",
+  "selector": "topic",
+  "provider": "codex",
+  "notes": "pane that renamed the app; ask it if unknown",
+  "expected": {
+   "verb": "results",
+   "project": "vibeTerminal",
+   "selector": "topic",
+   "provider": "codex",
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "long, several questions, conditional prompt",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 96,
+  "at": "2026-09-09T01:48:21.422Z",
+  "text": "Can you open a codex terminal for me?",
+  "verb": "open",
+  "project": null,
+  "selector": "none",
+  "provider": "codex",
+  "notes": "",
+  "expected": {
+   "verb": "open",
+   "project": null,
+   "selector": "none",
+   "provider": "codex",
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "open with a provider, project only from the addressed workspace",
+   "compilableInWorkspace": true
+  }
+ },
+ {
+  "n": 97,
+  "at": "2026-09-09T01:50:48.970Z",
+  "text": "He'll be. Can you open a new Codex terminal and Vibe terminal?",
+  "verb": "open",
+  "project": "vibeTerminal",
+  "selector": "none",
+  "provider": "codex",
+  "notes": "",
+  "expected": {
+   "verb": "open",
+   "project": "vibeTerminal",
+   "selector": "none",
+   "provider": "codex",
+   "promptPresent": false,
+   "compilable": true,
+   "reason": "open, provider and project, nothing else in the sentence",
+   "compilableInWorkspace": true
+  }
+ },
+ {
+  "n": 98,
+  "at": "2026-09-09T01:53:53.157Z",
+  "text": "Can you open a new codex terminal?",
+  "verb": "open",
+  "project": null,
+  "selector": "none",
+  "provider": "codex",
+  "notes": "",
+  "expected": {
+   "verb": "open",
+   "project": null,
+   "selector": "none",
+   "provider": "codex",
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "open with a provider, project only from the addressed workspace",
+   "compilableInWorkspace": true
+  }
+ },
+ {
+  "n": 99,
+  "at": "2026-09-09T09:23:05.677Z",
+  "text": "He'll be hilly now. Nevermind.",
+  "verb": "cancel",
+  "project": null,
+  "selector": null,
+  "provider": null,
+  "notes": "",
+  "expected": {
+   "verb": "cancel",
+   "project": null,
+   "selector": null,
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "cancellation",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 100,
+  "at": "2026-09-09T09:23:12.340Z",
+  "text": "He'll do it now. Never mind.",
+  "verb": "cancel",
+  "project": null,
+  "selector": null,
+  "provider": null,
+  "notes": "",
+  "expected": {
+   "verb": "cancel",
+   "project": null,
+   "selector": null,
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "cancellation",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 101,
+  "at": "2026-09-09T09:23:30.809Z",
+  "text": "Hey, Elina. Never mind.",
+  "verb": "cancel",
+  "project": null,
+  "selector": null,
+  "provider": null,
+  "notes": "",
+  "expected": {
+   "verb": "cancel",
+   "project": null,
+   "selector": null,
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "cancellation",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 102,
+  "at": "2026-09-09T09:25:25.464Z",
+  "text": "Hey, Lena. Can you... close all the terminals that are in the vibe terminal project.",
+  "verb": "close",
+  "project": "vibeTerminal",
+  "selector": "all",
+  "provider": null,
+  "notes": "",
+  "expected": {
+   "verb": "close",
+   "project": "vibeTerminal",
+   "selector": "all",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "close every pane in the project",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 103,
+  "at": "2026-09-09T12:02:33.721Z",
+  "text": "Here, Lina. Can you open a new codex terminal and a web terminal and ask it to investigate a bug where Where I want to ask the orchestrator to clear all of the terminals within a certain pane. It only cleared a half of them.",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "new",
+  "provider": "codex",
+  "notes": "\"and a web terminal\" may mean Codex Web",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "new",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "two terminals in one request",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 104,
+  "at": "2026-09-09T12:03:26.401Z",
+  "text": "Hey, Alina. Thank you. Can you look at my last request and action it?",
+  "verb": "redo",
+  "project": null,
+  "selector": "last_action",
+  "provider": null,
+  "notes": "",
+  "expected": {
+   "verb": "redo",
+   "project": null,
+   "selector": "last_action",
+   "provider": null,
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "act on the previous request",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 105,
+  "at": "2026-09-09T16:43:23.399Z",
+  "text": "Can you close the Cortex terminals and Vibe terminal? project.",
+  "verb": "close",
+  "project": "vibeTerminal",
+  "selector": "provider",
+  "provider": "codex",
+  "notes": "",
+  "expected": {
+   "verb": "close",
+   "project": "vibeTerminal",
+   "selector": "provider",
+   "provider": "codex",
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "close panes",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 106,
+  "at": "2026-09-09T16:44:17.164Z",
+  "text": "Hey, Lena. Can you open a new codex terminal in Vibe Terminal project? And I want to hear I don't only want to hear a ding when the action has been completed, but I also want to hear a different type of ding when I know that i put on the prompt and you've listened and you started processing so as i'm speaking there is a different kind of thing. And then when you've done the action, then there's another... the current conversation being.",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "new",
+  "provider": "codex",
+  "notes": "long prompt about dings",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "new",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "open, then a desire stated as a separate sentence",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 107,
+  "at": "2026-09-09T16:45:04.399Z",
+  "text": "There's a desired behavior for the future. So the prompt should be something like, when I say, Hey, Lena, and you start listening, then there is a type of thing that confirms you are listening. And then once you confirm that the task is done, then you do as you do right now.",
+  "verb": "fragment",
+  "project": null,
+  "selector": null,
+  "provider": null,
+  "notes": "continuation of 106",
+  "expected": {
+   "verb": "fragment",
+   "project": null,
+   "selector": null,
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "fragment continuing the previous turn",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 108,
+  "at": "2026-09-09T16:45:19.663Z",
+  "text": "Hey Alina. Did you get that?",
+  "verb": "verify",
+  "project": null,
+  "selector": "last_action",
+  "provider": null,
+  "notes": "did you get that",
+  "expected": {
+   "verb": "verify",
+   "project": null,
+   "selector": "last_action",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "verify question",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 109,
+  "at": "2026-09-09T16:45:53.966Z",
+  "text": "Hey, Alina. I know you can't do it. I want you to put a Codex terminal in the Vibe terminal project and prompt Codex to make this change.",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "provider",
+  "provider": "codex",
+  "notes": "new or idle",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "provider",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "anaphoric \"this change\"",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 110,
+  "at": "2026-09-09T16:46:34.686Z",
+  "text": "Hey, Elena. You didn't put in the prompt.",
+  "verb": "verify",
+  "project": null,
+  "selector": "last_action",
+  "provider": null,
+  "notes": "",
+  "expected": {
+   "verb": "verify",
+   "project": null,
+   "selector": "last_action",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "correction",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 111,
+  "at": "2026-09-09T16:47:53.699Z",
+  "text": "Hey, Lena. *sniff* Open a cloud code terminal in a vibe terminal and have it fix the issue of full screen terminals. When I make a terminal full screen, it doesn't matter what it is. It's only full screen horizontally and not vertically for the entire pane.",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "new",
+  "provider": "claude",
+  "notes": "",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "new",
+   "provider": "claude",
+   "promptPresent": true,
+   "compilable": true,
+   "reason": "open head plus \"and have it <task>\", project and provider named",
+   "compilableInWorkspace": true
+  }
+ },
+ {
+  "n": 112,
+  "at": "2026-09-09T18:14:11.635Z",
+  "text": "can you prompt a Codex Terminal in Vibe Terminal project to fix the full screen issue? When I make a terminal full screen, it makes it full screen horizontally, but it's very short vertically.",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "provider",
+  "provider": "codex",
+  "notes": "",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "provider",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": true,
+   "reason": "prompt <provider> terminal in <project> to <task>",
+   "compilableInWorkspace": true
+  }
+ },
+ {
+  "n": 113,
+  "at": "2026-09-09T22:25:58.497Z",
+  "text": "Hey, Alina. Can you prompt a codex terminal in Vib terminal project just to investigate why the full screen When I click full screen on a terminal, it's a full screen horizontally, but not vertically.",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "provider",
+  "provider": "codex",
+  "notes": "",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "provider",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": true,
+   "reason": "prompt <provider> terminal in <project> to <task>",
+   "compilableInWorkspace": true
+  }
+ },
+ {
+  "n": 114,
+  "at": "2026-09-10T14:33:59.670Z",
+  "text": "Hey Lena. Can you get codecs in VIBE terminal to investigate the performance issues and the escalating RAM usage of LENA terminal? I want to know. I want to deep dive on this and get a codex terminal to work on this.",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "provider",
+  "provider": "codex",
+  "notes": "",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "provider",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "the task repeats the command (\"get a Codex terminal to work on this\")",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 115,
+  "at": "2026-09-10T14:35:26.917Z",
+  "text": "Hey, Elena. Thank you. Are you able to open a project for me and... in Lunar Terminal.",
+  "verb": "open_project",
+  "project": "Lunar Terminal",
+  "selector": null,
+  "provider": null,
+  "notes": "unknown project: ask",
+  "expected": {
+   "verb": "open_project",
+   "project": "Lunar Terminal",
+   "selector": null,
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "unknown project",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 116,
+  "at": "2026-09-10T14:36:34.418Z",
+  "text": "Hey Alina. are you able to change your behavior like if i ask you After every response, listen to what I have to say. So I don't have to keep repeating. Hey, Lena, are you able to do that yourself or... or not",
+  "verb": "ask",
+  "project": null,
+  "selector": null,
+  "provider": null,
+  "notes": "preference / meta",
+  "expected": {
+   "verb": "ask",
+   "project": null,
+   "selector": null,
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "meta preference question",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 117,
+  "at": "2026-09-10T14:37:02.815Z",
+  "text": "Hey, Alina. What was that error?",
+  "verb": "ask",
+  "project": null,
+  "selector": "last_error",
+  "provider": null,
+  "notes": "what was that error",
+  "expected": {
+   "verb": "ask",
+   "project": null,
+   "selector": "last_error",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "memory question about Lina",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 118,
+  "at": "2026-09-10T14:38:08.577Z",
+  "text": "Hey, Alina. Can you clear the terminals in Vibeturnal project that are not working?",
+  "verb": "close",
+  "project": "vibeTerminal",
+  "selector": "idle",
+  "provider": null,
+  "notes": "not working = idle",
+  "expected": {
+   "verb": "close",
+   "project": "vibeTerminal",
+   "selector": "idle",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "close idle panes",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 119,
+  "at": "2026-09-10T14:38:52.064Z",
+  "text": "It's not four, though. It's three, correct?",
+  "verb": "answer",
+  "project": null,
+  "selector": null,
+  "provider": null,
+  "notes": "reply to Lina's question",
+  "expected": {
+   "verb": "answer",
+   "project": null,
+   "selector": null,
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "answer to Lina's question",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 120,
+  "at": "2026-09-10T14:39:17.380Z",
+  "text": "No, close the three that are inactive.",
+  "verb": "close",
+  "project": "vibeTerminal",
+  "selector": "idle",
+  "provider": null,
+  "notes": "answer: close the three inactive",
+  "expected": {
+   "verb": "close",
+   "project": "vibeTerminal",
+   "selector": "idle",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "answer to Lina's question, closes panes",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 121,
+  "at": "2026-09-11T18:17:07.459Z",
+  "text": "Hey Alina. There's a chat about... There's an agent working on... chat section in a Vybe terminal project. Can you tell us to continue?",
+  "verb": "follow_up",
+  "project": "vibeTerminal",
+  "selector": "topic",
+  "provider": null,
+  "notes": "\"chat section\" agent: continue",
+  "expected": {
+   "verb": "follow_up",
+   "project": "vibeTerminal",
+   "selector": "topic",
+   "provider": null,
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "garbled (\"tell us to continue\")",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 122,
+  "at": "2026-09-11T18:18:21.009Z",
+  "text": "Hey Lena. Hey Lena. Can you tell the... the chat, the agent that's working on project chat section in Vibe terminal to continue its work. - Shh.",
+  "verb": "follow_up",
+  "project": "vibeTerminal",
+  "selector": "topic",
+  "provider": null,
+  "notes": "\"project chat section\"",
+  "expected": {
+   "verb": "follow_up",
+   "project": "vibeTerminal",
+   "selector": "topic",
+   "provider": null,
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "stuttered head (\"the... the chat, the agent\")",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 123,
+  "at": "2026-09-11T20:09:06.540Z",
+  "text": "Have a agent working on adding a chat section in the vibe terminal project can you prompt it to do a deep dive on that",
+  "verb": "follow_up",
+  "project": "vibeTerminal",
+  "selector": "topic",
+  "provider": null,
+  "notes": "\"adding a chat section\": deep dive",
+  "expected": {
+   "verb": "follow_up",
+   "project": "vibeTerminal",
+   "selector": "topic",
+   "provider": null,
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "garbled head (\"Have a agent\"), anaphoric task",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 124,
+  "at": "2026-09-11T20:11:40.340Z",
+  "text": "If I say, hey, Lena. open a codex agent in Alina web app and have it do a deep dive on PDF and file viewer. feature within the agent page when I'm speaking to an agent and it submits a file to you.",
+  "verb": "ask",
+  "project": "lina web app",
+  "selector": "new",
+  "provider": "codex",
+  "notes": "hypothetical: what would you do",
+  "expected": {
+   "verb": "ask",
+   "project": "lina web app",
+   "selector": "new",
+   "provider": "codex",
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "hypothetical, not a request",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 125,
+  "at": "2026-09-11T20:12:35.413Z",
+  "text": "and all. Hey, Lena. Yeah, go ahead and spawn the agent with that prompt.",
+  "verb": "redo",
+  "project": "lina web app",
+  "selector": "new",
+  "provider": "codex",
+  "notes": "execute the hypothetical from 124",
+  "expected": {
+   "verb": "redo",
+   "project": "lina web app",
+   "selector": "new",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "executes a hypothetical from the previous turn",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 126,
+  "at": "2026-09-11T20:15:08.353Z",
+  "text": "And... Hey, Lena. have a codec terminal, work in Vibe terminal, and try to fix the issue where when I spawn a new terminal, it's very small. So make a little bit bigger. more agenting and smarter when spawning new terminals because it's really small when I spawn a new one.",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "provider",
+  "provider": "codex",
+  "notes": "",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "provider",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "garbled (\"have a Codex terminal, work in ...\")",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 127,
+  "at": "2026-09-11T20:15:59.954Z",
+  "text": "Really not. and Vibe Terminal have codex terminal review the documentation page on the website.",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "provider",
+  "provider": "codex",
+  "notes": "",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "provider",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "garbled word order",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 128,
+  "at": "2026-09-12T18:13:33.865Z",
+  "text": "Can you use one of the empty cloud code terminals in the vibe terminal project? I to make it... kind of investigate the performance of the orchestrator.",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "empty",
+  "provider": "claude",
+  "notes": "",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "empty",
+   "provider": "claude",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "garbled after the head (\"? I to make it...\")",
+   "compilableInWorkspace": false
+  }
+ }
+]

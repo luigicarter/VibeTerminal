@@ -7,7 +7,8 @@ const { authorizeModelAction, commandClauses, captureRelay, clarifyRelay, select
 
 function interpretTestIntent(context) {
   const instruction = context.instruction ?? context.text ?? '';
-  const sessions = context.sessions || [];
+  const sessions = context.sessions || (context.roster || []).map(row => ({ ...row,
+    kind: row.kind || row.provider, status: row.status || row.state }));
   const roots = context.roots || {};
   const projects = roots.projects || context.projects || [];
   const intent = { ...context, text: instruction, projects, allowedPaths: [roots.documents, ...projects.map(p => p.path)].filter(Boolean) };

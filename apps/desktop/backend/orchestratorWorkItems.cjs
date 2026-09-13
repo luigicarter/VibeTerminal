@@ -22,7 +22,11 @@ function createWorkItemStore({ userDataPath, getSecrets = () => [], now = Date.n
     const item = { ...fields(source, ['id', 'title', 'summary', 'source', 'cwd', 'status']), ...fields(source, ['objective', 'text'], 16000),
       createdAt: Number(source.createdAt), updatedAt: Number(source.updatedAt),
       requestIds: [...new Set((source.requestIds || []).filter(v => typeof v === 'string' && v).map(v => clean(v).slice(0, 500)))].slice(-100),
-      requiresRevalidation: restored || source.requiresRevalidation !== false };
+      requiresRevalidation: restored || source.requiresRevalidation !== false,
+      // A request that failed after its pane was opened keeps that pane and its
+      // objective visible for a retry instead of leaving a silent orphan. It is
+      // a display fact only: it grants nothing and still needs fresh evidence.
+      ...(source.retriable === true && { retriable: true }) };
     if (!Number.isFinite(item.updatedAt) || item.updatedAt < now() - MAX_AGE || item.updatedAt > now() + 60000) return null;
     if (source.binding?.target?.id && validGeneration(source.binding.target.generation)) {
       item.binding = { target: fields(source.binding.target, ['id', 'generation', 'cwd']),

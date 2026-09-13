@@ -15,6 +15,24 @@ const { createInspectionEvidence } = require('./orchestratorInspectionEvidence.c
 const { fileReadSource } = require('./orchestratorReadRecovery.cjs');
 const { assertCloseEligibility } = require('./orchestratorCloseSafety.cjs');
 const agentTools = require('../shared/orchestratorAgentTools.cjs');
+const { MEMORY_KINDS } = require('./orchestratorToolSchema.cjs');
+
+// A recall is reference data about Lina's own actions, so it is bounded like any
+// other read: the newest citations survive, the oldest are dropped.
+const MEMORY_RESULT_BYTES = 4096;
+function boundedMemoryResult(result) {
+  const size = value => Buffer.byteLength(JSON.stringify(value ?? null), 'utf8');
+  const bounded = { ...result };
+  for (const key of ['episodes', 'summaries']) {
+    while (Array.isArray(bounded[key]) && bounded[key].length && size(bounded) > MEMORY_RESULT_BYTES) {
+      bounded[key] = bounded[key].slice(0, -1);
+      bounded.truncated = true;
+    }
+  }
+  if (size(bounded) > MEMORY_RESULT_BYTES && bounded.pane) { bounded.pane = { ...bounded.pane, results: (bounded.pane.results || []).slice(-1) }; bounded.truncated = true; }
+  if (size(bounded) > MEMORY_RESULT_BYTES && bounded.project) { bounded.project = { ...bounded.project, lastResults: (bounded.project.lastResults || []).slice(-1), openQuestions: [] }; bounded.truncated = true; }
+  return bounded;
+}
 
 // Operations the application will observe for when the model supplies no token.
 // Native controls (terminal_interact) and finish_terminal still require the
@@ -28,7 +46,7 @@ const AUTO_OBSERVED_KINDS = ['send_prompt', 'answer_question', 'permission', 'in
 function createWorkspaceExecutor({ getSessions, getRequests, getEpoch, isDisposed, active, agentServices,
   getCurrentSession = id => getSessions().find(session => session.id === id), getConfiguration = () => undefined,
   getRoots, getWorkspaceState, readSession, dispatchAction, requireFreshSessions, refresh,
-  files, preferences: preferenceStore, tasks, activity, historyCandidates, deliveryDiagnostics,
+  files, preferences: preferenceStore, memory, tasks, activity, historyCandidates, deliveryDiagnostics,
   workHistory, workItems, operationState, userAnswer, trackManagedTaskOwnership,
   bindCreatedTarget, bindTarget, commitContext, receipt, recordDiagnostic, emit, redact, cleanError, now, reviewInspection }) {
   const executed = new Map();
@@ -37,7 +55,7 @@ function createWorkspaceExecutor({ getSessions, getRequests, getEpoch, isDispose
     let action = structuredClone(raw);
     if (action.keys !== undefined) action.keys = normalizeTerminalKeys(action.keys);
     let effectReceiptKey;
-    if (intent && Object.keys(action).some(k => !['kind', 'view', 'targetId', 'text', 'path', 'cwd', 'root', 'query', 'parent', 'name', 'kindOfSession', 'preferenceId', 'provider', 'reference', 'limit', 'offset', 'cursor', 'beforeSequence', 'maxChars', 'grantId', 'requestId', 'revision', 'observationSequence', 'keys', 'mouse', 'inputPurpose', 'submit', 'stepId', 'observationToken', 'inputRevision', 'editInput', 'answerText', 'answerTexts', 'decision', 'outcome', 'responseTurn', 'speechText', 'watchUntil', ...agentTools.FIELDS].includes(k))) throw new Error('Unexpected tool argument.');
+    if (intent && Object.keys(action).some(k => !['kind', 'view', 'targetId', 'text', 'path', 'cwd', 'root', 'query', 'parent', 'name', 'kindOfSession', 'preferenceId', 'provider', 'reference', 'limit', 'offset', 'cursor', 'since', 'beforeSequence', 'maxChars', 'grantId', 'requestId', 'revision', 'observationSequence', 'keys', 'mouse', 'inputPurpose', 'submit', 'stepId', 'observationToken', 'inputRevision', 'editInput', 'answerText', 'answerTexts', 'decision', 'outcome', 'responseTurn', 'speechText', 'watchUntil', ...agentTools.FIELDS].includes(k))) throw new Error('Unexpected tool argument.');
     let observationToken = action.observationToken;
     delete action.observationToken;
     let operatorGrant, operatorObservation, operatorState, autoObservationToken, autoObservationFailed = false;
@@ -126,6 +144,18 @@ function createWorkspaceExecutor({ getSessions, getRequests, getEpoch, isDispose
       }
       intent.question = question;
       return { ok: true, status: 'needs-answer', question };
+    }
+    // Retrieval over Lina's own recorded actions. It needs no grant and touches
+    // no terminal: it returns bounded citations of what the application already
+    // wrote about itself, which is reference data and never authority.
+    if (MEMORY_KINDS.includes(action.kind)) {
+      if (!memory) return { ok: false, status: 'unavailable', error: 'Recorded memory is not available for this request.' };
+      const result = action.kind === 'recall'
+        ? { ok: true, episodes: memory.recall({ query: action.query, pane: action.targetId, project: action.name,
+          since: action.since, limit: Math.min(Number(action.limit) || 5, 10) }) }
+        : action.kind === 'recall_pane' ? { ok: true, ...memory.recallPane(action.targetId) }
+        : { ok: true, ...memory.recallProject(action.name) };
+      return redact(boundedMemoryResult(result));
     }
     if (action.kind === 'read_workspace') {
       await requireFreshSessions(); check();

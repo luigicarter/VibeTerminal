@@ -1,0 +1,336 @@
+{
+  "messages": [
+    {
+      "id": "m1",
+      "role": "user",
+      "text": "Please open a Codex terminal in the vibeTerminal project.",
+      "at": 1772359200000,
+      "requestId": "r1",
+      "origin": "voice"
+    },
+    {
+      "id": "m2",
+      "role": "user",
+      "text": "Please open another Codex terminal inside the vibeTerminal project.",
+      "at": 1772359260000,
+      "requestId": "r2",
+      "origin": "voice"
+    },
+    {
+      "id": "m3",
+      "role": "user",
+      "text": "What was the last prompt you did?",
+      "at": 1772360400000,
+      "requestId": "r3",
+      "origin": "voice"
+    },
+    {
+      "id": "m4",
+      "role": "user",
+      "text": "Close the inactive panes please.",
+      "at": 1772360760000,
+      "requestId": "r4",
+      "origin": "voice"
+    },
+    {
+      "id": "m5",
+      "role": "user",
+      "text": "Close the inactive panes please, now.",
+      "at": 1772361000000,
+      "requestId": "r5",
+      "origin": "voice"
+    },
+    {
+      "id": "m6",
+      "role": "user",
+      "text": "Tell the agent to continue.",
+      "at": 1772442000000,
+      "requestId": "r6",
+      "origin": "voice"
+    },
+    {
+      "id": "m7",
+      "role": "user",
+      "text": "Which terminal needs me right now?",
+      "at": 1772442600000,
+      "requestId": "r7",
+      "origin": "voice"
+    },
+    {
+      "id": "m8",
+      "role": "user",
+      "text": "Resume the earlier conversation.",
+      "at": 1772443800000,
+      "requestId": "r8",
+      "origin": "voice"
+    },
+    {
+      "id": "m9",
+      "role": "user",
+      "text": "Open five terminals in the website project.",
+      "at": 1772445000000,
+      "requestId": "r9",
+      "origin": "voice"
+    },
+    {
+      "id": "m10",
+      "role": "user",
+      "text": "Report the results from the finished terminal.",
+      "at": 1772524800000,
+      "requestId": "r10",
+      "origin": "voice"
+    },
+    {
+      "id": "m11",
+      "role": "user",
+      "text": "Stop the running task.",
+      "at": 1772525700000,
+      "requestId": "r11",
+      "origin": "voice"
+    },
+    {
+      "id": "m12",
+      "role": "user",
+      "text": "Never mind.",
+      "at": 1772527200000,
+      "requestId": "r12",
+      "origin": "voice"
+    }
+  ],
+  "receipts": [
+    {
+      "id": "c1",
+      "kind": "send_prompt",
+      "targetId": "session_fixture_pane",
+      "status": "rejected",
+      "text": "fixture receipt",
+      "at": 1772359201000,
+      "requestId": "r1"
+    },
+    {
+      "id": "c2",
+      "kind": "send_prompt",
+      "targetId": "session_fixture_pane",
+      "status": "rejected",
+      "text": "fixture receipt",
+      "at": 1772359261000,
+      "requestId": "r2"
+    },
+    {
+      "id": "c3",
+      "kind": "send_prompt",
+      "targetId": "session_fixture_pane",
+      "status": "blocked",
+      "text": "fixture receipt",
+      "at": 1772360761000,
+      "requestId": "r4"
+    },
+    {
+      "id": "c4",
+      "kind": "send_prompt",
+      "targetId": "session_fixture_pane",
+      "status": "written",
+      "text": "fixture receipt",
+      "at": 1772361001000,
+      "requestId": "r5"
+    },
+    {
+      "id": "c5",
+      "kind": "send_prompt",
+      "targetId": "session_fixture_pane",
+      "status": "stale-observation",
+      "text": "fixture receipt",
+      "at": 1772442001000,
+      "requestId": "r6"
+    },
+    {
+      "id": "c6",
+      "kind": "send_prompt",
+      "targetId": "session_fixture_pane",
+      "status": "launch-timeout",
+      "text": "fixture receipt",
+      "at": 1772443801000,
+      "requestId": "r8"
+    },
+    {
+      "id": "c7",
+      "kind": "send_prompt",
+      "targetId": "session_fixture_pane",
+      "status": "input-surface-unverified",
+      "text": "fixture receipt",
+      "at": 1772524801000,
+      "requestId": "r10"
+    },
+    {
+      "id": "c8",
+      "kind": "send_prompt",
+      "targetId": "session_fixture_pane",
+      "status": "created",
+      "text": "fixture receipt",
+      "at": 1772525701000,
+      "requestId": "r11"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "r1",
+      "requestId": "r1",
+      "text": "Please open a Codex terminal in the vibeTerminal project.",
+      "status": "finished",
+      "createdAt": 1772359200000,
+      "updatedAt": 1772359202000,
+      "sequence": 1,
+      "origin": "voice",
+      "targetIds": [],
+      "dependsOn": [],
+      "targets": []
+    },
+    {
+      "id": "r2",
+      "requestId": "r2",
+      "text": "Please open another Codex terminal inside the vibeTerminal project.",
+      "status": "finished",
+      "createdAt": 1772359260000,
+      "updatedAt": 1772359262000,
+      "sequence": 2,
+      "origin": "voice",
+      "targetIds": [],
+      "dependsOn": [],
+      "targets": []
+    },
+    {
+      "id": "r3",
+      "requestId": "r3",
+      "text": "What was the last prompt you did?",
+      "status": "finished",
+      "createdAt": 1772360400000,
+      "updatedAt": 1772360402000,
+      "sequence": 3,
+      "origin": "voice",
+      "targetIds": [],
+      "dependsOn": [],
+      "targets": []
+    },
+    {
+      "id": "r4",
+      "requestId": "r4",
+      "text": "Close the inactive panes please.",
+      "status": "paused",
+      "createdAt": 1772360760000,
+      "updatedAt": 1772360762000,
+      "sequence": 4,
+      "origin": "voice",
+      "targetIds": [],
+      "dependsOn": [],
+      "targets": [],
+      "error": "I could not interpret that request. Please try again."
+    },
+    {
+      "id": "r5",
+      "requestId": "r5",
+      "text": "Close the inactive panes please, now.",
+      "status": "paused",
+      "createdAt": 1772361000000,
+      "updatedAt": 1772361002000,
+      "sequence": 5,
+      "origin": "voice",
+      "targetIds": [],
+      "dependsOn": [],
+      "targets": [],
+      "error": "I could not interpret that request. Please try again."
+    },
+    {
+      "id": "r6",
+      "requestId": "r6",
+      "text": "Tell the agent to continue.",
+      "status": "finished",
+      "createdAt": 1772442000000,
+      "updatedAt": 1772442002000,
+      "sequence": 6,
+      "origin": "voice",
+      "targetIds": [],
+      "dependsOn": [],
+      "targets": []
+    },
+    {
+      "id": "r7",
+      "requestId": "r7",
+      "text": "Which terminal needs me right now?",
+      "status": "finished",
+      "createdAt": 1772442600000,
+      "updatedAt": 1772442602000,
+      "sequence": 7,
+      "origin": "voice",
+      "targetIds": [],
+      "dependsOn": [],
+      "targets": []
+    },
+    {
+      "id": "r8",
+      "requestId": "r8",
+      "text": "Resume the earlier conversation.",
+      "status": "paused",
+      "createdAt": 1772443800000,
+      "updatedAt": 1772443802000,
+      "sequence": 8,
+      "origin": "voice",
+      "targetIds": [],
+      "dependsOn": [],
+      "targets": [],
+      "error": "OpenRouter could not accept this request. Check the selected model and settings. (HTTP 400)"
+    },
+    {
+      "id": "r9",
+      "requestId": "r9",
+      "text": "Open five terminals in the website project.",
+      "status": "cancelled",
+      "createdAt": 1772445000000,
+      "updatedAt": 1772445002000,
+      "sequence": 9,
+      "origin": "voice",
+      "targetIds": [],
+      "dependsOn": [],
+      "targets": []
+    },
+    {
+      "id": "r10",
+      "requestId": "r10",
+      "text": "Report the results from the finished terminal.",
+      "status": "finished",
+      "createdAt": 1772524800000,
+      "updatedAt": 1772524802000,
+      "sequence": 10,
+      "origin": "voice",
+      "targetIds": [],
+      "dependsOn": [],
+      "targets": []
+    },
+    {
+      "id": "r11",
+      "requestId": "r11",
+      "text": "Stop the running task.",
+      "status": "failed",
+      "createdAt": 1772525700000,
+      "updatedAt": 1772525702000,
+      "sequence": 11,
+      "origin": "voice",
+      "targetIds": [],
+      "dependsOn": [],
+      "targets": [],
+      "error": "Session session_abc123_def456 changed before its result could be verified."
+    },
+    {
+      "id": "r12",
+      "requestId": "r12",
+      "text": "Never mind.",
+      "status": "cancelled",
+      "createdAt": 1772527200000,
+      "updatedAt": 1772527202000,
+      "sequence": 12,
+      "origin": "voice",
+      "targetIds": [],
+      "dependsOn": [],
+      "targets": []
+    }
+  ]
+}

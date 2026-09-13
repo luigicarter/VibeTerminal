@@ -22,9 +22,9 @@ test('consumed operator finishes reuse attribution and retain pending result qua
   const f = finished();
   assert.equal(completedOperatorResponse(f), 'Submitted the review.');
   assert.match(completedOperatorResponse({ ...f, pendingResultTargets: ['a'] }), /result is still pending/);
-  assert.match(completedOperatorResponse({ ...f, deliveryWaits: [{ targetId: 'a', generation: 'g1', deliveryStatus: 'queued' }] }), /has not been sent/);
+  assert.match(completedOperatorResponse({ ...f, deliveryWaits: [{ targetId: 'a', generation: 'g1', deliveryStatus: 'queued' }] }), /nothing has been typed yet/);
   f.outcomes.unshift({ kind: 'send_prompt', grantId: 'grant', targetId: 'a', ok: true, status: 'queued' });
-  assert.doesNotMatch(completedOperatorResponse({ ...f, deliveryWaits: [{ targetId: 'a', deliveryStatus: 'written', delivered: true }] }), /has not been sent/);
+  assert.doesNotMatch(completedOperatorResponse({ ...f, deliveryWaits: [{ targetId: 'a', deliveryStatus: 'written', delivered: true }] }), /nothing has been typed yet/);
   f.plan.grants[0].targets.push({ id: 'b', generation: 'g2' });
   assert.equal(completedOperatorResponse(f), undefined, 'all targets require independent finishes');
   f.sessions.push({ id: 'b', generation: 'g2', name: 'Project B' });
@@ -37,7 +37,7 @@ test('operator summaries cannot certify written input or input for a replaced ge
   for (const generation of ['g1', 'old', undefined]) {
     const text = completedOperatorResponse({ ...f, deliveryWaits: [{ targetId: 'a', generation, deliveryStatus: 'written', delivered: true }] });
     assert.doesNotMatch(text, /accepted|is running/);
-    assert.match(text, generation === 'g1' ? /haven't confirmed that the task started/ : /changed.*unverified/);
+    assert.match(text, generation === 'g1' ? /haven't seen it start yet/ : /changed, so I can't tell you where this task stands/);
   }
 });
 test('partial, failed, uncertain, mixed and newly blocked work retain the executor', () => {
@@ -60,6 +60,6 @@ test('direct creation wording distinguishes started, unconfirmed and failed laun
   const format = result => formatDirectOutcomes([{ kind: 'create_session', id: 'a', ...result }], sessions);
   assert.equal(format({ ok: true, status: 'created', processState: 'running', name: 'Codex', cwd: '/project' }), 'Opened Codex in project.');
   assert.equal(format({ ok: true, status: 'created', processState: 'running' }), 'Opened the terminal.');
-  assert.match(format({ ok: true, status: 'starting' }), /not confirmed/);
+  assert.match(format({ ok: true, status: 'starting' }), /haven't seen it finish starting yet/);
   assert.match(format({ ok: false, status: 'launch-failed', error: 'Missing executable' }), /Missing executable/);
 });

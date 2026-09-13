@@ -10,7 +10,7 @@ async function fixture(t, { separate = false, readOnly = false, explicitOrder, s
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-multi-work-'));
   const secondRoot = separate ? path.join(root, 'other-project') : root;
   if (separate) fs.mkdirSync(secondRoot);
-  const f = { root, effects: [], plans: [], sessions: [], phases: new Map(), toolSequence: 0, recovered: 0, lastAction: new Map() };
+  const f = { root, effects: [], plans: [], sessions: [], phases: new Map(), toolSequence: 0, recovered: 0, lastAction: new Map(), reported: new Set() };
   const nativeSession = (id, cwd) => ({ id, generation: `generation-${id}`, launchToken: 1, cwd, kind: 'codex', provider: 'codex',
     conversationId: `conversation-${id}`, name: id, started: true, observation: 'observed', processState: 'running',
     agentProcessState: 'running', agentPid: 42, turnState: 'idle', revision: 1 });
@@ -39,18 +39,27 @@ async function fixture(t, { separate = false, readOnly = false, explicitOrder, s
       const response = value => new Response(JSON.stringify(value));
       if (url.endsWith('/key')) return response({ data: {} });
       if (url.endsWith('/models')) return response({ data: [{ id: 'fixture', context_length: 128000, supported_parameters: ['tools'] }] });
-      const body = JSON.parse(options.body), context = JSON.parse(body.messages.find(message => message.role === 'user').content);
+      const body = JSON.parse(options.body);
+      const users = body.messages.filter(message => message.role === 'user');
+      const context = JSON.parse(users[0].content);
+      // The application never authors an assistant turn. A delivery it could not
+      // complete arrives here as one plain user-role report instead.
+      assert.equal(body.messages.some(message => message.role === 'assistant' && message.tool_calls?.some(call => /^(?:agent-handoff|dispatch)-/.test(String(call.id)))), false);
+      const reports = users.slice(1).flatMap(message => { try { return JSON.parse(message.content).deliveryReport || []; } catch { return []; } });
       const tools = body.messages.filter(message => message.role === 'tool'), last = tools.length ? JSON.parse(tools.at(-1).content) : null;
       const previous = f.lastAction.get(context.instruction);
       // A stale observation is refused whether the model or the application's own
       // bound handoff issued the write; either way the next attempt must reread.
-      if (last?.validationFailure && (previous?.kind === 'send_prompt' || /Read it again/.test(String(last.error || '')))) {
+      const fresh = reports.filter(entry => !f.reported.has(JSON.stringify(entry)));
+      for (const entry of fresh) f.reported.add(JSON.stringify(entry));
+      if ((last?.validationFailure && (previous?.kind === 'send_prompt' || /Read it again/.test(String(last.error || '')))) ||
+          fresh.some(entry => /Read it again/.test(String(entry.reason || '')))) {
         assert.equal(++f.recovered, 1, 'Only the deliberately stale token requires recovery');
         if (previous?.kind === 'send_prompt') f.phases.set(previous.grantId, 0);
       }
       // The application delivers bound task handoffs itself; this model only owns
       // the grants it has not already submitted through its own handoff steps.
-      const handled = new Set(f.effects.filter(action => String(action.stepId || '').startsWith('agent-handoff-')).map(action => action.grantId));
+      const handled = new Set(f.effects.filter(action => String(action.stepId || '').startsWith('dispatch-')).map(action => action.grantId));
       const pending = context.authorizedCommands.grants.filter(grant => !handled.has(grant.id));
       const grant = pending.find(grant => (f.phases.get(grant.id) || 0) < 4);
       if (!grant) { assert.deepEqual(pending, [], 'All granted operators must converge'); return response({ choices: [{ finish_reason: 'stop', message: { content: 'The authorized work is submitted.' } }] }); }

@@ -42,8 +42,31 @@ test('reply reference is bounded and excludes monitor and system messages', () =
   input.messages.push({ requestId: 'old', role: 'system', text: 'private' }, { requestId: 'old', role: 'assistant', origin: 'monitor', text: 'monitor' });
   const result = buildReplyContext(input);
   assert.equal(result.instruction.length, 4000); assert.equal(result.instructionTruncated, true);
-  assert.equal(result.recentMessages.length, 4);
-  assert.ok(result.recentMessages.every(message => message.text.length === 2000 && message.truncated));
+  // The replied-to exchange needs its last turn, not its transcript: everything
+  // older about that request is already one ledger line.
+  assert.equal(result.recentMessages.length, 2);
+  assert.ok(result.recentMessages.every(message => message.text.length === 600 && message.truncated));
+});
+
+test('a sentence that names another project or another pane drops the implicit reply target', () => {
+  const base = () => ({ input: { text: '' }, currentSequence: 5,
+    messages: [{ requestId: 'old', role: 'user', text: 'Review the release checklist' }, { requestId: 'old', role: 'assistant', text: 'Sent it to Release checklist review.' }],
+    jobs: [{ input: { text: 'Review the release checklist' }, task: { requestId: 'old', sequence: 1, status: 'finished', projectPath: 'C:/projects/vibeTerminal', targets: [{ id: 'a' }] }, waits: [{ targetId: 'a', generation: 1, delivered: true }], context: { conversationTarget: { id: 'a', generation: 1 } } }],
+    sessions: [{ id: 'a', generation: 1, conversationTitle: 'Release checklist review' }, { id: 'b', generation: 1, conversationTitle: 'Sidebar dock work' }] });
+  const kept = buildReplyContext({ ...base(), instruction: 'tell it to continue' });
+  assert.equal(kept.requestId, 'old', 'A pronoun still resolves to the latest exchange.');
+  assert.equal(kept.implicit, true);
+  assert.equal(buildReplyContext({ ...base(), instruction: 'ask the sidebar dock work agent what it found' }), undefined,
+    'Naming another pane makes the sentence new business.');
+  assert.equal(buildReplyContext({ ...base(), instruction: 'run the tests', projectContext: { path: 'C:/projects/lina-web-app' } }), undefined,
+    'Naming another registered project makes the sentence new business.');
+  assert.equal(buildReplyContext({ ...base(), instruction: 'run the tests', projectContext: { path: 'C:/projects/vibeTerminal' } })?.requestId, 'old',
+    'The same project keeps the implicit target.');
+  // An explicit reply identity is the user's own choice and always binds.
+  const explicit = base();
+  explicit.input = { text: '', replyToRequestId: 'old' };
+  explicit.previous = explicit.jobs[0];
+  assert.equal(buildReplyContext({ ...explicit, instruction: 'ask the sidebar dock work agent what it found' })?.requestId, 'old');
 });
 
 const tool = (name, args) => ({ choices: [{ finish_reason: 'tool_calls', message: { tool_calls: [{ id: 'call', function: { name, arguments: JSON.stringify(args) } }] } }] });
@@ -75,7 +98,10 @@ test('both model phases retain an older question across interleaved work without
   for (const context of [contexts.at(-1), executions.at(-1)]) {
     assert.equal(context.replyContext.question.text, 'Alpha or Beta?');
     assert.equal(context.replyContext.requestId, first.requestId);
-    assert.ok(!context.recentConversation.some(message => message.text === question.text));
+    // Migrated from recentConversation: no payload carries prior prose at all,
+    // so the question survives only through replyContext.
+    assert.equal(context.recentConversation, undefined);
+    assert.ok(!JSON.stringify(context.ledger ?? []).includes(question.text));
   }
   await app.send({ text: 'Actually explain something else', origin: 'voice', replyToRequestId: answered.requestId });
   assert.equal(contexts.at(-1).replyContext.status, 'finished');

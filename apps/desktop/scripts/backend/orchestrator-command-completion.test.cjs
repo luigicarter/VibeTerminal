@@ -62,8 +62,8 @@ test('queued targets acknowledge only after both deliveries, once; later failure
   await f.deliver(1); assert.equal(acknowledgments().length, 1);
   await f.app.refresh(); await tick(); assert.equal(acknowledgments().length, 1);
   assert.equal(acknowledgments()[0].completionCue, false);
-  assert.match(acknowledgments()[0].speechText, /result is still pending/);
-  assert.equal(f.app.getState().messages.filter(message => message.requestId === result.requestId && /result is still pending/.test(message.text)).length, 1);
+  assert.match(acknowledgments()[0].speechText, /haven't seen it start yet/);
+  assert.equal(f.app.getState().messages.filter(message => message.requestId === result.requestId && /haven't seen it start yet/.test(message.text)).length, 1);
   Object.assign(f.sessions[0], { processState: 'failed', turnState: 'failed' });
   await f.app.refresh(); await tick();
   assert(f.spoken.some(event => event.kind === 'task-report' && /failed|could not|stopped|unavailable|ended/i.test(event.text)));

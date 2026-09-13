@@ -92,7 +92,8 @@ function createAgentQueries({ directory, store, workItems } = {}) {
       const page = require('./orchestratorBudget.cjs').boundedString(content.slice(offset), Math.max(128, Math.min(4000, Number(input.maxChars) || 4000)) - 64);
       const end = offset + page.length;
       return { ok: true, id: item.id, sourceVersion: signature, range: { start: offset, end },
-        workItem: { id: item.id, title: item.title, status: item.status, cwd: item.cwd, binding: item.binding, requiresRevalidation: item.requiresRevalidation },
+        workItem: { id: item.id, title: item.title, status: item.status, cwd: item.cwd, binding: item.binding, requiresRevalidation: item.requiresRevalidation,
+          ...(item.retriable === true && { retriable: true }) },
         text: page, complete: end >= content.length, authority: 'historical-reference-only',
         nextCursor: end < content.length ? encode({ kind: 'work', workItemId: item.id, signature, offset: end }) : null,
         readSource: { workItemId: item.id, sourceVersion: signature } };

@@ -45,11 +45,11 @@ test('busy report is explicit and deduplicated without a misleading no-start tim
   const f = fixture();
   const reports = collectTaskReports(f.job, [], { now: () => 120000 });
   assert.equal(reports.length, 1); assert.equal(reports[0].inputDisposition, 'submitted-while-running');
-  assert.match(reports[0].text, /submitted while the agent was working.*incorporated.*unverified/);
-  assert.doesNotMatch(reports[0].text, /could not confirm that the agent started/);
+  assert.match(reports[0].text, /Typed the follow-up into Terminal while it was working; I haven't seen it taken up yet/);
+  assert.doesNotMatch(reports[0].text, /haven't seen it start yet/);
   assert.deepEqual(collectTaskReports(f.job, [], { now: () => 240000 }), []);
   f.job.waits[0].deliveryStatus = 'unknown';
-  assert.match(collectTaskReports(f.job, [], { now: () => 300000 })[0].text, /delivery is unconfirmed/);
+  assert.match(collectTaskReports(f.job, [], { now: () => 300000 })[0].text, /couldn't confirm that Terminal took the prompt/);
 });
 test('pre-ack busy protection clears on actual queue and later idle dispatch uses new baseline', () => {
   const f = fixture();
@@ -70,5 +70,5 @@ test('actual staged receipt clears provisional busy submission wording', () => {
   f.scheduler.delivery({ actionId: 'followup', ok: true, status: 'staged' });
   assert.equal(f.job.waits[0].inputDisposition, undefined);
   const report = collectTaskReports(f.job, [])[0];
-  assert.match(report.text, /draft.*not been sent/); assert.doesNotMatch(report.text, /submitted while/);
+  assert.match(report.text, /draft in Terminal; nothing was sent/); assert.doesNotMatch(report.text, /while it was working/);
 });

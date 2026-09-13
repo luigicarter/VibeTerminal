@@ -106,7 +106,7 @@ test('mixed send, create, focus, failed effects and closure facts each remain vi
     { kind: 'interrupt', targetId: 'd', ok: false, error: 'Adapter unavailable.' }];
   const text = formatFinalResponse({ outcomes, grants: [grant()], sessions: [target('c')] });
   assert.equal(text.split('Closed 0 of 1').length, 2);
-  assert.match(text, /Opened Codex/); assert.match(text, /haven't confirmed that the task started/);
+  assert.match(text, /Opened Codex/); assert.match(text, /haven't seen it start yet/);
   assert.match(text, /Switched to/); assert.match(text, /Adapter unavailable/);
 });
 
@@ -162,7 +162,7 @@ test('unauthorized rejected close never acquires lifecycle evidence or fabricate
   const result = summarizeCloseOutcomes({ outcomes });
   assert.equal(result.present, false); assert.equal(result.text, undefined); assert.equal(result.totalTargetCount, 0);
   assert.equal(formatFinalResponse({ outcomes }), undefined, 'ordinary rejected action response remains caller-owned');
-  assert.match(formatDirectOutcomes(outcomes), /couldn't complete the request/);
+  assert.match(formatDirectOutcomes(outcomes), /couldn't do that in the terminal: Unauthorized tool[.]/);
   assert.doesNotMatch(formatDirectOutcomes(outcomes), /Closed|original terminals|close attempt failed/);
 });
 
@@ -172,7 +172,7 @@ test('authorized close validation failure retains frozen scope and independent u
   assert.equal(summarize([authorized]).failed, true);
   const unauthorized = { ...authorized, grantId: 'ungranted', targetId: 'b', error: 'Private validation internals.' };
   const text = formatFinalResponse({ outcomes: [receipt(), unauthorized], grants: [grant()] });
-  assert.match(text, /Closed 1 of 1 terminals/); assert.match(text, /couldn't complete the request/);
+  assert.match(text, /Closed 1 of 1 terminals/); assert.match(text, /couldn't do that in the terminal[.]/);
   assert.doesNotMatch(text, /Private validation|0 of|separate close attempt/);
 });
 

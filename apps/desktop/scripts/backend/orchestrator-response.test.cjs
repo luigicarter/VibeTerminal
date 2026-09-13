@@ -19,12 +19,12 @@ test('creation reports the confirmed project folder instead of a shell executabl
 test('creation preserves receipt labels and rejects replacement or unidentified inventory metadata', () => {
   const outcome = { kind: 'create_session', ok: true, status: 'created', processState: 'running', targetId: 'a' };
   const current = [{ id: 'a', generation: 'new', launchToken: 2, name: 'Replacement', cwd: '/replacement' }];
-  assert.equal(formatDirectOutcomes([{ ...outcome, target: { id: 'a', generation: 'old', launchToken: 1 }, cwd: '/original', name: 'Codex', draftStaged: true }], current), 'Opened Codex in original. The prompt is saved as an unsent draft.');
+  assert.equal(formatDirectOutcomes([{ ...outcome, target: { id: 'a', generation: 'old', launchToken: 1 }, cwd: '/original', name: 'Codex', draftStaged: true }], current), 'Opened Codex in original; the prompt is saved there as a draft and has not been sent.');
   assert.equal(formatDirectOutcomes([outcome], current, [{ targets: current }]), 'Opened the terminal.');
   assert.equal(formatDirectOutcomes([{ ...outcome, target: { id: 'a', generation: 'old', launchToken: 1 } }], current), 'Opened the terminal.');
   assert.equal(formatDirectOutcomes([{ ...outcome, target: { id: 'a', generation: 'new', launchToken: 1 } }], current), 'Opened the terminal.');
   assert.equal(formatDirectOutcomes([{ ...outcome, target: { id: 'a', generation: 'new', launchToken: 2 } }], current), 'Opened Replacement in replacement.');
-  assert.equal(format('create_session', 'starting'), 'The terminal was requested; startup is not confirmed yet.');
+  assert.equal(format('create_session', 'starting'), "I asked for a new terminal; I haven't seen it finish starting yet.");
   assert.doesNotMatch(format('create_session', 'launch-failed', { ok: false }), /Opened/);
   assert.doesNotMatch(format('create_session', 'unconfirmed', { cwd: '/requested', processState: 'running' }), /Opened|requested/);
 });
@@ -48,16 +48,16 @@ test('creation uses launch-matched provider labels and only a human project base
 });
 
 test('delivery wording distinguishes sent, queued, draft, and uncertain outcomes', () => {
-  assert.equal(format('send_prompt', 'written'), 'Sent the prompt to Codex.');
-  assert.match(format('send_prompt', 'queued'), /Queued.*hasn't been sent yet/);
-  assert.match(format('send_prompt', 'staged'), /draft.*hasn't been sent/);
-  assert.match(format('stage_draft', 'acknowledged'), /draft.*hasn't been sent/);
-  for (const status of ['unknown', 'unconfirmed']) assert.match(format('send_prompt', status, { ok: false }), /couldn't confirm.*haven't sent it again/);
-  assert.match(format('send_prompt', 'blocked', { ok: false, error: 'The terminal has a pending question.' }), /couldn't complete.*pending question/);
+  assert.equal(format('send_prompt', 'written'), 'Typed the prompt into Codex.');
+  assert.match(format('send_prompt', 'queued'), /queued; nothing has been typed yet/);
+  assert.match(format('send_prompt', 'staged'), /draft in Codex; nothing was sent/);
+  assert.match(format('stage_draft', 'acknowledged'), /draft in Codex; nothing was sent/);
+  for (const status of ['unknown', 'unconfirmed']) assert.match(format('send_prompt', status, { ok: false }), /couldn't confirm that Codex took the prompt.*haven't typed it again/);
+  assert.match(format('send_prompt', 'blocked', { ok: false, error: 'The terminal has a pending question.' }), /couldn't do that in Codex.*pending question/);
 });
 
 test('interrupt acknowledgement never claims a verified stop', () => {
-  assert.equal(format('interrupt', 'written'), 'Requested a stop in Codex.');
+  assert.equal(format('interrupt', 'written'), 'Asked Codex to stop.');
   assert.equal(format('interrupt', 'stopped'), 'Codex stopped.');
   assert.equal(format('focus_session', 'acknowledged'), 'Switched to Codex.');
   assert.equal(formatDirectOutcomes([{ kind: 'navigate', ok: true, grantId: 'g' }], [], [{ id: 'g', args: { view: 'history' } }]), 'Opened History.');

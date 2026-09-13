@@ -41,7 +41,6 @@ if(process.env.VIBE_QA_TRACE_OBSERVATION==='1'){
  observation.createTerminalObservation=(...args)=>{const store=create(...args),ingest=store.ingest;store.ingest=event=>{fs.appendFileSync(${JSON.stringify(path.join(output,'observation.jsonl'))},JSON.stringify(event)+'\\n');return ingest(event);};return store;};
 }
 const {interpretTestIntent}=require(${JSON.stringify(path.join(root,'scripts/backend/orchestrator-test-intent.cjs'))});
-const {TARGET_REVIEW_SYSTEM}=require(${JSON.stringify(path.join(root,'backend/orchestratorTargetReview.cjs'))});
 if(${hidden}){
  const electron=require('electron'),NativeWindow=electron.BrowserWindow,Module=require('node:module'),load=Module._load;
  // Fixture-only hidden runtime: do not create/activate a foreground QA window.
@@ -63,8 +62,6 @@ globalThis.fetch=async(url,options={})=>{
  if(url!=='https://openrouter.ai/api/v1/chat/completions')throw Error('Fixture blocked network: '+url);
  const body=JSON.parse(options.body);fs.appendFileSync(${JSON.stringify(traceFile)},JSON.stringify(body)+'\\n');
  const answer=message=>reply({choices:[{message}],usage:{cost:0}});
- // Script this model response while keeping application selection evidence and validation intact.
- if(body.messages[0]?.content===TARGET_REVIEW_SYSTEM){const context=JSON.parse(body.messages[1].content);return answer({content:JSON.stringify({decision:'DIRECT',evidenceIds:context.selectionEvidence.map(item=>item.id)})});}
  if(body.messages[0]?.content.startsWith('Check the purpose of proposed new-terminal drafts')){
   const purpose=JSON.parse(body.messages[1].content);
   if(purpose.proposedDrafts.some(item=>item.text))throw Error('This transport fixture only requests blank terminal creation.');
@@ -118,7 +115,9 @@ function toolsFrom(reply, expectedOk = true) { assert.equal(reply.ok, expectedOk
     });
   }
   await until(() => cdp.eval("Boolean(window.vibe?.orchestrator && document.querySelector('.orchestrator-mic'))"), "orchestrator UI");
-  assert.equal((await cdp.eval("window.vibe.orchestrator.configure({key:'fixture-no-real-key',sessionOnly:true,model:'fixture/relay',monitoringIntervalSeconds:300})")).ok, true);
+  // This fixture counts requested launches; the separately tested optional warm
+  // spare deliberately creates another pane, so keep it off in this scenario.
+  assert.equal((await cdp.eval("window.vibe.orchestrator.configure({key:'fixture-no-real-key',sessionOnly:true,model:'fixture/relay',monitoringIntervalSeconds:300,spareAgent:false})")).ok, true);
   assert.equal((await cdp.eval("window.vibe.orchestrator.setEnabled(true)")).ok, true);
   const project = async name => { const r = await dispatch({ kind: "create_project", parent: path.join(userData, "Documents"), name }); assert.equal(r.ok, true, JSON.stringify(r)); return r.path; };
   const navigate = async cwd => { assert.equal((await dispatch({ kind: "navigate", view: "project", cwd })).ok, true); };
