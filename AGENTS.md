@@ -37,7 +37,7 @@ Lina Terminal is an Electron + React desktop workspace for running local termina
 
 ## Docs Index
 
-- `docs/release-0.1.123-review.md` - Publication of the 0.1.122 work after repairing the stop-adapter test harness whose 15 ms settle deadline lost to one event-loop turn on the 4-core CI runner: the per-test deadline decisions, the injected-delay reproduction, why CPU load cannot reproduce it on a many-core machine, carried-over packaged acceptance and publication status.
+- `docs/release-0.1.123-review.md` - Verified publication of the 0.1.122 work after repairing the stop-adapter test harness whose 15 ms settle deadline lost to one event-loop turn on the 4-core CI runner: the per-test deadline decisions, the injected-delay reproduction, why CPU load cannot reproduce it on a many-core machine, carried-over packaged acceptance, and the successful workflow run with public release assets, update-feed and downloaded-installer hash verification.
 
 - `docs/release-0.1.122-review.md` - The unpublished 0.1.122 candidate whose CI run failed the release gate on that test-harness race: Orchestrator first-prompt readiness, idle-pane reuse, answer-plus-new-work replies, the bundled Codex 0.154.0 pin and the Chats-only-from-Chats rule, with three QA-harness repairs found during review (packaged model routing, the drag-preview sample, a hex sentinel that collided with a generated id), local gate and first packaged 0.154.0 acceptance evidence. The same work publishes as 0.1.123.
 

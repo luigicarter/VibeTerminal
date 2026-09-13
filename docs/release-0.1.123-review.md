@@ -112,11 +112,27 @@ race or a product defect needs an injected delay on the loop turn, not load.
 
 ## Publication
 
-Not yet published. The release commit and the `v0.1.123` tag exist locally only;
-the tag has not been pushed, so no CI run, GitHub Release, installer asset or
-public update-feed entry exists for this version yet. Publication evidence — the
-workflow run, the release assets, the downloaded installer size and hash, and
-the latest-feed response — is to be filled in here after CI completes.
+The [Windows workflow](https://github.com/luigicarter/VibeTerminal/actions/runs/34788123340)
+succeeded for commit `f641ee6` and release tag `v0.1.123`, concluding at
+23:10:52 UTC. Every step passed: the 59 release gates on the clean runner —
+including the 2,402 backend tests that failed at 2,401 on the previous
+candidate — then the installer build, the update-feed and voice-payload
+validation, the packaged voice, Open Codex, workspace, closure and navigation
+checks, and the additional task, voice and history UI checks, all before the
+publish step ran.
+
+GitHub published [v0.1.123](https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.123)
+on September 13, 2026 at 23:09:21 UTC against `main`, neither draft nor
+prerelease, with three assets: `LinaTerminal-Setup-0.1.123.exe` at 533,039,662
+bytes, its 533,764-byte blockmap, and a 359-byte `latest.yml`. An
+unauthenticated request to the public latest-update feed returned HTTP 200 with
+version 0.1.123, size 533,039,662, release date 2026-09-13T23:07:04.450Z and
+SHA-512 `UPHs4dO4a0JVGhsTghLzWxuxCj9TYyPtMOxN1B7BtXgbr8uNJEsOnBLNhHOC4NrqmrJKt3lv5xMcIYhqmh724A==`.
+The installer downloaded from the public release URL returned HTTP 200 at
+533,039,662 bytes and hashes to that same SHA-512, matching both the per-file
+and top-level feed entries. GitHub's latest release resolves to v0.1.123. Local
+verification evidence is
+`apps/desktop/.tmp/public-release-0.1.123/verification.json`.
 
 Unpublished tags 0.1.118, 0.1.119, 0.1.120 and 0.1.122 remain unchanged. Their
 failed validation was not bypassed. Hosted account deployment, preview wiring,
