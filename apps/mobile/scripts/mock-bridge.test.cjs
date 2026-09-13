@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const zlib = require('node:zlib');
+const path = require('node:path');
 
 const {
   anchorPan,
@@ -554,7 +555,11 @@ test('the Ask Lina subtitle only says "off" once the desktop has said so', () =>
 // --- the live terminal, protocol 2 -------------------------------------------
 
 const CODE = DEFAULT_CODE.replace(/-/g, '');
-const hasXterm = resolveXtermAssets(null) !== null;
+test('mock terminal assets come from the mobile app installation', () => {
+  const assets = resolveXtermAssets(null);
+  assert.ok(assets, 'run npm ci in apps/mobile');
+  assert.equal(assets.from, path.resolve(__dirname, '..'));
+});
 
 /**
  * Read a server-sent event stream until it has `events` of them, the server
@@ -928,7 +933,6 @@ test('the page that may send keys carries send() and no view-only banner', async
 
 test(
   'the xterm the page loads is content-addressed and cached forever',
-  { skip: hasXterm ? false : 'xterm is not installed; run npm ci in apps/desktop' },
   async () => {
     await withBridge({}, async (bridge, base) => {
       const immutable = 'public, max-age=31536000, immutable';

@@ -12,7 +12,7 @@ EAS Build, which is not configured yet.
 
 The app is a remote for the desktop: it reads and writes through the desktop's
 local HTTP bridge (API contract v1, transcribed in `src/api/types.ts`). Develop
-against `npm run mock`, the dependency-free stand-in on port 47832, and verify
+against `npm run mock`, the local stand-in on port 47832, and verify
 screens with `npm run capture`, which walks the whole UX in a phone-sized
 Electron window and writes PNGs to `.tmp/screens`.
 

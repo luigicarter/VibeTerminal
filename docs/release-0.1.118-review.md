@@ -29,6 +29,11 @@ previews remain disconnected, and mobile store submission is separate work.
 - Disabled the optional warm-spare feature only in the fixture that counts
   explicitly requested terminal launches; the spare has its own behavior tests.
 - Aligned the Windows CI Node toolchain with the tested Node 24 SQLite API.
+- A clean mobile CI installation exposed a mock-server dependency on the
+  desktop's installed xterm assets. The follow-up mobile-only commit makes
+  those assets explicit mobile development dependencies, removes the implicit
+  desktop lookup, and verifies ownership. All 79 mobile tests pass locally
+  without skips; the desktop release payload is unchanged by this fix.
 
 ## Acceptance record
 

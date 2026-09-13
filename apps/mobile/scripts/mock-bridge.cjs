@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * A dependency-free stand-in for the Lina Terminal desktop bridge.
+ * A Node HTTP stand-in for the Lina Terminal desktop bridge.
  *
  * It implements the bridge contract exactly as the desktop does, over
  * demonstration data, so the phone app can be built and verified without the
@@ -94,12 +94,12 @@ const XTERM_FILES = {
 };
 
 const XTERM_MISSING_MESSAGE =
-  'xterm was not found. Run npm ci in apps/desktop — the mock borrows that copy — ' +
+  'xterm was not found. Run npm ci in apps/mobile to install the mock terminal assets, ' +
   'or start it with --xterm-dir <folder holding @xterm/xterm and @xterm/addon-fit>.';
 
 /**
- * Find xterm without depending on it: `apps/desktop/node_modules` when it is
- * installed, otherwise whatever `--xterm-dir` points at. Either a folder that
+ * Find the mobile app's own development assets, or an explicit --xterm-dir.
+ * Either a folder that
  * contains `@xterm/...` or one whose `node_modules` does will do.
  *
  * The result carries a content hash, because the assets are served under it and
@@ -108,7 +108,7 @@ const XTERM_MISSING_MESSAGE =
 function resolveXtermAssets(xtermDir) {
   const roots = [];
   if (xtermDir) roots.push(nodePath.resolve(xtermDir));
-  roots.push(nodePath.resolve(__dirname, '../../desktop'));
+  roots.push(nodePath.resolve(__dirname, '..'));
   for (const root of roots) {
     const files = {};
     let complete = true;

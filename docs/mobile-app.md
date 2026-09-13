@@ -551,7 +551,7 @@ owns the design.
 
 ### The mock bridge
 
-`apps/mobile/scripts/mock-bridge.cjs` is a dependency-free `node:http` server
+`apps/mobile/scripts/mock-bridge.cjs` is a `node:http` server
 that implements the same contract over demonstration data: three projects in
 three clearly separate folders, seven terminals across the agent kinds, a
 transcript and screen text for each, an Orchestrator history with tasks in
@@ -581,11 +581,11 @@ prints `PAIR <requestId>` so a person or a test can answer with
 It serves the live terminal too, so the phone's terminal screen is exercised end
 to end without a desktop, and it implements frame protocol 2 rather than
 imitating it. `GET /terminal/:id?code=` is a real xterm page, not a picture of
-one: the mock has no dependencies of its own, so it resolves `@xterm/xterm` and
-`@xterm/addon-fit` out of `apps/desktop/node_modules` at runtime (or out of
-`--xterm-dir`) and serves them under their content hash at `/vendor/<hash>/*`
-with immutable caching, saying so plainly on both the page and stderr when
-neither exists.
+one: `@xterm/xterm` and `@xterm/addon-fit` are mobile-owned development
+dependencies, so a fresh `npm ci` in `apps/mobile` provides the preview assets
+without installing the desktop app. `--xterm-dir` remains an explicit override.
+The mock serves assets under their content hash at `/vendor/<hash>/*` with
+immutable caching and reports missing assets on the page and stderr.
 
 Behind the stream is a real screen model per session: twenty-four rows of
 eighty columns, the scrollback above them, and a cursor, written to by a small
