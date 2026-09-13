@@ -90,6 +90,14 @@ test('a replaced renderer cannot overwrite the new renderer even with a larger s
   assert.equal(stale.saved, false); assert.equal(stale.stale, true);
   assert.equal(f.store.bootstrap().workspace.workspaces[0].sessions[0].threadRef.id, 'C');
 });
+test('a late first renderer save cannot overwrite an acknowledged newer workspace', t => {
+  const f = fixture(t);
+  const initial = f.store.bootstrap({ legacy: workspace(), clientId: 'initial-renderer' });
+  assert.equal(f.store.checkpoint({ workspace: workspace(pane()), clientId: 'new-writer', sequence: 1 }).saved, true);
+  const late = f.store.checkpoint({ workspace: initial.workspace, clientId: 'initial-renderer', sequence: 1 });
+  assert.equal(late.saved, false);
+  assert.equal(f.store.bootstrap().workspace.workspaces[0].sessions[0].threadRef.id, 'A');
+});
 test('draft writes are revision-checked and never truncated', t => {
   const f = fixture(t); f.store.draft({ owner: 'pane:x', text: 'new', revision: 3 });
   assert.equal(f.store.draft({ owner: 'pane:x', text: 'old', revision: 2 }).saved, false);

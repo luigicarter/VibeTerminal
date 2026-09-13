@@ -37,9 +37,8 @@ const screenshot = async name => { let timer; try { const shot = await Promise.r
   await until(() => cdp.eval('Boolean(window.vibe?.orchestrator)'), 'preload');
   const dormant = Array.from({ length: 4 }, (_, i) => ({ id: `dormant-${i}`, name: `Dormant ${i + 1}`, kind: 'terminal', cwd, started: false, launchToken: 0, status: 'idle', createdAt: Date.now(), nextLaunchMode: 'new', layout: { x: (i % 2) * 50, y: Math.floor(i / 2) * 300, w: 48, h: 280, unit: 'fluid' } }));
   const workspace = { id: 'close-qa-project', name: 'Close QA', path: cwd, sessions: dormant };
-  // Seed the replacement document before React reads storage. Writing into the
-  // first document after preload can race its initial persistence effects and
-  // leave the replacement document with an empty workspace on a fast CI runner.
+  // Wait for bootstrap and its first checkpoint before writing the fixture.
+  // Preload readiness alone does not mean the initial empty workspace is saved.
   await cdp.eval(require('./workspace-fixture.cjs').checkpoint({workspaces:[workspace],multiSessions:[],activeWorkspaceId:'close-qa-project',activeView:'project'}));
   const seed = await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: `localStorage.setItem('vibe-terminal:workspaces:v2',${JSON.stringify(JSON.stringify([workspace]))});localStorage.setItem('vibe-terminal:active-workspace:v1','close-qa-project');localStorage.setItem('vibe-terminal:active-view:v1','project');localStorage.setItem('vibe-terminal:multi-sessions:v1','[]');` });
   await cdp.send('Page.reload');

@@ -80,12 +80,23 @@ function createChatStore({ directory, now = Date.now }) {
     return previous;
   }
   transaction(() => writeMeta('run', { bootId, startedAt: now(), clean: false, previousBoot: previousRun?.bootId }));
-  function bootstrap(legacy) {
+  function bootstrap(input) {
+    const wrapped = input && Object.hasOwn(input, 'legacy');
+    const legacy = wrapped ? input.legacy : input;
+    const clientId = wrapped ? input.clientId : undefined;
+    if (clientId !== undefined && (typeof clientId !== 'string' || !clientId || clientId.length > 200)) throw new Error('Invalid workspace client identity.');
     let workspace = readMeta('workspace');
     if (!workspace && legacy) transaction(() => { workspace = cleanWorkspace(legacy); indexWorkspace(workspace); writeMeta('migration', { importedAt: now(), version: 1 }); });
     workspace = workspace && JSON.parse(JSON.stringify(workspace));
     if (workspace && recoveryNeeded && !bootstrapped) for (const { pane } of paneEntries(workspace)) {
       if (pane.kind !== 'terminal') pane.started = false;
+    }
+    // Claim this renderer before its first save. A newer acknowledged writer
+    // must be able to retire an initial renderer that has not checkpointed yet.
+    if (clientId && clientId !== lastClient) {
+      if (retiredClients.has(clientId)) throw new Error('This workspace client was replaced. Reload the view.');
+      if (lastClient) retiredClients.add(lastClient);
+      lastClient = clientId; lastSequence = 0;
     }
     bootstrapped = true;
     return { bootId, recoveryNeeded, workspace, drafts: Object.fromEntries(db.prepare('SELECT * FROM drafts').all().map(d => [d.owner, { text: d.text, revision: d.revision }])), migrated: Boolean(readMeta('migration')) };

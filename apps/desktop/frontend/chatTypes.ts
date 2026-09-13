@@ -9,7 +9,7 @@ export interface ChatRow {
 export interface ChatWorkspace { workspaces: ProjectWorkspace[]; multiSessions: AgentSession[]; activeWorkspaceId: string | null; activeView: 'multi' | 'project' }
 export interface ChatBootstrap { bootId: string; recoveryNeeded: boolean; workspace: ChatWorkspace | null; drafts: Record<string, { text: string; revision: number }> }
 export interface ChatsApi {
-  bootstrap(legacy: ChatWorkspace | null): Promise<ChatBootstrap>;
+  bootstrap(legacy: ChatWorkspace | null, clientId?: string): Promise<ChatBootstrap>;
   checkpoint(input: { workspace: ChatWorkspace; sequence: number; clientId: string }): Promise<{ saved: boolean }>;
   list(): Promise<{ chats: ChatRow[]; error?: string }>;
   refresh(input?: { cwd?: string }): Promise<{ warnings: string[] }>;

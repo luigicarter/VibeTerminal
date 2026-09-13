@@ -77,7 +77,7 @@ contextBridge.exposeInMainWorld("vibe", {
   // for the right shell.
   platform: process.platform,
   chats: {
-    bootstrap: legacy => ipcRenderer.invoke('chats:bootstrap', legacy),
+    bootstrap: (legacy, clientId) => ipcRenderer.invoke('chats:bootstrap', { legacy, clientId }),
     checkpoint: payload => ipcRenderer.invoke('chats:checkpoint', payload),
     list: () => ipcRenderer.invoke('chats:list'),
     refresh: payload => ipcRenderer.invoke('chats:refresh', payload),

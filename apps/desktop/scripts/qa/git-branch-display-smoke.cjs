@@ -63,7 +63,7 @@ async function screenshot(name) {
   const page = await until(async () => (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(p => p.type === "page" && p.url.startsWith("file:") && !p.url.includes("surface=voice")), "renderer");
   cdp = new Cdp(page.webSocketDebuggerUrl); await cdp.open(); await cdp.send("Page.enable");
   await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 960, deviceScaleFactor: 1, mobile: false });
-  await until(() => cdp.eval("Boolean(window.vibe?.workspace)"), "preload");
+  await until(() => cdp.eval("Boolean(window.vibe?.workspace && document.querySelector('.app-shell'))"), "workspace bootstrap");
   const workspaces = [{ id: "a", name: "Branch QA A", path: repo, sessions: [] }, { id: "b", name: "Branch QA B", path: repoB, sessions: [] }];
   await cdp.eval(`localStorage.setItem('vibe-terminal:workspaces:v2',${JSON.stringify(JSON.stringify(workspaces))});localStorage.setItem('vibe-terminal:active-workspace:v1','a');localStorage.setItem('vibe-terminal:active-view:v1','project');`);
   await cdp.eval(require('./workspace-fixture.cjs').checkpointFromStorage);

@@ -1,5 +1,9 @@
 # Release 0.1.118 review
 
+Status: unpublished candidate. The tag is retained after a clean-runner fixture
+startup failure; [0.1.119](release-0.1.119-review.md) carries the correction and
+publication record.
+
 This release collects the pending repository work since 0.1.117: terminal-format
 Chats and local recovery storage, the Orchestrator dispatch/memory/voice overhaul,
 the opt-in read-only phone bridge, the mobile client, the separate Bun/PostgreSQL
@@ -74,9 +78,10 @@ microphone-capture/voice-workflow and paginated history/search interfaces passed
 Hidden UI tests distinguish functional acceptance from screenshot or physical
 microphone evidence.
 
-Local logs are under `apps/desktop/.tmp/release-0.1.118-*`; the final installer
-and update metadata are in `apps/desktop/release`. Production publication is
-pending the release-tag workflow and will be recorded after its asset checks.
+Local logs are under `apps/desktop/.tmp/release-0.1.118-*`. The local installer
+passed verification, but the tag workflow did not publish it. The active
+`apps/desktop/release` output directory belongs to the current publication
+candidate; see 0.1.119 for the final release assets.
 
 ## Boundaries
 

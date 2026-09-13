@@ -13,7 +13,7 @@ export async function initializeChatPersistence() {
   if (!window.vibe?.chats) return;
   let legacy: ChatWorkspace | null = null, legacyError: unknown;
   try { legacy = legacyWorkspace(); } catch (error) { legacyError = error; }
-  boot = await window.vibe.chats.bootstrap(legacy);
+  boot = await window.vibe.chats.bootstrap(legacy, clientId);
   if (!boot.workspace && legacyError) throw legacyError;
   if (boot.workspace) {
     localStorage.setItem(keys.workspaces, JSON.stringify(boot.workspace.workspaces));
