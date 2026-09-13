@@ -1,6 +1,6 @@
 # Terminal-format Chats implementation
 
-Chats now appears directly below Projects in the desktop sidebar. Opening a chat reveals its existing terminal, or resumes its exact saved native conversation in a terminal pane. The core feature is published in [v0.1.121](release-0.1.121-review.md). Additional hardening from the [design and recovery plan](chat-section-plan-2026-09-13.md) remains open as listed below; the full roadmap is not a claim of completed implementation.
+Chats now appears directly below Projects in the desktop sidebar. Opening a chat reveals its existing terminal, or resumes its exact saved native conversation in a terminal pane. The section itself is published in [v0.1.121](release-0.1.121-review.md); the provenance rule this document describes — one flat list holding only the conversations started from the Chats section, recorded by a persisted `chat` flag and an `origin` field, so the list starts empty and no folder scan fills it — is published in [v0.1.123](release-0.1.123-review.md). Additional hardening from the [design and recovery plan](chat-section-plan-2026-09-13.md) remains open as listed below; the full roadmap is not a claim of completed implementation.
 
 ## Implemented behavior
 
