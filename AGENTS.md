@@ -37,6 +37,8 @@ Lina Terminal is an Electron + React desktop workspace for running local termina
 
 ## Docs Index
 
+- `docs/release-0.1.120-review.md` - Final complete-work publication, compact-sidebar warning-space repair, unchanged unpublished 0.1.118/0.1.119 tags, acceptance and public update-feed verification.
+
 - `docs/release-0.1.119-review.md` - Publication of the complete pending work after correcting the clean-runner workspace fixture race and mobile mock dependency ownership; retained unpublished 0.1.118 tag, package/CI acceptance and publication evidence.
 
 - `docs/release-0.1.118-review.md` - Complete pending-work release: terminal Chats/recovery, Orchestrator overhaul, read-only phone bridge, mobile/server/account-preview source, release-review fixes, all-app acceptance and installer/publication evidence.

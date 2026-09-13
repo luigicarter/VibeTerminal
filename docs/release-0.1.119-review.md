@@ -1,5 +1,9 @@
 # Release 0.1.119 review
 
+Status: unpublished candidate. The clean-runner bootstrap correction passed,
+but a compact-sidebar warning-layout failure stopped publication. The unchanged
+tag is retained; [0.1.120](release-0.1.120-review.md) carries the UI correction.
+
 This is the publication candidate for the complete pending work described in the
 [0.1.118 review](release-0.1.118-review.md): terminal Chats/recovery, the
 Orchestrator overhaul, phone bridge, mobile client, account-server foundation,
@@ -47,10 +51,9 @@ The local 0.1.119 installer is 536,704,340 bytes. Its SHA-512 and size match
 models. The packaged-source two-process fixture passed for all 30 panes in
 `apps/desktop/.tmp/session-resume-smoke/1789320581791-63052`.
 
-Production workflow, final installer/feed validation and publication evidence
-will be recorded when those steps finish. No 0.1.118 release assets were
-published. Neither this work nor publication installs or restarts the user's
-running app automatically.
+The Windows workflow stopped before installer publication. No 0.1.118 or
+0.1.119 release assets were published. Neither this work nor publication
+installs or restarts the user's running app automatically.
 
 The existing recovery limits, disconnected-account boundaries and mobile store
 submission limits continue to apply.
