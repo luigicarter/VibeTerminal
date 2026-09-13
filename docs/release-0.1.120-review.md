@@ -1,5 +1,9 @@
 # Release 0.1.120 review
 
+Status: unpublished. CI exposed a transient Windows lock during a pane-memory
+save; investigation reproduced it locally, and the unchanged rerun was cancelled.
+[0.1.121](release-0.1.121-review.md) contains the bounded atomic-save repair.
+
 This publishes the complete pending work described in the
 [0.1.118 review](release-0.1.118-review.md), with the bootstrap ownership and
 mobile dependency fixes in [0.1.119](release-0.1.119-review.md), plus the final

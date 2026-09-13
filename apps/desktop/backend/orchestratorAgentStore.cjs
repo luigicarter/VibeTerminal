@@ -15,6 +15,17 @@ function createAgentStore({ userDataPath, getSecrets = () => [], now = Date.now,
   const filename = path.join(userDataPath, 'orchestrator-agents-v1.json'), backup = `${filename}.bak`;
   let state = { version: VERSION, revision: 0, identities: [], notes: [] }, status = 'new', blocked = false;
   let chain = Promise.resolve();
+  async function replaceFile(source, destination) {
+    for (let attempt = 0; ; attempt++) {
+      try { return await fsImpl.rename(source, destination); }
+      catch (error) {
+        // Windows readers/scanners can briefly hold the destination. Retry the
+        // same atomic replacement; never delete the last good file to proceed.
+        if (attempt >= 5 || !['EPERM', 'EACCES', 'EBUSY'].includes(error.code)) throw error;
+        await new Promise(resolve => setTimeout(resolve, 20 * 2 ** attempt));
+      }
+    }
+  }
   const clean = value => {
     const secrets = getSecrets();
     if (!Array.isArray(secrets)) throw new Error('Agent record redaction is unavailable.');
@@ -76,9 +87,9 @@ function createAgentStore({ userDataPath, getSecrets = () => [], now = Date.now,
         // A recovered backup remains intact until a new primary has committed.
         if (status === 'loaded' || status === 'saved') {
           await fsImpl.copyFile(filename, backupTemporary);
-          await fsImpl.rename(backupTemporary, backup);
+          await replaceFile(backupTemporary, backup);
         }
-        await fsImpl.rename(temporary, filename);
+        await replaceFile(temporary, filename);
         state = next; status = 'saved';
         return clone(result.value);
       } finally {

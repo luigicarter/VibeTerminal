@@ -58,6 +58,30 @@ test('commit failure never returns saved or updates the in-memory note', async t
   await assert.rejects(store.write(note(), scope), /ENOSPC/);
   assert.equal(store.list().total, 0); assert.equal(fs.existsSync(file), false);
 });
+test('transient Windows locks retry primary and backup replacement before acknowledging saved', async t => {
+  const attempts = new Map();
+  const { store, file } = fixture(t, { fsImpl: { ...fs.promises, rename: async (from, to) => {
+    const count = (attempts.get(to) || 0) + 1; attempts.set(to, count);
+    if (count <= 2) throw Object.assign(new Error('Temporary file lock'), { code: 'EPERM' });
+    return fs.promises.rename(from, to);
+  } } });
+  await store.write(note('first'), scope); await store.write(note('second'), scope);
+  assert.equal(JSON.parse(fs.readFileSync(file)).notes.length, 2);
+  assert.equal(JSON.parse(fs.readFileSync(file + '.bak')).notes.length, 1);
+  assert(attempts.get(file) >= 3); assert(attempts.get(file + '.bak') >= 3);
+});
+test('persistent locks stop after bounded retries and preserve the last committed file', async t => {
+  let blocked = false, attempts = 0;
+  const { store, file } = fixture(t, { fsImpl: { ...fs.promises, rename: async (from, to) => {
+    if (blocked) { attempts++; throw Object.assign(new Error('Still locked'), { code: 'EPERM' }); }
+    return fs.promises.rename(from, to);
+  } } });
+  await store.write(note('first'), scope); const saved = fs.readFileSync(file);
+  blocked = true;
+  await assert.rejects(store.write(note('second'), scope), /Still locked/);
+  assert.equal(attempts, 6); assert(saved.equals(fs.readFileSync(file)));
+  assert.equal(store.list().total, 1);
+});
 
 test('a valid backup recovers corruption and unknown newer schemas stay read-only', async t => {
   const { store, root, file } = fixture(t);
