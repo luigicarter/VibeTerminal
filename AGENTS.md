@@ -37,7 +37,9 @@ Lina Terminal is an Electron + React desktop workspace for running local termina
 
 ## Docs Index
 
-- `docs/release-0.1.122-review.md` - The 0.1.122 release: Orchestrator first-prompt readiness, idle-pane reuse, answer-plus-new-work replies, the bundled Codex 0.154.0 pin and the Chats-only-from-Chats rule, with three QA-harness repairs found during review (packaged model routing, the drag-preview sample, a hex sentinel that collided with a generated id), local gate and first packaged 0.154.0 acceptance evidence, and publication status.
+- `docs/release-0.1.123-review.md` - Publication of the 0.1.122 work after repairing the stop-adapter test harness whose 15 ms settle deadline lost to one event-loop turn on the 4-core CI runner: the per-test deadline decisions, the injected-delay reproduction, why CPU load cannot reproduce it on a many-core machine, carried-over packaged acceptance and publication status.
+
+- `docs/release-0.1.122-review.md` - The unpublished 0.1.122 candidate whose CI run failed the release gate on that test-harness race: Orchestrator first-prompt readiness, idle-pane reuse, answer-plus-new-work replies, the bundled Codex 0.154.0 pin and the Chats-only-from-Chats rule, with three QA-harness repairs found during review (packaged model routing, the drag-preview sample, a hex sentinel that collided with a generated id), local gate and first packaged 0.154.0 acceptance evidence. The same work publishes as 0.1.123.
 
 - `docs/orchestrator-terminal-readiness-2026-09-13.md` - Why the Orchestrator stopped getting first prompts into panes on 0.1.121 and what changed: the stale Claude footer rule replaced by recorded-screen recognizers for every PTY provider, startup-screen reporting and the folder-trust answer extended to all of them, never-prompted panes and panes owned by a cancelled task made reusable, mixed answer-plus-new-work replies represented per grant, a runnable provider-startup probe, and a per-provider verified/unverified readiness table.
 

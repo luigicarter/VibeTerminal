@@ -167,11 +167,20 @@ assertion is unchanged in strength; it can no longer pass or fail by accident.
 
 ## Publication
 
-Not yet published. The release commit and the `v0.1.122` tag exist locally only;
-the tag has not been pushed, so no CI run, GitHub Release, installer asset or
-public update-feed entry exists for this version yet. Publication evidence — the
-workflow run, the release assets, the downloaded installer size and hash, and
-the latest-feed response — is to be filled in here after CI completes.
+Not published. The tag was pushed at `4a0842c` and
+[CI run 34786799997](https://github.com/luigicarter/VibeTerminal/actions/runs/34786799997)
+failed in "Run release checks": `test:orchestrator` reported 2,401 of 2,402
+passing, failing `scripts/backend/observed-stop-adapter.test.cjs:40`. The cause
+was in the test harness, not the product — its 15 ms settle deadline lost to a
+single event-loop turn on the 4-core `windows-latest` runner, so the observer
+reported `unknown` for a stop that had completed. No installer, GitHub Release
+or update-feed entry was produced, and the workflow never reached the publish
+step.
+
+`v0.1.122` is retained unpublished, like 0.1.118 through 0.1.120. Its failed
+validation was not bypassed and the tag is unchanged. The harness repair and
+publication continue in [the 0.1.123 review](release-0.1.123-review.md), which
+publishes this same work.
 
 Unpublished tags 0.1.118, 0.1.119 and 0.1.120 remain unchanged. Hosted account
 deployment, preview wiring, mobile store submission and the documented recovery
