@@ -492,7 +492,9 @@ test('composer evidence expires ten seconds after the write and needs a supporte
   const expired = submitted(); expired.set(11001);
   expired.observe('\u2022 Working (esc to interrupt)');
   assert.equal(expired.wait.observedState, undefined);
-  const unsupported = submitted({ provider: 'gemini' }); unsupported.set(3000);
+  // Cursor Agent is the one PTY kind whose composer has never been captured, so
+  // nothing on its screen can be read as the prompt having left the composer.
+  const unsupported = submitted({ provider: 'cursor' }); unsupported.set(3000);
   unsupported.observe('\u2022 Working (esc to interrupt)');
   assert.equal(unsupported.wait.observedState, undefined);
   const unobserved = submitted(); unobserved.set(3000);

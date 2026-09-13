@@ -2,7 +2,7 @@
 const path = require('node:path');
 const PROVIDERS = new Set(['claude', 'codex', 'open-codex', 'codex-web', 'opencode', 'cursor', 'gemini', 'kimi', 'kimi-custom', 'qwen', 'grok']);
 const CONFIG_FIELDS = ['providerProfileId', 'providerModelOverride', 'openCodexModel', 'fusionPlannerFamily', 'fusionPlannerModel', 'fusionPlannerEffort', 'fusionPlannerFast', 'fusionExecutorFamily', 'fusionExecutorModel', 'fusionExecutorEffort', 'fusionExecutorFast', 'fusionRunMode', 'openFusionPlannerModel', 'openFusionExecutorModel', 'openFusionRunMode'];
-const SESSION_FIELDS = ['id', 'name', 'kind', 'command', 'cwd', 'createdAt', 'threadRef', 'resumeRef', 'threadSelectionPending', 'nextLaunchMode', 'started', 'launchToken', 'status', 'layout', 'tileId', 'splitTree', 'fusion', 'openFusion', ...CONFIG_FIELDS];
+const SESSION_FIELDS = ['id', 'name', 'kind', 'command', 'cwd', 'createdAt', 'threadRef', 'resumeRef', 'threadSelectionPending', 'nextLaunchMode', 'started', 'launchToken', 'status', 'layout', 'tileId', 'splitTree', 'fusion', 'openFusion', 'chat', ...CONFIG_FIELDS];
 function folder(value) {
   const windows = /^[a-z]:[\\/]|^\\\\|^\/\//i.test(value || '');
   const normalized = (windows ? path.win32 : path.posix).normalize(String(value || '')).replace(/\\/g, '/').replace(/\/+$/, '');

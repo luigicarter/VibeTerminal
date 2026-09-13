@@ -34,9 +34,13 @@ function createChatStore({ directory, now = Date.now }) {
   function upsert(conversation, extra = {}) {
     const nativeKey = key(conversation);
     const existing = byKey(nativeKey) || (extra.chatId && get(extra.chatId));
+    const createdAt = existing?.createdAt || now();
     const next = { ...existing, ...extra, chatId: existing?.chatId || extra.chatId || randomUUID(), nativeKey,
       conversation: conversation ? { ...existing?.conversation, ...Object.fromEntries(Object.entries(conversation).filter(([, value]) => value !== undefined)) } : existing?.conversation,
-      createdAt: existing?.createdAt || now(), updatedAt: Math.max(existing?.updatedAt || 0, Number(conversation?.updatedAt) || 0), revision: (existing?.revision || 0) + 1 };
+      // A pane without a saved timestamp still sorts by when it appeared, not to the bottom.
+      createdAt, updatedAt: Math.max(existing?.updatedAt || 0, Number(conversation?.updatedAt) || 0) || createdAt, revision: (existing?.revision || 0) + 1 };
+    // Provenance only ever rises: a pane that once opened as a chat stays one.
+    next.origin = extra.origin || existing?.origin || 'terminal';
     next.title = existing?.titleOverride ? existing.title : conversation?.title || existing?.title || extra.title || 'New chat';
     return put(next);
   }
@@ -55,13 +59,15 @@ function createChatStore({ directory, now = Date.now }) {
       const pane = applyObservation(raw);
       Object.assign(raw, pane);
       if (pane.kind === 'terminal') continue;
+      // Only a pane started from the Chats section is a chat; every other pane is a terminal.
+      const origin = pane.chat === true ? { origin: 'chat' } : {};
       // Retain earlier chats independently from the current pane binding.
-      if (pane.resumeRef?.id) { const prior = fromSession(pane, pane.resumeRef); if (prior) upsert(prior, { projectId }); }
+      if (pane.resumeRef?.id) { const prior = fromSession(pane, pane.resumeRef); if (prior) upsert(prior, { projectId, ...origin }); }
       const conversation = fromSession(pane, pane.threadRef?.id ? pane.threadRef : !pane.started ? pane.resumeRef : undefined);
       let chat = conversation && byKey(key(conversation));
       const provisional = oldBindings[pane.id] && get(oldBindings[pane.id]);
       if (!chat && provisional && !provisional.nativeKey) chat = provisional;
-      const extra = { chatId: chat?.chatId, projectId, paneId: pane.id, title: pane.name, kind: pane.kind,
+      const extra = { chatId: chat?.chatId, ...origin, projectId, paneId: pane.id, title: pane.name, kind: pane.kind,
         pending: Boolean(pane.threadSelectionPending), provisional: !conversation, lastRunState: pane.status, cwd: pane.cwd };
       chat = upsert(conversation, extra);
       bindings[pane.id] = chat.chatId;
@@ -134,14 +140,16 @@ function createChatStore({ directory, now = Date.now }) {
     const provider = pane.openFusion ? 'opencode' : pane.fusionPlannerFamily || 'claude';
     return observe({ id: pane.id, launchToken: pane.launchToken, revision: event.revision || now(), conversation: { provider, id: event.sessionId, createdAt: pane.createdAt, updatedAt: now() } });
   }
-  function list() {
+  function list(input = {}) {
     const bindings = readMeta('bindings') || {};
     const workspace = readMeta('workspace');
     const panes = workspace ? paneEntries(workspace).map(item => item.pane) : [];
     return db.prepare('SELECT value FROM chats').all().map(row => {
       const chat = parse(row.value), pane = panes.find(pane => bindings[pane.id] === chat.chatId);
       return { ...chat, paneId: pane?.id, started: Boolean(pane?.started) };
-    }).sort((a, b) => b.updatedAt - a.updatedAt || a.chatId.localeCompare(b.chatId));
+    // The sidebar lists only chats started from the Chats section; every other row stays in the catalog.
+    }).filter(chat => input.all || chat.origin === 'chat' && Boolean(chat.nativeKey || chat.paneId))
+      .sort((a, b) => b.updatedAt - a.updatedAt || a.chatId.localeCompare(b.chatId));
   }
   function importConversations(items) {
     if (!Array.isArray(items) || items.length > 200) throw new Error('Invalid history page.');
@@ -151,7 +159,7 @@ function createChatStore({ directory, now = Date.now }) {
       // An external scan cannot overwrite a recipe proven by a Lina pane.
       const clean = { provider: value.provider, id: value.id, cwd: value.cwd, title: String(value.title || '').slice(0, 200), updatedAt: Number(value.updatedAt) || 0, createdAt: Number(value.createdAt) || 0, claudeHome: value.claudeHome, fusion: value.fusion, openFusion: value.openFusion, plannerProvider: value.plannerProvider };
       if (!existing) for (const field of CONFIG_FIELDS) if (value[field] !== undefined) clean[field] = value[field];
-      return [upsert(clean)];
+      return [upsert(clean, existing ? {} : { origin: 'discovered' })];
     }));
   }
   function update({ chatId, revision, title, archived }) {
@@ -206,7 +214,7 @@ function createChatStore({ directory, now = Date.now }) {
     saveCopy, readCopy: chatId => parse(db.prepare('SELECT value FROM copies WHERE chatId=?').get(chatId)?.value),
     scopes: () => {
       const grouped = new Map();
-      for (const chat of list().filter(c => c.conversation)) {
+      for (const chat of list({ all: true }).filter(c => c.conversation)) {
         const value = chat.conversation;
         const scopeKey = JSON.stringify([value.provider, value.cwd, value.claudeHome, value.openFusion, value.fusion, value.providerProfileId]);
         if (!grouped.has(scopeKey)) grouped.set(scopeKey, { ...value, ownedThreadIds: [] });

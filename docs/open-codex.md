@@ -75,7 +75,9 @@ defaults are used, and OpenAI-hosted web search is disabled for this integration
 `npm run prepare:open-codex` copies the prepared, pinned native Codex payload into
 `vendor/open-codex/<platform>-<arch>`. Both Windows packaging commands prepare it
 and package it as `resources/open-codex`. The current verified payload is
-Codex CLI 0.144.0. Open Codex owns its own runtime process for each terminal pane.
+Codex CLI 0.154.0 (bumped 2026-09-13 — see `docs/codex-bundle-0.154-2026-09-13.md`;
+it shares the single pin with the Fusion `codex-bin` bundle). Open Codex owns its
+own runtime process for each terminal pane.
 
 - `npm run test:open-codex`: settings validation, credential boundaries, both API
   paths, tools/reasoning, interrupted streams, cancellation races, and history

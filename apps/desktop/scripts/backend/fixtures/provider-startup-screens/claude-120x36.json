@@ -1,0 +1,28 @@
+{
+ "kind": "claude",
+ "cols": 120,
+ "rows": 36,
+ "observation": {
+  "ok": true,
+  "id": "pane",
+  "generation": "g1",
+  "exited": false,
+  "sequence": 1,
+  "inputRevision": 0,
+  "text": " ▐▛███▛█   Claude Code v2.1.270\n▝▜██████▀  Fable 5.1 with xhigh effort · Claude Max\n  ▝▝ ▝▝    ~\\Documents\\vibeTerminal\n\n\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ Try \"fix typecheck errors\"\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n  [ Fable 5.1 ]                                                                                                    /rc\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+  "cols": 120,
+  "rows": 36,
+  "cursor": {
+   "x": 2,
+   "y": 6
+  },
+  "cursorVisible": true,
+  "alternateScreen": false,
+  "screenTruncated": false
+ },
+ "readiness": {
+  "ready": true,
+  "status": "ready",
+  "reason": "The Claude root composer is visible at its empty input cursor."
+ }
+}

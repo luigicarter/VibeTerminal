@@ -3,6 +3,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createTerminalRuntime } = require("../../backend/terminalRuntime.cjs");
 const capabilities = require("../../shared/providerCapabilities.json");
+const { idlePaneCandidate, neverPrompted } = require("../../backend/orchestratorResolver.cjs");
+const { sessionReady } = require("../../backend/orchestratorLaunchers.cjs");
 
 function pane(provider) {
   let time = 10000;
@@ -13,6 +15,66 @@ function pane(provider) {
   return { runtime, event, state: () => runtime.getSnapshot(provider), at: value => { time = value; },
     input: data => runtime.recordInput({ id: provider, generation, data }) };
 }
+
+// A pane cannot prove which root conversation it is until its provider writes a
+// transcript, and Claude only writes one after the first prompt. Its own
+// session-start hook still says the CLI reached its prompt, so the turn state is
+// not in doubt even while the identity is. Leaving it "unknown" is why the
+// Orchestrator opened a second pane beside every never-prompted one on 0.1.121.
+test("a session start with unproven identity still reports an idle, never-prompted pane", () => {
+  const p = pane("claude");
+  p.event("agent-process", { phase: "start", processId: "proc", agentPid: 4242 });
+  assert.equal(p.state().observation, "observed");
+  p.event("agent-session", { phase: "start", rootVerified: undefined, transcriptPath: undefined });
+  const s = p.state();
+  assert.equal(s.observation, "provisional", "identity is still unproven");
+  assert.equal(s.turnState, "idle", "but nothing is in flight");
+  assert.equal(s.agentProcessState, "running");
+  assert.equal(s.conversation, undefined);
+  assert.deepEqual([s.turnId, s.turnStartedAt, s.turnEndedAt], [undefined, undefined, undefined]);
+  assert.equal(neverPrompted(s), true);
+  assert.equal(idlePaneCandidate(s), true, "the resolver can reuse it");
+  assert.equal(sessionReady({ ...s, agentPid: 4242 }), true, "and its launch is finished");
+  // Once a turn exists the pane is no longer a fresh one, and a later
+  // unconfirmed session start cannot rewrite what the turn telemetry recorded.
+  p.event("agent-running", { turnStart: true, rootVerified: true });
+  const busy = p.state();
+  assert.equal(busy.turnState, "running");
+  p.event("agent-session", { phase: "start", rootVerified: undefined });
+  assert.equal(p.state().turnState, "running", "a session start never settles a live turn");
+});
+
+// The same pane once its provider writes the transcript that proves which root
+// conversation it is. The hinted session start was parked and replayed; it is the
+// replay that has to make the observation authoritative, because every caller
+// that still requires "observed" - native readiness, close safety, delivery
+// classification - is asking about exactly this window.
+test("a confirmed identity makes a never-prompted pane's idleness authoritative", async () => {
+  let time = 10000;
+  const runtime = createTerminalRuntime({ now: () => time, capabilities: p => capabilities[p],
+    lookup: async payload => payload.confirmId === "thread-1"
+      ? { status: "found", rootVerified: true, threadRef: { provider: "claude", id: "thread-1" } }
+      : { status: "pending" } });
+  const { generation } = runtime.beginLaunch({ id: "pane", provider: "claude", cwd: process.cwd(), launchToken: 1 });
+  const event = (type, details = {}) => runtime.ingest({ id: "pane", generation, type, ...details });
+  event("created");
+  event("agent-process", { phase: "start", processId: "proc", agentPid: 4242 });
+  event("agent-session", { phase: "start", providerThreadId: "thread-1", transcriptPath: "C:/transcripts/thread-1.jsonl" });
+  const parked = runtime.getSnapshot("pane");
+  assert.equal(parked.observation, "provisional", "the hinted identity is not proof of the root thread");
+  assert.equal(parked.turnState, "idle", "but nothing is in flight");
+  assert.equal(parked.conversation, undefined);
+  const record = runtime.getRecord("pane");
+  assert.equal(record.identityHints.size, 1);
+  await runtime.refreshRecord(record);
+  const confirmed = runtime.getSnapshot("pane");
+  assert.equal(confirmed.conversation?.id, "thread-1");
+  assert.equal(confirmed.observation, "observed", "the replayed start settles the observation");
+  assert.equal(confirmed.turnState, "idle");
+  assert.deepEqual([confirmed.turnId, confirmed.turnStartedAt, confirmed.turnEndedAt], [undefined, undefined, undefined]);
+  assert.equal(runtime.getRecord("pane").identityHints.size, 0);
+  runtime.dispose();
+});
 
 for (const provider of Object.keys(capabilities).filter(p => p !== "terminal")) {
   test(`${provider}: response, next turn, retry, and silence retain truthful timing`, () => {

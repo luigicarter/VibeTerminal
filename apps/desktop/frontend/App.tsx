@@ -2484,13 +2484,13 @@ export default function App() {
     scope: SessionScope,
     kind: AgentKind,
     cwd: string,
-    options?: { providerProfileId?: string; providerModelOverride?: string; openCodexModel?: string }
+    options?: { providerProfileId?: string; providerModelOverride?: string; openCodexModel?: string; chat?: boolean }
   ) {
     const created = createSession(kind, cwd, [], undefined, options);
     const metrics = placementMetrics(scope);
     updateScopeSessions(scope, (sessions) => [
       ...sessions,
-      { ...created, name: `${getProfile(kind).label} ${sessions.length + 1}`, layout: findNextFluidLayout(sessions, metrics) }
+      { ...created, name: `${getProfile(kind).label} ${sessions.length + 1}`, layout: findNextFluidLayout(sessions, metrics), ...(options?.chat ? { chat: true } : {}) }
     ]);
     if (scopeKey(scope) === activeScopeKeyRef.current) {
       setSelectedSessionId(created.id);
@@ -2603,7 +2603,7 @@ export default function App() {
 
   async function addSession(
     kind: AgentKind,
-    options?: { providerProfileId?: string; providerModelOverride?: string; openCodexModel?: string }
+    options?: { providerProfileId?: string; providerModelOverride?: string; openCodexModel?: string; chat?: boolean }
   ) {
     if (!activeScope) {
       return;
@@ -4445,7 +4445,8 @@ export default function App() {
           const launch = conversationLaunch(conversation);
           const project = workspaces.find(workspace => normalizeWorkspacePath(workspace.path) === normalizeWorkspacePath(conversation.cwd));
           const scope: SessionScope = project ? { type: "workspace", workspaceId: project.id } : { type: "multi" };
-          const created = { ...createSession(launch.kind, conversation.cwd, [], undefined, conversation), ...launch.patch };
+          // Only the Chats section marks the pane it opens as a chat; the Orchestrator's own resumes stay terminals.
+          const created = { ...createSession(launch.kind, conversation.cwd, [], undefined, conversation), ...launch.patch, ...(payload.chat === true ? { chat: true } : {}) };
           pendingConversationOpens.current.set(key, { id: created.id, launchToken: created.launchToken });
           const metrics = placementMetrics(scope);
           updateScopeSessions(scope, sessions => [...sessions, { ...created, layout: findNextFluidLayout(sessions, metrics) }]);
@@ -4807,7 +4808,7 @@ export default function App() {
         <span id="workspace-reorder-help" className="workspace-reorder-sr-only">Drag to reorder projects, or use Up and Down arrow keys on a reorder button.</span>
         <span className="workspace-reorder-sr-only" role="status" aria-live="polite">{workspaceOrderAnnouncement}</span>
         <ChatsSection project={activeWorkspace} projects={workspaces} sessions={allSessions} multi={activeView === 'multi'} profiles={launcherAgentProfiles}
-          onNew={async kind => { setOrchestratorViewOpen(false); await addSession(kind); }}
+          onNew={async kind => { setOrchestratorViewOpen(false); await addSession(kind, { chat: true }); }}
           onFocus={id => { setOrchestratorViewOpen(false); focusRelaySession(id); }}
           onOpen={async row => {
             const pane = row.paneId && allSessions.find(session => session.id === row.paneId);
@@ -4815,7 +4816,7 @@ export default function App() {
             await flushChatWorkspace();
             const conversation = await window.vibe?.chats?.open(row.chatId);
             if (!conversation) throw new Error('Saved chat service is unavailable.');
-            const result = await relayActionHandler.current('resume_conversation', { conversation });
+            const result = await relayActionHandler.current('resume_conversation', { conversation, chat: true });
             if (!result.ok) throw new Error(String(result.error || 'Could not open this chat.'));
             await flushChatWorkspace();
           }} />

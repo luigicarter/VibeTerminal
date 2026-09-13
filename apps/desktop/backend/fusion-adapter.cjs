@@ -365,7 +365,8 @@ function cleanCodexSetting(value) {
   return normalized === "auto" || normalized === "default" ? null : text;
 }
 
-// Codex 0.144.0's family union is minimal|low|medium|high|xhigh|max|ultra.
+// Codex 0.154.0's live catalog exposes low|medium|high|xhigh|max|ultra
+// ("minimal" survives only as a legacy saved value that normalizes to low).
 // Per-model support varies; readCodexSettings preserves the user's choice and
 // applyCodexTurnSettings resolves it against live model/list before every turn.
 function cleanCodexEffort(value) {

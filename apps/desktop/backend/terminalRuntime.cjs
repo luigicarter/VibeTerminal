@@ -520,6 +520,15 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
           record.pendingEvents.push({ ...event, observedAt: event.observedAt || now() });
           if (record.pendingEvents.length > 128) record.pendingEvents.shift();
           s.observation = "provisional";
+          // The pane's own session-start hook says the CLI reached its prompt.
+          // Which root conversation that is stays unproven — Claude only writes
+          // the transcript that confirms it after the first prompt — but the
+          // turn state is not in doubt: no child, no turn, nothing in flight.
+          // Withholding it left every never-prompted pane at 'unknown' forever,
+          // so the resolver judged it unusable and opened a second pane beside
+          // an empty one. Identity stays provisional; only idleness is recorded.
+          if (event.type === "agent-session" && event.phase === "start" && s.turnState === "unknown" &&
+              !s.turnId && !s.turnStartedAt && !s.turnEndedAt) s.turnState = "idle";
           return publish(record);
         }
       }
@@ -582,7 +591,15 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
         if (child && event.phase === "end") endChild(record, event, eventAt);
         if (!child && event.title && event.providerThreadId) bind(record,
           { id: event.providerThreadId, title: event.title, titleSource: event.titleSource, updatedAt: eventAt }, { liveTitle: true });
-        if (!child && event.phase === "start" && s.turnState === "unknown") {
+        // A root start with nothing in flight is a pane sitting at its prompt.
+        // The parking branch above may already have recorded that idleness while
+        // the identity was only hinted; when the hint is confirmed this same
+        // event is replayed, and it is the replay that makes the observation
+        // authoritative. Keying this on turnState still being "unknown" would
+        // leave such a pane provisional until its first turn, which is exactly
+        // the window the callers requiring "observed" ask about.
+        if (!child && event.phase === "start" && ["unknown", "idle"].includes(s.turnState) &&
+            !s.turnId && !s.turnStartedAt && !s.turnEndedAt) {
           s.turnState = "idle";
           s.observation = "observed";
         }

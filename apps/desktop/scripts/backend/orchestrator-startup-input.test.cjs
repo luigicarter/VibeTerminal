@@ -2,6 +2,16 @@
 const test = require('node:test'), assert = require('node:assert/strict');
 const { createTerminalInput } = require('../../backend/orchestratorTerminalInput.cjs');
 const { waitForRoutingReady } = require('../../backend/orchestratorLaunchers.cjs');
+const fs = require('node:fs'), path = require('node:path');
+// The real Claude Code 2.1.270 startup screen, decoded from the recording in
+// scripts/backend/fixtures/provider-startup-screens. The synthetic screen this
+// replaced carried a '? for shortcuts' footer that Claude Code 2.1.269 removed.
+const captureScreen = name => JSON.parse(fs.readFileSync(path.join(__dirname,
+  `fixtures/provider-startup-screens/${name}.json`), 'utf8')).observation;
+const CLAUDE_SCREEN = captureScreen('claude-120x36');
+const showScreen = (f, screen) => Object.assign(f.observation, { sequence: f.observation.sequence + 1,
+  text: screen.text, cursor: { ...screen.cursor }, cursorVisible: screen.cursorVisible,
+  cols: screen.cols, rows: screen.rows });
 const tick = () => new Promise(setImmediate);
 function fixture(t, options = {}) {
   const session = { id: 'p', generation: 'g', launchToken: 1, started: true, provider: 'codex', kind: 'codex',
@@ -146,10 +156,37 @@ for (const provider of ['codex', 'claude', 'terminal', 'grok', 'gemini']) test(`
   assert.equal(result.ok, true); assert.equal(f.writes.length, 1);
 });
 
-for (const provider of ['grok', 'gemini', 'cursor', 'opencode']) test(`new unsupported ${provider} launch retains prior semantic operator contract`, async t => {
-  const f = fixture(t); Object.assign(f.session, { kind: provider, provider });
-  assert.equal(f.input.needsStartupReadiness(f.session), false);
-  assert.equal((await f.input.handle(f.action())).ok, true); assert.equal(f.writes.length, 1);
+// Every PTY kind now waits for its own composer, not just Codex and Claude.
+// The captures are real recordings of the installed CLIs; gemini has none
+// (the CLI is not installed here) and reuses the Qwen Code form it forks.
+for (const [provider, name] of [['grok', 'grok-ready'], ['kimi', 'kimi-ready'], ['qwen', 'qwen-ready'],
+  ['opencode', 'opencode-ready'], ['gemini', 'qwen-ready']])
+  test(`a new ${provider} launch waits for its recorded composer before typing`, async t => {
+    const f = fixture(t); Object.assign(f.session, { kind: provider, provider });
+    assert.equal(f.input.needsStartupReadiness(f.session), true);
+    const pending = f.input.handle(f.action());
+    await f.waitForReads(1); assert.equal(f.writes.length, 0, 'a blank launch screen is not a composer');
+    Object.assign(f.observation, { sequence: f.observation.sequence + 1, text: 'Do you trust the files in this folder?' });
+    await f.waitForReads(f.reads + 1); assert.equal(f.writes.length, 0, 'a startup screen is waited through, never typed into');
+    showScreen(f, captureScreen(name));
+    const result = await pending;
+    assert.equal(result.ok, true); assert.equal(f.writes.length, 1); assert.equal(f.writes[0].text, f.action().text);
+  });
+
+// Cursor Agent is the one PTY kind with no captured composer: this machine is
+// not signed in to it. It keeps exactly the behaviour it had before this wait
+// covered it - typed into as soon as the pane paints something - and gains only
+// the startup-screen guard.
+test('a new cursor launch keeps typing as before, but never into its login screen', async t => {
+  const f = fixture(t); Object.assign(f.session, { kind: 'cursor', provider: 'cursor' });
+  assert.equal(f.input.needsStartupReadiness(f.session), true);
+  const pending = f.input.handle(f.action());
+  await f.waitForReads(1); assert.equal(f.writes.length, 0, 'nothing is typed into a blank screen');
+  Object.assign(f.observation, { sequence: f.observation.sequence + 1, text: 'Cursor Agent\nPress any key to log in...' });
+  await f.waitForReads(f.reads + 1); assert.equal(f.writes.length, 0, 'the login screen is reported and waited through');
+  Object.assign(f.observation, { sequence: f.observation.sequence + 1, text: 'Cursor Agent\n> ', cursor: { x: 2, y: 1 } });
+  const result = await pending;
+  assert.equal(result.ok, true); assert.equal(f.writes.length, 1);
 });
 
 for (const submit of [false, true]) test(`authorized editInput ${submit ? 'submission' : 'staging'} keeps an existing manual draft accessible`, async t => {
@@ -183,8 +220,7 @@ function trustFixture(t, options = {}) {
   Object.assign(f.session, { kind: 'claude', provider: 'claude', name: 'Open Claude Code 11', cwd: 'C:/project' });
   f.trust = () => Object.assign(f.observation, { sequence: f.observation.sequence + 1, cursor: { x: 0, y: 1 },
     text: 'Claude Code\nDo you trust the files in this folder?\n\n\u276f 1. Yes, proceed\n  2. No, exit' });
-  f.claudeReady = () => Object.assign(f.observation, { sequence: f.observation.sequence + 1, cursor: { x: 2, y: 2 },
-    text: 'Claude Code\n────────────────────\n\u276f\u00a0\n────────────────────\n? for shortcuts' });
+  f.claudeReady = () => showScreen(f, CLAUDE_SCREEN);
   return f;
 }
 

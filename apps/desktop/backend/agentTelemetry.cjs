@@ -4218,7 +4218,7 @@ function createAgentTelemetryManager(options = {}) {
         "fusion-codex": {
           command: nodePath,
           args: [adapterPath],
-          // Vendored Codex 0.144 maps this per-server value to the MCP client's
+          // Vendored Codex 0.154 maps this per-server value to the MCP client's
           // tool deadline. Keep planner delegations alive for the 4h ceiling.
           tool_timeout_sec: 14_400,
           env: {

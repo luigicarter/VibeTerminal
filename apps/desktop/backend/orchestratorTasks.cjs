@@ -3,7 +3,7 @@ const { randomUUID } = require('node:crypto');
 const { sessionIdentity } = require('./orchestratorRouting.cjs');
 const { routingBindingMatches } = require('./orchestratorLaunchers.cjs');
 const { resultDependencyBlocker, transferredStatus } = require('./orchestratorContinuation.cjs');
-const { assessNativePromptReadiness } = require('./orchestratorPromptReadiness.cjs');
+const { assessNativePromptReadiness, COMPOSER_FORMS } = require('./orchestratorPromptReadiness.cjs');
 const { paneLabel, failureSentence } = require('./orchestratorFailureText.cjs');
 
 // Submitted prompt text is startup evidence only. Keep it out of the wait record
@@ -13,9 +13,11 @@ const submittedPrompts = new WeakMap();
 // no longer at the input cursor and the composer is not sitting empty and ready.
 // This is not completion and not attribution; hook evidence still replaces it.
 function composerAcceptedPrompt(session, observation, text) {
-  const kind = session?.provider || session?.kind;
-  const provider = kind === 'claude-custom' ? 'claude' : kind;
-  if (!['codex', 'claude'].includes(provider)) return false;
+  // Every kind whose composer the readiness detector can recognize. A plain
+  // shell has no composer to leave, and a kind with no recognizer cannot supply
+  // the "not sitting empty and ready" half of this evidence.
+  const form = COMPOSER_FORMS.get(session?.provider || session?.kind);
+  if (!form || form === 'shell') return false;
   if (!observation?.ok || observation.exited || observation.id !== session.id || observation.generation !== session.generation) return false;
   if (typeof observation.text !== 'string' || !Number.isSafeInteger(observation.cursor?.y) || observation.cursor.y < 0) return false;
   // Compare with all whitespace removed: a hard wrap inside a long token (a path,
@@ -492,4 +494,4 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
   }
   return { create, hasCapacity, update, batch, blockingReason, ready, waitForDependencies: job => ready(job, { dependenciesOnly: true }), waitForAssignmentSubmission, track, watch, reconcile, delivery, cancel, jobs, get: id => jobs.get(id), snapshot: () => [...jobs.values()].map(project), busy: () => [...jobs.values()].some(job => ['queued', 'routing', 'running'].includes(job.task.status)), clear() { const protectedIds = liveRequestOwners(); for (const [id, job] of jobs) if (terminalStates.has(job.task.status) && !protectedIds.has(id) && !job.waits.some(wait => hasWorkspaceOccupancy(wait))) jobs.delete(id); changed(); } };
 }
-module.exports = { createTaskScheduler, createSemaphore, hasWorkspaceOccupancy };
+module.exports = { createTaskScheduler, createSemaphore, hasWorkspaceOccupancy, composerAcceptedPrompt };

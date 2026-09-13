@@ -1,6 +1,6 @@
 {
   "name": "vibe-terminal",
-  "version": "0.1.121",
+  "version": "0.1.122",
   "private": true,
   "description": "A tiled local workspace for running multiple coding agents side by side.",
   "author": "Lina Terminal contributors",
@@ -46,6 +46,7 @@
     "smoke:backend:build-supervisor": "node scripts/backend/build-supervisor-smoke.cjs",
     "smoke:backend:launch-cwd": "node scripts/backend/launch-cwd-smoke.cjs",
     "smoke:backend:cli-probe": "node scripts/backend/cli-probe-smoke.cjs",
+    "smoke:provider-startup": "node scripts/qa/provider-startup-probe.cjs",
     "smoke:backend:codex-discovery": "node scripts/backend/codex-discovery-smoke.cjs",
     "smoke:backend:claude-discovery": "node scripts/backend/claude-discovery-smoke.cjs",
     "smoke:backend:kimi-discovery": "node scripts/backend/kimi-discovery-smoke.cjs",

@@ -1,0 +1,28 @@
+{
+ "kind": "codex",
+ "cols": 100,
+ "rows": 30,
+ "observation": {
+  "ok": true,
+  "id": "pane",
+  "generation": "g1",
+  "exited": false,
+  "sequence": 1,
+  "inputRevision": 0,
+  "text": "╭──────────────────────────────────────────────────────────╮\n│ >_ OpenAI Codex (v0.154.0)                               │\n│                                                          │\n│ model:       gpt-6-astra xhigh   /model to change        │\n│ directory:   ~\\AppData\\Local\\Temp\\…\\scratchpad\\probe-cwd │\n│ permissions: YOLO mode                                   │\n╰──────────────────────────────────────────────────────────╯\n\n  Tip: Try the Desktop app. Run 'codex app' or visit https://chatgpt.com/codex?app-landing-page=true\n\n• You have 1 usage limit reset available. Run /usage to use one.\n \n⠁             ⠄                         ⠁               ⡀ ⠂ ⠄               ⠄  ⠈             ⠠\n› Ask Codex to do anything           ⠂                                              ⠁  ⠁⠈  ⢀    ⠁\n      ⠠⢀⠐        ⠄        ⠄         ⠠          ⢀     ⡀                    ⠄⠈        ⠂          ⠠\n  gpt-6-astra xhigh · ~\\AppData\\Local\\Temp\\claude\\C--Users-ahmed-Documents-vibeTerminal\\b9250720-ae…",
+  "cols": 100,
+  "rows": 30,
+  "cursor": {
+   "x": 2,
+   "y": 13
+  },
+  "cursorVisible": true,
+  "alternateScreen": false,
+  "screenTruncated": false
+ },
+ "readiness": {
+  "ready": true,
+  "status": "ready",
+  "reason": "The loaded Codex root composer is visible at its empty input cursor."
+ }
+}

@@ -18,7 +18,7 @@
 // assistant-text, thinking, tool-call, tool-result, turn-end, result,
 // turn-error), so the renderer, telemetry, and replay work unchanged.
 //
-// Protocol facts (generated v2 schema, codex-cli 0.144.0):
+// Protocol facts (generated v2 schema, codex-cli 0.154.0):
 //   - turn terminal states ride in turn/completed: turn.status is
 //     completed | interrupted | failed (no separate turn/failed method).
 //   - MCP tool calls raise mcpServer/elicitation/request even under

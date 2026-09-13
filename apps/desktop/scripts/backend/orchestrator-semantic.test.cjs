@@ -202,6 +202,14 @@ test('a failed interpretation shows the validator reason and a later turn can re
   const reason = system.text.slice(`${result.error} Reason: `.length);
   assert.match(reason, /unexpected intent fields/i);
   assert.ok(reason.length > 0 && reason.length <= 300);
+  // The task row is where the user looks back at what happened, so it carries
+  // the same specific reason the conversation was given, not only the generic
+  // line the request result keeps.
+  const task = f.relay.getState().tasks.find(item => item.requestId === result.requestId);
+  assert.equal(task.status, 'failed');
+  assert.equal(task.error, system.text, 'the task row reads exactly as the conversation did');
+  assert.match(task.error, /unexpected intent fields/i);
+  assert.notEqual(task.error, result.error, 'the generic line alone is not what the task row shows');
 
   await f.run('What went wrong?', none, reply('The previous request could not be compiled.'));
   const planning = metadata(f.compiler.at(-1));

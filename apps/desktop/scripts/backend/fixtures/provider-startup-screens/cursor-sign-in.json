@@ -1,0 +1,31 @@
+{
+ "kind": "cursor",
+ "cols": 100,
+ "rows": 30,
+ "observation": {
+  "ok": true,
+  "id": "pane",
+  "generation": "g1",
+  "exited": false,
+  "sequence": 1,
+  "inputRevision": 0,
+  "text": "\n\n\n\n\n\n\n\n\n\n\n\n\n                                     Cursor Agent\n                                     v2026.06.26-7079533\n                                     Press any key to log in...",
+  "cols": 100,
+  "rows": 30,
+  "cursor": {
+   "x": 0,
+   "y": 29
+  },
+  "cursorVisible": false,
+  "alternateScreen": false,
+  "screenTruncated": false
+ },
+ "readiness": {
+  "ready": false,
+  "status": "transient",
+  "reason": "The terminal is showing a startup screen: it is asking to sign in.",
+  "prompt": "sign-in",
+  "detail": "it is asking to sign in",
+  "affirmativeDefault": false
+ }
+}

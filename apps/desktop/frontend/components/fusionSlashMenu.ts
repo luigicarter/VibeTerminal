@@ -46,9 +46,10 @@ export const FUSION_EFFORT_LABELS: Record<FusionEffort, string> = {
   xhigh: "XHigh",
   max: "Max"
 };
-// Codex-side effort uses its own picker enum, separate from Claude. The 0.144.0
-// catalog verifies minimal|low|medium|high|xhigh|max|ultra, with per-model
-// support varying.
+// Codex-side effort uses its own picker enum, separate from Claude. The 0.154.0
+// catalog verifies low|medium|high|xhigh|max|ultra, with per-model support
+// varying. "minimal" stays in the map only so a saved legacy value still
+// normalizes (to low) instead of dropping the pane's effort selection.
 export const CODEX_EFFORT_LABELS: Record<FusionCodexEffort, string> = {
   auto: "Auto",
   minimal: "Minimal",
@@ -150,7 +151,7 @@ export const FUSION_FAMILY_OPTIONS: { id: FusionFamily; name: string; desc: stri
 
 // Curated model catalogs per family. Role-neutral descriptions: either role
 // can run either family. Claude's CLI accepts the aliases below (or full
-// claude-* ids); Codex ids are a curated subset of the shipped 0.144.0 catalog.
+// claude-* ids); Codex ids are a curated subset of the shipped 0.154.0 catalog.
 // Custom ids stay possible via free text, validated before anything restarts.
 export const FAMILY_MODEL_OPTIONS: Record<
   FusionFamily,

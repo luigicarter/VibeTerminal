@@ -108,7 +108,7 @@ function payloadCopyPlan(source) {
 
   const binDir = path.join(payloadRoot, "bin");
   for (const file of walkFiles(binDir)) {
-    // Fusion spawns codex.exe directly from outDir; Codex 0.144 also spawns
+    // Fusion spawns codex.exe directly from outDir; Codex 0.154 also spawns
     // codex-code-mode-host.exe as a sibling of the running executable.
     plan.set(file, path.join(outDir, path.basename(file)));
   }

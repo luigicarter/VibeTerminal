@@ -19,7 +19,7 @@ const { createRoutingRegistry, sessionIdentity, matchesBinding, paneKey } = requ
 // the launcher choice for an explicitly requested new conversation.
 const { validateRouteCall, deterministicNewTaskRoute } = require('./orchestratorRoutePlanner.cjs');
 const { resolveTitledOwner } = require('./orchestratorOwnerMatch.cjs');
-const { resolveAssignment, idlePaneRequest, idlePaneCandidate, paneRecency, providerFamily, paneLabel, IDLE_REUSE_REASON } = require('./orchestratorResolver.cjs');
+const { resolveAssignment, idlePaneRequest, idlePaneCandidate, ownsPaneForReuse, paneRecency, providerFamily, paneLabel, IDLE_REUSE_REASON } = require('./orchestratorResolver.cjs');
 const { createActionHistory } = require('./orchestratorActionHistory.cjs');
 const { completeInspections } = require('./orchestratorInspectionCompletion.cjs');
 const { createGoalReviewer } = require('./orchestratorGoalReview.cjs');
@@ -42,7 +42,7 @@ const { TERMINAL_KEYS } = require('../shared/terminalControls.cjs');
 const { canExecuteDirect, completedOperatorResponse, delegatedSubmissionFinishes } = require('./orchestratorFastPath.cjs');
 const { commandCompleted } = require('./orchestratorCommandCompletion.cjs');
 const { formatDirectOutcomes, creationDescription } = require('./orchestratorResponse.cjs');
-const { projectLabel, paneLabel: paneName, sentence, brainRejectionSentence } = require('./orchestratorFailureText.cjs');
+const { projectLabel, paneLabel: paneName, sentence, brainRejectionSentence, interpretationFailureText } = require('./orchestratorFailureText.cjs');
 const { formatFinalResponse, composeFinalResponse } = require('./orchestratorFinalResponse.cjs');
 const { summarizeCloseOutcomes, refreshCloseScopeOutcomes, confirmedClose } = require('./orchestratorCloseOutcome.cjs');
 const { prepareContinuation, commitContinuation, resultDependencyBlocker } = require('./orchestratorContinuation.cjs');
@@ -955,7 +955,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
     job.routeItems ||= [];
     if (!currentRoute) job.routeItems.push({ grantId: grant?.id, workItemId: workItem.id, binding, decision: 'explicit' });
     const identity = job.workspaceIdentities?.get(baseline.id);
-    if (identity && !job.lanes.some(lane => lane.key === `workspace:${identity}` && lane.targetIds?.includes(baseline.id))) job.lanes.push({ key: `workspace:${identity}`, targetIds: [baseline.id], readOnly: job.intent.commandPlan.access === 'read-only', workItemId: workItem.id });
+    if (identity && !job.lanes.some(lane => lane.key === `workspace:${identity}` && lane.targetIds?.includes(baseline.id))) job.lanes.push({ key: `workspace:${identity}`, targetIds: [baseline.id], readOnly: (grant?.access || job.intent.commandPlan.access) === 'read-only', workItemId: workItem.id });
     tasks.update(job, { workItemId: job.routeItems[0].workItemId, workItemIds: [...new Set(job.routeItems.map(item => item.workItemId))] });
   }
   // An assignment question carries the candidates it named and which kind of
@@ -1223,7 +1223,9 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
           !['existing', 'new'].includes(grant.args.assignmentMode) && idleRequest) {
         await requireFreshSessions(); active(token);
         const wanted = providerFamily(grant.args.kindOfSession || proposal.kindOfSession);
-        const owned = new Set(workItems.snapshot().items.map(item => paneKey(item.binding?.target)).filter(Boolean));
+        // A cancelled or failed item never delivered its prompt, so the pane it
+        // named is free for new work; a finished item keeps its conversation.
+        const owned = new Set(workItems.snapshot().items.filter(ownsPaneForReuse).map(item => paneKey(item.binding?.target)).filter(Boolean));
         const free = scopedSessions().filter(session => idlePaneCandidate(session) && paneKey(session) && !owned.has(paneKey(session)) &&
           (session.provider || session.kind) !== 'terminal' && (!wanted || providerFamily(session.provider || session.kind) === wanted))
           .sort((left, right) => paneRecency(right) - paneRecency(left));
@@ -1257,7 +1259,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
           }
         }
         const idleUnowned = !workItem && idlePaneCandidate(candidate) && grant.args.assignmentMode !== 'existing' &&
-          !workItems.snapshot().items.some(item => paneKey(item.binding?.target) === paneKey(candidate));
+          !workItems.snapshot().items.some(item => ownsPaneForReuse(item) && paneKey(item.binding?.target) === paneKey(candidate));
         recordDiagnostic({ ...diagnosticContext, event: 'routing_progress', stage: 'assignment_adoption',
           grantId: grant.id, targetId: proposal.targetId, decision: idleUnowned ? 'idle-unowned' : 'named-owner' });
         if (idleUnowned) { proposal = { ...proposal, decision: 'reuse', reason: IDLE_REUSE_REASON }; workItem = undefined; }
@@ -1271,7 +1273,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
         const verifiedReservation = reservation?.target && routingBindingMatches({ target: reservation.target, nativeIdentity: reservation.nativeIdentity }, target);
         if (!verifiedOwner && !verifiedReservation && (!evidence.has(target.id) || !routingBindingMatches(evidence.get(target.id), target))) throw new Error('Read the candidate conversation before assigning this task.');
         if (workItem?.binding?.nativeIdentity?.id && !routingBindingMatches({ target: { id: target.id, generation: target.generation }, nativeIdentity: workItem.binding.nativeIdentity }, target)) throw new Error('The work item belongs to a different native conversation. Start a fresh task explicitly or identify its original conversation.');
-        const otherOwner = workItems.snapshot().items.find(item => item.id !== workItem?.id && paneKey(item.binding?.target) === paneKey(target));
+        const otherOwner = workItems.snapshot().items.find(item => item.id !== workItem?.id && ownsPaneForReuse(item) && paneKey(item.binding?.target) === paneKey(target));
         if (otherOwner) throw new Error('That conversation belongs to a different task. Select its work item only for a related continuation, or create a separate agent.');
       } else if (proposal.decision === 'create') {
         launcher = launchers.find(item => item.kind === proposal.kindOfSession && item.available === true && item.configured === true && item.kind !== 'terminal');
@@ -1869,6 +1871,14 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
       job.deferred = intent.commandPlan.afterResults && { instruction: intent.commandPlan.afterResults.instruction, originalInstruction: input.originalInstruction || job.queueRecoveryInstruction || input.text };
       let targetIds, targets;
       const readOnly = intent.commandPlan.access === 'read-only';
+      // A reply that answered a read-only question and also asked for new work
+      // carries both scopes. Each pane's workspace lane takes the access of the
+      // grants that actually own that pane, so the continued read-only half
+      // still shares its lane and only the new work serializes.
+      const targetReadOnly = id => {
+        const owning = intent.commandPlan.grants.filter(grant => grant.targets.some(target => target.id === id));
+        return owning.length ? owning.every(grant => (grant.access || intent.commandPlan.access) === 'read-only') : readOnly;
+      };
       const configureTargets = async () => {
         targetIds = [...new Set([...intent.commandPlan.grants.flatMap(grant => grant.targets.map(target => target.id)), ...(intent.commandPlan.statusTargets || []).map(target => target.id)])];
         targets = targetIds.map(id => {
@@ -1891,7 +1901,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
           const identity = await resolveWorkspaceIdentity(target.cwd); active(token);
           job.workspaceIdentities.set(target.id, identity);
           const lane = job.lanes.find(lane => lane.key === `terminal:${target.id}`);
-          if (identity && lane && (!lane.operator || lane.workItemId)) job.lanes.push({ key: `workspace:${identity}`, targetIds: [target.id], readOnly, ...(lane.workItemId && { workItemId: lane.workItemId }) });
+          if (identity && lane && (!lane.operator || lane.workItemId)) job.lanes.push({ key: `workspace:${identity}`, targetIds: [target.id], readOnly: targetReadOnly(target.id), ...(lane.workItemId && { workItemId: lane.workItemId }) });
         }
         if (targetIds.length === 1) context().conversationTarget = { id: targets[0].id, generation: targets[0].generation };
         else if (targetIds.length > 1) context().conversationTarget = null;
@@ -2321,11 +2331,14 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
         if (settings.spendingLimit != null && Object.values(state.usage).reduce((a, b) => a + b, 0) >= settings.spendingLimit) throw new Error('Session spending limit reached.');
       }
       throw new Error('Relay action limit reached. Check the action receipts before continuing.');
-    } catch (error) { if (token !== epoch || signal.aborted || isCancellation(error)) return job.result = { ok: false, requestId: job.task.requestId, status: 'cancelled', error: 'Cancelled.' }; diagnosticError(error, { ...diagnosticContext, stage: 'brain' }); state.error = requestFailureText(error, outcomes); if (orphanedCreation(outcomes)) for (const item of job.routeItems || []) workItems.update(item.workItemId, { retriable: true }); const failureDetail = typeof error?.detail === 'string' && error.detail ? cleanError(error.detail).slice(0, 300) : ''; if (failureDetail) lastFailure = { requestId: job.task.requestId, stage: 'interpretation', reason: failureDetail, at: now() }; message('system', failureDetail ? `${state.error} Reason: ${failureDetail}` : state.error); const upstreamError = reportUpstream(error, input.origin, 'brain', token, signal); if (!upstreamError && input.origin === 'voice') { try { Promise.resolve(onUpstreamError({ category: error?.code === 'LOCAL_CONTEXT_LIMIT' ? 'context-limit' : state.error.includes('spending limit') ? 'spending-limit' : 'orchestration', origin: 'voice', operation: 'orchestration', requestId: job.task.requestId })).catch(() => {}); } catch {} } if (!job.queueRecoveryRejected && (!previousCommand?.queued || job.queueRecoveryTransferred)) preserveUnfinished(job, job.continuationCommitted ? previousCommand : undefined, !job.continuationCommitted); return job.result = { ok: false, requestId: job.task.requestId, error: state.error, ...(outcomes.length && { actions: redact(outcomes) }), ...(upstreamError && { upstreamError }) }; }
+    } catch (error) { if (token !== epoch || signal.aborted || isCancellation(error)) return job.result = { ok: false, requestId: job.task.requestId, status: 'cancelled', error: 'Cancelled.' }; diagnosticError(error, { ...diagnosticContext, stage: 'brain' }); state.error = requestFailureText(error, outcomes); if (orphanedCreation(outcomes)) for (const item of job.routeItems || []) workItems.update(item.workItemId, { retriable: true }); const failureDetail = typeof error?.detail === 'string' && error.detail ? cleanError(error.detail).slice(0, 300) : ''; if (failureDetail) { lastFailure = { requestId: job.task.requestId, stage: 'interpretation', reason: failureDetail, at: now() }; job.failureDetail = failureDetail; } message('system', failureDetail ? interpretationFailureText(state.error, failureDetail) : state.error); const upstreamError = reportUpstream(error, input.origin, 'brain', token, signal); if (!upstreamError && input.origin === 'voice') { try { Promise.resolve(onUpstreamError({ category: error?.code === 'LOCAL_CONTEXT_LIMIT' ? 'context-limit' : state.error.includes('spending limit') ? 'spending-limit' : 'orchestration', origin: 'voice', operation: 'orchestration', requestId: job.task.requestId })).catch(() => {}); } catch {} } if (!job.queueRecoveryRejected && (!previousCommand?.queued || job.queueRecoveryTransferred)) preserveUnfinished(job, job.continuationCommitted ? previousCommand : undefined, !job.continuationCommitted); return job.result = { ok: false, requestId: job.task.requestId, error: state.error, ...(outcomes.length && { actions: redact(outcomes) }), ...(upstreamError && { upstreamError }) }; }
     finally {
       releaseRoute?.(); activity.end(scope); job.executionDone = true;
       const settled = settledRequestState({ task: job.task, result: job.result, waits: job.waits, pendingCommand: context().pendingCommand });
-      if (settled) tasks.update(job, settled);
+      // The task row is where the user looks back at what happened, so it carries
+      // the same specific reason the conversation was given, not only the stable
+      // generic line the request result returns.
+      if (settled) tasks.update(job, settled.error && job.failureDetail ? { ...settled, error: interpretationFailureText(settled.error, job.failureDetail) } : settled);
       tasks.reconcile(state.sessions); reconcileAssignments(); recordLedgerEntry(job); rememberProjectAliases(job); emit();
     }
   }

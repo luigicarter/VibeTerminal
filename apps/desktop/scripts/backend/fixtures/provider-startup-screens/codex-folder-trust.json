@@ -1,0 +1,31 @@
+{
+ "kind": "codex",
+ "cols": 100,
+ "rows": 30,
+ "observation": {
+  "ok": true,
+  "id": "pane",
+  "generation": "g1",
+  "exited": false,
+  "sequence": 1,
+  "inputRevision": 0,
+  "text": "> You are in C:\\Users\\ahmed\\AppData\\Local\\Temp\\claude\\C--Users-ahmed-Documents-vibeTerminal\\b9250720\n\n  Do you trust the contents of this directory? Working with untrusted contents comes with higher\n  risk of prompt injection. Trusting the directory allows project-local config, hooks, and exec\n  policies to load.\n\n› 1. Yes, continue\n  2. No, quit\n\n  Press enter to continue",
+  "cols": 100,
+  "rows": 30,
+  "cursor": {
+   "x": 25,
+   "y": 9
+  },
+  "cursorVisible": false,
+  "alternateScreen": false,
+  "screenTruncated": false
+ },
+ "readiness": {
+  "ready": false,
+  "status": "transient",
+  "reason": "The terminal is showing a startup screen: it is asking whether to trust the files in this folder.",
+  "prompt": "folder-trust",
+  "detail": "it is asking whether to trust the files in this folder",
+  "affirmativeDefault": true
+ }
+}

@@ -48,11 +48,30 @@ const idlePaneRequest = text => IDLE_PANE_STRONG.test(text) ? 'strong' : IDLE_PA
 const IDLE_REUSE_REASON = 'Idle pane with no task owner; assigned to this new task.';
 const PROVIDER_FAMILY = { 'claude-custom': 'claude', 'kimi-custom': 'kimi' };
 const providerFamily = kind => PROVIDER_FAMILY[kind] || kind;
+// A pane that has never taken a prompt: no turn has started, ended, or been
+// identified. Nothing about it can be attributed to a conversation yet.
+const neverPrompted = session => !session?.turnId && !session?.turnStartedAt && !session?.turnEndedAt;
+// A freshly opened agent pane is idle by construction, but its native identity
+// is not provable until the provider writes a transcript, which for Claude only
+// happens after the first prompt. Requiring confirmed identity here made every
+// never-prompted pane permanently unusable, so the resolver opened another pane
+// beside an empty one. A provisional pane is reusable only while it has never
+// had a turn: its process is running, it is idle, and its binding is not
+// contested. Once a pane has taken any turn, confirmed observation is required
+// again, because then reuse means joining a conversation we must be able to name.
 function idlePaneCandidate(session) {
-  return Boolean(session) && session.observation === 'observed' && session.started !== false &&
-    ['idle', 'completed'].includes(session.turnState) && session.processState === 'running' &&
-    !session.pendingInteraction && !session.pendingInput && !session.manualInputPending && !session.interactionInputPending;
+  if (!session || session.started === false || session.processState !== 'running') return false;
+  if (session.pendingInteraction || session.pendingInput || session.manualInputPending || session.interactionInputPending) return false;
+  if (session.observation === 'observed') return ['idle', 'completed'].includes(session.turnState);
+  return session.observation === 'provisional' && session.turnState === 'idle' && neverPrompted(session) &&
+    session.agentProcessState === 'running' && session.binding?.status !== 'ambiguous';
 }
+// Work items that still own their pane. A cancelled or failed item never
+// delivered its prompt, so keeping it as an owner reserved an empty pane for
+// work that will not arrive and forced a new pane beside it. Finished items keep
+// their pane: that is the conversation their result lives in.
+const RELEASED_STATUSES = new Set(['cancelled', 'failed']);
+const ownsPaneForReuse = item => Boolean(item) && !RELEASED_STATUSES.has(item.status);
 const paneRecency = session => Math.max(Number(session?.lastActivityAt) || 0, Number(session?.turnEndedAt) || 0, Number(session?.turnStartedAt) || 0);
 
 // ---------------------------------------------------------------------------
@@ -221,7 +240,14 @@ function resolveAssignment({ instruction, grant = {}, sessions = [], workItems =
     (session.provider || session.kind) !== 'terminal' && (session.provider || session.kind) !== 'shell');
   const items = Array.isArray(workItems) ? workItems.filter(Boolean) : [];
   const ownerOf = new Map();
-  for (const item of items) { const id = item.binding?.target?.id; if (id && !ownerOf.has(id)) ownerOf.set(id, item); }
+  // Live owners first, so a pane whose cancelled item still carries a binding is
+  // attributed to whatever is actually working in it. A released item remains an
+  // owner for the title rule when nothing else claims the pane, because the user
+  // may still name that task when asking to continue it.
+  for (const item of [...items.filter(ownsPaneForReuse), ...items.filter(item => !ownsPaneForReuse(item))]) {
+    const id = item.binding?.target?.id; if (id && !ownerOf.has(id)) ownerOf.set(id, item);
+  }
+  const reuseOwned = new Set(items.filter(item => ownsPaneForReuse(item) && item.binding?.target?.id).map(item => item.binding.target.id));
   const selector = extractSelector(text, { launchers });
   const label = kind => launchers.find(item => item.kind === kind)?.label || 'coding agent';
   const project = projectName || cwd || 'this project';
@@ -236,7 +262,7 @@ function resolveAssignment({ instruction, grant = {}, sessions = [], workItems =
     return done('create', { kindOfSession: route.kindOfSession, reason });
   };
   const namedCandidates = list => list.map(session => ({ targetId: session.id, label: paneLabel(session) }));
-  const idleUnowned = family => byRecency(panes.filter(session => idlePaneCandidate(session) && !ownerOf.has(session.id) &&
+  const idleUnowned = family => byRecency(panes.filter(session => idlePaneCandidate(session) && !reuseOwned.has(session.id) &&
     (!family || providerFamily(session.provider || session.kind) === family)));
 
   // 0. A reply to the question this resolver asked is resolved from the stored
@@ -313,4 +339,5 @@ function resolveAssignment({ instruction, grant = {}, sessions = [], workItems =
 }
 
 module.exports = { extractSelector, resolveAssignment, resolveAnswer, paneLabel, candidateQuestion,
-  idlePaneRequest, idlePaneCandidate, paneRecency, providerFamily, IDLE_REUSE_REASON, RESOLVER_STOPWORDS };
+  idlePaneRequest, idlePaneCandidate, neverPrompted, ownsPaneForReuse, paneRecency, providerFamily,
+  IDLE_REUSE_REASON, RESOLVER_STOPWORDS };

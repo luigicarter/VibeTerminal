@@ -19,7 +19,7 @@
 // Pure apart from the readers and two effects handed in: no model call, no
 // store writes, no direct terminal access.
 
-const { idlePaneCandidate, providerFamily } = require('./orchestratorResolver.cjs');
+const { idlePaneCandidate, ownsPaneForReuse, providerFamily } = require('./orchestratorResolver.cjs');
 const path = require('node:path');
 
 const TICK_MS = 30000;
@@ -68,9 +68,11 @@ function createSparePaneKeeper({
   let chain = Promise.resolve();
 
   const list = () => { const value = getSessions(); return (Array.isArray(value) ? value : []).filter(Boolean); };
+  // A cancelled or failed item never delivered its prompt, so the pane it named
+  // is free; the resolver treats it the same way. A finished item keeps its pane.
   const ownedIds = () => {
     const value = getWorkItems();
-    return new Set((Array.isArray(value) ? value : []).map(item => item?.binding?.target?.id).filter(Boolean));
+    return new Set((Array.isArray(value) ? value : []).filter(ownsPaneForReuse).map(item => item?.binding?.target?.id).filter(Boolean));
   };
   const kindOf = session => String(session?.provider || session?.kind || '');
   const live = sessions => spare && sessions.find(session => session.id === spare.id && session.generation === spare.generation);

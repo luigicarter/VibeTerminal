@@ -8,6 +8,7 @@ const TOML = require('@iarna/toml');
 const { createAgentTelemetryManager } = require('../../backend/agentTelemetry.cjs');
 const { createTerminalRuntime } = require('../../backend/terminalRuntime.cjs');
 const { confirmClaudeThread } = require('../../backend/agentThreadHost.cjs');
+const { assessNativePromptReadiness } = require('../../backend/orchestratorPromptReadiness.cjs');
 const { confirmCodexThread } = require('../../backend/agentThreads.cjs');
 const root = path.resolve(__dirname, '../..');
 const output = path.join(root, '.tmp', 'native-chat-selection', `${Date.now()}-${process.pid}`);
@@ -72,7 +73,7 @@ async function run(provider) {
     Object.assign(env, { LINA_OPEN_CODEX_BIN: path.join(root, 'vendor/open-codex/win32-x64/codex.exe'), LINA_OPEN_CODEX_HOME: home,
       LINA_OPEN_CODEX_CATALOG: catalog, LINA_OPEN_CODEX_BASE_URL: `${url}/v1`, LINA_OPEN_CODEX_TOKEN: 'fixture', LINA_OPEN_CODEX_MODEL: 'fixture' });
   }
-  let native, screen, exited = false, raw = '', folderTrusted = false, hooksReviewed = false;
+  let native, screen, exited = false, raw = '', folderTrusted = false, hooksReviewed = false, cursorVisible = true, composerVerified = false;
   const events = [];
   const runtime = createTerminalRuntime({ lookup: async p => p.confirmId ? claude
     ? confirmClaudeThread(cwd, p.confirmId, p.claudeHome) : confirmCodexThread(cwd, p.confirmId, { codexHome: home }) : { status: 'pending' } });
@@ -84,6 +85,17 @@ async function run(provider) {
   } });
   const state = () => runtime.getSnapshot('pane');
   const text = () => Array.from({ length: screen.buffer.active.length }, (_, i) => screen.buffer.active.getLine(i)?.translateToString(true) || '').join('\n');
+  // What the app itself accepts as a ready composer. A hard-coded footer
+  // string is how this wait went stale once already: Claude Code 2.1.269
+  // dropped '? for shortcuts' and nothing here noticed.
+  const composerReady = () => {
+    const buffer = screen.buffer.active;
+    const view = Array.from({ length: screen.rows }, (_, i) => buffer.getLine(buffer.viewportY + i)?.translateToString(true) || '').join('\n').trimEnd();
+    return assessNativePromptReadiness({ id: 'pane', generation: 'screen', provider: nativeProvider, kind: nativeProvider },
+      { ok: true, id: 'pane', generation: 'screen', sequence: 1, inputRevision: 0, exited: false, text: view,
+        cursor: { x: buffer.cursorX, y: buffer.cursorY }, cursorVisible, screenTruncated: false,
+        cols: screen.cols, rows: screen.rows }).ready;
+  };
   async function until(fn, label, timeout = 35000) {
     const end = Date.now() + timeout;
     while (Date.now() < end) {
@@ -117,12 +129,22 @@ async function run(provider) {
     runtime.ingest({ id: 'pane', generation: admission.generation, type: 'created' });
     const currentScreen = screen, currentNative = native;
     currentScreen.onData(data => currentNative.write(data));
-    currentNative.onData(data => { raw += data; currentScreen.write(data); });
+    currentNative.onData(data => {
+      raw += data; currentScreen.write(data);
+      const last = Math.max(String(data).lastIndexOf('\x1b[?25l'), String(data).lastIndexOf('\x1b[?25h'));
+      if (last >= 0) cursorVisible = String(data).slice(last).startsWith('\x1b[?25h');
+    });
     currentNative.onExit(() => { if (native === currentNative) exited = true; });
-    await until(() => /bypass permissions|for shortcuts|context left|fixture (default|none)/i.test(text()), 'native composer ready');
+    await until(() => { if (composerReady()) { composerVerified = true; return true; }
+      return /bypass permissions|for shortcuts|context left|fixture (default|none)/i.test(text()); }, 'native composer ready');
     // Native startup can draw the composer before it begins accepting Enter.
     // This delay is confined to the native acceptance fixture.
     await wait(1500);
+    // Recorded, not required: the marker strings above usually win the race, so
+    // this says whether the app's own recognizer also saw a ready composer for
+    // this provider on this run. It is the only evidence the smoke carries for
+    // Open Codex, whose composer has never been captured on its own.
+    if (!composerVerified) composerVerified = composerReady();
   }
   async function stop() {
     if (!native || exited) return;
@@ -154,7 +176,7 @@ async function run(provider) {
     await until(() => events.slice(resumedAt).some(e => e.type === 'agent-attention' && e.attention?.state === 'completed' && e.providerThreadId === last), 'native resumed turn belongs to C');
     assert.ok(events.some(e => e.type === 'agent-session' && e.source === 'resume' && e.providerThreadId === last));
     assert.equal(state().conversation.id, last);
-    checks.push({ provider, ids, resumedId: last, resumeHookReview: hooksReviewed, sessionStartSources: events.filter(e => e.type === 'agent-session').map(e => e.source) });
+    checks.push({ provider, ids, resumedId: last, resumeHookReview: hooksReviewed, composerVerified, sessionStartSources: events.filter(e => e.type === 'agent-session').map(e => e.source) });
     console.log(`${provider}: exact chat C resumed with native history`);
   } finally {
     await stop(); screen?.dispose(); manager.cleanup(); runtime.dispose();

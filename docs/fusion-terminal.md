@@ -58,10 +58,12 @@
 > `frontend/components/fusionSlashMenu.ts` (extracted so the smoke executes
 > real behavior). Curated model catalogs (Claude: Opus 4.8 / Sonnet 4.5 /
 > fable aliases + validated `claude-*` ids; Codex: ids read from the shipped
-> 0.144.0 binary + custom escape hatch: GPT-5.6 Sol, Terra, Luna, then older
-> GPT-5.x options); **per-engine effort enums** — planning uses the
-> `claude --effort` enum (low..max), execution uses Codex's own
-> minimal/low/medium/high/xhigh/max/ultra enum, with per-model support varying.
+> 0.154.0 binary + custom escape hatch: GPT-5.6 Sol, Terra, Luna, then older
+> GPT-5.x options — the curated `gpt-5.4-mini` entry is no longer in 0.154.0's
+> live catalog, see `docs/codex-bundle-0.154-2026-09-13.md`); **per-engine
+> effort enums** — planning uses the `claude --effort` enum (low..max),
+> execution uses Codex's own low/medium/high/xhigh/max/ultra enum (a saved
+> legacy `minimal` normalizes to low), with per-model support varying.
 > The picker filters those levels for the selected live model, and both Codex
 > app-server runtimes enforce the same catalog before every turn (for example,
 > GPT-5.5 max falls back to xhigh and GPT-5.6 Luna ultra falls back to max).

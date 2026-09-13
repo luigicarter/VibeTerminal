@@ -9,7 +9,10 @@ const { createChatStore } = require('../../backend/chatStore.cjs');
 const { createChatService } = require('../../backend/chatService.cjs');
 const { key } = require('../../shared/chatIdentity.cjs');
 const cwd = path.resolve(__dirname, '../..');
-function pane(id = 'pane', nativeId = 'A') { return { id, kind: 'codex', name: 'A chat', cwd, started: true, launchToken: 1, createdAt: 1, status: 'idle', nextLaunchMode: 'resume', threadRef: nativeId ? { provider: 'codex', id: nativeId, createdAt: 1, updatedAt: 2 } : undefined }; }
+// The catalog lists only panes started from the Chats section, so the shared fixture is a chat pane;
+// launcherPane is the same pane opened from the terminal launcher instead.
+function pane(id = 'pane', nativeId = 'A') { return { ...launcherPane(id, nativeId), chat: true }; }
+function launcherPane(id = 'pane', nativeId = 'A') { return { id, kind: 'codex', name: 'A chat', cwd, started: true, launchToken: 1, createdAt: 1, status: 'idle', nextLaunchMode: 'resume', threadRef: nativeId ? { provider: 'codex', id: nativeId, createdAt: 1, updatedAt: 2 } : undefined }; }
 const workspace = (...sessions) => ({ workspaces: [{ id: 'project', name: 'Project', path: cwd, sessions }], multiSessions: [], activeWorkspaceId: 'project', activeView: 'project' });
 function fixture(t) { const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lina-chat-test-')); let store = createChatStore({ directory });
   t.after(() => { store.close(); fs.rmSync(directory, { recursive: true, force: true }); });
@@ -149,4 +152,51 @@ test('exact opener refuses missing/unverified IDs and never invokes a new chat',
   await assert.rejects(service.open(row.chatId), /missing/);
   result = { status: 'found', rootVerified: false, threadRef: { id: 'A' } }; await assert.rejects(service.open(row.chatId), /verified/);
   result = { status: 'found', rootVerified: true, threadRef: { id: 'A' } }; assert.equal((await service.open(row.chatId)).id, 'A');
+});
+test('a pane opened from the terminal launcher is catalogued but never listed as a chat', t => {
+  const f = fixture(t); f.store.bootstrap(workspace(launcherPane()));
+  assert.deepEqual(f.store.list(), []);
+  const all = f.store.list({ all: true });
+  assert.equal(all.length, 1); assert.equal(all[0].origin, 'terminal'); assert.equal(all[0].conversation.id, 'A');
+});
+test('the same pane started from the Chats section is listed as a chat', t => {
+  const f = fixture(t); f.store.bootstrap(workspace({ ...launcherPane(), chat: true }));
+  const rows = f.store.list();
+  assert.equal(rows.length, 1); assert.equal(rows[0].origin, 'chat'); assert.equal(rows[0].conversation.id, 'A');
+});
+test('a checkpoint that drops the chat flag never downgrades an existing chat', t => {
+  const f = fixture(t); f.store.bootstrap(workspace(pane()));
+  f.save(workspace(launcherPane()), 2);
+  const rows = f.store.list();
+  assert.equal(rows.length, 1); assert.equal(rows[0].origin, 'chat');
+});
+test('a chat pane closed before it had an identity leaves the list but stays in the catalog', t => {
+  const f = fixture(t); f.store.bootstrap(workspace(pane('pane', null)));
+  assert.equal(f.store.list().length, 1); assert.equal(f.store.list()[0].paneId, 'pane');
+  f.save(workspace(), 2);
+  assert.deepEqual(f.store.list(), []);
+  assert.equal(f.store.list({ all: true }).length, 1);
+});
+test('a folder scan fills the catalog without adding rows to the chat list', t => {
+  const f = fixture(t);
+  f.store.importConversations([{ provider: 'codex', id: 'scanned', cwd, title: 'Scanned', updatedAt: 5 }]);
+  assert.deepEqual(f.store.list(), []);
+  const all = f.store.list({ all: true });
+  assert.equal(all.length, 1); assert.equal(all[0].origin, 'discovered'); assert.equal(all[0].conversation.id, 'scanned');
+});
+test('a workspace snapshot round trip keeps the chat flag on its pane', t => {
+  const { cleanWorkspace } = require('../../shared/chatIdentity.cjs');
+  const cleaned = cleanWorkspace(workspace(pane(), launcherPane('other', 'B')));
+  assert.equal(cleaned.workspaces[0].sessions[0].chat, true);
+  assert.equal(cleaned.workspaces[0].sessions[1].chat, undefined);
+  const f = fixture(t); f.store.bootstrap(cleaned);
+  assert.equal(f.store.bootstrap().workspace.workspaces[0].sessions[0].chat, true);
+  assert.deepEqual(f.store.list().map(row => row.paneId), ['pane']);
+});
+test('a chat with no saved timestamp yet sorts above older saved chats', t => {
+  const f = fixture(t); f.store.bootstrap(workspace(pane('saved', 'A'), pane('fresh', null)));
+  const rows = f.store.list();
+  assert.equal(rows.length, 2);
+  assert(rows.find(row => row.paneId === 'fresh').updatedAt > 0);
+  assert.deepEqual(rows.map(row => row.paneId), ['fresh', 'saved']);
 });

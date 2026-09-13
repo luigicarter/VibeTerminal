@@ -1,0 +1,28 @@
+{
+ "kind": "claude",
+ "cols": 100,
+ "rows": 20,
+ "observation": {
+  "ok": true,
+  "id": "pane",
+  "generation": "g1",
+  "exited": false,
+  "sequence": 1,
+  "inputRevision": 0,
+  "text": "\n ▐▛███▛█   Claude Code v2.1.270\n▝▜██████▀  Fable 5.1 with xhigh effort · Claude Max\n  ▝▝ ▝▝    ~\\Documents\\vibeTerminal · /rc\n\n\n\n\n\n\n\n\n\n\n                                                                                 ◉ xhigh · /effort\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ Try \"refactor <filepath>\"\n────────────────────────────────────────────────────────────────────────────────────────────────────\n  [ Fable 5.1 ]\n  ⏸ manual mode on · ← for agents",
+  "cols": 100,
+  "rows": 20,
+  "cursor": {
+   "x": 2,
+   "y": 16
+  },
+  "cursorVisible": true,
+  "alternateScreen": true,
+  "screenTruncated": false
+ },
+ "readiness": {
+  "ready": true,
+  "status": "ready",
+  "reason": "The Claude root composer is visible at its empty input cursor."
+ }
+}

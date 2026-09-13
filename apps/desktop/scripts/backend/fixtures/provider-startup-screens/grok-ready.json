@@ -1,0 +1,28 @@
+{
+ "kind": "grok",
+ "cols": 100,
+ "rows": 30,
+ "observation": {
+  "ok": true,
+  "id": "pane",
+  "generation": "g1",
+  "exited": false,
+  "sequence": 1,
+  "inputRevision": 0,
+  "text": "                                                                                                    \n  ≡ master ~/AppData\\Local\\Temp\\claude\\C--Users-ahmed-Documents-vibeTerminal\\b9250720-aecc-4b16-a…  \n                                                                                                    \n                                                                                                    \n   ╭────────────────────────────────────────────────────────────────────────────────────────────╮   \n   │                                                                                            │   \n   │  Grok Build  1.0.25                                                                        │   \n   │                                                                                            │   \n   │  Grok 4.6 is here, try it out for free for a limited time! Upgrade for more usage.         │   \n   │                                                                                            │   \n   │  [Click here to Upgrade] or use Ctrl+O                                                     │   \n   │                                                                                            │   \n   │  New worktree                                                                      ctrl+w  │   \n   │  Resume session                                                                    ctrl+r  │   \n   │  Changelog                                                                                 │   \n   │  Quit                                                                              ctrl+q  │   \n   │                                                                                            │   \n   ╰────────────────────────────────────────────────────────────────────────────────────────────╯   \n                                                                                                    \n                                                                                                    \n                                                                                                    \n                                                                                                    \n  Update: v1.0.30 available, press ctrl+u to restart                                                \n                                                                                                    \n  ╭──────────────────────────────────────────────────────────────────────────────────────────────╮  \n  │ >                                                                                            │  \n  ╰──────────────────────────────────────────────────────────────────────────── Grok 4.6 (high) ─╯  \n                                                                                                    \n                                                                                          [stable]",
+  "cols": 100,
+  "rows": 30,
+  "cursor": {
+   "x": 6,
+   "y": 25
+  },
+  "cursorVisible": true,
+  "alternateScreen": true,
+  "screenTruncated": false
+ },
+ "readiness": {
+  "ready": true,
+  "status": "ready",
+  "reason": "The Grok Build composer box is visible at its empty input cursor."
+ }
+}

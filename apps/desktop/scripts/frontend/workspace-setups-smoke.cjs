@@ -48,8 +48,12 @@ async function main() {
   assert.throws(() => requireSetupSuccess({ok:false,error:'Cannot write setup'}),/Cannot write setup/);
   assert.throws(() => requireSetupSuccess({ok:false}),/operation failed/);
   requireSetupSuccess({ok:true});requireSetupSuccess(recipe);
-  const dirty = plain(recipe);dirty.panes[0].config.apiKey='bad';dirty.panes[0].threadRef={id:'bad'};dirty.panes[0].layout.key='bad';
-  assert(!JSON.stringify(sanitizeSetup(dirty)).includes('bad'));
+  // The sentinel must be a string a generated id cannot contain. 'bad' is three
+  // hex digits, so it appeared inside the setup's own UUID in 0.600% of runs
+  // (measured over 20,000) and failed this assertion with nothing wrong.
+  const dirty = plain(recipe), sentinel = 'must-not-survive';
+  dirty.panes[0].config.apiKey=sentinel;dirty.panes[0].threadRef={id:sentinel};dirty.panes[0].layout.key=sentinel;
+  assert(!JSON.stringify(sanitizeSetup(dirty)).includes(sentinel));
   assert.throws(() => sanitizeSetup({...recipe,projectPath:'relative'}),/absolute/);
   assert.throws(() => sanitizeSetup({...recipe,version:2}),/version/);
   const source={id:'source',generation:'generation-1'}, target={id:'target',generation:'generation-2'}, paths=['C:/repo/file.ts'];

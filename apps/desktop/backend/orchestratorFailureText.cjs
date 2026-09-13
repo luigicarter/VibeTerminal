@@ -130,6 +130,11 @@ const SENTENCES = Object.freeze({
   // The brain, when it could not answer. The provider's own sentence belongs in
   // the receipt and the diagnostics record, never in what the user hears.
   'brain-error': () => "I couldn't get a plan from the brain for that one, so nothing was typed.",
+  // Why an interpretation could not be represented. The validator's own sentence
+  // is already safe — it never echoes raw arguments — and it is the only part
+  // the user can act on, so it travels with the request account rather than
+  // staying in the diagnostics file.
+  'interpretation-reason': ({ reason }) => `Reason: ${String(reason ?? '').replace(/\s+/g, ' ').trim()}`,
   'brain-timeout': () => 'The brain took too long to answer; nothing was typed. Try once more.',
 
   // Answers Lina composes from its own memory, with no model call: what it last
@@ -179,5 +184,15 @@ function failureSentence(status, options = {}) {
 // for the receipt and the diagnostics record.
 function brainRejectionSentence() { return sentenceText('brain-error'); }
 
+// The request account plus the one validator sentence that says what could not
+// be represented. Both the conversation message and the task row use this, so
+// the user reads the same explanation wherever they look.
+function interpretationFailureText(base, reason) {
+  const text = String(base ?? '').trim();
+  const clause = sentenceText('interpretation-reason', { reason });
+  return clause && clause !== 'Reason:' ? `${text} ${clause}` : text;
+}
+
 module.exports = { PROVIDER_LABELS, displayLabel, projectLabel, paneLabel, providerSentence,
-  SENTENCES, FAILURE_STATUSES, sentence, sentenceText, failureSentence, brainRejectionSentence, taskEcho, TASK_ECHO_LIMIT };
+  SENTENCES, FAILURE_STATUSES, sentence, sentenceText, failureSentence, brainRejectionSentence,
+  interpretationFailureText, taskEcho, TASK_ECHO_LIMIT };

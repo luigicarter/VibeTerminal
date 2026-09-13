@@ -80,7 +80,12 @@ if (!process.versions.electron) {
     terminal.write('\x1b'); await wait(200);
     await enter('Say hello to verify this terminal.');
     await until(() => raw.includes('Packaged Open Codex console verified.'), 'completed provider turn');
-    assert.deepEqual(modelsUsed, ['model-two']);
+    // What this guards is model routing: the id chosen in the picker is the id
+    // every provider call carries. Codex 0.154.0 asks the same model for a
+    // short task title beside the turn, so a turn is no longer exactly one
+    // request, and asserting the count would assert an upstream detail instead.
+    assert.ok(modelsUsed.length >= 1, 'The packaged console must reach the configured provider.');
+    assert.deepEqual([...new Set(modelsUsed)], ['model-two'], 'Every packaged provider call must use the selected model.');
     const started = events.find(event => event.type === 'agent.process.started' && event.pid);
     assert.ok(started?.processId.startsWith('open-codex:'), 'Native root PID must be reported.');
     // Two interrupts return from native Codex to the same PowerShell. This

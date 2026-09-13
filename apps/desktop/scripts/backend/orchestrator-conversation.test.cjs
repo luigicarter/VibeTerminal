@@ -116,6 +116,8 @@ const CASES = {
     'Here is what I did: started a task in Codex; opened Claude Code 2.'],
   'brain-error': [{}, "I couldn't get a plan from the brain for that one, so nothing was typed."],
   'brain-timeout': [{}, 'The brain took too long to answer; nothing was typed. Try once more.'],
+  'interpretation-reason': [{ reason: 'Continue the read-only task separately from new terminal work.' },
+    'Reason: Continue the read-only task separately from new terminal work.'],
   'project-added': [{}, 'Added the folder as a Lina Terminal project.'],
   'project-removed': [{}, 'Removed the project from Lina Terminal. No files or folders were deleted.'],
   'folder-opened': [{}, 'Opened the folder in the file manager.'],

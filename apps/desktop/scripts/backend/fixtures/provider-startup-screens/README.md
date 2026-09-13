@@ -1,0 +1,68 @@
+# Provider startup screen captures
+
+Real PTY recordings of the first screen each supported coding CLI paints, taken
+on 2026-09-13 on Windows 11 with the CLIs installed on that machine. They exist
+because the Claude readiness detector was written against a synthetic fixture
+and silently stopped matching the shipped Claude Code layout; every recognizer
+in `backend/orchestratorPromptReadiness.cjs` is now grounded in one of these.
+
+## What is here
+
+For each capture `<name>`:
+
+- `<name>.bin` — the raw bytes the PTY produced, exactly as `node-pty` delivered
+  them (UTF-8, ANSI escapes intact). This is the recording; nothing is edited.
+- `<name>.json` — `{ kind, cols, rows, observation, readiness }`, where
+  `observation` is what `backend/terminalObservation.cjs` decodes from that
+  recording and `readiness` is the verdict
+  `backend/orchestratorPromptReadiness.cjs` returns for it.
+
+`scripts/backend/orchestrator-prompt-readiness.test.cjs` ingests every `.bin`
+through the real decoder and asserts the recorded cursor position and the
+expected verdict, so a layout change in any provider fails a test instead of a
+user's prompt.
+
+| capture | CLI | screen | expected verdict |
+| --- | --- | --- | --- |
+| `claude-120x36` | Claude Code 2.1.270 | ready composer, auto mode, 120x36 | `ready`, cursor (2,6) |
+| `claude-100x20` | Claude Code 2.1.270 | ready composer, manual mode, 100x20 | `ready`, cursor (2,16) |
+| `codex-folder-trust` | Codex 0.154.0 | folder-trust prompt | `transient` `folder-trust`, affirmative default |
+| `codex-ready` | Codex 0.154.0 | ready composer | `ready`, cursor (2,13) |
+| `open-codex-sign-in` | Open Codex (Codex TUI) | "Finish signing in via your browser" | `transient` `sign-in` |
+| `grok-ready` | Grok Build 1.0.25 | ready composer box | `ready`, cursor (6,25) |
+| `kimi-ready` | Kimi Code 0.27.0 | ready composer box, cursor hidden | `ready`, cursor (5,21) |
+| `kimi-custom-ready` | bundled Kimi Code 0.29.0 | ready composer box, cursor hidden | `ready`, cursor (5,22) |
+| `qwen-ready` | Qwen Code 0.21.12 | ready composer + update banner | `ready`, cursor (2,17) |
+| `opencode-ready` | OpenCode 1.18.25 | ready composer rail (alternate screen) | `ready`, cursor (16,15) |
+| `cursor-sign-in` | Cursor Agent 2026.06.26 | "Press any key to log in..." | `transient` `sign-in` |
+
+Three further startup screens exist as decoded text only —
+`qwen-update-offer.screen.txt`, `claude-external-imports.screen.txt` and
+`claude-folder-trust.screen.txt`. The provider-startup probe walked into each of
+them on 2026-09-13 and the 0.1.121 detector did not know any of them; the probe
+overwrote its own raw recording on its next run, so only the decoded screen
+survived. Classifying a startup screen is a text-only decision, so the text is
+enough to fix each one in a test.
+
+Gemini CLI is not installed on this machine, so no capture exists for it. Its
+recognizer reuses the Qwen Code form (Qwen Code is a Gemini CLI fork) and is
+marked UNVERIFIED in the source and in
+`docs/orchestrator-terminal-readiness-2026-09-13.md`.
+
+## How they were recorded
+
+Headless, with the same libraries the app uses: `node-pty` spawns the CLI on the
+bundled ConPTY, `@xterm/headless` (and, for these fixtures,
+`backend/terminalObservation.cjs`) decodes it. Nothing was typed into any pane;
+each recording is the screen the CLI painted on its own after launch.
+
+```
+node-pty.spawn(<cli exe>, <args>, {
+  cols, rows, cwd: <scratch git repo>, name: 'xterm-256color', useConptyDll: true,
+  env: <process env minus CLAUDECODE*/CLAUDE_CODE_*/VIBE_TERMINAL_*/LINA_* plus TERM=xterm-256color>,
+})
+```
+
+To re-record after a CLI upgrade, run `npm run smoke:provider-startup -- --save
+<dir>` from `apps/desktop`: the probe launches every kind the way the app does
+and writes the same `<name>.bin` / `<name>.json` pair for each one.

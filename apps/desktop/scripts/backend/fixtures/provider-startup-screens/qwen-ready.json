@@ -1,0 +1,28 @@
+{
+ "kind": "qwen",
+ "cols": 100,
+ "rows": 30,
+ "observation": {
+  "ok": true,
+  "id": "pane",
+  "generation": "g1",
+  "exited": false,
+  "sequence": 1,
+  "inputRevision": 0,
+  "text": "\n   ▄▄▄▄▄▄  ▄▄     ▄▄ ▄▄▄▄▄▄▄ ▄▄▄    ▄▄   ┌───────────────────────────────────────────────────────┐\n  ██╔═══██╗██║    ██║██╔════╝████╗  ██║  │ >_ Qwen Code (v0.21.12)                               │\n  ██║   ██║██║ █╗ ██║█████╗  ██╔██╗ ██║  │                                                       │\n  ██║▄▄ ██║██║███╗██║██╔══╝  ██║╚██╗██║  │ Token Plan | [ModelStudio Token Plan for Global/Intl] │\n  ╚██████╔╝╚███╔███╔╝███████╗██║ ╚████║  │  qwen3.8-max-preview                                  │\n   ╚══▀▀═╝  ╚══╝╚══╝ ╚══════╝╚═╝  ╚═══╝  │ ~\\...\\scratchpad\\probe-cwd                            │\n                                         └───────────────────────────────────────────────────────┘\n  Tips: You can switch permission mode quickly with Tab or /approval-mode.\n\n╭──────────────────────────────────────────────────────────────────────────────────────────────────╮\n│ Qwen Code update available! 0.21.12 → 0.23.3                                                     │\n│ Installed with npm. Attempting to automatically update now...                                    │\n╰──────────────────────────────────────────────────────────────────────────────────────────────────╯\n\n\n────────────────────────────────────────────────────────────────────────────────────────────────────\n>   Type your message or @path/to/file\n────────────────────────────────────────────────────────────────────────────────────────────────────\n  ➜ probe-cwd · git:(master) · qwen3.8-max-preview xhigh\n  Auto mode (tab to cycle)",
+  "cols": 100,
+  "rows": 30,
+  "cursor": {
+   "x": 2,
+   "y": 17
+  },
+  "cursorVisible": true,
+  "alternateScreen": true,
+  "screenTruncated": false
+ },
+ "readiness": {
+  "ready": true,
+  "status": "ready",
+  "reason": "The Qwen root composer is visible at its empty input cursor."
+ }
+}

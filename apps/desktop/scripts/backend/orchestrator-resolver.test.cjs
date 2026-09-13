@@ -6,7 +6,7 @@
 // decision costs: one interpretation call, and no routing or affinity round.
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
-const { extractSelector, resolveAssignment } = require('../../backend/orchestratorResolver.cjs');
+const { extractSelector, resolveAssignment, idlePaneCandidate, neverPrompted } = require('../../backend/orchestratorResolver.cjs');
 const { normalizeInstruction } = require('../../backend/orchestratorVocabulary.cjs');
 const { createActionHistory } = require('../../backend/orchestratorActionHistory.cjs');
 const { createOrchestrator } = require('../../backend/orchestrator.cjs');
@@ -140,6 +140,51 @@ test('an idle request with nothing free asks before opening another pane', () =>
   assert.equal(result.decision, 'ask');
   assert.equal(result.question, 'No idle Codex pane is free in vibeTerminal. Open a new one?');
   assert.equal(result.answerKind, 'open-new');
+});
+
+// --- Panes that have never taken a prompt, and owners that never delivered one -
+// Two reasons the September 13 profile kept opening a second pane beside an
+// empty one. A freshly opened Claude pane cannot prove its native identity until
+// the provider writes a transcript, which for Claude only happens after the
+// first prompt, so its observation stays provisional; and a work item whose
+// prompt was cancelled or failed kept its binding, reserving the pane for work
+// that never arrived.
+const fresh = (id, kind) => pane(id, '✳ Claude Code', kind, { observation: 'provisional', agentProcessState: 'running',
+  turnState: 'idle', conversationId: undefined, lastActivityAt: 900 });
+
+test('a never-prompted pane whose identity is still provisional is reusable', () => {
+  const sessions = [fresh('p8', 'claude')];
+  assert.deepEqual([idlePaneCandidate(sessions[0]), neverPrompted(sessions[0])], [true, true]);
+  const result = decide('Use Claude Code to investigate the voice cutoff.', { sessions, workItems: [] });
+  assert.deepEqual([result.decision, result.targetId], ['reuse', 'p8'], JSON.stringify(result));
+  // Once it has taken a turn, reuse means joining a conversation we must be able
+  // to name, so unconfirmed identity is no longer enough.
+  const used = [{ ...sessions[0], turnId: 't1', turnStartedAt: 2000, turnEndedAt: 3000, turnState: 'completed' }];
+  assert.equal(idlePaneCandidate(used[0]), false);
+  assert.equal(decide('Use Claude Code to investigate the voice cutoff.', { sessions: used, workItems: [] }).decision, 'create');
+  // A contested identity is never quietly adopted, however fresh the pane is.
+  assert.equal(idlePaneCandidate({ ...sessions[0], binding: { status: 'ambiguous' } }), false);
+  // Nor is a pane that has not reported its own agent process yet.
+  assert.equal(idlePaneCandidate({ ...sessions[0], agentProcessState: undefined }), false);
+});
+
+test('an owner whose prompt was cancelled or failed releases its pane; a finished one keeps it', () => {
+  const sessions = [pane('p9', 'Codex 9', 'codex', { lastActivityAt: 900 })];
+  const owner = status => [{ id: 'w9', cwd: VIBE, status, title: 'Investigate the voice detection cutoff',
+    objective: 'Investigate the voice detection cutoff.', binding: { target: { id: 'p9', generation: 'g-p9' } } }];
+  for (const status of ['cancelled', 'failed']) {
+    const result = decide('Start a Codex task on the chat section.', { sessions, workItems: owner(status) });
+    assert.deepEqual([result.decision, result.targetId], ['reuse', 'p9'], status);
+  }
+  for (const status of ['finished', 'running', undefined]) {
+    const result = decide('Start a Codex task on the chat section.', { sessions, workItems: owner(status) });
+    assert.equal(result.decision, 'create', `a ${status} item still owns its pane`);
+  }
+  // A released item is still the owner the user can name when continuing it:
+  // the title rule reads every item, whatever its status.
+  const named = decide('Go back to the agent working on the voice detection cutoff, and also check the microphone.',
+    { sessions, workItems: owner('cancelled') });
+  assert.deepEqual([named.decision, named.targetId, named.workItemId], ['reuse', 'p9', 'w9'], JSON.stringify(named));
 });
 
 test('an existing-agent continuation with no title match names the agents it can see', () => {

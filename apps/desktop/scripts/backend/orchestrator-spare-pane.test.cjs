@@ -109,6 +109,28 @@ test('no spare is opened when an idle unowned pane of that provider is already f
   assert.deepEqual(h.created, [{ cwd: PROJECT_A, kindOfSession: 'codex', waitForReady: true }]);
 });
 
+// The two reasons the keeper used to open a pane beside an empty one: a pane
+// whose native identity is not confirmed until its first prompt, and a work item
+// whose prompt was cancelled or failed but kept its binding.
+test('a never-prompted pane and a released owner both leave the workspace already spare', async () => {
+  const h = harness();
+  const provisional = h.pane(PROJECT_A, 'codex', { observation: 'provisional', turnState: 'idle' });
+  assert.equal(idlePaneCandidate(provisional), true, 'a pane that has never taken a prompt is idle');
+  await h.keeper.noteStart({ cwd: PROJECT_A, provider: 'codex' });
+  assert.deepEqual(h.created, []);
+  assert.equal(h.events.at(-1).reason, 'idle-pane-available');
+  // A cancelled item never delivered its prompt, so its pane is free too.
+  h.workItems.push({ id: 'w1', status: 'cancelled', binding: { target: { id: provisional.id, generation: provisional.generation } } });
+  await h.keeper.tick();
+  assert.deepEqual(h.created, []);
+  assert.equal(h.events.at(-1).reason, 'idle-pane-available');
+  // A finished item keeps its conversation, so the keeper opens the spare.
+  h.workItems[0].status = 'finished';
+  h.advance(CREATE_COOLDOWN_MS + 1);
+  await h.keeper.tick();
+  assert.deepEqual(h.created, [{ cwd: PROJECT_A, kindOfSession: 'codex', waitForReady: true }]);
+});
+
 test('memory pressure and the ten-second creation cooldown each stop a speculative pane', async () => {
   const h = harness();
   h.state.pressure = true;

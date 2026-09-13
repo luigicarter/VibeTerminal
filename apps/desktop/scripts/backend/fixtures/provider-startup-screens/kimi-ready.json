@@ -1,0 +1,28 @@
+{
+ "kind": "kimi",
+ "cols": 100,
+ "rows": 30,
+ "observation": {
+  "ok": true,
+  "id": "pane",
+  "generation": "g1",
+  "exited": false,
+  "sequence": 1,
+  "inputRevision": 0,
+  "text": "A newer version of @moonshot-ai/kimi-code is available (0.27.0 -> 0.41.0).\nDetected install source: native (windows). Auto-update is not supported on this platform.\nTo update manually, run: irm https://code.kimi.com/kimi-code/install.ps1 | iex\n \n ╭────────────────────────────────────────────────────────────────────────────────────────────────╮\n │                                                                                                │\n │  ▐█▛█▛█▌  Welcome to Kimi Code!                                                                │\n │  ▐█████▌  Send /help for help information.                                                     │\n │                                                                                                │\n │  Directory: C:\\Users\\ahmed\\AppData\\Local\\Temp\\claude\\C--Users-ahmed-Documents-vibeTerminal\\b92…│\n │  Session:   session_34b14015-e595-468a-9269-171e3de5aa45                                       │\n │  Model:     K3                                                                                 │\n │  Version:   0.27.0                                                                             │\n │                                                                                                │\n ╰────────────────────────────────────────────────────────────────────────────────────────────────╯\n \n ✦ Try Kimi Code Web UI - clearer task progress, visual sessions & settings management\n   Run /web to continue your session in the browser\n \n \n ╭────────────────────────────────────────────────────────────────────────────────────────────────╮\n │ >                                                                                              │\n ╰────────────────────────────────────────────────────────────────────────────────────────────────╯\n K3 thinking: max  C:\\Users\\ahmed\\AppData\\Local\\Temp\\claude\\C--Users-ahmed-Documents-vibeTerminal\\…\n                                                                                 context: 0% (0/1M)",
+  "cols": 100,
+  "rows": 30,
+  "cursor": {
+   "x": 5,
+   "y": 21
+  },
+  "cursorVisible": false,
+  "alternateScreen": false,
+  "screenTruncated": false
+ },
+ "readiness": {
+  "ready": true,
+  "status": "ready",
+  "reason": "The Kimi composer box is visible at its empty input cursor."
+ }
+}

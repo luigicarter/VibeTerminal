@@ -1,0 +1,28 @@
+{
+ "kind": "opencode",
+ "cols": 100,
+ "rows": 30,
+ "observation": {
+  "ok": true,
+  "id": "pane",
+  "generation": "g1",
+  "exited": false,
+  "sequence": 1,
+  "inputRevision": 0,
+  "text": "                                                                                                    \n                                                                                                    \n                                                                                                    \n                                                                                                    \n                                                                                                    \n                                                                                                    \n                                                                                                    \n                                                                                                    \n                                                                ▄                                   \n                               █▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀ █▀▀█ █▀▀█ █▀▀█                              \n                               █  █ █  █ █▀▀▀ █  █ █    █  █ █  █ █▀▀▀                              \n                               ▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀                              \n                                                                                                    \n                                                                                                    \n             ┃                                                                                      \n             ┃  Ask anything... \"Fix a TODO in the codebase\"                                        \n             ┃                                                                                      \n             ┃  Build · Kimi K3 Kimi For Coding · max                                               \n             ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀            \n             tab agents  ctrl+p commands                                                            \n                                                                                                    \n                                                                                                    \n                                                                                                    \n                                                                                                    \n                                                                                                    \n                                                                                                    \n                                                                                                    \n  ~\\AppData\\Local\\Temp\\claude\\C--Users-ahmed-Documents-vibeTerminal\\b9250720-aecc-4b16-    1.18.25  \n  ac87-b870f16368a7\\scratchpad\\probe-cwd:master",
+  "cols": 100,
+  "rows": 30,
+  "cursor": {
+   "x": 16,
+   "y": 15
+  },
+  "cursorVisible": true,
+  "alternateScreen": true,
+  "screenTruncated": false
+ },
+ "readiness": {
+  "ready": true,
+  "status": "ready",
+  "reason": "The OpenCode composer is visible at its empty input cursor."
+ }
+}

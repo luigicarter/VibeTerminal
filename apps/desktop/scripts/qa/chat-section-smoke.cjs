@@ -35,8 +35,10 @@ if (!process.versions.electron) {
   const facade = Object.create(electron), calls = [], fixtureWindows = [];
   let testing = false;
   const id = 'chat-fixture-A';
-  const session = { id: 'saved-terminal', name: 'Terminal recovery conversation', kind: 'codex', command: 'codex', cwd: output, createdAt: 1, started: false, launchToken: 1, nextLaunchMode: 'resume', status: 'idle', threadRef: { provider: 'codex', id, title: 'Terminal recovery conversation', createdAt: 1, updatedAt: 2 } };
-  const workspace = { workspaces: [{ id: 'chat-project', name: 'Chat project', path: output, sessions: [session] }], multiSessions: [], activeWorkspaceId: 'chat-project', activeView: 'project' };
+  const session = { id: 'saved-terminal', name: 'Terminal recovery conversation', kind: 'codex', command: 'codex', cwd: output, createdAt: 1, started: false, launchToken: 1, nextLaunchMode: 'resume', status: 'idle', chat: true, threadRef: { provider: 'codex', id, title: 'Terminal recovery conversation', createdAt: 1, updatedAt: 2 } };
+  // Opened from the terminal launcher instead of the Chats section: catalogued, never listed as a chat.
+  const launcher = { id: 'launcher-terminal', name: 'Launcher terminal', kind: 'codex', command: 'codex', cwd: output, createdAt: 1, started: false, launchToken: 1, nextLaunchMode: 'resume', status: 'idle', threadRef: { provider: 'codex', id: 'chat-fixture-B', title: 'Launcher terminal', createdAt: 1, updatedAt: 9 } };
+  const workspace = { workspaces: [{ id: 'chat-project', name: 'Chat project', path: output, sessions: [session] }], multiSessions: [launcher], activeWorkspaceId: 'chat-project', activeView: 'project' };
   const home = process.env.CODEX_HOME, dir = path.join(home, 'sessions', '2026', '09', '13'); fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, `rollout-${id}.jsonl`), [
     { type: 'session_meta', payload: { id, cwd: output, timestamp: '2026-09-13T00:00:00Z', source: 'cli' } },
@@ -62,6 +64,12 @@ if (!process.versions.electron) {
   }
   let phaseSeeded = false;
   async function exercise(win, evaluate) {
+    // A hidden window's capture can lag the DOM by a frame, so settle before shooting.
+    const shoot = async name => {
+      await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+      await wait(150);
+      await win.webContents.capturePage().then(image => fs.writeFileSync(path.join(output, name), image.toPNG()));
+    };
     await until(async () => (await evaluate('window.vibe.chats.list()')).chats.some(row => row.conversation?.id === id), 'durable native chat');
     let data = await evaluate('window.vibe.chats.list()'); const chat = data.chats.find(row => row.conversation?.id === id);
     const owner = 'native:' + chat.nativeKey;
@@ -107,7 +115,7 @@ if (!process.versions.electron) {
       await evaluate(`document.querySelector('.chat-open').click()`); await wait(150);
       assert.equal(calls.length, countBeforeFocus, 'opening a living chat only focuses it');
       win.setSize(1180, 800); await wait(200);
-      await win.webContents.capturePage().then(image => fs.writeFileSync(path.join(output, 'terminal-chat.png'), image.toPNG()));
+      await shoot('terminal-chat.png');
       const history = await evaluate(`window.vibe.chats.read(${JSON.stringify(chat.chatId)})`);
       assert(history.messages.some(message => message.text.includes('terminal format')));
       assert.equal(history.recoveryCopy, false);
@@ -115,6 +123,11 @@ if (!process.versions.electron) {
       fs.renameSync(path.join(dir, `rollout-${id}.jsonl`), path.join(dir, `saved-${id}.unavailable`));
       const recoveredCopy = await evaluate(`window.vibe.chats.read(${JSON.stringify(chat.chatId)})`);
       assert.equal(recoveredCopy.recoveryCopy, true);
+      // One flat list: a project's chat stays listed outside that project, labeled by its folder.
+      await evaluate(`document.querySelector('button[aria-label="Multi mode"]').click()`);
+      await until(() => evaluate(`document.querySelectorAll('.chat-row').length === 1 && document.querySelector('.chat-meta').textContent.includes('Chat project')`), 'project chat stays listed in multi mode with its folder label');
+      await evaluate(`Array.from(document.querySelectorAll('.workspace-button')).find(button=>button.textContent.includes('Chat project')).click()`);
+      await until(() => evaluate(`Boolean(document.querySelector('.chat-open'))`), 'project view restored');
       data = await evaluate('window.vibe.chats.list()'); const updated = data.chats.find(row => row.chatId === chat.chatId);
       await evaluate(`window.vibe.chats.update({chatId:${JSON.stringify(chat.chatId)},revision:${updated.revision},archived:true})`);
       await until(() => evaluate('document.querySelectorAll(".chat-row").length === 0'), 'archive hides chat without closing terminal');
@@ -124,12 +137,40 @@ if (!process.versions.electron) {
     const bounds = await evaluate(`(()=>{const p=document.querySelector('.workspace-list').getBoundingClientRect(),c=document.querySelector('.chats-section').getBoundingClientRect(),f=document.querySelector('.sidebar-footer').getBoundingClientRect();return {projectBottom:p.bottom,chatTop:c.top,chatBottom:c.bottom,footerTop:f.top,chatHeight:c.height}})()`);
     assert(bounds.chatTop >= bounds.projectBottom); assert(bounds.chatBottom <= bounds.footerTop + 1); assert(bounds.chatHeight >= 160);
     assert(await evaluate(`document.querySelector('.chats-list').getBoundingClientRect().height >= 40`), 'chat list must leave room for visible rows');
-    assert.equal((await evaluate('window.vibe.chats.list()')).chats.length, 1, 'paused placeholder must not duplicate the saved conversation');
+    const catalog = (await evaluate('window.vibe.chats.list()')).chats;
+    assert.equal(catalog.length, 1, 'paused placeholder must not duplicate the saved conversation, and the launcher pane adds no chat');
+    assert.equal(catalog[0].conversation.id, id); assert.equal(catalog[0].origin, 'chat');
     await evaluate(`document.querySelector('button[aria-label="New chat"]').click()`);
     await until(() => evaluate(`Boolean(document.querySelector('.chats-new-menu'))`), 'new chat picker');
     assert(await evaluate(`(()=>{const menu=document.querySelector('.chats-new-menu').getBoundingClientRect(),section=document.querySelector('.chats-section').getBoundingClientRect();return menu.bottom<=section.bottom+1 && menu.height>=32;})()`), 'provider picker must fit in a short sidebar');
+    if (phase === 'recover') {
+      // Only a pane started from this picker becomes a chat; the multi-mode launcher pane never does.
+      await evaluate(`Array.from(document.querySelectorAll('.chats-new-menu button')).find(button=>button.textContent.trim()==='Codex').click()`);
+      await until(() => evaluate(`document.querySelectorAll('.chat-row').length === 1`), 'the Chats picker adds a chat row');
+      const started = (await evaluate('window.vibe.chats.list()')).chats;
+      assert.equal(started.length, catalog.length + 1, 'the picker adds exactly one row; the launcher pane adds none');
+      assert(started.every(row => row.origin === 'chat'), 'only Chats-section panes are listed');
+      assert(!started.some(row => row.conversation?.id === 'chat-fixture-B'), 'a launcher pane is never listed as a chat');
+    } else await evaluate(`document.querySelector('button[aria-label="New chat"]').click()`);
+    await evaluate(`document.querySelector('button[aria-label="Collapse chats"]').click()`);
+    await until(() => evaluate(`!document.querySelector('.chats-list')`), 'chats collapse to their header');
+    const shut = await evaluate(`(()=>{const c=document.querySelector('.chats-section').getBoundingClientRect();return {chatHeight:c.height,projectMaxHeight:getComputedStyle(document.querySelector('.workspace-list')).maxHeight}})()`);
+    assert(shut.chatHeight <= 60, 'a collapsed section keeps only its header: ' + shut.chatHeight);
+    assert.equal(shut.projectMaxHeight, 'none', 'Projects reclaims the height Chats gave up');
+    await shoot(phase + '-collapsed.png');
+    win.reload(); await wait(400);
+    await until(() => evaluate(`Boolean(document.querySelector('button[aria-label="Expand chats"]'))`).catch(() => false), 'collapse survives a renderer reload');
+    assert.equal(await evaluate(`Boolean(document.querySelector('.chats-list'))`), false, 'a reloaded view stays collapsed');
+    await evaluate(`document.querySelector('button[aria-label="Expand chats"]').click()`);
+    await until(() => evaluate(`document.querySelector('.chats-list')?.getBoundingClientRect().height >= 40`), 'expanding restores the chat list');
+    // New chat on a collapsed section opens the section with its picker showing.
+    await evaluate(`document.querySelector('button[aria-label="Collapse chats"]').click()`);
+    await until(() => evaluate(`!document.querySelector('.chats-list')`), 'chats collapse again');
     await evaluate(`document.querySelector('button[aria-label="New chat"]').click()`);
-    await win.webContents.capturePage().then(image => fs.writeFileSync(path.join(output, phase + '-small.png'), image.toPNG()));
+    await until(() => evaluate(`Boolean(document.querySelector('.chats-list') && document.querySelector('.chats-new-menu'))`), 'New chat expands a collapsed section and opens its picker');
+    await evaluate(`document.querySelector('button[aria-label="New chat"]').click()`);
+    await until(() => evaluate(`!document.querySelector('.chats-new-menu')`), 'the picker closes again');
+    await shoot(phase + '-small.png');
     fs.writeFileSync(path.join(output, phase + '.json'), JSON.stringify({ ok: true, bounds, calls }, null, 2));
     app.quit();
   }

@@ -3,9 +3,10 @@
 // Locks the Fusion pane's per-role FAMILY/model/effort selection behavior:
 // each role (planner/executor) picks a family — Claude (claude CLI) or Codex
 // (codex app-server) — then a model, through an Open Fusion-style two-stage
-// picker. Per-family effort enums stay split; Codex 0.144.0 exposes
-// minimal|low|medium|high|xhigh|max|ultra with per-model support enforced in
-// both the UI and app-server runtimes. Legacy field migration
+// picker. Per-family effort enums stay split; Codex 0.154.0 exposes
+// low|medium|high|xhigh|max|ultra with per-model support enforced in both the
+// UI and app-server runtimes ("minimal" is only a legacy saved value that
+// normalizes to low). Legacy field migration
 // (model/claudeEffort → planner, codexModel/codexEffort → executor), model
 // validation before restart, and the menu-activation semantics.
 //
@@ -112,7 +113,7 @@ assert(
       JSON.stringify(["auto", "low", "medium", "high", "xhigh", "max"]) &&
     JSON.stringify(codexEffortValuesForModel("gpt-5.5")) ===
       JSON.stringify(["auto", "low", "medium", "high", "xhigh"]),
-  "the curated Codex picker must preserve the live 0.144.0 model/effort matrix"
+  "the curated Codex picker must preserve the live 0.154.0 model/effort matrix"
 );
 
 // ---- model validation ----

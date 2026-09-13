@@ -37,6 +37,12 @@ Lina Terminal is an Electron + React desktop workspace for running local termina
 
 ## Docs Index
 
+- `docs/release-0.1.122-review.md` - The 0.1.122 release: Orchestrator first-prompt readiness, idle-pane reuse, answer-plus-new-work replies, the bundled Codex 0.154.0 pin and the Chats-only-from-Chats rule, with three QA-harness repairs found during review (packaged model routing, the drag-preview sample, a hex sentinel that collided with a generated id), local gate and first packaged 0.154.0 acceptance evidence, and publication status.
+
+- `docs/orchestrator-terminal-readiness-2026-09-13.md` - Why the Orchestrator stopped getting first prompts into panes on 0.1.121 and what changed: the stale Claude footer rule replaced by recorded-screen recognizers for every PTY provider, startup-screen reporting and the folder-trust answer extended to all of them, never-prompted panes and panes owned by a cancelled task made reusable, mixed answer-plus-new-work replies represented per grant, a runnable provider-startup probe, and a per-provider verified/unverified readiness table.
+
+- `docs/codex-bundle-0.154-2026-09-13.md` - Bundled Codex pin 0.144.0 → 0.154.0: the user's 0.154-written `[agents]` config the old binary cannot parse, per-surface impact (pane vs Fusion app-server vs `debug models`), the single `vendor/codex-appserver` pin and the coherent Open Codex/Codex Web bundles, additive app-server protocol drift, effort/model catalog changes, and what was and was not verified.
+
 - `docs/release-0.1.121-review.md` - Complete-work publication after fixing a reproduced Windows atomic-save lock failure; bounded retries, stress/regression checks, retained unpublished candidates and verified publication evidence.
 
 - `docs/release-0.1.120-review.md` - Final complete-work publication, compact-sidebar warning-space repair, unchanged unpublished 0.1.118/0.1.119 tags, acceptance and public update-feed verification.

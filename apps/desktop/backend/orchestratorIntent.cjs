@@ -201,19 +201,33 @@ function normalizeIntent(raw, context = {}) {
     if (!previousCommand) throw new Error('The unfinished request is unavailable. sourceUserId and continuationOf transfer only a pending command, never a completed delivery. For a new follow-up instruction, omit both fields and preserve the complete CURRENT requested work on its explicitly selected conversation. Do not replay the earlier prompt, turn new work into task-status, or discard the follow-up. A request only to inspect existing delivery remains read-only.');
     context = { ...context, previousCommand };
   }
-  // Request-level access/dependencies cannot be split across grant sources.
-  // Preserve the old constraints even when this reply adds a current-user UI
-  // control. A new task cannot silently widen an inherited read-only lane.
+  // Request-level access/dependencies cannot be split across grant sources, so
+  // a reply that both answered a read-only question and asked for new terminal
+  // work used to be refused outright. That is one of the commonest things a
+  // person says — "Yes. And also make a new Claude terminal to look at ..." —
+  // and refusing it lost both halves. Access is recorded per grant instead: the
+  // continued grants keep the pending command's read-only scope, the new work
+  // carries the request's own scope, and the request is the wider of the two.
+  // Nothing the continuation could already do is widened by this.
   const continuationSource = priorIds.length ? context.previousCommand : undefined;
+  let mixedContinuation = false;
   if (continuationSource) {
     if (continuationSource.access === 'read-only') {
-      if (raw.access !== undefined && raw.access !== 'read-only') throw new Error('A continuation cannot weaken its read-only scope.');
       const controls = new Set(['focus_session', 'navigate', 'watch_terminal', 'stage_draft', 'interrupt', 'close']);
       const newActions = (Array.isArray(raw.actions) ? raw.actions : []).filter(action => action?.sourceUserId !== continuationSource.requestId);
-      if (newActions.some(action => !controls.has(action?.kind))) throw new Error('Continue the read-only task separately from new terminal work; mixed task access cannot be represented safely.');
+      const added = newActions.filter(action => !controls.has(action?.kind));
+      // The one thing a reply still may not do is turn the pane it is only
+      // reading into a pane it edits: that would widen the lane the pending
+      // command is already holding. New work of its own, in its own terminal,
+      // is a separate task and is represented as one.
+      const readOnlyTargets = new Set((continuationSource.grants || []).flatMap(grant => (grant.targets || []).map(target => target.id)));
+      if (added.some(action => (action?.targetIds || []).some(id => readOnlyTargets.has(id))))
+        throw new Error('Continue the read-only task separately from new terminal work in the same terminal; mixed task access cannot be represented safely.');
+      mixedContinuation = added.length > 0;
+      if (!mixedContinuation && raw.access !== undefined && raw.access !== 'read-only') throw new Error('A continuation cannot weaken its read-only scope.');
     }
     if (continuationSource.afterResults && raw.afterResults !== undefined && !same(raw.afterResults, continuationSource.afterResults)) throw new Error('A continuation cannot change its deferred instruction.');
-    raw = { ...raw, access: raw.access ?? continuationSource.access,
+    raw = { ...raw, access: mixedContinuation ? 'mutation' : raw.access ?? continuationSource.access,
       dependsOnRequestIds: [...new Set([...(continuationSource.dependsOnRequestIds || []), ...(raw.dependsOnRequestIds || [])])],
       ...(continuationSource.afterResults && { afterResults: clone(continuationSource.afterResults) }) };
   }
@@ -235,9 +249,13 @@ function normalizeIntent(raw, context = {}) {
   }) };
   const sourceUser = sourceFor({}, context);
   const continuedInspection = priorIds.length && (context.previousCommand?.responseKind === 'terminal-inspection' || context.previousCommand?.grants?.some(grant => grant.inspection === true));
-  if (continuedInspection && raw.responseKind !== undefined && raw.responseKind !== 'terminal-inspection') throw new Error('A continued terminal inspection must retain its informational scope.');
+  // A reply that also asks for new terminal work is no longer an informational
+  // request, so the request-level inspection scope does not carry over to it.
+  // The continued inspection grant keeps its own read-only scope below; the new
+  // work is an ordinary task.
+  if (continuedInspection && !mixedContinuation && raw.responseKind !== undefined && raw.responseKind !== 'terminal-inspection') throw new Error('A continued terminal inspection must retain its informational scope.');
   const semanticInspectionOnly = raw.actions.length > 0 && raw.actions.every(action => action?.kind === 'inspect_terminal');
-  const inspection = semanticInspectionOnly || raw.responseKind === 'terminal-inspection' || Boolean(continuedInspection);
+  const inspection = semanticInspectionOnly || raw.responseKind === 'terminal-inspection' || Boolean(continuedInspection && !mixedContinuation);
   if (inspection && (raw.statusTargetIds !== undefined || raw.statusRequestId !== undefined || raw.afterResults !== undefined || raw.dependsOnRequestIds?.length || raw.access === 'mutation')) throw new Error('Terminal inspection permits read-only informational navigation, without task status fields, dependencies or future work.');
   if (raw.afterResults !== undefined) {
     keys(raw.afterResults, new Set(['instruction']), 'deferred instruction');
@@ -426,6 +444,10 @@ function normalizeIntent(raw, context = {}) {
       slots.forEach(id => used.add(id)); continuedSlots.set(previousGrant, used);
     }
     const grant = { id: randomUUID(), kind: command.kind, sourceUserId: source.id, targets, selection: command.selection || 'one', args };
+    // Only when this reply mixes scopes: the half that continues the pending
+    // read-only command is recorded as read-only, so its workspace lane stays
+    // the shared read-only lane it already had while the new work serializes.
+    if (mixedContinuation && source.id === continuationSource.requestId) grant.access = 'read-only';
     if (command.kind === 'remove_project') {
       grant.projectSelection = clone(previousGrant?.projectSelection || captureProjectRemoval(args.path, context.projects || [], sessions));
       validateProjectRemoval(grant.projectSelection, context.projects || [], sessions);
@@ -528,7 +550,10 @@ function normalizeIntent(raw, context = {}) {
         return [target.id, interaction];
       }));
     }
-    if (inspection || semanticInspection) {
+    // A continued inspection keeps its informational scope even when the same
+    // reply also asked for new work: the scope belongs to that grant, not to
+    // the request that carried it.
+    if (inspection || semanticInspection || previousGrant?.inspection === true) {
       if (previousGrant && !previousGrant.inspection) throw new Error('An unfinished task cannot be replaced by terminal inspection. Preserve its original objective and completion boundary.');
       const nativeTargets = grant.targets.every(target => supportsNativeInspection(sessions.find(session => session.id === target.id)));
       const inspectionModes = grant.promptMode === 'compose' && grant.answerMode === 'delegated' &&

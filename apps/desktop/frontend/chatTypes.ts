@@ -3,7 +3,7 @@ import type { SavedConversation } from './orchestratorHistory';
 export interface ChatRow {
   chatId: string; nativeKey?: string; title: string; titleOverride?: boolean; cwd?: string;
   conversation?: SavedConversation; projectId?: string | null; paneId?: string;
-  started?: boolean; pending?: boolean; provisional?: boolean; archived?: boolean;
+  started?: boolean; pending?: boolean; provisional?: boolean; archived?: boolean; origin?: 'chat' | 'terminal' | 'discovered';
   kind?: string; updatedAt: number; revision: number;
 }
 export interface ChatWorkspace { workspaces: ProjectWorkspace[]; multiSessions: AgentSession[]; activeWorkspaceId: string | null; activeView: 'multi' | 'project' }

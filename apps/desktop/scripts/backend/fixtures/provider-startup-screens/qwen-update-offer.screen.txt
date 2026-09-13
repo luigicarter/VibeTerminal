@@ -1,0 +1,21 @@
+  ██║▄▄ ██║██║███╗██║██╔══╝  ██║╚██╗██║  │ Token Plan | [ModelStudio Token Plan for Global/Intl] │
+  ╚██████╔╝╚███╔███╔╝███████╗██║ ╚████║  │  qwen3.8-max-preview                                  │
+   ╚══▀▀═╝  ╚══╝╚══╝ ╚══════╝╚═╝  ╚═══╝  │ ~\...\desktop\.tmp\provider-startup-probe\workspace   │
+                                         └───────────────────────────────────────────────────────┘
+  Tips: Use /bug to submit issues to the maintainers when something goes off.
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────╮
+  │                                                                                              │
+  │  Built-in Provider Update · Token Plan                                                       │
+  │                                                                                              │
+  │  Token Plan                                                                                  │
+  │    + qwen3.8-max                                                                             │
+  │    + qwen3.8-flash                                                                           │
+  │    + deepseek-v4-pro-0813                                                                    │
+  │                                                                                              │
+  │  Tips: Your credentials will not be modified.                                                │
+  │                                                                                              │
+  │  › 1. Update all                                                                             │
+  │    2. Skip this version                                                                      │
+  │    3. Remind me later (esc)                                                                  │
+  │                                                                                              │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯

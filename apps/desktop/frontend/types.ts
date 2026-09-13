@@ -305,6 +305,9 @@ export interface AgentSession {
   name: string;
   kind: AgentKind;
   command: string;
+  // Started from the Chats section (its New chat picker or a saved row), so the
+  // sidebar lists it as a chat. Panes opened anywhere else stay terminals.
+  chat?: boolean;
   // A Fusion pane: a planner session that delegates execution to a separate
   // executor engine. Persisted with kind === "claude" for legacy reasons even
   // when the planner family is codex.

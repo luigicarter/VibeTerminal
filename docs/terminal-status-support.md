@@ -16,10 +16,27 @@ key are not proof of a running or completed agent turn.
 | Kimi + CC | Shared-compatible hooks and bundled task metadata | Reads native agent/process task IDs and statuses under the verified session | Same root/child separation as Kimi |
 | Qwen | Prompt/tool/permission/error hooks | Native subagent hooks retain available IDs or coarse activity | Stop is provisional; tool failures close the tool observation |
 | Grok Build | Dedicated passive session/prompt/tool/question/permission/failure/cancellation hooks | Native child IDs with provisional stop/continuation observations | Stop gates are response available; see [Grok integration](grok-build.md) |
+| Open Codex | Same Codex hooks, under its own isolated home; the pane is a separate account and history from a Codex pane | Same native child contract as Codex | Same as Codex. Not signed in on the verification machine, so only its sign-in screen is recorded evidence |
+| Codex Web | Codex hooks over the bundled Codex Web runtime; `providerCapabilities.json` still declares no lifecycle, so status is coarse | No native child contract declared for this pane | Never claims completion from output alone; the Web session's own turn boundary is not observed here |
 | Fusion | Chat host turn/tool/permission/result events | Detached task IDs and background activity survive the root result | Failed results, restoration and interruption retain host semantics |
 | Open Fusion | Chat host turn/tool/permission/result events | Detached task IDs and background activity survive the root result | Interruption cannot become success from a trailing result |
 
 ## Shared behavior
+
+- Before a pane's first prompt, readiness is a separate question from status:
+  `backend/orchestratorPromptReadiness.cjs` decides it from the decoded screen
+  alone, never from elapsed time or a running process. Every kind whose pane is a
+  real PTY now waits for its own composer, reports the startup screen it is
+  parked on, and (for a folder-trust screen in a registered project whose
+  affirmative option is already highlighted) answers that one screen. Cursor
+  Agent has no captured composer, so its panes are typed into as soon as they
+  paint something that is not a startup screen. See
+  [terminal readiness](orchestrator-terminal-readiness-2026-09-13.md).
+- A pane that has never taken a prompt reports `idle` as soon as its own
+  session-start hook arrives, even while its native identity is still
+  provisional, because a provider only proves that identity by writing a
+  transcript the first prompt creates. Identity stays provisional; only the turn
+  state is recorded.
 
 - Pane, sidebar and Orchestrator displays use the same status precedence. The
   raw root turn state remains separate for request attribution and completion
