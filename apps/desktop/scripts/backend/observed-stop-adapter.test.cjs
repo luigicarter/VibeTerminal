@@ -9,7 +9,12 @@ const { EventEmitter } = require('node:events');
 const stopModule = require('../../backend/observedStop.cjs');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
-function adapter() {
+// A test that emits its exits on a later loop turn must not race the settle
+// deadline: on a loaded runner that turn can outlast a few milliseconds, and the
+// observer then reports 'unknown' for a stop that did complete. Only a test whose
+// subject is the deadline itself passes a short stopTimeoutMs. The product
+// default in backend/observedStop.cjs is 10000 ms.
+function adapter({ stopTimeoutMs = 5000 } = {}) {
   const filename = path.resolve(__dirname, '../../backend/fusion-adapter.cjs'), realRequire = createRequire(filename), children = [];
   let endpoint;
   const context = {
@@ -24,7 +29,7 @@ function adapter() {
         children.push(child); return child;
       } };
       if (name === 'http') return { ...require('node:http'), createServer: handler => { endpoint = handler; return { on() {}, listen() {}, close() {} }; } };
-      if (name === './observedStop.cjs') return { ...stopModule, createHostStopObserver: options => stopModule.createHostStopObserver({ ...options, timeoutMs: 15, kill: child => { child.observedKills = (child.observedKills || 0) + 1; return !child.refuse; } }) };
+      if (name === './observedStop.cjs') return { ...stopModule, createHostStopObserver: options => stopModule.createHostStopObserver({ ...options, timeoutMs: stopTimeoutMs, kill: child => { child.observedKills = (child.observedKills || 0) + 1; return !child.refuse; } }) };
       return realRequire(name);
     }
   };
@@ -58,7 +63,9 @@ test('adapter kill failure remains failed; legacy reset does not replay the atte
 });
 
 test('adapter timeout can be observed under the original operation without a second mutation', async () => {
-  const a = adapter(), child = a.spawn();
+  // The deadline is this test's subject: the child never exits, so the short
+  // timeout is what produces 'unknown'.
+  const a = adapter({ stopTimeoutMs: 15 }), child = a.spawn();
   assert.equal((await a.request({})).process, 'unknown');
   child.exitCode = 0; child.emit('exit', 0);
   assert.equal((await a.request({ observeOnly: true })).process, 'stopped');
