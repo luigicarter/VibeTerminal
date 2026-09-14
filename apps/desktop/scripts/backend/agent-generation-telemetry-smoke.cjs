@@ -311,12 +311,17 @@ function runMetadataHook(file, args, env, input) {
   const kimiHome = path.join(root, "kimi");
   fs.mkdirSync(kimiHome, { recursive: true });
   const kimiFile = path.join(kimiHome, "config.toml");
-  fs.writeFileSync(kimiFile, 'model = "user-model"\n' + kimiHookTomlBlocks("old", false, "vibeterminal-kimi-custom-notify") + "\n# vibeterminal-kimi-custom-notify\n[[hooks]]\nevent = 'SubagentStart'\ncommand = 'old-notifier'\n");
+  // A config left by an older build: one hook set from a previous run (the
+  // marker may or may not have survived kimi's comment-dropping config writer,
+  // so this one is recognised by its command) plus a hand-written block under
+  // the retired kimi-custom marker. Both go; the user's setting stays.
+  fs.writeFileSync(kimiFile, 'model = "user-model"\n' + kimiHookTomlBlocks("/shims/old-run/notify.sh", false) + "\n# vibeterminal-kimi-custom-notify\n[[hooks]]\nevent = 'SubagentStart'\ncommand = 'old-notifier'\ntimeout = 5\n");
   await manager.ensureKimiCustomHooks(kimiHome);
   await manager.ensureKimiHooks(kimiHome);
   const kimi = fs.readFileSync(kimiFile, "utf8");
   assert.equal(kimi.includes("SubagentStart"), false);
   assert.equal(kimi.includes("kimi-custom-notify"), false);
+  assert.equal(kimi.includes("old-run"), false);
   assert.equal(kimi.match(/event = 'UserPromptSubmit'/g).length, 1);
   assert.equal(kimi.includes('model = "user-model"'), true);
   console.log("Generation telemetry smoke passed: nonce isolation, stale release, process separation, metadata, Gemini passive overlay/hooks, OpenCode config/title, shared Kimi migration.");

@@ -1977,13 +1977,13 @@ function postTelemetry(callbackUrl, token, payload) {
       claudeHooks.SubagentStop[0].hooks[0].command.includes("agent.subagent.stopped"),
       "Claude observes native child lifecycles");
     // The kimi hook blocks carry the claude event set as config.toml TOML
-    // ([[hooks]] tables), marker-tagged so merge/strip only ever touches
-    // vibeTerminal's own entries.
+    // ([[hooks]] tables). They are marker-tagged for readability, but merge and
+    // strip recognise them by their command (see the orphan case below).
     const kimiWinBlocks = kimiHookTomlBlocks("C:\\x\\notify.ps1", true);
     assert(
-      (kimiWinBlocks.match(/# vibeterminal-kimi-notify/g) || []).length === 8 &&
-        (kimiWinBlocks.match(/\[\[hooks\]\]/g) || []).length === 8,
-      "kimi blocks should be eight marker-tagged [[hooks]] tables"
+      (kimiWinBlocks.match(/# vibeterminal-kimi-notify/g) || []).length === 9 &&
+        (kimiWinBlocks.match(/\[\[hooks\]\]/g) || []).length === 9,
+      "kimi blocks should be nine marker-tagged [[hooks]] tables"
     );
     assert(
       kimiWinBlocks.includes(
@@ -1991,6 +1991,23 @@ function postTelemetry(callbackUrl, token, payload) {
       ),
       `windows kimi hooks should invoke the notify ps1 via powershell; got ${kimiWinBlocks}`
     );
+    // kimi 0.42's `[[hooks]]` schema is strict: exactly event/matcher/command/
+    // timeout, and timeout is INTEGER SECONDS. One rejected entry drops the
+    // whole hooks array, so every block must stay inside that shape.
+    for (const block of kimiWinBlocks.split("\n\n")) {
+      const keys = block
+        .split("\n")
+        .filter((line) => /=/.test(line))
+        .map((line) => line.split("=")[0].trim());
+      assert(
+        keys.every((key) => ["event", "matcher", "command", "timeout"].includes(key)),
+        `kimi blocks may only carry event/matcher/command/timeout; got ${keys}`
+      );
+      assert(
+        /\ntimeout = \d+$/.test(block.trimEnd()),
+        `kimi timeout must be an integer number of seconds; got ${block}`
+      );
+    }
     const kimiPosixBlocks = kimiHookTomlBlocks("/x/notify.sh", false);
     const kimiEventCommand = (event) => {
       const match = kimiPosixBlocks.match(
@@ -2026,6 +2043,43 @@ function postTelemetry(callbackUrl, token, payload) {
       "kimi Stop/StopFailure should fire agent.completed/agent.failed"
     );
 
+    // The delegation bracket rides the delegating-tool matcher, and that choice
+    // is load-bearing. kimi's native SubagentStop only fires on the subagent's
+    // SUCCESS path, so a failed or interrupted child would leave the bracket
+    // open and permanently suppress the pane's own turn end. Every tool call
+    // instead reaches the post-execution hook, arriving as PostToolUseFailure
+    // when the call errored or was aborted — so both close the bracket.
+    assert(
+      !kimiPosixBlocks.includes("SubagentStart") &&
+        !kimiPosixBlocks.includes("SubagentStop"),
+      "kimi must not bracket delegations on the never-on-failure native events"
+    );
+    // The matcher must name every delegating tool whose call awaits its
+    // children: a swarm member is itself a subagent firing the session-level
+    // Stop hook, so an unbracketed AgentSwarm settles the pane on member one.
+    // TowerSpawn is deliberately absent — it returns before its child finishes.
+    const kimiDelegationMatcher = "^(?:Agent|AgentSwarm)$";
+    assert(
+      kimiPosixBlocks.includes(
+        `event = 'PreToolUse'\nmatcher = '${kimiDelegationMatcher}'\ncommand = "'/x/notify.sh' 'agent.subagent.started'"`
+      ) &&
+        kimiPosixBlocks.includes(
+          `event = 'PostToolUse'\nmatcher = '${kimiDelegationMatcher}'\ncommand = "'/x/notify.sh' 'agent.subagent.stopped'"`
+        ) &&
+        kimiPosixBlocks.includes(
+          `event = 'PostToolUseFailure'\nmatcher = '${kimiDelegationMatcher}'\ncommand = "'/x/notify.sh' 'agent.subagent.stopped'"`
+        ),
+      `kimi should bracket awaiting delegations on success and failure; got ${kimiPosixBlocks}`
+    );
+    const kimiMatcherRegExp = new RegExp(kimiDelegationMatcher);
+    assert(
+      ["Agent", "AgentSwarm"].every((tool) => kimiMatcherRegExp.test(tool)) &&
+        !["TowerSpawn", "TowerStatus", "Bash", "AgentSwarmExtra"].some((tool) =>
+          kimiMatcherRegExp.test(tool)
+        ),
+      "the delegation matcher should cover the awaiting delegation tools and nothing else"
+    );
+
     // The config.toml merge is conservative and idempotent: user content is
     // preserved byte-for-byte, repeated launches never duplicate blocks, and a
     // new run refreshes the (per-run) notify program path.
@@ -2051,63 +2105,20 @@ function postTelemetry(callbackUrl, token, payload) {
       "a re-merge should refresh the notify program path"
     );
 
-    // The kimi-custom fork gets the same hook set under its own marker, and
-    // the two markers never strip each other's entries.
-    const kimiCustomBlocks = kimiHookTomlBlocks(
-      "/x/notify.sh",
-      false,
-      "vibeterminal-kimi-custom-notify"
-    );
+    // Orphan GC: kimi rewrites config.toml through its own TOML writer, which
+    // drops comments — so our marker disappears while the blocks stay. The
+    // strip must still recognise them by command, or a config accumulates one
+    // dead block set per app launch (a live config had reached 272).
+    const orphanToml =
+      '[thinking]\nenabled = true\n\n' +
+      '[[hooks]]\nevent = "Stop"\ncommand = "powershell -NoProfile -ExecutionPolicy Bypass -File \\"C:/shims/dead-run/notify.ps1\\" agent.completed"\ntimeout = 5\n\n' +
+      "[[hooks]]\nevent = 'UserPromptSubmit'\ncommand = 'my-own-hook.sh'\ntimeout = 10\n";
+    const orphanStrip = stripKimiHooks(orphanToml);
     assert(
-      (kimiCustomBlocks.match(/# vibeterminal-kimi-custom-notify/g) || [])
-        .length === 8,
-      "kimi-custom blocks should be eight marker-tagged [[hooks]] tables"
-    );
-    // The delegation bracket is marker-selected, and the difference is
-    // load-bearing: kimi deletes its ENTIRE hooks section when any entry fails
-    // its hook-event enum, so an event name a stock build may not know would
-    // silently disable all vibeTerminal kimi telemetry. The vendored fork is
-    // verified to expose SubagentStart/SubagentStop (and they bracket the
-    // detached window too); stock kimi gets the Agent tool matcher instead.
-    assert(
-      !kimiCustomBlocks.includes("event = 'SubagentStart'") &&
-        !kimiCustomBlocks.includes("event = 'SubagentStop'") &&
-        kimiCustomBlocks.includes("'agent.subagent.started'") &&
-        kimiCustomBlocks.includes("'agent.subagent.stopped'"),
-      "kimi-custom must use the stock-compatible Agent tool bracket in the shared home"
-    );
-    assert(
-      !kimiPosixBlocks.includes("SubagentStart") &&
-        !kimiPosixBlocks.includes("SubagentStop"),
-      "stock kimi must not reference hook events its enum may not know"
-    );
-    assert(
-      kimiPosixBlocks.includes(
-        `event = 'PreToolUse'\nmatcher = '^Agent$'\ncommand = "'/x/notify.sh' 'agent.subagent.started'"`
-      ) &&
-        kimiPosixBlocks.includes(
-          `event = 'PostToolUse'\nmatcher = '^Agent$'\ncommand = "'/x/notify.sh' 'agent.subagent.stopped'"`
-        ),
-      `stock kimi should bracket delegations with the Agent tool matcher; got ${kimiPosixBlocks}`
-    );
-    const bothMarkers = mergeKimiHooks(
-      mergedToml,
-      kimiCustomBlocks,
-      "vibeterminal-kimi-custom-notify"
-    );
-    assert(
-      bothMarkers.includes("# vibeterminal-kimi-notify") &&
-        bothMarkers.includes("# vibeterminal-kimi-custom-notify"),
-      "merging kimi-custom blocks must preserve the stock kimi ones"
-    );
-    const strippedCustom = stripKimiHooks(
-      bothMarkers,
-      "vibeterminal-kimi-custom-notify"
-    );
-    assert(
-      strippedCustom.trimmed.includes("# vibeterminal-kimi-notify") &&
-        !strippedCustom.trimmed.includes("# vibeterminal-kimi-custom-notify"),
-      "stripping the kimi-custom marker must leave stock kimi blocks intact"
+      !orphanStrip.trimmed.includes("dead-run") &&
+        orphanStrip.trimmed.includes("my-own-hook.sh") &&
+        orphanStrip.trimmed.includes("[thinking]\nenabled = true"),
+      `an unmarked orphan block must be collected and user hooks kept; got ${orphanStrip.trimmed}`
     );
 
     // The qwen hook groups carry the same event semantics as settings.json

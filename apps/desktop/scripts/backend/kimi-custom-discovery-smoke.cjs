@@ -34,10 +34,11 @@ function iso(ms) {
   return new Date(ms).toISOString();
 }
 
-// Mirror the fork's on-disk layout (identical to stock kimi): an append-only
-// session_index.jsonl whose sessionDir points at a <home>/sessions/<bucket>/<id>
-// -style directory holding state.json ({ title, lastPrompt, createdAt,
-// updatedAt } — ISO strings).
+// Mirror Kimi's on-disk layout: an append-only session_index.jsonl whose
+// sessionDir points at <home>/sessions/<workspaceId>/<sessionId>, holding
+// state.json. Both shapes appear on a real machine — pre-0.42 ISO strings with
+// `workDir`, and 0.42's epoch-ms numbers with `cwd`/`archived`/`titleKind` —
+// so both are exercised below.
 function writeSession(id, workDir, state) {
   const sessionDir = path.join(kimiCustomHome, "sessions", `wd_fixture_${id}`, id);
   fs.mkdirSync(sessionDir, { recursive: true });
@@ -218,6 +219,138 @@ try {
   assert(
     confirmKimiCustomThread(cwd, "").status === "missing",
     "an empty id should confirm as missing"
+  );
+
+  // Kimi Code 0.42 writes a different state.json: epoch-MILLISECOND timestamps
+  // instead of ISO strings, `cwd` instead of `workDir`, an `archived` flag, and
+  // `titleKind` recording where the title came from. Reading only ISO strings
+  // left every 0.42 session at 0/0, which dropped them under an `after` cutoff
+  // and flattened picker recency. These live in their own folder so the older
+  // fixtures above keep their counts.
+  const modernCwd = path.join(root, "modern-repo");
+  fs.mkdirSync(modernCwd, { recursive: true });
+  const modern = (overrides = {}) => ({
+    version: 2,
+    cwd: modernCwd,
+    archived: false,
+    isCustomTitle: false,
+    ...overrides
+  });
+
+  writeSession(
+    "session_11111111-1111-4111-8111-111111111111",
+    modernCwd,
+    modern({
+      id: "session_11111111-1111-4111-8111-111111111111",
+      createdAt: after + 1000,
+      updatedAt: after + 1000,
+      lastPrompt: "wire up the status hooks",
+      title: "wire up the status hooks",
+      titleKind: "replaceable"
+    })
+  );
+  let modernResult = find({ cwd: modernCwd });
+  assert(
+    modernResult &&
+      modernResult.id === "session_11111111-1111-4111-8111-111111111111" &&
+      modernResult.createdAt === after + 1000 &&
+      modernResult.updatedAt === after + 1000,
+    `0.42 epoch-ms timestamps must be read as-is, got: ${JSON.stringify(modernResult)}`
+  );
+  assert(
+    modernResult.title === "wire up the status hooks" &&
+      modernResult.titleSource === "preview",
+    "a replaceable title is the opening prompt standing in, not a named thread"
+  );
+
+  // A model-written title is "generated"; one the user typed is "named".
+  writeSession(
+    "session_22222222-2222-4222-8222-222222222222",
+    modernCwd,
+    modern({
+      createdAt: after + 2000,
+      updatedAt: after + 2000,
+      title: "Status hook rollout",
+      titleKind: "generated"
+    })
+  );
+  assert(
+    find({ cwd: modernCwd })?.titleSource === "generated",
+    "a generated title should be reported as generated"
+  );
+  writeSession(
+    "session_33333333-3333-4333-8333-333333333333",
+    modernCwd,
+    modern({
+      createdAt: after + 3000,
+      updatedAt: after + 3000,
+      title: "My own name",
+      titleKind: "custom",
+      isCustomTitle: true
+    })
+  );
+  assert(
+    find({ cwd: modernCwd })?.titleSource === "named",
+    "a user-typed title should be reported as named"
+  );
+
+  // Archived sessions are hidden from resume, exactly as kimi's own session
+  // queries hide them — but they still exist, so confirm stays conservative.
+  writeSession(
+    "session_44444444-4444-4444-8444-444444444444",
+    modernCwd,
+    modern({
+      createdAt: after + 9000,
+      updatedAt: after + 9000,
+      archived: true,
+      title: "archived work"
+    })
+  );
+  assert(
+    find({ cwd: modernCwd })?.id === "session_33333333-3333-4333-8333-333333333333",
+    "an archived session must not win the latest slot"
+  );
+  assert(
+    listKimiCustomThreads(modernCwd, 0, []).threads.every(
+      (thread) => thread.id !== "session_44444444-4444-4444-8444-444444444444"
+    ),
+    "an archived session must not be offered in the picker"
+  );
+  assert(
+    confirmKimiCustomThread(modernCwd, "session_44444444-4444-4444-8444-444444444444").status ===
+      "found",
+    "an archived session still exists, so confirm must not call it missing"
+  );
+
+  // A child session (a detached task's own session) is never a resume target.
+  writeSession(
+    "session_55555555-5555-4555-8555-555555555555",
+    modernCwd,
+    modern({
+      createdAt: after + 9500,
+      updatedAt: after + 9500,
+      title: "child work",
+      custom: {
+        parent_session_id: "session_11111111-1111-4111-8111-111111111111",
+        child_session_kind: "child"
+      }
+    })
+  );
+  assert(
+    find({ cwd: modernCwd })?.id === "session_33333333-3333-4333-8333-333333333333",
+    "a child session must not be offered as a root thread"
+  );
+
+  // The 0.42 `cwd` field is honoured the same way `workDir` was: a session
+  // recorded against another folder never leaks into this one.
+  writeSession(
+    "session_66666666-6666-4666-8666-666666666666",
+    modernCwd,
+    modern({ cwd: otherCwd, createdAt: after + 9900, updatedAt: after + 9900, title: "foreign" })
+  );
+  assert(
+    find({ cwd: modernCwd })?.id === "session_33333333-3333-4333-8333-333333333333",
+    "a 0.42 session whose cwd is elsewhere must not match this folder"
   );
 
   // An unreadable index cannot prove absence: stay conservative ("found" with a

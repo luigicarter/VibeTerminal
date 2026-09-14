@@ -30,8 +30,8 @@ user's prompt.
 | `codex-ready` | Codex 0.154.0 | ready composer | `ready`, cursor (2,13) |
 | `open-codex-sign-in` | Open Codex (Codex TUI) | "Finish signing in via your browser" | `transient` `sign-in` |
 | `grok-ready` | Grok Build 1.0.25 | ready composer box | `ready`, cursor (6,25) |
-| `kimi-ready` | Kimi Code 0.27.0 | ready composer box, cursor hidden | `ready`, cursor (5,21) |
-| `kimi-custom-ready` | bundled Kimi Code 0.29.0 | ready composer box, cursor hidden | `ready`, cursor (5,22) |
+| `kimi-ready` | Kimi Code 0.42.0 | ready composer box, cursor hidden | `ready`, cursor (5,16) |
+| `kimi-custom-ready` | bundled Kimi Code 0.42.0 | ready composer box, cursor hidden | `ready`, cursor (5,17) |
 | `qwen-ready` | Qwen Code 0.21.12 | ready composer + update banner | `ready`, cursor (2,17) |
 | `opencode-ready` | OpenCode 1.18.25 | ready composer rail (alternate screen) | `ready`, cursor (16,15) |
 | `cursor-sign-in` | Cursor Agent 2026.06.26 | "Press any key to log in..." | `transient` `sign-in` |
@@ -65,4 +65,18 @@ node-pty.spawn(<cli exe>, <args>, {
 
 To re-record after a CLI upgrade, run `npm run smoke:provider-startup -- --save
 <dir>` from `apps/desktop`: the probe launches every kind the way the app does
-and writes the same `<name>.bin` / `<name>.json` pair for each one.
+and writes a `<kind>.bin` / `<kind>.json` pair for each one that reaches its
+composer. The pair is named by *kind*, so a ready capture is renamed to
+`<kind>-ready.bin` / `<kind>-ready.json` on its way into this folder. Add
+`--only <kind,kind>` to re-record just the CLIs that moved, and `--no-type` to
+capture the untouched startup screen without spending a model turn — that is
+what every `*-ready` recording here is, so `--no-type` is the faithful flag.
+
+`kimi-ready` (stock 0.42.0, `~/.kimi-code/bin/kimi.exe`) and `kimi-custom-ready`
+(the vendored 0.42.0 fork bundle) were re-recorded on 2026-09-13 after the
+vendored bundle moved 0.29.0 → 0.42.0. 0.42 needs no recognizer change: the
+welcome box and the ruled composer keep the shape 0.27/0.29 painted, the banner
+is three rows shorter (no update-available notice, no web-UI tip), so only the
+recorded cursor rows moved. `kimi-custom-ready` opens with the vendored
+launcher's own `note: no api.txt …` line, which is the wrapper telling the user
+the shared `~/.kimi-code` providers apply.

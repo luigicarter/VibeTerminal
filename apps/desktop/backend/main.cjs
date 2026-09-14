@@ -602,6 +602,7 @@ function getTerminalRuntime() {
   if (!terminalRuntime) {
     terminalRuntime = createTerminalRuntime({
       lookup: requestAgentThreadLookup,
+      confirmSync: confirmAgentThreadInline,
       capabilities: (provider) => providerCapabilities[provider] || {},
       emit: (snapshot) => {
         chatService?.observe(snapshot);
@@ -1586,6 +1587,23 @@ function startAgentThreadHost() {
   });
 }
 
+// A hook callback cannot wait for the discovery host's IPC reply, so the
+// runtime's inline hint check needs an answer inside the same tick. Kimi's
+// store confirm is one index read plus one state.json, cheap enough to read
+// here; every other provider returns nothing and stays on the refresh timer.
+function confirmAgentThreadInline(payload) {
+  if (!payload?.cwd || !payload.confirmId) return undefined;
+  if (payload.provider !== "kimi" && payload.provider !== "kimi-custom") return undefined;
+  try {
+    const host = require("./agentThreadHost.cjs");
+    return payload.provider === "kimi-custom"
+      ? host.confirmKimiCustomThread(payload.cwd, payload.confirmId)
+      : host.confirmKimiThread(payload.cwd, payload.confirmId);
+  } catch {
+    return undefined;
+  }
+}
+
 function requestAgentThreadLookup(payload) {
   startAgentThreadHost();
 
@@ -1623,6 +1641,9 @@ function requestAgentThreadLookup(payload) {
 }
 
 function createMainWindow() {
+  // A macOS dock re-activation rebuilds the hosts a previous window-all-closed
+  // tore down; the real quit has to be able to tear them down again.
+  runtimeHostsShutDown = false;
   const screenshotPath =
     process.env.VIBE_INTERNAL_SCREENSHOT === "0" ? null : process.env.VIBE_SCREENSHOT_PATH;
   let screenshotScheduled = false;
@@ -1882,46 +1903,64 @@ app.whenReady().then(() => {
   });
 });
 
+// Electron emits "window-all-closed" only when the last window closes on its
+// own. Every programmatic quit - the close handler's own app.quit() after chat
+// shutdown, and the updater's - skips it and goes straight to "will-quit", so
+// this ran on no normal quit at all: hook blocks stayed merged into the
+// providers' configs and the telemetry shim run directory survived every exit.
+// Both paths call it now; it runs once per window lifetime and one throwing
+// step never stops the rest or blocks the quit.
+let runtimeHostsShutDown = false;
+function shutdownRuntimeHosts() {
+  if (runtimeHostsShutDown) return;
+  runtimeHostsShutDown = true;
+  const step = (action) => { try { action(); } catch { /* Quitting; a failed teardown step must not stop the others. */ } };
+  step(() => chatLaunchPreparation.cancelAll());
+  step(() => orchestratorIntegration?.dispose());
+  step(() => { terminalRuntime?.dispose(); terminalRuntime = null; });
+  step(() => { if (agentTelemetry) { agentTelemetry.cleanup(); agentTelemetry = null; } });
+  step(() => { if (buildSupervisor) { buildSupervisor.cleanup(); buildSupervisor = null; } });
+  step(() => {
+    if (ptyHost && !ptyHost.killed) {
+      sendToPtyHost({ type: "shutdown" });
+      ptyHost.kill();
+    }
+  });
+  step(() => {
+    if (agentThreadHost && !agentThreadHost.killed) {
+      agentThreadHost.stdin.write(`${JSON.stringify({ type: "shutdown" })}\n`);
+      agentThreadHost.kill();
+    }
+  });
+  step(() => {
+    if (fusionChatHost && !fusionChatHost.killed) {
+      sendToFusionChatHost({ type: "shutdown" });
+      fusionChatHost.kill();
+    }
+  });
+  step(() => {
+    if (openFusionChatHost && !openFusionChatHost.killed) {
+      sendToOpenFusionChatHost({ type: "shutdown" });
+      openFusionChatHost.kill();
+    }
+  });
+}
+
 app.on("window-all-closed", () => {
   if (chatService && !chatExitPrepared) { void prepareChatShutdown().finally(() => app.quit()); return; }
-  chatLaunchPreparation.cancelAll();
-  orchestratorIntegration?.dispose();
-  terminalRuntime?.dispose();
-  terminalRuntime = null;
-  if (agentTelemetry) {
-    agentTelemetry.cleanup();
-    agentTelemetry = null;
-  }
-
-  if (buildSupervisor) {
-    buildSupervisor.cleanup();
-    buildSupervisor = null;
-  }
-
-  if (ptyHost && !ptyHost.killed) {
-    sendToPtyHost({ type: "shutdown" });
-    ptyHost.kill();
-  }
-
-  if (agentThreadHost && !agentThreadHost.killed) {
-    agentThreadHost.stdin.write(`${JSON.stringify({ type: "shutdown" })}\n`);
-    agentThreadHost.kill();
-  }
-
-  if (fusionChatHost && !fusionChatHost.killed) {
-    sendToFusionChatHost({ type: "shutdown" });
-    fusionChatHost.kill();
-  }
-
-  if (openFusionChatHost && !openFusionChatHost.killed) {
-    sendToOpenFusionChatHost({ type: "shutdown" });
-    openFusionChatHost.kill();
-  }
+  shutdownRuntimeHosts();
 
   if (process.platform !== "darwin") {
     chatService?.close();
     app.quit();
   }
+});
+
+// The last stop of a programmatic quit. macOS can outlive window-all-closed and
+// build a second window, so the latch is released when one is created.
+app.on("will-quit", () => {
+  shutdownRuntimeHosts();
+  try { chatService?.close(); } catch { /* Already closed or mid-flush; quitting regardless. */ }
 });
 
 ipcMain.handle("app:get-cwd", () => getDefaultRuntimeCwd());

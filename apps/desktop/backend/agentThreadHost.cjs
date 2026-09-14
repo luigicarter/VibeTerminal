@@ -905,13 +905,24 @@ function confirmCursorThread(cwd, id) {
   return { status: "missing", rootVerified: false };
 }
 
-// Kimi Code CLI stores every session under $KIMI_CODE_HOME/sessions and keeps
-// an append-only index at <home>/session_index.jsonl — one JSON line per
-// session: { sessionId, sessionDir, workDir }. sessionDir is recorded absolute
-// (forward slashes, even on Windows), so it stays valid across home
-// relocations; state.json inside it carries { title, lastPrompt, createdAt,
-// updatedAt } with ISO timestamps. The env is read at call time so tests can
-// repoint the home per case.
+// Kimi Code CLI stores every session under
+//   $KIMI_CODE_HOME/sessions/<workspaceId>/<sessionId>/
+// (workspaceId is `wd_<slug>_<hash>` for the launch folder, sessionId is the
+// directory name) and keeps an append-only index at <home>/session_index.jsonl
+// — one JSON line per session: { sessionId, sessionDir, workDir }, with no
+// titles. sessionDir is recorded absolute (forward slashes, even on Windows),
+// so it stays valid across home relocations.
+//
+// state.json inside the session directory carries the title and timestamps, and
+// 0.42 writes a different shape from the one older builds left on disk. Both are
+// still resumable, so both are read here:
+//   0.42: { id, version: 2, cwd, createdAt/updatedAt as epoch MILLISECONDS,
+//           archived, lastPrompt, title, titleKind, isCustomTitle }
+//   pre-0.42: { workDir, createdAt/updatedAt as ISO strings, title,
+//           isCustomTitle, lastPrompt }
+// Reading only ISO timestamps left every 0.42 session at 0/0, which silently
+// dropped them under an `after` cutoff and destroyed picker recency.
+// The env is read at call time so tests can repoint the home per case.
 function kimiHome() {
   return process.env.KIMI_CODE_HOME || path.join(os.homedir(), ".kimi-code");
 }
@@ -953,13 +964,44 @@ function parseKimiSessionIndex(home = kimiHome()) {
   return { entries, readable: true };
 }
 
+// Epoch milliseconds (0.42) or an ISO string (older sessions) — the same two
+// forms kimi's own session index accepts.
 function parseKimiTimestampMs(value) {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : 0;
+  }
+  if (typeof value !== "string" || !value) {
+    return 0;
+  }
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+// The launch folder a session belongs to: 0.42 records `cwd`, older sessions
+// `workDir`, and a recovered session can carry it under `custom`.
+function kimiSessionCwd(state) {
+  const custom =
+    state && typeof state.custom === "object" && state.custom ? state.custom : {};
+  for (const candidate of [state?.cwd, state?.workDir, custom.cwd]) {
+    if (typeof candidate === "string" && candidate) {
+      return candidate;
+    }
+  }
+  return "";
+}
+
+// 0.42 records where the title came from: "custom" is one the user typed,
+// "generated" one the model wrote, and "replaceable" is the opening prompt
+// standing in until either arrives. Older sessions only have isCustomTitle.
+function kimiTitleSource(state) {
+  if (state?.titleKind === "custom" || state?.isCustomTitle === true) {
+    return "named";
+  }
+  return state?.titleKind === "generated" ? "generated" : "preview";
+}
+
 // state.json holds the display title (or, before one is generated, the opening
-// prompt) and the ISO timestamps the threadRef needs.
+// prompt) and the timestamps the threadRef needs.
 function isWithinStore(candidate, home) {
   const relative = path.relative(path.resolve(home), path.resolve(candidate));
   return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
@@ -974,13 +1016,21 @@ function readKimiSessionState(sessionDir, cwd) {
   } catch {
     return null;
   }
+  const custom =
+    state && typeof state.custom === "object" && state.custom ? state.custom : {};
+  const sessionCwd = kimiSessionCwd(state);
   return {
     rootVerified: Boolean(state && typeof state === "object" && !state.parentSessionId &&
-      !state.parent_session_id && !state.parentId && !state.parent_id && !state.parent_thread_id && state.kind !== "subagent" &&
-      (!state.workDir || isSamePath(state.workDir, cwd)) &&
+      !state.parent_session_id && !state.parentId && !state.parent_id && !state.parent_thread_id &&
+      !custom.parent_session_id && custom.child_session_kind !== "child" && state.kind !== "subagent" &&
+      (!sessionCwd || isSamePath(sessionCwd, cwd)) &&
       (state.createdAt || state.updatedAt || state.title || state.lastPrompt)),
+    // kimi's own session queries hide archived sessions unless asked, so they
+    // are not offered for resume either — but they still exist, so confirm
+    // stays conservative and lets `--session` try.
+    archived: state?.archived === true,
     title: normalizeThreadTitle(state?.title || state?.lastPrompt || ""),
-    titleSource: state?.title ? "named" : "preview",
+    titleSource: kimiTitleSource(state),
     createdAt: parseKimiTimestampMs(state?.createdAt),
     updatedAt: parseKimiTimestampMs(state?.updatedAt)
   };
@@ -1001,8 +1051,9 @@ function findLatestKimiThread(cwd, after = 0, excludeIds = [], options = {}) {
       continue;
     }
     const state = readKimiSessionState(entry.sessionDir, cwd);
-    if (!state || !state.rootVerified) {
-      // Index line without a readable session dir (deleted/moved) — skip it.
+    if (!state || !state.rootVerified || state.archived) {
+      // Index line without a readable session dir (deleted/moved), or an
+      // archived session kimi itself would not list — skip it.
       continue;
     }
     if (state.createdAt < after) {
@@ -1041,7 +1092,7 @@ function listKimiThreads(cwd, after = 0, excludeIds = [], options = {}) {
       continue;
     }
     const state = readKimiSessionState(entry.sessionDir, cwd);
-    if (!state || !state.rootVerified || state.createdAt < after) {
+    if (!state || !state.rootVerified || state.archived || state.createdAt < after) {
       continue;
     }
     threads.push({

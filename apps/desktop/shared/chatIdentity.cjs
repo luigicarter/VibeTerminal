@@ -3,6 +3,15 @@ const path = require('node:path');
 const PROVIDERS = new Set(['claude', 'codex', 'open-codex', 'codex-web', 'opencode', 'cursor', 'gemini', 'kimi', 'kimi-custom', 'qwen', 'grok']);
 const CONFIG_FIELDS = ['providerProfileId', 'providerModelOverride', 'openCodexModel', 'fusionPlannerFamily', 'fusionPlannerModel', 'fusionPlannerEffort', 'fusionPlannerFast', 'fusionExecutorFamily', 'fusionExecutorModel', 'fusionExecutorEffort', 'fusionExecutorFast', 'fusionRunMode', 'openFusionPlannerModel', 'openFusionExecutorModel', 'openFusionRunMode'];
 const SESSION_FIELDS = ['id', 'name', 'kind', 'command', 'cwd', 'createdAt', 'threadRef', 'resumeRef', 'threadSelectionPending', 'nextLaunchMode', 'started', 'launchToken', 'status', 'layout', 'tileId', 'splitTree', 'fusion', 'openFusion', 'chat', ...CONFIG_FIELDS];
+// Providers whose native conversation store is one directory. kimi-custom is
+// the vendored fork and reads/writes the same home as stock kimi
+// (agentThreadHost's kimiCustomHome() returns kimiHome()), so a session id
+// there proves nothing about which of the two produced it: "is this
+// conversation already taken" must be asked per store, not per provider label.
+// Claude's custom profile is deliberately absent - it scans a different home
+// (VIBE_CLAUDE_CUSTOM_HOME) and callers separate it by its own home field.
+const STORE_FAMILIES = { 'kimi-custom': 'kimi' };
+function storeFamily(provider) { return STORE_FAMILIES[provider] || provider; }
 function folder(value) {
   const windows = /^[a-z]:[\\/]|^\\\\|^\/\//i.test(value || '');
   const normalized = (windows ? path.win32 : path.posix).normalize(String(value || '')).replace(/\\/g, '/').replace(/\/+$/, '');
@@ -18,7 +27,7 @@ function identity(value) {
 function key(value) {
   const item = identity(value);
   if (!item) return null;
-  return JSON.stringify([item.provider === 'kimi-custom' ? 'kimi' : item.provider, item.provider === 'claude' ? item.claudeHome || 'global' : item.provider === 'opencode' && item.openFusion ? 'openfusion' : 'global', folder(item.cwd), item.id]);
+  return JSON.stringify([storeFamily(item.provider), item.provider === 'claude' ? item.claudeHome || 'global' : item.provider === 'opencode' && item.openFusion ? 'openfusion' : 'global', folder(item.cwd), item.id]);
 }
 function fromSession(session, ref = session.threadRef) {
   if (!ref?.id) return null;
@@ -45,4 +54,4 @@ function cleanWorkspace(value) {
   if (JSON.stringify(result).length > 16 * 1024 * 1024) throw new Error('Workspace snapshot is too large.');
   return result;
 }
-module.exports = { PROVIDERS, CONFIG_FIELDS, SESSION_FIELDS, folder, identity, key, fromSession, cleanSession, cleanWorkspace };
+module.exports = { PROVIDERS, CONFIG_FIELDS, SESSION_FIELDS, folder, storeFamily, identity, key, fromSession, cleanSession, cleanWorkspace };

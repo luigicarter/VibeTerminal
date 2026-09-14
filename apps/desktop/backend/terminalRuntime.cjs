@@ -6,6 +6,7 @@ const { isDeepStrictEqual } = require("node:util");
 const { normalizeClaudeTaskResult, normalizeClaudeBackgroundTasks } = require("./claudeTaskTelemetry.cjs");
 const { createApprovalLedger } = require('./agentApprovalLedger.cjs');
 const { selectedConversationEvent } = require('./terminalSelection.cjs');
+const { storeFamily } = require('../shared/chatIdentity.cjs');
 
 function cleanTitle(value) {
   return typeof value === "string" ? value.replace(/[\x00-\x1f\x7f-\x9f]/g, "").trim().slice(0, 512) : "";
@@ -26,7 +27,11 @@ function isQuestionTool(provider, name) {
 
 // Owns observations independently of mounted renderer panes. No inference from
 // terminal output, keystrokes, elapsed silence, or a clean shell/CLI exit.
-function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabilities = () => ({}) } = {}) {
+// `confirmSync` answers "is this hinted id a verified root conversation in my
+// store?" without leaving this tick. The discovery host replies over IPC, which
+// cannot settle inside a hook callback, so a hint used to be parked until the
+// 8s refresh - long enough that a short turn ended before it was ever painted.
+function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, confirmSync, capabilities = () => ({}) } = {}) {
   const records = new Map();
   const retired = new Map();
   let timer = null;
@@ -113,10 +118,29 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
     publish(record);
     return { disposition: "new", generation, record, previousGeneration: old?.snapshot.generation };
   }
+  // Ownership is a question about a store, not a provider label: kimi and
+  // kimi-custom share one native home, so an id claimed by either is claimed
+  // for both. Comparing raw providers let a kimi-custom pane bind its sibling's
+  // session, after which every one of its own hooks looked like a child.
   function owned(provider, id, exceptId, home) {
+    const family = storeFamily(provider);
     return Array.from(records.values()).some((record) => !record.closed &&
-      record.snapshot.id !== exceptId && record.snapshot.provider === provider && record.claudeHome === home &&
+      record.snapshot.id !== exceptId && storeFamily(record.snapshot.provider) === family && record.claudeHome === home &&
       (record.snapshot.conversation?.id === id || record.snapshot.selection?.threadRef?.id === id));
+  }
+  // One rule turns a hinted provider thread id into this pane's root
+  // conversation: a confirmed, unowned, parentless root. The inline path (a
+  // hook that arrives before anything is bound) and the refresh timer both
+  // apply it, so a hint can never bind one way now and another way on the tick.
+  function bindFromHint(record, hintId, transcriptPath, confirmed) {
+    const s = record.snapshot;
+    if (!hintId || s.conversation?.id || record.rootIdentityConflict) return false;
+    if (confirmed?.status !== "found" || confirmed.threadRef?.id !== hintId ||
+        confirmed.rootVerified !== true || confirmed.threadRef.parentThreadId ||
+        owned(s.provider, hintId, s.id, record.claudeHome) || !bind(record, confirmed.threadRef)) return false;
+    record.lookupFailures = 0;
+    if (transcriptPath) record.transcriptPath = transcriptPath;
+    return true;
   }
   function selectConversation(record, event) {
     const s = record.snapshot;
@@ -511,6 +535,15 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
             s.observation = "provisional";
             return publish(record);
           }
+          replayPending(record);
+        } else if (!record.identityHints.has(event.providerThreadId) &&
+            bindFromHint(record, event.providerThreadId, event.transcriptPath,
+              confirmSync?.({ provider: s.provider, cwd: s.cwd, claudeHome: record.claudeHome,
+                confirmId: event.providerThreadId, transcriptPath: event.transcriptPath }))) {
+          // The store already proves this hinted id is an unowned root, so the
+          // event that carried the hint applies now instead of being replayed
+          // after a completed turn. Attempted once per hint: a store that has
+          // not written the session yet stays on the refresh timer below.
           replayPending(record);
         } else {
           // A nonce proves pane ownership, not root-thread ownership: subagents
@@ -913,7 +946,16 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
   function replayPending(record) {
     const pending = record.pendingEvents.splice(0);
     record.identityHints.clear();
-    for (const event of pending) ingest(event);
+    // A parked hint can name a sibling pane's root conversation - kimi and
+    // kimi-custom share one store, so both panes see ids from it. Replaying one
+    // after this pane bound its own root filed the sibling's turn here as
+    // phantom child work that coarse completion could never clear. A hint that
+    // no other pane owns still replays: that is how a subagent is observed.
+    for (const event of pending) {
+      if (event.providerThreadId && event.providerThreadId !== record.snapshot.conversation?.id &&
+          owned(record.snapshot.provider, event.providerThreadId, record.snapshot.id, record.claudeHome)) continue;
+      ingest(event);
+    }
   }
   async function readMetadata(payload) {
     const key = JSON.stringify(payload);
@@ -962,8 +1004,9 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
         publishMetadata();
         return;
       }
+      const family = storeFamily(s.provider);
       const excluded = Array.from(records.values()).filter((entry) => !entry.closed &&
-        entry.snapshot.id !== s.id && entry.snapshot.provider === s.provider && entry.claudeHome === record.claudeHome)
+        entry.snapshot.id !== s.id && storeFamily(entry.snapshot.provider) === family && entry.claudeHome === record.claudeHome)
         .map((entry) => entry.snapshot.conversation?.id).filter(Boolean);
       let result;
       if (!knownId && record.identityHints.size) {
@@ -971,12 +1014,7 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
           const confirmed = await readMetadata({ provider: s.provider, cwd: s.cwd, claudeHome: record.claudeHome,
             confirmId: hintId, transcriptPath });
           if (!current(s.id, generation) || record.rootIdentityConflict || s.conversation?.id !== knownId || s.selection?.revision !== selectionRevision) return;
-          if (confirmed?.status === "found" && confirmed.threadRef?.id === hintId &&
-              confirmed.rootVerified === true && !confirmed.threadRef.parentThreadId &&
-              !owned(s.provider, hintId, s.id, record.claudeHome)) {
-            record.lookupFailures = 0;
-            bind(record, confirmed.threadRef);
-            if (transcriptPath) record.transcriptPath = transcriptPath;
+          if (bindFromHint(record, hintId, transcriptPath, confirmed)) {
             replayPending(record);
             publishMetadata();
             return;
@@ -1014,7 +1052,7 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, capabi
         // Two unbound panes launched concurrently in the same provider/cwd
         // cannot safely claim the sole newly-created candidate by polling order.
         const competing = Array.from(records.values()).some((other) => other !== record && !other.closed && !other.rejected &&
-          other.snapshot.provider === s.provider && other.claudeHome === record.claudeHome && !other.snapshot.conversation?.id &&
+          storeFamily(other.snapshot.provider) === family && other.claudeHome === record.claudeHome && !other.snapshot.conversation?.id &&
           normalizedPath(other.snapshot.cwd) === normalizedPath(s.cwd));
         if (result?.complete === false) {
           s.binding = { status: "pending", message: "Metadata scan incomplete; awaiting provider identity or retry." };

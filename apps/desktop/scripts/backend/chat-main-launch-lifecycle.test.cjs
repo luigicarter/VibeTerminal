@@ -45,10 +45,14 @@ function fixture({ cleanup } = {}) {
     process: { env: {}, platform: 'win32' }, Promise, Map
   };
   const names = new Set(['fusion-chat:start', 'fusion-chat:stop', 'openfusion-chat:start', 'openfusion-chat:stop']);
-  const selected = source.statements.filter(node => ts.isExpressionStatement(node) && ts.isCallExpression(node.expression) &&
+  // window-all-closed now delegates the teardown itself, so its declaration and
+  // its latch come along; the handler under test is still the shipped one.
+  const selected = source.statements.filter(node => (ts.isExpressionStatement(node) && ts.isCallExpression(node.expression) &&
     (node.expression.expression.getText(source) === 'ipcMain.handle' && names.has(node.expression.arguments[0]?.text) ||
-      node.expression.expression.getText(source) === 'app.on' && node.expression.arguments[0]?.text === 'window-all-closed'));
-  assert.equal(selected.length, 5);
+      node.expression.expression.getText(source) === 'app.on' && node.expression.arguments[0]?.text === 'window-all-closed')) ||
+    (ts.isFunctionDeclaration(node) && node.name?.text === 'shutdownRuntimeHosts') ||
+    (ts.isVariableStatement(node) && node.declarationList.declarations.some(item => item.name.getText(source) === 'runtimeHostsShutDown')));
+  assert.equal(selected.length, 7);
   vm.runInNewContext(selected.map(node => node.getText(source)).join('\n'), context);
   return { handlers, effects, prepared, preparations };
 }

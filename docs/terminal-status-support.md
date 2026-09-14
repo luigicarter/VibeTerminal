@@ -12,8 +12,8 @@ key are not proof of a running or completed agent turn.
 | Cursor | Project hooks and native stop status | No native detached-child contract in this adapter | Aborted is a provisional response, never a fabricated question; errors remain failures |
 | Gemini | Invocation-scoped defaults overlay with agent/model/tool/permission hooks | Explicit child transcript identity is kept separate from the root | AfterAgent is provisional; retry keeps the turn's elapsed time |
 | OpenCode | Plugin session status, permissions, and errors | Known parent/session identities scope child busy, idle, and approval events | Idle is a provisional response; metadata/message replay does not start a turn |
-| Kimi | Stock-compatible prompt/tool/stop hooks | Agent tool fallback plus compatible native task metadata polling | Stop is provisional; detached task settlement cannot complete the root |
-| Kimi + CC | Shared-compatible hooks and bundled task metadata | Reads native agent/process task IDs and statuses under the verified session | Same root/child separation as Kimi |
+| Kimi | Stock-compatible prompt/tool/stop hooks merged into the shared `config.toml`. The hooks carry a session id but no root proof, so the first prompt's id is confirmed against the store in the hook's own tick; the turn is painted then, not on the next metadata refresh | Agent tool bracket (closing on tool failure as well) plus compatible native task metadata polling | Stop is provisional; detached task settlement cannot complete the root |
+| Kimi + CC | Shared-compatible hooks and bundled task metadata, with the same inline confirmation of the first prompt's session | Reads native agent/process task IDs and statuses under the verified session. Kimi and Kimi + CC are one native home, so ownership is asked per store: a session either pane holds is never the other's child | Same root/child separation as Kimi |
 | Qwen | Prompt/tool/permission/error hooks | Native subagent hooks retain available IDs or coarse activity | Stop is provisional; tool failures close the tool observation |
 | Grok Build | Dedicated passive session/prompt/tool/question/permission/failure/cancellation hooks | Native child IDs with provisional stop/continuation observations | Stop gates are response available; see [Grok integration](grok-build.md) |
 | Open Codex | Same Codex hooks, under its own isolated home; the pane is a separate account and history from a Codex pane | Same native child contract as Codex | Same as Codex. Not signed in on the verification machine, so only its sign-in screen is recorded evidence |
@@ -100,6 +100,61 @@ or child work remains visible.
 Stock Kimi versions without the compatible task registry retain their hook
 fallback. New hook enums are not injected into the shared Kimi home solely
 because the bundled fork supports them. This preserves concurrent stock use.
+
+## Kimi hook installation (0.42 contract)
+
+Kimi has no per-invocation settings flag and no project-level config, so the app
+merges its hook blocks into the one config Kimi reads: `config.toml` in
+`$KIMI_CODE_HOME` (default `~/.kimi-code`). Kimi Code 0.42's schema is strict and
+unforgiving:
+
+- a `[[hooks]]` entry accepts exactly `event`, `matcher`, `command` and
+  `timeout`, and nothing else;
+- `timeout` is an **integer number of seconds**, 1 to 600 (not milliseconds, as
+  in the qwen writer next to it);
+- `event` must be one of twenty names, and **one** rejected entry drops the whole
+  hooks array with only a warning — an unknown event silently disables every
+  vibeTerminal kimi hook rather than just its own;
+- `matcher` is a JavaScript regular expression tested against the event's target
+  (the tool name for the tool events);
+- commands run through `shell: true`, so cmd.exe on Windows, and their output is
+  discarded except for `UserPromptSubmit`.
+
+**Orphan collection is content-based.** Kimi round-trips `config.toml` through
+its own TOML writer whenever a setting changes, and that writer drops comments —
+so the `# vibeterminal-kimi-notify` marker disappears while the blocks it was
+meant to claim remain. A marker-only strip therefore went blind and left one dead
+block set per app launch behind: a live config had reached 272 `[[hooks]]` blocks
+(8 marked, 264 orphans from 18 shim directories, 17 of them already deleted), and
+every kimi event fanned out to roughly 270 dead PowerShell launches, which is why
+status looked missing. The strip now recognises a block by its `command` —
+a `notify.ps1`/`notify.sh` under an `agent-shims` run directory, invoked with one
+of our attention types — reading both the literal and basic TOML string forms, so
+it sees our blocks however the file was last written. The marker is still emitted
+for readability and still recognised, but nothing depends on it. User-authored
+hooks and every other section are preserved; installing is idempotent to the byte.
+
+**The delegation bracket uses the delegating-tool matcher, not the native
+subagent events.** Kimi 0.42 does expose `SubagentStart`/`SubagentStop`, but they
+are not 1:1: `mirrorAgentRun` fires `SubagentStart` before awaiting the child
+(and only when the task carries a prompt), while the sole `SubagentStop`
+producer, `notifyAgentTaskStopped`, is called from the success branch alone — a
+failed, rejected or interrupted subagent rethrows without it. Because an open
+bracket suppresses the pane's own turn end, a leaked "started" is worse than a
+missed one. Every tool call instead reaches the post-execution hook: an abort or
+a throw inside a tool is converted into an `isError` result rather than skipping
+the hook, so it arrives as `PostToolUseFailure` instead of `PostToolUse`. The app
+therefore brackets on `PreToolUse`/`PostToolUse`/`PostToolUseFailure`, which
+closes on success, failure and interruption alike.
+
+The matcher names every delegating tool whose call awaits its children —
+`^(?:Agent|AgentSwarm)$` — because a swarm member is itself a subagent firing the
+session-level `Stop` hook, so an unbracketed `AgentSwarm` would settle the pane
+"done" on its first member. `TowerSpawn` and a background `Agent` return before
+their children finish, have no bracket to close, and are deliberately left out;
+those detached children depend on the native task metadata above. See
+[the Kimi 0.42 record](kimi-0.42-status-and-fork-refresh-2026-09-13.md) for the
+per-tool audit.
 
 ## Verification and limits
 

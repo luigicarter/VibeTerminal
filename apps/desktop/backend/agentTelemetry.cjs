@@ -2971,14 +2971,39 @@ function buildClaudeSettingsJson(scriptPath, isWin) {
 // Kimi reads hooks ONLY from $KIMI_CODE_HOME/config.toml (`[[hooks]]` entries) —
 // there is no --settings-style CLI flag and no project-level config — so the shim
 // cannot inject per-invocation hooks the way it does for claude/codex. Instead we
-// merge env-guarded, marker-tagged blocks into the user's config.toml when a kimi
-// pane launches (the cursor project-hooks model). The notify program exits 0 when
-// the VIBE_TERMINAL_* env is absent, so the hooks stay inert for plain `kimi`
-// runs outside vibeTerminal panes.
+// merge blocks into the user's config.toml when a kimi pane launches (the cursor
+// project-hooks model). The notify program exits 0 when the VIBE_TERMINAL_* env
+// is absent, so the hooks stay inert for plain `kimi` runs outside vibeTerminal
+// panes.
+//
+// Contract verified against Kimi Code 0.42.0:
+//   - a `[[hooks]]` entry takes exactly event/matcher/command/timeout and
+//     nothing else (a `.strict()` schema); timeout is INTEGER SECONDS, 1..600.
+//   - `event` must be one of twenty names, and ONE invalid entry drops the WHOLE
+//     hooks array with only a warning — so an event a build does not know
+//     silently disables every vibeTerminal kimi hook.
+//   - `matcher` is a JavaScript RegExp tested against the event's target: the
+//     tool name for PreToolUse/PostToolUse/PostToolUseFailure.
+//   - commands spawn with shell:true (cmd.exe on Windows) and their output is
+//     discarded except for UserPromptSubmit.
 const KIMI_HOOK_MARKER = "vibeterminal-kimi-notify";
-// The vendored custom fork (kimi-custom) gets the identical hook set under its
-// own marker, merged into its own app-owned home — never the stock kimi config.
-const KIMI_CUSTOM_HOOK_MARKER = "vibeterminal-kimi-custom-notify";
+// Markers older builds wrote (the fork briefly kept its own set under its own
+// name). Still recognised when stripping so an untouched config migrates, but
+// never relied on — see KIMI_OWNED_COMMAND for why.
+const KIMI_HOOK_MARKERS = [KIMI_HOOK_MARKER, "vibeterminal-kimi-custom-notify"];
+
+// What actually identifies a block as ours: the command invokes one of our
+// per-launch notify programs (notify.ps1/notify.sh inside an agent-shims run
+// directory) with one of our attention types as its first argument.
+//
+// Content-based on purpose. Kimi round-trips config.toml through its own TOML
+// writer whenever it saves a setting, and that writer DROPS COMMENTS — so the
+// marker above disappears and a marker-only strip goes blind. One live config
+// had grown to 272 `[[hooks]]` blocks: 8 still marked and 264 orphans from 18
+// shim directories (17 of them already deleted), fanning every kimi event out to
+// ~270 dead PowerShell launches. That is what made kimi status look missing.
+const KIMI_OWNED_COMMAND =
+  /notify\.(?:ps1|sh)["']?\s+["']?agent\.(?:running|waiting|completed|failed|subagent\.(?:started|stopped))\b/i;
 
 // TOML string for a hook command: a literal string when the value allows it (no
 // escaping at all), otherwise a basic string with the escapes TOML needs. The
@@ -3005,17 +3030,59 @@ function kimiHookCommand(notifyProgramPath, isWin, type, detail) {
 }
 
 // The set of config.toml hooks vibeTerminal installs: turn-start "running",
-// mid-turn tool activity, approval waiting, and turn-end completed/failed.
-// Mirrors the claude settings events one-for-one. `[[hooks]]` entries accept
-// only event/matcher/command/timeout — a malformed edit fails the whole config
-// for kimi, so the merge below never touches anything outside our own blocks.
-function kimiHookTomlBlocks(notifyProgramPath, isWin, marker = KIMI_HOOK_MARKER) {
-  // Both launchers use one stock-compatible configuration. This brackets the
-  // foreground Agent tool call only; detached children require native identity
-  // metadata and must not be advertised as exact lifecycle coverage.
+// mid-turn tool activity, approval waiting, turn-end completed/failed, and the
+// delegation bracket. Mirrors the claude settings events one-for-one. Every
+// event name here is from kimi 0.42's twenty-name enum and every block carries
+// only the four fields its strict schema accepts.
+function kimiHookTomlBlocks(notifyProgramPath, isWin) {
+  // The delegation bracket. Deliberately NOT kimi's native SubagentStart /
+  // SubagentStop: those are not 1:1. mirrorAgentRun fires SubagentStart before
+  // awaiting the child (and only when the task carries a prompt), but the only
+  // SubagentStop producer — notifyAgentTaskStopped — is called from the SUCCESS
+  // branch alone; a failed, rejected or interrupted subagent rethrows without
+  // it and leaves the bracket open forever. An open bracket suppresses the
+  // pane's own turn end (see shouldSuppressAgentCompletion), so a leaked
+  // "started" is far worse than a missed one.
+  //
+  // The delegating-tool matcher closes reliably instead: every tool call reaches
+  // onDidExecuteTool, and an abort or a throw inside the tool is converted into
+  // an isError result rather than skipping the hook — it simply arrives as
+  // PostToolUseFailure instead of PostToolUse, so both are bound to the close.
+  //
+  // The matcher must name EVERY delegating tool whose call awaits its children,
+  // because a swarm member is a subagent that fires the session-level Stop hook
+  // itself: an unbracketed swarm settles the pane "done" on its first member.
+  // The tools that spawn subagents are the four mirrorAgentRun call sites:
+  //   Agent       (agent/tools/agent/agentTool.ts:332) — awaits, except the
+  //               run_in_background path that returns at :512 and a mid-run
+  //               user detach at :519.
+  //   AgentSwarm  (features/swarm/…/sessionSwarmService.ts:191) — awaits: every
+  //               task is runInBackground:false (agentSwarmTool.ts:185) and
+  //               runSwarm awaits swarmService.run (:203), which resolves only
+  //               once AgentRunBatch.run finishes every attempt
+  //               (session/agentRunBatch.ts:149-172).
+  //   TowerSpawn  (features/tower/tools/spawn/spawnTool.ts:333) — NOT COVERED:
+  //               runInBackground:true (:325), the handle is returned without
+  //               awaiting (:341-347), the tool only does `void
+  //               handle.completion` (:200,:206) and its own output says the run
+  //               is detached (:273). It is also absent from the claude-code
+  //               profile's tool list (profiles.ts:47-48 expose only
+  //               TowerStatus/TowerTeardown). A detached run has no bracket to
+  //               close, so it is deliberately left out.
+  //   sessionInit (features/sessionInit/sessionInitService.ts:81) is not a tool
+  //               call, so there is nothing to bracket.
+  // Detached children (background Agent, TowerSpawn) depend on the native task
+  // metadata observer instead and must not be advertised as exact coverage.
+  const DELEGATION_TOOLS = ["Agent", "AgentSwarm"];
+  const delegationMatcher = `^(?:${DELEGATION_TOOLS.join("|")})$`;
   const subagentEntries = [
-    { event: "PreToolUse", matcher: "^Agent$", type: "agent.subagent.started" },
-    { event: "PostToolUse", matcher: "^Agent$", type: "agent.subagent.stopped" }
+    { event: "PreToolUse", matcher: delegationMatcher, type: "agent.subagent.started" },
+    { event: "PostToolUse", matcher: delegationMatcher, type: "agent.subagent.stopped" },
+    {
+      event: "PostToolUseFailure",
+      matcher: delegationMatcher,
+      type: "agent.subagent.stopped"
+    }
   ];
 
   const entries = [
@@ -3030,7 +3097,7 @@ function kimiHookTomlBlocks(notifyProgramPath, isWin, marker = KIMI_HOOK_MARKER)
   return entries
     .map(({ event, matcher, type, detail }) =>
       [
-        `# ${marker}`,
+        `# ${KIMI_HOOK_MARKER}`,
         "[[hooks]]",
         `event = ${kimiTomlString(event)}`,
         ...(matcher ? [`matcher = ${kimiTomlString(matcher)}`] : []),
@@ -3043,55 +3110,104 @@ function kimiHookTomlBlocks(notifyProgramPath, isWin, marker = KIMI_HOOK_MARKER)
     .join("\n\n");
 }
 
-// Strip every block we own: a marker comment claims the
-// `[[hooks]]` table that follows it, up to the next table header or EOF.
-// Returns the trimmed text plus whether anything other than our contribution
-// remains, so the caller can delete a config file vibeTerminal created.
-function stripKimiHooks(existingToml, marker = KIMI_HOOK_MARKER) {
+// The decoded value of a `command = ...` line, or null when the line is not one.
+// A literal ('…') string is taken verbatim; a basic ("…") string undoes the
+// backslash escapes kimi's own writer puts around the quoted script path, so the
+// same command reads identically however the file was last written.
+function kimiHookCommandValue(line) {
+  const match = /^\s*command\s*=\s*(.*)$/.exec(line.replace(/\r?\n$/, ""));
+  if (!match) {
+    return null;
+  }
+  const rest = match[1].trim();
+  if (rest.startsWith("'''") || rest.startsWith('"""')) {
+    // Multi-line strings are never ours; hand back the raw text unchanged.
+    return rest;
+  }
+  if (rest.startsWith("'")) {
+    const end = rest.indexOf("'", 1);
+    return end === -1 ? rest.slice(1) : rest.slice(1, end);
+  }
+  if (rest.startsWith('"')) {
+    let decoded = "";
+    for (let i = 1; i < rest.length; i += 1) {
+      if (rest[i] === "\\") {
+        i += 1;
+        decoded += rest[i] ?? "";
+        continue;
+      }
+      if (rest[i] === '"') {
+        break;
+      }
+      decoded += rest[i];
+    }
+    return decoded;
+  }
+  return rest;
+}
+
+// Strip every `[[hooks]]` block we own — recognised by its command, or by a
+// marker comment that happens to have survived — and nothing else. Kept lines
+// keep their own terminators, so user hooks and every other section come back
+// byte-for-byte (only trailing newlines are normalised, as before). Returns the
+// trimmed text plus whether anything other than our contribution remains, so the
+// caller can delete a config file vibeTerminal created.
+function stripKimiHooks(existingToml) {
   const source = typeof existingToml === "string" ? existingToml : "";
-  const eol = source.includes("\r\n") ? "\r\n" : "\n";
-  const lines = source.split(/\r\n|\n/);
+  // Split *after* each newline so every entry carries its own line ending.
+  const lines = source ? source.split(/(?<=\n)/) : [];
+  const text = (line) => line.replace(/\r?\n$/, "");
+  const isMarker = (line) =>
+    KIMI_HOOK_MARKERS.some((marker) => text(line).trim() === `# ${marker}`);
+  const isTableHeader = (line) => /^\s*\[/.test(line);
+  const isHooksHeader = (line) => /^\s*\[\[\s*hooks\s*\]\]\s*$/.test(text(line));
+
   const kept = [];
   let i = 0;
   while (i < lines.length) {
-    if (lines[i].trim() === `# ${marker}`) {
-      i += 1;
-      // The marker owns the table that follows it: the [[hooks]] header plus
-      // the body up to the next table header or EOF. A marker not followed by
-      // [[hooks]] (hand-edited) loses only the comment line itself.
-      if (i < lines.length && lines[i].trim() === "[[hooks]]") {
-        i += 1;
-        // Body: up to the next table header, the next marker comment, or EOF.
-        while (
-          i < lines.length &&
-          !/^\s*\[/.test(lines[i]) &&
-          ![marker, KIMI_HOOK_MARKER, KIMI_CUSTOM_HOOK_MARKER].some((entry) => lines[i].trim() === `# ${entry}`)
-        ) {
-          i += 1;
+    const marked = isMarker(lines[i]);
+    const headerAt = marked ? i + 1 : i;
+    if (headerAt < lines.length && isHooksHeader(lines[headerAt])) {
+      // The block body runs to the next table header, the next marker, or EOF —
+      // which also swallows the blank separator line our own writer emits.
+      let end = headerAt + 1;
+      let owned = marked;
+      while (end < lines.length && !isTableHeader(lines[end]) && !isMarker(lines[end])) {
+        const command = kimiHookCommandValue(lines[end]);
+        if (command !== null && KIMI_OWNED_COMMAND.test(command)) {
+          owned = true;
+        }
+        end += 1;
+      }
+      if (!owned) {
+        for (let k = i; k < end; k += 1) {
+          kept.push(lines[k]);
         }
       }
+      i = end;
       continue;
     }
-    kept.push(lines[i]);
+    // A marker comment with no table after it is ours and only ours: drop it
+    // rather than leave our litter in the user's file.
+    if (!marked) {
+      kept.push(lines[i]);
+    }
     i += 1;
   }
-  while (kept.length > 0 && kept[kept.length - 1].trim() === "") {
-    kept.pop();
-  }
+
   return {
-    trimmed: kept.join(eol),
+    trimmed: kept.join("").replace(/(?:\r?\n)+$/, ""),
     hasOtherContent: kept.some((line) => line.trim() !== "")
   };
 }
 
-// Idempotent merge: strip whatever an earlier run wrote, then append the
+// Idempotent merge: strip whatever any earlier run wrote, then append the
 // current blocks (a refreshed notify path always lands, and repeated launches
-// never accumulate duplicates). User content is preserved byte-for-byte
-// outside our blocks.
-function mergeKimiHooks(existingToml, blocksText, marker = KIMI_HOOK_MARKER) {
+// never accumulate duplicates). User content is preserved outside our blocks.
+function mergeKimiHooks(existingToml, blocksText) {
   const source = typeof existingToml === "string" ? existingToml : "";
   const eol = source.includes("\r\n") ? "\r\n" : "\n";
-  const { trimmed } = stripKimiHooks(source, marker);
+  const { trimmed } = stripKimiHooks(source);
   const blocks = String(blocksText || "")
     .split("\n")
     .join(eol);
@@ -3451,7 +3567,6 @@ function createAgentTelemetryManager(options = {}) {
   // Kimi config.toml files we have merged our hook blocks into this run —
   // same created-by-us tracking as cursorHookFiles so cleanup can undo it.
   const kimiHookFiles = new Map();
-  const kimiCustomHookFiles = new Map();
   // Qwen settings.json files we have merged our hook groups into this run —
   // same created-by-us tracking as the kimi/cursor maps so cleanup can undo it.
   const qwenHookFiles = new Map();
@@ -4535,9 +4650,11 @@ function createAgentTelemetryManager(options = {}) {
         raw = null;
       }
 
-      const migrated = stripKimiHooks(raw || "", KIMI_CUSTOM_HOOK_MARKER).trimmed;
+      // stripKimiHooks recognises every block we have ever written, including
+      // the orphans kimi's comment-dropping config writer left behind, so this
+      // one merge is also the garbage collection.
       const merged = mergeKimiHooks(
-        migrated,
+        raw || "",
         kimiHookTomlBlocks(notifyProgramPath, isWin)
       );
       if (merged === raw) {
@@ -4573,33 +4690,12 @@ function createAgentTelemetryManager(options = {}) {
     kimiHookFiles.clear();
   }
 
-  // Both launchers share the stock home. Install one stock-compatible hook set;
-  // never leave fork-only enum values or a second set of turn callbacks there.
+  // Both launchers share the stock home and one stock-compatible hook set, so
+  // the fork's entry point is the stock one. Kept as the launcher-facing name
+  // (main.cjs calls it on a kimi-custom pane); there is no second file set and
+  // therefore no second cleanup — cleanupKimiHooks covers the shared config.
   async function ensureKimiCustomHooks(homeOverride) {
     return ensureKimiHooks(homeOverride);
-  }
-
-  function cleanupKimiCustomHooks() {
-    for (const [file, info] of kimiCustomHookFiles) {
-      try {
-        const raw = fs.readFileSync(file, "utf8");
-        const { trimmed, hasOtherContent } = stripKimiHooks(
-          raw,
-          KIMI_CUSTOM_HOOK_MARKER
-        );
-        if (info.createdByUs && !hasOtherContent) {
-          // We created this config purely for our hooks; remove it rather than
-          // leave a dangling file behind.
-          fs.rmSync(file, { force: true });
-        } else {
-          const eol = raw.includes("\r\n") ? "\r\n" : "\n";
-          fs.writeFileSync(file, `${trimmed}${eol}`);
-        }
-      } catch {
-        // File gone, unreadable, or malformed — nothing safe to do.
-      }
-    }
-    kimiCustomHookFiles.clear();
   }
 
   // Merge our hook groups into the user's qwen settings.json ($QWEN_HOME or
@@ -4677,7 +4773,6 @@ function createAgentTelemetryManager(options = {}) {
     }
     cleanupCursorHooks();
     cleanupKimiHooks();
-    cleanupKimiCustomHooks();
     cleanupQwenHooks();
     if (server) {
       server.close();

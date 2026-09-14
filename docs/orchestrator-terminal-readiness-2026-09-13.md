@@ -176,7 +176,7 @@ in a scratch git repo under `apps/desktop/.tmp/provider-startup-probe`.
 | `codex` | Codex header + `›` composer | recorded, Codex 0.154.0 | ready 5.9 s, prompt accepted |
 | `claude` / `claude-custom` | name + rules + `❯`/`>` + cursor | recorded, Claude Code 2.1.270 | ready 4.3 s, prompt accepted |
 | `grok` | `Grok` + box composer | recorded, Grok Build 1.0.25 | ready 3.5 s on 1.0.30, prompt accepted |
-| `kimi` / `kimi-custom` | box composer, hidden cursor accepted | recorded, Kimi Code 0.27.0 and bundled 0.29.0 | ready 5.6-5.7 s, prompt accepted |
+| `kimi` / `kimi-custom` | box composer, hidden cursor accepted | recorded, Kimi Code 0.42.0 and bundled 0.42.0, re-recorded 2026-09-13 at cursor (5,16) / (5,17) | ready 4.3 s on 0.42.0; prompt accepted on the 0.27.0 / 0.29.0 run |
 | `qwen` | rules + `>` + cursor | recorded, Qwen Code 0.21.12 | ready 5.8 s on 0.23.3, prompt accepted |
 | `opencode` | `┃` rail + `╹▀` close + cursor | recorded, OpenCode 1.18.25 | ready 6.1 s on 1.18.30, prompt accepted |
 | `gemini` | **unverified** — reuses the Qwen form | Qwen Code is a Gemini CLI fork; the CLI is not installed here | skipped, not installed |
@@ -205,6 +205,22 @@ gemini       unknown                              skipped:Gemini CLI is not inst
 cursor       2026.06.26-7079533                   skipped:not signed in here (it is asking to sign in)                                              4.0   no     no             startup screens: sign-in
 open-codex   -                                    skipped:not signed in here (its captured startup screen is "Finish signing in via your browser")  -     no     no
 codex-web    -                                    skipped:needs a signed-in ChatGPT Codex session; its pane runs the bundled Codex TUI              -     no     no
+```
+
+That run is kept verbatim, so its `kimi` / `kimi-custom` rows still read 0.27.0
+and 0.29.0. Later the same day the vendored fork bundle moved to 0.42.0 (upstream
+0.42.0 plus the two harness commits) and stock `~/.kimi-code/bin/kimi.exe` was
+already 0.42.0, so both were re-probed and both fixtures re-recorded. 0.42 needed
+no recognizer change — the welcome box and ruled composer keep their shape, the
+banner is three rows shorter, so only the recorded cursor rows moved, (5,21) →
+(5,16) and (5,22) → (5,17). The re-probe was run with `--no-type`, which is why
+it spends no model turn and reports no acceptance:
+
+```
+KIND         CLI VERSION  VERDICT  SECS  TYPED  ACCEPTED  NOTES
+-----------  -----------  -------  ----  -----  --------  -----------------
+kimi         0.42.0       ready    4.3   no     no
+kimi-custom  0.42.0       ready    4.3   no     no        bundled Kimi Code
 ```
 
 Three of those CLIs had upgraded themselves since their fixtures were recorded —
