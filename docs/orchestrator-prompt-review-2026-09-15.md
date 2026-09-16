@@ -2,6 +2,8 @@
 
 Reviewed the source checkout, the installed **0.1.124** package version, the saved utterance fixtures, and Ahmed's live profile **read-only**. The user subsequently authorized fixes. Changes are in source; the installed application has not been replaced or restarted. No agent terminal, Electron window, or live-model session was opened for validation.
 
+These repairs subsequently shipped as **v0.1.125**. See [the release review](release-0.1.125-review.md) for hosted native/Electron acceptance, the additional shutdown-persistence repair found during release validation, and verified public installer/update-feed evidence. Publication did not restart the local installation.
+
 ## Evidence and incident timeline
 
 Evidence files are under `%APPDATA%/vibe-terminal`: `orchestrator-conversation.json` (compact JSON, line 1), `orchestrator-work-items.json` (line 1), `orchestrator-settings.json`, and `logs/orchestrator-errors.jsonl`. Request IDs below identify records precisely without checking private conversation dumps or credentials into Git. Times are UTC on September 16, which was September 15 evening in Toronto.
