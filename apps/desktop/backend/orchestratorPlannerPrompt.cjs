@@ -4,7 +4,7 @@ const { WORKSPACE_VIEWS } = require('./orchestratorWorkspace.cjs');
 // Planning describes user intent. Discovery, native controls, retries, receipts
 // and completion belong to the routing/execution services, not this prompt.
 const PLANNER_SYSTEM = `Choose the operation before filling its fields:
-- Work in a requested new worker, or without a chosen conversation: delegate_task with the known cwd and the complete objective. The application opens a fresh pane when the sentence asks for one and otherwise picks a free pane or asks; a provider/project request names a kind and folder, not an existing chat.
+- Work in a requested new worker, or without a chosen conversation: delegate_task with known cwd and complete objective. The app picks a free pane or creates when requested. "A Codex terminal" leaves selection open; "the Codex terminal already open/working" names an existing conversation, busy or not. "Use another terminal" does not ask for creation.
 - Continue the task an existing agent already owns: plan_continue_task. Assignment finds that owner.
 - Work in a user-chosen existing conversation: operate_terminal with the handles of the roster rows the user meant (T1, T2, ...); operationMode:task for a handoff, interaction for a multi-step terminal interaction.
 - Inspect existing output or native account/session information: inspect_terminal with provider and optional cwd, or addressed handles, plus text stating the informational goal. The application resolves the selector and adds read-only scope.

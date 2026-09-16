@@ -13,6 +13,18 @@ function sessionNativeIdentity(session) {
     selectionRevision: session.selection?.revision || 0,
     ...(engineProvider && { engineProvider }) };
 }
+// The first startup hook can arrive after Lina submits the first prompt. It
+// establishes the previously unnamed conversation; clear/resume never qualify.
+function initialConversationBinding(binding, session) {
+  const expected = binding?.nativeIdentity;
+  const actual = session && sessionNativeIdentity(session);
+  if (!expected || expected.id || expected.selectionRevision !== 0 || !actual?.id ||
+      session.selection?.source !== 'startup' || session.selection.status !== 'confirmed' || actual.selectionRevision !== 1 ||
+      !paneKey(binding.target) || paneKey(binding.target) !== paneKey(session) ||
+      binding.target.launchToken !== undefined && binding.target.launchToken !== session.launchToken) return false;
+  return ['provider', 'home', 'workspace', 'engineProvider'].every(field => !expected[field] ||
+    (field === 'workspace' ? typeof actual[field] === 'string' && workspaceKey(expected[field]) === workspaceKey(actual[field]) : expected[field] === actual[field]));
+}
 function matchesBinding(binding, session) {
   if (!paneKey(binding?.target) || paneKey(binding.target) !== paneKey(session)) return false;
   if (binding.target.launchToken !== undefined && binding.target.launchToken !== session.launchToken) return false;
@@ -111,4 +123,4 @@ function proposeRoutingCandidates({ sessions = [], workItem, requestId, replyToR
   const candidates = item ? sessions.filter(s => matchesBinding(item.binding, s) && s.observation === 'observed' && !['failed', 'exited'].includes(s.processState) && !owners.some(a => a.workItemId !== item.id && (paneKey(a.target) === paneKey(s) || nativeKey(a.nativeIdentity) && nativeKey(a.nativeIdentity) === nativeKey(sessionNativeIdentity(s))))).slice(0, 20).map(s => ({ id: s.id, generation: s.generation, launchToken: s.launchToken, cwd: s.cwd, kind: s.kind, turnState: s.turnState, pendingInput: Boolean(s.pendingInput), nativeIdentity: sessionNativeIdentity(s), evidence: 'exact-task-conversation-binding', requiresRevalidation: Boolean(item.requiresRevalidation) })) : [];
   return { workItemId: item?.id, candidates, reservations: owners.slice(0, 20).map(a => ({ id: a.id, workItemId: a.workItemId, requestId: a.requestId, target: a.target, status: a.status, decision: a.decision })), requiresNew: !item, reason: candidates.length ? 'verified-task-affinity' : item ? 'task-binding-needs-discovery' : 'no-explicit-task-affinity' };
 }
-module.exports = { createRoutingRegistry, proposeRoutingCandidates, sessionIdentity: sessionNativeIdentity, sessionNativeIdentity, matchesBinding, paneKey, nativeKey };
+module.exports = { createRoutingRegistry, proposeRoutingCandidates, sessionIdentity: sessionNativeIdentity, sessionNativeIdentity, matchesBinding, initialConversationBinding, paneKey, nativeKey };

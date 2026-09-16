@@ -18,11 +18,11 @@ function launcherCatalog(items = []) {
 }
 function routingBindingMatches(binding, session) {
   if (!binding) return true;
-  const { sessionIdentity, paneKey, nativeKey } = require('./orchestratorRouting.cjs');
+  const { sessionIdentity, paneKey, nativeKey, initialConversationBinding } = require('./orchestratorRouting.cjs');
   if (!session || !paneKey(binding.target) || paneKey(binding.target) !== paneKey(session)) return false;
   if (binding.target.launchToken !== undefined && binding.target.launchToken !== session.launchToken) return false;
   const expected = binding.nativeIdentity || {}, actual = sessionIdentity(session);
-  if (expected.selectionRevision !== undefined && expected.selectionRevision !== actual.selectionRevision) return false;
+  if (expected.selectionRevision !== undefined && expected.selectionRevision !== actual.selectionRevision && !initialConversationBinding(binding, session)) return false;
   return ['provider', 'home', 'workspace', 'id', 'engineProvider'].every(field => !expected[field] || (field === 'workspace'
     ? typeof actual.workspace === 'string' && nativeKey({ provider: '_', home: '_', id: '_', workspace: expected.workspace }) === nativeKey({ provider: '_', home: '_', id: '_', workspace: actual.workspace })
     : expected[field] === actual[field]));

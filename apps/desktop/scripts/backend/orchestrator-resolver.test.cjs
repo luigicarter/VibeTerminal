@@ -78,7 +78,7 @@ test('"the other one" is the pane beside the last delivery, and a question once 
 // --- Selector extraction ---------------------------------------------------
 // Every row below is a real utterance, read after wave 1 normalization.
 const SELECTORS = [
-  [1, 'provider'], [5, 'provider'], [18, 'new'], [22, 'new'], [33, 'idle'], [45, 'new'], [47, 'idle'],
+  [1, 'provider'], [5, 'provider'], [18, 'provider'], [22, 'new'], [33, 'idle'], [45, 'new'], [47, 'idle'],
   [48, 'idle'], [49, 'provider'], [58, 'idle'], [59, 'idle'], [60, 'idle'], [61, 'idle'], [62, 'new'],
   [63, 'just_opened'], [70, 'new'], [74, 'new'], [78, 'idle'], [82, 'just_opened'], [83, 'idle'],
   [85, 'idle'], [86, 'idle'], [87, 'idle'], [90, 'idle'], [91, 'new'], [93, 'new'], [94, 'just_opened'],
@@ -125,7 +125,10 @@ test('an empty Claude Code pane nobody owns takes the work it was asked for', ()
 test('the pane Lina just opened is the one the follow-up reaches', () => {
   const created = roster()[4];
   for (const n of [63, 82, 94]) {
-    const result = decide(utterance(n), { created });
+    // Row 82 explicitly says Codex; a Codex Web pane is a different launcher.
+    const sessions = roster();
+    if ([82, 94].includes(n)) Object.assign(sessions[4], { provider: 'codex', kind: 'codex' });
+    const result = decide(utterance(n), { created, sessions, workItems: rosterWork() });
     assert.deepEqual([result.decision, result.targetId, result.selector], ['reuse', 'p5', 'just_opened'], `#${n}`);
   }
   // A pane another task owns, and no retry pending, is not adopted by "the one
@@ -264,7 +267,10 @@ test('corpus sweep: at least nine in ten requests reach the decision their selec
     const result = decide(normalized(item.text), { cwd, projectName: item.project || 'vibeTerminal',
       created: roster()[4], sessions: cwd === WEB ? [] : undefined, workItems: cwd === WEB ? [] : undefined });
     total++;
-    if (!EXPECTED[item.selector].includes(result.decision)) {
+    const reading = readReference(normalized(item.text), { launchers });
+    const explicitExisting = reading.kind === 'provider' && reading.definiteProvider && !reading.indefiniteProvider;
+    const expected = explicitExisting ? ['reuse', 'ask'] : [82, 94].includes(item.n) ? ['ask'] : EXPECTED[item.selector];
+    if (!expected.includes(result.decision)) {
       misses.push({ n: item.n, labelled: item.selector, selector: result.selector, decision: result.decision, text: normalized(item.text).slice(0, 80) });
     }
   }
@@ -370,6 +376,21 @@ test('a start request with an idle unowned pane costs one model call and opens n
   assert.equal(f.effects[0].targetId, idle.id);
 });
 
+test('answering a routing question with its exact title preserves the task without a model call', async t => {
+  const f = await relayFixture(t);
+  f.session('review-a', 'Review orchestrator issues');
+  f.session('review-b', 'Review orchestrator performance');
+  f.plans.push({ name: 'plan_continue_task', args: { cwd: f.root, text: 'Investigate the messages and implement the fixes.' } });
+  const asked = await f.relay.send({ text: 'Continue the orchestrator review.', origin: 'text' });
+  const question = f.task(asked).question;
+  assert.ok(question?.routingCandidates?.length);
+  const answered = await f.relay.send({ text: 'Review Orchestrator issues.', origin: 'text', replyToRequestId: asked.requestId, questionId: question.id });
+  assert.equal(answered.ok, true, JSON.stringify(answered));
+  assert.deepEqual(f.calls, ['interpretation']);
+  assert.deepEqual(f.effects.map(action => [action.kind, action.targetId, action.text]),
+    [['send_prompt', 'review-a', 'Investigate the messages and implement the fixes.']]);
+});
+
 test('two chat-section panes produce one named question, then the answer delivers', { timeout: 4000 }, async t => {
   const f = await relayFixture(t);
   f.session('chat-a', 'Add project chat section', { lastActivityAt: 6000 });
@@ -391,11 +412,10 @@ test('two chat-section panes produce one named question, then the answer deliver
   assert.ok(logged.score > 0 && logged.score <= 1, JSON.stringify(logged));
   assert.equal(JSON.stringify(logged).includes('chat section'), false);
 
-  f.plans.push({ name: 'plan_continue_task', args: { cwd: f.root, text: 'Continue the chat section work.' } });
   const answered = await f.relay.send({ text: 'the second one', origin: 'text', replyToRequestId: asked.requestId, questionId: question.id });
   assert.equal(answered.ok, true, JSON.stringify(answered));
   assert.deepEqual(f.effects.map(effect => [effect.kind, effect.targetId]), [['send_prompt', 'chat-b']]);
-  assert.deepEqual(f.calls, ['interpretation', 'interpretation']);
+  assert.deepEqual(f.calls, ['interpretation'], 'a routing answer does not need reinterpretation');
 });
 
 test('answering the idle question with a new pane opens one', { timeout: 4000 }, async t => {

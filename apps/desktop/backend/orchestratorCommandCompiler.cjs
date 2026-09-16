@@ -432,6 +432,9 @@ function compileCommand(context) {
   // over the panes in one state ("stop both that are working"); a close is one
   // pane, because a group close is the review's.
   if (shape === 'stop' || shape === 'close') {
+    // The reference slot is not a second command or a deferred condition.
+    // Handles alone must not make "close T1 and open ..." compile as just close.
+    if (/\b(?:then|but|before|after|if|unless|when|until)\b|\band\s+(?:open|start|create|launch|spawn|tell|ask|prompt|send|close|stop|interrupt)\b/i.test(groups.ref)) return decline('second-command');
     const reference = resolveReference(text, terminalsOf(context), referenceOptions);
     const panes = reference.exact && !['new', 'idle', 'just_opened'].includes(reference.kind) ? reference.terminals : [];
     if (!panes.length || panes.some(pane => !pane.handle) || shape === 'close' && panes.length > 1) return decline('ambiguous-pane');
@@ -542,7 +545,7 @@ function createCommandInterpreter({ recordDiagnostic = () => {}, now = Date.now 
     catch { result = decline('no-match'); }
     if (!result.accepted) { record('declined', { reason: result.reason }); return undefined; }
     try {
-      const raw = canonicalizeInterpretation(decodePlannerCalls(result.calls, plannerTools(context), instructionOf(context)));
+      const raw = canonicalizeInterpretation(decodePlannerCalls(result.calls, plannerTools(context), instructionOf(context), context));
       record('accepted', { shape: result.shape });
       return raw;
     } catch { record('declined', { reason: 'decode-failed' }); return undefined; }

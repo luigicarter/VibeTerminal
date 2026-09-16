@@ -13,14 +13,14 @@ const { createAgentStore } = require('./orchestratorAgentStore.cjs');
 const { createAgentQueries } = require('./orchestratorAgentQueries.cjs');
 const { buildAgentContext } = require('./orchestratorAgentContext.cjs');
 const agentTools = require('../shared/orchestratorAgentTools.cjs');
-const { createRoutingRegistry, sessionIdentity, matchesBinding, paneKey } = require('./orchestratorRouting.cjs');
+const { createRoutingRegistry, sessionIdentity, matchesBinding, initialConversationBinding, paneKey } = require('./orchestratorRouting.cjs');
 // The routing model rounds are gone: the deterministic resolver decides which
 // pane a task reaches. What remains here is the routing operation validator and
 // the launcher choice for an explicitly requested new conversation.
 const { validateRouteCall, deterministicNewTaskRoute } = require('./orchestratorRoutePlanner.cjs');
 const { resolveTitledOwner } = require('./orchestratorOwnerMatch.cjs');
 const { paneReadiness } = require('./orchestratorPaneReadiness.cjs');
-const { resolveAssignment, idlePaneCandidate, ownsPaneForReuse, reuseOwnedPaneKeys, paneReuseOwner, paneRecency, paneLabel, IDLE_REUSE_REASON } = require('./orchestratorResolver.cjs');
+const { resolveAssignment, resolveAnswer, idlePaneCandidate, ownsPaneForReuse, reuseOwnedPaneKeys, paneReuseOwner, paneRecency, paneLabel, IDLE_REUSE_REASON } = require('./orchestratorResolver.cjs');
 const { idlePaneRequest, providerFamily } = require('./orchestratorReference.cjs');
 const { completeInspections } = require('./orchestratorInspectionCompletion.cjs');
 const { createGoalReviewer } = require('./orchestratorGoalReview.cjs');
@@ -1001,6 +1001,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
   }
   // The reply to that question, matched by the exact question the user answered.
   function answeredRoutingQuestion(job, instruction) {
+    if (job?.routingAnswer) return job.routingAnswer;
     if (!job?.input?.questionId) return undefined;
     const asked = tasks.get(job.input.replyToRequestId)?.task.question;
     if (!asked || asked.id !== job.input.questionId) return undefined;
@@ -1492,6 +1493,19 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
       const next = (Array.isArray(sessions) ? sessions : []).map(session => session && typeof session === 'object' && session.id ? { ...session, handle: terminalHandles.of(session.id) } : session);
       const changed = !isDeepStrictEqual(state.sessions, next);
       if (changed) state.sessions = structuredClone(next);
+      // Upgrade an unnamed first-prompt owner when its verified startup ID
+      // arrives. Leaving revision zero behind mints a second owner on follow-up.
+      if (changed) for (const item of workItems.snapshot().items) {
+        const live = state.sessions.find(session => session.id === item.binding?.target.id);
+        if (!initialConversationBinding(item.binding, live)) continue;
+        const binding = { ...item.binding, nativeIdentity: sessionIdentity(live) };
+        workItems.bind(item.id, binding);
+        const reservation = assignments.findByWorkItem(item.id);
+        if (reservation) assignments.bind(reservation.id, binding);
+        for (const job of tasks.jobs.values()) for (const route of job.routeItems || []) {
+          if (route.workItemId === item.id) route.binding = structuredClone(binding);
+        }
+      }
       const historyChanged = workHistory.observe(state.sessions);
       // Reconciliation still runs on unchanged observations: waiting tasks and
       // expired context must progress independently of UI publication.
@@ -1819,9 +1833,25 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
         // resolve request ids against it; neither reaches the planning payload.
         memory: requestMemory, ledger: recentLedger, ledgerRows: ledger.list().slice(-200), terminals: terminalModel(intent.sessions), roster, ...(recentFailure && { lastFailure: recentFailure }), pendingCommands: pendingJobs.map(prior => prior.context.pendingCommand).filter(Boolean), tasks: tasks.snapshot().filter(task => task.sequence < job.task.sequence), recentUserMessages };
       const confirmation = selectedPrior?.resumeConfirmation;
+      const routingAnswer = answeredRoutingQuestion(job, instructionText);
+      const routingChoice = resolveAnswer(routingAnswer);
+      const answerLabel = routingAnswer?.candidates?.find(candidate => candidate.targetId === routingChoice?.targetId)?.label;
+      const answerWords = value => String(value || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+      const exactRoutingReply = routingChoice?.decision === 'reuse' &&
+        (answerWords(instructionText) === answerWords(answerLabel) || /^(?:the )?(?:first|second|third)(?: one)?[.!]?$/i.test(instructionText.trim())) &&
+        previousCommand?.grants?.length === 1 && previousCommand.grants[0].kind === 'delegate_task';
       const confirmedGrant = confirmation && input.replyToRequestId === selectedPrior.task.requestId && input.questionId === confirmation.questionId && selectedPrior.task.question?.id === confirmation.questionId && selectedPrior.task.status === 'needs-answer' && previousCommand?.expiresAt > now() && previousCommand.requestId === confirmation.sourceUserId && isConversationResumeConfirmation(input.text)
         && previousCommand.grants?.filter(grant => grant.kind === 'resume_conversation' && JSON.stringify(grant.args) === JSON.stringify(confirmation.args));
-      if (confirmedGrant?.length === 1) {
+      if (exactRoutingReply) {
+        // Answering Lina's own routing question selects a saved task's worker;
+        // it is not an answer for the terminal's native question.
+        const saved = previousCommand.grants[0];
+        job.routingAnswer = routingAnswer;
+        intent.commandPlan = normalizeIntent({ goal: previousCommand.instruction, continuationOf: previousCommand.requestId,
+          actions: [{ kind: 'delegate_task', sourceUserId: previousCommand.requestId, ...saved.args,
+            ...Object.fromEntries(['text', 'operationMode', 'promptMode', 'answerMode', 'permissionMode', 'lifecycleMode', 'answerText', 'answerTexts']
+              .filter(field => saved[field] !== undefined).map(field => [field, saved[field]])) }] }, commandContext);
+      } else if (confirmedGrant?.length === 1) {
         intent.confirmedResume = confirmation.candidate;
         intent.commandPlan = normalizeIntent({ goal: 'Resume the saved conversation the user just confirmed.', continuationOf: previousCommand.requestId, actions: [{ kind: 'resume_conversation', ...confirmation.args, sourceUserId: previousCommand.requestId }] }, commandContext);
         selectedPrior.resumeConfirmation = undefined;
@@ -2649,7 +2679,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
       }
       agentDirectory.clear();
       return Promise.all([diagnostics.flush(), voiceDiagnostics.flush(), conversationStore.flush(), workHistory.flush(),
-        workItems.flush(), agentStore.flush(), memory.flush().catch(() => {})]);
+        workItems.flush(), paneMemory.flush().then(() => agentStore.flush()), memory.flush().catch(() => {})]);
     },
   };
 }

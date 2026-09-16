@@ -23,6 +23,14 @@ test('legacy unavailable speech default migrates without touching encrypted cred
   assert.equal(saved.encryptedKey, disk.encryptedKey); assert.deepEqual(saved.preferences, disk.preferences);
   assert.equal(saved.settings.ttsModel, TTS_MODEL); assert.equal(saved.settings.enabledOnLaunch, true);
 });
+test('legacy default-on spare settings migrate to off until explicitly opted in', t => {
+  const disk = { settings: { spareAgent: true }, encryptedKey: 'untouched' };
+  const { store, filename } = fixture(t, disk);
+  assert.equal(store.getSettings().spareAgent, false);
+  assert.deepEqual(JSON.parse(fs.readFileSync(filename, 'utf8')), disk);
+  store.configure({ spareAgent: true });
+  assert.equal(createSettings({ userDataPath: path.dirname(filename) }).getSettings().spareAgent, true);
+});
 test('custom speech choices remain visible and invalid startup/reporting flags are atomic', t => {
   const { store, filename } = fixture(t, { settings: { ttsModel: 'custom/speech', voice: 'custom-voice' } });
   assert.equal(store.getSettings().ttsModel, 'custom/speech'); assert.equal(store.getSettings().voice, 'custom-voice');

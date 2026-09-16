@@ -52,6 +52,15 @@ async function fixture(t){
   await f.relay.configure({apiKey:'test',model:'scripted',sessionOnly:true});assert.equal((await f.relay.setEnabled(true)).ok,true);
   f.run=text=>f.relay.send({text,origin:'text'});return f;
 }
+test('a model-planned blank opening executes its frozen grant with no execution-model retry loop', async t => {
+  const f = await fixture(t);
+  f.plans.push(f.plan([{ kind: 'create_session', kindOfSession: 'codex', cwd: f.root }]));
+  const result = await f.run('Can you open a new Codex one for me?');
+  assert.equal(result.ok, true, f.fetchError?.stack || JSON.stringify(result));
+  assert.equal(f.interpretations.length, 1);
+  assert.equal(f.phases.size, 0, 'no execution model is asked to reconstruct a blank opening');
+  assert.deepEqual(f.effects.map(action => action.kind), ['create_session']);
+});
 test('explicit unsent draft passes the purpose veto and is staged without task submission',async t=>{
   const f=await fixture(t);f.plans.push(f.plan([f.draft('Review later.')]));f.markers.push('DRAFT');
   const result=await f.run('Open Codex with an unsent draft: Review later.');assert.equal(result.ok,true,f.fetchError?.stack||JSON.stringify(result));

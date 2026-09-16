@@ -1,5 +1,5 @@
 'use strict';
-const { resolveReference, terminalsOf, providerFamily, STATE_KINDS } = require('./orchestratorReference.cjs');
+const { resolveReference, terminalsOf, providerFamily, STATE_KINDS, SHELL_KINDS } = require('./orchestratorReference.cjs');
 const { sameFolder } = require('./orchestratorTerminalModel.cjs');
 
 // A valid pane ID proves existence, not that the user selected that conversation.
@@ -60,7 +60,7 @@ function reviewExistingTargets(plan, context = {}) {
     // "Both terminals that are done" reaches across projects when it fans out;
     // a single working or done pane is still looked for where the sentence is
     // spoken.
-    const pool = reference.stateFanOut ? terminals : terminals.filter(inFolder);
+    const pool = reference.stateFanOut ? reference.pool : terminals.filter(inFolder);
     if (!targets.every(target => pool.some(pane => pane.id === target.id))) return decided('ASSIGN', 'outside-addressed-project');
     // A pane picked for what it is doing is checked against what it is doing:
     // the plan may keep the one working pane, or every done pane when the
@@ -189,8 +189,12 @@ function repairUnselectedTargets(raw, review, context = {}) {
 // into other projects, so the Brain can see them and name them).
 function eligibleExistingTargets(context = {}) {
   const text = String(context.normalizedText ?? context.instruction ?? '');
-  const reference = resolveReference(text, terminalsOf(context), { launchers: context.launchers || [] });
-  const eligible = [...reference.mentioned, ...(reference.group ? reference.pool : []), ...(reference.stateFanOut ? reference.candidates : [])];
+  const terminals = terminalsOf(context);
+  const reference = resolveReference(text, terminals, { launchers: context.launchers || [],
+    cwd: context.projectContext?.path, projectName: context.projectContext?.name || '' });
+  const eligible = [...reference.mentioned, ...(reference.exact ? reference.terminals : []),
+    ...(reference.group ? reference.stateFanOut ? reference.pool : terminals.filter(pane => !SHELL_KINDS.has(pane.provider)) : []),
+    ...(reference.stateFanOut ? reference.candidates : [])];
   return [...new Set(eligible.map(terminal => terminal.id))];
 }
 module.exports = { reviewExistingTargets, eligibleExistingTargets, repairUnselectedTargets };

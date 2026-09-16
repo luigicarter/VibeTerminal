@@ -200,6 +200,19 @@ test('a spare that is used again restarts its idle clock instead of being closed
   assert.deepEqual(h.closed, [spare.id]);
 });
 
+test('a manually prompted spare is released permanently and never auto-closed', async () => {
+  const h = harness();
+  await h.keeper.noteStart({ cwd: PROJECT_A, provider: 'codex' });
+  const [used] = h.sessions;
+  Object.assign(used, { turnId: 'manual-turn', turnStartedAt: Date.now(), turnState: 'completed', turnEndedAt: Date.now() });
+  await h.keeper.tick();
+  h.state.setting = false;
+  h.advance(IDLE_CLOSE_MS);
+  await h.keeper.tick();
+  assert.deepEqual(h.closed, []);
+  assert.equal(h.keeper.state().spare, null);
+});
+
 test('turning the setting off closes the keeper\'s spare and stops creating', async () => {
   const h = harness();
   await h.keeper.noteStart({ cwd: PROJECT_A, provider: 'codex' });
@@ -361,9 +374,9 @@ test('the spare setting round-trips through configure and getSettings', t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-spare-pane-'));
   t.after(() => { assert(path.resolve(root).startsWith(path.join(os.tmpdir(), 'vibe-spare-pane-'))); fs.rmSync(root, { recursive: true, force: true }); });
   const store = createSettings({ userDataPath: root });
-  assert.equal(store.getSettings().spareAgent, true, 'a spare agent is kept by default');
+  assert.equal(store.getSettings().spareAgent, false, 'speculative panes require opt-in');
   assert.throws(() => store.configure({ spareAgent: 'no' }), /Invalid spareAgent/);
-  assert.equal(store.getSettings().spareAgent, true);
+  assert.equal(store.getSettings().spareAgent, false);
   store.configure({ spareAgent: false });
   assert.equal(store.getSettings().spareAgent, false);
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'orchestrator-settings.json'), 'utf8')).settings.spareAgent, false);

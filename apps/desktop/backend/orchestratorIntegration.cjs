@@ -931,7 +931,7 @@ function installOrchestrator(options) {
     getWorkItems: () => savedState("orchestrator-work-items.json")?.items || [],
     getLaunchers: () => directory.launchers(),
     getProjectFact: cwd => (savedState("orchestrator-memory-v1.json")?.projectFacts || []).find(fact => fact?.cwd && projectKey(fact.cwd) === projectKey(cwd)) || null,
-    getSetting: () => relay.getSettings().spareAgent !== false,
+    getSetting: () => relay.getSettings().spareAgent === true,
     isEnabled: () => relay.isEnabled(),
     memoryPressure: systemMemoryPressure,
     createSession: ({ cwd, kindOfSession, waitForReady }) => {

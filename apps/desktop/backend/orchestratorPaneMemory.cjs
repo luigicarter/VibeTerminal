@@ -87,11 +87,11 @@ function validPaneMemory(value) {
 // its own pane fact beside this one, addressed by live pane rather than identity.
 function createPaneMemory({ store, now = Date.now, resolveAgentId = () => null, onError = () => {}, onRecord = () => {} } = {}) {
   let records = sanitizePaneMemory(store?.paneMemory?.());
-  let writing = false, dirty = false;
+  let writing = false, dirty = false, pending = Promise.resolve();
   function persist() {
     if (!store?.savePaneMemory || writing) { dirty = writing; return; }
     writing = true; dirty = false;
-    Promise.resolve(store.savePaneMemory(records))
+    pending = Promise.resolve(store.savePaneMemory(records))
       .catch(error => onError(error))
       .finally(() => { writing = false; if (dirty) { dirty = false; persist(); } });
   }
@@ -110,6 +110,9 @@ function createPaneMemory({ store, now = Date.now, resolveAgentId = () => null, 
     return current;
   }
   return {
+    // A dirty update schedules another store write from the first write's
+    // finally callback. Waiting on the store's current queue alone misses it.
+    async flush() { while (writing) await pending; },
     get(agentId) { const record = records[agentId]; return record ? { ...record } : null; },
     snapshot() { return structuredClone(records); },
     // The same records addressed by live pane, for the memory answers that

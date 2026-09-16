@@ -1,6 +1,6 @@
 'use strict';
 const { interpretationTool } = require('./orchestratorInterpretationSchema.cjs');
-const { readReference, terminalsOf } = require('./orchestratorReference.cjs');
+const { readReference, terminalsOf, providerFamily } = require('./orchestratorReference.cjs');
 
 const PLANNER_TOOL_PROTOCOL = 'Each plan_* call describes one operation and nothing happens during planning. interpret_workspace carries optional request metadata (goal, access, dependencies, clarification, or an observation-only request), never an actions array, and a clarification uses it alone. To open a worker AND run work, use plan_delegate_task once; do not also open a blank or draft terminal. Return every requested operation in one response.';
 
@@ -149,6 +149,8 @@ function decodePlannerCalls(calls, tools, instruction, context = {}) {
   const owned = ownedWorkItemId(context);
   const resolveHandles = handleResolver(context);
   const reading = readReference(instruction, { launchers: context.launchers || [] });
+  const mentionedProviders = new Set(String(instruction).split(/\b(?:and|or)\b/i)
+    .map(clause => readReference(clause, { launchers: context.launchers || [] }).provider).filter(Boolean).map(providerFamily));
   const pendingIds = new Set([context.previousCommand?.requestId, ...(Array.isArray(context.pendingCommands) ? context.pendingCommands : []).map(command => command?.requestId)].filter(Boolean));
   for (const call of calls) {
     const name = call.function?.name;
@@ -210,6 +212,17 @@ function decodePlannerCalls(calls, tools, instruction, context = {}) {
         args.scope = { ...scope, targetIds: resolveHandles(handles ?? targetIds) };
       }
       if (name === 'plan_delegate_task' && reading.kind === 'new') args.assignmentMode = 'new';
+      // For an explicit "prompt it with X", X is the payload. Do not pass the
+      // opening instructions on to the worker as another task to open a pane.
+      const literalPrompt = name === 'plan_delegate_task' && calls.filter(item => item.function?.name === name).length === 1 &&
+        /\bprompt\s+it\s+(?:with|and\s+say)\s+([^.!?\r\n]+)[.!?]*\s*$/i.exec(instruction);
+      if (literalPrompt && reading.kind === 'new' && !/\b(?:and|then|but)\b/i.test(literalPrompt[1])) {
+        args.text = literalPrompt[1].trim(); args.promptMode = 'literal';
+      }
+      if (['plan_delegate_task', 'plan_open_blank_terminal', 'plan_prepare_terminal_draft'].includes(name) && reading.provider && args.kindOfSession &&
+          providerFamily(args.kindOfSession) !== providerFamily(reading.provider) && mentionedProviders.size === 1) {
+        throw new Error('The planned launcher differs from the provider the user named. Preserve the named provider instead of substituting another launcher.');
+      }
       if (TARGETED_PLANS.has(name) && reading.kind === 'idle') args.targetAvailability = 'idle';
       if (name === 'plan_inspect_terminal' && args.targetIds === undefined && (reading.fanOut || reading.all)) args.selection = 'all';
       if (name === 'plan_continue_task') args.assignmentMode = 'existing';

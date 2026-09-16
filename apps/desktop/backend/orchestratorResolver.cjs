@@ -62,7 +62,7 @@ function resolveAnswer(answer) {
   if (!answer || typeof answer.text !== 'string') return undefined;
   const text = answer.text;
   if (answer.kind === 'open-new') {
-    if (NEGATIVE.test(text) && !AFFIRMATIVE.test(text)) return undefined;
+    if (NEGATIVE.test(text)) return undefined;
     if (AFFIRMATIVE.test(text)) return { decision: 'create', reason: 'You asked me to open a new pane for this task.' };
     return undefined;
   }
@@ -105,6 +105,7 @@ function resolveAssignment({ instruction, grant = {}, terminals = [], launchers 
   const done = (decision, extra = {}) => ({ decision, selector: reference.kind, candidateCount: panes.length, ...extra });
   const reuse = (terminal, extra = {}) => done('reuse', { targetId: terminal.id, ...(terminal.task?.id && { workItemId: terminal.task.id }), ...extra });
   const create = reason => {
+    if (reference.creationForbidden) return done('ask', { question: 'You asked me not to open another terminal. Which existing terminal should I use?' });
     const route = deterministicNewTaskRoute({ scope: { ...scope, assignmentMode: 'new', ...(reference.provider && !scope.kindOfSession && { kindOfSession: reference.provider }) },
       launchers, automaticProvider: true });
     if (!route || route.decision !== 'create') {
@@ -153,13 +154,14 @@ function resolveAssignment({ instruction, grant = {}, terminals = [], launchers 
   // (c) A handle the user said back, or the pane Lina opened a moment ago. A
   //     pane another task owns, and no retry pending, is not adopted by "the
   //     one you just opened": the request falls through to the ordinary rules.
-  if (reference.kind === 'handle' && reference.exact && panes.includes(reference.terminals[0])) {
-    return reuse(reference.terminals[0], { reason: 'The pane you named by its handle.' });
+  if (reference.kind === 'handle') {
+    return pick(inProject(reference.terminals), 'The pane you named by its handle.', 'That terminal is not available in this project. Which existing terminal did you mean?');
   }
   if (reference.kind === 'just_opened' && reference.exact) {
     const created = reference.terminals[0];
     if (!created.task || created.task.retriable === true) return reuse(created, { reason: 'The pane I opened for you a moment ago.' });
   }
+  if (reference.kind === 'just_opened' && !reference.exact) return done('ask', { question: `I cannot find the ${paneWord()} you said I just opened. Which existing terminal did you mean?` });
 
   // (c2) A pane described by what it is doing. Working includes waiting on the
   //      user: the turn is still that pane's, and a follow-up queues behind it.
@@ -183,6 +185,12 @@ function resolveAssignment({ instruction, grant = {}, terminals = [], launchers 
     }
     return pick(inProject(reference.candidates), 'The pane other than the one I last used.',
       `I only see one ${paneWord()} in ${project}. Which one did you mean?`);
+  }
+
+  // A definite provider reference names an existing conversation, even while
+  // it is busy or already owns work. It must never fall through to creation.
+  if (reference.kind === 'provider' && reference.definiteProvider && !reference.indefiniteProvider && !reference.named.length) {
+    return pick(reference.candidates, 'The existing terminal you named.', `Which existing ${paneWord()} did you mean in ${project}?`);
   }
 
   // (d) A pane the user named by its task, or a continuation the interpreter

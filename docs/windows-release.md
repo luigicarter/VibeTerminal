@@ -4,10 +4,10 @@ Lina Terminal ships to Windows users as an Electron Builder NSIS installer hoste
 
 ## Current Public Release
 
-The current Windows release is `v0.1.124`:
+The current Windows release is `v0.1.125`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.124`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.124/LinaTerminal-Setup-0.1.124.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.125`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.125/LinaTerminal-Setup-0.1.125.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -66,15 +66,11 @@ The compiled `dist/` renderer is still included because it is the UI Electron di
 
 ## Local Build
 
-Version `0.1.124` gives the Orchestrator one terminal model with short handles
-(T1, T2, ...) resolved in code before any model call, lets new work in a free
-pane run beside another agent in the same project, stops refusing sends into an
-idle Codex 0.154 pane, restores Kimi Code pane status on Kimi 0.42, and no longer
-pauses agent panes after a reboot that interrupted shutdown.
-See [the terminal-model overhaul](orchestrator-terminal-model-overhaul-2026-09-15.md),
-[the completion ladder](orchestrator-completion-ladder-2026-09-14.md) and
-[the Codex sparkle fence](codex-idle-sparkle-and-input-fence-2026-09-13.md) for
-the evidence and the remaining boundaries.
+Version `0.1.125` makes spare terminals opt-in, repairs first-prompt conversation
+ownership and follow-up routing, preserves existing-pane and handle selections,
+and fixes dropped close/open/prompt clauses and repeated blank-opening failures.
+See [the prompt review](orchestrator-prompt-review-2026-09-15.md) and
+[release review](release-0.1.125-review.md) for evidence and verification limits.
 Installed applications apply updates through the user's Update/Restart action;
 publication does not restart an active workspace.
 

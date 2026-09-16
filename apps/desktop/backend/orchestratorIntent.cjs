@@ -653,7 +653,10 @@ function normalizeIntent(raw, context = {}) {
     return freeze(grant);
   });
   const directScopedClose = context.requireCloseScope === true && grants.length > 0 && grants.every(grant => grant.kind === 'close' && grant.closeScope) && !raw.clarification && !raw.dependsOnRequestIds?.length && !raw.afterResults;
-  const plan = freeze({ goal: raw.goal, ...(raw.reply && { reply: raw.reply }), ...(inspection && { responseKind: 'terminal-inspection' }), ...(statusTargets && { responseKind: 'task-status', statusTargets, ...(statusRequestId && { statusRequestId }) }), ...(raw.afterResults && { afterResults: raw.afterResults }), access: inspection || statusTargets || grants.length && grants.every(grant => grant.kind === 'watch_terminal') ? 'read-only' : raw.access || 'mutation', executionMode: directScopedClose ? 'direct' : grants.some(grant => ['operate_terminal', 'delegate_task'].includes(grant.kind)) ? 'reason' : raw.executionMode || 'reason', dependsOnRequestIds: raw.dependsOnRequestIds || [], ...(raw.clarification !== undefined && { clarification: raw.clarification }), ...(raw.continuationOf !== undefined && { continuationOf: raw.continuationOf }), sourceUser, grants });
+  // Once the planner has bound a blank opening, there is nothing left for an
+  // execution model to compose. Dispatch the exact grant once in application code.
+  const directBlankCreation = context.requireCloseScope === true && grants.length > 0 && grants.every(grant => grant.kind === 'create_session' && grant.text === undefined) && !raw.clarification && !raw.dependsOnRequestIds?.length && !raw.afterResults;
+  const plan = freeze({ goal: raw.goal, ...(raw.reply && { reply: raw.reply }), ...(inspection && { responseKind: 'terminal-inspection' }), ...(statusTargets && { responseKind: 'task-status', statusTargets, ...(statusRequestId && { statusRequestId }) }), ...(raw.afterResults && { afterResults: raw.afterResults }), access: inspection || statusTargets || grants.length && grants.every(grant => grant.kind === 'watch_terminal') ? 'read-only' : raw.access || 'mutation', executionMode: directScopedClose || directBlankCreation ? 'direct' : grants.some(grant => ['operate_terminal', 'delegate_task'].includes(grant.kind)) ? 'reason' : raw.executionMode || 'reason', dependsOnRequestIds: raw.dependsOnRequestIds || [], ...(raw.clarification !== undefined && { clarification: raw.clarification }), ...(raw.continuationOf !== undefined && { continuationOf: raw.continuationOf }), sourceUser, grants });
   states.set(plan, new Map(grants.map(grant => [grant.id, executionState()])));
   authorizedSteps.set(plan, new Map());
   return plan;
@@ -932,6 +935,11 @@ function authorizeIntentAction(action, plan, sessions = [], options = {}) {
   }
   if (candidates.length !== 1) throw new Error('This effect needs one matching user command grant.');
   const grant = candidates[0];
+  // Some providers serialize every optional field. Empty text on a blank
+  // opening is no draft; nonempty, unbound text remains an authorization error.
+  if (grant.kind === 'create_session' && grant.text === undefined && typeof action.text === 'string' && !action.text.trim()) {
+    const { text, ...blank } = action; action = blank;
+  }
   assertIntentTargetAvailability(plan, { ...action, grantId: grant.id }, sessions);
   const requiredAvailability = grant.targetAvailability === 'idle' && action.kind !== 'finish_terminal' && !availabilitySatisfied(plan, grant, action.targetId || action.target?.id || grant.targets[0]?.id, action.stepId) ? 'idle' : undefined;
   if (action.targetAvailability !== undefined && action.targetAvailability !== requiredAvailability) throw new Error('The target availability requirement cannot change.');
@@ -943,7 +951,7 @@ function authorizeIntentAction(action, plan, sessions = [], options = {}) {
   if (grant.text !== undefined && grant.kind !== 'terminal_interact') allowed.add('text');
   if (ANSWER_KINDS.has(grant.kind)) ['answerText', 'answerTexts', 'requestId', 'revision'].forEach(key => allowed.add(key));
   if (grant.kind === 'terminal_interact') ['text', 'keys', 'submit'].forEach(key => allowed.add(key));
-  keys(action, allowed, 'workspace action');
+  keys(action, allowed, 'workspace action', allowed);
   if (action.grantId !== undefined) string(action.grantId, 'command grant ID', 256);
   if (action.target !== undefined) keys(action.target, new Set(['id', 'generation', ...(grant.kind === 'close' ? ['launchToken'] : [])]), 'target');
   const targetId = slot(action, grant), grantState = state.get(grant.id);

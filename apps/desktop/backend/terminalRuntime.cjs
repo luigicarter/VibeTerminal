@@ -170,7 +170,7 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, confir
     record.pendingEvents = record.selectionEvents.filter(e => e.providerThreadId === event.providerThreadId && e.observedAt >= event.observedAt);
     record.selectionEvents = record.selectionEvents.filter(e => e.providerThreadId !== event.providerThreadId && e.observedAt >= event.observedAt);
     s.conversation = undefined;
-    s.selection = { status: 'pending', revision: (s.selection?.revision || 0) + 1,
+    s.selection = { status: 'pending', revision: (s.selection?.revision || 0) + 1, source: event.source,
       threadRef: { provider: s.provider, id: event.providerThreadId, createdAt: event.observedAt, updatedAt: event.observedAt } };
     s.binding = { status: 'pending', message: 'Verifying the newly selected chat.' };
     record.nextLookupAt = 0;

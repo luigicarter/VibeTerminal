@@ -21,6 +21,7 @@
 
 const { idlePaneCandidate, ownsPaneForReuse } = require('./orchestratorResolver.cjs');
 const { providerFamily } = require('./orchestratorReference.cjs');
+const { neverPrompted } = require('./orchestratorPaneReadiness.cjs');
 const path = require('node:path');
 
 const TICK_MS = 30000;
@@ -52,7 +53,7 @@ function createSparePaneKeeper({
   // recallProject-shaped facts for one project: { defaultProvider } or null.
   getProjectFact = () => null,
   // The spareAgent setting.
-  getSetting = () => true,
+  getSetting = () => false,
   // The Orchestrator itself. A disabled app opens nothing on its own.
   isEnabled = () => true,
   memoryPressure = () => false,
@@ -110,7 +111,7 @@ function createSparePaneKeeper({
     //    or bound to a task is no longer a spare and is never closed here.
     if (spare) {
       const current = live(sessions);
-      if (!current || owned.has(current.id)) spare = null;
+      if (!current || owned.has(current.id) || !neverPrompted(current)) spare = null;
       else if (!idlePaneCandidate(current)) spare.idleSince = null;
       else spare.idleSince ||= now();
     }

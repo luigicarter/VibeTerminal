@@ -161,6 +161,17 @@ function createIntentInterpreter({ interpretIntent, getTask, complete, redact, c
   recordDiagnostic, diagnosticError, retryCeiling = 8000 }) {
   function validateInterpretedPlan(raw, commandContext, requireCloseScope = false) {
     const plan = normalizeIntent(raw, { ...commandContext, requireCloseScope });
+    // A close-only plan used to declare the compound "close ... and open a
+    // new one and prompt it" finished after dropping both remaining clauses.
+    const closeThenOpen = /^(?:(?:can|could|would|will) you\s+|please\s+)?close\b[^?!]*\b(?:and|then)\s+open\b/i.test(commandContext.instruction);
+    if (closeThenOpen && !plan.clarification && !plan.reply) {
+      if (!plan.grants.some(grant => ['create_session', 'delegate_task'].includes(grant.kind))) {
+        throw new Error('The compound request also asks to open a terminal. Preserve the close AND the opening in one complete plan before executing anything.');
+      }
+      if (taskClause(commandContext.instruction) && !plan.grants.some(grant => grant.kind === 'delegate_task' || grant.kind === 'operate_terminal' && !grant.inspection)) {
+        throw new Error('The compound request also asks to prompt the new terminal. Preserve the close AND delegate_task with the requested prompt; a blank opening does not perform that work.');
+      }
+    }
     const sources = new Set([plan.continuationOf, ...plan.grants.map(grant => grant.sourceUserId)]
       .filter(id => id && id !== commandContext.requestId));
     for (const id of plan.dependsOnRequestIds || []) if (sources.has(id)) {

@@ -11,6 +11,26 @@ const { createOrchestrator } = require('../../backend/orchestrator.cjs');
 const jsonResponse = body => new Response(JSON.stringify(body));
 let sequence = 0;
 
+test('first startup identity retains one task owner through subsequent follow-ups', async t => {
+  const f = await fixture(t);
+  const pane = f.session('fresh', { conversationId: undefined, observation: 'provisional', name: 'Review orchestrator issues' });
+  f.onSend = () => Object.assign(pane, { observation: 'observed', conversationId: 'native-review',
+    selection: { status: 'confirmed', revision: 1, source: 'startup' } });
+  const first = await f.run('Use the empty Codex terminal to review orchestrator issues.');
+  assert.equal(first.ok, true, JSON.stringify(first));
+  const owner = f.task(first).workItemId;
+  await f.settle();
+  const next = await f.run('Tell the agent working on review orchestrator issues to investigate the messages.', { assignmentMode: 'existing' });
+  assert.equal(next.ok, true, JSON.stringify(next));
+  assert.equal(f.task(next).workItemId, owner);
+  assert.deepEqual(f.effects.map(action => action.kind), ['send_prompt', 'send_prompt']);
+  await f.relay.dispose();
+  const saved = JSON.parse(fs.readFileSync(path.join(f.root, 'orchestrator-work-items.json'), 'utf8'));
+  assert.equal(saved.items.length, 1);
+  assert.equal(saved.items[0].binding.nativeIdentity.id, 'native-review');
+  assert.equal(saved.items[0].binding.nativeIdentity.selectionRevision, 1);
+});
+
 async function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-idle-reuse-'));
   const f = { root, sessions: [], effects: [], plans: [], reads: [],
@@ -40,7 +60,7 @@ async function fixture(t) {
     },
     dispatchAction: async action => {
       f.effects.push(action);
-      if (action.kind !== 'create_session') return { ok: true, status: 'written' };
+      if (action.kind !== 'create_session') { f.onSend?.(action); return { ok: true, status: 'written' }; }
       const created = f.session(`created-${f.sessions.length + 1}`, { cwd: action.cwd, kind: action.kindOfSession, provider: action.kindOfSession });
       return { ok: true, status: 'created', id: created.id, launchToken: created.launchToken, processState: 'running',
         target: { id: created.id, generation: created.generation, launchToken: created.launchToken } };

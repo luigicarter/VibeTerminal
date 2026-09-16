@@ -24,6 +24,26 @@ function memoryStore(initial = {}) {
   return { state, paneMemory: () => structuredClone(state.value), savePaneMemory: async value => { state.writes++; state.value = structuredClone(value); return { ok: true }; } };
 }
 
+test('flush drains a dirty follow-up write scheduled after the current store queue', async () => {
+  const releases = [], saved = [];
+  const memory = createPaneMemory({ store: { paneMemory: () => ({}), savePaneMemory: value => {
+    saved.push(structuredClone(value));
+    return new Promise(resolve => releases.push(resolve));
+  } } });
+  memory.remember('agent-1', { title: 'First' });
+  memory.remember('agent-1', { title: 'Latest' });
+  let flushed = false;
+  const draining = memory.flush().then(() => { flushed = true; });
+  releases.shift()();
+  await tick();
+  assert.equal(saved.length, 2);
+  assert.equal(flushed, false, 'the coalesced write must finish before disposal can finish');
+  assert.equal(saved[1]['agent-1'].title, 'Latest');
+  releases.shift()();
+  await draining;
+  assert.equal(flushed, true);
+});
+
 test('pane records are bounded per field and a malformed record is dropped on its own', () => {
   const cleaned = sanitizePaneMemory({
     good: { objective: 'o'.repeat(500), title: 't'.repeat(300), lastPromptText: 'p'.repeat(500), lastResultSummary: 'r'.repeat(900), status: 's'.repeat(90), lastPromptAt: 5, updatedAt: 9 },

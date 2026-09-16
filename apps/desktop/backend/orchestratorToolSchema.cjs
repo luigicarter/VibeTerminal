@@ -75,6 +75,9 @@ function scopedWorkspaceTool(tool, grants = []) {
   // binds it first; neither arbitrary creation nor terminal input is exposed.
   for (const grant of grants) for (const kind of grant.kind === 'delegate_task' ? [] : grant.kind === 'operate_terminal' ? grant.inspection === true ? inspectionKinds : operatorKinds : [grant.kind]) allowed.add(kind);
   const branches = tool.function.parameters.anyOf.filter(branch => allowed.has(branch.properties.kind.enum[0])).map(branch => {
+    if (branch.properties.kind.enum[0] === 'create_session' && grants.filter(grant => grant.kind === 'create_session').every(grant => grant.text === undefined)) {
+      const blank = structuredClone(branch); delete blank.properties.text; return blank;
+    }
     if (branch.properties.kind.enum[0] !== 'terminal_interact' || !operatorGrants.length) return branch;
     const scoped = structuredClone(branch);
     if (inspectionOnly) {

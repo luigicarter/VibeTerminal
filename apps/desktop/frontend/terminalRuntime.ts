@@ -18,7 +18,7 @@ export interface TerminalRuntimeSnapshot {
   backgroundObservation?: { source: "kimi-task-metadata"; availability: "available" | "unavailable"; observedAt: number };
   telemetryHealth: "pending" | "available" | "unavailable";
   conversation?: { provider: string; id?: string; title?: string; titleSource?: "named" | "generated" | "preview"; createdAt: number; updatedAt: number };
-  selection?: { status: "pending" | "confirmed" | "unavailable"; revision: number; threadRef?: NonNullable<TerminalRuntimeSnapshot["conversation"]> };
+  selection?: { status: "pending" | "confirmed" | "unavailable"; revision: number; source?: "startup" | "clear" | "resume"; threadRef?: NonNullable<TerminalRuntimeSnapshot["conversation"]> };
   terminalTitle?: string;
   turnId?: string;
   pendingInput?: "submit" | "interrupt";

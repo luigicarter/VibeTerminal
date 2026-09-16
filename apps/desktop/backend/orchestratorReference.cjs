@@ -57,6 +57,14 @@ const idlePaneRequest = text => IDLE_PANE_STRONG.test(text) ? 'strong' : IDLE_PA
 // A handle the user says back: "T3", "t-3". Handles are the model's own names
 // for panes and the most explicit reference there is, so they are read first.
 const HANDLE = /\b[Tt]-?(\d{1,6})\b/;
+// Words supplied to the worker describe its task, not which pane Lina should
+// create. Keep the target clause separate from that payload.
+function referenceText(instruction) {
+  const text = String(instruction ?? '');
+  const boundary = /(?:^|[.!?]\s*)(?:(?:can|could|would|will) you\s+|please\s+|and\s+)?(?:tell|ask|prompt|have|get|remind|use)\s+(?:the\s+|that\s+|this\s+)?(?:it\b|[Tt]-?\d{1,6}\b|[^.!?]*?\b(?:terminal|pane|agent|session|worker)\b)[^.!?]*?\s+to\s+/i.exec(text);
+  return boundary ? text.slice(0, boundary.index + boundary[0].length - 4) : text;
+}
+const NO_CREATION = /\b(?:do\s+not|don['’]?t|never)\s+(?:open|create|spawn|launch|start)\b[^.!?]{0,40}\b(?:terminals?|panes?|agents?|sessions?|workers?|ones?)\b/i;
 // A pane the user is pointing at ("that new terminal you just opened") is never
 // a request to open another one, so this is tested before the creation pattern:
 // the definite article separates "the new codex terminal" (the one from a moment
@@ -70,7 +78,7 @@ const JUST_OPENED = new RegExp([
 // and "the terminal actually only opens once I go in the pane" describe the bug
 // being reported, so a verb owned by a subject or a subordinate clause is not a
 // request to create anything.
-const CLAUSE = String.raw`(?<!\b(?:i|we|they|it|he|she|when|while|if|where|because|after|before|since|that|which|who|whenever|until)\s)`;
+const CLAUSE = String.raw`(?<!\b(?:i|we|they|it|he|she|when|while|if|where|because|after|before|since|that|which|who|whenever|until|to)\s)`;
 // A bare "another codex terminal" only asks for a pane when it sits in the
 // request itself, near the start of its sentence or right after "can you".
 const REQUEST_HEAD = String.raw`(?:^|[.?!]\s*|\b(?:can you|could you|would you|please|want you to|go ahead and)\s+)`;
@@ -82,6 +90,7 @@ const NEW_PANE = new RegExp([
   String.raw`${CLAUSE}\b(?:open|start|spawn|create|launch|make)\s+(?:an?\s+|the\s+)?(?:\w+\s+){0,2}${PANE_NOUN}\b`,
   String.raw`${REQUEST_HEAD}[^.?!]{0,40}?\b${FRESH}\s+(?:\w+\s+){0,2}${PANE_NOUN}\b`,
 ].join('|'), 'i');
+const REUSE_ANOTHER = new RegExp(String.raw`\b(?:use|(?:put|send)\s+(?:it|that)\s+(?:in|into|to))\s+another\s+(?:\w+\s+){0,2}${PANE_NOUN}\b`, 'i');
 // Panes described by what they are doing rather than by a title. "The terminal
 // working on X" is a title, which is why the working word may not be followed
 // by "on"; and "you couldn't prompt a terminal while it's currently working"
@@ -223,7 +232,7 @@ const SHELL_WORDS = new RegExp([
 const escapeRegExp = value => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function namedProvider(instruction, launchers = []) {
   let shell;
-  for (const launcher of launchers) {
+  for (const launcher of [...launchers].sort((a, b) => String(b?.label || '').length - String(a?.label || '').length)) {
     const label = String(launcher?.label ?? '').trim();
     if (SHELL_KINDS.has(launcher?.kind) || NOUN_LABEL.test(label)) { shell ??= launcher?.kind; continue; }
     if (label.length >= 4 && new RegExp(`\\b${escapeRegExp(label)}\\b`, 'i').test(instruction)) return launcher.kind;
@@ -238,17 +247,18 @@ function namedProvider(instruction, launchers = []) {
 // is one of 'handle' | 'new' | 'idle' | 'just_opened' | 'working' | 'done' |
 // 'last_target' | 'other' | 'title' | 'provider' | 'none'.
 function readReference(instruction, { launchers = [] } = {}) {
-  const text = String(instruction ?? '');
+  const text = referenceText(instruction);
   const provider = namedProvider(text, launchers);
-  const facts = { words: [], ...(provider && { provider }), fanOut: FAN_OUT.test(text), all: ALL_MATCHING.test(text), group: GROUP_REFERENCE.test(text),
+  const facts = { words: [], ...(NO_CREATION.test(String(instruction ?? '')) && { creationForbidden: true }), ...(provider && { provider }), fanOut: FAN_OUT.test(text), all: ALL_MATCHING.test(text), group: GROUP_REFERENCE.test(text),
     indefinite: INDEFINITE_WORKER.test(text) || GROUP_PHRASE.test(text) || CATEGORY_PANE.test(text),
     indefiniteProvider: INDEFINITE_PROVIDER.test(text) || GROUP_PHRASE.test(text) || CATEGORY_PANE.test(text),
     definiteProvider: DEFINITE_PROVIDER.test(text), deictic: DEICTIC.test(text), pronoun: PRONOUN_CONTINUATION.test(text) };
-  const handle = text.match(HANDLE);
-  if (handle) return { kind: 'handle', handle: `T${Number(handle[1])}`, ...facts };
+  const handles = [...new Set([...text.matchAll(new RegExp(HANDLE.source, 'g'))].map(match => `T${Number(match[1])}`))];
+  if (handles.length) return { kind: 'handle', handle: handles[0], handles, ...facts };
   if (JUST_OPENED.test(text)) return { kind: 'just_opened', ...facts };
   if (idlePaneRequest(text) === 'strong') return { kind: 'idle', ...facts };
-  if (NEW_PANE.test(text)) return { kind: 'new', ...facts };
+  if (REUSE_ANOTHER.test(text)) return { kind: 'other', ...facts };
+  if (!facts.creationForbidden && NEW_PANE.test(text)) return { kind: 'new', ...facts };
   if (WORKING_PANE.test(text)) return { kind: 'working', ...facts };
   if (DONE_PANE.test(text)) return { kind: 'done', ...facts };
   if (LAST_TARGET_PHRASE.test(text)) return { kind: 'last_target', ...facts };
@@ -304,15 +314,18 @@ function terminalsOf(context = {}) {
 // reaches across projects). `strict` drops the sole-candidate allowance a
 // title enjoys: a compiled plan cannot ask, so it needs a real score.
 function resolveReference(instruction, terminals, { launchers = [], cwd, projectName = '', now = Date.now(), strict = false } = {}) {
-  const text = String(instruction ?? '');
-  const reading = readReference(text, { launchers });
+  const text = referenceText(instruction);
+  const reading = readReference(instruction, { launchers });
   const all = (Array.isArray(terminals) ? terminals : []).filter(terminal => terminal && typeof terminal.id === 'string');
   const agents = all.filter(terminal => !SHELL_KINDS.has(terminal.provider));
   const panes = cwd ? agents.filter(terminal => sameFolder(terminal.cwd, cwd)) : agents;
   const family = providerFamily(reading.provider);
   const ofFamily = list => family ? list.filter(terminal => providerFamily(terminal.provider) === family) : list;
   const stateFanOut = STATE_KINDS.has(reading.kind) && reading.fanOut;
-  const pool = stateFanOut ? agents : panes;
+  // An explicitly named project bounds a fan-out. A project merely visible
+  // in the UI is still the default scope for a singular reference only.
+  const projectNamed = cwd && projectName && new RegExp(`\\b${escapeRegExp(projectName).replace(/\s+/g, '\\s+')}\\b`, 'i').test(text);
+  const pool = stateFanOut && !projectNamed ? agents : panes;
   const result = { ...reading, panes, pool, stateFanOut, exact: false, basis: null, terminals: [], candidates: [],
     scored: [], strong: [], mentioned: [], named: [], eligible: [], score: undefined, fresh: false };
   const exact = (list, basis) => Object.assign(result, { exact: true, basis, terminals: list });
@@ -325,13 +338,12 @@ function resolveReference(instruction, terminals, { launchers = [], cwd, project
 
   switch (reading.kind) {
     case 'handle': {
-      const terminal = all.find(item => item.handle === reading.handle);
-      result.candidates = terminal ? [terminal] : [];
-      if (terminal) exact([terminal], 'handle');
+      result.candidates = reading.handles.map(handle => all.find(item => item.handle === handle)).filter(Boolean);
+      if (result.candidates.length === reading.handles.length) exact(result.candidates, 'handle');
       break;
     }
     case 'just_opened': {
-      const opened = panes.filter(terminal => terminal.opened?.by === 'lina' && now - terminal.opened.at <= OPENED_WINDOW_MS)
+      const opened = ofFamily(panes).filter(terminal => terminal.opened?.by === 'lina' && now - terminal.opened.at <= OPENED_WINDOW_MS)
         .sort((left, right) => right.opened.at - left.opened.at);
       result.candidates = opened;
       if (opened.length) exact([opened[0]], 'opened');
