@@ -29,7 +29,7 @@ function harness(file, mocks) {
       const sibling = ['.ts', '.tsx'].map(extension => path.resolve(path.dirname(filename), name + extension)).find(candidate => fs.existsSync(candidate));
       return sibling ? load(sibling) : original(name);
     };
-    loaded._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText, filename);
+    loaded._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true } }).outputText, filename);
     return loaded.exports;
   };
   const exported = load(path.resolve(__dirname, '../../frontend', file));

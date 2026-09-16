@@ -572,7 +572,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
   // visible side effect the user would otherwise have to find and clean up. A
   // 4xx from the brain is the application's problem, never the user's settings.
   const orphanedCreation = outcomes => outcomes.find(outcome => outcome.kind === 'create_session' && outcome.ok === true && outcome.status === 'created' && outcome.processState === 'running');
-  function requestFailureText(error, outcomes = []) {
+  function requestFailureText(error, outcomes = [], waits = []) {
     const created = orphanedCreation(outcomes);
     const withPane = text => created ? `${text} ${sentence('pane-still-open', { pane: creationDescription(created, state.sessions) }).text}` : text;
     // A brain failure has no pane story of its own. Say what it meant for the
@@ -584,9 +584,9 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
     // Otherwise the receipts already hold the account of every pane this request
     // touched: what Lina did, why nothing was typed, and what is still open.
     // An internal stage that raised adds nothing the user can act on.
-    const evidence = composeFinalResponse({ outcomes, waits: [], sessions: state.sessions });
+    const evidence = composeFinalResponse({ outcomes, waits, sessions: state.sessions });
     const base = cleanError(error);
-    if (evidence) return redact(error?.internalStage ? evidence.text : `${evidence.text}\n\n${base}`).slice(0, 2000);
+    if (evidence) return redact(error?.internalStage || evidence.text.includes(base) ? evidence.text : `${evidence.text}\n\n${base}`).slice(0, 2000);
     return withPane(base);
   }
   // Tier 1 writes. One row per request, derived from the compiled plan, this
@@ -906,7 +906,8 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
       const currentAssignment = assignments.get(assignment.id) || assignment;
       const owners = [...tasks.jobs.values()].filter(job => job.routeItems?.some(item => item.workItemId === assignment.workItemId));
       if (!owners.length) continue;
-      const waits = owners.flatMap(job => job.waits.filter(wait => (!wait.done || hasWorkspaceOccupancy(wait)) && !wait.staged));
+      const waits = owners.flatMap(job => job.waits.filter(wait => (!wait.done || hasWorkspaceOccupancy(wait)) && !wait.staged &&
+        job.routeItems.some(route => route.workItemId === assignment.workItemId && route.binding?.target.id === wait.targetId && route.binding.target.generation === wait.generation)));
       if (waits.some(wait => ['unknown', 'uncertain', 'unconfirmed'].includes(wait.deliveryStatus))) assignments.mark(assignment.id, 'unknown');
       else if (waits.some(wait => wait.delivered)) assignments.mark(assignment.id, 'submitted');
       else if (waits.length) assignments.mark(assignment.id, 'queued');
@@ -927,19 +928,21 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
         const routes = job.routeItems.filter(route => route.workItemId === id);
         const waits = job.waits.filter(wait => routes.some(route => route.binding?.target.id === wait.targetId && route.binding.target.generation === wait.generation));
         const owners = workOwners.get(id) || [];
-        owners.push({ job, waits }); workOwners.set(id, owners);
+        const pendingWork = job.context?.pendingCommand?.grants?.some(grant => grant.routing?.workItemId === id);
+        owners.push({ job, waits, pendingWork }); workOwners.set(id, owners);
       }
     }
     for (const [id, owners] of workOwners) {
       const item = workItems.get(id);
       if (!item) continue;
-      const outstanding = owners.filter(owner => !owner.job.executionDone || owner.job.context?.pendingCommand || owner.waits.some(wait => !wait.done || hasWorkspaceOccupancy(wait)));
+      const outstanding = owners.filter(owner => !owner.job.executionDone || owner.pendingWork || owner.waits.some(wait => !wait.done || hasWorkspaceOccupancy(wait)));
       const selected = (outstanding.length ? outstanding : owners).sort((a, b) => a.job.task.sequence - b.job.task.sequence);
       const { job } = selected.at(-1);
-      const executing = selected.filter(owner => !owner.job.executionDone || owner.job.context?.pendingCommand);
+      const executing = selected.filter(owner => !owner.job.executionDone || owner.pendingWork);
       const pending = selected.flatMap(owner => owner.waits.filter(wait => !wait.done));
       const status = executing.length ? (executing.find(owner => owner.job.task.status === 'running') || executing.at(-1)).job.task.status
-        : pending.length ? pending.every(wait => wait.staged) ? 'paused' : 'waiting-results' : job.task.status;
+        : pending.length ? pending.every(wait => wait.staged) ? 'paused' : 'waiting-results'
+          : selected.some(owner => owner.waits.length) ? selected.some(owner => owner.waits.some(wait => wait.failed)) ? 'failed' : 'finished' : job.task.status;
       const summary = selected.map(owner => owner.waits.length
         ? owner.waits.map(wait => formatTaskWait(wait, state.sessions.find(session => session.id === wait.targetId && session.generation === wait.generation))).join(' ')
         : owner.job.task.error || owner.job.task.waitingReason || owner.job.result?.text || owner.job.task.text).join(' ').slice(0, 700);
@@ -1334,7 +1337,8 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
           let result;
           try { result = await dispatchAction({ ...action, waitForReady: true, requestId: job.task.requestId, signal, epoch: token }); }
           catch (error) { result = { ok: false, status: 'unknown', error: cleanError(error) }; }
-          const verified = { ...(result && typeof result.ok === 'boolean' ? result : { ok: false, status: 'unknown', error: 'Creation returned no acknowledgment.' }), actionId: action.actionId };
+          const verified = { ...(result && typeof result.ok === 'boolean' ? result : { ok: false, status: 'unknown', error: 'Creation returned no acknowledgment.' }),
+            name: result?.name || launcher.label, actionId: action.actionId };
           // Live cancellation still retains a dispatched launch receipt. A
           // disposed instance has already flushed its final history snapshot.
           if (disposed) return verified;
@@ -1371,37 +1375,48 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
     return pending;
   }
   async function bindTaskAssignments(pending, { job, intent, signal, token, outcomes }) {
+    const failures = [];
     for (const item of pending) {
       let created, session = item.target;
-      if (item.creation) {
-        // Cancellation of a follower must not cancel the request that owns launch.
-        created = await new Promise((resolve, reject) => {
-          const abort = () => reject(new Error('Cancelled.'));
-          if (signal.aborted) return abort();
-          signal.addEventListener('abort', abort, { once: true });
-          item.creation.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
-        });
+      try {
+        if (item.creation) {
+          // Cancellation of a follower must not cancel the request that owns launch.
+          created = await new Promise((resolve, reject) => {
+            const abort = () => reject(new Error('Cancelled.'));
+            if (signal.aborted) return abort();
+            signal.addEventListener('abort', abort, { once: true });
+            item.creation.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+          });
+          active(token);
+          if (item.ownsCreation) outcomes.push({ kind: 'create_session', grantId: item.grantId, ...created });
+          if (!created.ok || !created.target) throw new Error(created.error || 'The new agent did not become ready. No task was submitted.');
+          await requireFreshSessions(); active(token);
+          session = state.sessions.find(session => session.id === created.target.id && session.generation === created.target.generation);
+        }
         active(token);
-        if (item.ownsCreation) outcomes.push({ kind: 'create_session', grantId: item.grantId, ...created });
-        if (!created.ok || !created.target) throw new Error(created.error || 'The new agent did not become ready. No task was submitted.');
-        await requireFreshSessions(); active(token);
-        session = state.sessions.find(session => session.id === created.target.id && session.generation === created.target.generation);
+        if (!session) throw new Error('The assigned agent is no longer available.');
+        const expectedTarget = { id: session.id, generation: session.generation, ...(session.launchToken !== undefined && { launchToken: session.launchToken }), ...(sessionIdentity(session).id && { conversationId: sessionIdentity(session).id }) };
+        intent.commandPlan = bindDelegatedTask(intent.commandPlan, item.grantId, session, { sessions: state.sessions, expectedTarget,
+          workItemId: item.workItemId, workItem: workItems.get(item.workItemId), ...(item.ownsCreation && { creationReceipt: created }) });
+        const binding = { target: { id: session.id, generation: session.generation, ...(session.launchToken !== undefined && { launchToken: session.launchToken }) }, nativeIdentity: sessionIdentity(session) };
+        const bound = assignments.bind(item.reservationId, binding);
+        if (!bound.ok) throw new Error('The task reservation changed before submission.');
+        workItems.bind(item.workItemId, { ...binding, evidence: { requestId: job.task.requestId, source: item.ownsCreation ? 'verified-creation' : 'verified-routing' } });
+        item.binding = binding;
+        const tracked = job.routeItems.find(route => route.grantId === item.grantId); tracked.binding = binding;
+        job.pendingAssignments = (job.pendingAssignments || []).filter(pending => pending.grantId !== item.grantId);
+        if (item.creation && creations.get(item.reservationId) === item.creation) creations.delete(item.reservationId);
+      } catch (error) {
+        active(token);
+        // Keep the failed creation claim for exact-pane recovery, and continue
+        // binding siblings so a failure cannot erase their acknowledged effects.
+        if (created?.ok !== false) outcomes.push({ kind: 'assignment', grantId: item.grantId, targetId: session?.id || created?.id,
+          generation: session?.generation || created?.target?.generation, ok: false, status: 'binding-failed', error: cleanError(error) });
+        failures.push({ grantId: item.grantId, error });
       }
-      active(token);
-      if (!session) throw new Error('The assigned agent is no longer available.');
-      const expectedTarget = { id: session.id, generation: session.generation, ...(session.launchToken !== undefined && { launchToken: session.launchToken }), ...(sessionIdentity(session).id && { conversationId: sessionIdentity(session).id }) };
-      intent.commandPlan = bindDelegatedTask(intent.commandPlan, item.grantId, session, { sessions: state.sessions, expectedTarget,
-        workItemId: item.workItemId, workItem: workItems.get(item.workItemId), ...(item.ownsCreation && { creationReceipt: created }) });
-      const binding = { target: { id: session.id, generation: session.generation, ...(session.launchToken !== undefined && { launchToken: session.launchToken }) }, nativeIdentity: sessionIdentity(session) };
-      const bound = assignments.bind(item.reservationId, binding);
-      if (!bound.ok) throw new Error('The task reservation changed before submission.');
-      workItems.bind(item.workItemId, { ...binding, evidence: { requestId: job.task.requestId, source: item.ownsCreation ? 'verified-creation' : 'verified-routing' } });
-      item.binding = binding;
-      const tracked = job.routeItems.find(route => route.grantId === item.grantId); tracked.binding = binding;
-      job.pendingAssignments = (job.pendingAssignments || []).filter(pending => pending.grantId !== item.grantId);
-      if (item.creation && creations.get(item.reservationId) === item.creation) creations.delete(item.reservationId);
     }
     intent.sessions = structuredClone(state.sessions);
+    return failures;
   }
   // The common command shapes are compiled by code before any model call. The
   // compiler declines everything it cannot prove, and a decline costs nothing:
@@ -1953,7 +1968,18 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
         if (!routingContext.sequence || routingContext.sequence <= job.task.sequence) Object.assign(routingContext, { sequence: job.task.sequence, conversationTarget: context().conversationTarget, projectContext: context().projectContext, conversationGroup: context().conversationGroup, pendingConversationTarget: context().pendingConversationTarget });
         // Launch/result waits never occupy the serialized interpretation lane.
         releaseRoute(); releaseRoute = null;
-        if (pending.length) { tasks.update(job, { status: 'queued' }); await bindTaskAssignments(pending, { job, intent, signal, token, outcomes }); active(token); }
+        if (pending.length) {
+          tasks.update(job, { status: 'queued' });
+          const failures = await bindTaskAssignments(pending, { job, intent, signal, token, outcomes }); active(token);
+          if (failures.length) {
+            intent.failedAssignmentGrantIds = new Set(failures.map(item => item.grantId));
+            intent.assignmentFailure = Object.assign(new Error(failures.map(item => cleanError(item.error)).join(' ')), { internalStage: true });
+            // Delegations in a single plan are independent initial tasks;
+            // ordered/result-dependent work uses request dependencies or
+            // afterResults. Never skip an unresolved step in a mixed plan.
+            if (!intent.commandPlan.grants.every(grant => grant.kind === 'delegate_task' || grant.kind === 'operate_terminal' && handoffTargets(grant).length)) throw intent.assignmentFailure;
+          }
+        }
         if (pending.routingError) throw pending.routingError;
       }
       if (input.internalTargets && intent.commandPlan.grants.some(grant => !['send_prompt', 'operate_terminal'].includes(grant.kind) || grant.targets.some(target => !input.internalTargets.some(bound => target.id === bound.id && target.generation === bound.generation)))) throw new Error('The follow-up cannot change its original frozen terminals or operation.');
@@ -1968,7 +1994,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
       let targetIds, targets;
       const readOnly = intent.commandPlan.access === 'read-only';
       const configureTargets = async () => {
-        targetIds = [...new Set([...intent.commandPlan.grants.flatMap(grant => grant.targets.map(target => target.id)), ...(intent.commandPlan.statusTargets || []).map(target => target.id)])];
+        targetIds = [...new Set([...intent.commandPlan.grants.filter(grant => !intent.failedAssignmentGrantIds?.has(grant.id)).flatMap(grant => grant.targets.map(target => target.id)), ...(intent.commandPlan.statusTargets || []).map(target => target.id)])];
         targets = targetIds.map(id => {
           const frozen = intent.commandPlan.statusTargets?.find(target => target.id === id);
           const session = intent.sessions.find(session => session.id === id && (!frozen || session.generation === frozen.generation));
@@ -2086,8 +2112,30 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
           }
         }
       } else if (!intent.commandPlan.clarification) {
-        const dispatched = await dispatcher.run({ plan: intent.commandPlan, grants: intent.commandPlan.grants, signal, modelRound: 0 });
+        const dispatched = await dispatcher.run({ plan: intent.commandPlan,
+          grants: intent.assignmentFailure ? intent.commandPlan.grants.filter(grant => grant.kind === 'operate_terminal' && !intent.failedAssignmentGrantIds.has(grant.id)) : intent.commandPlan.grants,
+          signal, modelRound: 0 });
         active(token);
+        // Failed/unbound grants never reach an execution model. Successfully
+        // delivered siblings retain their claims and result monitors; only the
+        // remaining grants are preserved by the ordinary failure path.
+        if (intent.assignmentFailure) {
+          const text = requestFailureText(intent.assignmentFailure, outcomes, job.waits);
+          preserveUnfinished(job, job.continuationCommitted ? previousCommand : undefined, !job.continuationCommitted);
+          state.error = text;
+          message('assistant', text, { origin: input.origin, responseTurn: 'complete', status: 'action-failed' });
+          recordDiagnostic({ ...diagnosticContext, event: 'request_stage', stage: 'final_text', status: 'action-failed', elapsedMs: now() - job.task.createdAt });
+          job.reportingReady = true;
+          if (input.origin === 'voice' && onSpeak) {
+            const spoken = composeFinalResponse({ outcomes, waits: job.waits, sessions: state.sessions });
+            try { await onSpeak({ text: redact(text), speechText: redact(spoken?.speech || text), signal, origin: 'voice',
+              replyId: randomUUID(), requestId: job.task.requestId, responseTurn: 'complete', targetLabel: job.task.label }); }
+            catch (error) { diagnosticError(error, { ...diagnosticContext, stage: 'speech' }); }
+            active(token);
+          }
+          return job.result = { ok: false, requestId: job.task.requestId, status: 'action-failed', text: redact(text),
+            error: redact(text), responseTurn: 'complete', actions: redact(outcomes) };
+        }
         if (dispatched.handled.length || dispatched.fallback.length) recordDiagnostic({ ...diagnosticContext, event: 'request_stage', stage: 'executor_reply', elapsedMs: now() - job.task.createdAt, status: 'dispatcher' });
         if (dispatched.fallback.length) {
           // One plain user-role report. The model continues with its own tool
@@ -2418,7 +2466,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
         if (settings.spendingLimit != null && Object.values(state.usage).reduce((a, b) => a + b, 0) >= settings.spendingLimit) throw new Error('Session spending limit reached.');
       }
       throw new Error('Relay action limit reached. Check the action receipts before continuing.');
-    } catch (error) { if (token !== epoch || signal.aborted || isCancellation(error)) return job.result = { ok: false, requestId: job.task.requestId, status: 'cancelled', error: 'Cancelled.' }; diagnosticError(error, { ...diagnosticContext, stage: 'brain' }); state.error = requestFailureText(error, outcomes); if (orphanedCreation(outcomes)) for (const item of job.routeItems || []) workItems.update(item.workItemId, { retriable: true }); const failureDetail = typeof error?.detail === 'string' && error.detail ? cleanError(error.detail).slice(0, 300) : ''; if (failureDetail) { lastFailure = { requestId: job.task.requestId, stage: 'interpretation', reason: failureDetail, at: now() }; job.failureDetail = failureDetail; } message('system', failureDetail ? interpretationFailureText(state.error, failureDetail) : state.error); const upstreamError = reportUpstream(error, input.origin, 'brain', token, signal); if (!upstreamError && input.origin === 'voice') { try { Promise.resolve(onUpstreamError({ category: error?.code === 'LOCAL_CONTEXT_LIMIT' ? 'context-limit' : state.error.includes('spending limit') ? 'spending-limit' : 'orchestration', origin: 'voice', operation: 'orchestration', requestId: job.task.requestId })).catch(() => {}); } catch {} } if (!job.queueRecoveryRejected && (!previousCommand?.queued || job.queueRecoveryTransferred)) preserveUnfinished(job, job.continuationCommitted ? previousCommand : undefined, !job.continuationCommitted); return job.result = { ok: false, requestId: job.task.requestId, error: state.error, ...(outcomes.length && { actions: redact(outcomes) }), ...(upstreamError && { upstreamError }) }; }
+    } catch (error) { if (token !== epoch || signal.aborted || isCancellation(error)) return job.result = { ok: false, requestId: job.task.requestId, status: 'cancelled', error: 'Cancelled.' }; diagnosticError(error, { ...diagnosticContext, stage: 'brain' }); state.error = requestFailureText(error, outcomes, job.waits); if (orphanedCreation(outcomes)) for (const item of job.routeItems || []) if (!job.waits.some(wait => wait.targetId === item.binding?.target.id)) workItems.update(item.workItemId, { retriable: true }); const failureDetail = typeof error?.detail === 'string' && error.detail ? cleanError(error.detail).slice(0, 300) : ''; if (failureDetail) { lastFailure = { requestId: job.task.requestId, stage: 'interpretation', reason: failureDetail, at: now() }; job.failureDetail = failureDetail; } message('system', failureDetail ? interpretationFailureText(state.error, failureDetail) : state.error); const upstreamError = reportUpstream(error, input.origin, 'brain', token, signal); if (!upstreamError && input.origin === 'voice') { try { Promise.resolve(onUpstreamError({ category: error?.code === 'LOCAL_CONTEXT_LIMIT' ? 'context-limit' : state.error.includes('spending limit') ? 'spending-limit' : 'orchestration', origin: 'voice', operation: 'orchestration', requestId: job.task.requestId })).catch(() => {}); } catch {} } if (!job.queueRecoveryRejected && (!previousCommand?.queued || job.queueRecoveryTransferred)) preserveUnfinished(job, job.continuationCommitted ? previousCommand : undefined, !job.continuationCommitted); return job.result = { ok: false, requestId: job.task.requestId, error: state.error, ...(outcomes.length && { actions: redact(outcomes) }), ...(upstreamError && { upstreamError }) }; }
     finally {
       releaseRoute?.(); activity.end(scope); job.executionDone = true;
       const settled = settledRequestState({ task: job.task, result: job.result, waits: job.waits, pendingCommand: context().pendingCommand });

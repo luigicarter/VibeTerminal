@@ -47,10 +47,9 @@ async function fixture(t) {
 
 test('unsupported web launcher immediately becomes a focused clarification with the complete original request preserved', async t => {
   const f = await fixture(t), original = 'Open a new Codex terminal and a web terminal in Recovery QA. Keep both terminals separate.';
-  f.plans.push(f.multiple('web'));
   const result = await f.app.send({ text: original, origin: 'voice' });
-  assert.equal(f.calls.length, 1); assert.equal(f.plans.length, 0); assert.equal(f.effects.length, 0);
-  assert.match(result.text, /What did you mean.*web.*terminal/); assert.equal(result.responseTurn, 'listen');
+  assert.equal(f.calls.length, 0); assert.equal(f.plans.length, 0); assert.equal(f.effects.length, 0);
+  assert.match(result.text, /Which terminal did you mean.*web/); assert.equal(result.responseTurn, 'listen');
   assert.notEqual(result.text, 'done');
   const state = f.app.getState(), task = state.tasks.find(item => item.requestId === result.requestId);
   assert.equal(task.status, 'needs-answer'); assert.equal(task.text, original); assert.equal(task.question.text, result.text);
@@ -78,7 +77,7 @@ test('a malformed creation interpretation can still repair into its supported la
 test('unsafe unknown launcher names use generic clarification without echoing model arguments', async t => {
   const f = await fixture(t), unsafe = 'C:\\PRIVATE_UNSAFE_LAUNCHER\\evil.exe';
   f.plans.push(f.multiple(unsafe));
-  const result = await f.app.send({ text: 'Open Codex and a web terminal in Recovery QA.', origin: 'voice' });
+  const result = await f.app.send({ text: 'Open Codex and another terminal in Recovery QA.', origin: 'voice' });
   assert.equal(f.calls.length, 1); assert.equal(f.effects.length, 0); assert.equal(result.responseTurn, 'listen');
   assert.equal(result.text, 'What kind of terminal did you mean?');
   assert.equal(f.app.getState().tasks.find(item => item.requestId === result.requestId).status, 'needs-answer');

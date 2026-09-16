@@ -1,4 +1,7 @@
-.sidebar .workspace-list { flex: 0 1 auto; min-height: 45px; max-height: 38%; }
+/* Projects only gives up sidebar height while a Chats section is on screen and
+   open. Hidden or collapsed, it keeps the base `flex: 1 1 auto` and grows to
+   the footer. */
+.sidebar:has(.chats-section:not(.collapsed)) .workspace-list { flex: 0 1 auto; min-height: 45px; max-height: 38%; }
 .chats-section { display: flex; flex: 1 1 240px; min-height: 200px; flex-direction: column; gap: 8px; overflow: hidden; }
 .chats-section .sidebar-section-title { flex: 0 0 auto; margin: 0; }
 .chats-section .sidebar-section-title::after { display: none; }
@@ -47,7 +50,7 @@
   .app-shell .sidebar .multi-mode-card { padding: 5px 10px; }
   .app-shell .sidebar .orchestrator-nav-button { min-height: 34px; padding: 6px 12px; }
   .app-shell .sidebar .open-folder-button { min-height: 32px!important; padding: 5px 10px; }
-  .app-shell .sidebar .workspace-list { max-height: 22%; min-height: 42px; }
+  .app-shell .sidebar:has(.chats-section:not(.collapsed)) .workspace-list { max-height: 22%; min-height: 42px; }
   .chats-section { min-height: 180px; gap: 5px; }
   .chats-recovery { max-height: 35px; }
 }
@@ -56,9 +59,9 @@
   .app-shell .sidebar .brand > div > span { display: none; }
   .app-shell .sidebar .multi-mode-subtitle { display: none; }
   .app-shell .sidebar .workspace-path, .app-shell .sidebar .workspace-button .session-counts { display: none; }
-  .app-shell .sidebar .workspace-list { max-height: 45px; }
+  .app-shell .sidebar:has(.chats-section:not(.collapsed)) .workspace-list { max-height: 45px; }
   .chats-section { min-height: 160px; }
 }
-/* Collapsed to its header, Chats returns the sidebar height to Projects. */
+/* Collapsed to its header, Chats returns the sidebar height to Projects: the
+   cap above simply stops matching. */
 .chats-section.collapsed { flex: 0 0 auto; min-height: 0; }
-.app-shell .sidebar:has(.chats-section.collapsed) .workspace-list { max-height: none; flex: 1 1 auto; }

@@ -246,6 +246,25 @@ function namedProvider(instruction, launchers = []) {
 // group, indefinite, indefiniteProvider, definiteProvider, deictic, pronoun }. `kind`
 // is one of 'handle' | 'new' | 'idle' | 'just_opened' | 'working' | 'done' |
 // 'last_target' | 'other' | 'title' | 'provider' | 'none'.
+function unresolvedOpeningLauncher(instruction, { launchers = [], projects = [] } = {}) {
+  // Check only direct opening clauses, before worker payloads. A model choosing
+  // a valid launcher does not establish what an unrecognized spoken name meant.
+  const text = referenceText(instruction).replace(/"[^"]*"|`[^`]*`/g, '')
+    .split(/\b(?:and\s+)?(?:have|tell|ask|prompt)\s+(?:it|them)\b/i)[0];
+  const opening = new RegExp(`${REQUEST_HEAD}(?:open|launch|spawn|create)\\s+(.+)`, 'i').exec(text);
+  if (!opening) return undefined;
+  const names = projects.map(project => typeof project === 'string' ? project : project?.name).filter(Boolean);
+  for (const clause of opening[1].split(/\b(?:and|or|then)\b/i)) {
+    const match = /^\s*(?:(?:open|launch|spawn|create)\s+)?(?:(?:a|an|the|new|fresh|another|one|two|three|\d+)\s+)*([\w+-]+(?:\s+[\w+-]+){0,3})\s+(?:terminals?|panes?|agents?|sessions?|workers?)\b/i.exec(clause);
+    if (!match) continue;
+    const name = match[1].trim();
+    if (/^(?:(?:a|an|the|one|two|three|another|new|fresh|blank|empty|additional|separate|independent|plain|regular|normal|basic|ordinary|standard|both|all|requested|selected|first|second|third|other|same|coding|shell|powershell|command prompt)(?:\s+|$))+$/i.test(name)) continue;
+    if (namedProvider(name, launchers) || names.some(project => project.toLowerCase() === name.toLowerCase())) continue;
+    return name;
+  }
+  return undefined;
+}
+
 function readReference(instruction, { launchers = [] } = {}) {
   const text = referenceText(instruction);
   const provider = namedProvider(text, launchers);
@@ -430,5 +449,5 @@ function resolveReference(instruction, terminals, { launchers = [], cwd, project
   return result;
 }
 
-module.exports = { readReference, resolveReference, terminalsOf, idlePaneRequest, providerFamily, meaningful,
+module.exports = { readReference, resolveReference, terminalsOf, idlePaneRequest, providerFamily, meaningful, unresolvedOpeningLauncher,
   RESOLVER_STOPWORDS, STATE_KINDS, SHELL_KINDS, OPENED_WINDOW_MS };

@@ -1,7 +1,7 @@
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
-const { STT_MODEL, TTS_MODEL, TTS_VOICE } = require('../shared/voiceConfig.cjs');
+const { STT_MODEL, TTS_MODEL, TTS_VOICE, VOICE_ENDPOINTING, validVoicePauseMs, normalizeVoicePauseMs } = require('../shared/voiceConfig.cjs');
 // fallbackModel is optional and empty by default: the second brain is only used
 // when the primary fails its deadline or the provider does, and no configuration
 // silently sends work to a model the user did not choose.
@@ -11,7 +11,7 @@ const { STT_MODEL, TTS_MODEL, TTS_VOICE } = require('../shared/voiceConfig.cjs')
 // brain", so an unconfigured relay behaves exactly as it always has.
 // Speculative terminals require an explicit opt-in. Older builds persisted the
 // default true during unrelated settings saves; that is not user consent.
-const DEFAULTS = { model: '', fallbackModel: '', interpretationModel: '', sttModel: STT_MODEL, ttsModel: TTS_MODEL, voice: TTS_VOICE, language: 'en', monitoringEnabled: false, monitoringIntervalSeconds: 30, enabledOnLaunch: false, handsFreeEnabled: false, spareAgent: false };
+const DEFAULTS = { model: '', fallbackModel: '', interpretationModel: '', sttModel: STT_MODEL, ttsModel: TTS_MODEL, voice: TTS_VOICE, language: 'en', monitoringEnabled: false, monitoringIntervalSeconds: 30, enabledOnLaunch: false, handsFreeEnabled: false, voicePauseMs: VOICE_ENDPOINTING.defaultPauseMs, spareAgent: false };
 // A malformed saved file must never reach the list/map/push callers in the relay,
 // the policy check or the settings panel. Only well-formed entries survive.
 const normalizePreferences = list => (Array.isArray(list) ? list : []).filter(item => item && typeof item.id === 'string' && typeof item.text === 'string');
@@ -21,6 +21,7 @@ function createSettings({ userDataPath, secureStorage }) {
   try { const disk = JSON.parse(fs.readFileSync(filename, 'utf8')); data = { ...data, ...disk, settings: { ...DEFAULTS, ...disk.settings } }; } catch {}
   data.preferences = normalizePreferences(data.preferences);
   data.settings.handsFreeEnabled = data.settings.handsFreeEnabled === true;
+  data.settings.voicePauseMs = normalizeVoicePauseMs(data.settings.voicePauseMs);
   data.settings.spareAgent = data.settings.spareAgent === true && data.spareAgentOptIn === true;
   // The old default never had a published OpenRouter speech route. Migrate that
   // known configuration; other custom selections remain visible for correction.
@@ -55,6 +56,9 @@ function createSettings({ userDataPath, secureStorage }) {
           if (typeof value !== 'boolean') throw new Error(`Invalid ${name}.`);
           next.settings[name] = value;
           if (name === 'spareAgent') next.spareAgentOptIn = value;
+        } else if (name === 'voicePauseMs') {
+          if (!validVoicePauseMs(value)) throw new Error('Voice pause must be between 1 and 3 seconds.');
+          next.settings[name] = value;
         } else if (name === 'monitoringIntervalSeconds') {
           if (!Number.isFinite(value) || value < 5 || value > 300) throw new Error('Monitoring interval must be 5–300 seconds.');
           next.settings[name] = value;

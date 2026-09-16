@@ -137,6 +137,6 @@ test('obsolete completion cannot block or fail a fresh wake recording', async t 
   frame(true); frame(); frame(); assert.equal(f.analyses.length, 2);
   const id = f.controller.getState().recordingId; oldAnalysis.reject(Error('obsolete completion failed')); await tick();
   assert.equal(f.controller.getState().recordingId, id); assert.equal(f.controller.getState().handsFreeStatus, 'ready');
-  for (let n = 0; n < 10; n++) frame(); await until(() => f.sent.length);
+  for (let n = 0; n < 13; n++) frame(); await until(() => f.sent.length);
   assert.equal(f.sent.length, 1);
 });

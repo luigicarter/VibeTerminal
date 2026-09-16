@@ -8,23 +8,14 @@ const { createCompletionAudio } = require('./voiceCompletionAudio.cjs');
 const { isVoiceDismissal } = require('../shared/voiceDismissal.cjs');
 const { stripWakePrefix } = require('../shared/voiceWakePhrase.cjs');
 const { OpenRouterError, readOpenRouterResponse, classifyTransportError, upstreamErrorInfo } = require('./openRouterErrors.cjs');
-const { STT_MODEL, STT_PROMPT_NAMES, STT_PROMPT_MAX_CHARS, TTS_MODEL, TTS_VOICE, TTS_VOICES } = require('../shared/voiceConfig.cjs');
+const { STT_MODEL, STT_PROMPT_NAMES, STT_PROMPT_MAX_CHARS, TTS_MODEL, TTS_VOICE, TTS_VOICES, VOICE_ENDPOINTING, normalizeVoicePauseMs } = require('../shared/voiceConfig.cjs');
 // A push-to-talk hold shorter than this carries no command; it is a tap, not speech.
 const MIN_VOICED_MS = 250;
-const AUTOMATIC_PAUSE_MS = 1200;
-// The turn model is a binary classifier over [0,1] whose own decision boundary
-// is 0.5, and completion is already accepted just above it. The short pause is
-// reserved for the top of that range: at 0.9 the model's remaining doubt is a
-// fifth of what it is at the accept boundary, so a sentence it is sure has ended
-// costs 600 ms, while everything merely probable keeps the full 1,200 ms in
-// which a resumed word can still contradict it.
-const TURN_CONFIDENT_PROBABILITY = 0.9;
-const AUTOMATIC_PAUSE_CONFIDENT_MS = 600;
 // Transcription of the audio so far starts before the long pause ends. It is
 // only spent on a turn the model already called complete, and it is abandoned
 // the moment speech resumes, so it never shortens a sentence.
-const EARLY_TRANSCRIPTION_MS = 800;
-const AUTOMATIC_FALLBACK_MS = 3000;
+const EARLY_TRANSCRIPTION_MS = VOICE_ENDPOINTING.earlyTranscriptionMs;
+const AUTOMATIC_FALLBACK_MS = VOICE_ENDPOINTING.fallbackMs;
 const TRANSCRIPTION_ENDPOINT = 'https://openrouter.ai/api/v1/audio/transcriptions';
 // A question left unanswered this long gets the missed-speech alert, as before.
 const ANSWER_SILENCE_MS = 15000;
@@ -90,15 +81,12 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
       Promise.resolve(result).catch(() => {});
     } catch { /* Logging must not affect the voice lifecycle. */ }
   }
-  // A complete sentence the model is sure of ends on the short pause; anything
-  // less certain keeps the long one. A turn with less voiced audio than a tap
-  // never takes the short pause, so the fast path cannot fire inside MIN_VOICED_MS.
-  const pauseFor = current => current && !current.manual && current.turnConfidence >= TURN_CONFIDENT_PROBABILITY && current.voicedMs >= MIN_VOICED_MS
-    ? AUTOMATIC_PAUSE_CONFIDENT_MS : AUTOMATIC_PAUSE_MS;
+  // Confidence cannot shorten the user's thinking pause. Capture the preference
+  // once per turn so a settings save cannot end a recording already in progress.
+  const pauseFor = current => current?.pauseMs ?? normalizeVoicePauseMs(getSettings().voicePauseMs);
   function captureDiagnostic(stage, reason) {
     if (!turn?.source) return;
-    // The pause actually in force and the score that chose it: enough to tell a
-    // fast ending from a slow one after the fact, and never any recorded content.
+    // The pause actually in force and the detector's score, never recorded content.
     const endpointing = stage === 'finish' && !turn.manual
       ? { pauseMs: pauseFor(turn), ...(Number.isFinite(turn.turnConfidence) && { turnConfidence: turn.turnConfidence }) } : {};
     try { Promise.resolve(orchestrator?.recordDiagnostic?.({ event: 'voice_recording', origin: 'voice', stage, reason, recordingSource: turn.source, recordingId: turn.id, elapsedMs: turn.elapsedMs || 0, voicedMs: turn.voicedMs || 0, silenceMs: turn.silenceMs || 0, ...endpointing })).catch(() => {}); } catch { /* Best effort. */ }
@@ -265,7 +253,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
   function beginAutomatic(source, event, preRoll = recentAudio) {
     recentAudio = [];
     recording = createRecording({ ...recordingOptions, maxMs: 60000, preRoll, endpointing: false });
-    turn = { id: ++turnSequence, source, manual: false, speechRevision: 0, voicedMs: 0, silenceMs: 0, elapsedMs: 0, commandSpeech: source === 'answer', lastFrameEnd: event?.sampleEnd ?? samplePosition, pending: false, analyzedRevision: null };
+    turn = { id: ++turnSequence, source, manual: false, pauseMs: normalizeVoicePauseMs(getSettings().voicePauseMs), speechRevision: 0, voicedMs: 0, silenceMs: 0, elapsedMs: 0, commandSpeech: source === 'answer', lastFrameEnd: event?.sampleEnd ?? samplePosition, pending: false, analyzedRevision: null };
     captureDiagnostic('start', source);
     answerSilenceMs = 0;
     update({ phase: 'recording', recordingSource: source, recordingId: turn.id, finishHint: false, transcript: '', error: null });
@@ -316,7 +304,7 @@ function createVoiceController({ orchestrator, getKey, getSettings = () => ({}),
     }
     if (turn.silenceMs >= 3000 && !state.finishHint) update({ finishHint: true });
     // Wake history is retained for transcription, but never charged as live silence.
-    if (!turn.commandSpeech && turn.elapsedMs >= 6000 && turn.silenceMs >= AUTOMATIC_PAUSE_MS && turn.lastFrameEnd >= samplePosition) { finishRecording('wake-grace'); return; }
+    if (!turn.commandSpeech && turn.elapsedMs >= 6000 && turn.silenceMs >= pauseFor(turn) && turn.lastFrameEnd >= samplePosition) { finishRecording('wake-grace'); return; }
     if (turn.silenceMs >= 200 && turn.commandSpeech) void analyzeTurn();
   }
   async function analyzeTurn() {

@@ -180,6 +180,19 @@ const DEFAULT_FUSION_RUN_MODE: FusionRunMode = "auto";
 const LAST_FUSION_SETTINGS_KEY = "vibe-terminal:last-fusion-settings";
 const LAST_OPEN_FUSION_MODELS_KEY = "vibe-terminal:last-openfusion-models";
 
+// The Chats section is hidden unless this renderer switch is explicitly '1'.
+// Anything else — missing, another value, storage throwing — means hidden.
+// Read once at module load: storage may be unavailable, and the answer cannot
+// change without a reload.
+const CHATS_SECTION_VISIBLE_KEY = "lina:chats:visible";
+const CHATS_SECTION_VISIBLE = (() => {
+  try {
+    return typeof window !== "undefined" && window.localStorage.getItem(CHATS_SECTION_VISIBLE_KEY) === "1";
+  } catch {
+    return false;
+  }
+})();
+
 function readStoredJson(key: string): Record<string, unknown> | null {
   try {
     const raw = window.localStorage.getItem(key);
@@ -4636,7 +4649,7 @@ export default function App() {
       className={clsx("app-shell", !sidebarOpen && "sidebar-collapsed")}
       style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
     >
-      <aside className="sidebar" aria-label="Projects and chats">
+      <aside className="sidebar" aria-label={CHATS_SECTION_VISIBLE ? "Projects and chats" : "Projects"}>
         <div className="brand">
           <div className="brand-mark">
             <img src={vibeTerminalLogo} alt="" aria-hidden="true" />
@@ -4807,7 +4820,7 @@ export default function App() {
         </div>
         <span id="workspace-reorder-help" className="workspace-reorder-sr-only">Drag to reorder projects, or use Up and Down arrow keys on a reorder button.</span>
         <span className="workspace-reorder-sr-only" role="status" aria-live="polite">{workspaceOrderAnnouncement}</span>
-        <ChatsSection project={activeWorkspace} projects={workspaces} sessions={allSessions} multi={activeView === 'multi'} profiles={launcherAgentProfiles}
+        {CHATS_SECTION_VISIBLE && <ChatsSection project={activeWorkspace} projects={workspaces} sessions={allSessions} multi={activeView === 'multi'} profiles={launcherAgentProfiles}
           onNew={async kind => { setOrchestratorViewOpen(false); await addSession(kind, { chat: true }); }}
           onFocus={id => { setOrchestratorViewOpen(false); focusRelaySession(id); }}
           onOpen={async row => {
@@ -4819,7 +4832,7 @@ export default function App() {
             const result = await relayActionHandler.current('resume_conversation', { conversation, chat: true });
             if (!result.ok) throw new Error(String(result.error || 'Could not open this chat.'));
             await flushChatWorkspace();
-          }} />
+          }} />}
         <footer className="sidebar-footer"><button className="workspace-settings-button" title="Workspace settings" aria-label="Workspace settings" onClick={() => setSettingsOpen(true)}><Settings size={17} aria-hidden="true"/><span>Settings</span></button></footer>
       </aside>
 

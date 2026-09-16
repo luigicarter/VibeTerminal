@@ -2,7 +2,9 @@
 
 `components/ChatsSection.tsx` renders terminal-format Chats directly below
 Projects, with filtering, search, archive/rename, and a terminal-style history
-viewer. `chatPersistence.ts` hydrates the workspace from desktop SQLite before
+viewer. The section is hidden by default and only renders when
+`localStorage['lina:chats:visible']` is exactly `'1'`; otherwise Projects fills
+the sidebar down to the footer. `chatPersistence.ts` hydrates the workspace from desktop SQLite before
 App mounts; `sessionDrafts.ts` saves app-owned drafts by conversation identity.
 See the [implementation and recovery limits](chat-section-implementation-2026-09-13.md).
 

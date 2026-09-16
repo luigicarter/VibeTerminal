@@ -53,37 +53,54 @@ function fixture(options = {}) {
 // A command long enough to be a sentence, ending with the last spoken frame.
 async function speak(f, voicedMs = 500) { f.frame(100, true, true); f.frame(voicedMs, true); f.frame(200); await tick(); }
 
-test('a confident complete sentence ends after 600 ms of trailing silence', async t => {
-  const f = fixture(); t.after(() => f.controller.dispose()); await f.activate();
-  await speak(f);
-  assert.equal(f.analyses.length, 1);
-  f.frame(399); assert.equal(f.uploads.length, 0, 'nothing is sent before the short pause completes');
-  f.frame(1); await until(() => f.sent.length);
-  assert.equal(f.sent[0].text, 'show my agents');
-  assert.equal(f.finish().reason, 'semantic'); assert.equal(f.finish().pauseMs, 600); assert.equal(f.finish().turnConfidence, .99);
-  assert.equal(f.uploads.length, 1, 'the short pause outruns the early request, so the recording is sent once');
-  assert.equal(f.stt().sttEarly, false); assert.equal(f.stt().sttReused, false);
-});
-
-test('a complete sentence below the confidence threshold keeps the 1,200 ms pause and reuses its early transcript', async t => {
-  const f = fixture({ analyze: async input => ({ ...input, probability: .7, complete: true }) });
-  t.after(() => f.controller.dispose()); await f.activate();
-  await speak(f);
-  f.frame(599); assert.equal(f.uploads.length, 0, 'the early request waits for 800ms of silence');
+for (const probability of [.99, .7]) test(`completion score ${probability} respects the 1,500 ms pause and reuses speculative transcription`, async t => {
+  const f = fixture({ analyze: async input => ({ ...input, probability, complete: true }) });
+  t.after(() => f.controller.dispose()); await f.activate(); await speak(f);
+  f.frame(599); assert.equal(f.uploads.length, 0);
   f.frame(1); await tick();
-  assert.equal(f.uploads.length, 1, 'the audio so far goes out at 800ms');
-  assert.equal(f.sent.length, 0, 'the recording is still open, so nothing has been relayed');
-  f.frame(399); assert.equal(f.sent.length, 0);
+  assert.equal(f.uploads.length, 1); assert.equal(f.sent.length, 0);
+  f.frame(699); assert.equal(f.sent.length, 0); assert.equal(f.controller.getState().phase, 'recording');
   f.frame(1); await until(() => f.sent.length);
-  assert.equal(f.uploads.length, 1, 'nothing was appended, so the early transcript is used rather than a second request');
-  assert.equal(f.sent[0].text, 'show my agents');
-  assert.equal(f.finish().reason, 'semantic'); assert.equal(f.finish().pauseMs, 1200); assert.equal(f.finish().turnConfidence, .7);
+  assert.equal(f.finish().silenceMs, 1500); assert.equal(f.finish().pauseMs, 1500);
+  assert.equal(f.finish().turnConfidence, probability);
+  assert.equal(f.uploads.length, 1); assert.equal(f.sent[0].text, 'show my agents');
   assert.equal(f.stt().sttEarly, true); assert.equal(f.stt().sttReused, true);
 });
 
-// The turn becomes confident once the speaker has actually finished, so the
-// resumed sentence ends on the short pause and earns no second early request.
-const resumed = () => { let call = 0; return async input => ({ ...input, probability: ++call === 1 ? .7 : .99, complete: true }); };
+// A falsely confident clause ending must still leave time to continue speaking.
+const resumed = () => async input => ({ ...input, probability: .99, complete: true });
+
+for (const pause of [600, 700, 1000, 1200]) test(`a falsely confident ${pause} ms thinking pause retains the next clause`, async t => {
+  const f = fixture({ text: 'Hey Lina, review the code and fix the issues' });
+  t.after(() => f.controller.dispose()); await f.activate(); await speak(f);
+  const id = f.controller.getState().recordingId;
+  f.frame(pause - 200); await tick();
+  assert.equal(f.sent.length, 0); assert.equal(f.controller.getState().phase, 'recording');
+  f.frame(400, true); f.frame(200); await tick();
+  assert.equal(f.controller.getState().recordingId, id);
+  f.frame(1300); await until(() => f.sent.length);
+  assert.equal(f.sent.length, 1); assert.equal(f.sent[0].text, 'review the code and fix the issues');
+  // The final speculative recording includes both clauses and their pause.
+  assert(f.uploads.at(-1).samples >= (100 + 500 + pause + 400 + 800) * 16);
+  assert.equal(f.finish().silenceMs, 1500);
+});
+
+for (const voicePauseMs of [1000, 2300, 3000]) test(`saved ${voicePauseMs} ms pause is honored even at maximum confidence`, async t => {
+  const f = fixture({ settings: { voicePauseMs } }); t.after(() => f.controller.dispose());
+  await f.activate(); await speak(f); f.frame(voicePauseMs - 201); await tick();
+  assert.equal(f.sent.length, 0); assert.equal(f.controller.getState().phase, 'recording');
+  f.frame(1); await until(() => f.sent.length);
+  assert.equal(f.finish().pauseMs, voicePauseMs); assert.equal(f.finish().silenceMs, voicePauseMs);
+});
+
+test('saving a shorter pause cannot cut off a recording already in progress', async t => {
+  const f = fixture({ settings: { voicePauseMs: 2500 } }); t.after(() => f.controller.dispose());
+  await f.activate(); await speak(f); f.settings.voicePauseMs = 1000;
+  f.frame(2299); await tick(); assert.equal(f.sent.length, 0);
+  f.frame(1); await until(() => f.sent.length); assert.equal(f.finish().pauseMs, 2500);
+  await speak(f); f.frame(800); await until(() => f.sent.length === 2);
+  assert.equal(f.finish().pauseMs, 1000);
+});
 
 test('a word spoken after the early request aborts it and the whole recording is transcribed', async t => {
   const held = deferred();
@@ -94,11 +111,11 @@ test('a word spoken after the early request aborts it and the whole recording is
   f.frame(100, true); await tick();
   assert.equal(f.uploads[0].aborted, true, 'the in-flight early request is cancelled by the resumed word');
   assert.equal(f.controller.getState().phase, 'recording'); assert.equal(f.controller.getState().error, null);
-  f.frame(200); await tick(); f.frame(400); await until(() => f.sent.length);
+  f.frame(200); await tick(); f.frame(1300); await until(() => f.sent.length);
   assert.equal(f.uploads.length, 2); assert.equal(f.uploads[1].aborted, false);
   assert.equal(f.sent[0].text, 'show my agents and stop');
   assert.ok(f.uploads[1].samples > f.uploads[0].samples, 'the second request carries the resumed speech');
-  assert.equal(f.stt().sttEarly, false, 'the aborted request is not the one this turn was transcribed by');
+  assert.equal(f.stt().sttEarly, true); assert.equal(f.stt().sttReused, true, 'only the new full recording can be reused');
   assert.equal(f.controller.getState().error, null, 'an abandoned early request never surfaces as an error');
   assert.equal(f.diagnostics.some(event => event.event === 'voice_error'), false);
 });
@@ -109,10 +126,10 @@ test('an early transcript that arrived before speech resumed is discarded', asyn
   await speak(f);
   f.frame(600); await tick(); await tick();
   assert.equal(f.uploads.length, 1); assert.equal(f.uploads[0].aborted, false, 'this early request completed before the speaker went on');
-  f.frame(100, true); f.frame(200); await tick(); f.frame(400); await until(() => f.sent.length);
+  f.frame(100, true); f.frame(200); await tick(); f.frame(1300); await until(() => f.sent.length);
   assert.equal(f.uploads.length, 2); assert.equal(f.sent.length, 1);
   assert.equal(f.sent[0].text, 'show my agents and stop', 'the completed early result is dropped once more was said');
-  assert.equal(f.stt().sttEarly, false); assert.equal(f.stt().sttReused, false);
+  assert.equal(f.stt().sttEarly, true); assert.equal(f.stt().sttReused, true);
 });
 
 test('an incomplete turn and a tap-length turn never take the fast paths', async t => {
@@ -121,16 +138,16 @@ test('an incomplete turn and a tap-length turn never take the fast paths', async
   await speak(incomplete);
   incomplete.frame(1000); assert.equal(incomplete.uploads.length, 0, 'an incomplete turn is never transcribed early');
   incomplete.frame(1800); await until(() => incomplete.sent.length);
-  assert.equal(incomplete.finish().reason, 'silence-fallback'); assert.equal(incomplete.finish().pauseMs, 1200);
+  assert.equal(incomplete.finish().reason, 'silence-fallback'); assert.equal(incomplete.finish().pauseMs, 1500);
   assert.equal(incomplete.finish().turnConfidence, undefined);
 
   // 100ms of live speech is a tap, not a sentence: it keeps the long pause even
   // when the model is sure, and is never spent on an early request.
   const tap = fixture(); t.after(() => tap.controller.dispose()); await tap.activate();
   tap.frame(100, true, true); tap.frame(100, true); tap.frame(200); await tick();
-  tap.frame(999); assert.equal(tap.uploads.length, 0);
+  tap.frame(1299); assert.equal(tap.uploads.length, 0);
   tap.frame(1); await until(() => tap.sent.length);
-  assert.equal(tap.finish().pauseMs, 1200); assert.equal(tap.uploads.length, 1);
+  assert.equal(tap.finish().pauseMs, 1500); assert.equal(tap.uploads.length, 1);
   assert.equal(tap.stt().sttEarly, false);
 });
 
@@ -153,7 +170,7 @@ test('push-to-talk release still sends immediately and abandons an early request
 test('the transcription prompt lists product, launcher and project names within its cap', async t => {
   const projects = ['vibeTerminal', 'Aurora Ledger', 'x'.repeat(80), 'Northwind Payments Console', 'vibeTerminal', 'Ledger\nWithControl Characters'];
   const f = fixture({ getVocabulary: () => projects }); t.after(() => f.controller.dispose()); await f.activate();
-  await speak(f); f.frame(600); await until(() => f.sent.length);
+  await speak(f); f.frame(1300); await until(() => f.sent.length);
   const prompt = f.uploads[0].body.prompt;
   assert.ok(prompt.length <= STT_PROMPT_MAX_CHARS, `prompt is ${prompt.length} characters`);
   for (const name of ['Lina', 'Lina Terminal', 'Claude Code', 'Open Claude Code', 'Codex', 'Open Codex', 'Codex Web', 'Gemini', 'Cursor', 'Grok', 'Kimi', 'Qwen']) assert.ok(prompt.includes(name), name);
@@ -167,18 +184,18 @@ test('the transcription prompt lists product, launcher and project names within 
   // A vocabulary that throws, or is not a list of names, cannot fail a turn.
   const broken = fixture({ getVocabulary: () => { throw new Error('inventory unavailable'); } });
   t.after(() => broken.controller.dispose()); await broken.activate();
-  await speak(broken); broken.frame(600); await until(() => broken.sent.length);
+  await speak(broken); broken.frame(1300); await until(() => broken.sent.length);
   assert.ok(broken.uploads[0].body.prompt.startsWith('Lina, Lina Terminal, Claude Code'));
 });
 
 test('an endpoint that refuses the prompt field is retried once without it and never asked again', async t => {
   const f = fixture({ transcribe: call => call.body.prompt ? { status: 400 } : { text: 'Hey Lina, show my agents' } });
   t.after(() => f.controller.dispose()); await f.activate();
-  await speak(f); f.frame(600); await until(() => f.sent.length);
+  await speak(f); f.frame(1300); await until(() => f.sent.length);
   assert.deepEqual(f.uploads.map(call => Boolean(call.body.prompt)), [true, false], 'the refusal costs one silent retry');
   assert.equal(f.sent[0].text, 'show my agents'); assert.equal(f.controller.getState().error, null);
   assert.equal(f.stt().sttPrompt, false);
-  await speak(f); f.frame(600); await until(() => f.sent.length === 2);
+  await speak(f); f.frame(1300); await until(() => f.sent.length === 2);
   assert.deepEqual(f.uploads.map(call => Boolean(call.body.prompt)), [true, false, false], 'the field stays off for the rest of the session');
   assert.equal(f.diagnostics.some(event => event.event === 'voice_error'), false);
 });
@@ -191,20 +208,20 @@ test('the endpointing and transcription fields survive the on-disk diagnostics s
   const record = event => logger.record(event);
   const unsure = fixture({ record, analyze: async input => ({ ...input, probability: .7, complete: true }) });
   t.after(() => unsure.controller.dispose()); await unsure.activate();
-  await speak(unsure); unsure.frame(1000); await until(() => unsure.sent.length);
+  await speak(unsure); unsure.frame(1300); await until(() => unsure.sent.length);
   const confident = fixture({ record }); t.after(() => confident.controller.dispose()); await confident.activate();
-  await speak(confident); confident.frame(400); await until(() => confident.sent.length);
+  await speak(confident); confident.frame(1300); await until(() => confident.sent.length);
   await logger.flush();
   const rows = fs.readFileSync(filename, 'utf8').trim().split('\n').map(JSON.parse);
   const finishes = rows.filter(row => row.event === 'voice_recording' && row.stage === 'finish');
-  assert.deepEqual(finishes.map(row => [row.pauseMs, row.turnConfidence]), [[1200, .7], [600, .99]]);
+  assert.deepEqual(finishes.map(row => [row.pauseMs, row.turnConfidence]), [[1500, .7], [1500, .99]]);
   const stt = rows.filter(row => row.stage === 'stt_complete');
-  assert.deepEqual(stt.map(row => [row.sttEarly, row.sttReused, row.sttPrompt]), [[true, true, true], [false, false, true]]);
+  assert.deepEqual(stt.map(row => [row.sttEarly, row.sttReused, row.sttPrompt]), [[true, true, true], [true, true, true]]);
   // The fields are operational only: no transcript, audio or prompt text.
   assert.doesNotMatch(fs.readFileSync(filename, 'utf8'), /show my agents|input_audio|Claude Code/);
 });
 
-test('measured end of speech to relay latency, confident pause versus the 1,200 ms constant', async t => {
+test('speculative transcription offsets the longer pause without allowing confidence to shorten capture', async t => {
   // The transcription round trip these numbers are built on. It is the one cost
   // the endpointing change cannot remove, only start earlier.
   const STT_MS = 1100;
@@ -222,9 +239,9 @@ test('measured end of speech to relay latency, confident pause versus the 1,200 
   const confident = await measure(.99), unsure = await measure(.7);
   const before = { pauseMs: 1200, requestedAt: 1200, latencyMs: 1200 + STT_MS };
   console.log(JSON.stringify({ sttMs: STT_MS, before, confident, unsure }));
-  assert.equal(confident.pauseMs, 600); assert.equal(unsure.pauseMs, 1200);
-  assert.equal(confident.requestedAt, 600, 'a confident turn is sent as it ends');
+  assert.equal(confident.pauseMs, 1500); assert.equal(unsure.pauseMs, 1500);
+  assert.equal(confident.requestedAt, 800, 'transcription is speculative until the selected pause ends');
   assert.equal(unsure.requestedAt, 800, 'an unsure turn is transcribed from 800ms while the pause runs');
-  assert.equal(before.latencyMs - confident.latencyMs, 600);
+  assert.equal(before.latencyMs - confident.latencyMs, 400);
   assert.equal(before.latencyMs - unsure.latencyMs, 400);
 });

@@ -27,13 +27,16 @@ async function run(name, audio, commandStart, commandEnd) {
     await wait(200);
     const report = { name, wakes, commandStartMs: commandStart == null ? null : commandStart / 16, commandEndMs: commandEnd == null ? null : commandEnd / 16, uploads, sent: sent.length, events, predictions, lastSpeechMs: speech.at(-1), phase: controller.getState().phase, handsFreeStatus: controller.getState().handsFreeStatus };
     console.log(JSON.stringify(report));
-    assert.equal(wakes.length, 1); assert.equal(uploads.length, 1);
+    assert.equal(wakes.length, 1); assert(uploads.length >= 1);
+    const finalUpload = uploads.at(-1);
+    const lastAudibleMs = audio.findLastIndex(sample => Math.abs(sample) > .003) / 16;
     // The upload must carry every speech frame the detector classified. The
     // scenario's nominal end is the fixture's own offset and includes its
     // trailing padding, so the boundary that proves nothing was cut is the last
-    // classified speech, not that offset: a 600ms pause legitimately closes the
+    // classified speech, not that offset: the selected pause legitimately closes the
     // recording inside a clip's silent tail.
-    if (commandEnd != null) { assert.ok(uploads[0].atMs >= speech.at(-1), 'uploaded before the command stopped'); assert.ok(uploads[0].wavMs >= speech.at(-1) - (uploads[0].atMs - uploads[0].wavMs), 'uploaded audio is missing classified speech'); assert.ok(uploads[0].atMs <= commandEnd / 16 + 3500, 'completion exceeded 3.5 seconds'); assert.equal(sent.length, 1); }
+    if (commandEnd != null) { assert.ok(finalUpload.atMs >= lastAudibleMs, 'uploaded before the final audible clause');
+      assert.ok(finalUpload.atMs >= speech.at(-1), 'uploaded before the command stopped'); assert.ok(finalUpload.wavMs >= speech.at(-1) - (finalUpload.atMs - finalUpload.wavMs), 'uploaded audio is missing classified speech'); assert.ok(finalUpload.atMs <= commandEnd / 16 + 3500, 'completion exceeded 3.5 seconds'); assert.equal(sent.length, 1); }
     else assert.equal(sent.length, 0);
     return report;
   } finally { controller.dispose(); }
@@ -42,7 +45,7 @@ async function run(name, audio, commandStart, commandEnd) {
   const wake = read('wake'), command = read('complete'), prefix = silence(300);
   const scenarios = [
     ['delayed-command', concat(prefix, wake, silence(2000), command, silence(4000)), prefix.length + wake.length + 32000, prefix.length + wake.length + 32000 + command.length],
-    ['mid-command-pause', concat(prefix, wake, command.subarray(0, Math.floor(command.length / 2)), silence(600), command.subarray(Math.floor(command.length / 2)), silence(4000)), prefix.length + wake.length, prefix.length + wake.length + command.length + 9600],
+    ['mid-command-pause', concat(prefix, wake, command.subarray(0, Math.floor(command.length / 2)), silence(1000), command.subarray(Math.floor(command.length / 2)), silence(4000)), prefix.length + wake.length, prefix.length + wake.length + command.length + 16000],
     ['wake-only', concat(prefix, wake, silence(7500)), null, null],
   ];
   let failed = false;

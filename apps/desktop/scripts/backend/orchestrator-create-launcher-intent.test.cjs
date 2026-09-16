@@ -4,6 +4,27 @@ const {normalizeIntent,INTENT_TOOL,INTENT_SYSTEM}=require('../../backend/orchest
 const {createOrchestrator}=require('../../backend/orchestrator.cjs');
 const context={requestId:'source',instruction:'Open the requested panes.',sessions:[]};
 const compile=actions=>normalizeIntent({goal:'Open the requested panes.',actions},context);
+
+test('garbled spoken launcher clarifies before interpretation or any terminal effects', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-spoken-launcher-')), effects = [];
+  let interpretations = 0;
+  const relay = createOrchestrator({ userDataPath: root, getSessions: () => [], getRoots: () => ({ projects: [root] }),
+    getLaunchers: () => [{ kind: 'claude', label: 'Claude Code', available: true }, { kind: 'codex-web', label: 'Codex Web', available: true }],
+    interpretIntent: () => { interpretations++; return { goal: 'Investigate release readiness.', actions: [{ kind: 'delegate_task', kindOfSession: 'codex-web', cwd: root, text: 'Investigate release readiness.' }] }; },
+    dispatchAction: async action => { effects.push(action); return { ok: true }; },
+    fetch: async url => new Response(JSON.stringify(url.endsWith('/key') ? { data: {} } : { data: [{ id: 'scripted', context_length: 128000, supported_parameters: ['tools'] }] })) });
+  t.after(async () => { await relay.cancel(); await relay.dispose(); fs.rmSync(root, { recursive: true, force: true }); });
+  await relay.configure({ apiKey: 'test', model: 'scripted', sessionOnly: true }); await relay.setEnabled(true);
+  await relay.send({ text: 'Really, no. open a codical terminal and web terminal, and have it investigate what else do we need before we can release the app and make it a paid application.', origin: 'voice' });
+  assert.equal(interpretations, 0);
+  assert.deepEqual(effects, []);
+  const state = relay.getState();
+  assert.equal(state.tasks.at(-1).status, 'needs-answer');
+  await relay.dispose(); // Persistence is coalesced; wait for the actual drain.
+  const saved = fs.readFileSync(path.join(root, 'orchestrator-conversation.json'), 'utf8');
+  assert.match(saved, /Which terminal did you mean/);
+  assert.match(saved, /make it a paid application/);
+});
 test('priority operation guidance separates executable work from drafts and retains continuation restrictions',()=>{
   assert(INTENT_SYSTEM.startsWith('Choose the operation before filling its fields:'));
   const priority=INTENT_SYSTEM.slice(0,INTENT_SYSTEM.indexOf('Resolve project locations'));

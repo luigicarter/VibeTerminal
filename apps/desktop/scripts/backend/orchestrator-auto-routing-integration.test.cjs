@@ -18,7 +18,7 @@ async function until(predicate) {
 
 async function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-auto-routing-'));
-  const f = { root, projects: [{ name: 'Project', path: root }], sessions: [], effects: [], contexts: [], routes: [], reads: [], plans: [], phases: new Map(),
+  const f = { root, projects: [{ name: 'Project', path: root }], sessions: [], effects: [], contexts: [], routes: [], reads: [], plans: [], phases: new Map(), spoken: [],
     launchers: [{ kind: 'codex', label: 'Codex', available: true, configured: true }] };
   f.commits = observeWorkItemCommits(t, path.join(root, 'orchestrator-work-items.json'), () => f.relay?.getState().tasks);
   f.session = (id = 'pane', cwd = root) => ({ id, name: id, cwd, kind: 'codex', provider: 'codex', generation: `generation-${id}`,
@@ -30,6 +30,7 @@ async function fixture(t) {
       target: { id: session.id, generation: session.generation, launchToken: session.launchToken } };
   };
   f.relay = createOrchestrator({ userDataPath: root, secureStorage: { isEncryptionAvailable: () => false },
+    onSpeak: async event => { f.spoken.push(event); return { ok: true }; },
     getRoots: () => ({ documents: root, projects: f.projects }), getSessions: () => f.sessions,
     // Production awaits this catalog midway through building the planner context,
     // so the hook reproduces work that settles inside that window.
@@ -118,6 +119,126 @@ test('an exact literal task survives automatic worker creation unchanged', { tim
   const result = await f.run(text, { promptMode: 'literal' });
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(f.effects.find(a => a.kind === 'send_prompt').text, text);
+});
+
+for (const failedIndex of [0, 1]) test(`sibling launch failure ${failedIndex} retains independent delivery and retries only its own pane`, async t => {
+  const f = await fixture(t);
+  f.create = action => {
+    const result = f.created(action), index = f.sessions.length - 1;
+    if (index !== failedIndex) return result;
+    Object.assign(f.sessions[index], { agentProcessState: 'starting', agentPid: undefined, status: 'starting' });
+    return { ...result, ok: false, status: 'launch-timeout', target: undefined, sessionCreated: true,
+      delivery: 'not-dispatched', error: 'The pane is still starting.' };
+  };
+  f.plans.push({ goal: 'Run two independent reviews.', actions: [f.plan('Review the UI.'), f.plan('Review the API.')] });
+  const first = await f.relay.send({ text: 'Run two independent reviews.', origin: 'voice' });
+  assert.equal(first.ok, false);
+  assert.equal(first.text.split('The pane is still starting.').length - 1, 1, 'failure is reported once');
+  assert(f.spoken.some(event => event.text === first.text && !event.completionCue), 'spoken outcome uses the same recorded effects');
+  assert.equal(first.actions.filter(action => action.kind === 'create_session').length, 2);
+  const sent = f.effects.filter(action => action.kind === 'send_prompt');
+  assert.equal(sent.length, 1, JSON.stringify(first));
+  assert.equal(sent[0].targetId, f.sessions[1 - failedIndex].id);
+  const submitted = await f.commits.waitFor(item => item.binding?.target.id === sent[0].targetId && item.status === 'waiting-results', 'successful sibling');
+  assert.equal(submitted.status, 'waiting-results');
+  const workingPane = f.sessions[1 - failedIndex];
+  Object.assign(workingPane, { turnId: 'independent-result', actionId: sent[0].actionId, turnState: 'completed',
+    turnStartedAt: Date.now(), turnEndedAt: Date.now() });
+  await f.relay.refresh();
+  await f.commits.waitFor(item => item.id === submitted.id && item.status === 'finished', 'successful sibling result');
+  assert.notEqual(f.task(first).status, 'finished', 'one result cannot erase the failed sibling');
+  const failedPane = f.sessions[failedIndex];
+  Object.assign(failedPane, { agentProcessState: 'running', agentPid: 100, status: 'idle' });
+  await f.relay.refresh();
+  assert.equal(f.effects.filter(action => action.kind === 'send_prompt').length, 1, 'readiness alone cannot send');
+  f.plans.push(context => {
+    assert.equal(context.previousCommand.grants.length, 1, 'submitted sibling cannot return as unfinished');
+    const grant = context.previousCommand.grants[0];
+    return { goal: 'Retry the remaining review.', continuationOf: first.requestId,
+      actions: [{ kind: 'operate_terminal', sourceUserId: first.requestId, targetIds: [failedPane.id],
+        text: grant.text, operationMode: 'task' }] };
+  });
+  const retry = await f.relay.send({ text: 'Try the remaining review again.', replyToRequestId: first.requestId, origin: 'text' });
+  assert.equal(retry.ok, true, JSON.stringify(retry));
+  assert.equal(f.effects.filter(action => action.kind === 'create_session').length, 2);
+  assert.deepEqual(f.effects.filter(action => action.kind === 'send_prompt').map(action => action.targetId), [sent[0].targetId, failedPane.id]);
+});
+
+for (const count of [1, 2]) test(`garbled launcher clarification preserves the task and corrects to ${count} requested panes`, async t => {
+  const f = await fixture(t);
+  const objective = 'Investigate release readiness. Do not edit files.';
+  const first = await f.relay.send({ text: `Open a codical terminal and web terminal, and have it ${objective}`, origin: 'voice' });
+  assert.equal(f.contexts.length, 0); assert.equal(f.effects.length, 0);
+  assert.equal(f.task(first).status, 'needs-answer');
+  f.plans.push(context => {
+    assert.equal(context.previousCommand.requestId, first.requestId);
+    assert(context.previousCommand.instruction.includes(objective));
+    return { goal: objective, continuationOf: first.requestId,
+      actions: Array.from({ length: count }, () => f.plan(objective, { sourceUserId: first.requestId, kindOfSession: 'codex', assignmentMode: 'new', promptMode: 'literal' })) };
+  });
+  const next = await f.relay.send({ text: count === 1 ? 'Just one Codex terminal.' : 'Two separate Codex terminals.',
+    replyToRequestId: first.requestId, origin: 'voice' });
+  assert.equal(next.ok, true, JSON.stringify(next));
+  assert.equal(f.effects.filter(action => action.kind === 'create_session').length, count);
+  assert.deepEqual(f.effects.filter(action => action.kind === 'send_prompt').map(action => action.text), Array(count).fill(objective));
+});
+
+test('all failed launches retain both receipts and submit no work', async t => {
+  const f = await fixture(t);
+  f.create = action => ({ ...f.created(action), ok: false, target: undefined, status: 'launch-timeout', sessionCreated: true,
+    delivery: 'not-dispatched', error: 'Startup was not confirmed.' });
+  f.plans.push({ goal: 'Run independent reviews.', actions: [f.plan('Review UI.'), f.plan('Review API.')] });
+  const result = await f.relay.send({ text: 'Run independent reviews.', origin: 'text' });
+  assert.equal(result.ok, false); assert.equal(result.actions.length, 2);
+  assert.equal(f.effects.filter(action => action.kind === 'send_prompt').length, 0);
+});
+
+for (const fault of ['generation', 'receipt']) test(`invalid ${fault} binding never enters partial delivery authority`, async t => {
+  const f = await fixture(t);
+  f.create = action => {
+    const created = f.created(action);
+    if (f.sessions.length !== 1) return created;
+    return fault === 'generation' ? { ...created, target: { ...created.target, generation: 'wrong' } }
+      : { ...created, processState: 'unknown' };
+  };
+  f.plans.push({ goal: 'Run independent reviews.', actions: [f.plan('Review UI.'), f.plan('Review API.')] });
+  const result = await f.relay.send({ text: 'Run independent reviews.', origin: 'text' });
+  assert.equal(result.ok, false);
+  assert.equal(result.actions.filter(action => action.kind === 'create_session').length, 2);
+  assert.deepEqual(f.effects.filter(action => action.kind === 'send_prompt').map(action => action.targetId), [f.sessions[1].id]);
+  assert(result.actions.some(action => action.status === 'binding-failed'));
+});
+
+test('cancelled multi-launch retains late creation receipts without submitting either task', async t => {
+  const f = await fixture(t), release = [];
+  f.release = () => release.forEach(resolve => resolve());
+  f.create = async action => { const created = f.created(action); await new Promise(resolve => release.push(resolve)); return created; };
+  f.plans.push({ goal: 'Run two independent reviews.', actions: [f.plan('Review UI.'), f.plan('Review API.')] });
+  const pending = f.relay.send({ text: 'Run two independent reviews.', origin: 'text' });
+  await until(() => release.length === 2);
+  await f.relay.cancel();
+  release[1](); release[0]();
+  await pending;
+  await until(() => f.relay.getState().receipts.filter(receipt => receipt.kind === 'create_session').length === 2);
+  assert.equal(f.effects.filter(action => action.kind === 'send_prompt').length, 0);
+});
+
+test('failed sibling prevents after-results work even when the independent task finishes', async t => {
+  const f = await fixture(t);
+  f.create = action => {
+    const created = f.created(action);
+    return f.sessions.length === 1 ? created : { ...created, ok: false, target: undefined, status: 'launch-timeout',
+      sessionCreated: true, delivery: 'not-dispatched', error: 'Startup is unconfirmed.' };
+  };
+  f.plans.push({ goal: 'Review both before fixing.', actions: [f.plan('Review UI.'), f.plan('Review API.')],
+    afterResults: { instruction: 'Use both review results to implement fixes.' } });
+  const result = await f.relay.send({ text: 'Review UI and API independently. Use both review results to implement fixes.', origin: 'text' });
+  assert.equal(result.ok, false);
+  const sent = f.effects.find(action => action.kind === 'send_prompt'); assert(sent);
+  Object.assign(f.sessions[0], { turnId: 'review-result', actionId: sent.actionId, turnState: 'completed', turnStartedAt: Date.now(), turnEndedAt: Date.now() });
+  await f.relay.refresh();
+  assert.equal(f.contexts.length, 1, 'the dependent fix must not be interpreted or submitted');
+  assert.equal(f.effects.filter(action => action.kind === 'send_prompt').length, 1);
 });
 
 test('a timed-out creation recovers only its original ready pane for a later authorized follow-up', { timeout: 2000 }, async t => {

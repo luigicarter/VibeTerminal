@@ -28,7 +28,7 @@ function outcomeSentence(outcome, sessions = [], grants = []) {
   const grant = grants.find(item => item.id === outcome.grantId);
   const id = outcome.targetId || outcome.id;
   const target = sessions.find(item => item.id === id) || grant?.targets?.find(item => item.id === id);
-  const name = outcome.kind === 'create_session' ? 'the terminal'
+  const name = outcome.kind === 'create_session' ? displayLabel(outcome.name) || PROVIDER_LABELS[grant?.args?.kindOfSession] || 'the terminal'
     : target?.name || target?.conversationTitle || 'the terminal';
   const status = outcome.status;
   const say = (key, context = {}) => sentence(key, { pane: name, ...context });

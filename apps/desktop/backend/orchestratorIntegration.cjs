@@ -646,7 +646,9 @@ function installOrchestrator(options) {
     const createdTarget = async result => {
       if (result?.ok && result.id) terminalInput.trackStartup({ id: result.id, launchToken: result.launchToken,
         ...(result.target?.generation && !String(result.target.generation).startsWith('paused:') ? { generation: result.target.generation } : {}) });
-      if (action.waitForReady && result?.ok && result.id) return require("./orchestratorLaunchers.cjs").waitForRoutingReady({ result, getSession: id => directory.get(id), refresh: refreshInventory, signal: AbortSignal.any([launchLifetime.signal, ...(action.signal ? [action.signal] : [])]), timeoutMs: options.launchTimeoutMs ?? 20000 });
+      if (action.waitForReady && result?.ok && result.id) return require("./orchestratorLaunchers.cjs").waitForRoutingReady({ result, getSession: id => directory.get(id), refresh: refreshInventory,
+        signal: AbortSignal.any([launchLifetime.signal, ...(action.signal ? [action.signal] : [])]), timeoutMs: options.launchTimeoutMs ?? 20000,
+        onDiagnostic: event => relay.recordDiagnostic({ ...event, requestId: action.requestId, grantId: action.grantId, actionId: action.actionId, provider: action.kindOfSession }) });
       const session = result?.ok && result.id ? directory.get(result.id) : null;
       if (result?.ok && result.id && Number.isFinite(result.launchToken) &&
           !session?.fusion && !session?.openFusion && !["fusion", "openfusion"].includes(session?.kind || action.kindOfSession)) {

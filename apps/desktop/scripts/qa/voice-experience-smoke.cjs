@@ -90,7 +90,7 @@ async function screenshot(client, name) { if (hidden) { result.skippedScreenshot
   const speechWav = path.join(output, 'fake-microphone.wav');
   // Mid-command pauses must survive; the final pause gives completion a quiet
   // window before Chromium loops the fake microphone again.
-  const sentence = '<speak version="1.0" xml:lang="en-US">Push to talk works. Show me the workspace. Hey Lina.<break time="500ms"/>Open the project<break time="600ms"/>and run the tests.<break time="4s"/></speak>';
+  const sentence = '<speak version="1.0" xml:lang="en-US">Push to talk works. Show me the workspace. Hey Lina.<break time="500ms"/>Open the project<break time="1000ms"/>and run the tests.<break time="4s"/></speak>';
   const synthesis = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
     `$ErrorActionPreference='Stop';Add-Type -AssemblyName System.Speech;$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;$f=New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo(16000,[System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen,[System.Speech.AudioFormat.AudioChannel]::Mono);$s.SetOutputToWaveFile('${speechWav}',$f);$s.SpeakSsml('${sentence}');$s.Dispose()`],
     { windowsHide: true, encoding: 'utf8', timeout: 120000 });

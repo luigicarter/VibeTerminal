@@ -108,6 +108,7 @@ export interface RelayState {
         spendingLimit?: number;
         microphoneId?: string;
         handsFreeEnabled?: boolean;
+        voicePauseMs?: number;
         spareAgent?: boolean;
     };
     sessions: RelaySession[];

@@ -31,7 +31,10 @@ function createDiagnostics({ userDataPath, getSecrets = () => [], now = Date.now
     // Voice transcription overlap: whether the audio went out before the pause
     // ended, whether that result was the one used, and whether the vocabulary
     // prompt was attached. Never the audio, the transcript or the prompt itself.
-    for (const key of ['resultScopeTransferred', 'paginationAdvanced', 'progress', 'hasTurnId', 'modelFallback', 'sttEarly', 'sttReused', 'sttPrompt']) if (typeof input?.[key] === 'boolean') result[key] = input[key];
+    for (const key of ['resultScopeTransferred', 'paginationAdvanced', 'progress', 'hasTurnId', 'modelFallback', 'sttEarly', 'sttReused', 'sttPrompt', 'inventoryPresent', 'hasAgentPid']) if (typeof input?.[key] === 'boolean') result[key] = input[key];
+    if (Number.isSafeInteger(input?.launchToken) && input.launchToken >= 0) result.launchToken = input.launchToken;
+    if (['pending', 'ready', 'failed'].includes(input?.launchState)) result.launchState = input.launchState;
+    if (['observed', 'provisional', 'unavailable'].includes(input?.observation)) result.observation = input.observation;
     // Signed operational offsets: a turn that started before its own submission
     // is exactly the misattribution these records exist to show.
     for (const key of ['turnStartedOffsetMs']) if (Number.isFinite(input?.[key])) result[key] = Math.max(-1e9, Math.min(input[key], 1e9));

@@ -37,6 +37,12 @@ Lina Terminal is an Electron + React desktop workspace for running local termina
 
 ## Docs Index
 
+- `docs/release-0.1.126-review.md` - Production publication of the Orchestrator clarification/partial-launch repair, the more forgiving voice pause and the hidden-by-default Chats section, with the stale voice-experience harness the local gate caught, the 59-check gate at 2,579 Orchestrator tests, hosted release gates and the installed-application boundary.
+
+- `docs/voice-cutoff-repair-2026-09-16.md` - Replaces the 600 ms confidence shortcut with a 1.5-second default and 1–3 second voice-pause setting, preserves resumed speech/speculative transcription and manual send, with controller/native/UI evidence and the installed-version boundary. Links to the original cutoff analysis.
+
+- `docs/orchestrator-repair-implementation-2026-09-16.md` - Uncertain-launcher clarification, independent delivery after sibling startup failure, per-work-item settlement and exact retry, named/deduplicated partial replies, bounded startup diagnostics, real-Brain/native/packaged verification and the unreconstructed original Codex Web timeout boundary. Links to the incident review and repair plan.
+
 - `docs/release-0.1.125-review.md` - Production publication of the Orchestrator prompt/targeting and unsolicited-spare repairs, local mocked acceptance, hosted Windows release gates, update-feed verification, and installed-application boundary.
 
 - `docs/orchestrator-prompt-review-2026-09-15.md` - Saved conversation/log review and source fixes for unsolicited warm-spare panes, first-startup identity/duplicate task ownership, existing-pane and negative-answer routing, dropped close/open/prompt clauses, routing-title replies, malformed blank-opening retries, handle compiler wiring and launcher/payload drift; mocked regression evidence and installed/live-profile boundaries.
@@ -71,7 +77,7 @@ Lina Terminal is an Electron + React desktop workspace for running local termina
 
 - `docs/release-0.1.118-review.md` - Complete pending-work release: terminal Chats/recovery, Orchestrator overhaul, read-only phone bridge, mobile/server/account-preview source, release-review fixes, all-app acceptance and installer/publication evidence.
 
-- `docs/chat-section-implementation-2026-09-13.md` - Implemented terminal-format Chats directly below Projects: durable SQLite catalog/workspace and app-owned drafts, exact native resume, private Codex Web history, shutdown/crash/renderer-reload recovery, bounded history copies and backups, reviewed bugs, source/package verification and prioritized remaining edge cases. The section shipped in v0.1.121 and the Chats-only-from-Chats rule in v0.1.123; installation remains explicit.
+- `docs/chat-section-implementation-2026-09-13.md` - Implemented terminal-format Chats directly below Projects: durable SQLite catalog/workspace and app-owned drafts, exact native resume, private Codex Web history, shutdown/crash/renderer-reload recovery, bounded history copies and backups, reviewed bugs, source/package verification and prioritized remaining edge cases. The section shipped in v0.1.121 and the Chats-only-from-Chats rule in v0.1.123; installation remains explicit. Since 2026-09-16 the section is hidden by default behind the `lina:chats:visible` renderer switch, with storage and recovery still running underneath.
 
 - `docs/chat-section-plan-2026-09-13.md` - Broader Chats design and recovery roadmap: source audit, persistent chat versus pane identity, storage, native history, draft/send recovery, shutdown/updates, provider support, migration/backups and acceptance matrix. Links to the precise implemented scope; remaining hardening is not a shipped guarantee.
 

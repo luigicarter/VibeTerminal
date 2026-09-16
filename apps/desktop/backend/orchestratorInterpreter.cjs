@@ -9,7 +9,7 @@ const { resultDependencyBlocker } = require('./orchestratorContinuation.cjs');
 const { listSessionSummaries } = require('./orchestratorContext.cjs');
 const { boundedRoster } = require('./orchestratorPaneMemory.cjs');
 const { rosterRows } = require('./orchestratorTerminalModel.cjs');
-const { terminalsOf } = require('./orchestratorReference.cjs');
+const { terminalsOf, unresolvedOpeningLauncher } = require('./orchestratorReference.cjs');
 const { boundedMemory } = require('./orchestratorMemory.cjs');
 const { fitMessages } = require('./orchestratorBudget.cjs');
 const { completionOptions, exhaustedReply, structuredOutput } = require('./orchestratorModelOptions.cjs');
@@ -191,6 +191,10 @@ function createIntentInterpreter({ interpretIntent, getTask, complete, redact, c
     // reviewers that quote it and normalization all read the normalized
     // sentence, so an exact-quote check can never straddle two spellings.
     const context = planningContext(rawContext);
+    const unresolvedLauncher = unresolvedOpeningLauncher(context.instruction, context);
+    if (unresolvedLauncher) return normalizeIntent({
+      goal: context.instruction.slice(0, 4000), actions: [],
+      clarification: `Which terminal did you mean by "${unresolvedLauncher}"?` }, context);
     let raw, creationPurpose, creationPurposeKey, needsExecution = false;
     let needsAssignment = false;
     // An injected interpreter may decline. The command compiler is one: it

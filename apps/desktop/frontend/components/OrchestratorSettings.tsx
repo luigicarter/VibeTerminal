@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { relayApi, useOrchestrator, type RelayState } from '../orchestratorUi';
 import type { VoiceApi, VoiceState } from '../voice/types';
+import endpointing from '../../shared/voiceEndpointing.json';
 import './orchestratorSettings.css';
 type Model = { id: string; name?: string; label?: string; voices?: { id: string; name: string }[] };
-type Draft = { model: string; fallbackModel: string; interpretationModel: string; sttModel: string; ttsModel: string; voice: string; language: string; microphoneId: string; handsFreeEnabled: boolean; spareAgent: boolean; monitoringEnabled: boolean; enabledOnLaunch: boolean; monitoringIntervalSeconds: string; spendingLimit: string };
+type Draft = { model: string; fallbackModel: string; interpretationModel: string; sttModel: string; ttsModel: string; voice: string; language: string; microphoneId: string; handsFreeEnabled: boolean; voicePauseMs: string; spareAgent: boolean; monitoringEnabled: boolean; enabledOnLaunch: boolean; monitoringIntervalSeconds: string; spendingLimit: string };
 function draftFrom(settings: RelayState['settings']): Draft {
-  return { model: settings.model || '', fallbackModel: settings.fallbackModel || '', interpretationModel: settings.interpretationModel || '', sttModel: settings.sttModel || '', ttsModel: settings.ttsModel || '', voice: settings.voice || '', language: settings.language || '', microphoneId: settings.microphoneId || '', handsFreeEnabled: !!settings.handsFreeEnabled, spareAgent: settings.spareAgent === true, monitoringEnabled: !!settings.monitoringEnabled, enabledOnLaunch: !!settings.enabledOnLaunch, monitoringIntervalSeconds: String(settings.monitoringIntervalSeconds ?? 30), spendingLimit: settings.spendingLimit == null ? '' : String(settings.spendingLimit) };
+  return { model: settings.model || '', fallbackModel: settings.fallbackModel || '', interpretationModel: settings.interpretationModel || '', sttModel: settings.sttModel || '', ttsModel: settings.ttsModel || '', voice: settings.voice || '', language: settings.language || '', microphoneId: settings.microphoneId || '', handsFreeEnabled: !!settings.handsFreeEnabled, voicePauseMs: String(settings.voicePauseMs ?? endpointing.defaultPauseMs), spareAgent: settings.spareAgent === true, monitoringEnabled: !!settings.monitoringEnabled, enabledOnLaunch: !!settings.enabledOnLaunch, monitoringIntervalSeconds: String(settings.monitoringIntervalSeconds ?? 30), spendingLimit: settings.spendingLimit == null ? '' : String(settings.spendingLimit) };
 }
 export function OrchestratorSettings() {
   const state = useOrchestrator(), api = relayApi();
@@ -39,10 +40,12 @@ export function OrchestratorSettings() {
   async function connect() {
     if (!api || !draft) return;
     if (!draft.model.trim()) throw new Error('Choose an assistant model.');
+    const voicePauseMs = Number(draft.voicePauseMs);
+    if (!Number.isInteger(voicePauseMs) || voicePauseMs < endpointing.minPauseMs || voicePauseMs > endpointing.maxPauseMs) throw new Error('Voice pause must be between 1 and 3 seconds.');
     const interval = Number(draft.monitoringIntervalSeconds), spending = draft.spendingLimit === '' ? null : Number(draft.spendingLimit);
     if (!Number.isFinite(interval) || interval < 5) throw new Error('Monitoring interval must be at least 5 seconds.');
     if (spending !== null && (!Number.isFinite(spending) || spending < 0)) throw new Error('Spending limit must be zero or greater.');
-    const result = await api.configure({ ...draft, model: draft.model.trim(), fallbackModel: draft.fallbackModel.trim(), interpretationModel: draft.interpretationModel.trim(), monitoringIntervalSeconds: interval, spendingLimit: spending, ...(apiKey ? { apiKey, sessionOnly } : {}) });
+    const result = await api.configure({ ...draft, voicePauseMs, model: draft.model.trim(), fallbackModel: draft.fallbackModel.trim(), interpretationModel: draft.interpretationModel.trim(), monitoringIntervalSeconds: interval, spendingLimit: spending, ...(apiKey ? { apiKey, sessionOnly } : {}) });
     if (!result.ok) throw new Error(result.error || 'Could not save settings.');
     setKey(''); setChangingKey(false); setDirty(false);
     const connection = await api.testConnection();
@@ -74,6 +77,8 @@ export function OrchestratorSettings() {
       <p className="settings-description">A faster model for understanding what you said; replies and results still use the brain.</p>
       <div className="assistant-enable"><label className="assistant-check"><input type="checkbox" checked={!!state?.enabled} disabled={busy || !api || (!state?.enabled && ((!state?.settings.hasKey && !apiKey.trim()) || !draft.model.trim()))} onChange={event => void action(() => toggle(event.target.checked))}/> Enable Orchestrator</label></div>
       <label className="assistant-check"><input type="checkbox" checked={draft.handsFreeEnabled} onChange={event => edit('handsFreeEnabled', event.target.checked)}/> Hands-free voice - Hey Lina (English)</label>
+      <label>Pause before sending (seconds)<input type="number" min={endpointing.minPauseMs / 1000} max={endpointing.maxPauseMs / 1000} step="0.1" value={draft.voicePauseMs === '' ? '' : Number(draft.voicePauseMs) / 1000} onChange={event => edit('voicePauseMs', event.target.value === '' ? '' : String(Math.round(Number(event.target.value) * 1000)))}/></label>
+      <p className="settings-description">Wait this long after you pause before sending a completed thought. Increase it if Lina cuts you off. Applies to hands-free commands and spoken answers; click Send or release Space to send immediately.</p>
       <label className="assistant-check"><input type="checkbox" checked={draft.spareAgent} onChange={event => edit('spareAgent', event.target.checked)}/> Keep a spare agent ready in the active project</label>
       <p className="settings-description">One idle agent waits in the project you are working in, so "open" and "start" are instant; it closes itself after 30 unused minutes.</p>
       {voiceState?.handsFreeStatus === 'loading' && <p className="settings-description" role="status">Starting hands-free voice... Hold Space to talk.</p>}

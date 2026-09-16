@@ -35,10 +35,10 @@ test('neural speech bypasses RMS gate and wake plus immediate command preserves 
   const f = fixture(); t.after(() => f.controller.dispose()); await f.activate();
   for (let i = 0; i < 20; i++) f.frame();
   f.frame(100, true, true); assert.equal(f.controller.getState().recordingSource, 'wake');
-  f.frame(100, true); f.frame(1200); await until(() => f.sent.length);
+  f.frame(100, true); f.frame(1500); await until(() => f.sent.length);
   assert.equal(f.sent[0].text, 'show my agents');
   const wav = Buffer.from(f.uploads[0].input_audio.data, 'base64');
-  assert.equal((wav.length - 44) / 2, 32000 + 20800, 'two seconds of history plus every live sample survive');
+  assert.equal((wav.length - 44) / 2, 32000 + 25600, 'two seconds of history plus every live sample survive');
 });
 test('pre-wake silence does not consume grace and wake-only transcription is never relayed', async t => {
   const f = fixture({ text: 'Hey Lina!' }); t.after(() => f.controller.dispose()); await f.activate();
@@ -54,7 +54,7 @@ test('speech resuming during completion invalidates the result, including speech
   f.capture(100, .001); const resumed = f.packets.at(-1);
   resolve(); await tick(); assert.equal(f.uploads.length, 0, 'unclassified received audio must veto immediate sending');
   f.classify(resumed, true); await tick(); assert.equal(f.uploads.length, 0);
-  f.frame(); f.frame(); assert.equal(f.analyses.length, 2); resolve(); await tick(); f.frame(1000); await until(() => f.sent.length);
+  f.frame(); f.frame(); assert.equal(f.analyses.length, 2); resolve(); await tick(); f.frame(1300); await until(() => f.sent.length);
 });
 test('short unsure speech retries after three seconds without uploading doubtful audio', async t => {
   const f = fixture({ analyze: async input => ({ ...input, probability: .2, complete: false }) }); t.after(() => f.controller.dispose()); await f.activate();
@@ -79,7 +79,7 @@ test('short neural answer starts after playback, stops no-answer timer, and disp
   const interaction = { id: 'request', sessionId: 'pane', generation: 4, revision: 2, state: 'pending', kind: 'question', questions: [{ id: 'confirm', question: 'Continue?', options: [{ label: 'Yes' }, { label: 'No' }] }] };
   f.relayState.requests = [interaction]; await f.controller.announceInteraction(interaction);
   assert.equal(f.controller.getState().phase, 'awaiting-answer'); f.frame(100, true); assert.equal(f.controller.getState().recordingSource, 'answer');
-  f.frame(1200); await until(() => f.dispatched.length);
+  f.frame(1500); await until(() => f.dispatched.length);
   assert.deepEqual(f.dispatched[0], { kind: 'answer_question', targetId: 'pane', requestId: 'request', generation: 4, revision: 2, answers: { confirm: 'Yes' } }); assert.equal(f.sent.length, 0);
 });
 test('old capture and stream events cannot wake or finish a newer microphone generation', async t => {
@@ -230,13 +230,13 @@ test('adopted short tap and resumed speech cannot schedule concurrent completion
   f.controller.configure({ pushToTalk: 'start', holdId: 1 }); f.controller.configure({ pushToTalk: 'cancel', holdId: 1 });
   f.frame(100, true); f.frame(); f.frame(); assert.equal(f.analyses.length, 1, 'old inference remains sole owner until settled');
   settle(); await tick(); assert.equal(f.uploads.length, 0); f.frame(); assert.equal(f.analyses.length, 2);
-  settle(); await tick(); f.frame(1000); await until(() => f.sent.length); assert.equal(f.controller.getState().handsFreeStatus, 'ready');
+  settle(); await tick(); f.frame(1300); await until(() => f.sent.length); assert.equal(f.controller.getState().handsFreeStatus, 'ready');
 });
 test('completion scheduling and cancellation errors do not disable hands-free', async t => {
   let attempts = 0;
   const f = fixture({ analyze: async input => { if (++attempts < 3) throw Object.assign(Error('temporary'), { name: attempts === 1 ? 'BusyError' : 'AbortError' }); return { ...input, probability: .99, complete: true }; } });
   t.after(() => f.controller.dispose()); await f.activate(); f.frame(100, true, true); f.frame(100, true); f.frame(); f.frame(); await tick();
-  assert.equal(f.controller.getState().handsFreeStatus, 'ready'); f.frame(); await tick(); assert.equal(f.controller.getState().handsFreeStatus, 'ready'); f.frame(); await tick(); f.frame(1000); await until(() => f.sent.length);
+  assert.equal(f.controller.getState().handsFreeStatus, 'ready'); f.frame(); await tick(); assert.equal(f.controller.getState().handsFreeStatus, 'ready'); f.frame(); await tick(); f.frame(1300); await until(() => f.sent.length);
 });
 test('a new manual hold owns existing audio while an older flush release is still pending', async t => {
   const f = fixture(); t.after(() => f.controller.dispose()); await f.activate();
@@ -253,7 +253,7 @@ test('a short adopted tap invalidates a cached completion waiting for VAD backlo
   assert.equal(f.uploads.length, 0);
   f.controller.configure({ pushToTalk: 'start', holdId: 1 }); f.controller.configure({ pushToTalk: 'cancel', holdId: 1 }); f.frame(200);
   assert.equal(f.uploads.length, 0, 'old cached completion cannot commit after ownership changes'); assert.equal(f.analyses.length, 2);
-  settle(); await tick(); f.frame(1000); await until(() => f.sent.length);
+  settle(); await tick(); f.frame(1300); await until(() => f.sent.length);
 });
 test('speech queued at the answer deadline survives until VAD classifies it', async t => {
   const f = fixture({ text: 'yes', analyze: async input => ({ ...input, probability: .1, complete: false }) }); t.after(() => f.controller.dispose()); await f.activate();
@@ -280,10 +280,10 @@ test('confident completion waits through a short thinking pause and restarts whe
   assert.equal(f.analyses.length, 1); assert.equal(f.uploads.length, 0, '200ms pause must not send');
   f.frame(300); assert.equal(f.uploads.length, 0, 'half a second of thinking must not send');
   f.frame(300, true); f.frame(200); await tick();
-  assert.equal(f.analyses.length, 2); f.frame(399); assert.equal(f.uploads.length, 0);
+  assert.equal(f.analyses.length, 2); f.frame(1299); assert.equal(f.sent.length, 0);
   f.frame(1); await until(() => f.sent.length);
   const finish = f.diagnostics.filter(x => x.event === 'voice_recording' && x.stage === 'finish').at(-1);
-  assert.equal(finish.reason, 'semantic'); assert.equal(finish.pauseMs, 600); assert.equal(finish.turnConfidence, .99);
+  assert.equal(finish.reason, 'semantic'); assert.equal(finish.pauseMs, 1500); assert.equal(finish.turnConfidence, .99);
 });
 
 test('uncertain semantic result finishes after three seconds quiet and preserves queued speech', async t => {
@@ -322,7 +322,7 @@ test('question followup starts a temporary detector with wake preference off and
   await until(() => f.controller.getState().handsFreeStatus === 'ready');
   assert.equal(f.starts, 1); assert.equal(f.settings.handsFreeEnabled, false);
   f.frame(100, true); assert.equal(f.controller.getState().recordingSource, 'answer');
-  f.frame(1200); await until(() => f.sent.length && f.stopped);
+  f.frame(1500); await until(() => f.sent.length && f.stopped);
   assert.deepEqual(f.sent[0], { text: 'yes', origin: 'voice', replyToRequestId: 'r1', questionId: 'q1' });
   assert.equal(f.controller.getState().handsFreeStatus, 'off');
   const packets = f.packets.length; f.capture(); assert.equal(f.packets.length, packets, 'Temporary followup never enables wake detection');
@@ -355,7 +355,7 @@ test('spoken dismissal of native permission returns to wake standby without appr
   const f = fixture({ text: 'stop listening' }); t.after(() => f.controller.dispose()); await f.activate();
   const interaction = { id: 'p1', sessionId: 'pane', generation: 1, revision: 2, state: 'pending', kind: 'permission', detail: 'Allow the command?' };
   f.relayState.requests = [interaction]; await f.controller.announceInteraction(interaction);
-  f.frame(300, true); f.frame(1200); await until(() => f.uploads.length && f.controller.getState().phase === 'listening');
+  f.frame(300, true); f.frame(1500); await until(() => f.uploads.length && f.controller.getState().phase === 'listening');
   assert.equal(f.dispatched.length, 0); assert.equal(f.sent.length, 0);
   assert.equal(interaction.state, 'pending'); assert.equal(f.settings.handsFreeEnabled, true);
   f.frame(); assert.equal(f.packets.at(-1).mode, 'wake');
@@ -441,7 +441,7 @@ test('short-speech retry drains queued classifications and lets a current questi
   f.frame(100); await until(() => f.controller.getState().phase === 'awaiting-answer');
   assert.equal(f.uploads.length, 0); assert.equal(f.dispatched.length, 0); assert.equal(f.sent.length, 0);
   assert.equal(f.controller.getState().request.id, interaction.id);
-  probability = .99; f.frame(100, true); f.frame(1200); await until(() => f.dispatched.length);
+  probability = .99; f.frame(100, true); f.frame(1500); await until(() => f.dispatched.length);
   assert.deepEqual(f.dispatched[0], { kind: 'answer_question', targetId: 'pane', requestId: 'request', generation: 4, revision: 2, answers: { confirm: 'Yes' } });
 });
 
@@ -491,7 +491,7 @@ const WAKE_PREFIX_CASES = [
 ];
 for (const [text, expected] of WAKE_PREFIX_CASES) test(`wake transcript removes only a complete leading wake phrase: ${text}`, async t => {
   const f = fixture({ text }); t.after(() => f.controller.dispose()); await f.activate();
-  f.frame(100, true, true); f.frame(100, true); f.frame(1200); await until(() => f.sent.length);
+  f.frame(100, true, true); f.frame(100, true); f.frame(1500); await until(() => f.sent.length);
   assert.equal(f.sent[0].text, expected);
 });
 for (const [text, expected] of WAKE_PREFIX_CASES) test(`held transcript removes the same leading wake phrase: ${text}`, async t => {

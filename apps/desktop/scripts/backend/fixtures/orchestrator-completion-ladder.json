@@ -2282,6 +2282,71 @@
           ]
         }
       ]
+    },
+    {
+      "id": "T6.G",
+      "tier": 6,
+      "title": "Clarify an uncertain launcher before creating or prompting",
+      "setup": {
+        "projects": [
+          "vibeTerminal"
+        ],
+        "panes": []
+      },
+      "turns": [
+        {
+          "id": "T6.8",
+          "synthetic": true,
+          "text": "Open a codical terminal and web terminal in vibeTerminal, and have it say hi.",
+          "from": "vibeTerminal",
+          "note": "September 16 incident shape with a harmless payload; no provider guessing or sibling creation before clarification.",
+          "expect": {
+            "taskStatus": [
+              "needs-answer"
+            ],
+            "noEffects": true,
+            "paneDeltaTotal": 0,
+            "question": true,
+            "replyMentions": [
+              "codical"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "anyPromptDelivered": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "receipts",
+            "reply"
+          ]
+        },
+        {
+          "id": "T6.9",
+          "synthetic": true,
+          "text": "Just one Codex terminal in vibeTerminal. Send it the greeting from my original request.",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "waiting-results"
+            ],
+            "paneDeltaTotal": 1,
+            "createdKind": "codex",
+            "promptDelivered": true
+          },
+          "forbid": {
+            "question": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "receipts",
+            "ledger"
+          ]
+        }
+      ]
     }
   ]
 }

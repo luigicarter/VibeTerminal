@@ -19,6 +19,19 @@ const row = (id, at, extra = {}) => ({ requestId: `r-${at}`, at, verb: 'start', 
 const model = (sessions, extra = {}) => buildTerminalModel({ sessions, handles: createTerminalHandles(), ...extra });
 const ids = list => list.map(terminal => terminal.id);
 
+test('unknown opening names cannot acquire a launcher from the planner', () => {
+  const { unresolvedOpeningLauncher: unresolved } = require('../../backend/orchestratorReference.cjs');
+  const context = { launchers, projects: [{ name: 'vibeTerminal' }] };
+  assert.equal(unresolved('Really, no. open a codical terminal and web terminal, and have it investigate release readiness.', context), 'codical');
+  assert.equal(unresolved('Open a Claude Code terminal and web terminal.', context), 'web');
+  for (const text of ['Open a Claude Code terminal in vibeTerminal and have it investigate release readiness.',
+    'Open a Codex Web terminal.', 'Open a new terminal.', 'Open two blank terminals.',
+    'Open a Claude Code terminal and a Codex terminal.', 'Open a vibeTerminal terminal.',
+    'Tell it to open a codical terminal.', 'Do not open a web terminal.',
+    'Open a Claude Code terminal and have it explain how to open a web terminal.',
+    'Say "open a codical terminal".']) assert.equal(unresolved(text, context), undefined, text);
+});
+
 test('the grammar reads one kind per sentence, handles first, and states the facts the rules need', () => {
   for (const [text, kind] of [
     ['put that prompt in T3', 'handle'], ['tell t-2 to continue', 'handle'],

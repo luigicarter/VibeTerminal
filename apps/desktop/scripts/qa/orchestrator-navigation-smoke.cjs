@@ -6,6 +6,8 @@ const root = path.resolve(__dirname, "../.."), output = path.join(root, ".tmp", 
 fs.mkdirSync(output, { recursive: true });
 const userData = path.join(output, "userData"), docs = path.join(userData, "Documents");
 const packaged = process.argv.includes('--packaged'), performanceMode = process.argv.includes('--performance'), screenshots = process.argv.includes('--screenshots');
+const appPathIndex = process.argv.indexOf('--app-path');
+const appPath = appPathIndex >= 0 ? path.resolve(process.argv[appPathIndex + 1]) : path.join(root, 'release/win-unpacked/LinaTerminal.exe');
 if (performanceMode) {
   fs.mkdirSync(userData, { recursive: true });
   const messages = Array.from({ length: 1500 }, (_, i) => ({ id: `performance-${i}`, role: i % 2 ? 'assistant' : 'user', text: 'Synthetic retained conversation. '.repeat(64), at: Date.now() - 1500 + i }));
@@ -30,7 +32,7 @@ async function navigate(view, cwd) { const result = await dispatch({ kind: "navi
   const port = await freePort(), env = { ...process.env, VIBE_SCREENSHOT_MODE: "1", VIBE_INTERNAL_SCREENSHOT: "0", VIBE_SCREENSHOT_USER_DATA: userData, VIBE_AGENT_SHIM_BASE_DIR: path.join(output, "shims"), CODEX_HOME: path.join(output, "codex"), CLAUDE_CONFIG_DIR: path.join(output, "claude"), GEMINI_CLI_HOME: path.join(output, "gemini"), QWEN_HOME: path.join(output, "qwen"), KIMI_CODE_HOME: path.join(output, "kimi"), XDG_CONFIG_HOME: path.join(output, "config"), XDG_DATA_HOME: path.join(output, "data") };
   delete env.ELECTRON_RUN_AS_NODE; delete env.VITE_DEV_SERVER_URL;
   env.VIBE_SCREENSHOT_HIDDEN = screenshots ? '0' : '1';
-  child = spawn(path.join(root, packaged ? "release/win-unpacked/LinaTerminal.exe" : "node_modules/electron/dist/electron.exe"), [...(packaged ? [] : ['.']), `--remote-debugging-port=${port}`], { cwd: root, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+  child = spawn(packaged ? appPath : path.join(root, "node_modules/electron/dist/electron.exe"), [...(packaged ? [] : ['.']), `--remote-debugging-port=${port}`], { cwd: root, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
   results.pid = child.pid; const log = fs.createWriteStream(path.join(output, "electron.log")); child.stdout.pipe(log); child.stderr.pipe(log);
   const page = await until(async () => (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(page => page.type === "page" && page.url.startsWith("file:") && !page.url.includes("surface=voice")), "renderer");
   cdp = new Cdp(page.webSocketDebuggerUrl); await cdp.open(); await cdp.send("Page.enable");
@@ -94,6 +96,18 @@ async function navigate(view, cwd) { const result = await dispatch({ kind: "navi
   }
   await navigate('project', project.path);
   check('complete-workspace-map', { destinations: require('../../shared/workspaceNavigation.json').length });
+  await navigate('settings');
+  const pauseInput = `Array.from(document.querySelectorAll('.orchestrator-settings label')).find(e=>e.textContent.startsWith('Pause before sending'))?.querySelector('input')`;
+  const initialPause = await until(() => cdp.eval(`(()=>{const e=${pauseInput};return e&&{value:e.value,min:e.min,max:e.max};})()`), 'voice pause setting');
+  assert.deepEqual(initialPause, { value: '1.5', min: '1', max: '3' });
+  assert.equal((await cdp.eval('window.vibe.orchestrator.configure({voicePauseMs:2300})')).ok, true);
+  await until(() => cdp.eval('window.vibe.orchestrator.getState().then(s=>s.settings.voicePauseMs===2300)'), 'voice pause saved as milliseconds');
+  // This profile has no key. Exercise local settings through real IPC without
+  // enabling the assistant or invoking a cloud connection check.
+  await navigate('project', project.path); await navigate('settings');
+  await until(() => cdp.eval(`(${pauseInput})?.value==='2.3'`), 'voice pause survives remount');
+  check('voice-pause-settings-round-trip', { defaultSeconds: 1.5, savedMs: 2300, noKey: true });
+  await navigate('project', project.path);
   const beforeInvalid = await cdp.eval("JSON.stringify({workspace:document.querySelector('.workspace-button.active')?.textContent,storage:localStorage.getItem('vibe-terminal:workspaces:v2'),settings:!!document.querySelector('.settings-dialog')})");
   const invalid = await dispatch({ kind: "navigate", view: "project", cwd: path.join(docs, "missing") }); assert.equal(invalid.ok, false);
   assert.equal(await cdp.eval("JSON.stringify({workspace:document.querySelector('.workspace-button.active')?.textContent,storage:localStorage.getItem('vibe-terminal:workspaces:v2'),settings:!!document.querySelector('.settings-dialog')})"), beforeInvalid);
@@ -101,8 +115,9 @@ async function navigate(view, cwd) { const result = await dispatch({ kind: "navi
   for (const [width, height] of [[1440, 960], [1024, 640]]) {
     await cdp.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
     await sleep(150);
-    const geometry = await cdp.eval(`(()=>{const list=document.querySelector('.workspace-list');list.querySelectorAll('[data-qa-row]').forEach(row=>row.remove());for(let i=0;i<30;i++){const row=document.createElement('div');row.className='workspace-row';row.dataset.qaRow=String(i);row.innerHTML='<button class="workspace-button"><span class="workspace-name">Layout project '+(i+1)+'</span><span class="workspace-path">C:/Layout/Project-'+(i+1)+'</span></button>';list.append(row);}list.scrollTop=0;const chatSection=document.querySelector('.chats-section');chatSection.querySelectorAll('[data-qa-notice]').forEach(item=>item.remove());const notice=document.createElement('p');notice.className='chats-notice';notice.dataset.qaNotice='true';notice.textContent='Some provider history is unavailable or incomplete. Refresh after reconnecting the original provider store. '.repeat(4);chatSection.insertBefore(notice,chatSection.querySelector('.chats-list'));const r=list.getBoundingClientRect(),footer=document.querySelector('.sidebar-footer').getBoundingClientRect(),button=document.querySelector('.sidebar-footer button').getBoundingClientRect(),chats=document.querySelector('.chats-section').getBoundingClientRect(),chatList=document.querySelector('.chats-list').getBoundingClientRect();return {chatTop:chats.top,chatBottom:chats.bottom,chatListHeight:chatList.height,chatListBottom:chatList.bottom,width:innerWidth,height:innerHeight,listTop:r.top,listBottom:r.bottom,listHeight:r.height,footerTop:footer.top,gap:footer.top-r.bottom,settingsTop:button.top,settingsBottom:button.bottom,scrollHeight:list.scrollHeight,clientHeight:list.clientHeight,maxHeight:getComputedStyle(list).maxHeight};})()`);
-    assert(geometry.listHeight > 0); assert(geometry.chatTop >= geometry.listBottom && geometry.chatTop - geometry.listBottom <= 16, "Chats directly follows Projects"); assert(geometry.chatBottom <= geometry.footerTop && geometry.footerTop - geometry.chatBottom <= 16, "chat region fills available space to footer"); assert(geometry.chatListHeight >= 40 && geometry.chatListBottom <= geometry.chatBottom + 1, "chat rows remain usable inside their region even with long warnings"); assert(geometry.settingsTop >= 0 && geometry.settingsBottom <= height, "Settings fully visible"); assert(geometry.scrollHeight > geometry.clientHeight);
+    // Chats is hidden by default, so Projects owns the sidebar down to the footer.
+    const geometry = await cdp.eval(`(()=>{const list=document.querySelector('.workspace-list');list.querySelectorAll('[data-qa-row]').forEach(row=>row.remove());for(let i=0;i<30;i++){const row=document.createElement('div');row.className='workspace-row';row.dataset.qaRow=String(i);row.innerHTML='<button class="workspace-button"><span class="workspace-name">Layout project '+(i+1)+'</span><span class="workspace-path">C:/Layout/Project-'+(i+1)+'</span></button>';list.append(row);}list.scrollTop=0;const r=list.getBoundingClientRect(),footer=document.querySelector('.sidebar-footer').getBoundingClientRect(),button=document.querySelector('.sidebar-footer button').getBoundingClientRect();return {chatsSection:Boolean(document.querySelector('.chats-section')),sidebarLabel:document.querySelector('.sidebar').getAttribute('aria-label'),width:innerWidth,height:innerHeight,listTop:r.top,listBottom:r.bottom,listHeight:r.height,footerTop:footer.top,gap:footer.top-r.bottom,settingsTop:button.top,settingsBottom:button.bottom,scrollHeight:list.scrollHeight,clientHeight:list.clientHeight,maxHeight:getComputedStyle(list).maxHeight};})()`);
+    assert(geometry.listHeight > 0); assert.equal(geometry.chatsSection, false, "Chats is hidden by default"); assert.equal(geometry.sidebarLabel, "Projects", "the sidebar is labelled Projects while Chats is hidden"); assert.equal(geometry.maxHeight, "none", "no Chats section, so no cap on the Projects list"); assert(geometry.gap >= 0 && geometry.gap <= 16, "Projects fills the sidebar down to the footer, with no dead space"); assert(geometry.settingsTop >= 0 && geometry.settingsBottom <= height, "Settings fully visible"); assert(geometry.scrollHeight > geometry.clientHeight);
     await shot(`sidebar-${width}x${height}-top`);
     const bottom = await cdp.eval("(()=>{const list=document.querySelector('.workspace-list');list.scrollTop=list.scrollHeight;const row=list.querySelector('[data-qa-row=\"29\"]'),r=row.getBoundingClientRect(),lr=list.getBoundingClientRect();return {scrollTop:list.scrollTop,lastTop:r.top,lastBottom:r.bottom,listTop:lr.top,listBottom:lr.bottom,reachable:row.contains(document.elementFromPoint(r.left+r.width/2,Math.min(r.bottom-2,lr.bottom-2)))};})()");
     assert(bottom.scrollTop > 0); assert(bottom.lastBottom <= bottom.listBottom + 1); assert(bottom.lastTop >= bottom.listTop); assert(bottom.reachable); await shot(`sidebar-${width}x${height}-bottom`);

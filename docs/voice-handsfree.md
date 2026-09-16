@@ -43,8 +43,8 @@ still go to the Orchestrator. The indicator stays visible; its menu separately o
   competing Lisa/Linda paths reset without activating or consuming wake cooldown.
   The keyword beam retains 32 paths to avoid pruning quiet, fast speech.
 - Silero identifies speech, including short answers. Smart Turn v3.2 CPU int8
-  classifies completion after 200 ms of quiet, but sending waits for at least
-  1.2 seconds of uninterrupted quiet. Its latest-eight-second input is
+  classifies completion after 200 ms of quiet, but sending waits for the selected
+  pause (1.5 seconds by default) of uninterrupted quiet. Its latest-eight-second input is
   left-padded and normalized using a JavaScript implementation checked against
   the upstream Whisper feature extractor. The complete command remains buffered.
 - One app-wide service owns two hidden helpers: keyword/VAD and semantic completion.
@@ -101,15 +101,21 @@ turn and speech revisions and wait for queued VAD classifications before commitm
 Only one completion check runs per unchanged speech revision/pause. Speech
 resuming before commitment invalidates the completion result.
 
-The pause is adaptive: a complete turn the model scores at 0.9 or above, with at
-least 250 ms of command speech, ends after 600 ms of trailing silence, while a
-less certain completion keeps the 1,200 ms pause and the three-second fallback is
-unchanged. The threshold sits above the model's own 0.5 boundary because the
-offline workflow smoke scores real command endings at 0.94 to 0.98 and a
-mid-command pause at 0.06. On the long pause the audio recorded so far is transcribed at 800 ms
-while the recording stays open; a resumed word aborts that request silently and
-the finished recording is uploaded whole, and when nothing more is said its
-transcript is used instead of a second upload.
+**Pause before sending** in Orchestrator & voice settings defaults to **1.5
+seconds**, adjustable from 1 to 3 seconds. Detector confidence never shortens
+that pause. The setting is captured when a recording starts, so saving a shorter
+pause cannot cut off a turn already in progress. It applies to hands-free
+commands and automatic spoken answers. The three-second uncertain-completion
+fallback remains unchanged.
+
+After a complete-turn prediction and at least 250 ms of detected command speech,
+the audio recorded so far can be transcribed at 800 ms while recording stays
+open. Speech resuming before commitment discards that speculative result and
+transcribes the complete recording, including the new words. If no more is said,
+the early transcript is reused instead of uploading again. Click Send or release
+a Space hold to send immediately. See the
+[September 16 cutoff repair](voice-cutoff-repair-2026-09-16.md) for evidence and
+the installed-version boundary; older builds used a 600 ms confident cutoff.
 
 The microphone now shows its status as visible text. During an automatic
 recording it becomes a **Send** button: click to send immediately, or keep

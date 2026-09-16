@@ -1,0 +1,7 @@
+{
+  "defaultPauseMs": 1500,
+  "minPauseMs": 1000,
+  "maxPauseMs": 3000,
+  "earlyTranscriptionMs": 800,
+  "fallbackMs": 3000
+}

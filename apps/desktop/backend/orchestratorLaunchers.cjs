@@ -36,20 +36,38 @@ function sessionReady(session) {
   const readiness = paneReadiness(session);
   return readiness.form === 'native' ? readiness.named && readiness.idle : readiness.process;
 }
-function waitForRoutingReady({ result, getSession, refresh = async () => {}, signal, timeoutMs = 20000, pollMs = 100 }) {
+function waitForRoutingReady({ result, getSession, refresh = async () => {}, signal, timeoutMs = 20000, pollMs = 100, onDiagnostic = () => {}, now = Date.now }) {
   const { paneKey } = require('./orchestratorRouting.cjs');
   const { target: _provisionalTarget, cwd: _provisionalCwd, name: _provisionalName, processState: _provisionalProcessState, ...created } = result;
   return new Promise(resolve => {
     let settled = false, polling, generation = paneKey(result.target) ? result.target.generation : undefined;
+    const startedAt = now();
+    let last = { reason: 'inventory-refresh-pending' }, lastKey, transitions = 0, observedName;
+    const diagnostic = status => {
+      try { onDiagnostic({ event: 'request_stage', stage: 'routing_readiness', status, targetId: result.id,
+        generation, launchToken: result.launchToken, elapsedMs: now() - startedAt, ...last }); } catch {}
+    };
     const finish = value => {
       if (settled) return;
       settled = true; clearTimeout(deadline); clearTimeout(polling);
       signal?.removeEventListener('abort', abort);
-      resolve({ ...created, sessionCreated: true, ...value });
+      diagnostic(value.status);
+      resolve({ ...created, sessionCreated: true, ...(observedName && { name: observedName }),
+        startup: { phase: 'routing', ...last, elapsedMs: now() - startedAt }, ...value });
     };
     const fail = (status, error) => finish({ ok: false, target: undefined, status, error, delivery: 'not-dispatched' });
     const abort = () => fail('cancelled', 'Startup wait cancelled; the pane was created and no prompt was sent.');
-    const deadline = setTimeout(() => fail('launch-timeout', 'The pane was created but input readiness was not observed; no prompt was sent.'), timeoutMs);
+    const reasons = {
+      'inventory-refresh-pending': 'the workspace inventory did not finish refreshing',
+      'inventory-missing': 'the pane was not present in the workspace inventory',
+      'launch-mismatch': 'the inventory still described another launch',
+      'generation-missing': 'the pane had no confirmed launch generation',
+      'not-running': 'the terminal process was not confirmed running',
+      'launch-pending': 'the launcher was still starting',
+      unverified: 'the input recipient was not yet verified',
+      unnamed: 'the native conversation was not yet identified',
+    };
+    const deadline = setTimeout(() => fail('launch-timeout', `The pane was created, but startup could not be confirmed: ${reasons[last.reason] || 'the recipient was not ready'}. No prompt was sent.`), timeoutMs);
     if (signal?.aborted) return abort();
     signal?.addEventListener('abort', abort, { once: true });
     async function check() {
@@ -58,6 +76,14 @@ function waitForRoutingReady({ result, getSession, refresh = async () => {}, sig
         await refresh();
         if (settled) return;
         const session = getSession(result.id), valid = Boolean(paneKey(session));
+        const readiness = paneReadiness(session);
+        last = { reason: !session ? 'inventory-missing' : result.launchToken !== undefined && session.launchToken !== result.launchToken ? 'launch-mismatch'
+          : !valid ? 'generation-missing' : !readiness.process || !readiness.composerVerified ? readiness.reason : !readiness.named && readiness.form === 'native' ? 'unnamed' : readiness.reason,
+          inventoryPresent: Boolean(session), hasAgentPid: Number(session?.agentPid) > 0,
+          ...(session && { processState: session.processState, agentProcessState: session.agentProcessState,
+            launchState: session.launchState, observation: session.observation }) };
+        const key = JSON.stringify(last);
+        if (key !== lastKey && transitions < 12) { lastKey = key; transitions++; diagnostic('waiting'); }
         if (session?.launchToken > result.launchToken) return fail('superseded', 'The created session changed before readiness.');
         // Inventory may still describe the previous launch. Its generation and
         // stopped state are not evidence about the acknowledged replacement.
@@ -67,6 +93,7 @@ function waitForRoutingReady({ result, getSession, refresh = async () => {}, sig
         }
         if (generation !== undefined && session && session.generation !== generation) return fail('superseded', 'The created session changed before readiness.');
         if (valid) generation ??= session.generation;
+        if (valid && typeof session.name === 'string') observedName = bounded(session.name);
         if (session?.started === false || ['failed', 'exited'].includes(session?.status) || ['failed', 'exited'].includes(session?.processState)) return fail('launch-failed', 'The created session stopped before readiness.');
         // This receipt permits observing/onboarding the new native process.
         // Initial task text is separately held for decoded composer readiness, so

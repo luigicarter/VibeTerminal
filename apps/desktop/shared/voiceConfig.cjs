@@ -1,4 +1,7 @@
 const STT_MODEL = 'openai/whisper-large-v3-turbo';
+const VOICE_ENDPOINTING = Object.freeze(require('./voiceEndpointing.json'));
+const validVoicePauseMs = value => Number.isInteger(value) && value >= VOICE_ENDPOINTING.minPauseMs && value <= VOICE_ENDPOINTING.maxPauseMs;
+const normalizeVoicePauseMs = value => validVoicePauseMs(value) ? value : VOICE_ENDPOINTING.defaultPauseMs;
 // Whisper accepts an initial prompt and biases its decoding toward the spellings
 // it contains. These are the names a spoken command routes on and that a general
 // transcript otherwise renders phonetically ("codecs", "Quinn", "Lena"). Project
@@ -14,4 +17,4 @@ const TTS_VOICES = Object.freeze(['af_heart', 'af_bella', 'af_nicole', 'af_sarah
 // a response that declares them, or carries a WAV header, always wins.
 const TTS_NATIVE_RATE = 24000;
 const TTS_NATIVE_CHANNELS = 1;
-module.exports = { STT_MODEL, STT_PROMPT_NAMES, STT_PROMPT_MAX_CHARS, TTS_MODEL, TTS_VOICE, TTS_VOICES, TTS_NATIVE_RATE, TTS_NATIVE_CHANNELS };
+module.exports = { VOICE_ENDPOINTING, validVoicePauseMs, normalizeVoicePauseMs, STT_MODEL, STT_PROMPT_NAMES, STT_PROMPT_MAX_CHARS, TTS_MODEL, TTS_VOICE, TTS_VOICES, TTS_NATIVE_RATE, TTS_NATIVE_CHANNELS };

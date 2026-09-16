@@ -1,6 +1,28 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict');
 const { launcherCatalog, waitForRoutingReady, routingBindingMatches } = require('../../backend/orchestratorLaunchers.cjs');
+
+test('startup timeout names its phase and last blocker without granting input authority', async () => {
+  const events = [];
+  const session = { id: 'web', generation: 'g1', launchToken: 1, kind: 'codex-web', name: 'Codex Web 1',
+    processState: 'running', launchState: 'ready', agentProcessState: 'unknown', observation: 'provisional' };
+  const result = await waitForRoutingReady({ result: { ok: true, id: 'web', launchToken: 1 }, getSession: () => session,
+    timeoutMs: 25, pollMs: 1, onDiagnostic: event => events.push(event) });
+  assert.equal(result.status, 'launch-timeout'); assert.equal(result.target, undefined);
+  assert.equal(result.name, session.name); assert.equal(result.startup.phase, 'routing');
+  assert.equal(result.startup.reason, 'unverified');
+  assert.match(result.error, /input recipient was not yet verified/);
+  assert.equal(events.length, 2, 'one state transition and one final record, not one per poll');
+  assert.equal(events.at(-1).generation, 'g1');
+  assert.equal(events.at(-1).launchToken, 1);
+});
+
+test('startup diagnostics identify a stalled inventory refresh', async () => {
+  const result = await waitForRoutingReady({ result: { ok: true, id: 'web', launchToken: 1 },
+    refresh: () => new Promise(() => {}), getSession: () => assert.fail('refresh has not settled'), timeoutMs: 15 });
+  assert.equal(result.startup.reason, 'inventory-refresh-pending');
+  assert.match(result.error, /inventory did not finish refreshing/);
+});
 const { createSessionDirectory } = require('../../backend/orchestratorIntegration.cjs');
 const { createOrchestratorDelivery } = require('../../backend/orchestratorDelivery.cjs');
 const { sessionIdentity } = require('../../backend/orchestratorRouting.cjs');

@@ -52,6 +52,12 @@ if (!process.versions.electron) {
     testing = true;
     const evaluate = code => win.webContents.executeJavaScript(code, true);
     try {
+      // Chats is hidden unless this renderer switch is on, and the switch is read
+      // once at module load, so set it and reload before the first DOM read.
+      if (!(await evaluate(`localStorage.getItem('lina:chats:visible')==='1'`))) {
+        await evaluate(`localStorage.setItem('lina:chats:visible','1')`);
+        testing = false; win.reload(); return;
+      }
       await until(() => evaluate('Boolean(document.querySelector(".chats-section"))'), 'Chats rendered');
       await wait(500);
       if (phase === 'seed') {

@@ -4,10 +4,10 @@ Lina Terminal ships to Windows users as an Electron Builder NSIS installer hoste
 
 ## Current Public Release
 
-The current Windows release is `v0.1.125`:
+The current Windows release is `v0.1.126`:
 
-- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.125`
-- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.125/LinaTerminal-Setup-0.1.125.exe`
+- Release page: `https://github.com/luigicarter/VibeTerminal/releases/tag/v0.1.126`
+- Installer: `https://github.com/luigicarter/VibeTerminal/releases/download/v0.1.126/LinaTerminal-Setup-0.1.126.exe`
 - Update metadata: `latest.yml` on the same GitHub Release.
 
 The README download table links directly to the installer asset and to the full GitHub Releases page.
@@ -66,11 +66,14 @@ The compiled `dist/` renderer is still included because it is the UI Electron di
 
 ## Local Build
 
-Version `0.1.125` makes spare terminals opt-in, repairs first-prompt conversation
-ownership and follow-up routing, preserves existing-pane and handle selections,
-and fixes dropped close/open/prompt clauses and repeated blank-opening failures.
-See [the prompt review](orchestrator-prompt-review-2026-09-15.md) and
-[release review](release-0.1.125-review.md) for evidence and verification limits.
+Version `0.1.126` clarifies unrecognized terminal names before opening anything,
+keeps work flowing to the panes that did start when a sibling launch fails,
+settles and retries each work item on its own, reports the real startup blocker,
+waits 1.5 seconds of quiet before sending speech with a 1-3 second setting, and
+hides the Chats section by default behind the `lina:chats:visible` switch.
+See [the Orchestrator repair](orchestrator-repair-implementation-2026-09-16.md),
+[the voice pause repair](voice-cutoff-repair-2026-09-16.md) and
+[release review](release-0.1.126-review.md) for evidence and verification limits.
 Installed applications apply updates through the user's Update/Restart action;
 publication does not restart an active workspace.
 

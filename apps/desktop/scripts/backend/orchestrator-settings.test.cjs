@@ -10,6 +10,25 @@ function fixture(t, data) {
   if (data) fs.writeFileSync(filename, JSON.stringify(data));
   return { filename, store: createSettings({ userDataPath: root }) };
 }
+
+test('voice pause defaults safely for older or malformed settings and persists explicit choices', t => {
+  for (const voicePauseMs of [undefined, null, '1500', 600, 999, 3001, 1500.5, {}, []]) {
+    const { store, filename } = fixture(t, { settings: { voicePauseMs } });
+    const before = fs.readFileSync(filename, 'utf8');
+    assert.equal(store.getSettings().voicePauseMs, 1500);
+    assert.equal(fs.readFileSync(filename, 'utf8'), before, 'loading must not rewrite the live profile');
+  }
+  const { store, filename } = fixture(t);
+  for (const voicePauseMs of [1000, 1500, 2300, 3000]) {
+    store.configure({ voicePauseMs });
+    assert.equal(createSettings({ userDataPath: path.dirname(filename) }).getSettings().voicePauseMs, voicePauseMs);
+  }
+  const saved = fs.readFileSync(filename, 'utf8');
+  for (const voicePauseMs of [600, 3001, NaN, Infinity, '2000', 1200.5, null]) {
+    assert.throws(() => store.configure({ microphoneId: 'changed', voicePauseMs }), /Voice pause/);
+    assert.equal(fs.readFileSync(filename, 'utf8'), saved, 'invalid values cannot half-apply a settings save');
+  }
+});
 test('legacy unavailable speech default migrates without touching encrypted credentials or preferences', t => {
   const disk = { settings: { model: 'user/brain', ttsModel: 'openai/gpt-4o-mini-tts-2025-12-15', voice: 'alloy', microphoneId: 'saved-device' }, encryptedKey: 'opaque-fixture-ciphertext', preferences: [{ id: 'p', text: 'Concise replies' }] };
   const { store, filename } = fixture(t, disk);
