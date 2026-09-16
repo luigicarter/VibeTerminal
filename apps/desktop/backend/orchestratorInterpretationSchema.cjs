@@ -44,7 +44,28 @@ function interpretationTool(context) {
   };
   return tool;
 }
-function canonicalizeInterpretation(raw) {
+// Optional request metadata a model filled in with nothing. An empty string is
+// not a continuation claim, an empty deferral is not deferred work, and a
+// task-status response with no targets is not a task-status response — but each
+// one used to fail validation as though it were, which is how "Prompt the other
+// one as well." died on "Invalid continuation source" with a plan that was
+// otherwise a perfectly good clarification. A field that says nothing is
+// dropped, so the request is read as what it actually is: a new one.
+const BLANK_METADATA = ['continuationOf', 'statusRequestId', 'clarification', 'reply'];
+function dropEmptyMetadata(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+  const plan = { ...raw };
+  for (const field of BLANK_METADATA) if (typeof plan[field] === 'string' && !plan[field].trim()) delete plan[field];
+  if (plan.afterResults && (typeof plan.afterResults !== 'object' || typeof plan.afterResults.instruction !== 'string' || !plan.afterResults.instruction.trim())) delete plan.afterResults;
+  if (Array.isArray(plan.dependsOnRequestIds) && !plan.dependsOnRequestIds.length) delete plan.dependsOnRequestIds;
+  if (Array.isArray(plan.statusTargetIds) && !plan.statusTargetIds.length) delete plan.statusTargetIds;
+  // A task-status answer is about named terminals. Without them the marker is
+  // the only thing left of it, and it would refuse the whole plan on its own.
+  if (plan.responseKind === 'task-status' && !Array.isArray(plan.statusTargetIds)) { delete plan.responseKind; delete plan.statusRequestId; }
+  return plan;
+}
+function canonicalizeInterpretation(rawPlan) {
+  const raw = dropEmptyMetadata(rawPlan);
   if (!raw || !Array.isArray(raw.actions)) return raw;
   const scoped = raw.actions.filter(action => action && Object.hasOwn(action, 'access'));
   if (!scoped.length || scoped.some(action => !['read-only', 'mutation'].includes(action.access))) return raw;
@@ -58,4 +79,4 @@ function canonicalizeInterpretation(raw) {
     return command;
   }) };
 }
-module.exports = { interpretationTool, canonicalizeInterpretation };
+module.exports = { interpretationTool, canonicalizeInterpretation, dropEmptyMetadata };

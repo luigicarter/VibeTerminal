@@ -16,6 +16,7 @@ COPY --from=build /app/src ./src
 COPY --from=build /app/scripts ./scripts
 COPY migrations ./migrations
 COPY contracts ./contracts
+RUN rm -rf src/prepared migrations/prepared contracts/prepared scripts/prepared-contracts.ts
 USER bun
 EXPOSE 3002
 CMD ["bun", "--no-env-file", "dist/server.js"]

@@ -4,6 +4,7 @@ const kinds = new Set([...Object.keys(require('../shared/providerCapabilities.js
 // terminal composer to observe. Every other launcher kind runs a real CLI.
 const STRUCTURED_KINDS = new Set(['fusion', 'openfusion']);
 const { paneLabel, failureSentence } = require('./orchestratorFailureText.cjs');
+const { paneReadiness } = require('./orchestratorPaneReadiness.cjs');
 const bounded = value => typeof value === 'string' ? value.slice(0, 240) : undefined;
 function launcherCatalog(items = []) {
   return (Array.isArray(items) ? items : []).filter(item => kinds.has(item?.kind)).slice(0, 40).map(item => {
@@ -26,16 +27,14 @@ function routingBindingMatches(binding, session) {
     ? typeof actual.workspace === 'string' && nativeKey({ provider: '_', home: '_', id: '_', workspace: expected.workspace }) === nativeKey({ provider: '_', home: '_', id: '_', workspace: actual.workspace })
     : expected[field] === actual[field]));
 }
-// A pane whose native identity is still provisional but which has never taken a
-// turn is a finished launch, not an unfinished one: its CLI reported its own
-// session start and nothing is in flight. Waiting for confirmed identity would
-// mean waiting for the first prompt, which is what this readiness gates.
-const provisionalFreshPane = session => session.observation === 'provisional' &&
-  require('./orchestratorResolver.cjs').neverPrompted(session) && session.turnState === 'idle';
+// Launch readiness, asked of the one pane-state predicate. A shell or a
+// structured chat pane is ready once its processes are up; a native agent pane
+// also needs its recipient identified and no turn in flight. Nobody re-derives
+// those facts here any more (see backend/orchestratorPaneReadiness.cjs).
 function sessionReady(session) {
-  if (!require('./orchestratorRouting.cjs').paneKey(session) || session.started === false) return false;
-  if (['fusion', 'openfusion'].includes(session.kind)) return session.engineReady === true && !['failed', 'exited', 'starting'].includes(session.status);
-  return session.processState === 'running' && session.launchState !== 'pending' && (session.provider === 'terminal' || session.agentProcessState === 'running' && Number(session.agentPid) > 0 && (session.observation === 'observed' || provisionalFreshPane(session)) && ['idle', 'completed', 'response', 'interrupted'].includes(session.turnState) && !session.pendingInput && session.binding?.status !== 'ambiguous');
+  if (!require('./orchestratorRouting.cjs').paneKey(session)) return false;
+  const readiness = paneReadiness(session);
+  return readiness.form === 'native' ? readiness.named && readiness.idle : readiness.process;
 }
 function waitForRoutingReady({ result, getSession, refresh = async () => {}, signal, timeoutMs = 20000, pollMs = 100 }) {
   const { paneKey } = require('./orchestratorRouting.cjs');
@@ -70,8 +69,9 @@ function waitForRoutingReady({ result, getSession, refresh = async () => {}, sig
         if (valid) generation ??= session.generation;
         if (session?.started === false || ['failed', 'exited'].includes(session?.status) || ['failed', 'exited'].includes(session?.processState)) return fail('launch-failed', 'The created session stopped before readiness.');
         // This receipt permits observing/onboarding the new native process.
-        // Initial task text is separately held for decoded composer readiness.
-        const processReady = valid && !['fusion', 'openfusion', 'terminal'].includes(session.kind) && session.processState === 'running' && session.launchState !== 'pending' && session.agentProcessState === 'running' && Number(session.agentPid) > 0 && (session.observation === 'observed' || provisionalFreshPane(session)) && session.binding?.status !== 'ambiguous';
+        // Initial task text is separately held for decoded composer readiness, so
+        // this asks only for an identified recipient, not for an idle turn.
+        const processReady = valid && paneReadiness(session).form === 'native' && paneReadiness(session).named;
         if (valid && (result.launchToken === undefined || session.launchToken === result.launchToken) && (sessionReady(session) || processReady)) return finish({ ok: true, status: 'created', readiness: sessionReady(session) ? 'ready' : 'process-ready',
           ...(session.processState !== undefined ? { processState: session.processState } : {}),
           ...(typeof session.cwd === 'string' && session.cwd.trim() ? { cwd: session.cwd } : {}),
@@ -112,7 +112,10 @@ function waitForNativePromptReady({ action, getSession, readSession, signal, tim
   const identity = initial ? sessionIdentity(initial) : {};
   const shell = (initial?.kind || initial?.provider) === 'terminal';
   const rootPid = session => shell ? session?.pid || session?.terminalPid : session?.agentPid;
-  let pid = rootPid(initial), inputRevision = action.inputRevision;
+  // A retry of the same startup prompt keeps the input revision the first wait
+  // established. Re-baselining it on every attempt would let a keystroke that
+  // landed between two attempts pass unnoticed.
+  let pid = rootPid(initial), inputRevision = action.inputSurface?.inputRevision;
   return new Promise(resolve => {
     let settled = false, polling, readinessReason, startupScreen, startupAnswered = false, answering = false;
     const finish = value => {
@@ -190,6 +193,7 @@ function waitForNativePromptReady({ action, getSession, readSession, signal, tim
         if ((readiness.ready || unverifiedComposer) && session.launchState !== 'pending' && session.processState === 'running' &&
             (shell || session.agentProcessState === 'running') && Number.isSafeInteger(pid) && pid > 0 && session.binding?.status !== 'ambiguous') {
           return finish({ ok: true, session, observation, inputRevision, routingBinding: { target, nativeIdentity: { ...identity } },
+            surface: require('./orchestratorInputSurface.cjs').projectInputSurface(session, observation),
             ...(unverifiedComposer && { unverifiedComposer: true }) });
         }
       } catch (error) { return fail('launch-unconfirmed', String(error?.message || error)); }

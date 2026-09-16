@@ -2,6 +2,7 @@
 const { randomUUID } = require('node:crypto');
 const { isObservedBusyPrompt } = require('./orchestratorBusyInput.cjs');
 const { projectInputAuthority, sameInputAuthority } = require('./orchestratorInputAuthority.cjs');
+const { projectInputSurface, validInputSurface } = require('./orchestratorInputSurface.cjs');
 
 // Observation authority belongs to one live request. Screen content is evidence,
 // never an instruction or a capability. Even unchanged screens need a new token
@@ -44,7 +45,12 @@ function createOperatorObservations({ now = Date.now } = {}) {
     const record = { token, targetId: target.id, generation: target.generation, revision: target.revision,
       sequence: observation?.sequence, inputRevision: observation?.inputRevision, serial: ++serial, at: now(),
       runtime: Object.fromEntries(['id', 'generation', 'kind', 'provider', 'observation', 'started', 'launchState', 'processState', 'agentProcessState', 'agentPid', 'turnId', 'turnStartedAt', 'turnState', 'status', 'pendingInput', 'pendingInteraction', 'manualInputPending', 'interactionInputPending', 'heldMouseButton', 'binding', 'attention'].map(field => [field, structuredClone(target[field])])),
-      authority: projectInputAuthority(target, requests), requests: structuredClone(requests), used: false };
+      authority: projectInputAuthority(target, requests), requests: structuredClone(requests), used: false,
+      // The input surface this read saw. The frozen sequence/inputRevision above
+      // stay as the model's consistency check that it is acting on this read;
+      // the surface is what the native adapter actually fences the write on,
+      // because an animated composer moves the sequence and nothing else.
+      surface: projectInputSurface(target, observation) };
     tokens.set(token, record);
     if (currentRead) latestReads.set(targetKey, { token, modelRound: attempt.modelRound });
     while (tokens.size > 128) tokens.delete(tokens.keys().next().value);
@@ -82,13 +88,13 @@ function createOperatorObservations({ now = Date.now } = {}) {
     const previous = lastActions.get(key(target));
     if (previous && record.serial <= previous.serial) throw new Error('Read the terminal after the last action before taking another step.');
     if (['send_prompt', 'terminal_interact', 'interrupt'].includes(action.kind) && !['fusion', 'openfusion'].includes(target.kind || target.provider)) {
-      // Native operators may omit redundant model copies of counters already bound
-      // by this request's token. The dispatcher derives those fields only in its
-      // post-claim transport envelope, leaving the frozen step payload unchanged.
-      if (!Number.isSafeInteger(record.sequence) || record.sequence < 0 || !Number.isSafeInteger(record.inputRevision) || record.inputRevision < 0 ||
-          (action.observationSequence !== record.sequence && action.observationSequence !== undefined) ||
-          (action.inputRevision !== record.inputRevision && action.inputRevision !== undefined))
-        throw new Error('Native input requires the screen sequence and input revision from this observation.');
+      // Native input is bound by the input surface this read captured, not by
+      // counters copied back through the model. The model used to echo
+      // observation.sequence and observation.inputRevision; a repainting pane
+      // made the first of those wrong within milliseconds, and neither ever told
+      // the application anything it had not already recorded here.
+      if (!validInputSurface(record.surface))
+        throw new Error('Native input requires a captured input surface from this observation.');
     }
     return record;
   }
@@ -96,6 +102,9 @@ function createOperatorObservations({ now = Date.now } = {}) {
     record.used = true;
     if (action.kind !== 'finish_terminal') lastActions.set(key(target), { serial: ++serial, kind: action.kind });
   }
-  return { invalidate, beginRead, observe, latest, authorize, consume };
+  // Whether a token was minted here at all. A model that invents one ("obs-…",
+  // "96") has not read anything; its action falls back to the latest real read.
+  const known = token => typeof token === 'string' && tokens.has(token);
+  return { invalidate, beginRead, observe, latest, authorize, consume, known };
 }
 module.exports = { createOperatorObservations };

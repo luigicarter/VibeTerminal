@@ -50,7 +50,7 @@ test('spoken correction resumes a blocked objective with the original owner and 
   const app = createOrchestrator({ userDataPath: root, secureStorage: { isEncryptionAvailable: () => false },
     getSessions: () => [{ id: 'pane', generation: 'g1', name: 'Work', kind: 'codex', provider: 'codex', status: 'running', cwd: root }],
     getRoots: () => ({ documents: root, projects: [] }),
-    readSession: async () => ({ ok: true, id: 'pane', generation: 'g1', text: 'Ready for input', sequence: 10, observationSequence: 10, inputRevision: 2 }),
+    readSession: async () => ({ ok: true, id: 'pane', generation: 'g1', text: 'Ready for input', sequence: 10, inputRevision: 2 }),
     dispatchAction: async action => { effects.push(action); return { ok: true, status: 'written' }; },
     fetch: async (url, options) => {
       if (url.endsWith('/key')) return new Response(JSON.stringify({ data: {} }));

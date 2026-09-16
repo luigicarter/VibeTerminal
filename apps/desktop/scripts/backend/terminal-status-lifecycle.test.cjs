@@ -3,7 +3,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createTerminalRuntime } = require("../../backend/terminalRuntime.cjs");
 const capabilities = require("../../shared/providerCapabilities.json");
-const { idlePaneCandidate, neverPrompted } = require("../../backend/orchestratorResolver.cjs");
+const { idlePaneCandidate } = require("../../backend/orchestratorResolver.cjs");
+const { neverPrompted } = require("../../backend/orchestratorPaneReadiness.cjs");
 const { sessionReady } = require("../../backend/orchestratorLaunchers.cjs");
 
 function pane(provider) {

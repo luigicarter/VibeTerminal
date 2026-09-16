@@ -11,7 +11,7 @@ const { idleTargetMatches, targetAvailabilityError } = require('./orchestratorTa
 const INTENT_KINDS = Object.freeze(['watch_terminal', 'navigate', 'focus_session', 'create_session', 'stage_draft', 'send_prompt', 'inspect_terminal', 'operate_terminal', 'delegate_task', 'interrupt', 'restart', 'close', 'answer_question', 'permission', 'terminal_interact', 'add_project', 'remove_project', 'open_folder', 'launch_setup', 'save_setup', 'resume_conversation', 'create_project', 'remember_preference', 'forget_preference']);
 const TARGET_KINDS = new Set(['watch_terminal', 'focus_session', 'stage_draft', 'send_prompt', 'operate_terminal', 'interrupt', 'restart', 'close', 'answer_question', 'permission', 'terminal_interact']);
 const OPERATOR_ACTIONS = new Set(['send_prompt', 'terminal_interact', 'answer_question', 'permission', 'interrupt', 'focus_session', 'finish_terminal']);
-const OPERATOR_FIELDS = ['stepId', 'text', 'keys', 'mouse', 'inputPurpose', 'submit', 'observationSequence', 'inputRevision', 'editInput', 'answerText', 'answerTexts', 'requestId', 'revision', 'decision', 'outcome'];
+const OPERATOR_FIELDS = ['stepId', 'text', 'keys', 'mouse', 'inputPurpose', 'submit', 'editInput', 'answerText', 'answerTexts', 'requestId', 'revision', 'decision', 'outcome'];
 const ANSWER_KINDS = new Set(['answer_question', 'permission']);
 const TERMINAL_KEYS = Object.freeze(['up', 'down', 'left', 'right', 'tab', 'shift-tab', 'enter', 'escape', 'home', 'end', 'backspace', 'space']);
 const ARGUMENTS = {
@@ -33,7 +33,7 @@ function commandFields(kind) {
   if (ANSWER_KINDS.has(kind)) allowed.add('requestId');
   return allowed;
 }
-const PLAN_KEYS = new Set(['goal', 'clarification', 'continuationOf', 'actions', 'dependsOnRequestIds', 'access', 'executionMode', 'afterResults', 'responseKind', 'statusTargetIds', 'statusRequestId']);
+const PLAN_KEYS = new Set(['goal', 'clarification', 'reply', 'continuationOf', 'actions', 'dependsOnRequestIds', 'access', 'executionMode', 'afterResults', 'responseKind', 'statusTargetIds', 'statusRequestId']);
 const COMMAND_KEYS = new Set(['scope', 'watchUntil', 'kind', 'targetIds', 'selection', 'text', 'answerText', 'answerTexts', 'operationMode', 'promptMode', 'answerMode', 'permissionMode', 'lifecycleMode', 'requestId', 'sourceUserId', 'view', 'cwd', 'path', 'parent', 'name', 'kindOfSession', 'provider', 'reference', 'preferenceId', 'workItemId', 'assignmentMode']);
 const BASE_EXECUTION_KEYS = ['kind', 'grantId', 'targetId', 'target', 'generation', 'targetAvailability'];
 COMMAND_KEYS.add('targetAvailability');
@@ -114,6 +114,71 @@ function knownWorkspace(value, context) {
   if (!known) throw new Error('Task routing requires one identified known project.');
   return identity;
 }
+// The project a delegated task runs in. A path the workspace does not know is
+// not a project the user named: it is a guess, and refusing the request over it
+// loses work the application could place itself. The request's own project is
+// the answer whenever there is one; only a request with no project at all has
+// to ask, and it asks for the project rather than reporting a rejected path.
+function delegatedWorkspace(value, context) {
+  try { return knownWorkspace(value, context) && value; } catch (error) {
+    for (const fallback of [context.projectContext?.path, context.projectContext?.cwd, context.workspaceContext?.cwd]) {
+      if (typeof fallback !== 'string' || !fallback) continue;
+      try { knownWorkspace(fallback, context); return fallback; } catch { /* try the next one */ }
+    }
+    const failure = new Error('Task routing requires one identified known project. The requested path is not a Lina project and this request names none.');
+    failure.code = 'ORCHESTRATOR_UNKNOWN_PROJECT';
+    failure.clarification = 'Which project should I run this in?';
+    throw failure;
+  }
+}
+// The pane a stop/close request means by "the last one you worked on". The
+// ledger already records which pane each settled request typed into, so this is
+// a lookup, not a judgement: the terminal model marks the pane of the newest
+// delivery, and the reference resolver reads the sentence against it. Two
+// panes delivered in the same moment, or none at all, is a question — never a
+// guess, and never every pane at once.
+const { readReference, resolveReference, terminalsOf } = require('./orchestratorReference.cjs');
+// "Stop that last terminal you worked on" is an interrupt of the pane the
+// ledger names, however the model planned it: as a typed "Stop this terminal."
+// into the pane most recently talked about (a prompt into a working pane queues
+// behind its turn), or as a close of several panes (the close reviewer refused
+// and asked). The sentence decides the kind; the ledger decides the pane.
+const STOP_SENTENCE = /\b(?:stop|interrupt|pause|halt)\b/i;
+const CLOSE_SENTENCE = /\b(?:close|kill|quit|exit|shut|remove|delete)\b/i;
+function stopOfLastWorkedPane(command, instruction) {
+  if (!STOP_SENTENCE.test(instruction) || CLOSE_SENTENCE.test(instruction) || readReference(instruction).kind !== 'last_target') return command;
+  if (!['operate_terminal', 'send_prompt', 'close'].includes(command?.kind)) return command;
+  const targetIds = Array.isArray(command.targetIds) ? command.targetIds : Array.isArray(command.scope?.targetIds) ? command.scope.targetIds : [];
+  if (!targetIds.length) return command;
+  return { kind: 'interrupt', targetIds, ...(targetIds.length > 1 && { selection: 'all' }), ...(command.sourceUserId !== undefined && { sourceUserId: command.sourceUserId }) };
+}
+function selectionClarification(message, clarification) {
+  const error = new Error(message);
+  error.code = 'ORCHESTRATOR_LAST_TARGET_SELECTION';
+  error.clarification = clarification;
+  return error;
+}
+// Applied to interrupt and to a directly enumerated close: both stop work, and
+// both were reached by a sentence that pointed at one pane.
+function resolveLastWorkedTargets(command, targets, context, sessions) {
+  const instruction = String(context.normalizedText ?? context.instruction ?? '');
+  const reference = resolveReference(instruction, terminalsOf(context), { launchers: context.launchers || [] });
+  if (reference.kind !== 'last_target') {
+    if (targets.length > 1 && !reference.fanOut) {
+      throw selectionClarification('A stop request that names no group may not fan out across panes.',
+        'Which terminal should I stop? Name it or select its pane.');
+    }
+    return targets;
+  }
+  const live = reference.candidates.filter(terminal => sessions.some(session => session.id === terminal.id));
+  if (live.length === 1) {
+    const session = sessions.find(item => item.id === live[0].id);
+    return [{ id: session.id, generation: session.generation }];
+  }
+  throw selectionClarification(live.length ? 'More than one pane was last worked on; stopping either would be a guess.'
+    : 'No recorded pane matches the last terminal I worked on.',
+  'Which terminal should I stop? Name it or select its pane.');
+}
 function sessionConversationId(session) { return session.conversationId ?? session.conversation?.id ?? session.threadRef?.id; }
 function checkRoutingSession(routing, session) {
   if (!session || workspacePath(session.cwd) !== workspacePath(routing.cwd)) throw new Error('The routed terminal is outside the authorized project.');
@@ -132,9 +197,13 @@ function sourceFor(command, context) {
   if (!prior || prior.dispatched || prior.consumed || command.sourceUserId !== prior.requestId) throw new Error('The command refers to an unavailable or consumed user instruction.');
   return { id: string(prior.requestId, 'pending user request ID', 256), text: string(prior.instruction, 'pending user instruction', 16000) };
 }
+// A supplied answer is the user's own words. Case and end punctuation are the
+// model's ("Continue." for "tell it to continue"), not a different answer.
+const plainWords = value => String(value).toLowerCase().replace(/[.!?,;:]+$/g, '').replace(/\s+/g, ' ').trim();
 function sourceAnswer(value, source, label) {
   string(value, label, 16000);
-  if (!source.text.includes(value)) throw new Error('Answers must be literal text supplied by the identified user instruction.');
+  const answer = label === 'answer text';
+  if (!source.text.includes(value) && !(answer && plainWords(value) && plainWords(source.text).includes(plainWords(value)))) throw new Error('Answers must be literal text supplied by the identified user instruction.');
   return value;
 }
 // A deferred clause that merely repeats its own initial task would run that work
@@ -236,6 +305,9 @@ function normalizeIntent(raw, context = {}) {
   if (raw.executionMode !== undefined && !['direct', 'reason'].includes(raw.executionMode)) throw new Error('Invalid execution mode.');
   string(raw.goal, 'intent goal', 4000);
   if (raw.clarification !== undefined) string(raw.clarification, 'clarification', 2000);
+  // A Brain that answered in prose rather than with an operation: the words are
+  // the reply, and they authorize nothing.
+  if (raw.reply !== undefined) string(raw.reply, 'reply', 2000);
   if (raw.continuationOf !== undefined) {
     string(raw.continuationOf, 'continuation source', 256);
     if (!context.previousCommand || raw.continuationOf !== context.previousCommand.requestId) throw new Error('A clarification can continue only the available pending user command.');
@@ -298,7 +370,7 @@ function normalizeIntent(raw, context = {}) {
   }
   const continuedSlots = new Map();
   const grants = raw.actions.map((original, commandIndex) => {
-    let command = original, previousGrant;
+    let command = stopOfLastWorkedPane(original, String(context.normalizedText ?? context.instruction ?? '')), previousGrant;
     const semanticInspection = command?.kind === 'inspect_terminal';
     if (semanticInspection) {
       keys(command, commandFields('inspect_terminal'), 'inspection command');
@@ -381,7 +453,7 @@ function normalizeIntent(raw, context = {}) {
       }
     }
     if (command.kind === 'delegate_task') {
-      knownWorkspace(args.cwd, context);
+      args.cwd = delegatedWorkspace(args.cwd, context);
       const sameFolder = action => action?.path && workspacePath(action.path) === workspacePath(args.cwd);
       if (raw.actions.some(action => action?.kind === 'remove_project' && sameFolder(action))) throw new Error('A project cannot be removed and assigned new work in the same request. Preserve the intended order as separate requests.');
       const addition = raw.actions.findIndex(action => action?.kind === 'add_project' && sameFolder(action));
@@ -434,6 +506,21 @@ function normalizeIntent(raw, context = {}) {
         // Keep exact ownership during continuation/takeover validation. The
         // application resolver may reselect only after the old owner retires.
         if (!previousGrant) targets = targets.filter(target => idleTargetMatches(target, sessions));
+        // A request for a free pane whose every candidate is busy used to blank
+        // the whole plan and answer with the availability sentence. The model
+        // path never arrives here any more — the interpreter sends an
+        // availability requirement to assignment, which owns idle selection —
+        // so what is left is the continuation/retry path, and it says the same
+        // thing as a question rather than a plan with nothing in it.
+        if (!targets.length) {
+          const unavailable = targetAvailabilityError();
+          throw selectionClarification(unavailable.message, unavailable.message);
+        }
+      }
+      // Stopping is the one effect that cannot be taken back, so which pane a
+      // stop request means is decided here, from the ledger, not by the model.
+      if (['interrupt', 'close'].includes(command.kind) && !closeScope && !previousGrant) {
+        targets = resolveLastWorkedTargets(command, targets, context, sessions);
       }
       if ((command.selection || 'one') === 'one' && targets.length > 1) targets = [targets[randomInt(targets.length)]];
     }
@@ -565,12 +652,8 @@ function normalizeIntent(raw, context = {}) {
     }
     return freeze(grant);
   });
-  if (grants.some(grant => grant.targetAvailability === 'idle' && !grant.targets.length)) {
-    grants.length = 0;
-    raw = { ...raw, clarification: targetAvailabilityError().message };
-  }
   const directScopedClose = context.requireCloseScope === true && grants.length > 0 && grants.every(grant => grant.kind === 'close' && grant.closeScope) && !raw.clarification && !raw.dependsOnRequestIds?.length && !raw.afterResults;
-  const plan = freeze({ goal: raw.goal, ...(inspection && { responseKind: 'terminal-inspection' }), ...(statusTargets && { responseKind: 'task-status', statusTargets, ...(statusRequestId && { statusRequestId }) }), ...(raw.afterResults && { afterResults: raw.afterResults }), access: inspection || statusTargets || grants.length && grants.every(grant => grant.kind === 'watch_terminal') ? 'read-only' : raw.access || 'mutation', executionMode: directScopedClose ? 'direct' : grants.some(grant => ['operate_terminal', 'delegate_task'].includes(grant.kind)) ? 'reason' : raw.executionMode || 'reason', dependsOnRequestIds: raw.dependsOnRequestIds || [], ...(raw.clarification !== undefined && { clarification: raw.clarification }), ...(raw.continuationOf !== undefined && { continuationOf: raw.continuationOf }), sourceUser, grants });
+  const plan = freeze({ goal: raw.goal, ...(raw.reply && { reply: raw.reply }), ...(inspection && { responseKind: 'terminal-inspection' }), ...(statusTargets && { responseKind: 'task-status', statusTargets, ...(statusRequestId && { statusRequestId }) }), ...(raw.afterResults && { afterResults: raw.afterResults }), access: inspection || statusTargets || grants.length && grants.every(grant => grant.kind === 'watch_terminal') ? 'read-only' : raw.access || 'mutation', executionMode: directScopedClose ? 'direct' : grants.some(grant => ['operate_terminal', 'delegate_task'].includes(grant.kind)) ? 'reason' : raw.executionMode || 'reason', dependsOnRequestIds: raw.dependsOnRequestIds || [], ...(raw.clarification !== undefined && { clarification: raw.clarification }), ...(raw.continuationOf !== undefined && { continuationOf: raw.continuationOf }), sourceUser, grants });
   states.set(plan, new Map(grants.map(grant => [grant.id, executionState()])));
   authorizedSteps.set(plan, new Map());
   return plan;
@@ -716,7 +799,8 @@ function slot(action, grant) {
   return id;
 }
 function terminalInput(action, grant) {
-  if (!Number.isSafeInteger(action.observationSequence) || action.observationSequence < 0) throw new Error('Terminal interaction requires a fresh observation sequence.');
+  // Freshness is the application's own captured input surface, taken at the read
+  // before the write. The model used to have to copy a byte counter back here.
   if (action.keys !== undefined && (!Array.isArray(action.keys) || !action.keys.length || action.keys.length > 16 || action.keys.some(key => !TERMINAL_KEYS.includes(key)))) throw new Error('Unsupported or excessive terminal navigation keys.');
   if (action.submit !== undefined && typeof action.submit !== 'boolean') throw new Error('Invalid terminal submission flag.');
   if (action.text !== undefined && (typeof action.text !== 'string' || action.text !== (grant.answerText ?? grant.text))) throw new Error('Terminal input must match the user-supplied answer exactly.');
@@ -732,10 +816,8 @@ function terminalInput(action, grant) {
 function operatorStepKey(grant, targetId, stepId) { return JSON.stringify([grant.id, targetId, stepId]); }
 function operatorFields(kind) {
   const fields = [...BASE_EXECUTION_KEYS, 'stepId'];
-  if (kind === 'terminal_interact') fields.push('text', 'keys', 'mouse', 'inputPurpose', 'submit', 'observationSequence', 'inputRevision', 'editInput');
-  if (kind === 'interrupt') fields.push('observationSequence', 'inputRevision');
-  if (kind === 'send_prompt') fields.push('text', 'observationSequence', 'inputRevision', 'editInput');
-  if (kind === 'interrupt') fields.push('observationSequence', 'inputRevision');
+  if (kind === 'terminal_interact') fields.push('text', 'keys', 'mouse', 'inputPurpose', 'submit', 'editInput');
+  if (kind === 'send_prompt') fields.push('text', 'editInput');
   if (ANSWER_KINDS.has(kind)) fields.push('answerText', 'answerTexts', 'requestId', 'revision', ...(kind === 'permission' ? ['decision'] : []));
   if (kind === 'finish_terminal') fields.push('text', 'outcome');
   return new Set(fields);
@@ -802,10 +884,6 @@ function authorizeOperator(action, grant, plan, sessions, options) {
   if (lifecycleMode === 'interrupt' && dangerousKeys.some(key => key !== 'ctrl-c')) throw new Error('Interrupt authority does not authorize exiting or suspending the terminal agent.');
   const result = { kind: action.kind, grantId: grant.id, targetId, target: { ...target }, generation: target.generation, stepId: action.stepId };
   if (grant.targetAvailability === 'idle' && action.kind !== 'finish_terminal' && !availabilitySatisfied(plan, grant, targetId, action.stepId)) result.targetAvailability = 'idle';
-  for (const field of ['observationSequence', 'inputRevision']) if (Object.hasOwn(action, field)) {
-    if (!Number.isSafeInteger(action[field]) || action[field] < 0) throw new Error(`Invalid terminal ${field}.`);
-    result[field] = action[field];
-  }
   if (action.editInput !== undefined) {
     if (typeof action.editInput !== 'boolean') throw new Error('Invalid terminal input editing flag.');
     result.editInput = action.editInput;
@@ -864,7 +942,7 @@ function authorizeIntentAction(action, plan, sessions = [], options = {}) {
   const allowed = new Set([...BASE_EXECUTION_KEYS, ...(ARGUMENTS[grant.kind] || [])]);
   if (grant.text !== undefined && grant.kind !== 'terminal_interact') allowed.add('text');
   if (ANSWER_KINDS.has(grant.kind)) ['answerText', 'answerTexts', 'requestId', 'revision'].forEach(key => allowed.add(key));
-  if (grant.kind === 'terminal_interact') ['text', 'keys', 'submit', 'observationSequence'].forEach(key => allowed.add(key));
+  if (grant.kind === 'terminal_interact') ['text', 'keys', 'submit'].forEach(key => allowed.add(key));
   keys(action, allowed, 'workspace action');
   if (action.grantId !== undefined) string(action.grantId, 'command grant ID', 256);
   if (action.target !== undefined) keys(action.target, new Set(['id', 'generation', ...(grant.kind === 'close' ? ['launchToken'] : [])]), 'target');
@@ -895,7 +973,7 @@ function authorizeIntentAction(action, plan, sessions = [], options = {}) {
   if (grant.kind === 'terminal_interact') {
     const input = terminalInput(action, grant);
     if (!options.allowConsumed && (grantState.steps.get(targetId) || 0) + input.steps > 16) throw new Error('Terminal navigation limit reached for this user command.');
-    for (const key of ['text', 'keys', 'submit', 'observationSequence']) if (action[key] !== undefined) result[key] = clone(action[key]);
+    for (const key of ['text', 'keys', 'submit']) if (action[key] !== undefined) result[key] = clone(action[key]);
   } else if (grant.text !== undefined) {
     if (action.text !== undefined && action.text !== grant.text) throw new Error('Prompt text cannot change the authorized user task.');
     result.text = grant.text;

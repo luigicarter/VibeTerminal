@@ -18,23 +18,30 @@ test('idle-only group choice never chooses busy, and freezes original candidates
   }
 });
 
+// No eligible pane is a question the request asks, and it carries no plan at
+// all: the clarification is raised by the validator with its own code, so a
+// grant with no pane in it never exists to be authorized. Interpretation and
+// the relay's own retry path both turn that code into the question the user
+// reads (see planOrClarification in backend/orchestrator.cjs).
+const unavailable = (sessions, patch) => {
+  let raised;
+  assert.throws(() => compile(sessions, patch), error => { raised = error; return true; });
+  assert.equal(raised.code, 'ORCHESTRATOR_LAST_TARGET_SELECTION');
+  return raised;
+};
+
 test('no eligible target yields clarification without any effect authority', () => {
   for (const patch of [{ turnState: 'running' }, { generation: 'paused:a' }, { observation: 'unavailable' }, { pendingInput: true }, { pendingInteraction: {} }, { childActivity: true }, { agentProcessState: 'exited' },
     { manualInputPending: true }, { interactionInputPending: true }, { heldMouseButton: 'left' }, { attention: { reason: 'question' } }, { attention: { reason: 'approval' } }]) {
-    const plan = compile([live('a', patch)], { targetIds: ['a'] });
-    assert.equal(plan.grants.length, 0);
-    assert.match(plan.clarification, /currently free/);
-    assert.throws(() => authorizeIntentAction({ kind: 'send_prompt', targetId: 'a' }, plan, [live('a')]));
+    assert.match(unavailable([live('a', patch)], { targetIds: ['a'] }).clarification, /currently free/);
   }
 });
 
 test('free chat selection rejects contradictory startup and process evidence', () => {
   for (const kind of ['fusion', 'openfusion']) {
     for (const patch of [{ status: 'starting' }, { engineReady: false }, { processState: 'starting' }, { processState: 'exited' }, { agentProcessState: 'failed' }]) {
-      const sessions = [live('a', { kind, ...patch })];
-      const plan = compile(sessions, { targetIds: ['a'] });
-      assert.equal(plan.grants.length, 0, `${kind}: ${JSON.stringify(patch)}`);
-      assert.match(plan.clarification, /currently free/);
+      assert.match(unavailable([live('a', { kind, ...patch })], { targetIds: ['a'] }).clarification, /currently free/,
+        `${kind}: ${JSON.stringify(patch)}`);
     }
     const ready = compile([live('a', { kind, engineReady: true, processState: undefined, agentProcessState: undefined, agentPid: undefined })], { targetIds: ['a'] });
     assert.equal(ready.grants.length, 1, 'chat readiness does not require native PTY process fields');

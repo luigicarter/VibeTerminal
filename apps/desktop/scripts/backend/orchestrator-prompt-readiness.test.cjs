@@ -1,7 +1,9 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { assessNativePromptReadiness: assess, startupScreen } = require('../../backend/orchestratorPromptReadiness.cjs');
+const { assessNativePromptReadiness: assess, startupScreen, recognizeEmptyComposer,
+  COMPOSER_FORMS } = require('../../backend/orchestratorPromptReadiness.cjs');
+const composerOf = (session, observation) => recognizeEmptyComposer(COMPOSER_FORMS.get(session.provider || session.kind), observation);
 const { createTerminalObservation } = require('../../backend/terminalObservation.cjs');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -85,6 +87,28 @@ for (const field of ['manualInputPending', 'interactionInputPending']) test(`${f
   assert.equal(assess(session, observation).status, 'blocked');
 });
 
+// The keystroke latch is set by any key that is not Enter or Ctrl-C - an arrow,
+// Escape, typing then deleting - and output never clears it, so on its own it
+// locked a pane out permanently. A composer showing nothing but its own hint is
+// the evidence that overrides it; a composer holding anything else still blocks,
+// which is why the fixture above stays blocked: its hint copy is the 0.144
+// wording, and only what a capture actually recorded counts as a hint.
+test('the keystroke latch yields only to a composer showing nothing but its own hint', () => {
+  const { session, observation } = fixture(); observation.manualInputPending = true;
+  let hintNow = 'Run /review on my current changes';
+  const show = hint => { observation.text = observation.text.replace(hintNow, hint); hintNow = hint; };
+  show('Ask Codex to do anything');
+  assert.equal(assess(session, observation).ready, true, 'the recorded 0.154 hint overrides the latch');
+  assert.equal(assess({ ...session, manualInputPending: true }, observation).ready, true, 'the runtime copy of the latch behaves the same');
+  show('review the checkout flow');
+  assert.equal(assess(session, observation).status, 'blocked', 'text that is not the hint is a draft the caret was moved back through');
+  show('Ask Codex to do anything');
+  observation.cursor = { x: 12, y: 3 };
+  assert.equal(assess(session, observation).status, 'blocked', 'a cursor away from the composer cell still blocks');
+  const unknown = fixture(); unknown.session.provider = 'cursor'; unknown.observation.manualInputPending = true;
+  assert.equal(assess(unknown.session, unknown.observation).status, 'blocked', 'a kind with no recognizer keeps the hard block');
+});
+
 test('initial idle lifecycle is insufficient and a pending request stays blocked', () => {
   const { session, observation } = fixture(); session.turnState = 'idle'; observation.cursorVisible = false;
   assert.equal(assess(session, observation).ready, false);
@@ -127,13 +151,32 @@ async function replay(t, name, overrides = {}) {
 for (const [name, expected] of [
   ['claude-120x36', { status: 'ready', cursor: { x: 2, y: 6 } }],
   ['claude-100x20', { status: 'ready', cursor: { x: 2, y: 16 } }],
+  // Claude Code 2.1.270 on a custom endpoint — an Open Claude Code pane — paints
+  // the same composer and never shows the cursor. Recorded 2026-09-14 from a
+  // claude pane whose ANTHROPIC_BASE_URL pointed at a local server.
+  ['claude-hidden-cursor-100x30', { status: 'ready', cursor: { x: 2, y: 6 } }],
   ['codex-ready', { status: 'ready', cursor: { x: 2, y: 13 } }],
+  // The board's own default tile is 69x10. Codex prints its session header,
+  // "OpenAI Codex" banner and model line above the composer, and all three have
+  // scrolled off before the composer is painted at that size - so requiring the
+  // banner refused the first prompt into every default-sized Codex pane.
+  // Recorded 2026-09-14 with scripts/qa/provider-startup-probe.cjs --cols 69
+  // --rows 10 against Codex 0.154.0 installed on this machine.
+  ['codex-small-tile-69x10', { status: 'ready', cursor: { x: 2, y: 7 } }],
+  // Claude Code 2.1.270 paints a compact header that still fits at 69x10, so
+  // this capture locks the composer form at a small width rather than a missing
+  // banner. Recorded the same way, the same day.
+  ['claude-small-tile-69x10', { status: 'ready', cursor: { x: 2, y: 7 } }],
   ['grok-ready', { status: 'ready', cursor: { x: 6, y: 25 } }],
   ['kimi-ready', { status: 'ready', cursor: { x: 5, y: 16 } }],
   ['kimi-custom-ready', { status: 'ready', cursor: { x: 5, y: 17 } }],
   ['qwen-ready', { status: 'ready', cursor: { x: 2, y: 17 } }],
   ['opencode-ready', { status: 'ready', cursor: { x: 16, y: 15 } }],
   ['codex-folder-trust', { status: 'transient', prompt: 'folder-trust', affirmativeDefault: true, cursor: { x: 25, y: 9 } }],
+  // Kimi Code 0.42 opens on its own trust dialog, whose first option is worded
+  // "Trust this folder" with no number: a shape the 0.1.123 pattern, which
+  // required "1. Yes", never matched, so the pane waited out its whole startup.
+  ['kimi-folder-trust', { status: 'transient', prompt: 'folder-trust', affirmativeDefault: true, cursor: { x: 99, y: 15 } }],
   ['open-codex-sign-in', { status: 'transient', prompt: 'sign-in', affirmativeDefault: false, cursor: { x: 21, y: 14 } }],
   ['cursor-sign-in', { status: 'transient', prompt: 'sign-in', affirmativeDefault: false, cursor: { x: 0, y: 29 } }],
 ]) test(`captured ${name} startup screen decodes to ${expected.status}`, async t => {
@@ -148,17 +191,104 @@ for (const [name, expected] of [
   if (expected.affirmativeDefault !== undefined) assert.equal(readiness.affirmativeDefault, expected.affirmativeDefault);
 });
 
+// The recorded small-tile screen, stated as the rule it proves: at the board's
+// own default tile size a Codex pane has NO banner and NO model line on screen
+// when its composer is ready, and the first prompt must still go in.
+test('a default-sized Codex tile is ready with its banner already scrolled off', async t => {
+  const { observation, session } = await replay(t, 'codex-small-tile-69x10');
+  assert.equal(observation.cols, 69);
+  assert.equal(observation.rows, 10);
+  assert.equal(/OpenAI Codex/.test(observation.text), false, 'the recorded 69x10 screen carries no launch banner');
+  assert.equal(/\bmodel:/i.test(observation.text), false, 'and no model line');
+  assert.match(observation.text, /^› Ask Codex to do anything$/m, 'the composer itself is on screen');
+  const readiness = assess(session, observation);
+  assert.equal(readiness.ready, true, readiness.reason);
+  assert.equal(composerOf(session, observation).empty, true);
+});
+
+// The composer recognizer is the half of the assessment that survives an
+// established session: a header scrolls away, an empty input cell does not. It
+// is what the input-surface fence uses, and what overrides the keystroke latch,
+// so it is checked against every recording in its own right.
+test('every recorded ready composer is recognized empty, and no startup screen is', async t => {
+  for (const name of ['claude-120x36', 'claude-100x20', 'codex-ready', 'grok-ready', 'kimi-ready',
+    'kimi-custom-ready', 'qwen-ready', 'opencode-ready']) {
+    const { session, observation } = await replay(t, name);
+    const composer = composerOf(session, observation);
+    assert.equal(composer.empty, true, `${name}: ${composer.reason}`);
+    assert.equal(composer.atComposerCell, true, name);
+    // Whatever stands right of the caret in these recordings is the provider's
+    // own hint. Replace it with words a user would type, leave the caret where a
+    // recalled draft leaves it, and the same screen is no longer empty — while
+    // the launch verdict, which must tolerate rotating hint copy, is unchanged.
+    const window = observation.cursorContext;
+    const row = window.rows[observation.cursor.y - window.startRow];
+    const drafted = row.slice(0, observation.cursor.x) + 'review the checkout flow';
+    const draft = { ...observation, cursorContext: { ...window,
+      rows: window.rows.map((value, index) => index === observation.cursor.y - window.startRow ? drafted : value) } };
+    const verdict = composerOf(session, draft);
+    assert.equal(verdict.empty, false, name);
+    assert.equal(verdict.atComposerCell, true, `${name}: the composer is still painted and the caret still in its cell`);
+  }
+  for (const name of ['codex-folder-trust', 'open-codex-sign-in']) {
+    const { session, observation } = await replay(t, name);
+    assert.equal(composerOf(session, observation).empty, false, name);
+  }
+  // Cursor Agent's composer was never captured, so nothing is known either way.
+  const cursor = await replay(t, 'cursor-sign-in');
+  assert.equal(composerOf(cursor.session, cursor.observation).empty, undefined);
+});
+
+// The session header each CLI prints once is not launch evidence: it scrolls
+// off. A pane at the board's own default tile size (69x10) has lost it before
+// the composer is even painted, and requiring it refused that pane's first
+// prompt for the whole life of the pane — reporting "the empty Codex root
+// composer is not at the current cursor" about a composer that was on screen.
+test('a session whose banner has scrolled off is still ready at its composer', async t => {
+  const { session, observation } = await replay(t, 'codex-ready');
+  // What an established, or simply short, Codex pane looks like: the header
+  // gone, other rows above it, the same empty composer at the same cell.
+  const rows = observation.text.split('\n');
+  const text = rows.map((row, index) => index < 11 ? `output line ${index}` : row).join('\n');
+  const scrolled = { ...observation, text };
+  assert.equal(/OpenAI Codex/.test(text), false, 'the session header really is gone');
+  assert.equal(/\bmodel:/i.test(text), false, 'the model line went with it');
+  assert.equal(composerOf(session, scrolled).empty, true);
+  assert.equal(assess(session, scrolled).ready, true, assess(session, scrolled).reason);
+  // A header that is still ON SCREEN and has not named its model is a session
+  // that really is still starting, and still holds the first prompt back.
+  const loading = { ...observation, text: rows.map((row, index) => index < 11 ? 'model:' : row).join('\n') };
+  assert.equal(assess(session, loading).status, 'starting');
+  // And the launch verdict is unchanged for the screen that has the whole header.
+  assert.equal(assess(session, observation).ready, true);
+});
+
 // Kimi Code hides the terminal cursor while its composer is focused. That is a
 // concession to one provider's rendering, not a general relaxation.
-test('a hidden cursor is accepted for Kimi only', async t => {
+// Kimi and Claude are the two forms whose composer may be painted with no
+// cursor showing; for them the rules, the pointer and the caret column are the
+// evidence. Every other form still has to show its cursor.
+test('a hidden cursor is accepted for Kimi and Claude only', async t => {
   const kimi = await replay(t, 'kimi-ready');
   assert.equal(kimi.observation.cursorVisible, false);
   assert.equal(assess(kimi.session, kimi.observation).ready, true);
+  // Claude Code 2.1.270 on a custom endpoint: same composer, no cursor.
+  const hidden = await replay(t, 'claude-hidden-cursor-100x30');
+  assert.equal(hidden.observation.cursorVisible, false);
+  assert.equal(assess(hidden.session, hidden.observation).ready, true);
+  // Its structure is still load-bearing: without the rules it is not a composer.
+  const unruled = hidden.observation.text.split('\n').filter(line => !/^─+$/.test(line)).join('\n');
+  assert.equal(assess(hidden.session, { ...hidden.observation, text: unruled,
+    cursorContext: { startRow: hidden.observation.cursorContext.startRow,
+      rows: unruled.split('\n').slice(hidden.observation.cursorContext.startRow,
+        hidden.observation.cursorContext.startRow + hidden.observation.cursorContext.rows.length) } }).ready, false);
   const qwen = await replay(t, 'qwen-ready');
   assert.equal(qwen.observation.cursorVisible, true);
   assert.equal(assess(qwen.session, { ...qwen.observation, cursorVisible: false }).ready, false);
   const grok = await replay(t, 'grok-ready');
   assert.equal(assess(grok.session, { ...grok.observation, cursorVisible: false }).ready, false);
+  const codex = await replay(t, 'codex-ready');
+  assert.equal(assess(codex.session, { ...codex.observation, cursorVisible: false }).ready, false);
 });
 
 for (const kind of ['claude', 'claude-custom'])
@@ -168,29 +298,43 @@ for (const kind of ['claude', 'claude-custom'])
     assert.ok(observation.text.includes(footer), 'the recording carries the 2.1.270 auto-mode footer');
     assert.ok(!/\?\s+for shortcuts/.test(observation.text), 'Claude Code 2.1.270 prints no shortcut hint');
     assert.equal(assess(session, observation).ready, true);
+    // A screen is its text AND the decoder's unclipped rows around the cursor.
+    // Patching one without the other would describe a screen no terminal can
+    // paint, so every text patch below re-derives that window from its own text.
+    const screen = text => ({ ...observation, text, cursorContext: { startRow: observation.cursorContext.startRow,
+      rows: text.split('\n').slice(observation.cursorContext.startRow,
+        observation.cursorContext.startRow + observation.cursorContext.rows.length) } });
     // The footer is evidence the composer may carry, never evidence it must.
     for (const text of [observation.text.replace(footer, ''), observation.text.replace(footer, '? for shortcuts'),
       observation.text.replace(footer, '⏸ manual mode on · ← for agents'),
-      observation.text.replace('❯', '>'), observation.text + '\nWorking on the current request'])
-      assert.equal(assess(session, { ...observation, text }).ready, true, JSON.stringify(text.slice(-90)));
-    // What the composer must still be: named, ruled above and below, pointer and
+      observation.text.replace('❯', '>'), observation.text + '\nWorking on the current request',
+      // The launch banner scrolls off a small pane before the composer appears,
+      // so it is no longer evidence either way. The composer form is.
+      observation.text.replace('Claude Code', 'Unrelated program')])
+      assert.equal(assess(session, screen(text)).ready, true, JSON.stringify(text.slice(-90)));
+    // What the composer must still be: ruled above and below, pointer and
     // cursor in their exact cells, with no pending decision or human draft.
     for (const patch of [
-      { text: observation.text.replace('Claude Code', 'Unrelated program') },
-      { text: observation.text.split('\n').filter(line => !/^─+$/.test(line)).join('\n') },
-      { text: observation.text.replace(/^❯/m, ' ❯') },
-      { text: observation.text + '\nDo you want to proceed?' },
-      { text: observation.text + '\nAllow Claude to edit files?' },
-      { text: observation.text + '\nChoose a theme' },
-      { text: observation.text + '\nSelect a model' },
-      { text: observation.text + '\nSelect login method' },
-      { cursorVisible: false },
-      { manualInputPending: true },
+      screen(observation.text.split('\n').filter(line => !/^─+$/.test(line)).join('\n')),
+      screen(observation.text.replace(/^❯/m, ' ❯')),
+      screen(observation.text + '\nDo you want to proceed?'),
+      screen(observation.text + '\nAllow Claude to edit files?'),
+      screen(observation.text + '\nChoose a theme'),
+      screen(observation.text + '\nSelect a model'),
+      screen(observation.text + '\nSelect login method'),
+      // `cursorVisible: false` is deliberately NOT in this list: Claude Code
+      // 2.1.270 on a custom endpoint paints this exact composer with no cursor
+      // (claude-hidden-cursor-100x30), so a hidden cursor alone no longer
+      // refuses a Claude composer. Everything structural below still does.
       { interactionInputPending: true },
       { cursor: { x: 8, y: 6 } },
       { cursor: { x: 2, y: 4 } },
       { screenTruncated: true },
     ]) assert.equal(assess(session, { ...observation, ...patch }).ready, false, JSON.stringify(patch).slice(0, 120));
+    // The keystroke latch alone no longer holds a composer the recognizer can
+    // see is empty; over any other cursor position it still blocks.
+    assert.equal(assess(session, { ...observation, manualInputPending: true }).ready, true);
+    assert.equal(assess(session, { ...observation, manualInputPending: true, cursor: { x: 8, y: 6 } }).status, 'blocked');
   });
 
 test('a recorded composer is refused once its own pane reports a pending decision', async t => {
@@ -199,7 +343,12 @@ test('a recorded composer is refused once its own pane reports a pending decisio
     assert.equal(assess(session, observation).ready, true, name);
     assert.equal(assess({ ...session, pendingInteraction: true }, observation).status, 'blocked', name);
     assert.equal(assess({ ...session, turnState: 'waiting' }, observation).status, 'blocked', name);
-    assert.equal(assess(session, { ...observation, manualInputPending: true }).status, 'blocked', name);
+    assert.equal(assess(session, { ...observation, interactionInputPending: true }).status, 'blocked', name);
+    // The keystroke latch yields to the recognized empty composer and returns
+    // the moment the cursor sits anywhere else on the screen.
+    assert.equal(assess(session, { ...observation, manualInputPending: true }).ready, true, name);
+    assert.equal(assess(session, { ...observation, manualInputPending: true,
+      cursor: { x: observation.cursor.x + 3, y: observation.cursor.y } }).status, 'blocked', name);
   }
 });
 
@@ -218,6 +367,29 @@ for (const [file, prompt] of [
   // Claude's trust screen rests its pointer on "No, exit", so it is reported and
   // waited through and never answered. Codex's rests on "1. Yes, continue".
   assert.equal(screen.affirmativeDefault, false);
+});
+
+// Three recorded trust dialogs, three pointer glyphs, three wordings. What is
+// common is the rule: the pointer rests on the FIRST option and that option is
+// the affirmative one. Anything else is reported and waited through.
+test('a trust screen is answerable only while its pointer rests on the affirmative first option', () => {
+  const screens = {
+    'codex 0.154': '\nDo you trust the files in this folder?\n\n❯ 1. Yes, continue\n  2. No, exit',
+    'kimi 0.42': '\nTrust this folder?\n\n   ❯ Trust this folder\n     Don\'t trust',
+    'gemini 0.59': '\nDo you trust this folder?\n\n ● 1. Trust folder (vibeTerminal)\n   2. Do not trust',
+  };
+  for (const [label, text] of Object.entries(screens)) {
+    const screen = startupScreen(text);
+    assert.equal(screen?.prompt, 'folder-trust', label);
+    assert.equal(screen.affirmativeDefault, true, label);
+  }
+  for (const [label, text] of Object.entries({
+    'pointer on the refusal': '\nTrust this folder?\n\n   Trust this folder\n ❯ Don\'t trust',
+    'pointer on the second option': '\nDo you trust this folder?\n\n  1. Yes, continue\n❯ 2. No, exit',
+    'no pointer at all': '\nDo you trust this folder?\n\n  1. Yes, continue\n  2. No, exit',
+  })) assert.equal(startupScreen(text).affirmativeDefault, false, label);
+  // A sandbox or sign-in screen is never answered, however its options read.
+  assert.equal(startupScreen('\nSet up the Codex agent sandbox\n\n❯ 1. Yes, proceed').affirmativeDefault, false);
 });
 
 test('an update banner beside a ready composer is not an update offer', async t => {
@@ -314,4 +486,28 @@ test('real decoder accepts the trimmed empty composer and preserves cursor and d
   await decoder.ingest({ type: 'data', id: session.id, generation: session.generation, sequence: 4, data: '\x1b[5D' });
   await decoder.ingest({ type: 'input-state', id: session.id, generation: session.generation, inputRevision: 1, manualInputPending: true });
   assert.equal(assess(session, await read()).status, 'blocked', 'moving cursor to draft start cannot defeat pending human input');
+  // And the same draft still blocks with the caret back at its end, where a
+  // composer holding text actually leaves it.
+  await decoder.ingest({ type: 'data', id: session.id, generation: session.generation, sequence: 5, data: '\x1b[5C' });
+  assert.equal(assess(session, await read()).status, 'blocked', 'a draft the cursor sits after still blocks a latched pane');
+});
+
+// The sparkle Codex 0.154 paints around its empty composer takes the separator
+// cell between the pointer and the cursor several times a second. Recorded from
+// the installed 0.154 on 2026-09-13: 35 of 92 idle frames carried it.
+test('an ambient sparkle dot in the composer separator is decoration, not a draft', async t => {
+  const decoder = createTerminalObservation(); t.after(() => decoder.dispose());
+  const session = { id: 'pane', generation: 'g1', provider: 'codex', kind: 'codex', turnState: 'unknown' };
+  await decoder.ingest({ type: 'created', id: 'pane', generation: 'g1', cols: 80, rows: 10, inputRevision: 0 });
+  await decoder.ingest({ type: 'data', id: 'pane', generation: 'g1', sequence: 1,
+    data: 'OpenAI Codex (v0.154.0)\r\nmodel: gpt-6-astra\r\n\r\n› Ask Codex to do anything\x1b[4;3H' });
+  assert.equal(assess(session, await decoder.read({ id: 'pane', generation: 'g1' })).ready, true);
+  // One frame later the sparkle owns the separator cell; the cursor has not moved.
+  await decoder.ingest({ type: 'data', id: 'pane', generation: 'g1', sequence: 2, data: '\x1b[4;2H⠁\x1b[4;3H' });
+  const sparkled = await decoder.read({ id: 'pane', generation: 'g1' });
+  assert.equal(sparkled.cursorLine.beforeCursor, '›⠁', 'the decoder still reports what the cells actually hold');
+  assert.equal(assess(session, sparkled).ready, true);
+  // A character the user typed in that cell moves the cursor past it.
+  await decoder.ingest({ type: 'data', id: 'pane', generation: 'g1', sequence: 3, data: '\x1b[4;2Hx' });
+  assert.equal(assess(session, await decoder.read({ id: 'pane', generation: 'g1' })).ready, false);
 });

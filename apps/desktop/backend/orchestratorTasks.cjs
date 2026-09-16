@@ -53,7 +53,10 @@ function createSemaphore(limit) {
 }
 
 const terminalStates = new Set(['finished', 'failed', 'cancelled', 'paused', 'continued']);
-const completedStates = new Set(['completed', 'complete', 'finished', 'succeeded']);
+// A coarse provider (Claude, Gemini, Kimi, Qwen, Cursor, OpenCode, Grok) ends
+// its root turn with a provisional 'response' and never says more; with no
+// child activity pending that is the turn's end, and the task settles on it.
+const completedStates = new Set(['completed', 'complete', 'finished', 'succeeded', 'response']);
 const failedStates = new Set(['failed', 'cancelled', 'interrupted']);
 // Result completion and workspace occupancy are separate: a failed foreground
 // turn may leave observed detached workers editing the same workspace.
@@ -98,6 +101,10 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
       wait.baselineIdle = false;
     }
     wait.deliveryStatus = result.status || (result.ok ? 'acknowledged' : 'unknown');
+    // How many times the application looked before giving up, so the receipt can
+    // say it. Only the code-owned retry sets this.
+    if (Number.isSafeInteger(result.attempts) && result.attempts > 1) wait.deliveryAttempts = result.attempts;
+    else delete wait.deliveryAttempts;
     if (result.status === 'staged' && typeof result.reason === 'string') wait.deliveryReason = result.reason;
     else delete wait.deliveryReason;
     if (['queued', 'staged'].includes(result.status) || result.delivery === 'not-dispatched') {
@@ -145,9 +152,6 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
   // unknown result still blocks explicit dependencies, but cannot lease the
   // entire project forever after an echo or other completed shell command.
   function occupiedLanes(job) {
-    if (job.parkedForSubmission) return job.lanes.filter(lane => lane.key.startsWith('workspace:') && job.waits.some(wait =>
-      hasWorkspaceOccupancy(wait, { includeQueued: !job.controller?.signal.aborted })
-      && (!lane.targetIds || lane.targetIds.includes(wait.targetId))));
     if (job.executionDone) return job.lanes.filter(lane => job.waits.some(wait =>
       hasWorkspaceOccupancy(wait, { includeQueued: Boolean(lane.workItemId) && !job.controller?.signal.aborted })
       && (!lane.targetIds || lane.targetIds.includes(wait.targetId))));
@@ -155,25 +159,22 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
     // terminal's control lane. Answers and interrupts must remain admissible.
     return job.lanes.filter(lane => !(lane.workItemId && lane.key.startsWith('terminal:') && !job.admitted));
   }
-  function ownsWorkspace(workItemId, key) {
-    return [...jobs.values()].some(owner => owner.lanes.some(lane => lane.key === key && lane.workItemId === workItemId
-      && owner.waits.some(wait => hasWorkspaceOccupancy(wait) && (!lane.targetIds || lane.targetIds.includes(wait.targetId)))));
-  }
-  // Operators serialize their control loops, but must be able to answer or
-  // interrupt work a previous loop already dispatched. Result dependencies
-  // remain a separate prerequisite below; ordinary sends retain their leases.
+  // A task owns the pane it runs in, and nothing else: two panes in one
+  // worktree run side by side, which is how the user works, and the same pane
+  // serializes on its terminal lane. Operators serialize their control loops,
+  // but must be able to answer or interrupt work a previous loop already
+  // dispatched. Result dependencies are a separate prerequisite below.
+  // (Until 2026-09-15 a worktree was a lane of its own, with a parking wait,
+  // a parallel marker and an incumbent rule layered on it; every "prompt the
+  // empty terminal" then waited out the other pane's whole turn.)
   function conflictingLane(a, b) {
     if (b.executionDone && b.waits.length && b.waits.every(wait => wait.nativeShell) && a.task.targetIds.length === 1 && b.task.targetIds.length === 1 && a.task.targetIds[0] === b.task.targetIds[0]) return false;
-    return a.lanes.find(lane => !(lane.operator && lane.key.startsWith('terminal:') && b.executionDone) && occupiedLanes(b).some(other => {
-      if (lane.key !== other.key || (lane.readOnly && other.readOnly)) return false;
-      if (lane.workItemId && lane.key.startsWith('workspace:')) {
-        if (lane.workItemId === other.workItemId && (b.executionDone || b.parkedForSubmission)) return false;
-        // Let the incumbent receive a compatible continuation even when an
-        // unrelated mutation is queued behind it. Active loops never bypass.
-        if (other.workItemId && !b.admitted && ownsWorkspace(lane.workItemId, lane.key)) return false;
-      }
-      return true;
-    }));
+    // Once the earlier loop has finished, a control (an answer, an interrupt)
+    // and a continuation of the same work item may reach the pane while its
+    // turn still runs; a different task waits for that turn like any send.
+    const passes = (lane, other) => b.executionDone && (lane.operator && !lane.workItemId || Boolean(lane.workItemId) && lane.workItemId === other.workItemId);
+    return a.lanes.find(lane => occupiedLanes(b).some(other =>
+      lane.key === other.key && !(lane.readOnly && other.readOnly) && !passes(lane, other)));
   }
   const requestName = job => `request "${job.task.label || job.task.text || 'Earlier work'}"`;
   function targetName(id, owner) {
@@ -184,7 +185,6 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
     const occupied = occupiedLanes(owner).filter(other => other.key === lane.key);
     const ids = [...new Set(occupied.flatMap(other => other.targetIds || owner.task.targetIds))];
     const waits = owner.waits.filter(wait => ids.includes(wait.targetId) && hasWorkspaceOccupancy(wait, { includeQueued: true }));
-    const location = lane.key.startsWith('workspace:') ? `workspace ${lane.key.slice('workspace:'.length)}` : 'terminal control';
     const targets = ids.length ? ` on ${ids.map(id => targetName(id, owner)).join(', ')}` : '';
     const state = waits.some(wait => wait.backgroundPending) ? 'background work is still active'
       : waits.some(wait => !wait.delivered) ? 'its prompt is still awaiting delivery'
@@ -192,7 +192,7 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
           : waits.some(wait => ['running', 'busy', 'starting'].includes(currentSessions.find(session => session.id === wait.targetId)?.turnState)) ? 'work is still active'
             : waits.length ? 'it has not finished yet'
               : owner.admitted ? 'its control loop is still active' : 'it is ahead in the queue';
-    return `Waiting for ${requestName(owner)}${targets} in ${location}: ${state}.`;
+    return `Waiting for ${requestName(owner)}${targets} in terminal control: ${state}.`;
   }
   function blockingReason(job, { dependenciesOnly = false } = {}) {
     for (const id of job.task.dependsOn) {
@@ -220,7 +220,7 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
   function setWaitingReason(job, waitingReason) {
     if (job.task.waitingReason !== waitingReason) update(job, { waitingReason });
   }
-  async function ready(job, { dependenciesOnly = false, resumeSubmission = false } = {}) {
+  async function ready(job, { dependenciesOnly = false } = {}) {
     const signal = job.controller.signal;
     await new Promise((resolve, reject) => {
       let settled = false, checking = false, recheckScheduled = false;
@@ -251,11 +251,10 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
         // Routing may need to wait before creating a worker. This prerequisite
         // gate must not acquire execution lanes or mark the job admitted.
         if (dependenciesOnly) { finish(); setWaitingReason(job, undefined); return; }
-        // A later control request may have passed this job while it waited for
-        // workspace ownership. Its active loop still owns the terminal lane.
+        // A later control request may have passed this job while it waited.
+        // Its active loop still owns the terminal lane.
         const reason = blockingReason(job);
         if (reason) { setWaitingReason(job, reason); return; }
-        if (resumeSubmission) job.parkedForSubmission = false;
         job.admitted = true;
         finish();
         setWaitingReason(job, undefined);
@@ -263,37 +262,6 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
       };
       listeners.add(check); signal.addEventListener('abort', abort, { once: true }); check();
     });
-  }
-  async function waitForAssignmentSubmission(job, { targetId, workItemId, workspaceKey, readOnly = false }) {
-    const lanes = job.lanes.filter(lane => lane.key.startsWith('workspace:') && lane.workItemId === workItemId && lane.targetIds?.includes(targetId));
-    // An explicit target may not own a work item until its first authorized
-    // submission. Compare its prospective workspace without minting ownership.
-    if (!lanes.length && workspaceKey) lanes.push({ key: workspaceKey, workItemId, readOnly, targetIds: [targetId] });
-    const conflicts = () => job.lanes.find(other => lanes.some(lane => other.key === lane.key && other.workItemId && other.workItemId !== workItemId
-      && !(lane.readOnly && other.readOnly) && job.waits.some(wait => hasWorkspaceOccupancy(wait, { includeQueued: true })
-        && other.targetIds?.includes(wait.targetId))));
-    if (!lanes.length || !conflicts()) return false;
-    const signal = job.controller.signal;
-    job.parkedForSubmission = true;
-    update(job, { status: 'queued', waitingReason: ownerReason({ ...job, lanes: [conflicts()] }, conflicts()) });
-    try {
-      await new Promise((resolve, reject) => {
-        const finish = error => { listeners.delete(check); signal.removeEventListener('abort', abort); error ? reject(error) : resolve(); };
-        const abort = () => finish(new Error('Cancelled.'));
-        const check = () => {
-          if (signal.aborted) { abort(); return; }
-          const lane = conflicts();
-          if (!lane) finish();
-          else setWaitingReason(job, ownerReason({ ...job, lanes: [lane] }, lane));
-        };
-        listeners.add(check); signal.addEventListener('abort', abort, { once: true }); check();
-      });
-      // Controls admitted while parked keep their lanes until their own loop
-      // finishes. Restore our control occupancy atomically with readmission.
-      await ready(job, { resumeSubmission: true });
-      update(job, { status: 'running', waitingReason: undefined });
-      return true;
-    } finally { job.parkedForSubmission = false; }
   }
   function track(job, action, result, baseline) {
     // Pane creation (including an explicitly saved initial draft) never submits
@@ -492,6 +460,6 @@ function createTaskScheduler({ now = Date.now, onChange = () => {}, restored = [
     for (const job of selected) if (!terminalStates.has(job.task.status)) { job.controller?.abort(); for (const wait of job.waits) if (wait.source === 'watch') { wait.done = true; wait.delivered = false; } Object.assign(job.task, { status: 'cancelled', updatedAt: now(), waitingReason: job.waits.some(wait => !wait.done && wait.delivered) ? 'Request cancelled; previously sent terminal work may still be running.' : undefined }); }
     changed(); return { ok: selected.length > 0 || !requestId, status: 'cancelled' };
   }
-  return { create, hasCapacity, update, batch, blockingReason, ready, waitForDependencies: job => ready(job, { dependenciesOnly: true }), waitForAssignmentSubmission, track, watch, reconcile, delivery, cancel, jobs, get: id => jobs.get(id), snapshot: () => [...jobs.values()].map(project), busy: () => [...jobs.values()].some(job => ['queued', 'routing', 'running'].includes(job.task.status)), clear() { const protectedIds = liveRequestOwners(); for (const [id, job] of jobs) if (terminalStates.has(job.task.status) && !protectedIds.has(id) && !job.waits.some(wait => hasWorkspaceOccupancy(wait))) jobs.delete(id); changed(); } };
+  return { create, hasCapacity, update, batch, blockingReason, ready, waitForDependencies: job => ready(job, { dependenciesOnly: true }), track, watch, reconcile, delivery, cancel, jobs, get: id => jobs.get(id), snapshot: () => [...jobs.values()].map(project), busy: () => [...jobs.values()].some(job => ['queued', 'routing', 'running'].includes(job.task.status)), clear() { const protectedIds = liveRequestOwners(); for (const [id, job] of jobs) if (terminalStates.has(job.task.status) && !protectedIds.has(id) && !job.waits.some(wait => hasWorkspaceOccupancy(wait))) jobs.delete(id); changed(); } };
 }
 module.exports = { createTaskScheduler, createSemaphore, hasWorkspaceOccupancy, composerAcceptedPrompt };

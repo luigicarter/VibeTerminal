@@ -45,7 +45,7 @@ async function fixture(t) {
       else {
         const observed = JSON.parse(body.messages.filter(message => message.role === 'tool').at(-1).content);
         const base = { targetId, grantId: grant.id, stepId: `${grant.id}-${phase}`, observationToken: observed.observationToken };
-        action = phase === 1 ? { ...base, kind: 'send_prompt', text: grant.text, observationSequence: observed.observation.sequence, inputRevision: observed.observation.inputRevision }
+        action = phase === 1 ? { ...base, kind: 'send_prompt', text: grant.text}
           : { ...base, kind: 'finish_terminal', outcome: 'completed', text: 'Submission inspected.' };
       }
       assert.ok(phase < 4);

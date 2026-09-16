@@ -86,6 +86,21 @@ test('a refused send returns control with its reason and never finishes the oper
   assert.deepEqual(f.diagnostics.filter(entry => entry.stage === 'dispatch').map(entry => [entry.handledCount, entry.fallbackCount]), [[0, 1]]);
 });
 
+// The application retries a screen race itself, inside the native adapter, where
+// it can prove nothing was written and that the input revision never moved. By
+// the time a refusal reaches the dispatcher that retry is already spent, so a
+// second send here would be a duplicate prompt.
+test('a refused write already carries its attempt count and is handed back once', async () => {
+  const f = unit({ send: { ok: false, status: 'stale-observation', delivery: 'not-dispatched', reason: 'surface-changed', attempts: 3 } });
+  const result = await f.run();
+  assert.equal(f.actions.filter(action => action.kind === 'send_prompt').length, 1);
+  assert.deepEqual(f.actions.map(action => action.kind), ['read_session', 'send_prompt']);
+  assert.deepEqual(result.handled, []);
+  assert.equal(result.fallback.length, 1);
+  assert.equal(result.fallback[0].status, 'stale-observation');
+  assert.equal(f.outcomes.some(outcome => outcome.kind === 'finish_terminal'), false);
+});
+
 test('an unknown write outcome stops without retrying the write', async () => {
   const f = unit({ send: { ok: false, status: 'unknown', error: 'Action adapter returned no acknowledgment.' } });
   const result = await f.run();
@@ -227,7 +242,7 @@ test('a refused send reaches the model as one user-role delivery report it can a
     const observed = JSON.parse(body.messages.filter(message => message.role === 'tool').at(-1).content);
     if (executorRound === 2) {
       return call({ kind: 'send_prompt', grantId: grant.id, targetId: 'pane', stepId: 'model-send', observationToken: observed.observationToken,
-        text: grant.text, observationSequence: observed.observation.sequence, inputRevision: observed.observation.inputRevision });
+        text: grant.text});
     }
     // The application observed the pane after the model's own send. That screen
     // and its token arrive as a user-role observation, never as a tool result
@@ -274,4 +289,45 @@ test('the direct path executes its grants in code with no synthesized assistant 
   assert.equal(result.text, "Typed the task into Codex 1, but I haven't seen it start yet. I'll tell you when it does.");
   assert.deepEqual(result.actions.map(action => [action.kind, action.status]), [['send_prompt', 'written']]);
   assert.equal(f.relay.getState().receipts.filter(receipt => receipt.kind === 'send_prompt' && receipt.status === 'written').length, 1);
+});
+
+// A fan-out ("on both terminals that are done, push the fixes") is the same
+// bound handoff once per pane, in the plan's order. On the ladder the model
+// loop stepped through exactly that (read, read, send, send, read, read,
+// finish, finish) in five rounds and fifty seconds; the application does it
+// with no model round at all, and a refusal on one pane hands back that pane.
+test('a fan-out over bound panes is delivered pane by pane in code, and a refused pane is handed back', async () => {
+  const cwd = process.platform === 'win32' ? 'C:\\project' : '/project';
+  const pane = id => ({ id, generation: 'g-' + id, kind: 'codex', provider: 'codex', cwd, launchToken: 1, name: 'Codex ' + id,
+    started: true, status: 'idle', processState: 'running', agentProcessState: 'running', agentPid: 44, observation: 'observed', turnState: 'completed', turnId: 't-' + id, revision: 1 });
+  const sessions = [pane('a'), pane('b')];
+  const build = () => normalizeIntent({ goal: 'Push the fixes.', actions: [{ kind: 'operate_terminal', targetIds: ['a', 'b'], selection: 'all', operationMode: 'task',
+    promptMode: 'compose', text: 'Push the tested fixes.' }] }, { instruction: 'On both terminals that are done, push the fixes.', requestId: 'user-2', sessions, requests: [] });
+  const harness = (send = () => ({ ok: true, status: 'written' })) => {
+    const f = { actions: [], outcomes: [], reads: 0 };
+    f.plan = build();
+    f.dispatcher = createDispatcher({
+      doAction: async action => {
+        f.actions.push([action.kind, action.targetId]);
+        if (action.kind === 'read_session') return { ok: true, observationToken: 'token-' + (++f.reads), observation: { text: 'Ready.' } };
+        if (action.kind === 'send_prompt') return send(action);
+        if (action.kind === 'finish_terminal') return { ok: true, status: 'interaction-complete', text: action.text, targetId: action.targetId };
+        throw new Error('Unexpected action ' + action.kind);
+      },
+      observations: () => ({ authorize: () => ({}) }), getSessions: () => sessions, getRequests: () => [],
+      getOperation: () => ({ steps: 0, uncertain: false, sentTasks: new Set(), history: [] }), getWaits: () => [],
+      outcomes: f.outcomes, diagnosticContext: { requestId: 'request-2' } });
+    return f;
+  };
+  const both = harness();
+  const result = await both.dispatcher.run({ plan: both.plan, grants: both.plan.grants, modelRound: 0 });
+  assert.deepEqual(result.handled, [both.plan.grants[0].id]);
+  assert.deepEqual(result.fallback, []);
+  assert.deepEqual(both.actions, [['read_session', 'a'], ['send_prompt', 'a'], ['read_session', 'a'], ['finish_terminal', 'a'],
+    ['read_session', 'b'], ['send_prompt', 'b'], ['read_session', 'b'], ['finish_terminal', 'b']]);
+  const refused = harness(action => action.targetId === 'b' ? { ok: false, status: 'input-buffer-occupied', delivery: 'not-dispatched', error: 'That pane may contain unsent input.' } : { ok: true, status: 'written' });
+  const partial = await refused.dispatcher.run({ plan: refused.plan, grants: refused.plan.grants, modelRound: 0 });
+  assert.deepEqual(partial.handled, []);
+  assert.deepEqual(partial.fallback.map(item => [item.targetId, item.status]), [['b', 'input-buffer-occupied']], 'the first pane was delivered; the second is handed back with its reason');
+  assert.deepEqual(refused.actions.map(item => item.join(':')), ['read_session:a', 'send_prompt:a', 'read_session:a', 'finish_terminal:a', 'read_session:b', 'send_prompt:b']);
 });

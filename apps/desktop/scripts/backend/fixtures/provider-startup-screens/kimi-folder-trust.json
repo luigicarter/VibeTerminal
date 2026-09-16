@@ -1,0 +1,31 @@
+{
+ "kind": "kimi",
+ "cols": 100,
+ "rows": 30,
+ "observation": {
+  "ok": true,
+  "id": "pane",
+  "generation": "g1",
+  "exited": false,
+  "sequence": 1,
+  "inputRevision": 0,
+  "text": " ──────────────────────────────────────────────────────────────────────────────────────────────────\n  Trust this folder?\n  ↑↓ navigate · Enter select · Esc exit\n \n  C:\\Users\\ahmed\\Documents\\vibeTerminal\\apps\\desktop\\.tmp\\provider-startup-probe\\workspace\n \n  Project-level MCP servers are disabled until you explicitly choose Trust. Trust starts the\n  listed project MCP targets and remembers this folder.\n \n   ❯ Trust this folder\n     Enable project MCP servers. Remembered for this folder.\n \n     Don't trust\n     Exit Kimi Code. Asked again next launch.\n \n ──────────────────────────────────────────────────────────────────────────────────────────────────",
+  "cols": 100,
+  "rows": 30,
+  "cursor": {
+   "x": 99,
+   "y": 15
+  },
+  "cursorVisible": false,
+  "alternateScreen": false,
+  "screenTruncated": false
+ },
+ "readiness": {
+  "ready": false,
+  "status": "transient",
+  "reason": "The terminal is showing a startup screen: it is asking whether to trust the files in this folder.",
+  "prompt": "folder-trust",
+  "detail": "it is asking whether to trust the files in this folder",
+  "affirmativeDefault": true
+ }
+}

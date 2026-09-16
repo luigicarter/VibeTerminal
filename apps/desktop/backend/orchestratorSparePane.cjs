@@ -19,7 +19,8 @@
 // Pure apart from the readers and two effects handed in: no model call, no
 // store writes, no direct terminal access.
 
-const { idlePaneCandidate, ownsPaneForReuse, providerFamily } = require('./orchestratorResolver.cjs');
+const { idlePaneCandidate, ownsPaneForReuse } = require('./orchestratorResolver.cjs');
+const { providerFamily } = require('./orchestratorReference.cjs');
 const path = require('node:path');
 
 const TICK_MS = 30000;

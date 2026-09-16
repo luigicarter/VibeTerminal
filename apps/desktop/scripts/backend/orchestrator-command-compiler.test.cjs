@@ -9,6 +9,10 @@
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const { compileCommand, createCommandInterpreter, COMPILER_REASONS, SHAPES } = require('../../backend/orchestratorCommandCompiler.cjs');
+const { plannerTools, decodePlannerCalls } = require('../../backend/orchestratorPlannerTools.cjs');
+// Whether the work wants a fresh pane is read off the sentence when the call is
+// decoded, for a compiled call exactly as for one the Brain returns.
+const decoded = (context, compiled) => decodePlannerCalls(compiled.calls, plannerTools(context), context.instruction, context);
 const { createIntentInterpreter } = require('../../backend/orchestratorInterpreter.cjs');
 const { createOrchestrator } = require('../../backend/orchestrator.cjs');
 const { normalizeInstruction } = require('../../backend/orchestratorVocabulary.cjs');
@@ -22,7 +26,7 @@ const PROJECTS = ['vibeTerminal', 'Ternary model dev', 'lina web app', 'lina mob
 const LAUNCHERS = [['codex', 'Codex'], ['claude', 'Claude Code'], ['codex-web', 'Codex Web'],
   ['open-codex', 'Open Codex'], ['gemini', 'Gemini']].map(([kind, label]) => ({ kind, label, available: true, configured: true }));
 // The compiled shape, in the corpus's own verb vocabulary.
-const VERB_OF_SHAPE = { open: 'open', start: 'start', follow_up: 'follow_up', status: 'status', results: 'results' };
+const VERB_OF_SHAPE = { open: 'open', start: 'start', follow_up: 'follow_up', status: 'status', results: 'results', stop: 'interrupt', close: 'close' };
 
 // The project view a request can be submitted from. It is deliberately not the
 // project most corpus rows name, so a named project winning over the addressed
@@ -114,11 +118,16 @@ const sentenceContext = (instruction, extra = {}) => ({ instruction, requestId: 
 
 test('destructive, ambiguous and incomplete sentences are declined with a stated reason', () => {
   const cases = [
-    ['close the Codex terminal in vibeTerminal', 'blocked-verb'],
-    ['interrupt the Codex terminal in vibeTerminal', 'blocked-verb'],
+    // Two Codex panes: "the Codex terminal" points at neither, so nothing is
+    // stopped or closed; a group close, a cancellation and an answer stay the
+    // Brain's whatever the roster holds.
+    ['close the Codex terminal in vibeTerminal', 'ambiguous-pane'],
+    ['interrupt the Codex terminal in vibeTerminal', 'ambiguous-pane'],
     ['answer yes in the Codex terminal in vibeTerminal', 'blocked-verb'],
     ['close all the terminals in vibeTerminal', 'blocked-verb'],
-    ['tell the Codex terminal that is currently working in vibeTerminal to fix the login page', 'blocked-verb'],
+    ['close the terminals in vibeTerminal that are not working', 'blocked-verb'],
+    ['never mind, close the Codex terminal', 'blocked-verb'],
+    ['tell the Codex terminal that is currently working in vibeTerminal to fix the login page', 'ambiguous-pane'],
     ['open a new Codex terminal in vibeTerminal and then close it', 'second-command'],
     ['open a new Codex terminal in Lunar Terminal', 'unknown-project'],
     ['open a new Codex terminal in vibeTerminal and in lina mobile', 'ambiguous-project'],
@@ -134,14 +143,103 @@ test('destructive, ambiguous and incomplete sentences are declined with a stated
   }
 });
 
+// Stopping, closing and following up on the one pane a sentence points at
+// exactly used to be blocked outright, so every "stop that last terminal" and
+// "tell it to…" took a model round. The reference resolver names the pane or
+// the sentence is declined; nothing here lets a model choose which pane to stop.
+test('stop, close and follow-up compile over an exact reference and are declined without one', () => {
+  const working = { ...PANES[0], id: 'pane-busy', name: 'Investigate ram growth', conversationTitle: 'Investigate ram growth', status: 'running', turnState: 'running', turnId: 't-busy', turnStartedAt: 3000, lastActivityAt: 3000 };
+  const sessions = [PANES[0], PANES[1], working];
+  const ledgerRows = [{ requestId: 'r1', at: 100, verb: 'start', outcome: 'delivered-started', pane: { id: 'pane-docs' } }];
+  const withPanes = (instruction, extra = {}) => compileCommand(sentenceContext(instruction, { sessions, ledgerRows, ...extra }));
+  const args = result => JSON.parse(result.calls[0].function.arguments);
+  // Handles are transient in a directly built context: pane-checkout T1, pane-docs T2, pane-busy T3.
+  const stopLast = withPanes('can you stop that last terminal you worked on?');
+  assert.deepEqual([stopLast.accepted, stopLast.shape, stopLast.selector, stopLast.calls[0].function.name, args(stopLast)], [true, 'stop', 'last_target', 'plan_interrupt', { handles: ['T2'] }], JSON.stringify(stopLast));
+  const stopHandle = withPanes('stop T3');
+  assert.deepEqual([stopHandle.shape, args(stopHandle).handles, stopHandle.targetIds], ['stop', ['T3'], ['pane-busy']]);
+  const stopWorking = withPanes("interrupt the terminal that's currently working");
+  assert.deepEqual([stopWorking.shape, args(stopWorking).handles], ['stop', ['T3']]);
+  const closeOther = withPanes('close the other one');
+  assert.equal(closeOther.accepted, false, 'two panes are other than the last one: a question, not a close');
+  const closeHandle = withPanes('close T1');
+  assert.deepEqual([closeHandle.shape, args(closeHandle)], ['close', { scope: { type: 'explicit', handles: ['T1'] } }]);
+  const followHandle = withPanes('tell T3 to also cover the heap profile');
+  assert.deepEqual([followHandle.shape, followHandle.selector, followHandle.calls[0].function.name, args(followHandle)],
+    ['follow_up', 'handle', 'plan_operate_terminal', { handles: ['T3'], text: 'Also cover the heap profile.', operationMode: 'task', promptMode: 'compose' }]);
+  const followIt = withPanes('tell it to write that up in the docs folder');
+  assert.deepEqual([followIt.shape, followIt.selector, args(followIt).handles], ['follow_up', 'none', ['T2']], '"it" is the pane Lina last typed into');
+  const followWorking = withPanes("ask the terminal that's currently working to summarise its findings so far");
+  assert.deepEqual([followWorking.shape, args(followWorking).handles], ['follow_up', ['T3']]);
+  // Without the facts the reference needs, none of these compile.
+  for (const [instruction, reason] of [['stop that last terminal you worked on', 'ambiguous-pane'], ['tell it to write that up in the docs folder', 'ambiguous-pane'],
+    ['stop T9', 'ambiguous-pane'], ['stop both terminals that are working', 'ambiguous-pane']]) {
+    assert.equal(compileCommand(sentenceContext(instruction, { sessions: [PANES[0], PANES[1]] })).reason, reason, instruction);
+  }
+  // A fan-out stop over one state names every pane in it.
+  const stopBoth = withPanes('stop both terminals that are working', { sessions: [PANES[0], working, { ...working, id: 'pane-busy-2', turnId: 't-2' }] });
+  assert.deepEqual(args(stopBoth).handles, ['T2', 'T3']);
+});
+
 test('a sentence whose authority is somewhere other than its own words is never compiled', () => {
   const instruction = 'open a new Codex terminal in vibeTerminal';
   assert.equal(compileCommand(sentenceContext(instruction)).accepted, true);
-  for (const extra of [{ targetId: 'pane-checkout' }, { previousCommand: { requestId: 'earlier', grants: [] } },
-    { replyWorkItem: { id: 'work-1' } }, { pendingCommands: [{ requestId: 'earlier' }] },
+  for (const extra of [{ targetId: 'pane-checkout' }, { replyWorkItem: { id: 'work-1' } },
     { interactionContext: { id: 'request-1' } }, { dependencyResults: [{ requestId: 'earlier' }] },
+    { authorizedRelay: { target: { id: 'pane-checkout' } } }, { originalInstruction: 'the sentence before' },
     { replyContext: { question: { id: 'q1', text: 'Which one?' } } }]) {
     assert.deepEqual(compileCommand(sentenceContext(instruction, extra)), { accepted: false, reason: 'context-dependent' }, JSON.stringify(extra));
+  }
+});
+
+// The September 14 completion ladder declined 33 of 35 turns `context-dependent`
+// because one unfinished command from any earlier request stopped every later
+// sentence compiling. A pending command now stops only the sentences that point
+// back at it.
+const AFTER_A_PRIOR_REQUEST = [{ previousCommand: { requestId: 'earlier', instruction: 'open a Codex terminal', grants: [] } },
+  { pendingCommands: [{ requestId: 'earlier', grants: [] }] },
+  { previousCommand: { requestId: 'earlier', grants: [] }, pendingCommands: [{ requestId: 'earlier', grants: [] }] }];
+
+test('an unfinished command from an earlier request no longer stops a fresh sentence compiling', () => {
+  const instruction = 'open a new Codex terminal in vibeTerminal';
+  for (const extra of AFTER_A_PRIOR_REQUEST) {
+    const result = compileCommand(sentenceContext(instruction, extra));
+    assert.equal(result.accepted, true, `${JSON.stringify(extra)} declined ${result.reason}`);
+    assert.equal(result.provider, 'codex');
+  }
+});
+
+test('a sentence that points back at the previous turn is still declined while a command is pending', () => {
+  for (const instruction of ['tell the other terminal to review the release notes',
+    'tell the same terminal to review the release notes',
+    'tell the previous agent to review the release notes']) {
+    assert.deepEqual(compileCommand(sentenceContext(instruction, AFTER_A_PRIOR_REQUEST[0])),
+      { accepted: false, reason: 'context-dependent' }, instruction);
+    // With nothing pending the same sentence is refused for its own reason, so
+    // the pending command is what this rule is reading, not the words alone.
+    assert.equal(compileCommand(sentenceContext(instruction)).reason, 'ambiguous-pane', instruction);
+  }
+  // A pane named by its work still compiles while a command is pending.
+  const named = compileCommand(sentenceContext('tell the checkout validation terminal to review the release notes', AFTER_A_PRIOR_REQUEST[0]));
+  assert.equal(named.accepted, true, named.reason);
+  assert.equal(named.targetId, 'pane-checkout');
+});
+
+// The rows the corpus marks compilable, replayed as the SECOND turn of a
+// session: the compiler must reach the same plan it reaches on the first.
+test('every compilable corpus row still compiles as a later turn of a session', () => {
+  for (const [mode, extra, field] of [['no workspace', undefined, 'compilable'], ['workspace', inWorkspace, 'compilableInWorkspace']]) {
+    for (const row of CORPUS.filter(item => item.expected[field])) {
+      const first = compiledFor(row, extra);
+      if (!first.accepted) continue;
+      for (const pending of AFTER_A_PRIOR_REQUEST) {
+        const later = compiledFor(row, { ...extra, ...pending });
+        assert.equal(later.accepted, true, `${mode}: row ${row.n} declined ${later.reason} as a later turn`);
+        assert.deepEqual({ shape: later.shape, project: later.project, provider: later.provider, promptPresent: later.promptPresent },
+          { shape: first.shape, project: first.project, provider: first.provider, promptPresent: first.promptPresent },
+          `${mode}: row ${row.n} compiled differently as a later turn`);
+      }
+    }
   }
 });
 
@@ -159,8 +257,10 @@ test('the supported shapes compile to the planner calls the brain would have ret
   assert.deepEqual(JSON.parse(start.calls[0].function.arguments),
     { cwd: PROJECTS[0].path, kindOfSession: 'codex', text: 'Fix the login page that is not working right.' });
 
-  const fresh = compileCommand(sentenceContext('open another Codex terminal in vibeTerminal and have it review the release notes'));
-  assert.equal(JSON.parse(fresh.calls[0].function.arguments).assignmentMode, 'new');
+  const freshContext = sentenceContext('open another Codex terminal in vibeTerminal and have it review the release notes');
+  const fresh = compileCommand(freshContext);
+  assert.equal(JSON.parse(fresh.calls[0].function.arguments).assignmentMode, undefined, 'the compiled call carries no assignment mode');
+  assert.equal(decoded(freshContext, fresh).actions[0].assignmentMode, 'new');
 
   const follow = compileCommand(sentenceContext('tell the agent working on the checkout validation to also cover expired coupons'));
   assert.deepEqual(follow.calls.map(item => item.function.name), ['plan_continue_task']);
@@ -208,8 +308,8 @@ test('the put-in idiom is a start, and pointing at an earlier turn is not', () =
     assert.equal(result.shape, 'start', instruction);
     assert.equal(JSON.parse(result.calls[0].function.arguments).text, 'Identify a bug in the wake phrase.', instruction);
   }
-  assert.equal(JSON.parse(compileCommand(sentenceContext('put in another Codex terminal in vibeTerminal to identify a bug in the wake phrase'))
-    .calls[0].function.arguments).assignmentMode, 'new');
+  const anotherContext = sentenceContext('put in another Codex terminal in vibeTerminal to identify a bug in the wake phrase');
+  assert.equal(decoded(anotherContext, compileCommand(anotherContext)).actions[0].assignmentMode, 'new');
   // The object named from an earlier turn, and work named from one, are both
   // memory or redo requests: the words to send are not in this sentence.
   for (const [instruction, reason] of [
@@ -322,7 +422,8 @@ async function relayFixture(t, { sessions = [], brain } = {}) {
     readSession: async target => {
       const session = f.sessions.find(item => item.id === target.id && item.generation === target.generation);
       return session ? { ok: true, id: session.id, generation: session.generation, turnId: session.turnId, turnState: session.turnState,
-        sequence: session.sequence, observationSequence: session.sequence, inputRevision: session.inputRevision,
+        sequence: session.sequence, inputRevision: 0, cols: 100, rows: 28, cursor: { x: 2, y: 0 }, cursorVisible: true, alternateScreen: false,
+        cursorLine: { startRow: 0, text: 'Codex is idle at an empty root task composer. Ready to receive a task.', beforeCursor: 'Co' }, 
         inputState: { kind: 'empty', hasText: false }, text: 'Codex is idle at an empty root task composer. Ready to receive a task.' }
         : { ok: false, status: 'stale-generation' };
     },
@@ -403,4 +504,61 @@ test('two panes with the same named work is the brain\'s question to ask, not th
   assert.equal(f.modelCalls.length >= 1, true, 'the ambiguous follow-up reached the brain');
   assert.deepEqual(f.effects, [], 'nothing was typed while the recipient was ambiguous');
   assert.match(String(result.text || result.error), /Which one/);
+});
+
+// ---------------------------------------------------------------------------
+// The plain-shell launcher and "<provider> terminal".
+//
+// PROJECTS/LAUNCHERS above — the list this suite and the fidelity harness both
+// use — leave out the `terminal` kind, and the renderer never does: agentProfiles
+// reports it with `available: true` unconditionally (frontend/App.tsx inventory),
+// so every real workspace hands the compiler a list that contains it. With it
+// present, `extractSelector` used to read the word "terminal" in "Codex terminal"
+// as the `terminal` provider while the compiler's own provider slot read "Codex",
+// the two readings disagreed, and the cross-check declined `unknown-provider`.
+//
+// The user speaks this way constantly (rows 33, 59, 61, 62, 91, 96 all say
+// "<provider> terminal"), so every one of them took a model round it did not
+// need. The shell is now selected by shell words only, never by the pane noun.
+function withShellLauncher() {
+  return [{ kind: 'terminal', label: 'Terminal', available: true, configured: true },
+    ...LAUNCHERS.map(item => ({ ...item }))];
+}
+function compiledWithShell(text, projects = PROJECTS.slice(0, 1), extra = {}) {
+  const withShell = withShellLauncher();
+  const instruction = normalizeInstruction(text, { projects, launchers: withShell }).text;
+  return compileCommand({ instruction, sessions: [], projects,
+    roots: { projects, documents: 'C:/Projects' }, launchers: withShell,
+    projectContext: identifyProject(instruction, projects, null),
+    requests: [], workItems: [], recentUserMessages: [], ...extra });
+}
+
+test('a `terminal` launcher in the catalog no longer stops row 62 compiling', () => {
+  const row = CORPUS.find(item => item.n === 62);
+  const result = compiledWithShell(row.text);
+  assert.equal(result.accepted, true, `declined ${result.reason} with the shell launcher present`);
+  assert.equal(result.provider, 'codex');
+});
+
+test('every "<provider> terminal" corpus row compiles the same with and without the shell launcher', () => {
+  const withShell = withShellLauncher();
+  for (const row of CORPUS.filter(item => /\b(?:codex|claude code|gemini)\s+terminals?\b/i.test(item.text))) {
+    const plain = compiledFor(row, inWorkspace);
+    const shelled = compiledWithShell(row.text, PROJECTS, inWorkspace);
+    assert.equal(shelled.accepted, plain.accepted, `row ${row.n}: ${shelled.reason || 'accepted'} with the shell, ${plain.reason || 'accepted'} without`);
+    if (plain.accepted) assert.equal(shelled.provider, plain.provider, `row ${row.n} provider`);
+  }
+  assert.ok(withShell.some(item => item.kind === 'terminal'), 'the shell launcher is in the catalog under test');
+});
+
+test('the plain shell is still selected by the words a user says for a shell', () => {
+  const { readReference } = require('../../backend/orchestratorReference.cjs');
+  const launchers = withShellLauncher();
+  for (const text of ['open a powershell terminal here', 'open a plain terminal in vibeTerminal',
+    'give me a shell in vibeTerminal', 'open the command prompt']) {
+    assert.equal(readReference(text, { launchers }).provider, 'terminal', text);
+  }
+  for (const text of ['open a Codex terminal in vibeTerminal', 'prompt the Claude Code terminal to review the tests']) {
+    assert.notEqual(readReference(text, { launchers }).provider, 'terminal', text);
+  }
 });

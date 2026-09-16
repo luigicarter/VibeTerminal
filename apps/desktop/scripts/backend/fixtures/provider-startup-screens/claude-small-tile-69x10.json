@@ -1,0 +1,28 @@
+{
+ "kind": "claude",
+ "cols": 69,
+ "rows": 10,
+ "observation": {
+  "ok": true,
+  "id": "pane",
+  "generation": "g1",
+  "exited": false,
+  "sequence": 15,
+  "inputRevision": 0,
+  "text": "\n ▐▛███▛█   Claude Code v2.1.270\n▝▜██████▀  Fable 5.1 with xhigh effort · Claude Max\n  ▝▝ ▝▝    ~\\Documents\\vibeTerminal\\apps\\deskt… · /rc connecting…\n\n                                                  ◉ xhigh · /effort\n─────────────────────────────────────────────────────────────────────\n❯ Try \"how does <filepath> work?\"\n─────────────────────────────────────────────────────────────────────",
+  "cols": 69,
+  "rows": 10,
+  "cursor": {
+   "x": 2,
+   "y": 7
+  },
+  "cursorVisible": true,
+  "alternateScreen": true,
+  "screenTruncated": false
+ },
+ "readiness": {
+  "ready": true,
+  "status": "ready",
+  "reason": "The Claude root composer is visible at its empty input cursor."
+ }
+}

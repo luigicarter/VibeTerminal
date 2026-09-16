@@ -183,9 +183,13 @@ for (const mode of ['new', 'existing']) test(`assignmentMode ${mode} keeps its o
     assert.equal(result.ok, true, JSON.stringify(result));
     assert.deepEqual(f.effects.map(effect => effect.kind), ['create_session', 'send_prompt']);
   } else {
-    assert.equal(f.task(result).status, 'needs-answer', JSON.stringify(result));
-    assert.deepEqual(f.effects, []);
+    // Changed 2026-09-15: the idle pane the sentence names is the answer even
+    // when the plan says "continue an existing agent". The user's own sentence
+    // ("a codex terminal that's not doing anything, prompt it to…") had been
+    // answered with "which agent should continue?" while a free pane sat there.
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.deepEqual(f.effects.map(effect => effect.kind), ['send_prompt']);
+    assert.equal(f.effects[0].targetId, idle.id);
     assert.equal(f.sessions.length, 1);
-    assert.equal(f.sessions[0].id, idle.id);
   }
 });

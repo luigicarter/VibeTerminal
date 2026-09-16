@@ -2,7 +2,7 @@
 
 const { sentence } = require('./orchestratorFailureText.cjs');
 
-const completed = new Set(['completed', 'complete', 'finished', 'succeeded']);
+const completed = new Set(['completed', 'complete', 'finished', 'succeeded', 'response']);
 const uncertain = new Set(['unknown', 'unconfirmed', 'uncertain', 'write-failed']);
 
 // Waits are owned by the scheduler: turn identity is attributed to this input,

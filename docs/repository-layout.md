@@ -74,6 +74,12 @@ map and affected app guides together; preserve unrelated work.
 
 ## Commands
 
+Disconnected account/payment preparation follows the same ownership map:
+server modules/SQL/contracts stay server-owned, native services stay desktop-owned,
+and web clients stay website-owned. Prepared migration SQL is nested outside
+normal discovery. Dedicated test harnesses may connect these modules only to
+disposable local fixtures. See [account paid readiness](account-paid-readiness.md).
+
 The `apps/server` service is independent of the website's marketing API. It owns
 login, account/tier management, PostgreSQL, activity intake and monitoring.
 Source and local container acceptance are implemented; live Google deployment

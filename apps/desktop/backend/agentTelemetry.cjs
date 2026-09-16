@@ -1578,15 +1578,25 @@ function windowsPowerShellShimSource(provider) {
     "if ($Provider -eq 'claude' -and -not [string]::IsNullOrEmpty($env:VIBE_TERMINAL_CLAUDE_SETTINGS)) {",
     "  $ProviderArgs = @($ProviderArgs) + @('--settings', $env:VIBE_TERMINAL_CLAUDE_SETTINGS)",
     "}",
-    "elseif ($Provider -eq 'codex' -and -not [string]::IsNullOrEmpty($env:VIBE_TERMINAL_NOTIFY_PROGRAM)) {",
-    "  if (-not [string]::IsNullOrEmpty($env:VIBE_TERMINAL_CODEX_HOOK_TRUST_OVERRIDE)) {",
-    "    $ProviderArgs = @('-c', $env:VIBE_TERMINAL_CODEX_HOOK_TRUST_OVERRIDE) + @($ProviderArgs)",
+    "elseif ($Provider -eq 'codex') {",
+    "  if (-not [string]::IsNullOrEmpty($env:VIBE_TERMINAL_NOTIFY_PROGRAM)) {",
+    "    if (-not [string]::IsNullOrEmpty($env:VIBE_TERMINAL_CODEX_HOOK_TRUST_OVERRIDE)) {",
+    "      $ProviderArgs = @('-c', $env:VIBE_TERMINAL_CODEX_HOOK_TRUST_OVERRIDE) + @($ProviderArgs)",
+    "    }",
+    "    $notifyValue = \"notify=['powershell','-NoProfile','-ExecutionPolicy','Bypass','-File','$($env:VIBE_TERMINAL_NOTIFY_PROGRAM)','agent.completed']\"",
+    "    $ProviderArgs = @($ProviderArgs) + @('-c', $notifyValue)",
+    "    if (-not [string]::IsNullOrEmpty($env:VIBE_TERMINAL_CODEX_HOOK_OVERRIDES)) {",
+    "      try {",
+    "        foreach ($override in ($env:VIBE_TERMINAL_CODEX_HOOK_OVERRIDES | ConvertFrom-Json)) {",
+    "          $ProviderArgs = @($ProviderArgs) + @('-c', [string]$override)",
+    "        }",
+    "      } catch {}",
+    "    }",
     "  }",
-    "  $notifyValue = \"notify=['powershell','-NoProfile','-ExecutionPolicy','Bypass','-File','$($env:VIBE_TERMINAL_NOTIFY_PROGRAM)','agent.completed']\"",
-    "  $ProviderArgs = @($ProviderArgs) + @('-c', $notifyValue)",
-    "  if (-not [string]::IsNullOrEmpty($env:VIBE_TERMINAL_CODEX_HOOK_OVERRIDES)) {",
+    "  # Appended last so they ride the ACTIVE command (codex, codex resume <id>).",
+    "  if (-not [string]::IsNullOrEmpty($env:VIBE_TERMINAL_CODEX_TUI_OVERRIDES)) {",
     "    try {",
-    "      foreach ($override in ($env:VIBE_TERMINAL_CODEX_HOOK_OVERRIDES | ConvertFrom-Json)) {",
+    "      foreach ($override in ($env:VIBE_TERMINAL_CODEX_TUI_OVERRIDES | ConvertFrom-Json)) {",
     "        $ProviderArgs = @($ProviderArgs) + @('-c', [string]$override)",
     "      }",
     "    } catch {}",
@@ -1819,25 +1829,42 @@ function powershellCommand() {
   // Inject per-turn notification hooks for the threaded agents (see agentTelemetry.cjs).
   if (provider === "claude" && process.env.VIBE_TERMINAL_CLAUDE_SETTINGS) {
     args = args.concat(["--settings", process.env.VIBE_TERMINAL_CLAUDE_SETTINGS]);
-  } else if (provider === "codex" && process.env.VIBE_TERMINAL_NOTIFY_PROGRAM) {
-    if (process.env.VIBE_TERMINAL_CODEX_HOOK_TRUST_OVERRIDE) {
-      args = ["-c", process.env.VIBE_TERMINAL_CODEX_HOOK_TRUST_OVERRIDE].concat(args);
+  } else if (provider === "codex") {
+    if (process.env.VIBE_TERMINAL_NOTIFY_PROGRAM) {
+      if (process.env.VIBE_TERMINAL_CODEX_HOOK_TRUST_OVERRIDE) {
+        args = ["-c", process.env.VIBE_TERMINAL_CODEX_HOOK_TRUST_OVERRIDE].concat(args);
+      }
+      args = args.concat([
+        "-c",
+        "notify=['" + process.env.VIBE_TERMINAL_NOTIFY_PROGRAM + "','agent.completed']"
+      ]);
+      try {
+        const overrides = JSON.parse(
+          process.env.VIBE_TERMINAL_CODEX_HOOK_OVERRIDES || "[]"
+        );
+        for (const override of overrides) {
+          if (typeof override === "string" && override) {
+            args = args.concat(["-c", override]);
+          }
+        }
+      } catch {
+        // Lifecycle telemetry is additive; legacy completion still works.
+      }
     }
-    args = args.concat([
-      "-c",
-      "notify=['" + process.env.VIBE_TERMINAL_NOTIFY_PROGRAM + "','agent.completed']"
-    ]);
+    // Appended last, so they ride the ACTIVE command (codex, codex resume
+    // <id>, ...). Independent of the notify program: a pane with no lifecycle
+    // telemetry still must not repaint while idle.
     try {
-      const overrides = JSON.parse(
-        process.env.VIBE_TERMINAL_CODEX_HOOK_OVERRIDES || "[]"
+      const tuiOverrides = JSON.parse(
+        process.env.VIBE_TERMINAL_CODEX_TUI_OVERRIDES || "[]"
       );
-      for (const override of overrides) {
+      for (const override of tuiOverrides) {
         if (typeof override === "string" && override) {
           args = args.concat(["-c", override]);
         }
       }
     } catch {
-      // Lifecycle telemetry is additive; legacy completion still works.
+      // A malformed list must never stop the pane from launching.
     }
   }
 
@@ -2016,6 +2043,28 @@ const CODEX_LIFECYCLE_EVENTS = [
   "SessionStart"
 ];
 
+// `-c` values every Codex-family pane (codex, open-codex, codex-web) launches
+// with, carried to the wrappers in VIBE_TERMINAL_CODEX_TUI_OVERRIDES.
+//
+// Codex 0.154 added an ambient composer "sparkle" (tui/src/bottom_pane/
+// chat_composer/sparkle.rs): while the composer is EMPTY it repaints ~30
+// braille cells every 40-80 ms forever. Measured in a Lina pane on 0.154:
+// 12-31 PTY chunks per second, ~20 KB/s, steady for 50 s, unaffected by focus.
+// That costs a decode + repaint + mobile-bridge frame per idle pane, and it
+// makes an idle pane look permanently "changed" to anything watching output.
+// `tui.whimsy=false` is the narrow switch (`tui.animations=false` also removes
+// the welcome animation, shimmer and spinners, which we want to keep).
+//
+// Deliberately NOT part of codexHookOverrides: that list is also consumed by
+// backend/openCodexCli.cjs as the lifecycle-hook list and is mirrored by the
+// trust-hash override, which hashes exactly the hook handlers.
+//
+// Not version gated. Verified on the retained Codex 0.144.0
+// (apps/desktop/.tmp/codex-release-cli): `-c tui.whimsy=false` is accepted
+// silently on config load and at TUI startup — unknown `[tui]` keys are
+// ignored, not rejected. See docs/codex-idle-sparkle-whimsy-override-2026-09-13.md.
+const CODEX_TUI_CONFIG_OVERRIDES = Object.freeze(["tui.whimsy=false"]);
+
 // App-owned observer used by invocation-local Codex hooks. It consumes the hook
 // JSON from stdin and never writes stdout, so it cannot change a prompt, tool,
 // or approval decision. Turn-scoped subagent hooks intentionally carry the
@@ -2073,6 +2122,12 @@ process.stdin.on("end", () => {
         detail = "approval";
         break;
       case "PreToolUse":
+        // Codex parks its turn on request_user_input until the person answers:
+        // that pane is waiting on them, not working, and the roster says so.
+        if (hook.tool_name === "request_user_input") { type = "agent.waiting"; detail = "question"; break; }
+        type = "agent.running";
+        detail = "tool";
+        break;
       case "PostToolUse":
         type = "agent.running";
         detail = "tool";
@@ -3982,6 +4037,10 @@ function createAgentTelemetryManager(options = {}) {
         VIBE_TERMINAL_CLAUDE_SETTINGS: claudeSettingsPath,
         VIBE_TERMINAL_NOTIFY_PROGRAM: notifyProgramPath,
         VIBE_TERMINAL_CODEX_HOOK_OVERRIDES: JSON.stringify(codexHookOverrides),
+        // Separate from the hook list on purpose (see CODEX_TUI_CONFIG_OVERRIDES):
+        // the wrappers append these at the ACTIVE command level so a
+        // `codex resume <id>` subcommand cannot discard them.
+        VIBE_TERMINAL_CODEX_TUI_OVERRIDES: JSON.stringify(CODEX_TUI_CONFIG_OVERRIDES),
         // Recheck at session preparation: do not grant trust to a stale or
         // replaced cached observer, even when the manager initialized earlier.
         VIBE_TERMINAL_CODEX_HOOK_TRUST_OVERRIDE: (() => {
@@ -4825,6 +4884,7 @@ module.exports = {
   buildFusionSystemPrompt,
   codexLifecycleConfigOverrides,
   codexLifecycleTrustOverride,
+  CODEX_TUI_CONFIG_OVERRIDES,
   codexLifecycleHookSource,
   ensureOpenFusionOpencodeHome,
   migrateOpenFusionThreadsFromGlobal,

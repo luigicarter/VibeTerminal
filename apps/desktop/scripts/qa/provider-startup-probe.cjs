@@ -19,6 +19,7 @@
 //
 //   node scripts/qa/provider-startup-probe.cjs [--only <kind,kind>] [--timeout 60]
 //                                              [--no-type] [--save <dir>]
+//                                              [--save-name <suffix>] [--cols 69] [--rows 10]
 //
 // --save writes each observed screen as a <kind>.bin / <kind>.json pair in the
 // format scripts/backend/fixtures/provider-startup-screens uses, so a fixture
@@ -41,14 +42,26 @@ const { spawnPty, windowsPtyHostOptions } = require(path.join(root, 'backend/pty
 const { createAgentTelemetryManager } = require(path.join(root, 'backend/agentTelemetry.cjs'));
 
 const PROMPT = 'Reply with exactly OK and nothing else.';
-const COLS = 100, ROWS = 30;
+// The pane size the probe opens at. The default is the size the fixtures in
+// scripts/backend/fixtures/provider-startup-screens were recorded at; --cols and
+// --rows record the same CLI at another size, which is how the small-tile
+// captures (69x10, the board's own default tile) were taken. A recording made at
+// one width cannot be replayed at another - the CLI's own cursor addressing is
+// width-dependent - so a size that matters gets its own recording.
+const DEFAULT_COLS = 100, DEFAULT_ROWS = 30;
 
 const argv = process.argv.slice(2);
 const flag = name => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; };
 const only = (flag('--only') || '').split(',').map(value => value.trim()).filter(Boolean);
 const readyTimeoutMs = Number(flag('--timeout') || 60) * 1000;
 const saveDir = flag('--save');
+const saveName = flag('--save-name') || null;
 const typePrompt = !argv.includes('--no-type');
+const COLS = Number(flag('--cols') || DEFAULT_COLS);
+const ROWS = Number(flag('--rows') || DEFAULT_ROWS);
+if (!Number.isSafeInteger(COLS) || COLS < 20 || !Number.isSafeInteger(ROWS) || ROWS < 4) {
+  throw new Error(`Unusable pane size ${COLS}x${ROWS}: at least 20x4 is required.`);
+}
 
 // Every launchable PTY kind, with the command the pane runs. `shim` is the shim
 // the app puts on PATH; the arguments are the ones buildLaunchCommand produces
@@ -275,8 +288,9 @@ async function probe(entry, manager) {
   fs.writeFileSync(path.join(outDir, `${entry.kind}.screen.txt`), String(observation?.text ?? ''));
   fs.writeFileSync(path.join(outDir, `${entry.kind}.raw.bin`), Buffer.from(raw.join(''), 'utf8'));
   if (saveDir && readiness?.ready) {
-    fs.writeFileSync(path.join(saveDir, `${entry.kind}.bin`), Buffer.from(raw.join(''), 'utf8'));
-    fs.writeFileSync(path.join(saveDir, `${entry.kind}.json`), JSON.stringify({ kind: entry.kind, cols: COLS, rows: ROWS,
+    const base = saveName ? `${entry.kind}${saveName}` : entry.kind;
+    fs.writeFileSync(path.join(saveDir, `${base}.bin`), Buffer.from(raw.join(''), 'utf8'));
+    fs.writeFileSync(path.join(saveDir, `${base}.json`), JSON.stringify({ kind: entry.kind, cols: COLS, rows: ROWS,
       observation: { ok: true, id: 'pane', generation: 'g1', exited: false, sequence: observation.sequence,
         inputRevision: observation.inputRevision, text: observation.text, cols: observation.cols, rows: observation.rows,
         cursor: observation.cursor, cursorVisible: observation.cursorVisible, alternateScreen: observation.alternateScreen,

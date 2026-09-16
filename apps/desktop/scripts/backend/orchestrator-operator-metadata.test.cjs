@@ -54,7 +54,7 @@ test('consumed, expired or invalid latest evidence never falls back to an older 
   f.read(3);
   const invalid = f.read(4, f.target, { ...f.screen, inputRevision: undefined });
   assert.equal(f.observations.latest(f.target, 5), invalid);
-  assert.throws(() => f.observations.authorize(invalid, f.target, { kind: 'terminal_interact' }), /screen sequence and input revision/);
+  assert.throws(() => f.observations.authorize(invalid, f.target, { kind: 'terminal_interact' }), /captured input surface/);
 });
 
 test('implicit selection never crosses a request, terminal or generation boundary', () => {
@@ -91,9 +91,10 @@ test('selected implicit evidence still enforces live native input and chat revis
 
 test('supplied native counters remain exact and omission never manufactures missing read evidence', () => {
   const f = fixture(), token = f.read(0);
-  for (const field of ['observationSequence', 'inputRevision']) for (const value of [null, -1, 999, '2']) {
-    assert.throws(() => f.observations.authorize(token, f.target, { kind: 'terminal_interact', [field]: value }), /screen sequence and input revision/);
-  }
+  // Neither field reaches this authorization any more: the tool does not offer
+  // them, and the token's own captured surface is what binds native input.
+  for (const field of ['observationSequence', 'inputRevision']) for (const value of [null, -1, 999, '2'])
+    assert.ok(f.observations.authorize(token, f.target, { kind: 'terminal_interact', [field]: value }));
   const record = f.observations.authorize(token, f.target, { kind: 'terminal_interact' });
   assert.equal(record.sequence, 10); assert.equal(record.inputRevision, 2);
   assert.throws(() => f.observations.authorize(undefined, f.target, { kind: 'terminal_interact' }), /missing, used, or stale/);

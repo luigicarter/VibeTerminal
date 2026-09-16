@@ -19,7 +19,9 @@ function session() {
     revision: 1, updatedAt: 10 };
 }
 const screen = { ok: true, id: 'p', generation: 'g', sequence: 7, inputRevision: 0, cols: 100, rows: 28 };
-const control = { kind: 'terminal_interact', observationSequence: 7, inputRevision: 0, keys: ['down'] };
+// The one freshness contract a control carries: the input surface of that read.
+const { projectInputSurface } = require('../../backend/orchestratorInputSurface.cjs');
+const control = { kind: 'terminal_interact', keys: ['down'], inputSurface: projectInputSurface(session(), screen) };
 function churn(s) {
   s.revision += 20; s.updatedAt = 30; s.lastActivityAt = 30; s.lastOutputAt = 30;
   s.terminalTitle = 'New terminal'; s.name = 'New title'; s.conversation.title = 'Generated title'; s.conversation.updatedAt = 30;

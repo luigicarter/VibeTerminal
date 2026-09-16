@@ -112,7 +112,12 @@ test('auto tool choice preserves one valid effect and rejects plain or malformed
   assert.equal(f.effects.length, 1);
   assert.equal(f.effects[0].kind, 'focus_session');
   assert.equal(f.calls[0].tool_choice, 'auto');
-  for (const invalid of [answer('I focused it.'), intent({ goal: 'Invent an operation.', actions: [{ kind: 'invented' }] })]) {
+  // Prose is a question for the user: one call, no effect, the words reach them.
+  f.responses.push(answer('I focused it.'));
+  const asked = await f.instance.send({ text: 'Focus terminal a', origin: 'text' });
+  assert.equal(asked.ok, true, JSON.stringify(asked)); assert.equal(asked.text, 'I focused it.');
+  assert.equal(f.effects.length, 1, 'Prose cannot add an effect');
+  for (const invalid of [intent({ goal: 'Invent an operation.', actions: [{ kind: 'invented' }] })]) {
     f.responses.push(invalid, invalid);
     const rejected = await f.instance.send({ text: 'Focus terminal a', origin: 'text' });
     assert.equal(rejected.ok, false);
@@ -151,7 +156,7 @@ test('model timing correlates headers and full body while excluding unknown prov
     assert.equal(complete.headersMs, headers.headersMs);
     assert.ok(complete.bodyMs >= 0);
     // Each stage records the deadline of its own category, not a single global one.
-    assert.equal(complete.deadlineMs, complete.category === 'interpretation' ? 25000 : 45000);
+    assert.equal(complete.deadlineMs, complete.category === 'interpretation' ? 40000 : 45000);
   }
   const compiler = entries.find(entry => entry.stage === 'model_complete' && entry.category === 'interpretation');
   assert.equal(compiler.provider, 'Fixture provider');
@@ -204,7 +209,7 @@ test('a brain that misses its deadline hands the same work to the configured fal
   assert.equal(f.effects.length, 0);
   const entries = await f.logs();
   const started = entries.filter(entry => entry.stage === 'model_started');
-  assert.deepEqual(started.map(entry => entry.deadlineMs), [25000, 25000, 45000]);
+  assert.deepEqual(started.map(entry => entry.deadlineMs), [40000, 40000, 45000]);
   const fallback = started.filter(entry => entry.modelFallback === true);
   assert.equal(fallback.length, 1);
   assert.equal(fallback[0].model, 'standby-brain');

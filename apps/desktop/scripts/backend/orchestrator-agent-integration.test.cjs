@@ -48,7 +48,7 @@ async function fixture(t, count = 0, nativePipeline = false) {
       const observed=JSON.parse(body.messages.filter(m=>m.role==='tool').at(-1).content);
       const args={targetId,grantId:grant.id,stepId:`${grant.id}-${phase}`,observationToken:observed.observationToken};
       if (phase===1) return response(tool({...args,kind:'send_prompt',text:grant.text||metadata.instruction,
-        observationSequence:observed.observation?.sequence,inputRevision:observed.observation?.inputRevision}));
+        }));
       return response(tool({...args,kind:'finish_terminal',outcome:'completed',text:'Delivery observed; result pending.'}));
     }
   });

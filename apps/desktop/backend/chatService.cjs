@@ -78,7 +78,8 @@ function createChatService({ directory, getHistoryConfig, confirm, notify = () =
       void call('observe', snapshot).then(changed => { if (changed) publish(); else observedSignatures.delete(snapshot.id); }).catch(() => observedSignatures.delete(snapshot.id));
     },
     observeChat(event) { if (!closed && event.type === 'session' && !event.replay) void call('observeChat', event).then(changed => { if (changed) publish(); }).catch(() => {}); },
-    async finish(clean = true) { await call('finish', { clean }); },
+    async shutdown(reason) { await call('shutdown', { reason }); },
+    async finish(clean = true, incomplete = []) { await call('finish', { clean, incomplete }); },
     backup: () => call('backup'),
     close() { closed = true; clearTimeout(notifyTimer); history.dispose(); store.close(); },
     get error() { return error; }

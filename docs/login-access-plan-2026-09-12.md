@@ -4,6 +4,11 @@ September 12, 2026. **Bun + TypeScript backend implemented and locally verified.
 See the [phase 1 implementation record](server-phase-1-implementation.md). Live
 Google VM/email/monitoring acceptance is pending; client screens are a later phase.
 
+**Current follow-on state:** account interfaces exist as disconnected previews;
+separate login/payment preparation is tracked in
+[account paid readiness](account-paid-readiness.md). That work does not wire or
+deploy the product.
+
 ## Scope
 
 The [phase 1 implementation plan](server-phase-1-plan.md) turns this architecture

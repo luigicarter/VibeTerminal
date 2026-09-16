@@ -148,17 +148,25 @@ function createDispatcher({ doAction, observations, getSessions = () => [], getR
         const state = progress.grants.find(item => item.id === grant.id);
         if (state?.dispatched) continue;
         // Bound task delivery only. Native menus, inspections, interrupts and
-        // exits keep their own model-authored judgment.
+        // exits keep their own model-authored judgment. A fan-out ("on both
+        // terminals that are done, push the fixes") is the same handoff once
+        // per bound pane, in the plan's order; on the ladder the model loop
+        // spent five rounds and fifty seconds stepping through exactly that.
         if (grant.kind !== 'operate_terminal' || grant.inspection || grant.operationMode !== 'task' ||
-            (grant.lifecycleMode || 'preserve') !== 'preserve' || (grant.targets || []).length !== 1) break;
+            (grant.lifecycleMode || 'preserve') !== 'preserve') break;
         const targets = handoffTargets(grant);
-        if (targets.length !== 1) break;
-        const handoff = targets[0];
-        if (typeof handoff.cwd !== 'string' || !handoff.cwd || !state?.availableTargetIds?.includes(handoff.target.id)) break;
-        const result = await deliver({ plan, grant, handoff, modelRound });
-        if (result.ok) { handled.push(grant.id); continue; }
-        fallback.push({ grantId: grant.id, targetId: handoff.target.id, status: result.status, reason: result.reason,
-          ...(result.screen && { screen: result.screen }) });
+        if (!targets.length || targets.length !== (grant.targets || []).length) break;
+        if (targets.some(handoff => typeof handoff.cwd !== 'string' || !handoff.cwd || !state?.availableTargetIds?.includes(handoff.target.id))) break;
+        let refused;
+        for (const handoff of targets) {
+          if (signal?.aborted) break;
+          const result = await deliver({ plan, grant, handoff, modelRound });
+          if (result.ok) continue;
+          refused = { grantId: grant.id, targetId: handoff.target.id, status: result.status, reason: result.reason, ...(result.screen && { screen: result.screen }) };
+          break;
+        }
+        if (!refused && !signal?.aborted) { handled.push(grant.id); continue; }
+        if (refused) fallback.push(refused);
         break;
       }
       if (handled.length || fallback.length) {

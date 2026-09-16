@@ -158,7 +158,7 @@ function deriveLedgerEntry({ requestId, at, plan, status, waits = [], receipts =
     || (folder ? require('node:path').basename(folder) : null);
   return normalizeEntry({
     requestId, at, verb, project: named, cwd: folder,
-    pane: paneId ? { id: paneId, name: session?.conversationTitle || session?.name, provider: session?.kind || session?.provider } : null,
+    pane: paneId ? { id: paneId, name: require('./orchestratorPaneReadiness.cjs').paneDisplayName(session) || session?.name, provider: session?.kind || session?.provider } : null,
     typedText: prompt, outcome: resolved.outcome, error: resolved.error ?? error,
   }, at);
 }

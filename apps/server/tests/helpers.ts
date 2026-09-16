@@ -7,7 +7,7 @@ import { permissions } from '../scripts/permissions';
 import { createApp } from '../src/app';
 import { deliverEmails, type Email } from '../src/jobs/email';
 
-export async function fixture() {
+export async function fixture(options: { publicUrl?: string } = {}) {
   const adminUrl = process.env.LINA_TEST_ADMIN_URL;
   if (!adminUrl || process.env.LINA_TEST_ALLOW_PROVISION !== '1')
     throw new Error(
@@ -44,7 +44,7 @@ export async function fixture() {
     NODE_ENV: 'test',
     DATABASE_URL: url('lina_app'),
     MIGRATION_DATABASE_URL: url('lina_migrator'),
-    PUBLIC_URL: 'http://127.0.0.1:3002',
+    PUBLIC_URL: options.publicUrl || 'http://127.0.0.1:3002',
     AUTH_SECRET: randomBytes(32).toString('hex'),
     OUTBOX_KEY: randomBytes(32).toString('hex'),
     METRICS_TOKEN: randomBytes(32).toString('hex'),

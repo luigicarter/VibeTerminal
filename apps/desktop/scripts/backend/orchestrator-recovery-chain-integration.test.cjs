@@ -49,7 +49,7 @@ async function fixture(t, { modelIntent = false } = {}) {
       f.reads.push(target);
       const session = f.sessions.find(s => s.id === target.id);
       if (!session) return { ok: false, status: 'stale-generation' };
-      const result = { ok: true, id: session.id, generation: session.generation, text: 'Task workspace ready.', sequence: 10, observationSequence: 10, inputRevision: 2 };
+      const result = { ok: true, id: session.id, generation: session.generation, text: 'Task workspace ready.', sequence: 10, inputRevision: 2 };
       if (target.completedTurnId) result.completedResult = { turnId: target.completedTurnId, text: 'Review found a checkout defect.', status: 'completed' };
       if (f.afterRead) await f.afterRead(session);
       return result;
@@ -88,7 +88,7 @@ async function fixture(t, { modelIntent = false } = {}) {
       const observed = JSON.parse(body.messages.filter(m => m.role === 'tool').at(-1).content);
       const base = { targetId, grantId: grant.id, stepId: `${grant.id}-${phase}`, observationToken: observed.observationToken };
       if (phase === 1) return jsonResponse(tool({ ...base, kind: 'send_prompt', text: grant.text || metadata.instruction,
-        observationSequence: observed.observation?.sequence, inputRevision: observed.observation?.inputRevision }));
+        }));
       if (phase === 3) return jsonResponse(tool({ ...base, kind: 'finish_terminal', outcome: 'completed', text: 'Submission inspected.' }));
       return jsonResponse(tool({ kind: 'respond', text: 'The requested submission is blocked.', responseTurn: 'complete' }));
     }

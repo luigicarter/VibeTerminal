@@ -2,6 +2,10 @@
 
 September 12, 2026 (local date; the final test run was September 13 UTC).
 
+For subsequent disconnected login/payment preparation and current security
+acceptance, see [account paid readiness](account-paid-readiness.md). The evidence
+below remains the original phase-1 record; live deployment is still pending.
+
 **The backend is implemented and locally verified in apps/server. Live Google
 VM deployment is still pending.** No cloud resources, public signup, real-user
 activity collection, live emails, or notification destinations were enabled.

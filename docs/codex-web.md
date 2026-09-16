@@ -72,6 +72,8 @@ Computer Use follows normal Codex configuration: inherited plugins and MCP serve
 
 Lina manages the bundled executable, so this launcher sets `check_for_update_on_startup=false`. A cached newer native CLI version must not interrupt startup or offer an updater for another installation. The native TUI smoke always seeds a newer cached version and checks that the model picker opens without an update notice.
 
+`nativeArgs` also sets `-c tui.whimsy=false`, the same switch every other Codex-family pane gets: Codex Web runs Astra models, whose empty composer would otherwise repaint forever under 0.154's idle sparkle. It sits with the other overrides at the active command level, so a `codex-web resume <id>` launch keeps it, and an explicit user `-c` still wins. See [the idle-sparkle override](codex-idle-sparkle-whimsy-override-2026-09-13.md).
+
 `codexWebHost.cjs` supervises the bridge and authenticated local connection actions. It does not send chat requests, interpret approvals or store transcripts. `codexWebLauncher.cjs` runs the hidden upstream Electron browser host. `codexWebModelDiscovery.cjs` handles account metadata and model selection. `codexWebBrowserLogin.cjs` owns the temporary login profile.
 
 Startup uses Lina's bundled runtime directly. Full manifest/checksum validation happens during resource preparation instead of copying and hashing the full runtime at every launch. Local provider startup runs alongside authentication. A previously verified account's cached catalog can open the CLI while authentication is still pending; this does not mark the current login authenticated. Stale model catalogs refresh in the same background operation. Without usable cached metadata, first-time setup still waits for authentication and discovery.

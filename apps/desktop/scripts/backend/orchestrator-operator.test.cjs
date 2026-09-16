@@ -19,8 +19,7 @@ function operation(body, kind, extra = {}) {
   assert.ok(grant, 'The user objective must authorize terminal operation.');
   const observed = latest(body);
   assert.ok(observed.observationToken, 'A read must return a fresh observation token.');
-  return call({ kind, grantId: grant.id, targetId: 'pane', stepId: `${kind}-${call.sequence}`, observationToken: observed.observationToken,
-    ...(['send_prompt', 'terminal_interact', 'interrupt'].includes(kind) ? { observationSequence: observed.observation?.sequence, inputRevision: observed.observation?.inputRevision } : {}), ...extra });
+  return call({ kind, grantId: grant.id, targetId: 'pane', stepId: `${kind}-${call.sequence}`, observationToken: observed.observationToken, ...extra });
 }
 const finish = body => operation(body, 'finish_terminal', { text: 'Verified the requested operation.', outcome: 'completed' });
 async function fixture(t, kind = 'codex') {
@@ -28,7 +27,7 @@ async function fixture(t, kind = 'codex') {
   const f = { effects: [], steps: [], bodies: [], reads: 0, sequence: 10, sessions: [{ id: 'pane', name: 'Work', kind, provider: kind, generation: 'g1', cwd: root, status: 'running' }] };
   f.relay = createOrchestrator({ userDataPath: root, secureStorage: { isEncryptionAvailable: () => false },
     getRoots: () => ({ documents: root, projects: [{ name: 'Work', path: root }] }), getSessions: () => f.sessions,
-    readSession: async target => { f.reads++; if (f.readOverride) return f.readOverride(target); const session = f.sessions.find(session => session.id === target.id); return { ok: true, id: session.id, generation: session.generation, text: f.screen || 'Ready for input', sequence: f.sequence, observationSequence: f.sequence, inputRevision: 2 }; },
+    readSession: async target => { f.reads++; if (f.readOverride) return f.readOverride(target); const session = f.sessions.find(session => session.id === target.id); return { ok: true, id: session.id, generation: session.generation, text: f.screen || 'Ready for input', sequence: f.sequence, inputRevision: 2, cols: 100, rows: 28, cursor: { x: 0, y: 0 }, cursorVisible: true, alternateScreen: false, cursorLine: { startRow: 0, text: 'Ready for input', beforeCursor: '' } }; },
     dispatchAction: async action => { f.effects.push(action); return f.dispatch ? f.dispatch(action) : { ok: true, status: 'written' }; },
     fetch: async (url, options) => {
       if (url.endsWith('/key')) return new Response(JSON.stringify({ data: {} }));
@@ -125,10 +124,10 @@ test('finishing tolerates telemetry churn without relaxing effect or token autho
   const observe = () => observations.observe(target, screen);
   const finishAction = { kind: 'finish_terminal' };
   const old = observe(), consumed = observe();
-  observations.consume(observations.authorize(consumed, target, { kind: 'terminal_interact', observationSequence: 10, inputRevision: 2 }), target, { kind: 'terminal_interact' });
+  observations.consume(observations.authorize(consumed, target, { kind: 'terminal_interact'}), target, { kind: 'terminal_interact' });
   const fresh = observe(); target.revision++;
-  assert.ok(observations.authorize(fresh, target, { kind: 'terminal_interact', observationSequence: 10, inputRevision: 2 }));
-  assert.throws(() => observations.authorize(fresh, { ...target, turnId: 'new-turn' }, { kind: 'terminal_interact', observationSequence: 10, inputRevision: 2 }), /terminal changed/);
+  assert.ok(observations.authorize(fresh, target, { kind: 'terminal_interact'}));
+  assert.throws(() => observations.authorize(fresh, { ...target, turnId: 'new-turn' }, { kind: 'terminal_interact'}), /terminal changed/);
   assert.throws(() => observations.authorize(consumed, target, finishAction), /missing, used, or stale/);
   assert.throws(() => observations.authorize(old, target, finishAction), /after the last action/);
   assert.throws(() => observations.authorize(fresh, { ...target, generation: 'g2' }, finishAction), /missing, used, or stale/);
@@ -222,12 +221,12 @@ test('omitting the grant ID never bypasses operator observation authority', asyn
   const result = await f.run([call({ kind: 'send_prompt', targetId: 'pane', stepId: 'unobserved', text: 'Review the latest changes.' }),
     body => { assert.equal(latest(body).ok, true); assert.equal(f.effects.length, 1); assert.equal(f.reads, 1); return read(); }, finish]);
   assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(f.effects.length, 1); assert.equal(f.effects[0].operator, true);
-  assert.equal(typeof f.effects[0].grantId, 'string'); assert.equal(f.effects[0].observationSequence, 10); assert.equal(f.effects[0].inputRevision, 2);
+  assert.equal(typeof f.effects[0].grantId, 'string'); assert.equal(f.effects[0].inputSurface.inputRevision, 2);
 });
 
 test('a native control with no read is still refused; only observed operations are supplied for', async t => {
   const f = await fixture(t);
-  const result = await f.run([call({ kind: 'terminal_interact', targetId: 'pane', stepId: 'unobserved', keys: ['down'], inputPurpose: 'interaction', observationSequence: 10, inputRevision: 2 }),
+  const result = await f.run([call({ kind: 'terminal_interact', targetId: 'pane', stepId: 'unobserved', keys: ['down'], inputPurpose: 'interaction' }),
     body => { assert.equal(latest(body).ok, false); assert.match(latest(body).error, /[Rr]ead this terminal/); assert.equal(f.effects.length, 0); assert.equal(f.reads, 0); return read(); },
     body => operation(body, 'terminal_interact', { keys: ['down'], inputPurpose: 'interaction' }), read(), finish]);
   assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(f.effects.length, 1);
@@ -259,27 +258,63 @@ test('native interrupt rejects an explicit mismatched revision and preserves obs
     body => { assert.equal(latest(body).ok, false); assert.equal(f.effects.length, 0); return read(); },
     body => operation(body, 'interrupt'), read(), finish], { text: 'Interrupt the running task in Work and verify it stopped.', lifecycleMode: 'interrupt' });
   assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(f.effects.length, 1);
-  assert.equal(f.effects[0].kind, 'interrupt'); assert.equal(f.effects[0].operator, true); assert.equal(f.effects[0].observationSequence, 10); assert.equal(f.effects[0].inputRevision, 2);
+  assert.equal(f.effects[0].kind, 'interrupt'); assert.equal(f.effects[0].operator, true); assert.equal(f.effects[0].inputSurface.inputRevision, 2);
 });
 
-for (const kind of ['send_prompt', 'interrupt', 'terminal_interact']) for (const omitted of [['observationSequence', 'inputRevision'], ['inputRevision'], ['observationSequence']]) {
-  test(`${kind} derives omitted ${omitted.join('/')} from its token without changing step replay identity`, async t => {
+for (const kind of ['send_prompt', 'interrupt', 'terminal_interact']) {
+  test(`${kind} takes its native input evidence from its token without changing step replay identity`, async t => {
     const f = await fixture(t); let original;
     if (kind === 'interrupt') Object.assign(f.sessions[0], { turnState: 'running', turnId: 'active-turn' });
     const result = await f.run([read(), body => {
       original = JSON.parse(operation(body, kind, { ...(kind === 'send_prompt' && { text: 'Review the latest changes.' }), ...(kind === 'terminal_interact' && { keys: ['down'] }), stepId: 'derived-once' }).choices[0].message.tool_calls[0].function.arguments);
-      for (const field of omitted) delete original[field];
+      // The model never supplies freshness numbers; there is nothing to omit.
+      assert.equal(Object.hasOwn(original, 'observationSequence'), false);
+      assert.equal(Object.hasOwn(original, 'inputRevision'), false);
       return call(original);
     }, body => { assert.equal(latest(body).ok, true, JSON.stringify(latest(body))); return call(original); },
     body => { assert.equal(latest(body).ok, true, 'An exact replay returns its receipt despite the consumed observation token.'); return read(); }, finish], kind === 'interrupt' ? { lifecycleMode: 'interrupt', text: 'Interrupt the running task.' } : {});
     assert.equal(result.ok, true, JSON.stringify(result));
     assert.equal(f.effects.length, 1);
-    assert.equal(f.effects[0].observationSequence, 10);
-    assert.equal(f.effects[0].inputRevision, 2);
+    assert.equal(f.effects[0].inputSurface.inputRevision, 2);
     assert.equal(f.effects[0].operator, true);
     assert.ok(f.effects[0].requestId);
   });
 }
+
+// The frozen sequence/inputRevision stay as the model's proof it is acting on
+// the read it was given. What the native adapter actually fences the write on is
+// the input surface, because a pane that repaints itself moves the sequence and
+// nothing else. Both travel with the token.
+test('an observation token records the input surface beside the counters it freezes', () => {
+  const observations = createOperatorObservations();
+  const target = { id: 'pane', generation: 'g1', revision: 1, kind: 'codex', provider: 'codex' };
+  const screen = { ok: true, id: 'pane', generation: 'g1', sequence: 4, inputRevision: 1, cols: 80, rows: 10,
+    cursor: { x: 2, y: 3 }, cursorVisible: true, cursorLine: { startRow: 3, text: '› Ask Codex to do anything', beforeCursor: '› ' },
+    cursorContext: { startRow: 1, rows: ['', '', '› Ask Codex to do anything', ''] },
+    text: 'OpenAI Codex\nmodel: gpt-6-astra\n\n› Ask Codex to do anything' };
+  const record = observations.authorize(observations.observe(target, screen), target, { kind: 'send_prompt' });
+  assert.equal(record.sequence, 4); assert.equal(record.inputRevision, 1);
+  assert.equal(record.surface.composer.empty, true);
+  assert.equal(record.surface.inputRevision, 1);
+  assert.equal(record.surface.line.beforeCursor, '› ');
+  assert.equal(JSON.stringify(record.surface).includes('Ask Codex'), false, 'the surface never carries the screen text');
+  assert.equal(Object.hasOwn(record.surface, 'sequence'), false, 'the surface never carries the output counter');
+  // A read with no input revision captured no surface, so it cannot authorize.
+  assert.throws(() => observations.authorize(observations.observe(target, { ...screen, inputRevision: undefined }), target, { kind: 'send_prompt' }),
+    /captured input surface/);
+});
+
+test('an operator effect carries the observed input surface to the native adapter', async t => {
+  const f = await fixture(t);
+  const result = await f.run([read(), body => operation(body, 'send_prompt', { text: 'Review the latest changes.' }), read(), finish]);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(f.effects.length, 1);
+  const surface = f.effects[0].inputSurface;
+  assert.ok(surface, 'the operator effect carries the observed input surface');
+  assert.equal(surface.inputRevision, 2);
+  assert.equal(surface.id, 'pane');
+  assert.equal(JSON.stringify(surface).includes('Ready for input'), false);
+});
 
 test('derived counters require valid fresh evidence and never replace supplied mismatches', () => {
   let time = 100;
@@ -288,13 +323,13 @@ test('derived counters require valid fresh evidence and never replace supplied m
   const token = observations.observe(target, { sequence: 0, inputRevision: 0 });
   for (const kind of ['send_prompt', 'interrupt', 'terminal_interact']) {
     assert.ok(observations.authorize(token, target, { kind }));
-    for (const field of ['observationSequence', 'inputRevision']) for (const value of [1, null, -1])
-      assert.throws(() => observations.authorize(token, target, { kind, [field]: value }), /screen sequence and input revision/);
     assert.ok(observations.authorize(token, { ...target, revision: 2 }, { kind }));
     assert.throws(() => observations.authorize(token, { ...target, turnId: 'new-turn' }, { kind }), /terminal changed/);
     assert.throws(() => observations.authorize(token, { ...target, generation: 'g2' }, { kind }), /missing, used, or stale/);
-    for (const screen of [{ sequence: 0 }, { inputRevision: 0 }, { sequence: -1, inputRevision: 0 }, { sequence: 0, inputRevision: -1 }])
-      assert.throws(() => observations.authorize(observations.observe(target, screen), target, { kind }), /screen sequence and input revision/);
+    // A read that never saw an input revision captured no surface, so it cannot
+    // authorize native input however fresh its token is.
+    for (const screen of [{ sequence: 0 }, { sequence: 0, inputRevision: -1 }, {}])
+      assert.throws(() => observations.authorize(observations.observe(target, screen), target, { kind }), /captured input surface/);
   }
   assert.ok(observations.authorize(token, target, { kind: 'terminal_interact' }));
   time += 30001;
@@ -313,7 +348,7 @@ test('a write using derived evidence remains unconfirmed and cannot be replayed 
   body => operation(body, 'finish_terminal', { outcome: 'blocked', text: 'Submission remains unconfirmed.' }), reply('Submission remains unconfirmed.')]);
   assert.equal(result.ok, false);
   assert.equal(f.effects.length, 1);
-  assert.equal(f.effects[0].inputRevision, 2);
+  assert.equal(f.effects[0].inputSurface.inputRevision, 2);
 });
 
 test('completion after an action requires another read, not the consumed pre-action observation', async t => {
@@ -335,7 +370,7 @@ test('request-owned metadata completes read-send-read-finish and repeated call i
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(f.effects.length, 1); assert.equal(f.reads, 2);
   assert.equal(typeof f.effects[0].stepId, 'string'); assert.ok(f.effects[0].stepId.length);
-  assert.equal(f.effects[0].observationSequence, 10); assert.equal(f.effects[0].inputRevision, 2);
+  assert.equal(f.effects[0].inputSurface.inputRevision, 2);
 });
 
 test('a same-response batched read cannot supply implicit evidence to its already chosen action', async t => {
@@ -360,8 +395,21 @@ test('a failed current read prevents implicit fallback to an earlier successful 
   assert.equal(result.upstreamError, undefined, JSON.stringify(result)); assert.equal(f.effects.length, 1);
 });
 
-// An explicitly supplied token is never replaced by an application observation.
-for (const invalid of [{ stepId: '' }, { stepId: null }, { observationToken: '' }, { observationToken: null }, { observationToken: 'not-a-real-token' }]) {
+// An invented observationToken is not evidence of anything, so it is treated as
+// absent and the action binds to the model's latest unused read of that pane.
+// The ladder's T4.4 spent nine rejections and 32 model calls on tokens like
+// "obs-session_…" and "96" before this; a token the operator really minted is
+// still checked exactly as before (used, stale, wrong pane).
+for (const invented of ['', null, 'not-a-real-token']) {
+  test(`supplied invented observationToken=${JSON.stringify(invented)} binds to the latest real read`, async t => {
+    const f = await fixture(t);
+    const result = await f.run([read(), () => call({ kind: 'send_prompt', targetId: 'pane', text: 'Review the latest changes.', observationToken: invented }),
+      body => { assert.equal(latest(body).ok, true, JSON.stringify(latest(body))); assert.equal(f.effects.length, 1); return read(); }, implicitFinish]);
+    assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(f.effects.length, 1);
+  });
+}
+// An explicitly supplied step identity is never replaced by an application one.
+for (const invalid of [{ stepId: '' }, { stepId: null }]) {
   test(`supplied invalid ${Object.keys(invalid)[0]}=${JSON.stringify(Object.values(invalid)[0])} is not silently replaced`, async t => {
     const f = await fixture(t);
     const result = await f.run([read(), () => call({ kind: 'send_prompt', targetId: 'pane', text: 'Review the latest changes.', ...invalid }),
@@ -392,7 +440,7 @@ test('a task with no read at all is observed by the application and then written
   const result = await f.run([call({ kind: 'send_prompt', targetId: 'pane', text: 'Review the latest changes.' }),
     body => { assert.equal(latest(body).ok, true); assert.equal(f.reads, 1); assert.equal(f.effects.length, 1); return read(); }, implicitFinish]);
   assert.equal(result.ok, true, JSON.stringify(result));
-  assert.equal(f.effects.length, 1); assert.equal(f.effects[0].observationSequence, 10); assert.equal(f.effects[0].inputRevision, 2);
+  assert.equal(f.effects.length, 1); assert.equal(f.effects[0].inputSurface.inputRevision, 2);
 });
 
 test('an earlier-round read still supplies the observation and no extra read is taken', async t => {
@@ -428,4 +476,29 @@ test('an application-supplied observation keeps the drift and after-action rules
   const record = observations.authorize(token, target, send);
   observations.consume(record, target, send);
   assert.throws(() => observations.authorize(token, target, send), /missing, used, or stale/);
+});
+
+// A Brain that pages with beforeSequence: 1 is reading the current screen (there
+// is nothing before the first sample), and a current read mints the token every
+// later step binds to. The ladder's T3.3 spent 33 calls on reads that minted none.
+test('a read with beforeSequence 1 is the current screen and mints the observation token', async t => {
+  const f = await fixture(t);
+  const result = await f.run([call({ kind: 'read_session', targetId: 'pane', beforeSequence: 1 }),
+    body => { assert.equal(typeof latest(body).observationToken, 'string', JSON.stringify(latest(body)).slice(0, 300)); return call({ kind: 'send_prompt', targetId: 'pane', text: 'Review the latest changes.' }); },
+    read(), implicitFinish]);
+  assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(f.effects.length, 1);
+});
+
+// Every tier-5 navigation step on the completion ladder carried a mouse "move"
+// beside its typed text ("/status" + Enter + move to 1,1) and was refused for
+// mixing controls. The move is a no-op the model adds by habit and is dropped;
+// a click beside typed text is still two steps and still refused.
+test('a mouse move beside typed navigation text is dropped rather than refused', async t => {
+  const f = await fixture(t);
+  const result = await f.run([read(), body => operation(body, 'terminal_interact', { text: '/status', keys: ['enter'], inputPurpose: 'interaction',
+    mouse: { x: 1, y: 1, button: 'left', action: 'move' } }), read(), finish]);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(f.effects.map(action => action.kind), ['terminal_interact']);
+  assert.equal(f.effects[0].mouse, undefined);
+  assert.equal(f.effects[0].text, '/status');
 });

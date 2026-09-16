@@ -111,13 +111,35 @@ const CASES = {
     'The last prompt I put in was “Review the release checklist.”, in Codex. It started working on it.'],
   'last-error': [{ pane: 'Codex', reason: 'The composer was not reachable.' },
     'The last thing that went wrong was in Codex: The composer was not reachable.'],
+  'last-prompt-confirmed': [{ pane: 'Codex', typedText: 'Review the release checklist.', outcome: 'delivered-started' },
+    'Yes, I put “Review the release checklist.” in Codex. It started working on it.'],
+  'last-prompt-denied': [{ pane: 'Codex', typedText: 'Review the release checklist.' },
+    'No. I tried to put “Review the release checklist.” in Codex, but it was not sent.'],
   'pane-result': [{ pane: 'Codex', summary: 'it found two stale handlers.' }, 'Codex came back with: it found two stale handlers.'],
+  'pane-result-several': [{ panes: 'Full screen layout, Pairing screen' },
+    'More than one has finished: Full screen layout, Pairing screen. Which one do you mean?'],
+  'pane-results': [{ results: 'Full screen layout came back with: two stale handlers removed. Pairing screen came back with: the code entry works.' },
+    'Full screen layout came back with: two stale handlers removed. Pairing screen came back with: the code entry works.'],
   'recent-actions': [{ actions: 'started a task in Codex; opened Claude Code 2' },
     'Here is what I did: started a task in Codex; opened Claude Code 2.'],
+  'status-all': [{ report: 'Codex 1 is working; Claude 2 is done; Kimi is idle' },
+    'Here is where things stand: Codex 1 is working; Claude 2 is done; Kimi is idle.'],
+  'needs-me': [{ pane: 'Codex terminal', project: 'lina web app', task: 'Do a deep dive on the PDF viewer.' }, 'Codex terminal in lina web app, on “Do a deep dive on the PDF viewer.”, is waiting on you.'],
+  'needs-me-several': [{ panes: 'Codex 1, Claude 2' }, 'These are waiting on you: Codex 1, Claude 2.'],
+  'needs-me-none': [{}, 'Nothing is waiting on you right now.'],
+  'last-done': [{ pane: 'Full screen layout', project: 'vibeTerminal' }, 'The last one to finish was Full screen layout in vibeTerminal.'],
+  'gave-to': [{ pane: 'Claude 1', task: 'full screen layout', typedText: 'Fix the full screen layout.' },
+    'I put the full screen layout work in Claude 1: “Fix the full screen layout.”.'],
+  'gave-to-pane': [{ pane: 'Full screen layout', task: 'full screen layout', project: 'vibeTerminal' },
+    'The full screen layout work is in Full screen layout in vibeTerminal.'],
   'brain-error': [{}, "I couldn't get a plan from the brain for that one, so nothing was typed."],
   'brain-timeout': [{}, 'The brain took too long to answer; nothing was typed. Try once more.'],
   'interpretation-reason': [{ reason: 'Continue the read-only task separately from new terminal work.' },
     'Reason: Continue the read-only task separately from new terminal work.'],
+  'missing-project': [{}, "I couldn't tell which project this belongs to, so nothing was started. Tell me the project and I'll run it there."],
+  'missing-pane': [{}, "I couldn't tell which terminal you meant, so nothing was typed. Name it or select its pane."],
+  'missing-answer': [{}, "I don't have the answer that terminal is waiting for, so nothing was typed. Tell me what to say and I'll pass it on."],
+  'missing-task': [{}, "I couldn't tell what to send, so nothing was typed. Say what the terminal should do and I'll pass it on."],
   'project-added': [{}, 'Added the folder as a Lina Terminal project.'],
   'project-removed': [{}, 'Removed the project from Lina Terminal. No files or folders were deleted.'],
   'folder-opened': [{}, 'Opened the folder in the file manager.'],
@@ -138,6 +160,11 @@ test('every sentence in the catalogue has a case, and renders exactly what the u
 });
 
 test('every spoken form is at most two sentences and names the pane the written one names', () => {
+  // The retried form of a refusal is a second rendering of one catalogue entry
+  // and holds to the same two-sentence contract.
+  const retried = sentence('stale-observation', { pane: 'Codex', attempts: 3 });
+  assert.ok(sentences(retried.speech) <= 2, retried.speech);
+  assert.ok(retried.text.includes('Codex'));
   for (const [key, [context]] of Object.entries(CASES)) {
     const { text, speech } = sentence(key, context);
     assert.ok(sentences(speech) <= 2, `${key} speaks ${sentences(speech)} sentences: ${speech}`);
@@ -158,6 +185,9 @@ test('no sentence Lina says contains blame or defect vocabulary', () => {
     ...Object.entries(CASES).map(([key, [context]]) => [`speech(${key})`, sentence(key, context).speech]),
     ['brainRejectionSentence', brainRejectionSentence({ status: 400, providerMessage: 'The conversation transcript is malformed.' })],
     ['failureSentence(launch-timeout)', failureSentence('launch-timeout', { pane: 'Codex', seconds: 20 })],
+    // The retried form of the same refusal: the count is a fact about what Lina
+    // did, and it may not turn into blame for the pane or the user.
+    ['failureSentence(stale-observation, retried)', failureSentence('stale-observation', { pane: 'Codex', attempts: 3 })],
     ['taskWaitSentence(delivered)', taskWaitSentence({ targetId: 'a', generation: 'g', delivered: true, deliveryStatus: 'written' }, { id: 'a', generation: 'g', name: 'Codex' }).text],
     ['taskWaitSentence(unknown)', taskWaitSentence({ targetId: 'a', generation: 'g', deliveryStatus: 'unknown' }, { id: 'a', generation: 'g', name: 'Codex' }).text],
     ['taskWaitSentence(pane gone)', taskWaitSentence({ targetId: 'a', generation: 'g' }, undefined).text],

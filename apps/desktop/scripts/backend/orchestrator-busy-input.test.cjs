@@ -4,8 +4,10 @@ const {createTerminalInput}=require('../../backend/orchestratorTerminalInput.cjs
 const {isObservedBusyPrompt,isBusyPromptSubmission,canQueueBusyPrompt}=require('../../backend/orchestratorBusyInput.cjs');
 function fixture(patch={},readPatch={},writeResult={ok:true,status:'written'},sequence=2) {
  const session={id:'s',generation:'g',kind:'codex',provider:'codex',agentPid:42,processState:'running',agentProcessState:'running',turnId:'t',turnState:'running',observation:'observed',revision:1,childActivity:true,...patch};
- const action={target:{id:'s',generation:'g'},actionId:'a',operator:true,promptSubmission:true,text:'Review remaining changes',submit:true,requestId:'r',observationSequence:1,inputRevision:0};
- const writes=[]; const input=createTerminalInput({getSession:()=>session,readSession:async()=>{Object.assign(session,readPatch);return {ok:true,id:'s',generation:'g',sequence,inputRevision:0,cols:100,rows:28};},write:async payload=>{writes.push(payload);return writeResult;},now:()=>100});
+ const screen={ok:true,id:'s',generation:'g',sequence,inputRevision:0,cols:100,rows:28};
+ // The one freshness contract: the surface the app captured at its own read.
+ const action={target:{id:'s',generation:'g'},actionId:'a',operator:true,promptSubmission:true,text:'Review remaining changes',submit:true,requestId:'r',inputSurface:require('../../backend/orchestratorInputSurface.cjs').projectInputSurface(session,screen)};
+ const writes=[]; const input=createTerminalInput({getSession:()=>session,readSession:async()=>{Object.assign(session,readPatch);return {...screen};},write:async payload=>{writes.push(payload);return writeResult;},now:()=>100});
  return {session,action,writes,input};
 }
 test('pure busy Codex submission survives output churn and logical children with fresh host evidence',async()=>{
@@ -15,7 +17,7 @@ test('busy capability cannot apply to keys, input overrides, questions, stale in
  for(const patch of [{keys:['ctrl-c']},{editInput:true},{promptSubmission:false},{mouse:{}}]) {const h=fixture();Object.assign(h.action,patch);assert.equal(isBusyPromptSubmission(h.action,h.session),false);assert.equal((await h.input.handle(h.action)).ok,false);assert.equal(h.writes.length,0);}
  for(const patch of [{turnState:'waiting'},{pendingInteraction:true},{agentProcessState:'exited'},{binding:{status:'ambiguous'}},{provider:'claude',kind:'claude'}]) {const h=fixture(patch);assert.equal((await h.input.handle(h.action)).ok,false);assert.equal(h.writes.length,0);}
  for(const patch of [{agentPid:43},{turnId:'new'},{agentProcessState:'exited'}]) {const h=fixture({},patch);assert.equal((await h.input.handle(h.action)).ok,false);assert.equal(h.writes.length,0);}
- const h=fixture();h.action.inputRevision=2;const stale=await h.input.handle(h.action);assert.equal(stale.status,'stale-observation');assert.equal(canQueueBusyPrompt(h.action,h.session,stale),false);
+ const h=fixture();h.action.inputSurface={...h.action.inputSurface,inputRevision:2};const stale=await h.input.handle(h.action);assert.equal(stale.status,'stale-observation');assert.equal(canQueueBusyPrompt(h.action,h.session,stale),false);
 });
 test('only proven unsent busy failures can queue; ownership and uncertain writes never replay',async()=>{
  const h=fixture({provider:'claude',kind:'claude'});const result=await h.input.handle(h.action);assert.equal(canQueueBusyPrompt(h.action,h.session,result),true);

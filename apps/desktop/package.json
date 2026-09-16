@@ -1,6 +1,6 @@
 {
   "name": "vibe-terminal",
-  "version": "0.1.123",
+  "version": "0.1.124",
   "private": true,
   "description": "A tiled local workspace for running multiple coding agents side by side.",
   "author": "Lina Terminal contributors",
@@ -18,13 +18,14 @@
     "smoke:open-codex": "node scripts/backend/open-codex-native-smoke.cjs && node scripts/qa/open-codex-smoke.cjs",
     "smoke:open-codex:packaged": "node scripts/qa/open-codex-packaged-smoke.cjs",
     "prepare:codex-web": "node scripts/dev/prepare-codex-web.cjs",
-    "test:codex-web": "node --test scripts/backend/codex-web.test.cjs scripts/backend/codex-web-browser-login.test.cjs scripts/backend/codex-web-protocol.test.cjs",
+    "test:codex-web": "node --test scripts/backend/codex-web.test.cjs scripts/backend/codex-web-browser-login.test.cjs scripts/backend/codex-web-protocol.test.cjs scripts/backend/codex-tui-overrides.test.cjs",
     "smoke:codex-web": "node scripts/backend/codex-web-native-smoke.cjs && node scripts/backend/codex-web-work-surface-smoke.cjs && node scripts/qa/codex-web-tui-smoke.cjs && node scripts/qa/codex-web-image-input-smoke.cjs && node scripts/qa/codex-web-image-catalog-smoke.cjs && node scripts/qa/codex-web-diff-colors-smoke.cjs",
     "dev": "node scripts/app/dev.cjs",
     "dev:frontend": "vite --host 127.0.0.1",
     "preview:account": "vite --config vite.account-preview.config.ts",
     "build:account-preview": "tsc --noEmit && vite build --config vite.account-preview.config.ts",
     "test:account-preview": "node --test scripts/frontend/account-preview.test.cjs",
+    "test:account-prepared": "node --test scripts/backend/account-prepared.test.cjs",
     "dev:renderer": "npm run dev:frontend",
     "build": "tsc --noEmit && vite build",
     "start": "npm run build && electron .",
@@ -114,6 +115,7 @@
     "smoke:electron:orchestrator-background-launch": "node scripts/qa/orchestrator-background-launch-smoke.cjs",
     "smoke:electron:orchestrator-tasks": "node scripts/qa/orchestrator-task-ui-smoke.cjs",
     "smoke:orchestrator:live-tasks": "node scripts/qa/orchestrator-live-tasks.cjs",
+    "smoke:orchestrator:ladder": "node scripts/qa/orchestrator-completion-ladder.cjs",
     "smoke:frontend:orchestrator-history": "node scripts/frontend/orchestrator-history-smoke.cjs",
     "smoke:frontend:orchestrator-tasks": "node scripts/frontend/orchestrator-tasks-smoke.cjs && node --test scripts/frontend/orchestrator-messages.test.cjs",
     "smoke:frontend:conversation-live": "node scripts/frontend/conversation-live-smoke.cjs",
@@ -226,7 +228,8 @@
       "!**/scripts/**",
       "!**/vendor/**",
       "!**/*.map",
-      "!**/apps/website/**"
+      "!**/apps/website/**",
+      "!backend/account-prepared/**"
     ],
     "win": {
       "target": [

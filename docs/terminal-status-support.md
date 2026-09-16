@@ -32,6 +32,13 @@ key are not proof of a running or completed agent turn.
   Agent has no captured composer, so its panes are typed into as soon as they
   paint something that is not a startup screen. See
   [terminal readiness](orchestrator-terminal-readiness-2026-09-13.md).
+- Whether a pane is free to take work, and whether it may be typed into, are
+  two questions. One predicate answers the first
+  (`backend/orchestratorPaneReadiness.cjs`: process, recipient, named
+  conversation, idle), and it stays conservative about a human draft. The decoded
+  composer answers the second, so a visibly empty composer is never refused as
+  occupied. See
+  [the idle sparkle and the input fence](codex-idle-sparkle-and-input-fence-2026-09-13.md).
 - A pane that has never taken a prompt reports `idle` as soon as its own
   session-start hook arrives, even while its native identity is still
   provisional, because a provider only proves that identity by writing a

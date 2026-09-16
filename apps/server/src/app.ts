@@ -6,7 +6,7 @@ import { isIP } from 'node:net';
 import { z } from 'zod';
 import type { Pool } from 'pg';
 import type { Config } from './config';
-import { createAuth } from './auth';
+import { createAuth, type Auth } from './auth';
 import { migrationStatus } from './db/migrations';
 import { accessFor } from './access';
 import { changeAccount } from './admin/service';
@@ -31,7 +31,7 @@ type Identity = {
   };
   session: { id: string; createdAt: Date; expiresAt: Date };
 };
-type Env = {
+export type Env = {
   Bindings: { peerIp?: string };
   Variables: { requestId: string; identity: Identity };
 };
@@ -77,8 +77,12 @@ function scrubTokens(value: unknown): unknown {
     );
   return value;
 }
-export function createApp(config: Config, pool: Pool) {
-  let instance: ReturnType<typeof createAuth> | undefined;
+export function createApp(
+  config: Config,
+  pool: Pool,
+  options: { auth?: Auth; migrationRoot?: URL } = {},
+) {
+  let instance: ReturnType<typeof createAuth> | undefined = options.auth;
   const getAuth = () => (instance ??= createAuth(config, pool));
   const app = new Hono<Env>(),
     metrics = new Metrics();
@@ -137,7 +141,7 @@ export function createApp(config: Config, pool: Pool) {
   );
   app.get('/health/ready', async (c) => {
     try {
-      const state = await migrationStatus(pool);
+      const state = await migrationStatus(pool, options.migrationRoot);
       return c.json(
         {
           status: state.ready ? 'ready' : 'not_ready',
@@ -434,7 +438,11 @@ export function createApp(config: Config, pool: Pool) {
     const result = await pool.query(
       `SELECT u.id,u.email,u.name,u.role,u."emailVerified",p.status,p.revision,p.last_login_at,
       g.plan_id AS assigned_tier,g.source,g.expires_at,(SELECT max(last_seen_at) FROM devices WHERE user_id=u.id) AS last_seen_at
-      FROM "user" u JOIN account_profiles p ON p.user_id=u.id LEFT JOIN access_grants g ON g.user_id=u.id AND g.revoked_at IS NULL
+      FROM "user" u JOIN account_profiles p ON p.user_id=u.id LEFT JOIN LATERAL (
+        SELECT ag.* FROM access_grants ag JOIN plans plan ON plan.id=ag.plan_id
+        WHERE ag.user_id=u.id AND ag.revoked_at IS NULL AND ag.starts_at<=now() AND (ag.expires_at IS NULL OR ag.expires_at>now())
+        ORDER BY plan.rank DESC,ag.expires_at DESC NULLS FIRST,ag.id LIMIT 1
+      ) g ON true
       WHERE ($1='' OR position(lower($1) in lower(u.email))>0) AND ($2='' OR p.status=$2) AND ($3='' OR g.plan_id=$3)
       ORDER BY u."createdAt" DESC,u.id LIMIT $4 OFFSET $5`,
       [search, status, tier, limit, offset],
@@ -525,7 +533,11 @@ export function createApp(config: Config, pool: Pool) {
       'SELECT status,count(*)::int AS count FROM account_profiles GROUP BY status',
     );
     const tiers = await pool.query(
-      `SELECT g.plan_id,count(DISTINCT g.user_id)::int AS count FROM access_grants g JOIN account_profiles p ON p.user_id=g.user_id JOIN "user" u ON u.id=g.user_id WHERE g.revoked_at IS NULL AND g.starts_at<=now() AND (g.expires_at IS NULL OR g.expires_at>now()) AND p.status='active' AND u."emailVerified" GROUP BY g.plan_id`,
+      `SELECT chosen.plan_id,count(*)::int AS count FROM account_profiles p JOIN "user" u ON u.id=p.user_id
+        JOIN LATERAL (SELECT g.plan_id FROM access_grants g JOIN plans plan ON plan.id=g.plan_id
+          WHERE g.user_id=p.user_id AND g.revoked_at IS NULL AND g.starts_at<=now() AND (g.expires_at IS NULL OR g.expires_at>now())
+          ORDER BY plan.rank DESC,g.expires_at DESC NULLS FIRST,g.id LIMIT 1) chosen ON true
+        WHERE p.status='active' AND u."emailVerified" GROUP BY chosen.plan_id`,
     );
     const recent = await pool.query(
       `SELECT count(DISTINCT sd.user_id)::int AS count FROM session_devices sd JOIN session s ON s.id=sd.session_id WHERE sd.last_seen_at>now()-interval '3 minutes' AND s."expiresAt">now()`,

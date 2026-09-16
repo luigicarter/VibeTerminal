@@ -5,6 +5,7 @@ const { createTerminalRuntime } = require('../../backend/terminalRuntime.cjs');
 const { createOrchestratorDelivery } = require('../../backend/orchestratorDelivery.cjs');
 const { createTerminalInput } = require('../../backend/orchestratorTerminalInput.cjs');
 const { sessionIdentity } = require('../../backend/orchestratorRouting.cjs');
+const { composerScreen, inputAction } = require('./orchestrator-input-fixture.cjs');
 
 function fixture(t, { provider = 'claude', lookup } = {}) {
   let time = 10000;
@@ -169,7 +170,11 @@ test('pending selection blocks automated keys and mid-observation switching prev
     return { ok: true, id: 'pane', generation: get().generation, sequence: 1, inputRevision: 0, cols: 80, rows: 24, text: 'Ready' };
   }, write: async p => { writes.push(p); return { ok: true }; } });
   t.after(() => input.dispose());
-  const action = { target: { id: 'pane', generation: get().generation }, actionId: 'race', requestId: 'request', operator: true, keys: ['down'], observationSequence: 1, inputRevision: 0 };
+  // The action carries the surface the app would have captured at its own read
+  // of this pane; every input action needs one, and the fixture builds it off
+  // the same projection production uses.
+  const action = inputAction(get(), composerScreen({ id: 'pane', generation: get().generation }),
+    { target: { id: 'pane', generation: get().generation }, actionId: 'race', requestId: 'request', operator: true, keys: ['down'] });
   assert.equal((await input.handle(action)).delivery, 'not-dispatched');
   assert.equal((await input.handle({ ...action, actionId: 'pending' })).status, 'recipient-unavailable');
   assert.deepEqual(writes, []);

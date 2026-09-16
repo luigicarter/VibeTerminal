@@ -50,7 +50,7 @@ async function fixture(t) {
   return { app, root, sessions, effects, contexts, executorContexts, reads, projects, session, run, follow, setAsk: value => { ask = value; }, task: id => app.getState().tasks.find(item => item.requestId === id) };
 }
 
-test('clearing history retains the actual prerequisite while a dependent waits for another workspace', { timeout: 4000 }, async t => {
+test('clearing history retains the actual prerequisite while a dependent waits for a busy pane', { timeout: 4000 }, async t => {
   const f = await fixture(t); f.setAsk(false);
   const a = await f.run(objective, { goal: objective, actions: [{ kind: 'delegate_task', cwd: f.root, text: objective }] });
   Object.assign(f.sessions[0], { turnState: 'completed', turnEndedAt: Date.now() }); await f.app.refresh();
@@ -59,23 +59,20 @@ test('clearing history retains the actual prerequisite while a dependent waits f
   const c = await f.run('Existing work elsewhere.', { goal: 'Existing work elsewhere.', actions: [{ kind: 'delegate_task', cwd: other, text: 'Existing work elsewhere.' }] });
   assert.equal(f.task(c.requestId).status, 'waiting-results');
   const dependentText = 'Apply the review findings.';
-  const bPending = f.run(dependentText, { goal: dependentText, dependsOnRequestIds: [a.requestId], actions: [{ kind: 'delegate_task', cwd: other, text: dependentText }] });
-  const deadline = Date.now() + 2000;
-  while (!f.app.getState().tasks.some(task => task.sequence === 3 && task.targetIds.length && task.status === 'queued')) {
-    assert(Date.now() < deadline, 'Dependent request reaches its workspace wait'); await new Promise(resolve => setImmediate(resolve));
-  }
-  await f.app.clearHistory();
-  assert.equal(f.task(a.requestId).status, 'finished');
-  assert.equal(f.app.getState().tasks.find(task => task.sequence === 3).status, 'queued');
-  assert.equal(f.effects.filter(action => action.kind === 'send_prompt').length, 2);
-  Object.assign(f.sessions[1], { turnState: 'completed', turnEndedAt: Date.now() }); await f.app.refresh();
-  const b = await bPending;
+  // A task owns its pane, never the worktree: the dependent takes its own pane
+  // in the other project at once and runs beside the work already there.
+  const b = await f.run(dependentText, { goal: dependentText, dependsOnRequestIds: [a.requestId], actions: [{ kind: 'delegate_task', cwd: other, text: dependentText }] });
   assert.equal(b.ok, true, JSON.stringify(b));
+  assert.equal(f.task(b.requestId).status, 'waiting-results');
   assert.equal(f.effects.filter(action => action.kind === 'send_prompt' && action.text === dependentText).length, 1);
+  await f.app.clearHistory();
+  assert.equal(f.task(a.requestId).status, 'finished', 'a finished prerequisite of unfinished work survives clearing');
+  assert.equal(f.effects.filter(action => action.kind === 'send_prompt').length, 3);
   // The application delivers a bound handoff itself, so the prerequisite
   // evidence is the attributed completed result it read before dispatching.
   assert.ok(f.reads.some(target => target.completedTurnId), 'The prerequisite result was read by turn identity');
-  Object.assign(f.sessions[2], { turnState: 'completed', turnEndedAt: Date.now() }); await f.app.refresh();
+  Object.assign(f.sessions.at(-1), { turnState: 'completed', turnEndedAt: Date.now() }); await f.app.refresh();
+  assert.equal(f.task(b.requestId).status, 'finished');
   await f.app.clearHistory();
   assert.equal(f.task(a.requestId), undefined, 'Finished dependencies no longer pin old history');
 });

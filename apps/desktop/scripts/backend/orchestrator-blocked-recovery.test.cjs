@@ -23,9 +23,9 @@ test('blocked finish retains the objective without making claimed effects replay
 });
 test('fresh recovery preserves step accounting and only successful finish consumes objective', () => {
   const f = fixture();
-  claimGrant(f.action('terminal_interact', 'edit', { keys: ['home'], observationSequence: 1, inputRevision: 0 }), f.plan);
+  claimGrant(f.action('terminal_interact', 'edit', { keys: ['home']}), f.plan);
   claimGrant(f.action('finish_terminal', 'blocked', { outcome: 'blocked', text: 'Composer needs clearing.' }), f.plan);
-  claimGrant(f.action('terminal_interact', 'recover', { keys: ['end'], observationSequence: 2, inputRevision: 1 }), f.plan);
+  claimGrant(f.action('terminal_interact', 'recover', { keys: ['end']}), f.plan);
   assert.equal(f.project().progress[0].steps, 2);
   assert.deepEqual(f.project().blockedTargetIds, []);
   assert.equal(f.project().progress[0].outcome, undefined);

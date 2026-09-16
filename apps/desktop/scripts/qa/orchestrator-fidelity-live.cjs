@@ -25,7 +25,7 @@ const path = require('node:path');
 const { compileCommand } = require('../../backend/orchestratorCommandCompiler.cjs');
 const { normalizeInstruction } = require('../../backend/orchestratorVocabulary.cjs');
 const { identifyProject } = require('../../backend/orchestratorPolicy.cjs');
-const { extractSelector } = require('../../backend/orchestratorResolver.cjs');
+const { readReference } = require('../../backend/orchestratorReference.cjs');
 
 const CORPUS = require('../backend/fixtures/orchestrator-utterances.json');
 const REPORT_ROOT = path.resolve(__dirname, '../../.tmp/orchestrator-fidelity');
@@ -98,7 +98,7 @@ function readPlan(plan, context) {
     : grants.some(grant => grant.kind === 'watch_terminal') ? 'watch'
     : grants.length ? grants[0].kind : 'conversation';
   return { verb, project: project?.name ?? null, provider: provider ?? null,
-    selector: extractSelector(context.instruction, { launchers: LAUNCHERS }).kind };
+    selector: readReference(context.instruction, { launchers: LAUNCHERS }).kind };
 }
 
 function score(reading, expected) {

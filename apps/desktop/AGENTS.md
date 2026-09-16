@@ -25,3 +25,9 @@ user's request. Their standalone `account-preview.html`/Vite preview entry must
 remain outside the normal App, Settings, preload and startup until wiring is
 requested. Administration is web-only: never add admin controls or admin links
 to the desktop account surface. See `../../docs/account-phase-2-previews.md`.
+
+Prepared native account code lives in `backend/account-prepared` and presentation
+adapters in `frontend/account-prepared`. They are explicitly constructed only by
+dedicated tests, excluded from normal startup/IPC and native packaging. Do not
+wire them in or start their refresh/activity timers without a later integration
+request. See `../../docs/account-paid-readiness.md` for verified boundaries.

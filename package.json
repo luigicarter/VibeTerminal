@@ -123,6 +123,8 @@
     "build:account-preview:desktop": "node scripts/run-app.cjs desktop build:account-preview",
     "build:account-preview:web": "node scripts/run-app.cjs website build:account-preview",
     "test:account-previews": "node scripts/run-app.cjs desktop test:account-preview && node scripts/run-app.cjs website test:account-preview",
+    "test:account-prepared": "node --test scripts/account-preparation.test.cjs && node scripts/run-app.cjs desktop test:account-prepared && node scripts/run-app.cjs website test:account-prepared && npm run test:server",
+    "smoke:account-prepared": "node scripts/account-prepared-smoke.cjs",
     "dev:mobile": "node scripts/run-app.cjs mobile dev",
     "setup:server": "node scripts/run-app.cjs server --install",
     "dev:server": "node scripts/run-app.cjs server dev",

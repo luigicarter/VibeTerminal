@@ -34,7 +34,7 @@ for (const busy of [false, true]) for (const mode of ['cancel', 'dispose', 'time
   test(`${mode} cancels only the pending ${busy ? 'interaction' : 'delivery'} host action`, async t => {
     const h = await fixture(t, busy);
     if (mode === 'timeout') t.mock.timers.enable({ apis: ['setTimeout'] });
-    const pending = h.invoke('dispatch', { kind: 'send_prompt', target: { id: 'p', generation: 'g' }, text: 'New task', ...(busy ? { operator: true, requestId: 'owner', observationSequence: 1, inputRevision: 0 } : {}) });
+    const pending = h.invoke('dispatch', { kind: 'send_prompt', target: { id: 'p', generation: 'g' }, text: 'New task', ...(busy ? { operator: true, requestId: 'owner'} : {}) });
     for (let i = 0; i < 100 && !h.sent.length; i++) { if (mode === 'timeout') t.mock.timers.tick(100); await tick(); }
     assert.equal(h.sent.length, 1); const original = h.sent[0];
     assert.equal(original.type, 'action'); assert.equal(original.payload.kind, busy ? 'interaction' : 'input');

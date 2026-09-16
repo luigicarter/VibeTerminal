@@ -22,6 +22,8 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run build
       - run: bun run contracts && git diff --exit-code -- contracts/openapi.json
+      - run: bun run contracts:prepared && git diff --exit-code -- contracts/prepared/openapi.json
+      - run: bun run format:check
       - run: bun run test:container
       - run: docker run --rm --mount "type=bind,source=$PWD/deploy,target=/rules,readonly" --mount "type=bind,source=$PWD/tests/alerts.test.yaml,target=/tests.yaml,readonly" --entrypoint promtool prom/prometheus:v3.5.0 test rules /tests.yaml
       - run: docker build -f deploy/Dockerfile -t lina-account-server:ci .

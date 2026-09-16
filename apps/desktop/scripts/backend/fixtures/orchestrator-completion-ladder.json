@@ -1,0 +1,2287 @@
+{
+  "version": 1,
+  "about": "Graded scenarios for the Orchestrator completion ladder. Every non-synthetic turn quotes one row of orchestrator-utterances.json verbatim, by its `row` number; that file is the record of what the user actually said and is never edited from here. A turn passes only when every `expect` holds and no `forbid` fired, judged on recorded evidence (receipts, task status, the ledger, pane screens, pane counts, the reply text) and never on what the model said it did.",
+  "source": "scripts/backend/fixtures/orchestrator-utterances.json",
+  "projects": [
+    "vibeTerminal",
+    "lina web app",
+    "lina mobile"
+  ],
+  "paneStates": {
+    "idle": "created, resized and sitting at its own composer; never prompted",
+    "working": "sent its objective with a held stub turn, so the pane reads as working",
+    "needs-input": "sent its objective with a stub turn that asks a question, so the pane parks on it",
+    "done": "sent its objective with a fast stub turn that printed `marker` on the pane",
+    "note": "A navigation scenario opens its panes idle: tier 5 is about driving a pane that is sitting at its composer, not about interrupting work."
+  },
+  "deviations": [
+    "The design's tier-4 workspace has a kimi pane. kimi (and gemini, qwen, grok, cursor, opencode) write the user's real CLI homes, so no scenario launches them and the third vibeTerminal pane is a second idle codex pane instead; the one turn that addressed 'the kimi one' is synthesized against that pane.",
+    "Tier-4 T4.4 quotes row 66's shape, not its words: row 66 names a different pane title than this workspace has.",
+    "Claude Code 2.1.270 on a custom endpoint paints its composer with no terminal cursor. That made every stub-backed claude pane refuse its first prompt until backend/orchestratorPromptReadiness.cjs accepted a hidden cursor for the claude form (fixture claude-hidden-cursor-100x30); the same screen is what an Open Claude Code pane shows a real user.",
+    "Tier 5 covers the two providers this harness may launch, codex and claude. gemini, cursor, grok, kimi, qwen and opencode write the user's real CLI homes, so their navigation profiles (backend/orchestratorTerminalGuide.cjs) are exercised only by the in-memory fixture at scripts/qa/orchestrator-terminal-inspection-fixture.cjs, never here.",
+    "Tier 5 screen patterns are grounded in the navigation profiles and in what these CLIs print, not in a recorded capture: no tier-5 turn has been run against a live pane yet, so a first run should be read as calibration as much as measurement."
+  ],
+  "scenarios": [
+    {
+      "id": "T1.1",
+      "tier": 1,
+      "title": "Open a codex pane in a named project",
+      "setup": {
+        "projects": [
+          "vibeTerminal"
+        ],
+        "panes": []
+      },
+      "turns": [
+        {
+          "id": "T1.1.a",
+          "row": 62,
+          "text": "Can you open a new Codex terminal and Vibe terminal project?",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "paneDelta": {
+              "vibeTerminal": 1
+            },
+            "createdKind": "codex",
+            "promptDelivered": false
+          },
+          "forbid": {
+            "question": true,
+            "closedAny": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "reply"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "T1.2",
+      "tier": 1,
+      "title": "Start a codex pane with an objective",
+      "setup": {
+        "projects": [
+          "vibeTerminal"
+        ],
+        "panes": []
+      },
+      "turns": [
+        {
+          "id": "T1.2.a",
+          "row": 91,
+          "text": "Hey, bye. can you start a codex terminal and have it investigate performance issues.",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "paneDelta": {
+              "vibeTerminal": 1
+            },
+            "createdKind": "codex",
+            "promptDelivered": true,
+            "targetRef": "created",
+            "ledgerOutcome": [
+              "delivered-started"
+            ],
+            "paneScreenMatches": {
+              "ref": "created",
+              "pattern": "performance"
+            }
+          },
+          "forbid": {
+            "question": true,
+            "closedAny": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "paneScreens",
+            "reply"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "T1.3",
+      "tier": 1,
+      "title": "Start a claude pane with an objective",
+      "setup": {
+        "projects": [
+          "vibeTerminal"
+        ],
+        "panes": []
+      },
+      "turns": [
+        {
+          "id": "T1.3.a",
+          "row": 111,
+          "text": "Hey, Lena. *sniff* Open a cloud code terminal in a vibe terminal and have it fix the issue of full screen terminals. When I make a terminal full screen, it doesn't matter what it is. It's only full screen horizontally and not vertically for the entire pane.",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "paneDelta": {
+              "vibeTerminal": 1
+            },
+            "createdKind": "claude",
+            "promptDelivered": true,
+            "targetRef": "created",
+            "ledgerOutcome": [
+              "delivered-started"
+            ]
+          },
+          "forbid": {
+            "question": true,
+            "closedAny": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "paneScreens",
+            "reply"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "T1.4",
+      "tier": 1,
+      "title": "Progress report over a project, with no effects",
+      "setup": {
+        "projects": [
+          "vibeTerminal"
+        ],
+        "panes": [
+          {
+            "ref": "busy",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "working",
+            "objective": "Investigate the orchestrator performance"
+          },
+          {
+            "ref": "free",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "idle"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "id": "T1.4.a",
+          "row": 72,
+          "text": "Can you tell me what's going on in the Vibe terminals and tell me the progress?",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "paneDelta": {
+              "vibeTerminal": 0
+            },
+            "noEffects": true,
+            "replyMentions": [
+              "terminal"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "closedAny": true,
+            "anyPromptDelivered": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "reply"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "T1.5",
+      "tier": 1,
+      "title": "Open a codex pane with no project named and one project registered",
+      "setup": {
+        "projects": [
+          "vibeTerminal"
+        ],
+        "panes": []
+      },
+      "turns": [
+        {
+          "id": "T1.5.a",
+          "row": 96,
+          "text": "Can you open a codex terminal for me?",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "paneDelta": {
+              "vibeTerminal": 1
+            },
+            "createdKind": "codex"
+          },
+          "forbid": {
+            "question": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "reply"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "T1.6",
+      "tier": 1,
+      "title": "Noise changes nothing and asks nothing",
+      "setup": {
+        "projects": [
+          "vibeTerminal"
+        ],
+        "panes": [
+          {
+            "ref": "free",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "idle"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "id": "T1.6.a",
+          "row": 36,
+          "text": "I'm going to figure out something for the Hive Vibes thing.",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "paneDelta": {
+              "vibeTerminal": 0
+            },
+            "noEffects": true
+          },
+          "forbid": {
+            "paneCreated": true,
+            "anyPromptDelivered": true,
+            "closedAny": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "reply"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "T2.1",
+      "tier": 2,
+      "title": "Reuse an idle codex pane rather than opening one",
+      "setup": {
+        "projects": [
+          "vibeTerminal"
+        ],
+        "panes": [
+          {
+            "ref": "free",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "idle"
+          },
+          {
+            "ref": "busy",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "working",
+            "objective": "Investigate the orchestrator performance"
+          },
+          {
+            "ref": "free-2",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "idle"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "id": "T2.1.a",
+          "row": 59,
+          "text": "Can you use one of the empty Vibe terminal codex terminals to investigate? why the orchestrator is reading out loud the, the, the result of the agent i would like it to just summarize some of the things give me a tldr Yeah. Yeah, prompt with that. *laughter*",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "paneDelta": {
+              "vibeTerminal": 0
+            },
+            "promptDelivered": true,
+            "ledgerOutcome": [
+              "delivered-started"
+            ],
+            "targetRefAnyOf": [
+              "free",
+              "free-2"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "typedIntoRefs": [
+              "busy"
+            ],
+            "question": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "paneScreens",
+            "reply"
+          ],
+          "note": "Two idle codex panes and one busy one: the sentence says \"one of the empty codex terminals\", so reusing either idle pane is right and creating one is not. The check names the first, because the workspace lists it first; a run that picks the other is reported rather than silently passed."
+        }
+      ]
+    },
+    {
+      "id": "T2.2",
+      "tier": 2,
+      "title": "The codex pane that is not doing anything",
+      "setup": {
+        "projects": [
+          "vibeTerminal"
+        ],
+        "panes": [
+          {
+            "ref": "free",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "idle"
+          },
+          {
+            "ref": "busy",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "working",
+            "objective": "Investigate the orchestrator performance"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "id": "T2.2.a",
+          "row": 61,
+          "text": "Yeah. There is a codex terminal right now that's currently not doing anything in the Vibe terminal project. What I'd like you to do is prompted and to investigate the and to do a deep dive on the harness. So the orchestrator should be able to determine which terminal to actually assign which prompt. And if it needs to open one, then it needs to open one, or it can continue to prompt the same one that's already been working. There needs to be a metal ground and energetic work flow i don't want to always be telling it to to you to prompt a certain terminal and stuff like that so i want people to tell it to do the thing and it does the thing in the appropriate terminal or creates a new terminal because we need to be efficient on the conversations and keep agents on specific tasks.",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "paneDelta": {
+              "vibeTerminal": 0
+            },
+            "targetRef": "free",
+            "promptDelivered": true
+          },
+          "forbid": {
+            "paneCreated": true,
+            "typedIntoRefs": [
+              "busy"
+            ],
+            "question": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "paneScreens",
+            "reply"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "T2.3",
+      "tier": 2,
+      "title": "One of the empty cloud code terminals",
+      "setup": {
+        "projects": [
+          "vibeTerminal"
+        ],
+        "panes": [
+          {
+            "ref": "free-claude",
+            "project": "vibeTerminal",
+            "kind": "claude",
+            "state": "idle"
+          },
+          {
+            "ref": "free-codex",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "idle"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "id": "T2.3.a",
+          "row": 128,
+          "text": "Can you use one of the empty cloud code terminals in the vibe terminal project? I to make it... kind of investigate the performance of the orchestrator.",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "paneDelta": {
+              "vibeTerminal": 0
+            },
+            "targetRef": "free-claude",
+            "promptDelivered": true
+          },
+          "forbid": {
+            "paneCreated": true,
+            "typedIntoRefs": [
+              "free-codex"
+            ],
+            "question": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "paneScreens",
+            "reply"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "T2.4",
+      "tier": 2,
+      "title": "No idle codex pane: create one, never type into the busy one",
+      "setup": {
+        "projects": [
+          "vibeTerminal"
+        ],
+        "panes": [
+          {
+            "ref": "busy",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "working",
+            "objective": "Investigate the orchestrator performance"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "id": "T2.4.a",
+          "row": 91,
+          "text": "Hey, bye. can you start a codex terminal and have it investigate performance issues.",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "paneDelta": {
+              "vibeTerminal": 1
+            },
+            "createdKind": "codex",
+            "targetRef": "created",
+            "promptDelivered": true
+          },
+          "forbid": {
+            "typedIntoRefs": [
+              "busy"
+            ],
+            "question": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "paneScreens",
+            "reply"
+          ]
+        },
+        {
+          "id": "T2.4.b",
+          "row": 47,
+          "text": "Bye. Don't put it in a new terminal. Just put it in a terminal that's not currently working.",
+          "from": "vibeTerminal",
+          "note": "Follows the creation above. The correction must not open a third pane.",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "needs-answer"
+            ],
+            "paneDelta": {
+              "vibeTerminal": 0
+            }
+          },
+          "forbid": {
+            "paneCreated": true,
+            "typedIntoRefs": [
+              "busy"
+            ]
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "reply"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "T2.5",
+      "tier": 2,
+      "title": "Two idle codex panes: choose one or ask, never create",
+      "setup": {
+        "projects": [
+          "vibeTerminal"
+        ],
+        "panes": [
+          {
+            "ref": "free-1",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "idle"
+          },
+          {
+            "ref": "free-2",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "idle"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "id": "T2.5.a",
+          "row": 33,
+          "text": "Hey, bye. I have a codex terminal that's not doing anything. Can you prompt it to review everything that's been done in the repo and push the production?",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "needs-answer"
+            ],
+            "paneDelta": {
+              "vibeTerminal": 0
+            },
+            "targetRefAnyOf": [
+              "free-1",
+              "free-2"
+            ],
+            "questionAllowed": true
+          },
+          "forbid": {
+            "paneCreated": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "paneScreens",
+            "reply"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "T3.1",
+      "tier": 3,
+      "title": "The terminal you just opened",
+      "setup": {
+        "projects": [
+          "vibeTerminal"
+        ],
+        "panes": [
+          {
+            "ref": "older",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "idle"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "id": "T3.1.a",
+          "row": 62,
+          "text": "Can you open a new Codex terminal and Vibe terminal project?",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "paneDelta": {
+              "vibeTerminal": 1
+            },
+            "createdKind": "codex"
+          },
+          "forbid": {
+            "question": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "reply"
+          ]
+        },
+        {
+          "id": "T3.1.b",
+          "row": 63,
+          "text": "that new terminal that you just opened. Can you prompt it to fix a bug that when I tell the orchestrator to open a terminal, It replies with a random C drive type of path. It's really weird.",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "paneDelta": {
+              "vibeTerminal": 0
+            },
+            "targetRef": "@T3.1.a",
+            "promptDelivered": true
+          },
+          "forbid": {
+            "paneCreated": true,
+            "typedIntoRefs": [
+              "older"
+            ],
+            "question": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "paneScreens",
+            "reply"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "T3.2",
+      "tier": 3,
+      "title": "Truthful answers about a prompt that did land",
+      "setup": {
+        "projects": [
+          "vibeTerminal"
+        ],
+        "panes": [
+          {
+            "ref": "free",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "idle"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "id": "T3.2.a",
+          "row": 59,
+          "text": "Can you use one of the empty Vibe terminal codex terminals to investigate? why the orchestrator is reading out loud the, the, the result of the agent i would like it to just summarize some of the things give me a tldr Yeah. Yeah, prompt with that. *laughter*",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "targetRef": "free",
+            "promptDelivered": true
+          },
+          "forbid": {
+            "paneCreated": true
+          },
+          "grade": [
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "paneScreens"
+          ]
+        },
+        {
+          "id": "T3.2.b",
+          "row": 3,
+          "text": "did you enter that prompt?",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "noEffects": true,
+            "replyMatches": "(?i)\\b(yes|did|entered|typed|sent|went in|landed|put in|put)\\b"
+          },
+          "forbid": {
+            "paneCreated": true,
+            "anyPromptDelivered": true
+          },
+          "grade": [
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "reply"
+          ]
+        },
+        {
+          "id": "T3.2.c",
+          "row": 2,
+          "text": "What was the last prompt you did?",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "noEffects": true,
+            "replyMentions": [
+              "summar"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "anyPromptDelivered": true
+          },
+          "grade": [
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "reply",
+            "memory"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "T3.3",
+      "tier": 3,
+      "title": "A busy pane takes the follow-up, and the pronoun after it",
+      "setup": {
+        "projects": [
+          "vibeTerminal"
+        ],
+        "panes": [
+          {
+            "ref": "busy",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "working",
+            "objective": "Investigate the orchestrator performance"
+          },
+          {
+            "ref": "free",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "idle"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "id": "T3.3.a",
+          "row": 37,
+          "text": "Let the Codex terminal that's currently working in Vibe terminal project that I, uh, when I asked you to clear the terminal, you literally quit at the codex terminal. which basically closed the codex session. Please let that terminal know that while it's currently working. That was one of the issues I reported. to continue its work that it's currently doing.",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "waiting-results"
+            ],
+            "paneDelta": {
+              "vibeTerminal": 0
+            },
+            "targetRef": "busy",
+            "ledgerOutcome": [
+              "delivered-started",
+              "delivered-unconfirmed"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "typedIntoRefs": [
+              "free"
+            ],
+            "question": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "reply"
+          ],
+          "settleMs": 20000,
+          "note": "A follow-up typed into a working agent is queued behind its turn; delivery into the right pane is completion, and the task settles when the agent gets to it."
+        },
+        {
+          "id": "T3.3.b",
+          "row": 12,
+          "text": "voices, voices, hey, vibe. Can you prompt it and ask it if the application is still paused?",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "waiting-results"
+            ],
+            "paneDelta": {
+              "vibeTerminal": 0
+            },
+            "targetRef": "busy",
+            "ledgerOutcome": [
+              "delivered-started",
+              "delivered-unconfirmed"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "typedIntoRefs": [
+              "free"
+            ]
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "reply"
+          ],
+          "settleMs": 20000,
+          "note": "A follow-up typed into a working agent is queued behind its turn; delivery into the right pane is completion, and the task settles when the agent gets to it."
+        }
+      ]
+    },
+    {
+      "id": "T3.4",
+      "tier": 3,
+      "title": "Never mind cancels the work in flight",
+      "setup": {
+        "projects": [
+          "vibeTerminal"
+        ],
+        "panes": []
+      },
+      "turns": [
+        {
+          "id": "T3.4.a",
+          "row": 65,
+          "text": "Hey, bye. Never mind.",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "cancelled"
+            ],
+            "paneDelta": {
+              "vibeTerminal": 0
+            },
+            "noEffects": true
+          },
+          "forbid": {
+            "paneCreated": true,
+            "anyPromptDelivered": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "reply"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "T3.5",
+      "tier": 3,
+      "title": "An answer that also carries new work",
+      "setup": {
+        "projects": [
+          "vibeTerminal"
+        ],
+        "panes": [
+          {
+            "ref": "free",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "idle"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "id": "T3.5.a",
+          "synthetic": true,
+          "text": "Yes. And also make a new cloud code terminal to look at the conversations I have with the orchestrator and tell me where it goes wrong.",
+          "from": "vibeTerminal",
+          "note": "The user's real 2026-09-13 reply to an idle-pane question, submitted here as plain new work: the answer half and the new work half must both be understood, and the request must never come back as 'could not interpret'.",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "paneDeltaAtMost": {
+              "vibeTerminal": 1
+            }
+          },
+          "forbid": {
+            "replyMatchesForbidden": "(?i)could not interpret|couldn't interpret"
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "reply"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "T4.A",
+      "tier": 4,
+      "title": "Tracking a workspace of three projects: who is working, who needs me, who is done",
+      "setup": {
+        "projects": [
+          "vibeTerminal",
+          "lina web app",
+          "lina mobile"
+        ],
+        "panes": [
+          {
+            "ref": "chat-section",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "working",
+            "objective": "Add a chat section to the app"
+          },
+          {
+            "ref": "full-screen",
+            "project": "vibeTerminal",
+            "kind": "claude",
+            "state": "done",
+            "objective": "Fix the full screen bug",
+            "marker": "RESULT-FS-42"
+          },
+          {
+            "ref": "spare",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "idle"
+          },
+          {
+            "ref": "pdf-viewer",
+            "project": "lina web app",
+            "kind": "codex",
+            "state": "needs-input",
+            "objective": "Do a deep dive on the PDF viewer"
+          },
+          {
+            "ref": "web-spare",
+            "project": "lina web app",
+            "kind": "codex",
+            "state": "idle"
+          },
+          {
+            "ref": "pairing",
+            "project": "lina mobile",
+            "kind": "claude",
+            "state": "done",
+            "objective": "Build the pairing screen",
+            "marker": "RESULT-PAIR-9"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "id": "T4.1",
+          "row": 123,
+          "text": "Have a agent working on adding a chat section in the vibe terminal project can you prompt it to do a deep dive on that",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "waiting-results"
+            ],
+            "paneDeltaTotal": 0,
+            "targetRef": "chat-section",
+            "ledgerOutcome": [
+              "delivered-started",
+              "delivered-unconfirmed"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "typedIntoRefs": [
+              "full-screen",
+              "spare",
+              "pdf-viewer",
+              "web-spare",
+              "pairing"
+            ],
+            "question": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "reply"
+          ],
+          "settleMs": 20000,
+          "note": "A follow-up typed into a working agent is queued behind its turn; delivery into the right pane is completion, and the task settles when the agent gets to it."
+        },
+        {
+          "id": "T4.2",
+          "row": 15,
+          "text": "There's a terminal that needs me. Which one is it?",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "noEffects": true,
+            "replyMentions": [
+              "PDF"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "anyPromptDelivered": true
+          },
+          "grade": [
+            "taskStatus",
+            "receipts",
+            "reply",
+            "paneScreens"
+          ]
+        },
+        {
+          "id": "T4.3",
+          "row": 30,
+          "text": "There's a terminal that's done. What's the result?",
+          "from": "vibeTerminal",
+          "note": "Two panes are done. Naming both, or asking which, both pass; inventing a third does not.",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "needs-answer"
+            ],
+            "noEffects": true,
+            "questionAllowed": true,
+            "replyMentionsAnyOf": [
+              "full screen",
+              "RESULT-FS-42",
+              "pairing",
+              "RESULT-PAIR-9"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "anyPromptDelivered": true
+          },
+          "grade": [
+            "taskStatus",
+            "receipts",
+            "reply"
+          ]
+        },
+        {
+          "id": "T4.4",
+          "synthetic": true,
+          "text": "What did the full screen bug terminal say? come back with.",
+          "note": "Row 66's shape with this workspace's pane title.",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "noEffects": true,
+            "replyMentions": [
+              "RESULT-FS-42"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "anyPromptDelivered": true
+          },
+          "grade": [
+            "taskStatus",
+            "receipts",
+            "reply",
+            "paneScreens"
+          ]
+        },
+        {
+          "id": "T4.5",
+          "synthetic": true,
+          "text": "The codex terminal in lina web app is waiting on something. Tell it to continue.",
+          "from": "lina web app",
+          "note": "Passing behaviour is either an answer that reaches the waiting pane or a reply that says the pane is waiting on a decision. A generic failure is neither. Typing a prompt over an open question is the harmful outcome.",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "needs-answer",
+              "failed"
+            ],
+            "paneDeltaTotal": 0,
+            "deliveredOrReplyMatches": {
+              "ref": "pdf-viewer",
+              "pattern": "(?i)waiting on an answer|pending (?:question|decision|answer)|needs an answer|answer before it can continue|answer .{0,40}waiting for"
+            }
+          },
+          "forbid": {
+            "paneCreated": true,
+            "typedIntoRefs": [
+              "chat-section",
+              "full-screen",
+              "spare",
+              "web-spare",
+              "pairing"
+            ]
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "paneScreens",
+            "reply"
+          ]
+        },
+        {
+          "id": "T4.6",
+          "synthetic": true,
+          "text": "Which terminal did you give the full screen bug to?",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "noEffects": true,
+            "replyMentionsAnyOf": [
+              "claude",
+              "cloud code",
+              "full screen"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "anyPromptDelivered": true
+          },
+          "grade": [
+            "taskStatus",
+            "receipts",
+            "reply",
+            "memory"
+          ]
+        },
+        {
+          "id": "T4.7",
+          "synthetic": true,
+          "text": "Prompt the other one as well.",
+          "from": "vibeTerminal",
+          "note": "Ambiguous on purpose: several panes could be 'the other one'. A question is the right answer.",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "needs-answer"
+            ],
+            "questionAllowed": true,
+            "paneDeltaTotal": 0
+          },
+          "forbid": {
+            "paneCreated": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "receipts",
+            "reply"
+          ]
+        },
+        {
+          "id": "T4.8",
+          "row": 6,
+          "text": "can you stop that last terminal you worked on?",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "paneDeltaTotal": 0,
+            "interruptedRef": "chat-section"
+          },
+          "forbid": {
+            "paneCreated": true,
+            "closedAny": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "reply"
+          ]
+        },
+        {
+          "id": "T4.9",
+          "row": 28,
+          "text": "Yes. on both terminals that are currently done. Please push them to push the fixes. tested. and basically resolved both the issues.",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "failed"
+            ],
+            "paneDeltaTotal": 0,
+            "targetRefsAll": [
+              "full-screen",
+              "pairing"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "typedIntoRefs": [
+              "spare",
+              "web-spare",
+              "pdf-viewer"
+            ]
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "paneScreens",
+            "reply"
+          ],
+          "note": "Both done panes must get the prompt; whether the Brain then certifies a push it cannot see in a stub reply is not graded, so a task it reports as failed for lack of push evidence still passes on delivery."
+        },
+        {
+          "id": "T4.10",
+          "row": 42,
+          "text": "Thank you. Hey, what was the last terminal that was done?",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "noEffects": true
+          },
+          "forbid": {
+            "paneCreated": true,
+            "anyPromptDelivered": true
+          },
+          "grade": [
+            "taskStatus",
+            "receipts",
+            "reply",
+            "memory"
+          ]
+        },
+        {
+          "id": "T4.11",
+          "synthetic": true,
+          "text": "Prompt the empty codex terminal in vibe terminal to summarize the repo.",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "paneDeltaTotal": 0,
+            "targetRef": "spare",
+            "promptDelivered": true
+          },
+          "forbid": {
+            "paneCreated": true,
+            "typedIntoRefs": [
+              "chat-section",
+              "full-screen",
+              "pdf-viewer",
+              "web-spare",
+              "pairing"
+            ],
+            "question": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "paneScreens",
+            "reply"
+          ]
+        },
+        {
+          "id": "T4.12",
+          "synthetic": true,
+          "text": "And tell it to write that up in the docs folder.",
+          "from": "vibeTerminal",
+          "note": "The pronoun must stay on the pane the previous turn used.",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "paneDeltaTotal": 0,
+            "targetRef": "@T4.11"
+          },
+          "forbid": {
+            "paneCreated": true,
+            "typedIntoRefs": [
+              "chat-section",
+              "full-screen",
+              "pdf-viewer",
+              "web-spare",
+              "pairing"
+            ]
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "reply"
+          ]
+        },
+        {
+          "id": "T4.13",
+          "row": 119,
+          "text": "It's not four, though. It's three, correct?",
+          "from": "vibeTerminal",
+          "note": "A correction about a count. It is a conversation turn, not an instruction to act.",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "noEffects": true,
+            "paneDeltaTotal": 0
+          },
+          "forbid": {
+            "paneCreated": true,
+            "anyPromptDelivered": true,
+            "closedAny": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "receipts",
+            "reply"
+          ]
+        },
+        {
+          "id": "T4.14",
+          "row": 120,
+          "text": "No, close the three that are inactive.",
+          "from": "vibeTerminal",
+          "note": "Exactly three panes are idle across the workspace once T4.11 has used the spare: run this last so the count is read from the live workspace, and grade on which panes survived.",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "needs-answer"
+            ],
+            "survivingRefs": [
+              "chat-section",
+              "pdf-viewer"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "reply"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "T5.A",
+      "tier": 5,
+      "title": "Reading usage out of the Codex panes",
+      "setup": {
+        "projects": [
+          "vibeTerminal"
+        ],
+        "panes": [
+          {
+            "ref": "codex-1",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "idle"
+          },
+          {
+            "ref": "codex-2",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "idle"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "id": "T5.1",
+          "row": 39,
+          "text": "can you check the other codex terminals and let me know how much usage i have just do slash status and the usage will come up. Let me know how much I have left for the week.",
+          "from": "vibeTerminal",
+          "note": "The guide names /status as the Codex entry point. Graded on reaching a status screen in a codex pane and reporting what it showed; the user also asked for the weekly figure, which a stub-backed pane cannot know, so an honest \"that figure is not shown\" also reports what it showed.",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "needs-answer"
+            ],
+            "paneDeltaTotal": 0,
+            "interactedRef": "codex-1",
+            "paneScreenMatches": {
+              "ref": "codex-1",
+              "pattern": "(?i)token|usage|limit|context|/status"
+            },
+            "replyMentionsAnyOf": [
+              "usage",
+              "limit",
+              "token",
+              "status"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "taskSent": true,
+            "closedAny": true,
+            "interruptedAny": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "receipts",
+            "paneScreens",
+            "reply"
+          ]
+        },
+        {
+          "id": "T5.2",
+          "row": 84,
+          "text": "Can you tell me the usage that we have in Codex?",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "needs-answer"
+            ],
+            "paneDeltaTotal": 0,
+            "interactedRef": "codex-1",
+            "paneScreenMatches": {
+              "ref": "codex-1",
+              "pattern": "(?i)token|usage|limit|context"
+            },
+            "replyMentionsAnyOf": [
+              "usage",
+              "limit",
+              "token"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "taskSent": true,
+            "closedAny": true,
+            "interruptedAny": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "receipts",
+            "paneScreens",
+            "reply"
+          ]
+        },
+        {
+          "id": "T5.9",
+          "synthetic": true,
+          "text": "What model is the codex terminal using right now?",
+          "from": "vibeTerminal",
+          "note": "The model name is on the pane header already, so the right answer needs no navigation at all; a read is enough. A turn that drives menus to find it still passes, one that invents a model name does not.",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "needs-answer"
+            ],
+            "paneDeltaTotal": 0,
+            "replyMentions": [
+              "stub-standard"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "taskSent": true,
+            "closedAny": true,
+            "interruptedAny": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "receipts",
+            "reply"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "T5.B",
+      "tier": 5,
+      "title": "Driving the Claude pane's own screens",
+      "setup": {
+        "projects": [
+          "lina web app"
+        ],
+        "panes": [
+          {
+            "ref": "claude-1",
+            "project": "lina web app",
+            "kind": "claude",
+            "state": "idle"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "id": "T5.4",
+          "row": 29,
+          "text": "Are you able to go in the Cloud Code terminal and lean on a web app and change the model to Opus 5?",
+          "from": "lina web app",
+          "note": "Row 29 asks for a change, not a read: the pass is reaching the /model picker and reporting what it offered. A pane pointed at a stub endpoint may not list Opus 5 at all, and saying so is the honest answer.",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "needs-answer"
+            ],
+            "paneDeltaTotal": 0,
+            "interactedRef": "claude-1",
+            "paneScreenMatches": {
+              "ref": "claude-1",
+              "pattern": "(?i)model|opus|sonnet|select"
+            },
+            "replyMentionsAnyOf": [
+              "model",
+              "Opus"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "taskSent": true,
+            "closedAny": true,
+            "interruptedAny": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "receipts",
+            "paneScreens",
+            "reply"
+          ]
+        },
+        {
+          "id": "T5.6",
+          "synthetic": true,
+          "text": "Set that cloud code terminal to xhigh effort.",
+          "from": "lina web app",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "needs-answer"
+            ],
+            "paneDeltaTotal": 0,
+            "interactedRef": "claude-1",
+            "paneScreenMatches": {
+              "ref": "claude-1",
+              "pattern": "(?i)effort|high|xhigh|/effort"
+            },
+            "replyMentionsAnyOf": [
+              "effort",
+              "high"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "taskSent": true,
+            "closedAny": true,
+            "interruptedAny": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "receipts",
+            "paneScreens",
+            "reply"
+          ]
+        },
+        {
+          "id": "T5.10",
+          "synthetic": true,
+          "text": "Open help in the cloud code terminal and tell me the commands it lists.",
+          "from": "lina web app",
+          "note": "The guide makes /help the Claude discovery command. The menu must be dismissed afterwards: the composer check below is what proves the pane was left usable.",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "needs-answer"
+            ],
+            "paneDeltaTotal": 0,
+            "interactedRef": "claude-1",
+            "paneScreenMatches": {
+              "ref": "claude-1",
+              "pattern": "(?i)/help|/usage|/status|/model"
+            },
+            "replyMentionsAnyOf": [
+              "/help",
+              "/usage",
+              "/status",
+              "/model",
+              "commands"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "taskSent": true,
+            "closedAny": true,
+            "interruptedAny": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "receipts",
+            "paneScreens",
+            "reply"
+          ]
+        },
+        {
+          "id": "T5.12",
+          "synthetic": true,
+          "text": "Escape out of whatever menu is open in that terminal.",
+          "from": "lina web app",
+          "note": "Runs straight after the help screen, so there is a menu to escape from. Graded on the pane being back at its composer.",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "needs-answer"
+            ],
+            "paneDeltaTotal": 0,
+            "interactedRef": "claude-1",
+            "paneScreenMatches": {
+              "ref": "claude-1",
+              "pattern": "❯|Try \""
+            },
+            "replyMentionsAnyOf": [
+              "closed",
+              "composer",
+              "ready",
+              "menu"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "taskSent": true,
+            "closedAny": true,
+            "interruptedAny": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "receipts",
+            "paneScreens",
+            "reply"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "T5.C",
+      "tier": 5,
+      "title": "Per-provider usage in one sweep, and the context commands",
+      "setup": {
+        "projects": [
+          "vibeTerminal"
+        ],
+        "panes": [
+          {
+            "ref": "codex-1",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "idle"
+          },
+          {
+            "ref": "claude-1",
+            "project": "vibeTerminal",
+            "kind": "claude",
+            "state": "idle"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "id": "T5.3",
+          "synthetic": true,
+          "text": "Check the usage limits for each terminal and tell me what each one says.",
+          "from": "vibeTerminal",
+          "note": "Two providers, two grammars: /status for Codex, /usage for Claude (orchestratorTerminalGuide.cjs). A kind that cannot show plan quota has to be reported as such rather than guessed at.",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "needs-answer"
+            ],
+            "paneDeltaTotal": 0,
+            "interactedRef": "codex-1",
+            "replyMentionsAnyOf": [
+              "usage",
+              "limit",
+              "token",
+              "not shown",
+              "unavailable"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "taskSent": true,
+            "closedAny": true,
+            "interruptedAny": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "receipts",
+            "paneScreens",
+            "reply"
+          ]
+        },
+        {
+          "id": "T5.5",
+          "synthetic": true,
+          "text": "Change the codex terminal in vibeTerminal to gpt-5.6-mini with high effort.",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "needs-answer"
+            ],
+            "paneDeltaTotal": 0,
+            "interactedRef": "codex-1",
+            "paneScreenMatches": {
+              "ref": "codex-1",
+              "pattern": "(?i)model|effort|reasoning|select"
+            },
+            "replyMentionsAnyOf": [
+              "model",
+              "effort"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "taskSent": true,
+            "closedAny": true,
+            "interruptedAny": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "receipts",
+            "paneScreens",
+            "reply"
+          ]
+        },
+        {
+          "id": "T5.7",
+          "synthetic": true,
+          "text": "Put that codex terminal in plan mode.",
+          "from": "vibeTerminal",
+          "note": "Codex 0.154 has a collaboration mode rather than Claude's permission modes; the honest answer may be that this pane has no plan mode. Inventing a confirmation is the failure.",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "needs-answer"
+            ],
+            "paneDeltaTotal": 0,
+            "interactedRef": "codex-1",
+            "replyMentionsAnyOf": [
+              "plan",
+              "mode",
+              "not available",
+              "unavailable"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "taskSent": true,
+            "closedAny": true,
+            "interruptedAny": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "receipts",
+            "paneScreens",
+            "reply"
+          ]
+        },
+        {
+          "id": "T5.8",
+          "synthetic": true,
+          "text": "Compact the context in the codex terminal and tell me when it is done.",
+          "from": "vibeTerminal",
+          "note": "The only tier-5 command that costs a model turn; the stub answers it like any other tool-less call.",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "needs-answer"
+            ],
+            "paneDeltaTotal": 0,
+            "interactedRef": "codex-1",
+            "paneScreenMatches": {
+              "ref": "codex-1",
+              "pattern": "(?i)compact|context|summar"
+            },
+            "replyMentionsAnyOf": [
+              "compact",
+              "context"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "taskSent": true,
+            "closedAny": true,
+            "interruptedAny": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "receipts",
+            "paneScreens",
+            "reply"
+          ]
+        },
+        {
+          "id": "T5.11",
+          "synthetic": true,
+          "text": "Clear the conversation in the cloud code terminal.",
+          "from": "vibeTerminal",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "needs-answer"
+            ],
+            "paneDeltaTotal": 0,
+            "interactedRef": "claude-1",
+            "paneScreenMatches": {
+              "ref": "claude-1",
+              "pattern": "❯|Try \""
+            },
+            "replyMentionsAnyOf": [
+              "clear",
+              "cleared",
+              "fresh",
+              "new"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "taskSent": true,
+            "closedAny": true,
+            "interruptedAny": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "receipts",
+            "paneScreens",
+            "reply"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "T6.A",
+      "tier": 6,
+      "title": "One sentence that both opens and prompts",
+      "setup": {
+        "projects": [
+          "vibeTerminal"
+        ],
+        "panes": []
+      },
+      "turns": [
+        {
+          "id": "T6.1",
+          "row": 79,
+          "text": "you Hey, vibe. - Yeah. I want you to create a new codex terminal in Vibre terminal. prompt it and tell it that I want to change the name of Vibe Terminal to Lina Terminal. And I want to change the wake phrase to Lena or Hey Lena. I think Hey Lena is better. So I want you to prompt... one of the codex terminals that's clearly free or make any terminal that's better",
+          "from": "vibeTerminal",
+          "note": "The sentence asks for a new pane and then says \"or make any terminal that is better\". One pane, one prompt, typed once.",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "paneDeltaAtMost": {
+              "vibeTerminal": 1
+            },
+            "promptDelivered": true,
+            "ledgerOutcome": [
+              "delivered-started"
+            ]
+          },
+          "forbid": {
+            "question": true,
+            "closedAny": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "paneScreens",
+            "reply"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "T6.B",
+      "tier": 6,
+      "title": "A sentence that corrects itself mid-way",
+      "setup": {
+        "projects": [
+          "vibeTerminal"
+        ],
+        "panes": [
+          {
+            "ref": "busy",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "working",
+            "objective": "Investigate the orchestrator performance"
+          },
+          {
+            "ref": "free",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "idle"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "id": "T6.2",
+          "row": 83,
+          "text": "There's another codex terminal that's currently empty. that I want you to prompt or it's not empty. Actually, it's just not busy. Just pick one that's not busy right now. I want you to prompt it. and report a bug that when I ask the orchestrator to open a terminal, the orchestrator tries to input the prompt while the terminal is still opening. So if the orchestrator tries to put in the prompt while it's still opening, then the prompt never gets pasted and the action fails. So I want one of the codec terminals to investigate that. Thank you.",
+          "from": "vibeTerminal",
+          "note": "\"…that I want you to prompt or it's not empty. Actually, it's just not busy.\" The correction is the instruction: pick the pane that is not busy.",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "paneDelta": {
+              "vibeTerminal": 0
+            },
+            "targetRef": "free",
+            "promptDelivered": true
+          },
+          "forbid": {
+            "paneCreated": true,
+            "typedIntoRefs": [
+              "busy"
+            ],
+            "question": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "paneScreens",
+            "reply"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "T6.C",
+      "tier": 6,
+      "title": "A complaint about what just happened",
+      "setup": {
+        "projects": [
+          "vibeTerminal"
+        ],
+        "panes": [
+          {
+            "ref": "free",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "idle"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "id": "T6.3",
+          "row": 35,
+          "text": "Yes, but you've literally exited out of the terminal. That's a problem. can you take what i'm asking you Put it to another codex terminal and and get it to review the issues you're experiencing right now and tell it to investigate the current issues in the orchestrator chat.",
+          "from": "vibeTerminal",
+          "note": "The user is complaining that a pane was exited and asking for the same work to be put somewhere else. One pane takes it; a second new pane is the harmful answer.",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "paneDeltaAtMost": {
+              "vibeTerminal": 1
+            },
+            "promptDelivered": true
+          },
+          "forbid": {
+            "closedAny": true,
+            "interruptedAny": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "reply"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "T6.D",
+      "tier": 6,
+      "title": "A question about Lina herself",
+      "setup": {
+        "projects": [
+          "vibeTerminal"
+        ],
+        "panes": [
+          {
+            "ref": "free",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "idle"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "id": "T6.4",
+          "row": 116,
+          "text": "Hey Alina. are you able to change your behavior like if i ask you After every response, listen to what I have to say. So I don't have to keep repeating. Hey, Lena, are you able to do that yourself or... or not",
+          "from": "vibeTerminal",
+          "note": "A capability question, answered honestly, with no effects. Push-to-talk replaced the wake word, so \"listen after every response\" is not something Lina can turn on for herself.",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "noEffects": true,
+            "paneDeltaTotal": 0,
+            "replyMentionsAnyOf": [
+              "cannot",
+              "can't",
+              "not able",
+              "no",
+              "push",
+              "space",
+              "settings"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "anyPromptDelivered": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "receipts",
+            "reply"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "T6.E",
+      "tier": 6,
+      "title": "Two panes asked for, one prompt",
+      "setup": {
+        "projects": [
+          "vibeTerminal"
+        ],
+        "panes": []
+      },
+      "turns": [
+        {
+          "id": "T6.5",
+          "row": 103,
+          "text": "Here, Lina. Can you open a new codex terminal and a web terminal and ask it to investigate a bug where Where I want to ask the orchestrator to clear all of the terminals within a certain pane. It only cleared a half of them.",
+          "from": "vibeTerminal",
+          "note": "\"open a new codex terminal and a web terminal and ask it to investigate…\" — two panes, and \"it\" names only one of them. Two panes with the prompt in one, or one clarifying question, are both right; the prompt in both is not.",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "needs-answer"
+            ],
+            "paneDeltaAtMost": {
+              "vibeTerminal": 2
+            },
+            "questionAllowed": true
+          },
+          "forbid": {
+            "closedAny": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "ledger",
+            "receipts",
+            "reply"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "T6.F",
+      "tier": 6,
+      "title": "A sweep across three projects, and a reference to nothing",
+      "setup": {
+        "projects": [
+          "vibeTerminal",
+          "lina web app",
+          "lina mobile"
+        ],
+        "panes": [
+          {
+            "ref": "chat-section",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "working",
+            "objective": "Add a chat section to the app"
+          },
+          {
+            "ref": "spare",
+            "project": "vibeTerminal",
+            "kind": "codex",
+            "state": "idle"
+          },
+          {
+            "ref": "web-done",
+            "project": "lina web app",
+            "kind": "codex",
+            "state": "done",
+            "objective": "Do a deep dive on the PDF viewer",
+            "marker": "RESULT-PDF-3"
+          },
+          {
+            "ref": "mobile-idle",
+            "project": "lina mobile",
+            "kind": "claude",
+            "state": "idle"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "id": "T6.6",
+          "synthetic": true,
+          "text": "Give me one line per project on what every agent is doing right now.",
+          "from": "vibeTerminal",
+          "note": "Every project, one line each, and the lines have to match the live workspace: one working, two idle, one done.",
+          "expect": {
+            "taskStatus": [
+              "finished"
+            ],
+            "noEffects": true,
+            "paneDeltaTotal": 0,
+            "replyMentions": [
+              "vibeTerminal"
+            ],
+            "replyMentionsAnyOf": [
+              "lina web app",
+              "lina mobile"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "anyPromptDelivered": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "receipts",
+            "reply"
+          ]
+        },
+        {
+          "id": "T6.7",
+          "synthetic": true,
+          "text": "Prompt the terminal that finished yesterday.",
+          "from": "vibeTerminal",
+          "note": "Nothing in this workspace finished yesterday. Saying so, or asking which pane is meant, is the answer; picking one anyway is not.",
+          "expect": {
+            "taskStatus": [
+              "finished",
+              "needs-answer"
+            ],
+            "paneDeltaTotal": 0,
+            "questionAllowed": true,
+            "replyMentionsAnyOf": [
+              "yesterday",
+              "no terminal",
+              "didn't",
+              "did not",
+              "none",
+              "which"
+            ]
+          },
+          "forbid": {
+            "paneCreated": true,
+            "anyPromptDelivered": true
+          },
+          "grade": [
+            "paneCount",
+            "taskStatus",
+            "receipts",
+            "reply"
+          ]
+        }
+      ]
+    }
+  ]
+}

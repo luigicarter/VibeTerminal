@@ -21,8 +21,15 @@ function fixture(t, options = {}) {
     text: '', cursor: { x: 0, y: 0 }, cursorVisible: true };
   const f = { session, observation, writes: [], reads: 0, sessionPresent: true };
   f.ready = () => Object.assign(observation, { sequence: observation.sequence + 1, text: 'OpenAI Codex\nmodel: gpt-5.6\n› ', cursor: { x: 2, y: 2 } });
-  f.action = (extra = {}) => ({ target: { id: 'p', generation: 'g' }, actionId: 'first', requestId: 'r', operator: true,
-    promptSubmission: true, text: 'Implement the feature', submit: true, observationSequence: 0, inputRevision: 0, ...extra });
+  // A startup prompt is the one action that may arrive with no surface: the
+  // pane has painted no composer yet, and the wait captures one when it does.
+  // Every other control is bound to the surface of the screen it was authorized
+  // against, exactly as it is in production.
+  f.surface = () => require('../../backend/orchestratorInputSurface.cjs').projectInputSurface(session, observation);
+  f.action = (extra = {}) => { const action = { target: { id: 'p', generation: 'g' }, actionId: 'first', requestId: 'r', operator: true,
+    promptSubmission: true, text: 'Implement the feature', submit: true, ...extra };
+    const deferred = (action.promptSubmission || action.inputPurpose === 'task') && !action.editInput && f.input.needsStartupReadiness(session);
+    return deferred ? action : { inputSurface: f.surface(), ...action }; };
   f.input = createTerminalInput({ getSession: () => f.sessionPresent ? session : undefined,
     readSession: async () => { f.reads++; return { ...observation }; },
     write: async action => { f.writes.push(action); return { ok: true, status: 'written' }; },
@@ -50,7 +57,35 @@ test('process-ready creation observes blank, shell and loading screens without i
   assert.equal(f.writes.length, 1); assert.equal(f.writes[0].text, action.text);
   assert.equal(f.writes[0].actionId, 'first'); assert.equal(f.writes[0].requestId, 'r');
   assert.equal(f.writes[0].interactionEvidence.sequence, 3); assert.equal(f.writes[0].interactionEvidence.inputRevision, 0);
+  // The startup write is fenced on the input surface the wait actually saw, so
+  // the host is never left comparing an output counter a repaint keeps moving.
+  const surface = f.writes[0].interactionEvidence.surface;
+  assert.equal(surface.verified, true); assert.equal(surface.composerEmpty, true);
+  assert.equal(surface.sequence, 3); assert.match(surface.fingerprint, /^[0-9a-f]{64}$/);
 });
+
+// A keystroke latch is set by any key that is not Enter or Ctrl-C and output
+// never clears it, so before this it locked a pane out for good. What the
+// composer actually shows now decides.
+for (const [name, draft] of [['an empty composer', false], ['a visible draft', true]])
+  test(`a latched pane that becomes ready with ${name} ${draft ? 'is left alone' : 'still takes the task'}`, async t => {
+    const f = fixture(t, draft ? { startupTimeoutMs: 60 } : {});
+    const pending = f.input.handle(f.action());
+    await f.waitForReads(1);
+    f.observation.manualInputPending = true;
+    f.ready();
+    if (draft) Object.assign(f.observation, { sequence: f.observation.sequence + 1,
+      text: 'OpenAI Codex\nmodel: gpt-5.6\n› review this for me', cursor: { x: 21, y: 2 } });
+    const result = await pending;
+    if (draft) {
+      assert.equal(result.ok, false, JSON.stringify(result)); assert.equal(result.delivery, 'not-dispatched');
+      assert.equal(f.writes.length, 0);
+    } else {
+      assert.equal(result.status, 'written', JSON.stringify(result));
+      assert.equal(f.writes.length, 1);
+      assert.equal(f.writes[0].interactionEvidence.surface.composerEmpty, true);
+    }
+  });
 
 test('task text staging waits but native menu controls remain available during startup', async t => {
   const f = fixture(t);
@@ -118,9 +153,9 @@ test('accepted shell startup survives later custom prompt but never a replacemen
   Object.assign(f.observation, { sequence: 1, text: 'PS C:\\project>', cursor: { x: 14, y: 0 } });
   assert.equal((await f.input.handle(f.action())).ok, true);
   f.observation.text = 'custom shell'; f.observation.sequence++;
-  assert.equal((await f.input.handle(f.action({ actionId: 'next', observationSequence: 2 }))).ok, true);
+  assert.equal((await f.input.handle(f.action({ actionId: 'next'}))).ok, true);
   f.session.pid = 43;
-  const last = f.input.handle(f.action({ actionId: 'replacement', observationSequence: 2 }));
+  const last = f.input.handle(f.action({ actionId: 'replacement'}));
   assert.equal((await last).status, 'recipient-unavailable'); assert.equal(f.writes.length, 2);
 });
 

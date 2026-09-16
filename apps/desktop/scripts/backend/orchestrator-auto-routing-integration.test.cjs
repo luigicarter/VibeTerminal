@@ -49,7 +49,7 @@ async function fixture(t) {
       f.reads.push(target);
       const session = f.sessions.find(s => s.id === target.id);
       if (!session) return { ok: false, status: 'stale-generation' };
-      const result = { ok: true, id: session.id, generation: session.generation, text: 'Task workspace ready.', sequence: 10, observationSequence: 10, inputRevision: 2 };
+      const result = { ok: true, id: session.id, generation: session.generation, text: 'Task workspace ready.', sequence: 10, inputRevision: 2 };
       if (target.completedTurnId) result.completedResult = { turnId: target.completedTurnId, text: 'Review found a checkout defect.', status: 'completed' };
       if (f.afterRead) await f.afterRead(session);
       return result;
@@ -85,7 +85,7 @@ async function fixture(t) {
       const observed = JSON.parse(body.messages.filter(m => m.role === 'tool').at(-1).content);
       const base = { targetId, grantId: grant.id, stepId: `${grant.id}-${phase}`, observationToken: observed.observationToken };
       if (phase === 1) return jsonResponse(tool({ ...base, kind: 'send_prompt', text: grant.text || metadata.instruction,
-        observationSequence: observed.observation?.sequence, inputRevision: observed.observation?.inputRevision }));
+        }));
       if (phase === 3) return jsonResponse(tool({ ...base, kind: 'finish_terminal', outcome: 'completed', text: 'Submission inspected.' }));
       return jsonResponse(tool({ kind: 'respond', text: 'The requested submission is blocked.', responseTurn: 'complete' }));
     }
@@ -278,27 +278,25 @@ test('a newly revealed conversation identity is latched before a later operator 
     if (phase !== 3) return;
     const observed = JSON.parse(body.messages.filter(m => m.role === 'tool').at(-1).content);
     return { kind: 'send_prompt', grantId: grant.id, targetId, stepId: 'second-effect', text: 'Check the same task again.',
-      observationToken: observed.observationToken, observationSequence: observed.observation?.sequence, inputRevision: observed.observation?.inputRevision };
+      observationToken: observed.observationToken};
   };
   await f.run('Fix checkout and check the same task again.');
   assert.equal(f.effects.filter(a => a.kind === 'send_prompt').length, 1);
 });
 
-test('an explicitly submitted managed task holds its workspace against independent automatic work', { timeout: 2000 }, async t => {
+// A task owns the pane it runs in, never the worktree (2026-09-15): independent
+// work in the same project takes its own pane at once and never the owned one.
+test('an explicitly submitted managed task keeps its pane, and independent automatic work runs in its own pane at once', { timeout: 2000 }, async t => {
   const f = await fixture(t); f.sessions.push(f.session());
   f.plans.push({ kind: 'operate_terminal', targetIds: ['pane'], text: 'Fix checkout.' });
   const first = await f.relay.send({ text: 'Use pane to fix checkout.', origin: 'text' });
   assert.equal(first.ok, true, JSON.stringify(first));
-  const submission = f.effects.find(a => a.kind === 'send_prompt');
-  const second = f.run('Update deployment documentation.');
-  await until(() => f.effects.filter(a => a.kind === 'send_prompt').length > 1
-    || f.relay.getState().tasks.some(task => task.sequence === 2 && task.workItemId && task.status === 'queued'));
-  await tick();
-  assert.equal(f.effects.filter(a => a.kind === 'send_prompt').length, 1, 'Automatic work must wait for explicit managed work, even without busy telemetry');
-  Object.assign(f.sessions[0], { turnId: 'explicit-result', actionId: submission.actionId, turnState: 'completed', turnStartedAt: Date.now(), turnEndedAt: Date.now() });
-  await f.relay.refresh();
-  const result = await second; assert.equal(result.ok, true, JSON.stringify(result));
-  assert.equal(f.effects.filter(a => a.kind === 'send_prompt').length, 2);
+  assert.ok(f.task(first).workItemId, 'an explicit submission owns its pane through a work item');
+  const second = await f.run('Update deployment documentation.');
+  assert.equal(second.ok, true, JSON.stringify(second));
+  const sends = f.effects.filter(a => a.kind === 'send_prompt');
+  assert.equal(sends.length, 2, 'independent work never waits for another pane\'s turn in the same worktree');
+  assert.notEqual(sends[1].targetId, 'pane', 'and never goes into the pane the explicit task owns');
 });
 
 test('a routed submission is observed and finalized even when the model never requests its post-send read', async t => {
@@ -313,15 +311,29 @@ test('a routed submission is observed and finalized even when the model never re
   assert.notEqual(f.task(result).status, 'failed');
 });
 
-test('a pending command cleared while a later request compiles never reaches interpretation as a null entry', { timeout: 4000 }, async t => {
-  const f = await fixture(t);
-  assert.equal((await f.run('Earlier project work.')).ok, true);
+// The queued-recovery family. A request queues behind a pane whose operator
+// loop is still active (a task owns its pane; nothing waits for a worktree),
+// so the earlier loop is held open here until a test releases it.
+async function heldPane(f) {
+  f.sessions.push(f.session());
+  let release; const stall = new Promise(resolve => { release = resolve; });
+  f.executor = async ({ metadata, phase }) => { if (metadata.instruction === 'Earlier project work.' && phase === 1) await stall; };
+  f.plans.push({ kind: 'operate_terminal', targetIds: ['pane'], text: 'Earlier project work.' });
+  const earlier = f.relay.send({ text: 'Earlier project work.', origin: 'text' });
+  await until(() => f.relay.getState().tasks.some(task => task.text === 'Earlier project work.' && task.status === 'running'));
   const queue = text => {
-    const sent = f.run(text);
+    f.plans.push({ kind: 'operate_terminal', targetIds: ['pane'], text });
+    const sent = f.relay.send({ text, origin: 'text' });
     return until(() => f.relay.getState().tasks.some(task => task.text === text && task.status === 'queued' && task.targetIds.length))
       .then(() => ({ sent, requestId: f.relay.getState().tasks.find(task => task.text === text).requestId }));
   };
-  const cleared = await queue('The cancelled queued task.'), surviving = await queue('The surviving queued task.');
+  return { earlier, release: async () => { release(); await earlier; }, queue };
+}
+
+test('a pending command cleared while a later request compiles never reaches interpretation as a null entry', { timeout: 4000 }, async t => {
+  const f = await fixture(t);
+  const held = await heldPane(f);
+  const cleared = await held.queue('The cancelled queued task.'), surviving = await held.queue('The surviving queued task.');
   let compiled;
   f.beforeLaunchers = async () => { f.beforeLaunchers = undefined; await f.relay.cancel({ requestId: cleared.requestId }); };
   f.plans.push(context => { compiled = context; return { goal: 'Report the active work.', actions: [] }; });
@@ -333,79 +345,45 @@ test('a pending command cleared while a later request compiles never reaches int
   assert.deepEqual(payload.pendingCommands.map(command => command.requestId), [surviving.requestId]);
   assert.doesNotMatch(String(later.error || ''), /Cannot read properties of null/);
   assert.equal(f.relay.getState().tasks.find(task => task.requestId === cleared.requestId).status, 'cancelled');
-  await f.relay.cancel(); await cleared.sent; await surviving.sent;
+  await f.relay.cancel(); await held.release(); await cleared.sent; await surviving.sent;
 });
 
-test('continuing an unsent queued task transfers its original request and submits only once', { timeout: 3000 }, async t => {
-  const f = await fixture(t);
-  await f.run('Earlier project work.');
-  const earlier = f.sessions[0], earlierSend = f.effects.find(action => action.kind === 'send_prompt');
-  const pending = f.run('Review the queued task; do not edit.');
-  await until(() => f.relay.getState().tasks.some(task => task.text === 'Review the queued task; do not edit.' && task.status === 'queued' && task.targetIds.length));
-  const original = f.relay.getState().tasks.find(task => task.text === 'Review the queued task; do not edit.');
-  const target = f.sessions[1];
-  f.plans.push(context => {
-    const queued = context.pendingCommands.find(command => command.requestId === original.requestId);
-    assert.equal(queued?.queued, true, 'The unsent original must be exposed as pending authority');
-    assert.equal(queued.grants[0].text, 'Review the queued task; do not edit.');
-    return { goal: 'Continue the original task.', continuationOf: original.requestId, actions: [
-      { kind: 'operate_terminal', sourceUserId: original.requestId, targetIds: [target.id] }
-    ] };
-  });
-  const resumed = f.relay.send({ text: 'Send that queued task.', origin: 'text', replyToRequestId: original.requestId });
-  await until(() => f.relay.getState().tasks.find(task => task.requestId === original.requestId).status === 'continued');
-  assert.equal(f.relay.getState().tasks.find(task => task.requestId === original.requestId).controlDisposition, 'transferred');
-  assert.equal(f.effects.filter(action => action.kind === 'send_prompt').length, 1, 'A project conflict still gates the transfer');
-  Object.assign(earlier, { turnId: 'earlier-done', actionId: earlierSend.actionId, turnState: 'completed', turnStartedAt: Date.now(), turnEndedAt: Date.now() });
-  await f.relay.refresh();
-  const result = await resumed;
-  assert.equal(result.ok, true, JSON.stringify(result));
-  assert.equal((await pending).status, 'cancelled');
-  assert.equal(f.effects.filter(action => action.kind === 'create_session').length, 2);
-  const sent = f.effects.filter(action => action.kind === 'send_prompt' && action.targetId === target.id);
-  assert.equal(sent.length, 1);
-  assert.equal(sent[0].text, 'Review the queued task; do not edit.');
-  await f.relay.refresh();
-  assert.equal(f.effects.filter(action => action.kind === 'send_prompt' && action.targetId === target.id).length, 1);
-});
+// (2026-09-15) Moving an unsent queued task to another pane is no longer a
+// scenario: a routed task is never queued before its submission, and a request
+// queued behind an active loop on its pane is continued on that pane only.
 
 for (const race of [false, true]) test(`queued recovery ${race ? 'after original admission' : 'interpretation failure'} cannot retain a second delivery grant`, { timeout: 3000 }, async t => {
   const f = await fixture(t);
-  await f.run('Earlier project work.');
-  const earlier = f.sessions[0], earlierSend = f.effects.find(action => action.kind === 'send_prompt');
-  const pending = f.run('The original queued task.');
-  await until(() => f.relay.getState().tasks.some(task => task.text === 'The original queued task.' && task.status === 'queued' && task.targetIds.length));
-  const original = f.relay.getState().tasks.find(task => task.text === 'The original queued task.');
-  const target = f.sessions[1];
-  const releaseEarlier = async () => {
-    Object.assign(earlier, { turnId: 'earlier-done', actionId: earlierSend.actionId, turnState: 'completed', turnStartedAt: Date.now(), turnEndedAt: Date.now() });
-    await f.relay.refresh();
-  };
+  const held = await heldPane(f);
+  const target = f.session('spare'); f.sessions.push(target);
+  const queued = await held.queue('The original queued task.');
+  const original = f.relay.getState().tasks.find(task => task.requestId === queued.requestId);
   f.plans.push(async context => {
     assert(context.pendingCommands.some(command => command.requestId === original.requestId && command.queued));
     if (!race) throw new Error('Fixture interpretation failure.');
-    await releaseEarlier();
+    await held.release();
     await until(() => f.relay.getState().tasks.find(task => task.requestId === original.requestId).status !== 'queued');
     return { goal: 'Continue original task.', continuationOf: original.requestId, actions: [{ kind: 'operate_terminal', sourceUserId: original.requestId, targetIds: [target.id] }] };
   });
   const recovered = await f.relay.send({ text: 'Send the original queued task.', origin: 'text', replyToRequestId: original.requestId });
   assert.equal(recovered.ok, false);
   assert.equal(f.relay.retry({ requestId: recovered.requestId }).ok, false, 'A rejected recovery must not retain duplicate authority');
-  if (!race) await releaseEarlier();
-  assert.equal((await pending).ok, true);
-  assert.equal(f.effects.filter(action => action.kind === 'send_prompt' && action.targetId === target.id).length, 1);
+  if (!race) await held.release();
+  assert.equal((await queued.sent).ok, true);
+  assert.equal(f.effects.filter(action => action.kind === 'send_prompt' && action.targetId === 'pane').length, 2, 'the original is delivered exactly once, after the earlier work');
+  assert.equal(f.effects.filter(action => action.kind === 'send_prompt' && action.targetId === target.id).length, 0, 'the rejected recovery delivered nothing');
 });
 
 for (const controls of [...[' Enter ', ' CTRL-M ', 'Ctrl-J'].map(key => ({ keys: [key] })),
   ...['click', 'up'].map(action => ({ mouse: { x: 2, y: 2, button: 'left', action } }))]) {
-  test(`explicit task controls retain workspace ownership: ${JSON.stringify(controls)}`, { timeout: 2000 }, async t => {
+  test(`explicit task controls take pane ownership; independent work runs in its own pane at once: ${JSON.stringify(controls)}`, { timeout: 2000 }, async t => {
     const f = await fixture(t); f.sessions.push(f.session());
     f.plans.push({ kind: 'operate_terminal', targetIds: ['pane'], text: 'Submit the task in this worker.' });
     f.executor = ({ phase, targetId, grant, body }) => {
       if (targetId !== 'pane' || phase !== 1) return;
       const observed = JSON.parse(body.messages.filter(message => message.role === 'tool').at(-1).content);
       return { kind: 'terminal_interact', targetId, grantId: grant.id, stepId: 'native-submit', observationToken: observed.observationToken,
-        observationSequence: observed.observation.sequence, inputRevision: observed.observation.inputRevision, inputPurpose: 'task', ...controls };
+        inputPurpose: 'task', ...controls };
     };
     f.sendEffect = action => {
       Object.assign(f.sessions.find(session => session.id === action.target.id), { turnState: 'running', turnId: action.actionId, turnStartedAt: Date.now() });
@@ -414,14 +392,11 @@ for (const controls of [...[' Enter ', ' CTRL-M ', 'Ctrl-J'].map(key => ({ keys:
     const first = await f.relay.send({ text: 'Submit the task in this worker.', origin: 'text' });
     assert.equal(first.ok, true, JSON.stringify(first)); assert.ok(f.task(first).workItemId);
     assert.equal(f.task(first).status, 'waiting-results');
-    const second = f.run('Independently fix checkout.');
-    await until(() => f.effects.some(action => action.kind === 'send_prompt')
-      || f.relay.getState().tasks.some(task => task.sequence === 2 && task.workItemId && task.status === 'queued'));
-    await tick(); assert.equal(f.effects.filter(action => action.kind === 'send_prompt').length, 0, 'Independent task must wait for the native submission result');
-    Object.assign(f.sessions[0], { turnState: 'completed', turnEndedAt: Date.now() }); await f.relay.refresh();
-    const result = await second; assert.equal(result.ok, true, JSON.stringify(result));
+    const result = await f.run('Independently fix checkout.'); assert.equal(result.ok, true, JSON.stringify(result));
     assert.equal(f.effects.filter(action => action.kind === 'terminal_interact').length, 1);
-    assert.equal(f.effects.filter(action => action.kind === 'send_prompt').length, 1);
+    const sends = f.effects.filter(action => action.kind === 'send_prompt');
+    assert.equal(sends.length, 1, 'independent work runs in its own pane without waiting for the native submission');
+    assert.notEqual(sends[0].targetId, 'pane');
   });
 }
 
@@ -432,7 +407,7 @@ test('interaction-only mouse control does not acquire task or workspace ownershi
     if (phase !== 1) return;
     const observed = JSON.parse(body.messages.filter(message => message.role === 'tool').at(-1).content);
     return { kind: 'terminal_interact', targetId, grantId: grant.id, stepId: 'menu-click', observationToken: observed.observationToken,
-      observationSequence: observed.observation.sequence, inputRevision: observed.observation.inputRevision, inputPurpose: 'interaction',
+      inputPurpose: 'interaction',
       mouse: { x: 2, y: 2, button: 'left', action: 'click' } };
   };
   const result = await f.relay.send({ text: 'Select the current menu entry.', origin: 'text' });

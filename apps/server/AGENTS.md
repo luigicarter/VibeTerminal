@@ -4,6 +4,13 @@ This directory owns the implemented Lina account backend. See `README.md` and
 `../../docs/server-phase-1-implementation.md` for commands, acceptance evidence,
 and the pending live Google VM/email/monitoring boundary.
 
+Account/payment preparation is in `src/prepared`, with SQL in
+`migrations/prepared` and its separate contract in `contracts/prepared`.
+Normal startup, migration discovery and the normal worker must not enable it.
+Only explicit disposable test composition mounts these modules. Keep the
+prepared SQL manifest separate and preserve existing migration checksums.
+See `../../docs/account-paid-readiness.md` before later wiring or live billing.
+
 The user selected Bun + TypeScript. Use Hono, Better Auth and PostgreSQL here;
 keep `.bun-version`, packageManager, Bun lockfile and container versions aligned.
 Do not create a server package-lock.json or move this service to Node/Go as a

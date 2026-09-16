@@ -293,3 +293,33 @@ test('PTY action channel rejects stale and unproven recipients and reports write
   assert.equal(action({ kind: 'kill' }).status, 'kill-requested');
   assert.equal(action({}).ok, false);
 });
+
+// The rows a composer recognizer indexes are taken before the model's character
+// budget clips the screen text. Without that window, a tall screen read at 4000
+// characters would drop leading rows and every row a check reads by cursor
+// position would silently move.
+test('the window around the cursor survives a clipped read and is not part of the text budget', async () => {
+  const observation = createTerminalObservation();
+  try {
+    await observation.ingest({ type: 'created', id: 'tall', generation: 'g', cols: 40, rows: 30 });
+    const rows = Array.from({ length: 20 }, (_, index) => `history row ${index}`).join('\r\n');
+    await observation.ingest({ type: 'data', id: 'tall', generation: 'g', sequence: 1, data: `${rows}\r\n\x1b[?25h> ` });
+    const full = await observation.read({ id: 'tall', generation: 'g' });
+    assert.deepEqual(full.cursor, { x: 2, y: 20 });
+    assert.equal(full.cursorContext.startRow, 18);
+    assert.equal(full.cursorContext.rows.length, 9, 'two rows above the cursor and six below, clipped to the screen');
+    // Unlike the screen excerpt, the window keeps the composer's own trailing
+    // space: it reports the cells, not a trimmed transcript.
+    assert.deepEqual(full.cursorContext.rows.slice(0, 3), ['history row 18', 'history row 19', '> ']);
+    assert.equal(full.text.split('\n').at(-1), '>');
+    const clipped = await observation.read({ id: 'tall', generation: 'g', maxChars: 30 });
+    assert.equal(clipped.screenTruncated, true);
+    assert.equal(clipped.text.includes('history row 0'), false, 'the excerpt really did lose its leading rows');
+    assert.deepEqual(clipped.cursorContext, full.cursorContext);
+    assert.deepEqual(clipped.cursor, full.cursor);
+    // A read that asks for no text at all still reports where the cursor is.
+    const none = await observation.read({ id: 'tall', generation: 'g', maxChars: 0 });
+    assert.equal(none.text, '');
+    assert.deepEqual(none.cursorContext, full.cursorContext);
+  } finally { observation.dispose(); }
+});

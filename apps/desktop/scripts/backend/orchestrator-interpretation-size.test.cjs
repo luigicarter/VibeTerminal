@@ -78,11 +78,11 @@ function buildContext(instruction, extra = {}) {
       lastResults: ['Reported two findings and left the pane idle at the composer.'.slice(0, 120),
         'Named the first broken CI step and stopped at the composer.'.slice(0, 120)] },
     elsewhere: `2 other projects active today: ${PROJECT_NAMES[1]}, ${PROJECT_NAMES[2]}` };
-  const roster = sessions.map((session, index) => ({ id: session.id, name: session.name, title: session.conversationTitle,
-    provider: session.kind, status: session.status, turnState: session.turnState,
+  // The roster is the terminal model's rows, as the application builds them.
+  const { buildTerminalModel, rosterRows } = require('../../backend/orchestratorTerminalModel.cjs');
+  const roster = rosterRows(buildTerminalModel({ sessions, records: Object.fromEntries(sessions.map((session, index) => [session.id, {
     objective: `Investigate the orchestrator interpretation payload in ${projects[index % 3].name} and report the measured size.`,
-    lastPromptAt: 1757000400000 + index * 1000,
-    lastResultSummary: 'Reported two findings and left the pane idle at the composer.' }));
+    lastPromptAt: 1757000400000 + index * 1000, lastResultSummary: 'Reported two findings and left the pane idle at the composer.' }])) }), { limit: 64 });
   return { instruction, requestId: 'current-request', sessions, tasks, memory, roster,
     workItems: Array.from({ length: 6 }, (_, index) => ({ id: `work-${index}`, status: 'active',
       objective: `Investigate the orchestrator interpretation payload in ${projects[index % 3].name} and report the measured size.`,
@@ -136,11 +136,15 @@ test('a start request and a follow-up each compile into one interpretation call 
   assert.ok(Buffer.byteLength(JSON.stringify(payload.roster), 'utf8') <= ROSTER_CEILING, 'The roster stays inside its fixed byte budget.');
   assert.ok(payload.roster.every(pane => pane.terminalNavigationGuide === undefined && pane.board === undefined && pane.launchState === undefined),
     'Roster rows carry planning identity only, not board or launch metadata.');
-  assert.ok(payload.roster.every(pane => pane.id && pane.cwd && pane.state), 'Every offered pane keeps the identity a plan needs.');
+  // The project by name, not the folder path: the plan names the project and
+  // the application resolves the folder, and the shorter row keeps the roster
+  // inside its budget.
+  assert.ok(payload.roster.every(pane => pane.handle && pane.project && pane.state && pane.id === undefined && pane.generation === undefined),
+    'Every offered pane keeps the identity a plan needs: its handle, its project and its state, never an id.');
   assert.ok(payload.roster.every(pane => pane.status === undefined && pane.turnState === undefined && pane.readiness === undefined && pane.needsInput === undefined),
     'One derived state per pane replaces the three status vocabularies that could disagree.');
-  assert.deepEqual([...new Set(payload.roster.map(pane => pane.state))].sort(), ['free', 'working']);
-  assert.ok(payload.roster.some(pane => pane.objective && pane.lastResultSummary), 'Pane memory reaches the planner with the pane it belongs to.');
+  assert.deepEqual([...new Set(payload.roster.map(pane => pane.state))].sort(), ['idle', 'working']);
+  assert.ok(payload.roster.some(pane => pane.on && pane.result), 'Pane memory reaches the planner with the pane it belongs to: what it is on and its last result.');
 });
 
 // An existing-terminal group phrase makes every pane in every project an
@@ -157,8 +161,10 @@ test('a group phrase never pushes an addressed project\'s pane out of the roster
   const { messages } = createPlanningInput({ instruction: 'use one of the open terminals to investigate the composer',
     requestId: 'group-request', sessions, roots: { projects: [] }, requests: [],
     projectContext: { id: 'project-0', name: 'vibeTerminal', path: folders[0] } });
-  const roster = JSON.parse(messages[1].content).roster.map(pane => pane.id);
-  const addressed = sessions.filter(session => session.cwd === folders[0]).map(session => session.id);
+  // Panes reach the planner by handle; a directly built context gets transient
+  // handles in session order, so pane-N is T(N+1).
+  const roster = JSON.parse(messages[1].content).roster.map(pane => pane.handle);
+  const addressed = sessions.map((session, index) => [session, `T${index + 1}`]).filter(([session]) => session.cwd === folders[0]).map(([, handle]) => handle);
   assert.deepEqual(roster.slice(0, addressed.length), [...addressed].reverse(),
     'Every pane of the addressed project leads the roster, most recently active first.');
   for (const id of addressed) assert.ok(roster.includes(id), `The addressed project keeps ${id}.`);

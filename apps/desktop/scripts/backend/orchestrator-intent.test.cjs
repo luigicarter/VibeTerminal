@@ -130,7 +130,7 @@ test('a caller may canonicalize a consumed action for receipt lookup but cannot 
 
 test('receipt lookup can canonicalize terminal navigation after the budget is exhausted', () => {
   const plan = compile([{ kind: 'terminal_interact', targetIds: ['a'] }]);
-  const input = { kind: 'terminal_interact', observationSequence: 1, keys: Array(16).fill('down') };
+  const input = { kind: 'terminal_interact', keys: Array(16).fill('down') };
   const first = authorizeIntentAction(input, plan, sessions);
   claimGrant(first, plan);
   assert.deepEqual(authorizeIntentAction(input, plan, sessions, { allowConsumed: true }), first);
@@ -307,45 +307,46 @@ test('permission values remain literal user sources and executor cannot expand d
 
 test('terminal navigation retains literal input and consumes only on submission', () => {
   const plan = compile([{ kind: 'terminal_interact', targetIds: ['a'], answerText: 'my answer' }], { instruction: 'Type my answer into that terminal.' });
-  const nav = authorizeIntentAction({ kind: 'terminal_interact', observationSequence: 1, keys: ['down', 'tab'] }, plan, sessions);
+  const nav = authorizeIntentAction({ kind: 'terminal_interact', keys: ['down', 'tab'] }, plan, sessions);
   assert.equal(nav.text, undefined);
   assert.equal(claimGrant(nav, plan).consumed, false);
-  const typed = authorizeIntentAction({ kind: 'terminal_interact', observationSequence: 2, text: 'my answer' }, plan, sessions);
+  const typed = authorizeIntentAction({ kind: 'terminal_interact', text: 'my answer' }, plan, sessions);
   assert.equal(claimGrant(typed, plan).consumed, false);
-  const submit = authorizeIntentAction({ kind: 'terminal_interact', observationSequence: 3, keys: ['enter'] }, plan, sessions);
+  const submit = authorizeIntentAction({ kind: 'terminal_interact', keys: ['enter'] }, plan, sessions);
   assert.equal(claimGrant(submit, plan).consumed, true);
-  assert.throws(() => authorizeIntentAction({ kind: 'terminal_interact', observationSequence: 4, keys: ['enter'] }, plan, sessions), /already dispatched/);
+  assert.throws(() => authorizeIntentAction({ kind: 'terminal_interact', keys: ['enter'] }, plan, sessions), /already dispatched/);
 });
 
 test('terminal inputs need fresh observations, supported bounded keys and exact single-line user text', () => {
   const plan = compile([{ kind: 'terminal_interact', targetIds: ['a'], text: 'Unit' }], { instruction: 'Type Unit' });
-  for (const payload of [{ keys: ['up'] }, { observationSequence: -1, keys: ['up'] }, { observationSequence: Number.MAX_SAFE_INTEGER + 1, keys: ['up'] }, { observationSequence: 1, keys: ['ctrl-c'] }, { observationSequence: 1, keys: ['enter', 'down'] }, { observationSequence: 1, text: 'Smoke' }, { observationSequence: 1, submit: 'yes' }, { observationSequence: 1 }]) assert.throws(() => authorizeIntentAction({ kind: 'terminal_interact', ...payload }, plan, sessions));
+  // What a terminal_interact must still be. Freshness is no longer among these:
+  // the application captures the input surface at its own read.
+  for (const payload of [{ keys: ['raw-escape'] }, { keys: Array(17).fill('up') }, { keys: ['enter', 'down'] }, { text: 'Smoke' }, { submit: 'yes' }, { }]) assert.throws(() => authorizeIntentAction({ kind: 'terminal_interact', ...payload }, plan, sessions));
   assert.throws(() => compile([{ kind: 'terminal_interact', targetIds: ['a'], text: 'a\nb' }], { instruction: 'Type a\nb' }), /single-line/);
   assert.throws(() => compile([{ kind: 'terminal_interact', targetIds: ['a'], text: 'invented answer' }]), /literal text/);
 });
 
 test('a newly observed silent terminal can accept authorized input at sequence zero', () => {
   const plan = compile([{ kind: 'terminal_interact', targetIds: ['a'], text: 'Unit' }], { instruction: 'Type Unit' });
-  const action = authorizeIntentAction({ kind: 'terminal_interact', observationSequence: 0, text: 'Unit' }, plan, sessions);
-  assert.equal(action.observationSequence, 0);
+  const action = authorizeIntentAction({ kind: 'terminal_interact', text: 'Unit' }, plan, sessions);
   assert.equal(claimGrant(action, plan).consumed, false);
 });
 
 test('terminal navigation has a total per-target budget rather than a reset on each call', () => {
   const plan = compile([{ kind: 'terminal_interact', targetIds: ['a', 'b'], selection: 'all', answerText: 'Enter' }], { instruction: 'Scroll down and press Enter in both terminals.' });
-  const action = authorizeIntentAction({ kind: 'terminal_interact', targetId: 'a', observationSequence: 1, keys: Array(15).fill('down') }, plan, sessions);
+  const action = authorizeIntentAction({ kind: 'terminal_interact', targetId: 'a', keys: Array(15).fill('down') }, plan, sessions);
   claimGrant(action, plan);
-  assert.throws(() => authorizeIntentAction({ kind: 'terminal_interact', targetId: 'a', observationSequence: 2, keys: ['down', 'enter'] }, plan, sessions), /limit/);
-  claimGrant(authorizeIntentAction({ kind: 'terminal_interact', targetId: 'a', observationSequence: 2, submit: true }, plan, sessions), plan);
-  assert.equal(claimGrant(authorizeIntentAction({ kind: 'terminal_interact', targetId: 'b', observationSequence: 1, keys: ['down'] }, plan, sessions), plan).consumed, false);
+  assert.throws(() => authorizeIntentAction({ kind: 'terminal_interact', targetId: 'a', keys: ['down', 'enter'] }, plan, sessions), /limit/);
+  claimGrant(authorizeIntentAction({ kind: 'terminal_interact', targetId: 'a', submit: true }, plan, sessions), plan);
+  assert.equal(claimGrant(authorizeIntentAction({ kind: 'terminal_interact', targetId: 'b', keys: ['down'] }, plan, sessions), plan).consumed, false);
 });
 
 test('navigation-only grants cannot submit a menu answer and native literal inputs remain complete in context', () => {
   const navigation = compile([{ kind: 'terminal_interact', targetIds: ['a'] }], { instruction: 'Scroll up in this terminal.' });
-  assert.throws(() => authorizeIntentAction({ kind: 'terminal_interact', observationSequence: 1, keys: ['enter'] }, navigation, sessions), /user-supplied answer/);
+  assert.throws(() => authorizeIntentAction({ kind: 'terminal_interact', keys: ['enter'] }, navigation, sessions), /user-supplied answer/);
   const text = 'literal value '.repeat(40), input = compile([{ kind: 'terminal_interact', targetIds: ['a'], text }], { instruction: `Type ${text}` });
   assert.equal(projectIntent(input).grants[0].text, text);
-  assert.throws(() => authorizeIntentAction({ kind: 'terminal_interact', observationSequence: 1, keys: ['enter'], submit: true }, input, sessions), /once/);
+  assert.throws(() => authorizeIntentAction({ kind: 'terminal_interact', keys: ['enter'], submit: true }, input, sessions), /once/);
 });
 
 test('non-target effect arguments are frozen and can only dispatch once', () => {

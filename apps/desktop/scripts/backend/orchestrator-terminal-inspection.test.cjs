@@ -16,7 +16,7 @@ function operate(body, kind, extra = {}) {
   const grant = meta(body).authorizedCommands.grants.find(grant => grant.kind === 'operate_terminal');
   assert.ok(grant); const observed = latest(body); assert.ok(observed.observationToken);
   return call({ kind, targetId: 'Atlas', grantId: grant.id, stepId: `step-${++serial}`, observationToken: observed.observationToken,
-    ...(kind === 'terminal_interact' && { observationSequence: observed.observation.sequence, inputRevision: observed.observation.inputRevision }), ...extra });
+    ...(kind === 'terminal_interact' && { }), ...extra });
 }
 async function fixture(t, kind, mode = 'usage') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-inspection-'));

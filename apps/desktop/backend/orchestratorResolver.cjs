@@ -3,177 +3,49 @@
 // Deterministic assignment resolver.
 //
 // Which pane a task goes to is a question about facts the application already
-// holds: pane titles, provider, idle/busy, who owns which work item, and what
-// Lina herself did a moment ago. Up to eight routing model rounds plus an
-// ownership reviewer used to re-derive those facts and, in the September 12
-// failure, overrode the user's own words with app policy. This module answers
-// the question in code: reuse, create, or one question naming the candidates.
+// holds: what each pane is called, what it runs, whether it is free, who owns
+// it, and what Lina herself did a moment ago. Up to eight routing model rounds
+// plus an ownership reviewer used to re-derive those facts and, in the
+// September 12 failure, overrode the user's own words with app policy. This
+// module answers the question in code: reuse, create, or one question naming
+// the candidates. The sentence is read once, by the reference resolver
+// (orchestratorReference.cjs), against the terminal model; what is left here
+// is the dialogue: which reading leads to which decision, and what to ask.
 //
-// Pure apart from the readers handed in: no model call, no store writes, no
-// terminal effects. The caller still reads the chosen pane, verifies its native
-// identity, and enforces one work item per pane before any task reaches it.
-const { scoreCandidates, STOPWORDS, MIN_SCORE, MIN_MATCHED_TOKENS, RUNNER_UP_MARGIN } = require('./orchestratorOwnerMatch.cjs');
+// Pure: no model call, no store writes, no terminal effects. The caller still
+// reads the chosen pane, verifies its native identity, and enforces one work
+// item per pane before any task reaches it.
+const { scoreCandidates, RUNNER_UP_MARGIN } = require('./orchestratorOwnerMatch.cjs');
 const { deterministicNewTaskRoute } = require('./orchestratorRoutePlanner.cjs');
+const { resolveReference, providerFamily, RESOLVER_STOPWORDS } = require('./orchestratorReference.cjs');
+const { paneReadiness, paneDisplayName } = require('./orchestratorPaneReadiness.cjs');
 
 // ---------------------------------------------------------------------------
-// Pane facts. Everything here is already in the session registry; no model may
-// re-derive it.
+// Pane facts read by the assignment stage in orchestrator.cjs. Everything here
+// is already in the session registry; no model may re-derive it.
 // ---------------------------------------------------------------------------
-
-// "Use one of the empty terminals" is an instruction, not a hint. An idle pane
-// that no work item owns is exactly what the user means by empty, so it takes
-// new work: deterministically, with no reviewer call and no additional pane.
-// Two tiers, scored against the saved utterances. Strong is an explicit request
-// for an idle pane: honour it, and ask rather than silently opening another one.
-// Weak only mentions availability near a pane noun ("a terminal that's free"
-// inside a longer sentence): prefer an idle pane if one exists, else create as
-// usual. A relative clause counts only when it hangs off a pane noun, so "fix
-// the login page that is not working" stays a task description, and bare "free"
-// ("when the hands free is unavailable") selects nothing at all.
-const PANE_NOUN = String.raw`(?:terminals?|panes?|agents?|sessions?)`;
-const IDLE_PANE_STRONG = new RegExp([
-  String.raw`\b(?:empty|idle|unused|not busy|not doing anything|clearly free)\b`,
-  // The relative clause may sit in the next sentence: speech punctuates "put it
-  // in the Codex terminal. That's not working." exactly like one sentence.
-  String.raw`\b(?:one|${PANE_NOUN})\b[^?!]{0,12}\b(?:that['’]?s|that is|which is) (?:free|not (?:currently )?working)\b`,
-].join('|'), 'i');
-const IDLE_PANE_WEAK = new RegExp([
-  String.raw`\b(?:not (?:currently )?working|free|available)\b[^.?!]{0,25}\b${PANE_NOUN}\b`,
-  String.raw`\b${PANE_NOUN}\b[^.?!]{0,25}\b(?:not (?:currently )?working|free|available)\b`,
-  // "one of the Codex terminals" means any of them, idle preferred: a hint, not
-  // the explicit idle request that asks before opening another pane.
-  String.raw`\bone of the (?:\w+ ){0,3}${PANE_NOUN}\b`,
-].join('|'), 'i');
-const idlePaneRequest = text => IDLE_PANE_STRONG.test(text) ? 'strong' : IDLE_PANE_WEAK.test(text) ? 'weak' : undefined;
 const IDLE_REUSE_REASON = 'Idle pane with no task owner; assigned to this new task.';
-const PROVIDER_FAMILY = { 'claude-custom': 'claude', 'kimi-custom': 'kimi' };
-const providerFamily = kind => PROVIDER_FAMILY[kind] || kind;
-// A pane that has never taken a prompt: no turn has started, ended, or been
-// identified. Nothing about it can be attributed to a conversation yet.
-const neverPrompted = session => !session?.turnId && !session?.turnStartedAt && !session?.turnEndedAt;
-// A freshly opened agent pane is idle by construction, but its native identity
-// is not provable until the provider writes a transcript, which for Claude only
-// happens after the first prompt. Requiring confirmed identity here made every
-// never-prompted pane permanently unusable, so the resolver opened another pane
-// beside an empty one. A provisional pane is reusable only while it has never
-// had a turn: its process is running, it is idle, and its binding is not
-// contested. Once a pane has taken any turn, confirmed observation is required
-// again, because then reuse means joining a conversation we must be able to name.
-function idlePaneCandidate(session) {
-  if (!session || session.started === false || session.processState !== 'running') return false;
-  if (session.pendingInteraction || session.pendingInput || session.manualInputPending || session.interactionInputPending) return false;
-  if (session.observation === 'observed') return ['idle', 'completed'].includes(session.turnState);
-  return session.observation === 'provisional' && session.turnState === 'idle' && neverPrompted(session) &&
-    session.agentProcessState === 'running' && session.binding?.status !== 'ambiguous';
-}
+// A pane free for new work, as the one readiness predicate defines it.
+const idlePaneCandidate = session => paneReadiness(session).free;
 // Work items that still own their pane. A cancelled or failed item never
 // delivered its prompt, so keeping it as an owner reserved an empty pane for
 // work that will not arrive and forced a new pane beside it. Finished items keep
 // their pane: that is the conversation their result lives in.
 const RELEASED_STATUSES = new Set(['cancelled', 'failed']);
 const ownsPaneForReuse = item => Boolean(item) && !RELEASED_STATUSES.has(item.status);
+// Which panes are spoken for, asked once. Three callers used to spell this
+// filter-map-compare by hand, and a pane counted as owned or free depending on
+// which copy ran. `paneKey` is imported lazily: this module is required by the
+// routing module it would otherwise cycle with.
+const reuseOwnedPaneKeys = items => new Set((items || []).filter(ownsPaneForReuse)
+  .map(item => require('./orchestratorRouting.cjs').paneKey(item.binding?.target)).filter(Boolean));
+const paneReuseOwner = (items, session, exceptItemId) => {
+  const { paneKey } = require('./orchestratorRouting.cjs');
+  const key = paneKey(session);
+  return key ? (items || []).find(item => item.id !== exceptItemId && ownsPaneForReuse(item) && paneKey(item.binding?.target) === key) : undefined;
+};
 const paneRecency = session => Math.max(Number(session?.lastActivityAt) || 0, Number(session?.turnEndedAt) || 0, Number(session?.turnStartedAt) || 0);
-
-// ---------------------------------------------------------------------------
-// Selector extraction. Deterministic, over the normalized instruction (wave 1
-// has already turned "cloud code" into "Claude Code" and "codec" into "Codex").
-// ---------------------------------------------------------------------------
-
-// A pane the user is pointing at ("that new terminal you just opened") is never
-// a request to open another one, so this is tested before the creation pattern:
-// the definite article separates "the new codex terminal" (the one from a moment
-// ago) from "a new codex terminal" (open one).
-const JUST_OPENED = new RegExp([
-  String.raw`\b(?:you )?just (?:opened|created|made|started|spawned|launched)\b`,
-  String.raw`\bthat new (?:\w+ ){0,2}${PANE_NOUN}\b`,
-  String.raw`\bthe new (?:\w+ ){0,2}${PANE_NOUN}\b`,
-].join('|'), 'i');
-// Creation verbs only count in the request itself. "when I spawn a new terminal"
-// and "the terminal actually only opens once I go in the pane" describe the bug
-// being reported, so a verb owned by a subject or a subordinate clause is not a
-// request to create anything.
-const CLAUSE = String.raw`(?<!\b(?:i|we|they|it|he|she|when|while|if|where|because|after|before|since|that|which|who|whenever|until)\s)`;
-// A bare "another codex terminal" only asks for a pane when it sits in the
-// request itself, near the start of its sentence or right after "can you".
-const REQUEST_HEAD = String.raw`(?:^|[.?!]\s*|\b(?:can you|could you|would you|please|want you to|go ahead and)\s+)`;
-const NEW_PANE = new RegExp([
-  String.raw`${CLAUSE}\b(?:open|start|spawn|create|launch|make)\b[^.?!]{0,30}\b(?:new|another)\b[^.?!]{0,30}\b${PANE_NOUN}\b`,
-  String.raw`${CLAUSE}\b(?:open|start|spawn|create|launch|make)\s+(?:an?\s+|the\s+)?(?:\w+\s+){0,2}${PANE_NOUN}\b`,
-  String.raw`${REQUEST_HEAD}[^.?!]{0,40}?\b(?:new|another)\s+(?:\w+\s+){0,2}${PANE_NOUN}\b`,
-].join('|'), 'i');
-
-const QUOTED = /["“”]([^"“”]{3,80})["“”]/g;
-const TOPIC_PHRASE = String.raw`[\s.,:;-]*([^.?!]{3,90}?)(?=\s*(?:,|\.|\?|!|\bto\b|\band\b|$))`;
-const NAMED_TOPIC = new RegExp(String.raw`\b(?:working on|worked on|titled|called|named)\b${TOPIC_PHRASE}`, 'gi');
-const THE_TITLED_PANE = new RegExp(String.raw`\bthe\s+((?:[\p{L}\p{N}]+\s+){1,4}?)${PANE_NOUN}\b`, 'giu');
-// "about" is the weakest marker ("There's a chat about..."), so it is consulted
-// only after the explicit ones have found nothing.
-const ABOUT_TOPIC = new RegExp(String.raw`\babout\b${TOPIC_PHRASE}`, 'gi');
-const CLAUSE_WORD = /\b(?:when|where|while|because|which|who|but|so|that|if)\b/i;
-
-// Vocabulary that describes how a pane should be chosen rather than what it is
-// working on. Kept out of the title words so "the new codex terminal" and "put
-// in that prompt" cannot score against a task title.
-const SELECTION_WORDS = ['new', 'newer', 'newest', 'empty', 'idle', 'free', 'busy', 'open', 'opened', 'opens', 'opening',
-  'create', 'created', 'creates', 'creating', 'start', 'started', 'starts', 'starting', 'spawn', 'spawned', 'spawning',
-  'launch', 'launched', 'make', 'makes', 'made', 'put', 'puts', 'putting', 'send', 'sends', 'sent', 'prompt', 'prompts',
-  'prompted', 'prompting', 'currently', 'right', 'please', 'okay', 'yeah', 'yes', 'thank', 'thanks', 'hey', 'able',
-  'really', 'like', 'look', 'looks', 'see', 'seen', 'say', 'says', 'said', 'give', 'gives', 'given', 'was', 'were',
-  'last', 'next', 'first', 'second', 'third', 'currently', 'actually', 'something', 'anything', 'everything'];
-const RESOLVER_STOPWORDS = new Set([...STOPWORDS, ...SELECTION_WORDS]);
-
-const tokenize = value => (String(value ?? '').toLowerCase().match(/[\p{L}\p{N}]+/gu) || []).filter(word => word.length >= 3);
-const meaningful = text => tokenize(text).filter(word => !RESOLVER_STOPWORDS.has(word));
-
-// Providers the user can name. Values are launcher kinds; the caller supplies
-// the live launcher catalog so a configured custom launcher is named too.
-const PROVIDER_PATTERNS = [
-  [/\bcodex web\b/i, 'codex-web'], [/\bopen codex\b/i, 'open-codex'], [/\bcodex\b/i, 'codex'],
-  [/\bclaude code\b|\bclaude\b/i, 'claude'], [/\bgemini\b/i, 'gemini'], [/\bqwen\b/i, 'qwen'],
-  [/\bkimi\b/i, 'kimi'], [/\bcursor\b/i, 'cursor'], [/\bgrok\b/i, 'grok'],
-  [/\bopen ?fusion\b/i, 'openfusion'], [/\bfusion\b/i, 'fusion'], [/\bopencode\b/i, 'opencode'],
-];
-
-function namedProvider(instruction, launchers = []) {
-  for (const launcher of launchers) {
-    const label = String(launcher?.label ?? '').trim();
-    if (label.length >= 4 && new RegExp(`\\b${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(instruction)) return launcher.kind;
-  }
-  for (const [pattern, kind] of PROVIDER_PATTERNS) if (pattern.test(instruction)) return kind;
-  return undefined;
-}
-
-// Returns { kind, words, provider?, text? }. `kind` is one of
-// 'new' | 'idle' | 'just_opened' | 'title' | 'provider' | 'none'.
-function extractSelector(instruction, { launchers = [] } = {}) {
-  const text = String(instruction ?? '');
-  const provider = namedProvider(text, launchers);
-  const base = provider ? { provider } : {};
-  if (JUST_OPENED.test(text)) return { kind: 'just_opened', words: [], ...base };
-  if (idlePaneRequest(text) === 'strong') return { kind: 'idle', words: [], ...base };
-  if (NEW_PANE.test(text)) return { kind: 'new', words: [], ...base };
-  const title = titlePhrase(text);
-  if (title) return { kind: 'title', words: title.words, text: title.text, ...base };
-  if (provider) return { kind: 'provider', words: [], provider };
-  return { kind: 'none', words: [] };
-}
-
-// Speech repeats itself ("There's a chat about... There's an agent working on...
-// chat section"), so every occurrence of each pattern is considered, strongest
-// pattern first, and the first phrase carrying two distinctive words wins.
-function titlePhrase(text) {
-  for (const [pattern, guard] of [[QUOTED, false], [NAMED_TOPIC, false], [THE_TITLED_PANE, true], [ABOUT_TOPIC, false]]) {
-    pattern.lastIndex = 0;
-    for (const match of text.matchAll(pattern)) {
-      const phrase = String(match[1] || '').trim();
-      // A span crossing a subordinate clause is a sentence, not a title.
-      if (guard && CLAUSE_WORD.test(phrase)) continue;
-      const words = meaningful(phrase);
-      if (words.length >= MIN_MATCHED_TOKENS) return { words, text: phrase };
-    }
-  }
-  return undefined;
-}
+const paneLabel = session => paneDisplayName(session).slice(0, 80) || String(session?.id || 'that terminal');
 
 // ---------------------------------------------------------------------------
 // Answer handling. A routing question stored the candidates it named; the reply
@@ -213,57 +85,54 @@ function resolveAnswer(answer) {
   return undefined;
 }
 
-const paneLabel = session => {
-  const name = String(session?.conversationTitle || session?.conversation?.title || session?.name || session?.id || '').trim();
-  return name.replace(/\s+/g, ' ').slice(0, 80) || String(session?.id || 'that terminal');
-};
 const candidateQuestion = candidates => candidates.length === 2
   ? `Which one: ${candidates[0].label} or ${candidates[1].label}?`
   : `Which one: ${candidates.slice(0, -1).map(item => item.label).join(', ')}, or ${candidates.at(-1).label}?`;
 
 // ---------------------------------------------------------------------------
-// The resolver itself.
+// The resolver itself, over the terminal model.
 // ---------------------------------------------------------------------------
 
-function paneTexts(session, workItem) {
-  return [session?.conversationTitle, session?.conversation?.title, session?.name,
-    ...(Array.isArray(session?.aliases) ? session.aliases : []),
-    (workItem?.title || '').slice(0, 200), (workItem?.objective || workItem?.text || '').slice(0, 200)];
-}
-
-function resolveAssignment({ instruction, grant = {}, sessions = [], workItems = [], history, launchers = [],
-  cwd, projectName, answer, sameCwd } = {}) {
+// Returns { decision: 'reuse' | 'create' | 'ask', selector, candidateCount, ... }.
+function resolveAssignment({ instruction, grant = {}, terminals = [], launchers = [], cwd, projectName, answer, now } = {}) {
   const text = String(instruction ?? '');
   const scope = grant.args || {};
-  const same = typeof sameCwd === 'function' ? sameCwd : (a, b) => Boolean(a && b && String(a).toLowerCase() === String(b).toLowerCase());
-  const panes = (Array.isArray(sessions) ? sessions : []).filter(session => session && same(session.cwd, cwd) &&
-    (session.provider || session.kind) !== 'terminal' && (session.provider || session.kind) !== 'shell');
-  const items = Array.isArray(workItems) ? workItems.filter(Boolean) : [];
-  const ownerOf = new Map();
-  // Live owners first, so a pane whose cancelled item still carries a binding is
-  // attributed to whatever is actually working in it. A released item remains an
-  // owner for the title rule when nothing else claims the pane, because the user
-  // may still name that task when asking to continue it.
-  for (const item of [...items.filter(ownsPaneForReuse), ...items.filter(item => !ownsPaneForReuse(item))]) {
-    const id = item.binding?.target?.id; if (id && !ownerOf.has(id)) ownerOf.set(id, item);
-  }
-  const reuseOwned = new Set(items.filter(item => ownsPaneForReuse(item) && item.binding?.target?.id).map(item => item.binding.target.id));
-  const selector = extractSelector(text, { launchers });
+  const reference = resolveReference(text, terminals, { launchers, cwd, projectName: projectName || '', ...(now !== undefined && { now }) });
+  const panes = reference.panes;
   const label = kind => launchers.find(item => item.kind === kind)?.label || 'coding agent';
   const project = projectName || cwd || 'this project';
-  const byRecency = list => [...list].sort((left, right) => paneRecency(right) - paneRecency(left));
-  const done = (decision, extra = {}) => ({ decision, selector: selector.kind, candidateCount: panes.length, ...extra });
+  const byRecency = list => [...list].sort((left, right) => (right.activeAt || 0) - (left.activeAt || 0));
+  const done = (decision, extra = {}) => ({ decision, selector: reference.kind, candidateCount: panes.length, ...extra });
+  const reuse = (terminal, extra = {}) => done('reuse', { targetId: terminal.id, ...(terminal.task?.id && { workItemId: terminal.task.id }), ...extra });
   const create = reason => {
-    const route = deterministicNewTaskRoute({ scope: { ...scope, assignmentMode: 'new', ...(selector.provider && !scope.kindOfSession && { kindOfSession: selector.provider }) },
+    const route = deterministicNewTaskRoute({ scope: { ...scope, assignmentMode: 'new', ...(reference.provider && !scope.kindOfSession && { kindOfSession: reference.provider }) },
       launchers, automaticProvider: true });
     if (!route || route.decision !== 'create') {
       return done('ask', { question: route?.text || 'Which configured coding agent should I use for this project?' });
     }
     return done('create', { kindOfSession: route.kindOfSession, reason });
   };
-  const namedCandidates = list => list.map(session => ({ targetId: session.id, label: paneLabel(session) }));
-  const idleUnowned = family => byRecency(panes.filter(session => idlePaneCandidate(session) && !reuseOwned.has(session.id) &&
-    (!family || providerFamily(session.provider || session.kind) === family)));
+  // Two untitled panes in one project carry the same label; a question that
+  // says "vibeTerminal or vibeTerminal?" cannot be answered, so a repeated label
+  // is told apart by its provider and what it is doing.
+  const namedCandidates = list => {
+    const labels = list.map(terminal => String(terminal.name || '').slice(0, 80) || String(terminal.id));
+    return list.map((terminal, index) => ({ targetId: terminal.id,
+      label: labels.filter(item => item === labels[index]).length > 1 ? `${labels[index]} (${terminal.provider}, ${terminal.state})` : labels[index] }));
+  };
+  const wanted = scope.kindOfSession || reference.provider;
+  const family = providerFamily(wanted);
+  const ofFamily = list => family ? list.filter(terminal => providerFamily(terminal.provider) === family) : list;
+  const paneWord = () => wanted ? `${label(wanted)} pane` : 'pane';
+  // One matching pane is the answer; several are a question naming them; none
+  // is a question too, because the sentence described a pane that is not there.
+  const pick = (list, reason, none) => {
+    if (list.length === 1) return reuse(list[0], { reason });
+    if (list.length > 1) { const named = namedCandidates(byRecency(list).slice(0, 3)); return done('ask', { question: candidateQuestion(named), candidates: named }); }
+    return done('ask', { question: none, candidates: [] });
+  };
+  const inProject = list => list.filter(terminal => panes.includes(terminal));
+  const free = () => byRecency(ofFamily(panes).filter(terminal => terminal.free));
 
   // 0. A reply to the question this resolver asked is resolved from the stored
   //    candidates, never re-interpreted.
@@ -271,48 +140,77 @@ function resolveAssignment({ instruction, grant = {}, sessions = [], workItems =
   if (answered) {
     if (answered.decision === 'create') return create(answered.reason);
     if (answered.decision === 'ask') return done('ask', { question: answered.question, candidates: answered.candidates });
-    const session = panes.find(item => item.id === answered.targetId);
-    if (session) return done('reuse', { targetId: session.id, workItemId: ownerOf.get(session.id)?.id, reason: answered.reason, ...(answered.score !== undefined && { score: answered.score }) });
+    const terminal = panes.find(item => item.id === answered.targetId);
+    if (terminal) return reuse(terminal, { reason: answered.reason, ...(answered.score !== undefined && { score: answered.score }) });
   }
 
   // (a) The interpreter already resolved this to a fresh conversation.
   if (scope.assignmentMode === 'new') return create('The user asked for a new conversation.');
 
   // (b) An explicit request to open one.
-  if (selector.kind === 'new') return create('The user asked me to open a new pane for this task.');
+  if (reference.kind === 'new') return create('The user asked me to open a new pane for this task.');
 
-  // (c) The pane Lina opened a moment ago.
-  if (selector.kind === 'just_opened') {
-    const created = history?.lastCreatedPane?.({ cwd });
-    const owner = created && ownerOf.get(created.id);
-    if (created && (!owner || owner.retriable === true)) {
-      return done('reuse', { targetId: created.id, workItemId: owner?.id, reason: 'The pane I opened for you a moment ago.' });
+  // (c) A handle the user said back, or the pane Lina opened a moment ago. A
+  //     pane another task owns, and no retry pending, is not adopted by "the
+  //     one you just opened": the request falls through to the ordinary rules.
+  if (reference.kind === 'handle' && reference.exact && panes.includes(reference.terminals[0])) {
+    return reuse(reference.terminals[0], { reason: 'The pane you named by its handle.' });
+  }
+  if (reference.kind === 'just_opened' && reference.exact) {
+    const created = reference.terminals[0];
+    if (!created.task || created.task.retriable === true) return reuse(created, { reason: 'The pane I opened for you a moment ago.' });
+  }
+
+  // (c2) A pane described by what it is doing. Working includes waiting on the
+  //      user: the turn is still that pane's, and a follow-up queues behind it.
+  if (reference.kind === 'working' || reference.kind === 'done') {
+    return pick(inProject(reference.candidates),
+      reference.kind === 'working' ? 'The pane that is working right now.' : 'The pane that finished its last task.',
+      reference.kind === 'working' ? `No ${paneWord()} is working in ${project} right now. Which one did you mean?`
+        : `No ${paneWord()} has finished a task in ${project}. Which one did you mean?`);
+  }
+  // (c3) The pane Lina last typed into, and the one that is not it.
+  if (reference.kind === 'last_target') {
+    if (reference.exact) return reuse(reference.terminals[0], { reason: 'The pane I last typed into.' });
+    return done('ask', { question: `I have not typed into a pane in ${project} yet. Which one did you mean?`, candidates: [] });
+  }
+  if (reference.kind === 'other') {
+    // Only a delivery that is the latest thing in the ledger anchors "the
+    // other one"; after a question or an answer it is a guess, so it asks.
+    if (!reference.fresh) {
+      const named = namedCandidates(byRecency(ofFamily(panes)).slice(0, 3));
+      return done('ask', { question: candidateQuestion(named), candidates: named });
     }
+    return pick(inProject(reference.candidates), 'The pane other than the one I last used.',
+      `I only see one ${paneWord()} in ${project}. Which one did you mean?`);
   }
 
   // (d) A pane the user named by its task, or a continuation the interpreter
   //     marked as belonging to an existing agent.
-  if (selector.kind === 'title' || scope.assignmentMode === 'existing') {
+  if (reference.kind === 'title' || scope.assignmentMode === 'existing') {
     // Busy panes are eligible: a follow-up to a working agent queues behind it.
-    const scored = scoreCandidates({ instruction: selector.words.length ? selector.words : text, projectName: project,
-      stopwords: RESOLVER_STOPWORDS, perText: true,
-      candidates: panes.map(session => ({ id: session.id, texts: paneTexts(session, ownerOf.get(session.id)) })) });
-    const eligible = scored.filter(item => item.matched >= MIN_MATCHED_TOKENS);
-    // Ask only when two named candidates actually remain. A sole pane whose
-    // title carries the words the user said is the answer even when a longer
-    // title keeps its score under the threshold; a second close title is not.
-    if (eligible.length && (eligible[0].score >= MIN_SCORE || eligible.length === 1)) {
-      const best = eligible[0];
-      const contenders = eligible.filter(item => item.score > best.score - RUNNER_UP_MARGIN);
-      if (contenders.length === 1) {
-        const session = panes.find(item => item.id === best.id);
-        return done('reuse', { targetId: session.id, workItemId: ownerOf.get(session.id)?.id, score: best.score,
-          reason: `Its title matches the task you named in ${project}.` });
-      }
-      const named = namedCandidates(byRecency(contenders.map(item => panes.find(pane => pane.id === item.id)).filter(Boolean)).slice(0, 3));
-      return done('ask', { question: candidateQuestion(named), candidates: named, score: best.score });
+    // Ask only when two named candidates actually remain.
+    const titled = reference.kind === 'title' && reference.basis !== 'working' ? reference.candidates : reference.scored;
+    if (titled.length === 1) return reuse(titled[0], { score: reference.score, reason: `Its title matches the task you named in ${project}.` });
+    if (titled.length > 1) { const named = namedCandidates(byRecency(titled).slice(0, 3)); return done('ask', { question: candidateQuestion(named), candidates: named, score: reference.score }); }
+    // "The agent working on the chat section" names a pane that was started by
+    // hand and carries no title. What the sentence still says is that the pane
+    // is working, and when exactly one pane is, that is the pane; two are a
+    // question, and none is new work as before.
+    if (reference.kind === 'title' && reference.working && !reference.eligible.length) {
+      const working = inProject(reference.candidates);
+      if (working.length === 1) return reuse(working[0], { reason: 'The one pane working right now; its title does not say what on.' });
+      if (working.length > 1) { const named = namedCandidates(byRecency(working).slice(0, 3)); return done('ask', { question: candidateQuestion(named), candidates: named }); }
     }
     if (scope.assignmentMode === 'existing') {
+      // "Prompt the codex terminal that's not doing anything" planned as a
+      // continuation still names an idle pane; a free one is the answer, not
+      // a question about which agent to continue.
+      if (reference.kind === 'idle' && free().length) return reuse(free()[0], { reason: IDLE_REUSE_REASON });
+      // "And tell it to write that up" right after a prompt went somewhere:
+      // "it" is the pane Lina last typed into here, not a question.
+      const last = reference.pronoun && panes.find(terminal => terminal.lastWorked);
+      if (last) return reuse(last, { continuation: true, reason: 'The pane I last typed into; the sentence says "it".' });
       const recent = byRecency(panes).slice(0, 3);
       if (!recent.length) return done('ask', { question: `I do not see an agent in ${project} to continue. Should I open one?`, candidates: [], answerKind: 'open-new' });
       const named = namedCandidates(recent);
@@ -320,24 +218,27 @@ function resolveAssignment({ instruction, grant = {}, sessions = [], workItems =
     }
   }
 
+  // (d2) "Prompt it…": the pane Lina last typed into, busy or not (a follow-up
+  //      queues behind its turn). With no delivery on record to be "it", a
+  //      question, never a free pane: on the ladder that guess went into the
+  //      spare pane.
+  if (reference.kind === 'none' && reference.pronoun) {
+    if (reference.exact) return reuse(reference.terminals[0], { continuation: true, reason: 'The pane I last typed into; the sentence says "it".' });
+    return done('ask', { question: `I have not typed into a pane in ${project} yet. Which one did you mean?`, candidates: [] });
+  }
+
   // (e) An explicit request for an idle pane.
-  if (selector.kind === 'idle') {
-    const family = providerFamily(scope.kindOfSession || selector.provider);
-    const free = idleUnowned(family);
-    if (free.length) return done('reuse', { targetId: free[0].id, reason: IDLE_REUSE_REASON });
-    return done('ask', { question: `No idle ${label(scope.kindOfSession || selector.provider)} pane is free in ${project}. Open a new one?`, answerKind: 'open-new' });
+  if (reference.kind === 'idle') {
+    if (free().length) return reuse(free()[0], { reason: IDLE_REUSE_REASON });
+    return done('ask', { question: `No idle ${label(wanted)} pane is free in ${project}. Open a new one?`, answerKind: 'open-new' });
   }
 
   // (f) A provider, or nothing at all. An unowned idle pane is reusable for new
   //     work; opening a second pane beside an empty one is the failure this
   //     resolver exists to stop.
-  const family = providerFamily(scope.kindOfSession || selector.provider);
-  const free = idleUnowned(family);
-  if (free.length) return done('reuse', { targetId: free[0].id, reason: IDLE_REUSE_REASON });
-  return create(selector.provider ? `No idle ${label(scope.kindOfSession || selector.provider)} pane is free in ${project}.`
-    : `No idle pane is free in ${project}.`);
+  if (free().length) return reuse(free()[0], { reason: IDLE_REUSE_REASON });
+  return create(reference.provider ? `No idle ${label(wanted)} pane is free in ${project}.` : `No idle pane is free in ${project}.`);
 }
 
-module.exports = { extractSelector, resolveAssignment, resolveAnswer, paneLabel, candidateQuestion,
-  idlePaneRequest, idlePaneCandidate, neverPrompted, ownsPaneForReuse, paneRecency, providerFamily,
-  IDLE_REUSE_REASON, RESOLVER_STOPWORDS };
+module.exports = { resolveAssignment, resolveAnswer, paneLabel, candidateQuestion,
+  idlePaneCandidate, ownsPaneForReuse, reuseOwnedPaneKeys, paneReuseOwner, paneRecency, IDLE_REUSE_REASON };

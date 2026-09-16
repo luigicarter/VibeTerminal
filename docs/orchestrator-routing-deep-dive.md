@@ -209,12 +209,11 @@ into a busy agent or start conflicting mutations in another terminal without an
 additional task-ownership rule. Opening a second terminal does not isolate files.
 
 Add task-submission ownership checks while preserving operator access for
-controls. Use canonical worktree identity from
-[`orchestratorWorkspaceIdentity.cjs`](../backend/orchestratorWorkspaceIdentity.cjs),
-which resolves junctions/subfolders and distinguishes linked worktrees. Begin with
-conservative same-worktree mutation scheduling; claimed disjoint filenames alone
-do not establish safe independent writes. Separate worktrees can permit actual
-parallel mutation when their creation/use is within the task's scope.
+controls. (Historical: the worktree lane, its canonical identity lookup and the
+parking wait this recommended were built, and then removed on 2026-09-15 by
+phase 6 of `docs/orchestrator-terminal-model-overhaul-2026-09-15.md`: a task
+owns the pane it runs in, and two panes in one worktree run side by side, which
+is how the user works. Separate worktrees were never the mechanism.)
 
 ### 4. Request, task, conversation and terminal are different identities
 

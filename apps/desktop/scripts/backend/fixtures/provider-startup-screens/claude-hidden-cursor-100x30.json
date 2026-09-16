@@ -1,0 +1,28 @@
+{
+  "kind": "claude",
+  "cols": 100,
+  "rows": 30,
+  "observation": {
+    "ok": true,
+    "id": "pane",
+    "generation": "g1",
+    "exited": false,
+    "sequence": 1,
+    "inputRevision": 0,
+    "text": " ▐▛███▛█   Claude Code v2.1.270\n▝▜██████▀  stub-standard · API Usage Billing\n  ▝▝ ▝▝    ~\\AppData\\Local\\lina-terminal-harness\\2026-09-14T19-42-52-370Z-40128-openai-gpt-5.6-…\n\n\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯  \n────────────────────────────────────────────────────────────────────────────────────────────────────\n  ⏸ manual mode on · ? for shortcuts · ← for agents",
+    "cols": 100,
+    "rows": 30,
+    "cursor": {
+      "x": 2,
+      "y": 6
+    },
+    "cursorVisible": false,
+    "alternateScreen": false,
+    "screenTruncated": false
+  },
+  "readiness": {
+    "ready": true,
+    "status": "ready",
+    "reason": "The Claude root composer is visible at its empty input cursor."
+  }
+}

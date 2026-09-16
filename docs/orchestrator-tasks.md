@@ -20,10 +20,10 @@ busy; independent work uses a separate conversation. A new worker is created
 without staged prompt text, checked for actual readiness, then receives a frozen
 operator grant and one normal observed submission. Creation is never task delivery.
 
-Related requests share a pending creation reservation. Automatic tasks wait for
-conflicting managed work in the same canonical worktree without holding terminal
-control lanes. Busy continuations retain their independent result-attribution
-requirements. Clarification and deferred steps retain the original work item and
+Related requests share a pending creation reservation. A task owns the pane it
+runs in and nothing else (since 2026-09-15): automatic work takes a free pane or
+opens one and runs at once beside the other panes of the same project. Busy
+continuations retain their independent result-attribution requirements. Clarification and deferred steps retain the original work item and
 native conversation identity; a changed conversation cannot receive their input.
 Known slow creation can recover the exact original launch without creating a
 duplicate. Unknown prompt delivery remains non-replayable.
@@ -40,12 +40,17 @@ alongside the routing call. Terminal waits do not occupy a model slot. Fully bou
 simple commands use the existing action adapters directly; reading and reasoning
 still use the workspace tool loop.
 
-Active operator loops for one terminal serialize, while an operator may inspect,
-answer or interrupt a busy terminal after an earlier loop has dispatched its work.
-Operator lanes do not wait for that earlier coding task to finish. Ordinary sends
-retain their readiness gates and result occupancy; explicit result dependencies
-always apply. Independent projects can progress together. Ordinary managed-agent submissions that may write to the same Git worktree wait for earlier work; junctions
-and subdirectories resolve to the same worktree identity. Explicit result dependencies,
+Active operator loops for one terminal serialize. Once an earlier loop has
+dispatched its work, a control (an answer, an interrupt, an inspection) and a
+continuation of the same work item may reach that pane while its turn still
+runs; a different task aimed at the same pane waits for that turn like any send.
+Ordinary sends retain their readiness gates and result occupancy; explicit result
+dependencies always apply. A task owns its pane, never the worktree: two panes in
+one project run side by side, which is how the user works and what "prompt the
+empty codex terminal" always meant. (Until 2026-09-15 a Git worktree was a lane of
+its own, with a parking wait before a managed submission, a `parallel` marker and
+an incumbent rule layered on it; all of that is gone, see
+`docs/orchestrator-terminal-model-overhaul-2026-09-15.md`, phase 6.) Explicit result dependencies,
 such as reviewing a project before fixing the findings, wait for observed terminal
 completion and read the result associated with that turn. A plain shell write, an
 idle screen, `finish_terminal` or a provisional agent response does not establish
@@ -290,8 +295,7 @@ physical microphone behavior.
 
 Run `npm run test:orchestrator`, `npm run test:voice:capture`, and
 `node scripts/frontend/orchestrator-tasks-smoke.cjs` for offline regressions. The task
-integration tests cover native/structured completion evidence and shared-worktree
-identity. The isolated Electron command smoke exercises real preload/IPC and PTY
+integration tests cover native/structured completion evidence and pane ownership. The isolated Electron command smoke exercises real preload/IPC and PTY
 delivery. The live task evaluation uses the configured Brain with disposable session
 adapters; the configured Brain passed four of four live cases without sending work
 to the user's terminals. Neither synthetic audio nor

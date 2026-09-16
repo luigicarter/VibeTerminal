@@ -1,4 +1,4 @@
-import { betterAuth } from 'better-auth';
+import { betterAuth, type BetterAuthPlugin } from 'better-auth';
 import { APIError, createAuthMiddleware } from 'better-auth/api';
 import { twoFactor } from 'better-auth/plugins';
 import { queueAfterTransactionHook } from '@better-auth/core/context';
@@ -6,7 +6,11 @@ import type { Pool } from 'pg';
 import type { Config } from '../config';
 import { queueEmail } from '../jobs/email';
 import { log } from '../monitoring/log';
-export function createAuth(config: Config, pool: Pool) {
+export function createAuth(
+  config: Config,
+  pool: Pool,
+  plugins: BetterAuthPlugin[] = [],
+) {
   return betterAuth({
     appName: 'Lina Terminal',
     baseURL: config.PUBLIC_URL,
@@ -80,7 +84,10 @@ export function createAuth(config: Config, pool: Pool) {
         );
       },
     },
-    plugins: [twoFactor({ issuer: 'Lina Terminal', trustDeviceMaxAge: 0 })],
+    plugins: [
+      twoFactor({ issuer: 'Lina Terminal', trustDeviceMaxAge: 0 }),
+      ...plugins,
+    ],
     hooks: {
       after: createAuthMiddleware(async (ctx) => {
         if (ctx.context.returned instanceof APIError) return;

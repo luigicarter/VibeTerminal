@@ -95,6 +95,13 @@ function createTerminalObservation({ maxHistoryBytes = 1024 * 1024, globalHistor
       if (!pane.disposed) {
         pane.sequence = operation.sequence;
         pane.outputAt = operation.at;
+        // Where the caret stood the last time no frame was open. Three numbers,
+        // captured per parse batch; the rows around it are still read live,
+        // because only decoration cells move inside a frame.
+        if (!pane.frameOpen) {
+          const buffer = pane.terminal.buffer.active;
+          pane.settledCaret = { x: buffer.cursorX, y: buffer.cursorY, visible: pane.cursorVisible };
+        }
         retain(pane, screen(pane), operation.at);
       }
       finish();
@@ -125,9 +132,16 @@ function createTerminalObservation({ maxHistoryBytes = 1024 * 1024, globalHistor
       // Return false so mode changes/reset still reach xterm's own handlers.
       // A displayed prompt marker with a hidden cursor can be a disabled TUI.
       pane.cursorVisible = true;
-      for (const [final, visible] of [['h', true], ['l', false]]) {
+      // Mode 2026 is synchronized output: a TUI opens it, repaints, and closes
+      // it, so a consumer never renders a half-drawn frame. Codex 0.154 wraps
+      // every sparkle frame in one, and during that frame it parks the cursor
+      // out on a decoration row. A read that lands inside an open frame would
+      // therefore report a caret that is nothing to do with the input, so the
+      // caret from the last CLOSED frame is retained and reported instead.
+      for (const [final, set] of [['h', true], ['l', false]]) {
         pane.terminal.parser.registerCsiHandler({ prefix: '?', final }, params => {
-          if (params.includes(25)) pane.cursorVisible = visible;
+          if (params.includes(25)) pane.cursorVisible = set;
+          if (params.includes(2026)) pane.frameOpen = set;
           return false;
         });
       }
@@ -194,14 +208,30 @@ function createTerminalObservation({ maxHistoryBytes = 1024 * 1024, globalHistor
     const full = screen(pane);
     const text = maxChars ? Array.from(full).slice(-maxChars).join('') : '';
     const buffer = pane.terminal.buffer.active;
-    const cursorRow = buffer.baseY + buffer.cursorY;
+    // Inside an open synchronized frame the TUI has parked the caret wherever it
+    // is painting, so the caret from the last closed frame is what the input
+    // surface is. The rows are still read live: only decoration cells move
+    // inside a frame, and the composer recognizers normalise those away.
+    const caret = pane.frameOpen && pane.settledCaret
+      ? { x: Math.min(pane.settledCaret.x, pane.terminal.cols - 1), y: Math.min(pane.settledCaret.y, pane.terminal.rows - 1), visible: pane.settledCaret.visible }
+      : { x: buffer.cursorX, y: buffer.cursorY, visible: pane.cursorVisible };
+    const cursorRow = buffer.baseY + caret.y;
     let inputLineStart = cursorRow;
     while (inputLineStart > buffer.viewportY && buffer.getLine(inputLineStart)?.isWrapped) inputLineStart--;
     let inputLinePrefix = '';
     for (let row = inputLineStart; row < cursorRow; row++) inputLinePrefix += buffer.getLine(row)?.translateToString(false, 0, pane.terminal.cols) || '';
     const inputLine = buffer.getLine(cursorRow);
     const cursorLine = { text: inputLinePrefix + (inputLine?.translateToString(true) || ''),
-      beforeCursor: inputLinePrefix + (inputLine?.translateToString(false, 0, buffer.cursorX) || ''), startRow: inputLineStart - buffer.viewportY };
+      beforeCursor: inputLinePrefix + (inputLine?.translateToString(false, 0, caret.x) || ''), startRow: inputLineStart - buffer.viewportY };
+    // The rows a composer recognizer indexes, taken before `maxChars` clips the
+    // screen text: a clipped read drops leading rows, which would silently move
+    // every row a check reads by cursor position. The window reaches two rows
+    // above the cursor (a rule or box top) and six below (a rail's closing row).
+    const contextStart = Math.max(0, caret.y - 2);
+    const contextEnd = Math.min(pane.terminal.rows - 1, caret.y + 6);
+    const contextRows = [];
+    for (let y = contextStart; y <= contextEnd; y++) contextRows.push(buffer.getLine(buffer.viewportY + y)?.translateToString(true) || '');
+    const cursorContext = { startRow: contextStart, rows: contextRows };
     let remaining = maxChars;
     let historyClipped = false;
     const history = [];
@@ -213,10 +243,10 @@ function createTerminalObservation({ maxHistoryBytes = 1024 * 1024, globalHistor
       remaining -= Array.from(value).length;
       history.unshift({ sequence: sample.sequence, at: sample.at, text: value });
     }
-    return { ok: true, source: 'terminal-screen', historySource: 'display-samples', id, generation: pane.generation, text, history, sequence: pane.sequence, outputAt: pane.outputAt, metadataAt: pane.metadataAt, readAt: Date.now(), cursor: { x: buffer.cursorX, y: buffer.cursorY }, cursorVisible: pane.cursorVisible, alternateScreen: buffer.type === 'alternate', cols: pane.terminal.cols, rows: pane.terminal.rows, fromLaunch: true, exited: !!pane.exited, truncated: pane.truncated || historyClipped || text.length < full.length || (since !== undefined && pane.history.length > 0 && since < pane.history[0].sequence - 1), historyBytes: pane.bytes,
+    return { ok: true, source: 'terminal-screen', historySource: 'display-samples', id, generation: pane.generation, text, history, sequence: pane.sequence, outputAt: pane.outputAt, metadataAt: pane.metadataAt, readAt: Date.now(), cursor: { x: caret.x, y: caret.y }, cursorVisible: caret.visible, alternateScreen: buffer.type === 'alternate', cols: pane.terminal.cols, rows: pane.terminal.rows, fromLaunch: true, exited: !!pane.exited, truncated: pane.truncated || historyClipped || text.length < full.length || (since !== undefined && pane.history.length > 0 && since < pane.history[0].sequence - 1), historyBytes: pane.bytes,
       nextBeforeSequence: pane.history.length > 1 ? pane.history.at(-1).sequence : null,
-      screenTruncated: text.length < full.length,
-      cursorLine,
+      screenTruncated: text.length < full.length, frameOpen: Boolean(pane.frameOpen),
+      cursorLine, cursorContext,
       inputRevision: pane.inputRevision, manualInputPending: pane.manualInputPending, interactionInputPending: pane.interactionInputPending, ownerRequestId: pane.ownerRequestId,
       hasEarlier: pane.history.length > 1, historyUnavailable: Boolean(pane.evictedThroughSequence) };
   }

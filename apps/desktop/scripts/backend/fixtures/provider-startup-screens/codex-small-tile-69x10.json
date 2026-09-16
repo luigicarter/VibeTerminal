@@ -1,0 +1,28 @@
+{
+ "kind": "codex",
+ "cols": 69,
+ "rows": 10,
+ "observation": {
+  "ok": true,
+  "id": "pane",
+  "generation": "g1",
+  "exited": false,
+  "sequence": 89,
+  "inputRevision": 0,
+  "text": "│ permissions: YOLO mode                                 │\n╰────────────────────────────────────────────────────────╯\n\n  Tip: Try the Desktop app. Run 'codex app' or visit\n  https://chatgpt.com/codex?app-landing-page=true\n \n \n› Ask Codex to do anything\n \n  gpt-6-astra high · ~\\Documents\\vibeTerminal\\apps\\desktop\\.tmp\\prov…",
+  "cols": 69,
+  "rows": 10,
+  "cursor": {
+   "x": 2,
+   "y": 7
+  },
+  "cursorVisible": true,
+  "alternateScreen": false,
+  "screenTruncated": false
+ },
+ "readiness": {
+  "ready": true,
+  "status": "ready",
+  "reason": "The loaded Codex root composer is visible at its empty input cursor."
+ }
+}

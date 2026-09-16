@@ -6,7 +6,7 @@ const { fitMessages } = require('../../backend/orchestratorBudget.cjs');
 const { normalizeIntent, authorizeIntentAction } = require('../../backend/orchestratorIntent.cjs');
 
 // Supply shared property definitions separately, just as the workspace tool does.
-const names = 'kind grantId targetId stepId observationToken text observationSequence inputRevision editInput keys mouse inputPurpose submit requestId revision answerText answerTexts decision outcome view cwd query provider offset limit beforeSequence maxChars reference cursor root parent name kindOfSession path preferenceId speechText responseTurn'.split(' ');
+const names = 'kind grantId targetId stepId observationToken text editInput keys mouse inputPurpose submit requestId revision answerText answerTexts decision outcome view cwd query provider offset limit beforeSequence maxChars reference cursor root parent name kindOfSession path preferenceId speechText responseTurn'.split(' ');
 const kinds = 'navigate list_roots list_sessions read_session list_conversations read_conversation search_conversation resume_conversation search_files create_project focus_session stage_draft send_prompt interrupt restart close create_session add_project list_setups read_setup launch_setup save_setup list_preferences remember_preference forget_preference ask_user respond list_work answer_question permission terminal_interact finish_terminal'.split(' ');
 const flat = { properties: Object.fromEntries(names.map(name => [name, { type: 'string', description: name }])) };
 flat.properties.kind.enum = kinds;
@@ -44,12 +44,17 @@ test('finish advertises the accepted operator payload and excludes native input 
   }
 });
 
-test('operator descriptions make redundant metadata optional without changing legacy requirements', () => {
+// The model has no freshness numbers to supply or copy: the read that issued
+// the observation token is what binds native input, and the application captures
+// the input surface there. Neither field is on the tool at all any more.
+test('operator descriptions expose no screen counters for the model to copy', () => {
   for (const kind of ['send_prompt', 'interrupt', 'terminal_interact']) {
-    assert.match(branch(kind).description, /observationSequence and inputRevision are optional/);
-    assert.match(branch(kind).description, /copy exactly observation.sequence and observation.inputRevision/);
+    assert.doesNotMatch(branch(kind).description, /observationSequence|inputRevision/);
     assert.match(branch(kind).description, /are observed for you.*focus_session, terminal_interact and finish_terminal still need your own earlier read_session round/);
-    for (const name of ['stepId', 'observationToken', 'inputRevision']) assert.equal(branch(kind).required.includes(name), false);
+    for (const name of ['stepId', 'observationToken', 'observationSequence', 'inputRevision']) {
+      assert.equal(branch(kind).required.includes(name), false, `${kind}.${name}`);
+      if (name.startsWith('observationS') || name === 'inputRevision') assert.equal(Object.hasOwn(branch(kind).properties, name), false, `${kind}.${name}`);
+    }
   }
   // The application observes and identifies these operations itself, so neither
   // field is model-facing; the operations it cannot observe for still carry both.
@@ -59,7 +64,6 @@ test('operator descriptions make redundant metadata optional without changing le
   for (const kind of ['focus_session', 'terminal_interact', 'finish_terminal']) {
     for (const name of ['stepId', 'observationToken']) assert.equal(Object.hasOwn(branch(kind).properties, name), true, `${kind}.${name}`);
   }
-  assert.equal(branch('terminal_interact').required.includes('observationSequence'), true);
   assert.equal(branch('send_prompt').required.includes('text'), false);
   assert.equal(branch('send_prompt').properties.keys, undefined);
   assert.equal(branch('focus_session').properties.inputRevision, undefined);
@@ -98,12 +102,12 @@ test('compact scopes retain root constraints and exact per-kind field boundaries
   assert.equal(compact.additionalProperties, false);
   assert.deepEqual(compact.required, ['kind']);
   assert.deepEqual(compact.properties.keys, flat.properties.keys);
-  assert.match(compact.properties.inputRevision.description, /observation.inputRevision/);
+  assert.equal(Object.hasOwn(compact.properties, 'inputRevision'), false);
   for (const item of compact.anyOf) {
     const original = branch(item.properties.kind.enum[0]);
     assert.equal(item.additionalProperties, false);
     assert.deepEqual(Object.keys(item.properties), Object.keys(original.properties));
-    assert.deepEqual(['kind', ...(item.required || [])], original.required.filter(name => item.properties.kind.enum[0] !== 'terminal_interact' || name !== 'observationSequence'));
+    assert.deepEqual(['kind', ...(item.required || [])], original.required);
   }
   const finish = compact.anyOf.find(item => item.properties.kind.enum[0] === 'finish_terminal');
   assert.equal(Object.hasOwn(finish.properties, 'inputRevision'), false);
@@ -135,7 +139,7 @@ test('inspection scope exposes reads and only bounded terminal inspection contro
   const interaction = compact.anyOf.find(item => item.properties.kind.enum[0] === 'terminal_interact');
   assert.equal(Object.hasOwn(interaction.properties, 'editInput'), false);
   assert.ok(Object.hasOwn(interaction.properties, 'inputPurpose'));
-  assert.equal((interaction.required || []).includes('observationSequence'), false);
+  assert.equal(Object.hasOwn(interaction.properties, 'observationSequence'), false);
   assert.equal(interaction.additionalProperties, false);
   assert.deepEqual(compact.properties.keys, flat.properties.keys);
   assert.deepEqual(branch('terminal_interact').properties.inputPurpose.enum, ['task', 'interaction']);

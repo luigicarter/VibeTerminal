@@ -2,6 +2,7 @@ const readline = require("readline");
 const { encodeTerminalControls } = require('../shared/terminalControls.cjs');
 const { createTerminalHistory } = require('./terminalHistory.cjs');
 const { windowsPtyHostOptions, describePtyHost, spawnPty } = require('./ptyHostOptions.cjs');
+const { validSurfaceEvidence } = require('./orchestratorInputSurface.cjs');
 const sessions = new Map();
 let transportBlocked = false;
 const outgoingEvents = [];
@@ -562,7 +563,7 @@ function handleMessage(message) {
 // Keep the draft and the one final Enter inside one reserved host action. Native
 // composers can treat Enter in the paste write as pasted content. A short gap
 // lets their input parser finish; it does not prove that the agent starts work.
-function stageNativeSubmission(payload, session, data, submitData, resultKey, result) {
+function stageNativeSubmission(payload, session, data, submitData, resultKey, result, extra = {}) {
   const terminal = session.terminal, revision = session.inputRevision;
   const owner = session.ownerRequestId, cols = session.cols, rows = session.rows;
   const deadlineAt = payload.deadlineAt ?? Date.now() + 15000;
@@ -573,7 +574,7 @@ function stageNativeSubmission(payload, session, data, submitData, resultKey, re
     if (ok) {
       session.manualInputPending = false; session.interactionInputPending = false; session.ownerRequestId = null;
       emit({ type: 'input-state', id: session.id, generation: session.generation, ...inputState(session) });
-      result(true, 'written');
+      result(true, 'written', undefined, extra);
     } else result(false, 'unknown', error, { submission: 'unconfirmed', partialWrite: true });
   };
   const cancel = () => finish(false, 'Submission cancelled after text may have reached the terminal. Text may remain in the composer; no automatic Enter or retry.');
@@ -589,7 +590,12 @@ function stageNativeSubmission(payload, session, data, submitData, resultKey, re
     catch { return finish(false, 'The native recipient exited after text was staged. Text may remain in the composer; submission is unconfirmed.'); }
     try { terminal.write(submitData); finish(true); }
     catch (error) { finish(false, error.message); }
-  }, NATIVE_SUBMIT_DELAY_MS);
+  // Codex reads a long write as a paste ("[Pasted Content 1257 chars]") and
+  // keeps consuming it past the fixed gap, so an Enter sent then is swallowed
+  // and the prompt sits unsent in the composer (measured on the completion
+  // ladder, 2026-09-15). The gap grows with a long text: half a millisecond per
+  // character past the first four hundred, at most a second and a half.
+  }, Math.min(1500, NATIVE_SUBMIT_DELAY_MS + Math.max(0, Math.ceil((String(data).length - 400) / 2))));
 }
 
 function handleAction(payload, strict) {
@@ -615,15 +621,56 @@ function handleAction(payload, strict) {
     if (payload.kind === "interaction") {
       const evidence = payload.interactionEvidence, pid = payload.expectedAgentPid;
       const age = Date.now() - Number(evidence?.observedAt);
-      if (payload.generation == null || !Number.isSafeInteger(pid) || pid <= 0 || evidence?.id !== payload.id || evidence?.generation !== session.generation || evidence?.pid !== pid || !Number.isSafeInteger(evidence?.sequence) || evidence.sequence !== session.sequence || !Number.isFinite(age) || age < 0 || age > 5000 || (evidence.shell && pid !== session.terminal.pid)) return result(false, "stale-observation", "Fresh generation-bound terminal interaction evidence is required.");
+      // Division of labour with the main process. The host proves, from state
+      // only it owns: no INPUT since the observation, the same geometry, the
+      // same live recipient, the same generation, this request's ownership. Main
+      // proves, from a decoder the host does not have: the same INPUT SURFACE —
+      // caret, composer, and what stands left of the caret. Neither can do the
+      // other's half, so both run on every write.
+      //
+      // What the host does NOT do any more is compare `session.sequence`. That
+      // counter counts PTY output chunks: an animated composer bumps it several
+      // times a second while nothing about the input moves, so as a freshness
+      // fence it refused every send into an idle Codex 0.154 pane, forever. It
+      // survives here only as the diagnostic below.
+      const surface = evidence?.surface;
+      if (!validSurfaceEvidence(surface)) return result(false, "invalid-action", "Malformed terminal input surface evidence.");
+      // The diagnostic names the field that failed and never a fragment of the
+      // screen: a refusal here used to say only "fresh evidence is required",
+      // which told nobody which of eight facts had moved.
+      const staleField = payload.generation == null ? 'generation' : !Number.isSafeInteger(pid) || pid <= 0 ? 'pid'
+        : evidence?.id !== payload.id ? 'id' : evidence?.generation !== session.generation ? 'generation'
+        // The observation is stamped in the main process and the age is read
+        // here; a clock slewed by a millisecond between the two made a fresh
+        // observation "age:-1" and refused a first prompt 29 model calls in a
+        // row on a loaded machine. Skew is not staleness: a second of it is
+        // tolerated, five seconds of real age is still the ceiling.
+        : evidence?.pid !== pid ? 'evidence-pid' : !Number.isFinite(age) || age < -1000 || age > 5000 ? `age:${Math.round(age)}`
+        : evidence.shell && pid !== session.terminal.pid ? 'shell-pid' : null;
+      if (staleField) return result(false, "stale-observation", `Fresh generation-bound terminal interaction evidence is required (${staleField}).`);
       if (!Number.isSafeInteger(evidence.cols) || evidence.cols !== session.cols || !Number.isSafeInteger(evidence.rows) || evidence.rows !== session.rows) return result(false, "stale-observation", "The terminal geometry changed after the last observation.");
       try { process.kill(pid, 0); } catch { return result(false, "recipient-unavailable", "The expected input recipient is no longer alive."); }
+      // INPUT freshness is the host's whole remaining fence, and it is mandatory:
+      // the observed input revision is the only thing standing between that
+      // surface and a keystroke since.
       const freshInput = Number.isSafeInteger(evidence.inputRevision) && evidence.inputRevision === session.inputRevision;
-      if ((payload.operator || payload.editInput || evidence.inputRevision !== undefined) && !freshInput) return result(false, "stale-observation", "Read the current terminal input revision before interacting.");
+      if (!freshInput) return result(false, "stale-observation", "Read the current terminal input revision before interacting.");
+      // How far output ran past the observation, for diagnostics only: never a
+      // gate, and it carries no screen content.
+      const surfaceEcho = { surfaceFingerprint: surface.fingerprint, sequenceAtWrite: session.sequence };
       if (payload.operator && (typeof payload.requestId !== 'string' || !payload.requestId)) return result(false, "invalid-action", "Operator controls require a request owner.");
       const encoded = encodeTerminalControls(payload, session);
       if (!encoded.ok) return result(false, encoded.status || "invalid-action", encoded.error);
-      if (session.manualInputPending && !payload.editInput) return result(false, "input-buffer-occupied", "This terminal may contain unsent user input.");
+      // The keystroke latch is conservative by construction: any key that is not
+      // Enter or Ctrl-C sets it, and output never clears it, so one arrow key
+      // could lock a pane out for the rest of its life. A composer main has just
+      // proved empty, at this exact input revision, is the evidence that clears
+      // it — before inputChanged below, so the emitted input-state and the
+      // decoder's mirror of it converge on the same fact.
+      if (session.manualInputPending && !payload.editInput) {
+        if (surface.composerEmpty !== true) return result(false, "input-buffer-occupied", "This terminal may contain unsent user input.");
+        session.manualInputPending = false;
+      }
       if (session.interactionInputPending && session.ownerRequestId !== (payload.requestId || null) && !payload.editInput) return result(false, "input-buffer-occupied", "Another request owns the staged terminal input.");
       if (session.heldMouseButton && session.mouseOwnerRequestId !== (payload.requestId || null) && !payload.editInput) return result(false, "input-buffer-occupied", "Another request owns the held mouse button.");
       if (session.heldMouseButton && payload.mouse && !payload.mouse.button.startsWith('wheel-') && payload.mouse.button !== session.heldMouseButton) return result(false, 'invalid-action', 'Release the currently held mouse button before using another button.');
@@ -642,7 +689,7 @@ function handleAction(payload, strict) {
       }
       inputChanged(session);
       if (encoded.text && submitted && !evidence.shell) {
-        return stageNativeSubmission(payload, session, encoded.data.slice(0, -1), encoded.data.slice(-1), resultKey, result);
+        return stageNativeSubmission(payload, session, encoded.data.slice(0, -1), encoded.data.slice(-1), resultKey, result, surfaceEcho);
       }
       session.terminal.write(encoded.data);
       if (payload.mouse && ['up', 'click'].includes(payload.mouse.action) && payload.mouse.button === session.heldMouseButton) {
@@ -653,7 +700,7 @@ function handleAction(payload, strict) {
         session.manualInputPending = false; session.interactionInputPending = false; session.ownerRequestId = null;
         emit({ type: 'input-state', id: session.id, generation: session.generation, ...inputState(session) });
       }
-      return result(true, "written"); // ConPTY acceptance, not foreground ownership or answer consumption.
+      return result(true, "written", undefined, surfaceEcho); // ConPTY acceptance, not foreground ownership or answer consumption.
     }
     if (payload.expectedAgentPid !== undefined) {
       const pid = Number(payload.expectedAgentPid);

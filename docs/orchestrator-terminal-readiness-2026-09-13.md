@@ -56,8 +56,20 @@ unreachable in production.
 for Grok, Kimi (and Kimi custom), Qwen, Gemini and OpenCode, each grounded in a
 recorded screen, and Open Codex and Codex Web reuse the Codex recognizer because
 both run the Codex TUI. Kimi hides the terminal cursor while its composer is
-focused, so for that form alone the composer box and the cursor column are the
+focused, so for that form the composer box and the cursor column are the
 evidence and a hidden cursor is accepted.
+
+Claude joined it on 2026-09-14. Claude Code 2.1.270 authenticated through a
+custom endpoint — `ANTHROPIC_BASE_URL` with `ANTHROPIC_AUTH_TOKEN`, which is
+what every Open Claude Code (`claude-custom`) pane runs — paints its composer
+and never shows the cursor, so requiring a visible one meant no first prompt
+could ever be typed into such a pane: every send waited out its sixty seconds
+and reported "A visible native input cursor has not been observed." The
+recognizer now accepts a hidden cursor for the `claude` form as well, on the
+same terms as Kimi: the rules above and below the row, the pointer, and the
+caret column remain the evidence, and a screen without them is still refused.
+The recorded screen is `claude-hidden-cursor-100x30`; the subscription-
+authenticated `claude-120x36` still shows its cursor and both read ready.
 
 A kind with no verified recognizer — Cursor Agent, whose composer has never been
 captured here — reports `unsupported`, and `waitForNativePromptReady` now treats
@@ -174,7 +186,7 @@ in a scratch git repo under `apps/desktop/.tmp/provider-startup-probe`.
 | Kind | Composer recognizer | Grounded in | Probe result |
 | --- | --- | --- | --- |
 | `codex` | Codex header + `›` composer | recorded, Codex 0.154.0 | ready 5.9 s, prompt accepted |
-| `claude` / `claude-custom` | name + rules + `❯`/`>` + cursor | recorded, Claude Code 2.1.270 | ready 4.3 s, prompt accepted |
+| `claude` / `claude-custom` | name + rules + `❯`/`>`; a hidden cursor accepted | recorded, Claude Code 2.1.270 on a subscription and on a custom endpoint | ready 4.3 s, prompt accepted |
 | `grok` | `Grok` + box composer | recorded, Grok Build 1.0.25 | ready 3.5 s on 1.0.30, prompt accepted |
 | `kimi` / `kimi-custom` | box composer, hidden cursor accepted | recorded, Kimi Code 0.42.0 and bundled 0.42.0, re-recorded 2026-09-13 at cursor (5,16) / (5,17) | ready 4.3 s on 0.42.0; prompt accepted on the 0.27.0 / 0.29.0 run |
 | `qwen` | rules + `>` + cursor | recorded, Qwen Code 0.21.12 | ready 5.8 s on 0.23.3, prompt accepted |

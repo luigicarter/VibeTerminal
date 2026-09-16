@@ -607,8 +607,19 @@ function boundedMemory(block, { maxBytes = 3072 } = {}) {
 // be checked and repaired, which is the correction path's work, not a lookup.
 const TEMPLATES = [
   { kind: 'recent-actions', pattern: /\bwhat (?:did|have) you (?:do|done|been doing)\b/i },
+  // "Which terminal did you give the full screen bug to?" — a lookup over what
+  // was typed where, by the words of the task, never by a pane the model names.
+  { kind: 'gave-to', pattern: /\b(?:which|what) (?:terminal|agent|pane|one) did (?:you|i) (?:give|send|assign|hand|put)\s+(.{2,80}?)\s+(?:to|in|into)\b/i, capture: 'taskWords' },
+  // "There's a terminal that needs me. Which one is it?" — the roster knows.
+  { kind: 'needs-me', pattern: /\b(?:terminal|agent|pane|one)\b[^.?!]{0,40}?\bneeds? (?:me|my (?:attention|input|answer|help))\b|\b(?:which|what) (?:one|terminal|agent|pane) (?:needs (?:me|my)|is waiting|wants)\b/i },
+  // "What was the last terminal that was done?", "There's a terminal that's
+  // done, can you see it?" — the most recently finished pane, from the roster.
+  { kind: 'last-done', pattern: /\b(?:what|which) (?:was|is) the last (?:terminal|agent|pane|one)(?: that)?(?: was| got| is)? (?:done|finished|completed)\b|\blast (?:terminal|agent|pane|one) (?:that )?(?:was |got )?(?:done|finished|completed)\b|\b(?:terminal|agent|pane|one)(?: that)?(?:['’]s| is) done\b[^.?!]*[.?!]?\s*(?:can you see|which one|where)/i },
+  // "What's going on in the Vibe terminals, tell me the progress?" — a state
+  // report over every pane in view, from the roster, no model.
+  { kind: 'status-all', pattern: /\bwhat(?:['’]s| is) going on\b[^.?!]*\b(?:terminals?|agents?|panes?|projects?)\b|\btell me the progress\b|\bprogress (?:report|update)\b|\bhow (?:are|is) (?:the |my |all the )?(?:terminals?|agents?|panes?)\b|\bwhat are (?:the|my|all the) (?:terminals?|agents?|panes?) doing\b/i },
   { kind: 'last-prompt', pattern: /\bwhat (?:was|were) the last prompt\b/i },
-  { kind: 'last-prompt', pattern: /\bdid you (?:enter|send|put in|paste|type|submit)\b[^?.!]{0,40}?\bprompt\b/i },
+  { kind: 'last-prompt', pattern: /\bdid you (?:enter|send|put in|paste|type|submit)\b[^?.!]{0,40}?\bprompt\b/i, confirm: true },
   { kind: 'last-prompt', pattern: /\bwhich (?:pane|terminal|one) did (?:i|you) (?:send|put|paste|type)\b/i },
   { kind: 'last-error', pattern: /\bwhat (?:was|is) (?:that|the|my|the last) (?:error|failure|problem|issue)\b/i },
   { kind: 'pane-result', pattern: /\bwhat(?:['’]s| is| was| were)? the (?:result|results|outcome|findings?)\b/i },
@@ -624,12 +635,17 @@ function memoryQuestion(instruction) {
   for (const template of TEMPLATES) {
     const match = template.pattern.exec(sentence);
     if (!match) continue;
-    const result = { kind: template.kind };
+    const result = { kind: template.kind, ...(template.confirm && { confirm: true }) };
     if (template.capture === 'paneWords') {
       const words = text(match[1], 120);
       // "you" is the assistant, not a pane; that sentence is a recent-actions ask.
       if (!words || /^(?:you|it|that|this|they|he|she)$/i.test(words)) continue;
       result.paneWords = words;
+    }
+    if (template.capture === 'taskWords') {
+      const words = text(match[1], 120).replace(/^(?:the|that|this|my|our)\s+/i, '');
+      if (!words) continue;
+      result.taskWords = words;
     }
     const minutes = MINUTES.exec(sentence);
     if (minutes) result.minutes = Math.min(1440, Number(minutes[1]) || 0) || undefined;
@@ -640,16 +656,81 @@ function memoryQuestion(instruction) {
 
 // Answers the matched question from the store, or returns null when the store
 // does not hold the answer and the brain should take the request as it does now.
-function answerMemoryQuestion(store, match, { project, at = Date.now() } = {}) {
+function answerMemoryQuestion(store, match, { project, at = Date.now(), terminals = [] } = {}) {
   if (!store || !match) return null;
   const scoped = rows => {
     const here = project ? rows.filter(row => projectKey(row.project) === projectKey(project)) : [];
     return here.length ? here : rows;
   };
+  // The roster, as the app holds it: the panes in view with their live state.
+  // Answers about "which terminal needs me / is done / what is everyone doing"
+  // come from here, so they are true at the moment they are spoken.
+  // The panes as the terminal model holds them (orchestratorTerminalModel.cjs):
+  // the same objects the Brain's roster and the renderer read, so what Lina
+  // says here is what she shows and what assignment acts on. The handle is the
+  // name, `state` the one pane-state reading, `on` the task, `result` the last
+  // recorded result.
+  const { spokenName } = require('./orchestratorTerminalModel.cjs');
+  const roster = (Array.isArray(terminals) ? terminals : []).filter(t => t && typeof t === 'object' && t.id);
+  const paneProject = t => t.project || '';
+  const inProject = project ? roster.filter(t => projectKey(paneProject(t)) === projectKey(project)) : [];
+  const panes = inProject.length ? inProject : roster;
+  const paneName = t => text(spokenName(t), CAPS.paneName);
+  const paneState = t => t.state;
+  const STATE_PHRASE = { waiting: 'is waiting on you', working: 'is working', done: 'is done', idle: 'is idle', starting: 'is still starting', stopped: 'has stopped' };
+  const episodeFor = t => ({ project: paneProject(t) || project || null, pane: { id: t.id, name: paneName(t), provider: t.provider || null } });
+  const taskOf = t => t.on ? text(t.on, 100) : undefined;
+  const summaryOf = (t, rows) => rows.find(row => row.resultExcerpt && row.pane?.id === t.id)?.resultExcerpt || (t.result ? text(t.result, CAPS.result) : undefined);
+  if (match.kind === 'status-all') {
+    if (!panes.length) return null;
+    const listed = panes.slice(0, 6);
+    // "T4 (Codex terminal) is working on “Investigate the parser.”": the handle
+    // the user can say back, what runs there, and what it is doing.
+    const describe = s => `${paneName(s)} (${['terminal', 'shell'].includes(s.provider) ? 'shell' : `${s.providerLabel || 'agent'} terminal`})`;
+    const report = listed.map(s => `${describe(s)} ${STATE_PHRASE[paneState(s)]}${s.on && ['working', 'waiting', 'done'].includes(paneState(s)) ? ` on “${text(s.on, 60)}”` : ''}`).join('; ');
+    const more = panes.length > listed.length ? ` and ${panes.length - listed.length} more` : '';
+    return { key: 'status-all', episode: episodeFor(listed[0]), context: { report: `${report}${more}`.slice(0, 400) } };
+  }
+  if (match.kind === 'needs-me') {
+    const waiting = panes.filter(s => paneState(s) === 'waiting');
+    // A pane the roster reads as working may be the one asking a question its
+    // provider never reported. Only a workspace with nothing working can say
+    // that nothing is waiting; otherwise the brain reads the panes themselves.
+    if (!waiting.length) return panes.some(s => paneState(s) === 'working') ? null
+      : { key: 'needs-me-none', episode: { project: project || null, pane: null }, context: {} };
+    if (waiting.length === 1) return { key: 'needs-me', episode: episodeFor(waiting[0]),
+      context: { pane: paneName(waiting[0]), project: paneProject(waiting[0]) || undefined, task: taskOf(waiting[0]) } };
+    return { key: 'needs-me-several', episode: episodeFor(waiting[0]),
+      context: { panes: waiting.slice(0, 4).map(s => `${paneName(s)}${taskOf(s) ? ` (${taskOf(s)})` : ''}`).join(', ') } };
+  }
+  if (match.kind === 'last-done') {
+    const done = panes.filter(s => paneState(s) === 'done')
+      .sort((a, b) => (b.endedAt || 0) - (a.endedAt || 0));
+    if (!done.length) return null;
+    return { key: 'last-done', episode: episodeFor(done[0]), context: { pane: paneName(done[0]), project: paneProject(done[0]) || undefined } };
+  }
+  if (match.kind === 'gave-to') {
+    const rows = store.recall({ query: match.taskWords, limit: 10 }).filter(row => row.pane?.name && row.typedText);
+    if (rows.length) {
+      const [row] = rows;
+      return { key: 'gave-to', episode: row,
+        context: { pane: row.pane.name, task: match.taskWords, typedText: row.typedText } };
+    }
+    // No ledger row (the pane may have been started by hand): a pane whose own
+    // title carries the task's words is still a recorded fact about where the
+    // work lives, so it is answered from the roster.
+    const wanted = topicsFrom([match.taskWords]);
+    const titled = wanted.length ? panes.filter(t => { const have = topicsFrom([t.on, t.name].filter(Boolean)); return wanted.every(word => have.includes(word)); }) : [];
+    if (titled.length === 1) return { key: 'gave-to-pane', episode: episodeFor(titled[0]),
+      context: { pane: paneName(titled[0]), task: match.taskWords, project: paneProject(titled[0]) || undefined } };
+    return null;
+  }
   if (match.kind === 'last-prompt') {
     const [latest] = scoped(store.recall({ limit: 20 })).filter(row => row.typedText);
     if (!latest) return null;
-    return { key: 'last-prompt', episode: latest,
+    // "Did you enter that prompt?" is answered yes or no before the record.
+    const delivered = ['delivered-started', 'delivered-unconfirmed'].includes(latest.outcome);
+    return { key: match.confirm ? (delivered ? 'last-prompt-confirmed' : 'last-prompt-denied') : 'last-prompt', episode: latest,
       context: { pane: latest.pane?.name || latest.pane?.provider || undefined, typedText: latest.typedText, outcome: latest.outcome } };
   }
   if (match.kind === 'last-error') {
@@ -659,10 +740,28 @@ function answerMemoryQuestion(store, match, { project, at = Date.now() } = {}) {
   }
   if (match.kind === 'pane-result') {
     const rows = match.paneWords ? store.recall({ query: match.paneWords, limit: 10 }) : scoped(store.recall({ limit: 20 }));
-    const answered = rows.find(row => row.resultExcerpt);
-    if (!answered) return null;
-    return { key: 'pane-result', episode: answered,
-      context: { pane: answered.pane?.name || undefined, summary: answered.resultExcerpt } };
+    // "There's a terminal that's done, what's the result?" names no pane, so
+    // the answer must be about a pane that has in fact finished: a result row
+    // for some other pane is not it. Two finished panes are a question; one
+    // with no recorded result is the brain's to read.
+    const finished = panes.filter(s => paneState(s) === 'done');
+    // Several finished panes are all answered at once from what is on record;
+    // a finished pane with no recorded result is named as such rather than
+    // turning the whole answer into a question. "Which one do you mean" is
+    // kept for when nothing at all is on record.
+    if (!match.paneWords && finished.length > 1) {
+      const told = finished.slice(0, 4).map(s => ({ pane: paneName(s), summary: summaryOf(s, rows) }));
+      const known = told.filter(item => item.summary), unknown = told.filter(item => !item.summary);
+      if (known.length) return { key: 'pane-results', episode: episodeFor(finished[0]),
+        context: { results: `${known.map(item => `${item.pane} came back with: ${String(item.summary).replace(/\s*[.!?]*$/, '')}`).join('. ')}.`
+          + (unknown.length ? ` ${unknown.map(item => item.pane).join(', ')} finished with no result on record.` : '') } };
+      return { key: 'pane-result-several', episode: episodeFor(finished[0]), context: { panes: told.map(item => item.pane).join(', ') } };
+    }
+    const answered = rows.find(row => row.resultExcerpt && (match.paneWords || !finished.length || finished.some(s => s.id === row.pane?.id)));
+    if (answered) return { key: 'pane-result', episode: answered, context: { pane: answered.pane?.name || undefined, summary: answered.resultExcerpt } };
+    if (!match.paneWords && finished.length === 1 && summaryOf(finished[0], rows)) return { key: 'pane-result', episode: episodeFor(finished[0]),
+      context: { pane: paneName(finished[0]), summary: summaryOf(finished[0], rows) } };
+    return null;
   }
   if (match.kind === 'recent-actions') {
     const since = match.minutes ? at - match.minutes * 60000 : undefined;

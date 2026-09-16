@@ -54,10 +54,19 @@ function createWorkspaceExecutor({ getSessions, getRequests, getEpoch, isDispose
     if (!raw || typeof raw !== 'object' || typeof raw.kind !== 'string') throw new Error('Invalid action.');
     let action = structuredClone(raw);
     if (action.keys !== undefined) action.keys = normalizeTerminalKeys(action.keys);
+    // A mouse "move" beside typed text or keys is a no-op the model adds by habit
+    // (every tier-5 navigation step on the completion ladder carried one, and
+    // every one was refused for mixing controls). It is dropped; a click beside
+    // typed text is still refused, because that is two steps.
+    if (action.kind === 'terminal_interact' && action.mouse?.action === 'move' && (action.text || action.keys?.length || action.submit)) delete action.mouse;
     let effectReceiptKey;
-    if (intent && Object.keys(action).some(k => !['kind', 'view', 'targetId', 'text', 'path', 'cwd', 'root', 'query', 'parent', 'name', 'kindOfSession', 'preferenceId', 'provider', 'reference', 'limit', 'offset', 'cursor', 'since', 'beforeSequence', 'maxChars', 'grantId', 'requestId', 'revision', 'observationSequence', 'keys', 'mouse', 'inputPurpose', 'submit', 'stepId', 'observationToken', 'inputRevision', 'editInput', 'answerText', 'answerTexts', 'decision', 'outcome', 'responseTurn', 'speechText', 'watchUntil', ...agentTools.FIELDS].includes(k))) throw new Error('Unexpected tool argument.');
+    if (intent && Object.keys(action).some(k => !['kind', 'view', 'targetId', 'text', 'path', 'cwd', 'root', 'query', 'parent', 'name', 'kindOfSession', 'preferenceId', 'provider', 'reference', 'limit', 'offset', 'cursor', 'since', 'beforeSequence', 'maxChars', 'grantId', 'requestId', 'revision', 'keys', 'mouse', 'inputPurpose', 'submit', 'stepId', 'observationToken', 'editInput', 'answerText', 'answerTexts', 'decision', 'outcome', 'responseTurn', 'speechText', 'watchUntil', ...agentTools.FIELDS].includes(k))) throw new Error('Unexpected tool argument.');
     let observationToken = action.observationToken;
     delete action.observationToken;
+    // Only a token this request's operator actually minted counts as supplied.
+    // An invented one is treated as absent, so the action binds to the latest
+    // real read instead of failing nine times in a row on the same sentence.
+    const suppliedToken = Object.hasOwn(raw, 'observationToken') && Boolean(intent?.operatorObservations?.known?.(observationToken));
     let operatorGrant, operatorObservation, operatorState, autoObservationToken, autoObservationFailed = false;
     action.kind = ({ send: 'send_prompt', kill: 'close', respond_permission: 'permission' })[action.kind] || action.kind;
     if (intent && action.kind === 'open_file') throw new Error('Use Workspace tools to open files or folders in an external application. Voice controls stay inside Lina Terminal.');
@@ -190,10 +199,22 @@ function createWorkspaceExecutor({ getSessions, getRequests, getEpoch, isDispose
       if (intent && intent.readBudget.remainingBytes < 512) return { ok: true, status: 'read-step-limit', contextNote: 'Process the excerpts already read, then fetch more in the next tool step.' };
       check(); if (activity.touch(scope, target, action.kind)) emit();
       const readSource = require('./orchestratorReadRecovery.cjs').readSource(target, true);
+      // beforeSequence pages back through retained display samples. A Brain that
+      // sends 1 (there is nothing before the first sample) or pages past the
+      // start is reading the current screen, and a current read is the one that
+      // mints the observation token every later step needs; treating it as a
+      // history page left the Brain reading, finishing, and being refused until
+      // the action limit (T3.3 and T4.5 on the completion ladder, 33 calls each).
+      const maxChars = intent ? Math.min(Number(action.maxChars) || 4000, 4000) : Number(action.maxChars) || 16000;
+      let paging = Number.isSafeInteger(action.beforeSequence) && action.beforeSequence > 1;
       let data;
-      try { data = await readSession({ id, generation: target.generation, maxChars: intent ? Math.min(Number(action.maxChars) || 4000, 4000) : Number(action.maxChars) || 16000, beforeSequence: action.beforeSequence }); }
+      try {
+        data = await readSession({ id, generation: target.generation, maxChars, ...(paging && { beforeSequence: action.beforeSequence }) });
+        if (paging && data?.status === 'history-end') { paging = false; data = await readSession({ id, generation: target.generation, maxChars }); }
+      }
       catch (error) { check(); return { ok: false, status: 'unavailable', error: cleanError(error), readSource }; }
       check();
+      const currentRead = !paging;
       if (data?.ok === false) return { ok: false, status: data.status || 'unavailable', error: data.error || 'The terminal observation is unavailable.', readSource };
       const current = await getCurrentSession(id); check();
       if (!current || current.generation !== binding.target.generation || current.launchToken !== binding.target.launchToken ||
@@ -202,18 +223,24 @@ function createWorkspaceExecutor({ getSessions, getRequests, getEpoch, isDispose
       }
       if (!routingBindingMatches(binding, current)) return { ok: false, status: 'conversation-changed',
         error: 'The native conversation changed during this read. Read the current conversation again.', readSource };
-      if (action.beforeSequence === undefined && intent?.commandPlan.grants.some(grant => grant.inspection && grant.targets.some(item => item.id === target.id && item.generation === target.generation))) {
+      // The decoder's unclipped rows around the cursor exist so the composer
+      // recognizers survive the model's 4000-character read budget. They are
+      // application evidence about the input surface, not part of the screen
+      // excerpt the model reads, so they never leave this function.
+      const visible = data && typeof data === 'object' && data.cursorContext !== undefined
+        ? Object.fromEntries(Object.entries(data).filter(([key]) => key !== 'cursorContext')) : data;
+      if (currentRead && intent?.commandPlan.grants.some(grant => grant.inspection && grant.targets.some(item => item.id === target.id && item.generation === target.generation))) {
         intent.inspectionEvidence ||= createInspectionEvidence();
-        intent.inspectionEvidence.observe(target, redact(data));
+        intent.inspectionEvidence.observe(target, redact(visible));
       }
       if (data?.completedResult && workHistory.enrich(target, data.completedResult)) emit();
       if (intent && identifyReadTarget(intent, getSessions())?.id === id) bindTarget(target, intent);
-      const result = { ok: true, readSource, terminalNavigationGuide: terminalNavigationGuide(target), observation: redact(data), pendingInteractions: redact(getRequests().filter(r => r.sessionId === id && r.state === 'pending' && (r.generation === undefined || r.generation === target.generation))) };
+      const result = { ok: true, readSource, terminalNavigationGuide: terminalNavigationGuide(target), observation: redact(visible), pendingInteractions: redact(getRequests().filter(r => r.sessionId === id && r.state === 'pending' && (r.generation === undefined || r.generation === target.generation))) };
       // A decoded read is the only place this process sees a root composer. Offer
       // it as startup evidence for already submitted task prompts; the scheduler
       // owns whether it proves anything. The raw screen never leaves the backend.
-      if (action.beforeSequence === undefined) tasks.reconcile(getSessions(), { observations: [{ session: target, observation: data }] });
-      if (intent && action.beforeSequence === undefined) {
+      if (currentRead) tasks.reconcile(getSessions(), { observations: [{ session: target, observation: data }] });
+      if (intent && currentRead) {
         intent.operatorObservations ||= createOperatorObservations({ now });
         result.observationToken = intent.operatorObservations.observe(target, data, result.pendingInteractions, { readId, modelRound: diagnosticContext.modelRound });
         intent.observedInteractions = [...(intent.observedInteractions || []).filter(request => request.sessionId !== id),
@@ -271,29 +298,12 @@ function createWorkspaceExecutor({ getSessions, getRequests, getEpoch, isDispose
       const roots = await getRoots();
       active(token);
       if (intent.commandPlan.grants.some(grant => ['operate_terminal', 'watch_terminal', 'close'].includes(grant.kind))) { await requireFreshSessions(); check(); }
-      const taskSubmission = require('./orchestratorSubmission.cjs').isTaskSubmission(action, { operator: true });
-      if (taskSubmission) {
-        const grant = intent.commandPlan.grants.find(grant => grant.kind === 'operate_terminal' && (!action.grantId || action.grantId === grant.id)
-          && grant.targets.some(target => target.id === action.targetId));
-        const route = requestContext.job.routeItems?.find(item => item.grantId === grant?.id && item.binding?.target.id === action.targetId);
-        const target = grant && getSessions().find(session => session.id === action.targetId);
-        const managed = target && !['terminal', 'shell'].includes(target.kind || target.provider);
-        const existing = managed && workItems.list({ cwd: target.cwd, limit: 100 }).find(item => item.binding && routingBindingMatches(item.binding, target));
-        const workItemId = grant?.routing?.workItemId || route?.workItemId || existing?.id;
-        const identity = managed && requestContext.job.workspaceIdentities?.get(action.targetId);
-        if (managed && await tasks.waitForAssignmentSubmission(requestContext.job, { targetId: action.targetId, workItemId,
-          ...(identity && { workspaceKey: `workspace:${identity}` }), readOnly: intent.commandPlan.access === 'read-only' })) {
-          await requireFreshSessions(); check();
-          // Keep the original token. Existing authority checks below require a
-          // fresh read if another operator or the user changed the input state.
-        }
-      }
       // The observation fence is unchanged; only its supplier is. When a task,
       // answer, permission or interrupt arrives with no observationToken property
       // and no eligible earlier read, the application performs the ordinary
       // read_session itself and binds the minted token explicitly below. Explicit
       // tokens, terminal_interact and finish_terminal keep the model-must-read rule.
-      if (AUTO_OBSERVED_KINDS.includes(action.kind) && !Object.hasOwn(raw, 'observationToken')) {
+      if (AUTO_OBSERVED_KINDS.includes(action.kind) && !suppliedToken) {
         // One decision per model tool call: a replayed identical call reaches its
         // existing effect receipt below without taking another terminal read.
         intent.autoObservations ||= new Map();
@@ -360,7 +370,7 @@ function createWorkspaceExecutor({ getSessions, getRequests, getEpoch, isDispose
             (action.text || action.submit || action.mouse || action.keys?.some(key => !['up', 'down', 'left', 'right', 'home', 'end', 'pageup', 'pagedown', 'tab', 'shift-tab', 'escape'].includes(key)))) throw new Error('The terminal is asking for permission. This request does not delegate that decision.');
         // An application read is explicit evidence for this step: it is bound by
         // token, not by the implicit earlier-round rule latest() enforces.
-        if (!Object.hasOwn(raw, 'observationToken')) observationToken = autoObservationToken ?? intent.operatorObservations.latest(target, diagnosticContext.modelRound);
+        if (!suppliedToken) observationToken = autoObservationToken ?? intent.operatorObservations.latest(target, diagnosticContext.modelRound);
         operatorObservation = intent.operatorObservations.authorize(observationToken, target, action,
           getRequests().filter(request => request.sessionId === target.id && (request.generation === undefined || request.generation === target.generation) && request.state === 'pending'));
       }
@@ -495,9 +505,7 @@ function createWorkspaceExecutor({ getSessions, getRequests, getEpoch, isDispose
       // transport metadata after claiming the original immutable model action;
       // never alter its fingerprint or replace explicitly supplied values.
       const observedInput = operatorGrant && ['send_prompt', 'terminal_interact', 'interrupt'].includes(action.kind) && !['fusion', 'openfusion'].includes(action.target.kind || action.target.provider)
-        ? { observationSequence: action.observationSequence === undefined ? operatorObservation.sequence : action.observationSequence,
-          inputRevision: action.inputRevision === undefined ? operatorObservation.inputRevision : action.inputRevision,
-          inputAuthority: operatorObservation.authority,
+        ? { inputAuthority: operatorObservation.authority, inputSurface: operatorObservation.surface,
           ...(action.kind === 'send_prompt' && { promptObservation: { agentPid: operatorObservation.runtime.agentPid,
             turnId: operatorObservation.runtime.turnId, turnStartedAt: operatorObservation.runtime.turnStartedAt } }) } : {};
       // Explicit managed sends have the same conversation boundary as routed

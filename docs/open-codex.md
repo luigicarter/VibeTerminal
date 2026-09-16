@@ -46,7 +46,11 @@ can also be used through the compatibility adapter.
 - `backend/openCodexCli.cjs`: launches the separately bundled native executable,
   injects the custom provider and native lifecycle hooks, and reports a unique
   root process identity. It does not fall back to PATH `codex`. Native approvals,
-  terminal input, and execution are owned by the native CLI.
+  terminal input, and execution are owned by the native CLI. It also appends the
+  shared Codex TUI overrides (`VIBE_TERMINAL_CODEX_TUI_OVERRIDES`, currently
+  `-c tui.whimsy=false`) after `argv`, so a fresh or resumed Open Codex pane never
+  runs 0.154's idle composer animation; see
+  [the idle-sparkle override](codex-idle-sparkle-whimsy-override-2026-09-13.md).
 - Packaged Windows launches run this wrapper with the console-capable Bun
   executable already shipped at `resources/codex-web/runtime/runtime/bun.exe`.
   This reuses only the JavaScript host; the Open Codex executable, provider

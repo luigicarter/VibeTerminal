@@ -2,7 +2,7 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const {createOrchestrator}=require('../../backend/orchestrator.cjs');
 const {reviewExistingTargets}=require('../../backend/orchestratorTargetReview.cjs');
-const {extractSelector}=require('../../backend/orchestratorResolver.cjs');
+const {readReference}=require('../../backend/orchestratorReference.cjs');
 async function fixture(t){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'vibe-target-review-'));
   const f={root,sessions:[],effects:[],plans:[],completions:[],interpretations:[],executions:[],phases:new Map()};let sequence=0;
@@ -14,7 +14,7 @@ async function fixture(t){
   f.plan=actions=>({goal:'Preserve the original requested work.',access:'read-only',actions});
   f.relay=createOrchestrator({userDataPath:root,getSessions:()=>f.sessions,getRoots:()=>({projects:[root]}),getLaunchers:()=>[{kind:'codex',available:true,configured:true}],
     routeTask:async(context,api)=>f.route?f.route(context,api):({kind:'choose',decision:'create',kindOfSession:'codex',reason:'Independent task needs a separate conversation.'}),
-    readSession:async target=>({ok:true,id:target.id,generation:target.generation,text:f.readText||'Ready.',sequence:4,observationSequence:4,inputRevision:0}),
+    readSession:async target=>({ok:true,id:target.id,generation:target.generation,text:f.readText||'Ready.',sequence:4,inputRevision:0}),
     dispatchAction:async action=>{
       f.effects.push(action);
       if(action.kind==='create_session'){
@@ -51,7 +51,7 @@ async function fixture(t){
       if(phase%2===0)return tool('workspace',{kind:'read_session',targetId});
       const observed=JSON.parse(body.messages.filter(message=>message.role==='tool').at(-1).content);
       return tool('workspace',{kind:phase===1?'send_prompt':'finish_terminal',targetId,grantId:grant.id,stepId:`step-${phase}`,observationToken:observed.observationToken,
-        ...(phase===1?{text:grant.text,observationSequence:observed.observation.sequence,inputRevision:observed.observation.inputRevision}:{outcome:'completed',text:'Submission inspected.'})});
+        ...(phase===1?{text:grant.text}:{outcome:'completed',text:'Submission inspected.'})});
     }catch(error){f.fetchError=error;throw error;}}});
   t.after(async()=>{await f.relay.cancel();await f.relay.dispose();assert.equal(path.dirname(root),os.tmpdir());fs.rmSync(root,{recursive:true,force:true});});
   await f.relay.configure({apiKey:'fixture-secret-never-in-task-text',model:'scripted',sessionOnly:true});assert.equal((await f.relay.setEnabled(true)).ok,true);
@@ -67,22 +67,23 @@ async function fixture(t){
 const noReviewCall=f=>assert.equal(f.completions.length,f.interpretations.length+f.executions.length,
   'the existing-target check must not spend a model call');
 
+// The repair is the application's, not the model's: an operation the sentence
+// never selected becomes delegate_task here, in one interpretation, and the
+// deterministic resolver picks the pane. The model is asked nothing.
 test('provider/project request misbound to an unrelated conversation repairs before any input', async t => {
   const f = await fixture(t), objective = 'Fix full-screen pane height; preserve width and verify the change.';
-  f.plans.push(f.plan([f.operation(objective)]), body => {
-    assert.match(body.messages[0].content, /did not select the proposed existing conversation/);
-    assert.deepEqual(f.effects, []);
-    return f.plan([f.work(objective)]);
-  });
+  f.plans.push(f.plan([f.operation(objective)]));
   const result = await f.run(`Prompt a Codex terminal in ${f.root} to ${objective}`);
   assert.equal(result.ok, true, f.fetchError?.stack || JSON.stringify(result));
+  assert.equal(f.interpretations.length, 1, 'the repair costs no second interpretation');
   assert.deepEqual(f.effects.map(effect => effect.kind), ['create_session', 'send_prompt']);
   assert.notEqual(f.effects[1].targetId, 'existing');
   assert.equal(f.effects[1].text, objective);
   noReviewCall(f);
-  assert.deepEqual((await f.selections()).map(event => [event.status, event.strategy]), [['assign', 'deterministic']]);
+  assert.deepEqual((await f.selections()).map(event => [event.status, event.strategy]), [['assign', 'deterministic'], ['assigned', 'deterministic']]);
   const log = fs.readFileSync(path.join(f.root, 'logs', 'orchestrator-errors.jsonl'), 'utf8');
   assert.equal(log.includes(objective), false);
+  assert.equal(log.includes('did not select'), false);
 });
 
 test('assignment repair can discover the same task started directly in an existing agent', async t => {
@@ -132,13 +133,14 @@ test('a named-pane send costs exactly one model call end to end', async t => {
 // question now: the resolver knows which panes are idle and unowned.
 test('a group phrase goes to assignment, which reuses the idle pane', async t => {
   const f = await fixture(t), objective = 'Check the pane height.';
-  f.plans.push(f.plan([f.operation(objective)]), f.plan([f.work(objective)]));
+  f.plans.push(f.plan([f.operation(objective)]));
   f.route = async () => ({ kind: 'choose', decision: 'reuse', targetId: 'existing', reason: 'Idle pane with no task owner.' });
   const result = await f.run('Prompt one of the existing Codex terminals to check the height.');
   assert.equal(result.ok, true, f.fetchError?.stack || JSON.stringify(result));
+  assert.equal(f.interpretations.length, 1);
   assert.deepEqual(f.effects.map(effect => effect.kind), ['send_prompt']);
   assert.equal(f.effects[0].targetId, 'existing');
-  assert.deepEqual((await f.selections()).map(event => event.status), ['assign']);
+  assert.deepEqual((await f.selections()).map(event => event.status), ['assign', 'assigned']);
 });
 
 test('same-task follow-up retains the existing busy owner through the prior exchange', async t => {
@@ -170,57 +172,53 @@ test('mixed requests retain the explicitly selected sibling when unassigned work
   assert.equal(sends.find(effect => effect.targetId !== 'existing').text, 'Fix full-screen height.');
 });
 
-for (const replacement of ['same-target', 'drop-task', 'empty-pane']) test(`assignment veto cannot be bypassed by ${replacement}`, async t => {
-  const f = await fixture(t), operation = f.operation('Fix pane height.');
-  f.plans.push(f.plan([operation]), f.plan(replacement === 'same-target' ? [operation] : replacement === 'empty-pane' ? [{ kind: 'create_session', kindOfSession: 'codex', cwd: f.root }] : []));
+// There is nothing left to bypass: a provider/project request never reaches the
+// pane the plan named, because the operation itself is rewritten before any
+// effect exists. The pane that was proposed keeps receiving nothing.
+test('a provider/project request cannot type into the pane the plan named', async t => {
+  const f = await fixture(t);
+  f.plans.push(f.plan([f.operation('Fix pane height.')]));
   const result = await f.run(`Prompt a Codex in ${f.root} to fix pane height.`);
-  assert.equal(result.ok, false); assert.deepEqual(f.effects, []);
-  assert.deepEqual((await f.selections()).map(event => event.status), replacement === 'same-target' ? ['assign', 'assign'] : ['assign']);
+  assert.equal(result.ok, true, f.fetchError?.stack || JSON.stringify(result));
+  assert.equal(f.interpretations.length, 1);
+  assert.equal(f.effects.some(effect => effect.kind === 'send_prompt' && effect.targetId === 'existing'), false);
+  assert.deepEqual(f.effects.map(effect => effect.kind), ['create_session', 'send_prompt']);
 });
 
-for (const order of ['schema-first', 'selection-first']) test(`schema and selection repairs compose before dispatch: ${order}`, async t => {
+// The schema repair is the only interpretation repair left. A plan that is both
+// malformed and misbound costs exactly one repair round for the malformed half;
+// the misbound half is resolved in code on the repaired plan.
+test('a schema repair composes with the deterministic selection repair before dispatch', async t => {
   const f = await fixture(t), objective = 'Investigate full-screen pane height only; do not modify files.';
-  const malformed = f.plan([{ ...f.operation(objective), unexpected: 'PRIVATE_INVALID_ARGUMENT' }]);
-  const misbound = f.plan([f.operation(objective)]);
-  f.plans.push(...(order === 'schema-first' ? [malformed, misbound] : [misbound, malformed]), body => {
+  f.plans.push(f.plan([{ ...f.operation(objective), unexpected: 'PRIVATE_INVALID_ARGUMENT' }]), body => {
     assert.deepEqual(f.effects, []);
-    assert.match(body.messages[0].content, /schema\/contract error/);
-    assert.match(body.messages[0].content, /did not select the proposed existing conversation/);
+    assert.match(body.messages[0].content, /Validation failure/);
+    assert.equal(body.messages[0].content.includes('did not select the proposed existing conversation'), false);
     assert.equal(body.messages[0].content.includes('PRIVATE_INVALID_ARGUMENT'), false);
     assert.equal(JSON.parse(body.messages[1].content).instruction, instruction);
-    return f.plan([f.work(objective)]);
+    return f.plan([f.operation(objective)]);
   });
   const instruction = `Prompt a Codex terminal in ${f.root} to ${objective}`;
   const result = await f.run(instruction);
   assert.equal(result.ok, true, f.fetchError?.stack || JSON.stringify(result));
-  assert.equal(f.interpretations.length, 3);
+  assert.equal(f.interpretations.length, 2);
   assert.deepEqual(f.effects.map(effect => effect.kind), ['create_session', 'send_prompt']);
   assert.notEqual(f.effects[1].targetId, 'existing');
   assert.equal(f.effects[1].text, objective);
   noReviewCall(f);
   const events = await f.events();
-  assert.equal(events.filter(event => event.stage === 'interpretation' && event.status === 'retry').length, 2);
+  assert.equal(events.filter(event => event.stage === 'interpretation' && event.status === 'retry').length, 1);
   assert.ok(events.some(event => event.event === 'intent_repair' && event.status === 'repaired'));
   assert.equal(JSON.stringify(events).includes('PRIVATE_INVALID_ARGUMENT'), false);
 });
 
-for (const repeated of ['schema', 'selection']) test(`a repeated ${repeated} failure cannot use the other repair allowance`, async t => {
+test('a repeated schema failure still stops before any effect', async t => {
   const f = await fixture(t), operation = f.operation('Investigate pane height only.');
-  const plan = f.plan([repeated === 'schema' ? { ...operation, unexpected: true } : operation]);
+  const plan = f.plan([{ ...operation, unexpected: true }]);
   f.plans.push(plan, plan);
   const result = await f.run(`Prompt a Codex terminal in ${f.root} to investigate pane height only.`);
   assert.equal(result.ok, false);
   assert.equal(f.interpretations.length, 2);
-  assert.equal(f.fetchError, undefined);
-  assert.deepEqual(f.effects, []);
-});
-
-test('a repaired schema cannot drop an assignment veto on the final interpretation', async t => {
-  const f = await fixture(t), operation = f.operation('Investigate pane height only.');
-  f.plans.push(f.plan([operation]), f.plan([{ ...operation, unexpected: true }]), f.plan([]));
-  const result = await f.run(`Prompt a Codex terminal in ${f.root} to investigate pane height only.`);
-  assert.equal(result.ok, false);
-  assert.equal(f.interpretations.length, 3);
   assert.equal(f.fetchError, undefined);
   assert.deepEqual(f.effects, []);
 });
@@ -269,14 +267,18 @@ test('fresh follow-up repairs an expired source ID without replaying the earlier
   assert.deepEqual(f.effects.map(effect => effect.targetId), ['existing', 'existing']);
 });
 
-for (const decision of ['INSPECTION', 'TASK', 'UNCLEAR']) test(`inspection repair retains its original purpose: ${decision}`, async t => {
-  const f = await fixture(t); f.inspectionDecision = decision; f.readText = 'Session limit: 23% used; resets 19:00.';
-  const operation = f.operation('Inspect current session usage limits.');
-  f.plans.push(f.plan([operation]), { ...f.plan([operation]), responseKind: 'terminal-inspection' });
-  const result = await f.run(decision === 'INSPECTION' ? 'What are my Codex session usage limits?' : 'Prompt a Codex to investigate the layout bug.');
-  assert.equal(result.ok, decision === 'INSPECTION', f.fetchError?.stack || JSON.stringify(result));
+// The classification round that used to decide whether a selection veto had
+// been answered with an inspection went with the veto. An informational plan is
+// an informational plan, and it costs one interpretation.
+test('an informational request runs as an inspection with no classification call', async t => {
+  const f = await fixture(t); f.readText = 'Session limit: 23% used; resets 19:00.';
+  f.plans.push({ ...f.plan([f.operation('Inspect current session usage limits.')]), responseKind: 'terminal-inspection' });
+  const result = await f.run('What are my Codex session usage limits?');
+  assert.equal(result.ok, true, f.fetchError?.stack || JSON.stringify(result));
+  assert.equal(f.interpretations.length, 1);
+  assert.equal(f.completions.some(body => String(body.messages[0].content).startsWith('Classify the ORIGINAL user request')), false);
   assert.deepEqual(f.effects, []);
-  if (result.ok) assert.match(result.text, /23%/);
+  assert.match(result.text, /23%/);
 });
 
 // ---------------------------------------------------------------------------
@@ -363,7 +365,7 @@ test('the saved utterance corpus resolves its title and last-target rows determi
   assert.equal(rows.length, 11);
   const decoy = pane('decoy', 'Invoice rounding repair', { kind: 'claude', provider: 'claude', conversationTitle: 'Invoice rounding repair' });
   for (const row of rows) {
-    const selector = extractSelector(row.text, { launchers: [] });
+    const selector = readReference(row.text, { launchers: [] });
     const named = row.selector === 'title';
     if (named) assert.equal(selector.kind, 'title', `row ${row.n} carries no title phrase`);
     const chosen = pane('chosen', 'Codex 3', { conversationTitle: named ? selector.text : 'Orchestrator wake word work' });

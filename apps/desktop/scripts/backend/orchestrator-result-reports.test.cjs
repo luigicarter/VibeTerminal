@@ -21,6 +21,30 @@ test('identity, status, source, provisional and incomplete observations fail clo
     assert.equal(validateResultEvidence({ ...session(), ...patch }, result()), undefined);
   }
 });
+// Added 2026-09-15: a Claude Code pane never reaches an observed end (its end
+// comes from its own Stop hook), so its finished tasks carried no result and
+// "what's the result?" went to the model every time. Its provisional end is
+// accepted, with coverage that says the end was not confirmed on screen; a
+// Codex pane's provisional end is still the transient state it always was.
+test('a provisional turn end is accepted for providers that report their own end, and refused for the rest', () => {
+  const claude = validateResultEvidence({ ...session(), kind: 'claude', observation: 'provisional' }, { ...result(), source: 'terminal-screen' });
+  assert.equal(claude?.turnId, 't'); assert.match(claude.coverage, /not confirmed on screen/);
+  assert.equal(validateResultEvidence({ ...session(), kind: 'codex', observation: 'provisional' }, { ...result(), source: 'terminal-screen' }), undefined);
+  assert.equal(validateResultEvidence({ ...session(), kind: 'fusion', observation: 'provisional' }, result()), undefined);
+  // The runtime flags that same provisional end as possible child activity;
+  // with no child observed it is not a busy child. An observed child, or
+  // background work, still blocks.
+  const marker = { ...session(), kind: 'claude', observation: 'provisional', childActivity: true, coarseChildObservation: 'provisional', children: [] };
+  assert.equal(validateResultEvidence(marker, { ...result(), source: 'terminal-screen' })?.turnId, 't');
+  // The runtime names that provisional end 'response', and the capture keeps
+  // the session's own state, so the two agree.
+  const response = validateResultEvidence({ ...marker, turnState: 'response' }, { ...result(), status: 'response', source: 'terminal-screen' });
+  assert.equal(response?.status, 'response');
+  assert.equal(validateResultEvidence({ ...marker, coarseChildObservation: 'observed' }, { ...result(), source: 'terminal-screen' }), undefined);
+  assert.equal(validateResultEvidence({ ...marker, children: [{ id: 'child' }] }, { ...result(), source: 'terminal-screen' }), undefined);
+  assert.equal(validateResultEvidence({ ...marker, coarseChildObservation: undefined }, { ...result(), source: 'terminal-screen' }), undefined);
+});
+
 test('failed and interrupted results remain eligible only for matching observed endings', () => {
   for (const status of ['failed', 'interrupted', 'cancelled']) {
     const evidence = validateResultEvidence({ ...session(), turnState: status }, { ...result(), status });

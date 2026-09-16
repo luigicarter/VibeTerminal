@@ -20,7 +20,7 @@ function operation(body, kind, extra = {}) {
   const observation = latest(body);
   return { kind, targetId: 'a', grantId: metadata(body).authorizedCommands.grants[0].id, stepId: `step-${++callId}`,
     observationToken: observation.observationToken,
-    ...(kind === 'send_prompt' ? { observationSequence: observation.observation?.sequence, inputRevision: observation.observation?.inputRevision } : {}), ...extra };
+    ...(kind === 'send_prompt' ? { } : {}), ...extra };
 }
 function assertPaired(body) {
   for (let i = 0; i < body.messages.length; i++) {

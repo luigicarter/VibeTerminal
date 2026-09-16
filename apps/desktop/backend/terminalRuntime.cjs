@@ -679,7 +679,13 @@ function createTerminalRuntime({ emit = () => {}, now = Date.now, lookup, confir
           s.attention = undefined;
           s.turnStartedAt = eventAt;
         }
-        s.turnId = event.providerTurnId || (newTurn ? undefined : s.turnId);
+        // A provider whose hooks carry no turn id (Claude, Gemini, Kimi, Qwen,
+        // Cursor, OpenCode, Grok) still has a turn: the app names it by the
+        // pane's generation and the moment it started, so a prompt the
+        // Orchestrator typed can be attributed to the turn it began and settle
+        // when that turn ends. Without a name, every task in such a pane waited
+        // for a result forever (measured on Claude Code 2.1.270, 2026-09-14).
+        s.turnId = event.providerTurnId || (newTurn ? `${s.generation}:${eventAt}` : s.turnId);
         s.turnEndedAt = undefined;
         if (s.attention?.state === "waiting") s.attention = undefined;
         record.approvals?.observe('root', event, eventAt);

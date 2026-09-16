@@ -7,15 +7,22 @@ test('agent continuation binds an explicitly addressed work item without redisco
   const context = { sessions: [], replyWorkItem: { id: 'work-auth', binding: { target: { id: 'worker-auth' } } } };
   const tools = plannerTools(context);
   const request = { cwd: 'C:/App', text: 'Also test expired refresh tokens.' };
-  const continued = decodePlannerCalls([call('plan_continue_task', request)], tools, request.text);
+  // workItemId is not offered to the planner at all: the application fills the
+  // reply's own work item in, so a continuation cannot name a different one and
+  // cannot invent one. The context is the fourth argument that supplies it.
+  for (const tool of tools) assert.equal(Object.hasOwn(tool.function.parameters.properties || {}, 'workItemId'), false, tool.function.name);
+  const continued = decodePlannerCalls([call('plan_continue_task', request)], tools, request.text, context);
   assert.equal(continued.actions[0].workItemId, 'work-auth');
   assert.equal(continued.actions[0].kind, 'delegate_task', 'Continuation still uses normal task ownership validation.');
   assert.equal(continued.actions[0].assignmentMode, 'existing');
-  assert.throws(() => decodePlannerCalls([call('plan_continue_task', { ...request, assignmentMode: 'new' })], tools, request.text), /existing owner/);
-  const independent = decodePlannerCalls([call('plan_delegate_task', request)], tools, request.text);
+  // Whether the work wants a fresh pane is read off the sentence, never off the
+  // model: an assignmentMode the model writes anyway is dropped.
+  assert.equal(decodePlannerCalls([call('plan_continue_task', { ...request, assignmentMode: 'new' })], tools, request.text, context).actions[0].assignmentMode, 'existing');
+  for (const tool of tools) assert.equal(Object.hasOwn(tool.function.parameters.properties || {}, 'assignmentMode'), false, tool.function.name);
+  const independent = decodePlannerCalls([call('plan_delegate_task', request)], tools, request.text, context);
   assert.equal(independent.actions[0].workItemId, undefined, 'A reply is not authority to reuse a conversation for independent work.');
-  const otherTools = plannerTools({ ...context, targetId: 'different-worker' });
-  assert.equal(decodePlannerCalls([call('plan_continue_task', request)], otherTools, request.text).actions[0].workItemId, undefined);
+  const elsewhere = { ...context, targetId: 'different-worker' };
+  assert.equal(decodePlannerCalls([call('plan_continue_task', request)], plannerTools(elsewhere), request.text, elsewhere).actions[0].workItemId, undefined);
 });
 test('planner calls separate blank opening, unsent drafts, task assignment and request metadata',()=>{
   // Drafts and project registration are offered only to an instruction that

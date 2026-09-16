@@ -11,8 +11,11 @@ const usageCost = response => Number.isFinite(response?.usage?.cost) && response
 // sentence goes cannot hold a spoken request for the full execution budget. The
 // per-attempt signal is built here and handed to the transport, which keeps its
 // own defensive cap for the catalog and key calls that have no category.
+// Interpretation gets 40 s: the cheaper reasoning Brains (deepseek-v4-flash,
+// qwen3.7-flash) took 25 to 35 s to plan a long spoken sentence on the ladder
+// and were cut off with "took too long", which is worse than a slow plan.
 const MODEL_DEADLINES = Object.freeze({
-  interpretation: 25000,
+  interpretation: 40000,
   'close-review': 20000,
   'goal-review': 20000,
   execution: 45000,

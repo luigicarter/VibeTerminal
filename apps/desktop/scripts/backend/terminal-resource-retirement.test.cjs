@@ -15,7 +15,7 @@ test('late creation and output cannot recreate observations after runtime retire
   const runtime = createTerminalRuntime(), directory = createSessionDirectory({ getRuntime: () => runtime });
   let ingested = 0, acknowledged = 0;
   const context = vm.createContext({ disposed: false, directory, getRuntime: () => runtime, pendingHost: new Map(),
-    queuedInputAttempts: { correlate: event => event }, observations: { ingest() { ingested++; return Promise.resolve(); } },
+    inputAttempts: { correlate: event => event }, observations: { ingest() { ingested++; return Promise.resolve(); } },
     observationPublications: new Set(), completions: { capture: async () => undefined },
     relay: { observeWork() {} }, publishSoon() {}, delivery: { observe: async () => {} } });
   vm.runInContext(source.slice(begin, end), context);

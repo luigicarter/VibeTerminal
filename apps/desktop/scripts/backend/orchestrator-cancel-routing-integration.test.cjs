@@ -60,9 +60,9 @@ for (const cancellation of ['global', 'request', 'disable']) test(`${cancellatio
   const sessions = ['a', 'b'].map(id => ({ id, generation: `g-${id}`, kind: 'codex', cwd: root }));
   const app = createOrchestrator({ userDataPath: root, secureStorage: { isEncryptionAvailable: () => false },
     getSessions: () => sessions, getRoots: () => ({ documents: root, projects: [root] }),
-    resolveWorkspaceIdentity: async () => { enter(); return barrier; },
-    interpretIntent: context => {
+    interpretIntent: async context => {
       contexts.push(context);
+      if (context.instruction === 'Focus a') { enter(); await barrier; }
       return context.instruction === 'hello' ? { goal: 'Greet the user.', actions: [] }
         : { goal: 'Focus the requested terminal.', executionMode: 'direct', actions: [{ kind: 'focus_session', targetIds: [context.instruction.endsWith('b') ? 'b' : 'a'] }] };
     },

@@ -14,10 +14,6 @@ const TRANSIENT_FIELDS = Object.freeze(['lastPromptAt', 'lastPromptText', 'lastR
 const AGENT_ID = /^[\w.:@+-]{1,256}$/;
 
 const bytes = value => Buffer.byteLength(JSON.stringify(value ?? null), 'utf8');
-const sameFolder = (left, right) => {
-  const identity = value => String(value).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
-  return typeof left === 'string' && typeof right === 'string' && Boolean(left) && identity(left) === identity(right);
-};
 
 function sanitizePaneRecord(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -74,27 +70,15 @@ function validPaneMemory(value) {
   })());
 }
 
-const needsInputNow = session => Boolean(session.pendingInput || session.pendingInteraction || session.manualInputPending ||
-  session.interactionInputPending || session.status === 'waiting' || ['question', 'approval'].includes(session.attention?.reason));
-const recencyOf = session => Math.max(Number(session?.lastActivityAt) || 0, Number(session?.turnEndedAt) || 0, Number(session?.turnStartedAt) || 0);
 
 // One state per pane. status, turnState and readiness are three vocabularies for
 // the same fact, and a single row could say "running", "idle" and "ready" at
 // once. A plan only ever needs to know whether the pane is free, working,
 // waiting on the user, still starting, or gone - so that is what it is told.
-const PANE_STATES = Object.freeze(['free', 'working', 'needs-input', 'starting', 'stopped']);
-const STOPPED_STATUS = new Set(['closed', 'exited', 'paused']);
-function paneState(session) {
-  if (!session || typeof session !== 'object') return 'stopped';
-  if (STOPPED_STATUS.has(session.status) || session.started === false ||
-    ['exited', 'failed'].includes(session.processState) || ['exited', 'failed'].includes(session.agentProcessState)) return 'stopped';
-  if (needsInputNow(session)) return 'needs-input';
-  if (['running', 'busy'].includes(session.turnState) || session.childActivity) return 'working';
-  if (session.turnState === 'starting' || session.status === 'starting' ||
-    session.launchState === 'pending' || session.readiness === 'starting') return 'starting';
-  if (['running', 'busy'].includes(session.status) && !session.turnState) return 'working';
-  return 'free';
-}
+// The words are the roster's; the facts behind them are the one pane-state
+// predicate every other reader of pane state uses, so the Brain is told a pane
+// is free exactly when assignment would hand it new work, and told it is done
+// when its last task finished, which is what "both terminals that are done" means.
 
 // store: the agent store (paneMemory/savePaneMemory). resolveAgentId maps a live
 // pane to its durable agent identity; a pane with no identity (a plain shell)
@@ -128,6 +112,12 @@ function createPaneMemory({ store, now = Date.now, resolveAgentId = () => null, 
   return {
     get(agentId) { const record = records[agentId]; return record ? { ...record } : null; },
     snapshot() { return structuredClone(records); },
+    // The same records addressed by live pane, for the memory answers that
+    // speak about panes ("which one needs me", "what's the result").
+    bySession(sessions = []) {
+      return Object.fromEntries(sessions.filter(session => typeof session?.id === 'string')
+        .map(session => [session.id, records[resolveAgentId(session.id)]]).filter(([, record]) => record).map(([id, record]) => [id, { ...record }]));
+    },
     remember(agentId, patch) { return apply(agentId, patch); },
     // The same update addressed by live pane instead of durable identity.
     rememberPane(sessionId, patch) {
@@ -150,20 +140,6 @@ function createPaneMemory({ store, now = Date.now, resolveAgentId = () => null, 
       persist();
       return true;
     },
-    roster({ cwd, sessions = [], limit = 24 } = {}) {
-      const live = sessions.filter(session => session && typeof session.id === 'string' &&
-        !['closed', 'exited'].includes(session.status) && session.processState !== 'exited' &&
-        (!cwd || sameFolder(session.cwd, cwd)));
-      return live.slice().sort((a, b) => recencyOf(b) - recencyOf(a)).slice(0, Math.max(0, limit)).map(session => {
-        const record = records[resolveAgentId(session.id)] || {};
-        const row = { id: session.id, name: session.name, title: record.title || session.conversationTitle,
-          provider: session.kind || session.provider, state: paneState(session),
-          objective: record.objective, lastPromptAt: record.lastPromptAt,
-          lastResultSummary: record.lastResultSummary ? record.lastResultSummary.slice(0, 200) : undefined };
-        for (const key of Object.keys(row)) if (row[key] === undefined || row[key] === null || row[key] === '') delete row[key];
-        return row;
-      });
-    },
   };
 }
 
@@ -174,5 +150,5 @@ function boundedRoster(rows, { maxBytes = 4096 } = {}) {
   return result;
 }
 
-module.exports = { createPaneMemory, sanitizePaneMemory, sanitizePaneRecord, validPaneMemory, boundedRoster, paneState,
-  PANE_MEMORY_LIMITS, PANE_STATES, TRANSIENT_FIELDS };
+module.exports = { createPaneMemory, sanitizePaneMemory, sanitizePaneRecord, validPaneMemory, boundedRoster,
+  PANE_MEMORY_LIMITS, TRANSIENT_FIELDS };

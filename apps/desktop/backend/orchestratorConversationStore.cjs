@@ -133,6 +133,16 @@ function createConversationStore({ userDataPath, getSecrets = () => [], now = Da
     const evicted = new Set();
     for (const record of records) { if (bytes <= MAX_BYTES) break; evicted.add(record.item); bytes -= record.size; }
     for (const kind of Object.keys(fields)) result[kind] = result[kind].filter(item => !evicted.has(item));
+    // Terminal handles ("T3") are workspace identity, not history: they ride
+    // the same file so a restored pane keeps its handle, and "clear history"
+    // leaves them alone. Attached after the record lists are settled (they are
+    // one object, not a list), bounded and validated like everything else here.
+    if (snapshot?.handles && typeof snapshot.handles === 'object') {
+      const byId = Object.entries(snapshot.handles.byId && typeof snapshot.handles.byId === 'object' ? snapshot.handles.byId : {})
+        .filter(([id, handle]) => typeof id === 'string' && id.length <= 200 && /^T\d{1,6}$/.test(String(handle))).slice(-2000);
+      const next = Number(snapshot.handles.next);
+      if (byId.length || Number.isSafeInteger(next)) result.handles = { next: Number.isSafeInteger(next) && next > 0 ? next : 1, byId: Object.fromEntries(byId) };
+    }
     return result;
   }
   function enqueue(fn) { chain = chain.then(fn).catch(() => {}); return chain; }

@@ -50,7 +50,7 @@ for (const provider of ['claude', 'codex', 'cursor', 'gemini', 'kimi', 'kimi-cus
     const screen = await h.invoke('dispatch', { kind: 'read_session', target: { id: 'pane', generation } });
     assert.equal(screen.observation.inputRevision, 2);
     const result = await h.invoke('dispatch', { kind: 'send_prompt', target: { id: 'pane', generation }, operator: true, requestId: 'owner', editInput: false,
-      observationSequence: screen.observation.sequence, inputRevision: screen.observation.inputRevision, text: 'Review the last commit.\nDo not edit.' });
+      text: 'Review the last commit.\nDo not edit.' });
     assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(h.sent.length, 1);
     assert.equal(h.sent[0].payload.kind, 'interaction'); assert.equal(h.sent[0].payload.operator, true);
     assert.equal(h.sent[0].payload.requestId, 'owner'); assert.equal(h.sent[0].payload.editInput, false);
@@ -59,11 +59,14 @@ for (const provider of ['claude', 'codex', 'cursor', 'gemini', 'kimi', 'kimi-cus
   });
   test(`${provider}: a current waiting screen supports identity-bound terminal interaction through the real bridge`, async t => {
     const h = harness(t, provider, 'waiting'), generation = h.snapshot.generation;
-    h.integration.incoming('terminal', { id: 'pane', generation, type: 'created', pid: 32123, cols: 80, rows: 24 });
+    h.integration.incoming('terminal', { id: 'pane', generation, type: 'created', pid: 32123, cols: 80, rows: 24, inputRevision: 0 });
     h.integration.incoming('terminal', { id: 'pane', generation, type: 'data', data: 'Choose: 1 Small  2 Large', sequence: 1 });
     const screen = await h.invoke('dispatch', { kind: 'read_session', target: { id: 'pane', generation } });
     assert.equal(screen.observation.ok, true);
-    const action = { kind: 'terminal_interact', actionId: 'native-answer', target: { id: 'pane', generation }, observationSequence: screen.observation.sequence, keys: ['down', 'enter'] };
+    // The action is bound to the surface this read captured, exactly as an
+    // operator step is bound to its token's. There is no counter to copy.
+    const action = { kind: 'terminal_interact', actionId: 'native-answer', target: { id: 'pane', generation }, keys: ['down', 'enter'],
+      inputSurface: require('../../backend/orchestratorInputSurface.cjs').projectInputSurface(h.snapshot, screen.observation) };
     const result = await h.invoke('dispatch', action);
     assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(result.status, 'written');
     assert.equal(h.sent.length, 1); assert.equal(h.sent[0].type, 'action'); assert.equal(h.sent[0].payload.kind, 'interaction');

@@ -11,7 +11,7 @@ async function fixture(t){
   f.work=text=>({kind:'delegate_task',kindOfSession:'codex',assignmentMode:'new',cwd:root,text});
   f.plan=actions=>({goal:'Preserve the original requested work.',access:'read-only',actions});
   f.relay=createOrchestrator({userDataPath:root,getSessions:()=>f.sessions,getRoots:()=>({projects:f.projects}),getLaunchers:()=>[{kind:'codex',available:true,configured:true}],
-    readSession:async target=>({ok:true,id:target.id,generation:target.generation,text:'Ready.',sequence:4,observationSequence:4,inputRevision:0}),
+    readSession:async target=>({ok:true,id:target.id,generation:target.generation,text:'Ready.',sequence:4,inputRevision:0}),
     dispatchAction:async action=>{
       f.effects.push(action);
       if(action.kind==='add_project'){
@@ -46,7 +46,7 @@ async function fixture(t){
       if(phase%2===0)return tool('workspace',{kind:'read_session',targetId});
       const observed=JSON.parse(body.messages.filter(message=>message.role==='tool').at(-1).content);
       return tool('workspace',{kind:phase===1?'send_prompt':'finish_terminal',targetId,grantId:grant.id,stepId:`step-${phase}`,observationToken:observed.observationToken,
-        ...(phase===1?{text:grant.text,observationSequence:observed.observation.sequence,inputRevision:observed.observation.inputRevision}:{outcome:'completed',text:'Submission inspected.'})});
+        ...(phase===1?{text:grant.text}:{outcome:'completed',text:'Submission inspected.'})});
     }catch(error){f.fetchError=error;throw error;}}});
   t.after(async()=>{await f.relay.cancel();await f.relay.dispose();assert.equal(path.dirname(root),os.tmpdir());fs.rmSync(root,{recursive:true,force:true});});
   await f.relay.configure({apiKey:'test',model:'scripted',sessionOnly:true});assert.equal((await f.relay.setEnabled(true)).ok,true);
@@ -71,7 +71,9 @@ test('an initial empty-terminal proposal repairs into the complete executable ta
   });f.markers.push('EXECUTE');
   const result=await f.run(`Open a new Codex and ${text}`);
   assert.equal(result.ok,true,f.fetchError?.stack||JSON.stringify(result));
-  assert.equal(f.checks.length,1);assert.equal(f.checks[0].proposedDrafts[0].text,undefined);
+  // A blank pane costs no purpose call: whether the sentence also asks for work
+  // is read from the sentence itself ("investigate" hands the pane a task).
+  assert.equal(f.checks.length,0);
   assert.deepEqual(f.effects.map(action=>action.kind),['create_session','send_prompt']);assert.equal(f.effects.at(-1).text,text);
 });
 
@@ -82,10 +84,28 @@ test('an explicitly requested blank terminal passes purpose review without recei
   assert.deepEqual(f.effects.map(action=>action.kind),['create_session']);assert.equal(Boolean(f.effects[0].prompt||f.effects[0].text),false);
 });
 
-test('a draft judgment cannot authorize a blank creation that carries no draft',async t=>{
-  const f=await fixture(t);f.plans.push(f.plan([{kind:'create_session',kindOfSession:'codex',cwd:f.root}]));f.markers.push('DRAFT');
+// A blank creation is never judged by a model, so a DRAFT verdict cannot
+// authorize one: the sentence asks for work, and the plan is repaired into work
+// without the review ever being reached.
+test('a blank creation for a sentence that asks for work is repaired, never judged',async t=>{
+  const f=await fixture(t),text='Investigate the regression.';
+  f.plans.push(f.plan([{kind:'create_session',kindOfSession:'codex',cwd:f.root}]),f.plan([f.work(text)]));f.markers.push('DRAFT');
   const result=await f.run('Open Codex and investigate the regression.');
-  assert.equal(result.ok,true,JSON.stringify(result));assert.deepEqual(f.effects,[]);assert(f.relay.getState().tasks.some(task=>task.status==='needs-answer'));
+  assert.equal(result.ok,true,f.fetchError?.stack||JSON.stringify(result));
+  assert.equal(f.checks.length,0,'no purpose call is spent, so the scripted DRAFT verdict is never consulted');
+  assert.deepEqual(f.effects.map(action=>action.kind),['create_session','send_prompt']);
+});
+
+// The other half of the same decision, and the request the ladder failed on
+// twice: a sentence that asks only for a pane gets the pane, with no question.
+test('a blank creation for a sentence that asks for no work is accepted with no question',async t=>{
+  const f=await fixture(t);
+  f.plans.push([{name:'plan_open_blank_terminal',args:{kindOfSession:'codex',cwd:f.root}}]);
+  const result=await f.run('Can you open a codex terminal for me?');
+  assert.equal(result.ok,true,f.fetchError?.stack||JSON.stringify(result));
+  assert.equal(f.checks.length,0);
+  assert.deepEqual(f.effects.map(action=>action.kind),['create_session']);
+  assert.equal(f.relay.getState().tasks.some(task=>task.status==='needs-answer'),false);
 });
 
 test('a purpose repair cannot replace executable work with an informational inspection',async t=>{

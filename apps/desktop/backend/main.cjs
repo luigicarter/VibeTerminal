@@ -31,30 +31,45 @@ function getChatService() {
 function chatCaller(event) { if (!mainWindow || event.sender !== mainWindow.webContents) throw new Error('Chats are available only in the workspace window.'); return getChatService(); }
 for (const method of ['bootstrap', 'checkpoint', 'list', 'refresh', 'update', 'open', 'draft', 'read']) ipcMain.handle('chats:' + method, (event, input) => chatCaller(event)[method](input));
 ipcMain.on('chats:flushed', (event, payload) => { if (mainWindow && event.sender === mainWindow.webContents) chatFlushes.get(payload?.id)?.(payload.error); });
-async function prepareChatShutdown() {
+async function prepareChatShutdown(reason) {
   if (chatShutdownPromise) return chatShutdownPromise;
+  // Record the intent to shut down before the first await. Windows can end the
+  // process at any point after a session-end notification, and a run that never
+  // recorded a request is the only kind that reopens agent panes paused.
+  const requested = chatService ? chatService.shutdown(reason).catch(() => {}) : null;
   chatShutdownPromise = (async () => {
     let clean = true;
+    // The steps that missed their deadline, named for the next diagnosis.
+    const incomplete = [];
+    if (requested) {
+      let timer;
+      try { await Promise.race([requested, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Storage shutdown deadline exceeded.')), 900); })]); }
+      catch {}
+      finally { clearTimeout(timer); }
+    }
     if (chatService && mainWindow && !mainWindow.isDestroyed()) {
       const id = require('node:crypto').randomUUID();
       try { await new Promise((resolve, reject) => {
         const timer = setTimeout(() => { chatFlushes.delete(id); reject(new Error('Renderer did not finish saving.')); }, 1200);
         chatFlushes.set(id, error => { clearTimeout(timer); chatFlushes.delete(id); error ? reject(new Error(error)) : resolve(); });
         mainWindow.webContents.send('chats:flush', { id });
-      }); } catch { clean = false; }
+      }); } catch { clean = false; incomplete.push('renderer'); }
     }
     orchestratorIntegration?.dispose();
     chatLaunchPreparation.cancelAll();
     // Hosts acknowledge completion by exiting; only force a host after its deadline.
-    await Promise.all([ptyHost, agentThreadHost, fusionChatHost, openFusionChatHost].filter(Boolean).map(host => new Promise(resolve => {
+    await Promise.all([['ptyHost', ptyHost], ['agentThreadHost', agentThreadHost], ['fusionChatHost', fusionChatHost], ['openFusionChatHost', openFusionChatHost]]
+      .filter(([, host]) => host).map(([name, host]) => new Promise(resolve => {
       if (host.exitCode !== null || host.killed) return resolve();
-      const timer = setTimeout(() => { clean = false; try { host.kill(); } catch {} resolve(); }, 2200);
+      const timer = setTimeout(() => { clean = false; incomplete.push(name); try { host.kill(); } catch {} resolve(); }, 2200);
       host.once('close', () => { clearTimeout(timer); resolve(); });
-      try { host.stdin.write(JSON.stringify({ type: 'shutdown' }) + '\n'); } catch { clearTimeout(timer); clean = false; resolve(); }
+      try { host.stdin.write(JSON.stringify({ type: 'shutdown' }) + '\n'); } catch { clearTimeout(timer); clean = false; incomplete.push(name); resolve(); }
     })));
     if (chatService) {
       let timer;
-      try { await Promise.race([chatService.finish(clean), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Storage shutdown deadline exceeded.')), 900); })]); }
+      // A storage write that misses its own deadline cannot record that it did;
+      // the run simply stays unclean, with its request already on the record.
+      try { await Promise.race([chatService.finish(clean, incomplete), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Storage shutdown deadline exceeded.')), 900); })]); }
       catch { clean = false; }
       finally { clearTimeout(timer); }
     }
@@ -63,7 +78,7 @@ async function prepareChatShutdown() {
   })();
   return chatShutdownPromise;
 }
-app.on('before-quit', event => { if (!chatExitPrepared && chatService) { event.preventDefault(); void prepareChatShutdown().finally(() => app.quit()); } });
+app.on('before-quit', event => { if (!chatExitPrepared && chatService) { event.preventDefault(); void prepareChatShutdown('quit').finally(() => app.quit()); } });
 function getCodexWebHost() {
   return codexWebHost ||= require('./codexWebHost.cjs').createCodexWebHost({
     app, shell, clipboard, resolveCodexBin: () => require('./codexWebNative.cjs').resolveNativeBinary({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, root: path.join(__dirname, '..') }),
@@ -907,7 +922,7 @@ function restartAndInstallUpdate() {
   }
 
   setImmediate(async () => {
-    await prepareChatShutdown();
+    await prepareChatShutdown('update');
     getAutoUpdater().quitAndInstall(true, true);
   });
   return true;
@@ -1891,8 +1906,8 @@ app.whenReady().then(() => {
     getTelemetry: getAgentTelemetry, getChanges: getCodeChangeSummary,
     observeStoppedSession: payload => stopSessionObserved({ ...payload, observeOnly: true }),
     getHistoryConfig: savedConversationConfig });
-  mainWindow.on('close', event => { if (!chatExitPrepared && chatService) { event.preventDefault(); void prepareChatShutdown().finally(() => app.quit()); } else orchestratorIntegration?.dispose(); });
-  mainWindow.on('query-session-end', () => { void prepareChatShutdown(); });
+  mainWindow.on('close', event => { if (!chatExitPrepared && chatService) { event.preventDefault(); void prepareChatShutdown('quit').finally(() => app.quit()); } else orchestratorIntegration?.dispose(); });
+  mainWindow.on('query-session-end', () => { void prepareChatShutdown('session-end'); });
   startMobileBridge();
   setTimeout(checkForUpdatesOnLaunch, 1500);
 
@@ -1947,7 +1962,7 @@ function shutdownRuntimeHosts() {
 }
 
 app.on("window-all-closed", () => {
-  if (chatService && !chatExitPrepared) { void prepareChatShutdown().finally(() => app.quit()); return; }
+  if (chatService && !chatExitPrepared) { void prepareChatShutdown('quit').finally(() => app.quit()); return; }
   shutdownRuntimeHosts();
 
   if (process.platform !== "darwin") {

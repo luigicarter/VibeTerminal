@@ -7,6 +7,11 @@ and mobile applications.
 Better Auth 1.7.4, and PostgreSQL. Google VM deployment and real email/alert
 delivery remain pending the production configuration.
 
+**Later preparation is now separate:** `src/prepared` contains disconnected
+desktop login, signed access and billing modules. Normal startup and migrations
+do not enable them. See [paid readiness](../../docs/account-paid-readiness.md)
+for the current implementation, security findings, test commands and launch gates.
+
 Read the [implementation and verification record](../../docs/server-phase-1-implementation.md)
 and [phase 1 plan](../../docs/server-phase-1-plan.md). Login screens and client
 integration are the next development phase; this service currently provides APIs.

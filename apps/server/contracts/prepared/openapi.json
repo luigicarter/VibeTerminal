@@ -1,0 +1,622 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Lina prepared account additions — UNMOUNTED",
+    "version": "0.1.0",
+    "description": "Combined with the existing account contract only in dedicated test composition. Normal startup exposes none of these additions."
+  },
+  "paths": {
+    "/api/desktop-auth/start": {
+      "post": {
+        "summary": "Start a 10-minute browser authorization attempt",
+        "security": [],
+        "x-lina-prepared": true,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "challenge": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{43}$"
+                  },
+                  "state": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{43}$"
+                  },
+                  "callback": {
+                    "type": "string",
+                    "maxLength": 512
+                  },
+                  "installationId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "platform": {
+                    "type": "string",
+                    "enum": [
+                      "windows",
+                      "macos",
+                      "linux"
+                    ]
+                  },
+                  "appVersion": {
+                    "type": "string",
+                    "pattern": "^[0-9][0-9A-Za-z.+-]{0,39}$"
+                  }
+                },
+                "required": [
+                  "challenge",
+                  "state",
+                  "callback",
+                  "installationId",
+                  "platform",
+                  "appVersion"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success; never includes raw session tokens in JSON"
+          },
+          "400": {
+            "description": "Invalid input or exchange"
+          },
+          "401": {
+            "description": "Invalid session"
+          },
+          "403": {
+            "description": "Access, Origin or MFA denied"
+          },
+          "409": {
+            "description": "Conflicting state"
+          },
+          "429": {
+            "description": "Rate limited"
+          },
+          "503": {
+            "description": "Dependency unavailable or billing unconfigured"
+          }
+        }
+      }
+    },
+    "/api/desktop-auth/attempts/{id}": {
+      "get": {
+        "summary": "Inspect an attempt before explicit browser approval",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "x-lina-prepared": true,
+        "responses": {
+          "200": {
+            "description": "Success; never includes raw session tokens in JSON"
+          },
+          "400": {
+            "description": "Invalid input or exchange"
+          },
+          "401": {
+            "description": "Invalid session"
+          },
+          "403": {
+            "description": "Access, Origin or MFA denied"
+          },
+          "409": {
+            "description": "Conflicting state"
+          },
+          "429": {
+            "description": "Rate limited"
+          },
+          "503": {
+            "description": "Dependency unavailable or billing unconfigured"
+          }
+        }
+      }
+    },
+    "/api/desktop-auth/approve": {
+      "post": {
+        "summary": "Approve and issue a 60-second single-use PKCE-bound code",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "x-lina-prepared": true,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "attemptId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  }
+                },
+                "required": [
+                  "attemptId"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success; never includes raw session tokens in JSON"
+          },
+          "400": {
+            "description": "Invalid input or exchange"
+          },
+          "401": {
+            "description": "Invalid session"
+          },
+          "403": {
+            "description": "Access, Origin or MFA denied"
+          },
+          "409": {
+            "description": "Conflicting state"
+          },
+          "429": {
+            "description": "Rate limited"
+          },
+          "503": {
+            "description": "Dependency unavailable or billing unconfigured"
+          }
+        }
+      }
+    },
+    "/api/desktop-auth/cancel": {
+      "post": {
+        "summary": "Cancel using the attempt-scoped secret",
+        "security": [],
+        "x-lina-prepared": true,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "attemptId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "cancelSecret": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "attemptId",
+                  "cancelSecret"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success; never includes raw session tokens in JSON"
+          },
+          "400": {
+            "description": "Invalid input or exchange"
+          },
+          "401": {
+            "description": "Invalid session"
+          },
+          "403": {
+            "description": "Access, Origin or MFA denied"
+          },
+          "409": {
+            "description": "Conflicting state"
+          },
+          "429": {
+            "description": "Rate limited"
+          },
+          "503": {
+            "description": "Dependency unavailable or billing unconfigured"
+          }
+        }
+      }
+    },
+    "/api/desktop-auth/exchange": {
+      "post": {
+        "summary": "Exchange once for a separate HTTP-only native session cookie",
+        "security": [],
+        "x-lina-prepared": true,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "attemptId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "code": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{43}$"
+                  },
+                  "verifier": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9._~-]{43,128}$"
+                  },
+                  "state": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{43}$"
+                  }
+                },
+                "required": [
+                  "attemptId",
+                  "code",
+                  "verifier",
+                  "state"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success; never includes raw session tokens in JSON"
+          },
+          "400": {
+            "description": "Invalid input or exchange"
+          },
+          "401": {
+            "description": "Invalid session"
+          },
+          "403": {
+            "description": "Access, Origin or MFA denied"
+          },
+          "409": {
+            "description": "Conflicting state"
+          },
+          "429": {
+            "description": "Rate limited"
+          },
+          "503": {
+            "description": "Dependency unavailable or billing unconfigured"
+          }
+        }
+      }
+    },
+    "/api/v1/me/entitlement": {
+      "post": {
+        "summary": "Issue a device/session/user-bound Ed25519 entitlement; at most 24 hours",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "x-lina-prepared": true,
+        "responses": {
+          "200": {
+            "description": "Success; never includes raw session tokens in JSON"
+          },
+          "400": {
+            "description": "Invalid input or exchange"
+          },
+          "401": {
+            "description": "Invalid session"
+          },
+          "403": {
+            "description": "Access, Origin or MFA denied"
+          },
+          "409": {
+            "description": "Conflicting state"
+          },
+          "429": {
+            "description": "Rate limited"
+          },
+          "503": {
+            "description": "Dependency unavailable or billing unconfigured"
+          }
+        }
+      }
+    },
+    "/api/v1/me/preferences": {
+      "get": {
+        "summary": "Read own optional-usage preference",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "x-lina-prepared": true,
+        "responses": {
+          "200": {
+            "description": "Success; never includes raw session tokens in JSON"
+          },
+          "400": {
+            "description": "Invalid input or exchange"
+          },
+          "401": {
+            "description": "Invalid session"
+          },
+          "403": {
+            "description": "Access, Origin or MFA denied"
+          },
+          "409": {
+            "description": "Conflicting state"
+          },
+          "429": {
+            "description": "Rate limited"
+          },
+          "503": {
+            "description": "Dependency unavailable or billing unconfigured"
+          }
+        }
+      },
+      "put": {
+        "summary": "Update own optional-usage preference",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "x-lina-prepared": true,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "shareUsage": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "shareUsage"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success; never includes raw session tokens in JSON"
+          },
+          "400": {
+            "description": "Invalid input or exchange"
+          },
+          "401": {
+            "description": "Invalid session"
+          },
+          "403": {
+            "description": "Access, Origin or MFA denied"
+          },
+          "409": {
+            "description": "Conflicting state"
+          },
+          "429": {
+            "description": "Rate limited"
+          },
+          "503": {
+            "description": "Dependency unavailable or billing unconfigured"
+          }
+        }
+      }
+    },
+    "/api/v1/billing": {
+      "get": {
+        "summary": "Read own billing state",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "x-lina-prepared": true,
+        "responses": {
+          "200": {
+            "description": "Success; never includes raw session tokens in JSON"
+          },
+          "400": {
+            "description": "Invalid input or exchange"
+          },
+          "401": {
+            "description": "Invalid session"
+          },
+          "403": {
+            "description": "Access, Origin or MFA denied"
+          },
+          "409": {
+            "description": "Conflicting state"
+          },
+          "429": {
+            "description": "Rate limited"
+          },
+          "503": {
+            "description": "Dependency unavailable or billing unconfigured"
+          }
+        }
+      }
+    },
+    "/api/v1/billing/checkout": {
+      "post": {
+        "summary": "Create or reuse a checkout; prices are resolved server-side",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "x-lina-prepared": true,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "tier": {
+                    "type": "string",
+                    "enum": [
+                      "full_access",
+                      "orchestrator"
+                    ]
+                  },
+                  "interval": {
+                    "type": "string",
+                    "enum": [
+                      "month",
+                      "year"
+                    ]
+                  }
+                },
+                "required": [
+                  "tier",
+                  "interval"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success; never includes raw session tokens in JSON"
+          },
+          "400": {
+            "description": "Invalid input or exchange"
+          },
+          "401": {
+            "description": "Invalid session"
+          },
+          "403": {
+            "description": "Access, Origin or MFA denied"
+          },
+          "409": {
+            "description": "Conflicting state"
+          },
+          "429": {
+            "description": "Rate limited"
+          },
+          "503": {
+            "description": "Dependency unavailable or billing unconfigured"
+          }
+        }
+      }
+    },
+    "/api/v1/billing/portal": {
+      "post": {
+        "summary": "Create own restricted customer-portal session",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "x-lina-prepared": true,
+        "responses": {
+          "200": {
+            "description": "Success; never includes raw session tokens in JSON"
+          },
+          "400": {
+            "description": "Invalid input or exchange"
+          },
+          "401": {
+            "description": "Invalid session"
+          },
+          "403": {
+            "description": "Access, Origin or MFA denied"
+          },
+          "409": {
+            "description": "Conflicting state"
+          },
+          "429": {
+            "description": "Rate limited"
+          },
+          "503": {
+            "description": "Dependency unavailable or billing unconfigured"
+          }
+        }
+      }
+    },
+    "/webhooks/stripe": {
+      "post": {
+        "summary": "Verify raw Stripe signature, persist event identity, then acknowledge",
+        "x-lina-prepared": true,
+        "security": [
+          {
+            "stripeSignature": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Durably accepted or ignored supported envelope"
+          },
+          "400": {
+            "description": "Invalid signature or live-mode event"
+          },
+          "503": {
+            "description": "Database unavailable"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Secure-better-auth.session_token"
+      },
+      "stripeSignature": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "Stripe-Signature"
+      }
+    }
+  },
+  "x-lina-prepared": true,
+  "x-lina-policy": {
+    "refreshSeconds": 300,
+    "maximumOfflineSeconds": 86400,
+    "normalStartup": false,
+    "livePayments": false
+  }
+}

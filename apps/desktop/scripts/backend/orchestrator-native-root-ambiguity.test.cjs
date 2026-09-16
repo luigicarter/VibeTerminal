@@ -81,7 +81,10 @@ test('generated OpenCode producer through authenticated HTTP invalidates recipie
   await delivery.pump();
   assert.equal((await delivery.submit({ ...action, actionId: 'fresh' })).status, 'blocked');
   const native = await input.handle({ ...action, actionId: 'operator', operator: true, requestId: 'request',
-    observationSequence: 7, inputRevision: 0, submit: true, promptSubmission: true });
+    submit: true, promptSubmission: true,
+    inputSurface: require('../../backend/orchestratorInputSurface.cjs').projectInputSurface(h.get(),
+      { ok: true, id: 'pane', generation: h.launch.generation, sequence: 1, inputRevision: 0, cols: 80, rows: 24,
+        cursor: { x: 2, y: 0 }, cursorVisible: true, cursorLine: { startRow: 0, text: '> ', beforeCursor: '> ' } }) });
   assert.equal(native.status, 'recipient-unavailable');
   assert.equal(native.delivery, 'not-dispatched');
   assert.deepEqual(writes, []);
@@ -157,7 +160,10 @@ test('conflict arriving during checked input observation prevents bytes; manual 
   }, write: async payload => { writes.push(payload); return { ok: true }; } });
   t.after(() => input.dispose());
   const result = await input.handle({ target: { id: 'pane', generation: h.launch.generation }, actionId: 'race',
-    observationSequence: 7, text: 'Task input', submit: true, promptSubmission: true });
+    text: 'Task input', submit: true, promptSubmission: true,
+    inputSurface: require('../../backend/orchestratorInputSurface.cjs').projectInputSurface(h.get(),
+      { ok: true, id: 'pane', generation: h.launch.generation, sequence: 1, inputRevision: 0, cols: 80, rows: 24,
+        cursor: { x: 2, y: 0 }, cursorVisible: true, cursorLine: { startRow: 0, text: '> ', beforeCursor: '> ' } }) });
   assert.equal(result.delivery, 'not-dispatched');
   assert.deepEqual(writes, []);
   assertAmbiguous(h.get());

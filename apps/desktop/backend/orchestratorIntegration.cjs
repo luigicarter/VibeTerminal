@@ -296,6 +296,38 @@ function createSessionDirectory({ getRuntime, now = Date.now } = {}) {
     clear: () => { ui.clear(); chats.clear(); activity.clear(); bodies.clear(); interactions.clear(); completedResults.clear(); } };
 }
 
+// The launcher catalog the whole planning path reads is published by the
+// renderer's inventory reply, and the relay reads it straight out of the session
+// directory. On the FIRST request of a session that read used to happen while
+// the very first inventory was still in flight, so the request planned against
+// an empty catalog: the deterministic command compiler has no provider to
+// resolve its provider slot against and declines `unknown-provider`, and the
+// brain is then asked to choose an agent from a list of none. The September 14
+// completion ladder hit exactly this on the first turn of every run (compiled
+// `unknown-provider`, once per run, always the first request).
+//
+// A request that arrives before any inventory has been applied waits for one,
+// bounded. Once one HAS been applied, whatever the catalog holds is what this
+// workspace has, and nothing waits again - so a workspace that publishes no
+// launchers at all costs one refresh, not a timeout.
+const INVENTORY_WAIT_MS = 10000;
+const INVENTORY_POLL_MS = 100;
+async function waitForInventoryApplied({ applied, refresh, isDisposed = () => false, now = Date.now,
+  sleep = ms => new Promise(resolve => { const timer = setTimeout(resolve, ms); timer.unref?.(); }),
+  timeoutMs = INVENTORY_WAIT_MS, pollMs = INVENTORY_POLL_MS } = {}) {
+  if (applied() || isDisposed()) return applied();
+  const deadline = now() + Math.max(0, Number(timeoutMs) || 0);
+  const poll = Math.max(1, Number(pollMs) || 1);
+  while (!applied() && !isDisposed() && now() < deadline) {
+    // createInventoryRefresh coalesces reads, so this joins the inventory the
+    // session refresh already started rather than asking for a second one.
+    try { await refresh(); } catch { /* an unavailable inventory is retried until the deadline */ }
+    if (applied() || isDisposed() || now() >= deadline) break;
+    await sleep(Math.min(poll, Math.max(1, deadline - now())));
+  }
+  return applied();
+}
+
 function installOrchestrator(options) {
   const { app, BrowserWindow, Menu, ipcMain, screen, shell, safeStorage, dialog, systemPreferences, getMainWindow,
     getRuntime, sendPty, sendFusion, sendOpenFusion, getTelemetry, getChanges } = options;
@@ -307,7 +339,6 @@ function installOrchestrator(options) {
   const { waitForSessionLaunch } = require("./orchestratorLaunch.cjs");
   const { createTerminalInput } = require("./orchestratorTerminalInput.cjs");
   const { createOrchestratorHistoryProcess } = require("./orchestratorHistoryProcess.cjs");
-  const { createWorkspaceIdentity } = require("./orchestratorWorkspaceIdentity.cjs");
   const { createCompletionEvidence } = require("./orchestratorCompletion.cjs");
   const { createVoiceController } = require("./voiceController.cjs");
   const { createVoiceOverlayWindow } = require("./voiceOverlayWindow.cjs");
@@ -320,8 +351,17 @@ function installOrchestrator(options) {
   const completions = createCompletionEvidence({ getSession: id => directory.get(id), readObservation: target => observations.read(target) });
   const setups = createWorkspaceSetupStore({ userDataPath: app.getPath("userData") });
   const pendingUi = new Map(), pendingHost = new Map();
+  let inventoryApplied = 0;
   const inventoryReader = createInventoryRefresh({ read: () => requestUi("inventory"),
-    apply: result => { if (!disposed) directory.updateUi(result.sessions || result.items || [], result.projectPaths || [], result.launchers || [], result.projects || []); } });
+    apply: result => { if (!disposed) { directory.updateUi(result.sessions || result.items || [], result.projectPaths || [], result.launchers || [], result.projects || []); inventoryApplied++; } } });
+  // Every request's launcher catalog. See waitForInventoryApplied above: the
+  // first request of a session must not plan against a catalog the workspace has
+  // not published yet.
+  const requestLaunchers = async () => {
+    await waitForInventoryApplied({ applied: () => inventoryApplied > 0,
+      refresh: () => inventoryReader.refresh(), isDisposed: () => disposed });
+    return directory.launchers();
+  };
   const closeReconciliation = require("./orchestratorCloseReconciliation.cjs").createCloseReconciliation({
     observe: options.observeStoppedSession,
     getSessions: () => directory.list(),
@@ -344,9 +384,11 @@ function installOrchestrator(options) {
     onUpdate: result => relay.recordDelivery(result),
     onBeforeWrite: metadata => relay.prepareDelivery(metadata)
   });
-  const routedInputBindings = new Map();
-  const idleInputActions = new Set();
-  const queuedInputAttempts = require('./orchestratorQueuedInputAttempts.cjs').createQueuedInputAttempts();
+  // One registry for every in-flight input attempt: its task owner, the
+  // conversation it was routed to, and whether the request demanded an idle
+  // pane. These were three containers written and deleted beside each other at
+  // four call sites.
+  const inputAttempts = require('./orchestratorQueuedInputAttempts.cjs').createQueuedInputAttempts();
   // The project registry is the user's own trust evidence: a folder they added
   // to Lina Terminal is a folder they have already decided to work in.
   const projectKey = value => { const text = String(value || ''); if (!text) return ''; const windows = process.platform === 'win32' || /^[A-Za-z]:[\\/]/.test(text); const normalized = (windows ? path.win32 : path.posix).normalize(text).replace(/\\/g, '/').replace(/\/+$/, ''); return windows ? normalized.toLowerCase() : normalized; };
@@ -356,12 +398,12 @@ function installOrchestrator(options) {
   };
   const terminalInput = createTerminalInput({ getSession: inputSession, readSession: target => observations.read(target),
     startupTimeoutMs: options.startupTimeoutMs ?? options.launchTimeoutMs ?? 60000, startupPollMs: options.startupPollMs ?? 100,
-    onBeforeWrite: metadata => relay.prepareDelivery(queuedInputAttempts.correlate(metadata)),
+    onBeforeWrite: metadata => relay.prepareDelivery(inputAttempts.correlate(metadata)),
     onStartupScreen: report => { if (!disposed) relay.recordStartupScreen?.(report); },
     isRegisteredProject,
     write: ({ signal, ...payload }) => {
-      if (!require("./orchestratorLaunchers.cjs").routingBindingMatches(routedInputBindings.get(payload.actionId), directory.get(payload.id))) return { ok: false, status: "blocked", delivery: "not-dispatched", error: "The routed conversation changed before dispatch." };
-      if (idleInputActions.has(payload.actionId) && !require('./orchestratorTargetAvailability.cjs').isIdleTarget(inputSession(payload.id))) return unavailableIdleTarget();
+      if (!require("./orchestratorLaunchers.cjs").routingBindingMatches(inputAttempts.routingBinding(payload.actionId), directory.get(payload.id))) return { ok: false, status: "blocked", delivery: "not-dispatched", error: "The routed conversation changed before dispatch." };
+      if (inputAttempts.idle(payload.actionId) && !require('./orchestratorTargetAvailability.cjs').isIdleTarget(inputSession(payload.id))) return unavailableIdleTarget();
       return hostAction(sendPty, payload, 'action', signal);
     } });
   function unavailableIdleTarget() {
@@ -375,20 +417,79 @@ function installOrchestrator(options) {
     if (action.signal?.aborted) return { ok: false, status: 'cancelled', delivery: 'not-dispatched' };
     if (action.targetAvailability === 'idle' || !observation?.ok || observation.id !== target.id || observation.generation !== target.generation ||
         !require('./orchestratorBusyInput.cjs').isBusyPromptSubmission(prompt, session)) return { ok: false, status: 'blocked', delivery: 'not-dispatched', error: 'The queued prompt no longer has a verified busy input recipient.' };
-    if (observation.manualInputPending || observation.interactionInputPending) return { ok: false, status: 'input-buffer-occupied', delivery: 'not-dispatched', error: 'The terminal contains staged input. The queued prompt was not sent.' };
+    const surface = require('./orchestratorInputSurface.cjs').projectInputSurface(session, observation);
+    // A conservative keystroke latch — set by any key that is not Enter or
+    // Ctrl-C, never cleared by output — only blocks while the decoder cannot see
+    // an empty composer. Staged input owned by another request always blocks.
+    if (observation.interactionInputPending || (observation.manualInputPending && surface.composer.empty !== true)) return { ok: false, status: 'input-buffer-occupied', delivery: 'not-dispatched', error: 'The terminal contains staged input. The queued prompt was not sent.' };
     // Both terminal-input and PTY transports retain proven-unsent action IDs.
     // Use one fresh attempt, retaining the original queued delivery owner for
     // prewrite/result attribution and delayed native events.
-    const actionId = randomUUID();
-    queuedInputAttempts.remember(actionId, { ...action, target });
-    if (action.routingBinding) routedInputBindings.set(actionId, action.routingBinding);
-    try {
-      const result = await terminalInput.handle({ ...prompt, actionId, observationSequence: observation.sequence, inputRevision: observation.inputRevision,
-        promptObservation: { agentPid: session.agentPid, turnId: session.turnId, turnStartedAt: session.turnStartedAt } });
-      return queuedInputAttempts.correlate(result);
-    } finally {
-      routedInputBindings.delete(actionId); queuedInputAttempts.complete(actionId);
+    return submitOperatorPrompt({ ...prompt, actionId: randomUUID(), inputSurface: surface,
+      promptObservation: { agentPid: session.agentPid, turnId: session.turnId, turnStartedAt: session.turnStartedAt } },
+      { id: target.id, generation: target.generation, launchToken: session.launchToken, agentPid: session.agentPid });
+  }
+  // A pane that repaints between the read and the write is a screen race, not a
+  // decision for the model: every such refusal used to cost a model call, and
+  // the model's usual answer was to try something else entirely. The application
+  // owns the retry instead, for the one case it can prove is safe — an operator
+  // prompt submission, proven unsent, whose input revision never moved — and
+  // retries the identical text under a fresh transport identity. Immediate, with
+  // no sleeps: the re-read awaits the decoder's next batch, and elapsed time is
+  // never evidence of anything here. Startup adds its own readiness condition.
+  const OPERATOR_SUBMIT_ATTEMPTS = 3;
+  async function submitOperatorPrompt(action, baseline) {
+    // Every terminal input action is fenced on a captured input surface. An
+    // operator action carries the one its own read_session captured, which also
+    // proves the model acted on the screen it was shown. A user command that
+    // answers a pending question has no such read, so the application takes one
+    // here rather than leaving a path that writes without evidence. A startup
+    // send is the exception: its pane has not painted a composer yet, and the
+    // startup wait captures the surface the moment it does.
+    let prompt = action;
+    // Only the startup PROMPT defers its capture; a menu key into a pane that
+    // has not been prompted yet is still fenced on a surface taken right now.
+    const deferred = baseline.startup && !prompt.editInput && (prompt.promptSubmission === true || prompt.inputPurpose === 'task');
+    if (!prompt.inputSurface && !deferred) {
+      const observation = await observations.read({ id: baseline.id, generation: baseline.generation });
+      if (!observation?.ok) return { ok: false, status: 'stale-observation', delivery: 'not-dispatched',
+        error: 'Read the current terminal screen before interacting.' };
+      prompt = { ...prompt, inputSurface: require('./orchestratorInputSurface.cjs').projectInputSurface(inputSession(baseline.id), observation) };
     }
+    // Retryable is re-read each round: a startup prompt arrives without a
+    // surface and gains the one its wait captured, which is exactly the baseline
+    // a second attempt must be fenced on.
+    const retryable = () => prompt.operator === true && !prompt.editInput &&
+      Boolean(prompt.inputSurface) && prompt.promptSubmission === true;
+    let attempts = 0, result;
+    do {
+      const attemptId = attempts === 0 ? prompt.actionId : randomUUID();
+      attempts += 1;
+      inputAttempts.remember(attemptId, { ...prompt, actionId: prompt.actionId });
+      try { result = inputAttempts.correlate(await terminalInput.handle({ ...prompt, actionId: attemptId })); }
+      finally { inputAttempts.complete(attemptId); }
+      // A startup attempt captures its surface inside the wait; carry it forward
+      // so every later attempt is fenced on the same baseline.
+      if (!prompt.inputSurface && result?.inputSurface) prompt = { ...prompt, inputSurface: result.inputSurface };
+      if (!retryable() || attempts >= OPERATOR_SUBMIT_ATTEMPTS || prompt.signal?.aborted) break;
+      // Only a screen race is retried, and only while nothing can have been
+      // written: proven not dispatched, the input revision never moved, and the
+      // same live recipient on the same routed conversation. Immediate, with no
+      // sleeps — the next read awaits the decoder's next batch, and elapsed time
+      // is never evidence here.
+      if (result?.ok !== false || result.delivery !== 'not-dispatched' ||
+          result.status !== 'stale-observation' || result.reason === 'input-revision-changed') break;
+      // A startup send whose wait already captured the composer is retried
+      // like any other send: the composer can repaint once more right after
+      // readiness, and giving up on that one repaint left a freshly opened
+      // pane with "changed while I was about to type" and nothing typed.
+      const current = inputSession(baseline.id);
+      if (!current || current.generation !== baseline.generation || current.launchToken !== baseline.launchToken || current.agentPid !== baseline.agentPid ||
+          !require('./orchestratorLaunchers.cjs').routingBindingMatches(prompt.routingBinding, current)) break;
+    } while (true);
+    // How many times the pane moved is what the user is told; the receipt
+    // carries the count, never the screen.
+    return attempts > 1 && result?.ok === false && result.status === 'stale-observation' ? { ...result, attempts } : result;
   }
   let disposed = false, inventoryTimer = null, publicationTimer = null, spareTimer = null, voice, activation = 0;
   function inputSession(id) {
@@ -658,7 +759,11 @@ function installOrchestrator(options) {
     }
     const s = await currentTarget(action);
     if (!effectBinding && ["fusion", "openfusion"].includes(s.kind)) effectBinding = { target: { id: s.id, generation: s.generation }, nativeIdentity: require("./orchestratorRouting.cjs").sessionIdentity(s) };
-    if (kind === 'terminal_interact') return terminalInput.handle(action);
+    // A terminal_interact that is a prompt submission takes the same retry as
+    // send_prompt; keys, mouse and draft edits fall through it unchanged,
+    // because the screen under a menu is what gives those their meaning.
+    if (kind === 'terminal_interact') return submitOperatorPrompt(action,
+      { id: s.id, generation: s.generation, launchToken: s.launchToken, agentPid: s.agentPid, startup: terminalInput.needsStartupReadiness(s) });
     if (["focus_session", "stage_draft", "get_draft", "stage_handoff", "restart"].includes(kind)) {
       const { signal, ...payload } = action;
       const result = await requestUi(kind, { ...payload, id: s.id, generation: s.generation }, signal);
@@ -687,7 +792,8 @@ function installOrchestrator(options) {
     if (kind === "interrupt") {
       if (s.kind === "fusion") { check(); currentTarget(action); await getTelemetry().interruptFusionSession(s.id); return checkedHost(sendFusion, { id: s.id, generation: s.generation, actionId: action.actionId }, "interrupt"); }
       if (s.kind === "openfusion") return checkedHost(sendOpenFusion, { id: s.id, generation: s.generation, actionId: action.actionId }, "interrupt");
-      if (action.operator === true) return terminalInput.handle({ ...action, target: { id: s.id, generation: s.generation }, keys: ['ctrl-c'] });
+      if (action.operator === true) return submitOperatorPrompt({ ...action, target: { id: s.id, generation: s.generation }, keys: ['ctrl-c'] },
+        { id: s.id, generation: s.generation, launchToken: s.launchToken, agentPid: s.agentPid });
       return checkedHost(sendPty, { id: s.id, generation: s.generation, actionId: action.actionId, kind: "interrupt" });
     }
     if (kind === "send_prompt") {
@@ -714,30 +820,12 @@ function installOrchestrator(options) {
         const prompt = { ...action, target: { id: s.id, generation: s.generation }, submit: true, promptSubmission: true,
           promptObservation: action.promptObservation ?? { agentPid: s.agentPid, turnId: s.turnId, turnStartedAt: s.turnStartedAt } };
         if (relay.getRequests().some(request => request.sessionId === s.id && request.generation === s.generation && request.state === 'pending')) return { ok: false, status: 'blocked', delivery: 'not-dispatched', error: 'Answer the pending terminal request before submitting a new prompt.' };
-        if (action.routingBinding) routedInputBindings.set(action.actionId, action.routingBinding);
-        if (action.targetAvailability === 'idle') idleInputActions.add(action.actionId);
-        let result;
-        const startup = terminalInput.needsStartupReadiness(s) && action.operator === true &&
-          !action.editInput && Number.isSafeInteger(action.inputRevision);
-        try {
-          result = await terminalInput.handle(prompt);
-          // A startup repaint can win the race between decoded readiness and
-          // the PTY's exact screen fence. Retry only a proven-unsent rejection,
-          // retaining the original input revision, PID and routing authority.
-          // Fresh transport IDs are correlated back to this one task owner.
-          for (let retry = 0; startup && retry < 2 && result?.ok === false && result.delivery === 'not-dispatched' &&
-              result.status === 'stale-observation' && result.reason !== 'input-revision-changed' && !action.signal?.aborted; retry++) {
-            const current = inputSession(s.id);
-            if (!current || current.generation !== s.generation || current.launchToken !== s.launchToken || current.agentPid !== s.agentPid ||
-                !require('./orchestratorLaunchers.cjs').routingBindingMatches(action.routingBinding, current) || !terminalInput.needsStartupReadiness(current)) break;
-            const attemptId = randomUUID();
-            queuedInputAttempts.remember(attemptId, prompt);
-            if (action.routingBinding) routedInputBindings.set(attemptId, action.routingBinding);
-            if (action.targetAvailability === 'idle') idleInputActions.add(attemptId);
-            try { result = queuedInputAttempts.correlate(await terminalInput.handle({ ...prompt, actionId: attemptId })); }
-            finally { routedInputBindings.delete(attemptId); idleInputActions.delete(attemptId); queuedInputAttempts.complete(attemptId); }
-          }
-        } finally { routedInputBindings.delete(action.actionId); idleInputActions.delete(action.actionId); }
+        // A repaint can win the race between the decoded read and the PTY's own
+        // fence — at startup, and for the rest of a pane's life whenever its
+        // composer animates. Both are the same race; both are retried in the one
+        // helper, and nothing is retried once a byte may have been written.
+        const result = await submitOperatorPrompt(prompt, { id: s.id, generation: s.generation, launchToken: s.launchToken,
+          agentPid: s.agentPid, startup: terminalInput.needsStartupReadiness(s) });
         const latest = directory.get(s.id);
         const pendingInteraction = relay.getRequests().some(request => request.sessionId === s.id && request.generation === s.generation && request.state === 'pending');
         if (require('./orchestratorBusyInput.cjs').canQueueBusyPrompt(prompt, latest && { ...latest, pendingInteraction }, result)) return delivery.submit({ ...action, target: prompt.target });
@@ -763,7 +851,6 @@ function installOrchestrator(options) {
     return result;
   }
   const relay = createOrchestrator({ userDataPath: app.getPath("userData"), secureStorage: safeStorage, fetch: options.fetch, interpretIntent: options.interpretIntent,
-    resolveWorkspaceIdentity: createWorkspaceIdentity(),
     getSessions: async () => {
       const result = await inventoryReader.refresh();
       if (!result?.ok) throw new Error(result?.error || "Current workspace inventory is unavailable.");
@@ -772,7 +859,7 @@ function installOrchestrator(options) {
       void closeReconciliation.refresh().catch(() => {});
       return directory.list();
     },
-    getLaunchers: () => directory.launchers(),
+    getLaunchers: requestLaunchers,
     getSession: id => directory.get(id),
     getWorkspaceState: signal => requestUi("workspace_state", {}, signal),
     readSession: async target => {
@@ -951,6 +1038,10 @@ function installOrchestrator(options) {
   async function validateVoice() {
     const settings = relay.getSettings();
     if (settings.ttsModel !== TTS_MODEL || !TTS_VOICES.includes(settings.voice)) return { ok: false, voiceReady: false, error: 'Choose a supported voice in Settings.' };
+    // A Brain served from this machine (LINA_ORCHESTRATOR_API_BASE) has no
+    // transcription or speech models to offer. That is not a reason to refuse
+    // the text assistant: voice stays off and the relay stays on.
+    if (process.env.LINA_ORCHESTRATOR_API_BASE) return { ok: true, voiceReady: false, error: 'Voice is off while the Brain runs on a custom endpoint. The text assistant is available.' };
     try {
       const [transcription, speech] = await Promise.all([relay.models('transcription'), relay.models('speech')]);
       if (!transcription.some(model => model.id === settings.sttModel)) return { ok: false, voiceReady: false, error: 'The selected transcription model is unavailable. Choose another in Settings.' };
@@ -984,8 +1075,9 @@ function installOrchestrator(options) {
     if (!result.ok || disposed || token !== activation) return result.ok ? { ok: false, status: 'cancelled' } : result;
     const audio = await validateVoice();
     if (disposed || token !== activation) return { ok: false, status: 'cancelled' };
-    voiceReady = audio.ok; publish();
+    voiceReady = audio.ok && audio.voiceReady !== false; publish();
     if (!audio.ok) { captureReady = false; await voice.setListening(false); await relay.setEnabled(false); return audio; }
+    if (audio.voiceReady === false) { captureReady = false; await voice.setListening(false); await refreshInventory(); return { ok: true, voiceReady: false, listening: false, error: audio.error }; }
     try {
       showIndicator(); await surface.ensureReady();
       if (disposed || token !== activation) return { ok: false, status: 'cancelled' };
@@ -1148,7 +1240,7 @@ function installOrchestrator(options) {
     // generation to compare. Its compact launch fence must still reject late
     // creation/output events that would otherwise recreate a forgotten decoder.
     if (kind === 'terminal' && getRuntime?.()?.getRecord?.(event?.id)?.closed) return false;
-    if (kind === 'terminal') event = queuedInputAttempts.correlate(event);
+    if (kind === 'terminal') event = inputAttempts.correlate(event);
     // Closed Fusion owners are retained privately while inventory exposes a
     // paused fallback. Only the matching owner's explicit restart may cross
     // that display-generation boundary; stop/replacement removes the right.
@@ -1203,7 +1295,7 @@ function installOrchestrator(options) {
     return true;
   }
   function forgetTerminal(id, generation) {
-    queuedInputAttempts.forget(id, generation);
+    inputAttempts.forget(id, generation);
     delivery.forget(id, generation); observations.forget(id, generation); completions.forget(id, generation); directory.forget(id, generation);
     for (const request of relay.getRequests()) if (request.sessionId === id && request.generation === generation && request.state === "pending") {
       const scope = { id: request.id, sessionId: id, generation, revision: request.revision };
@@ -1225,7 +1317,7 @@ function installOrchestrator(options) {
     surface.dispose();
     for (const finish of pendingUi.values()) finish({ ok: false, status: "cancelled", error: "Application closed." });
     for (const pending of [...pendingHost.values()]) pending.cancel("Application closed before acknowledgment.");
-    queuedInputAttempts.clear();
+    inputAttempts.clear();
     return disposal;
   }
   app.once("before-quit", event => {
@@ -1241,4 +1333,4 @@ function installOrchestrator(options) {
   return { incoming, outgoing: directory.outgoing, refreshInventory, dispose, getState: snapshot, directory, answerExisting, forgetTerminal };
 }
 
-module.exports = { createSessionDirectory, installOrchestrator };
+module.exports = { createSessionDirectory, installOrchestrator, waitForInventoryApplied, INVENTORY_WAIT_MS };

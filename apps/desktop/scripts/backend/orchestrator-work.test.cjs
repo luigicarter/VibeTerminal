@@ -38,6 +38,13 @@ test('records observed agent endings, never idle, provisional, written or shell 
   assert.match(store.snapshot()[0].summary, /no result excerpt/);
   store.observe([session({ id: 'failed', turnState: 'failed' }), session({ id: 'stopped', turnState: 'interrupted' })]);
   assert.deepEqual(new Set(store.snapshot().map(record => record.status)), new Set(['completed', 'failed', 'interrupted']));
+  // Added 2026-09-15: a provider that only reports its own end (Claude Code
+  // here) ends with a provisional 'response'; that ending is recorded, and the
+  // runtime's provisional child marker with no child does not block it.
+  assert.equal(store.observe([session({ id: 'claude', kind: 'claude', provider: 'claude', observation: 'provisional', turnState: 'response',
+    childActivity: true, coarseChildObservation: 'provisional', children: [] })]), true);
+  assert.equal(store.observe([session({ id: 'claude-child', kind: 'claude', provider: 'claude', observation: 'provisional', turnState: 'response',
+    childActivity: true, coarseChildObservation: 'observed' })]), false, 'an observed child still blocks');
   await store.flush();
 });
 

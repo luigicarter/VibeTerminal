@@ -18,6 +18,11 @@ function fixture(t) { const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'l
   t.after(() => { store.close(); fs.rmSync(directory, { recursive: true, force: true }); });
   return { directory, get store() { return store; }, reopen() { store.close(); store = createChatStore({ directory }); return store; }, save(value, sequence = 1) { return store.checkpoint({ workspace: value, sequence, clientId: 'test' }); } };
 }
+// The run record is read from a closed database so the assertions see exactly
+// what a later launch would read, not a value still held in this process.
+function runRecord(directory) { const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(path.join(directory, 'chat-workspace.sqlite'), { readOnly: true });
+  try { return JSON.parse(db.prepare('SELECT value FROM meta WHERE key=?').get('run').value); } finally { db.close(); } }
 test('pane closure and project removal keep exact chat, recipe, title override, archive and draft', t => {
   const f = fixture(t), p = { ...pane(), openCodexModel: 'saved-model' };
   f.store.bootstrap(workspace(p));
@@ -144,6 +149,49 @@ test('a process killed after commit recovers committed identity without a shutdo
   await new Promise((resolve, reject) => { const timer = setTimeout(() => { child.kill(); reject(new Error('Fixture timeout')); }, 10000); child.stdout.once('data', () => { clearTimeout(timer); resolve(); }); child.once('error', reject); });
   await new Promise(resolve => { child.once('exit', resolve); child.kill('SIGKILL'); });
   const restored = f.reopen().bootstrap(); assert.equal(restored.recoveryNeeded, true); assert.equal(restored.workspace.workspaces[0].sessions[0].threadRef.id, 'A');
+});
+test('a shutdown that never finished still reopens agent panes started', t => {
+  const f = fixture(t); f.store.bootstrap(workspace(pane()));
+  // Windows ended the session; the app asked for a shutdown and was terminated
+  // before any of its deadlines could be met.
+  f.store.shutdown({ reason: 'session-end' });
+  const restored = f.reopen().bootstrap();
+  assert.equal(restored.recoveryNeeded, false);
+  assert.equal(restored.workspace.workspaces[0].sessions[0].started, true);
+  f.store.close();
+  const record = runRecord(f.directory);
+  assert.equal(record.recovery, false);
+  assert.equal(record.previousRun.shutdownReason, 'session-end');
+  assert.equal(record.previousRun.clean, false);
+  assert.ok(record.previousRun.shutdownRequestedAt);
+  assert.equal(record.previousRun.previousRun, undefined);
+});
+test('a finished shutdown keeps its own request and hands its outcome to the next run', t => {
+  const f = fixture(t); f.store.bootstrap(workspace(pane()));
+  f.store.shutdown({ reason: 'quit' });
+  f.store.finish({ clean: false, incomplete: ['ptyHost'] });
+  f.store.close();
+  const finished = runRecord(f.directory);
+  assert.ok(finished.bootId); assert.ok(finished.startedAt); assert.ok(finished.shutdownRequestedAt);
+  assert.equal(finished.shutdownReason, 'quit'); assert.equal(finished.clean, false);
+  assert.ok(finished.finishedAt); assert.deepEqual(finished.incomplete, ['ptyHost']);
+  const restored = f.reopen().bootstrap();
+  assert.equal(restored.recoveryNeeded, false);
+  assert.equal(restored.workspace.workspaces[0].sessions[0].started, true);
+  f.store.close();
+  const record = runRecord(f.directory);
+  assert.equal(record.recovery, false);
+  assert.deepEqual(record.previousRun, { bootId: finished.bootId, startedAt: finished.startedAt,
+    shutdownRequestedAt: finished.shutdownRequestedAt, shutdownReason: 'quit', clean: false,
+    finishedAt: finished.finishedAt, incomplete: ['ptyHost'] });
+});
+test('a run that never asked to shut down still reopens its agent panes paused', t => {
+  const f = fixture(t); f.store.bootstrap(workspace(pane()));
+  const restored = f.reopen().bootstrap();
+  assert.equal(restored.recoveryNeeded, true);
+  assert.equal(restored.workspace.workspaces[0].sessions[0].started, false);
+  f.store.close();
+  assert.equal(runRecord(f.directory).recovery, true);
 });
 test('exact opener refuses missing/unverified IDs and never invokes a new chat', async t => {
   const f = fixture(t); f.store.bootstrap(workspace(pane())); let result = { status: 'missing' };

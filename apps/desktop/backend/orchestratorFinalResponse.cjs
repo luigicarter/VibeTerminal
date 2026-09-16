@@ -50,13 +50,16 @@ function composeFinalResponse({ outcomes = [], waits = [], deliveryUpdates = [],
     if (!part?.text) return;
     if (!definiteFailure(item)) { parts.push(part); return; }
     const key = targetId(item) ? JSON.stringify(['failure', targetId(item), generation(item)]) : `text:${part.text}`;
-    const detailed = Boolean(item.error || item.reason);
+    // A reason about the pane (it is waiting on an answer, it is busy) outranks
+    // a reason about the attempt (a screen race, a malformed step): the user is
+    // told what the pane needs, not which of fifteen tries was the last.
+    const rank = (item.status === 'blocked' ? 2 : 0) + (item.error || item.reason ? 1 : 0);
     const existing = failures.get(key);
     if (existing) {
-      if (detailed && !existing.detailed) { parts[existing.index] = part; existing.detailed = true; }
+      if (rank > existing.rank) { parts[existing.index] = part; existing.rank = rank; }
       return;
     }
-    failures.set(key, { index: parts.length, detailed });
+    failures.set(key, { index: parts.length, rank });
     parts.push(part);
   };
   const renderWait = wait => {

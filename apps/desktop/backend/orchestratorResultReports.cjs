@@ -1,6 +1,8 @@
 'use strict';
 
-const STATUSES = new Set(['completed', 'failed', 'interrupted', 'cancelled']);
+// 'response' is the runtime's provisional end for the providers below: their
+// own Stop hook says the turn ended, nothing on screen confirms it.
+const STATUSES = new Set(['completed', 'response', 'failed', 'interrupted', 'cancelled']);
 const SOURCES = new Set(['chat-events', 'terminal-screen']);
 function bounded(value, bytes) {
   let text = '', used = 0;
@@ -12,13 +14,30 @@ function bounded(value, bytes) {
   return text;
 }
 
+// Providers whose turn end the runtime can only report from their own hooks
+// (Claude Code, Gemini, Kimi, Qwen, Cursor, OpenCode, Grok Build) never reach
+// an "observed" end, so a finished Claude task carried no result at all and
+// "what's the result?" went to the model and its reviewer every time. Their
+// result is read at the provider-reported end and its coverage says so. Codex
+// and the chat panes still fail closed on a provisional end, which for them is
+// a transient state before the observed one.
+const PROVISIONAL_END_PROVIDERS = new Set(['claude', 'claude-custom', 'gemini', 'kimi', 'kimi-custom', 'qwen', 'cursor', 'opencode', 'grok']);
+const endObserved = session => session?.observation === 'observed'
+  || session?.observation === 'provisional' && PROVISIONAL_END_PROVIDERS.has(session.provider || session.kind);
+// The runtime counts a provisional coarse end as possible child activity
+// (a Stop hook can describe a child or an intermediate response). With no
+// child actually observed that marker is the same provisional end as above,
+// not a busy child; observed children and background work still block.
+const childrenBusy = session => Boolean(session?.childActivity)
+  && !(session.coarseChildObservation === 'provisional' && !(Array.isArray(session.children) && session.children.length));
+
 // This binds a result to an observed turn. The caller must additionally match
 // this envelope to its request-owned wait and redact secrets before model/UI use.
 function validateResultEvidence(session, result) {
   if (!session?.id || session.generation == null || !String(session.generation) || String(session.generation).startsWith('paused:') || !session.turnId
     || ['terminal', 'shell'].includes(session.kind) || ['terminal', 'shell'].includes(session.provider)
-    || session.observation !== 'observed' || session.completionAttribution === 'ambiguous'
-    || session.pendingInput || session.childActivity || !STATUSES.has(session.turnState)
+    || !endObserved(session) || session.completionAttribution === 'ambiguous'
+    || session.pendingInput || childrenBusy(session) || !STATUSES.has(session.turnState)
     || !Number.isFinite(session.turnStartedAt) || !Number.isFinite(session.turnEndedAt)
     || session.turnStartedAt < 0 || session.turnEndedAt < session.turnStartedAt
     || !result || !SOURCES.has(result.source) || result.turnId !== session.turnId
@@ -28,9 +47,11 @@ function validateResultEvidence(session, result) {
     || typeof result.text !== 'string' || !result.text.trim()) return undefined;
   return Object.freeze({ targetId: session.id, generation: session.generation, turnId: session.turnId,
     status: result.status, at: result.at, source: result.source, text: bounded(result.text, 16000),
-    coverage: bounded(result.coverage || (result.source === 'terminal-screen'
-      ? 'Displayed terminal excerpt at the observed turn end; may include user input and earlier output.'
-      : 'Agent output at an observed turn end; not independently verified.'), 1000) });
+    coverage: bounded(session.observation === 'provisional'
+      ? 'Displayed terminal excerpt at the turn end the provider reported; that end was not confirmed on screen, so the excerpt may be incomplete.'
+      : result.coverage || (result.source === 'terminal-screen'
+        ? 'Displayed terminal excerpt at the observed turn end; may include user input and earlier output.'
+        : 'Agent output at an observed turn end; not independently verified.'), 1000) });
 }
 
 function buildResultSummaryMessages(evidence) {
@@ -59,4 +80,4 @@ function buildProgressSummaryMessages({ targetId, generation, turnId, name, stat
   ];
 }
 
-module.exports = { validateResultEvidence, buildResultSummaryMessages, fallbackResultSummary, buildProgressSummaryMessages };
+module.exports = { validateResultEvidence, buildResultSummaryMessages, fallbackResultSummary, buildProgressSummaryMessages, endObserved, childrenBusy, PROVISIONAL_END_PROVIDERS };

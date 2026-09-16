@@ -28,7 +28,7 @@ function createPane(id, kind, cwd, mode = 'usage') {
       cursor: ['/model'], opencode: ['/models'] }[kind] || [])])];
   const aliases = { claude: '/cost', gemini: '/usage', qwen: '/usage', grok: '/cost' };
   pane.screen = () => mode === 'passive' ? 'Review completed: 2 defects found in parser.js. No changes made.' : pane.phase === 'prompt' ? `${kind} ready. ${pane.composer ? `Input: ${pane.composer} (not submitted). Press Enter to run it.` : "Empty prompt."} No task running.` : pane.phase === 'closed' ? (pane.observedUsage ? `Returned to empty prompt. Last inspected: ${pane.facts}` : 'Returned to empty prompt.') : mode === 'missing' ? 'Usage information unavailable for this authentication method. Esc closes.' : pane.phase === 'discovery' ? 'Local help: Account information is selected. Press Enter to inspect its availability; Esc closes.' : pane.phase === 'menu' ? (mode === 'credits-menu' ? 'Grok Build: Context usage 3200 tokens. Tabs: Context usage | Usage limit | Session info. Tab/Right next; Shift-Tab/Left previous; Esc closes.' : 'Account information. Tabs: Status | Usage. Press right for Usage; Esc closes.') : `${pane.facts}\n${scenario.appendOnly ? 'Informational output appended above empty prompt; no modal is open.' : 'Esc closes.'}`;
-  pane.read = () => { pane.reads.push({ sequence: pane.sequence, inputRevision: pane.inputRevision, afterActions: pane.actions.length }); if (pane.phase === 'usage' && mode !== 'missing') pane.observedUsage = true; return { ok: true, id, generation: pane.session.generation, sequence: pane.sequence, observationSequence: pane.sequence, inputRevision: pane.inputRevision, text: pane.screen(), inputState: { kind: pane.composer ? 'text' : 'empty', hasText: Boolean(pane.composer) } }; };
+  pane.read = () => { pane.reads.push({ sequence: pane.sequence, inputRevision: pane.inputRevision, afterActions: pane.actions.length }); if (pane.phase === 'usage' && mode !== 'missing') pane.observedUsage = true; return { ok: true, id, generation: pane.session.generation, sequence: pane.sequence, inputRevision: pane.inputRevision, text: pane.screen(), cols: 100, rows: 30, cursor: { x: 2, y: 0 }, cursorVisible: true, alternateScreen: false, cursorLine: { startRow: 0, text: pane.screen().split(String.fromCharCode(10))[0], beforeCursor: '' }, inputState: { kind: pane.composer ? 'text' : 'empty', hasText: Boolean(pane.composer) } }; };
   const originalScreen = pane.screen;
   pane.screen = () => pane.phase === 'info' ? `${kind} informational output. No quota figures on this page. Available read-only commands: ${commands.join(', ')}. Empty prompt ready.` : originalScreen();
   pane.dispatch = action => {
@@ -36,7 +36,8 @@ function createPane(id, kind, cwd, mode = 'usage') {
     assert.equal(action.kind, 'terminal_interact', 'Inspection must not submit tasks or change lifecycle');
     assert.equal(action.operator, true); assert.equal(validateTerminalControls(action).ok, true);
     assert.ok(pane.reads.some(read => read.afterActions === pane.actions.length), 'A fresh read is required before every input');
-    assert.equal(action.observationSequence, pane.sequence); assert.equal(action.inputRevision, pane.inputRevision);
+    // Freshness is the captured input surface, not two numbers the model copied.
+    assert.equal(action.inputSurface.inputRevision, pane.inputRevision);
     assert.equal(mode === 'passive', false, 'Passive output inspection must have zero effects');
     // Plan the whole synthetic transition before committing it. A fixture-level
     // unsupported control is proven unsent, not an uncertain native write.

@@ -7,10 +7,13 @@ const { sessionIdentity } = require('../../backend/orchestratorRouting.cjs');
 const { agent, childApproval } = require('./orchestrator-agent-fixtures.cjs');
 const directory = () => { let next = 0; return createAgentDirectory({ makeId: () => `agent-${++next}` }); };
 
-test('agent record explains child approval independently of its completed root and legacy ready label', () => {
+test('agent record explains child approval independently of its completed root and summary label', () => {
   const source = childApproval();
   const old = sessionSummary(source, { includeNavigationGuide: false });
-  assert.equal(old.readiness, 'ready'); assert.equal(old.children, undefined);
+  // The summary label follows the one pane-state predicate now: a root whose
+  // child is waiting on an approval is not ready, where the old label said it
+  // was because it read only the root's turn state.
+  assert.equal(old.readiness, 'unverified'); assert.equal(old.children, undefined);
   const record = projectAgent(source, { agentId: 'agent-a', state: 'bound' });
   assert.equal(record.activity.foreground.state, 'completed');
   assert.equal(record.activity.childWork, true);

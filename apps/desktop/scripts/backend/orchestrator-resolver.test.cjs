@@ -6,9 +6,11 @@
 // decision costs: one interpretation call, and no routing or affinity round.
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
-const { extractSelector, resolveAssignment, idlePaneCandidate, neverPrompted } = require('../../backend/orchestratorResolver.cjs');
+const { resolveAssignment, idlePaneCandidate } = require('../../backend/orchestratorResolver.cjs');
+const { readReference, resolveReference } = require('../../backend/orchestratorReference.cjs');
+const { buildTerminalModel } = require('../../backend/orchestratorTerminalModel.cjs');
+const { neverPrompted } = require('../../backend/orchestratorPaneReadiness.cjs');
 const { normalizeInstruction } = require('../../backend/orchestratorVocabulary.cjs');
-const { createActionHistory } = require('../../backend/orchestratorActionHistory.cjs');
 const { createOrchestrator } = require('../../backend/orchestrator.cjs');
 const corpus = require('./fixtures/orchestrator-utterances.json');
 
@@ -21,13 +23,16 @@ const launchers = [{ kind: 'codex', label: 'Codex', available: true, configured:
 const sameCwd = (a, b) => Boolean(a && b && String(a).toLowerCase() === String(b).toLowerCase());
 const normalized = text => normalizeInstruction(text, { projects, launchers }).text;
 const row = n => corpus.find(item => item.n === n);
+const ids = list => list.map(terminal => terminal.id);
 const utterance = n => normalized(row(n).text);
 
 // The roster from the September 12 profile: two panes about the chat section,
 // one about performance, and three panes nobody owns.
 const pane = (id, name, kind, extra = {}) => ({ id, name, kind, provider: kind, cwd: VIBE, generation: `g-${id}`,
   launchToken: 1, conversationId: `c-${id}`, started: true, status: 'idle', observation: 'observed',
-  processState: 'running', turnState: 'idle', lastActivityAt: 1000, ...extra });
+  // Inventory always carries the pane's own agent process; reuse needs an
+  // identified recipient exactly as delivery and idle-target selection do.
+  processState: 'running', agentProcessState: 'running', agentPid: 4000 + id.length, turnState: 'idle', lastActivityAt: 1000, ...extra });
 const roster = () => [
   pane('p1', 'Add project chat section', 'codex', { status: 'running', turnState: 'running', turnId: 'busy-turn', lastActivityAt: 6000 }),
   pane('p2', 'Investigate chat section integration', 'codex', { lastActivityAt: 5000 }),
@@ -41,14 +46,34 @@ const rosterWork = () => [
   { id: 'w2', cwd: VIBE, title: 'Investigate chat section integration', objective: 'Investigate how the chat section integrates with the composer.', binding: { target: { id: 'p2', generation: 'g-p2' } } },
   { id: 'w4', cwd: VIBE, title: 'Investigate terminal performance', objective: 'Investigate terminal performance and RAM growth.', binding: { target: { id: 'p4', generation: 'g-p4' } } },
 ];
-function decide(instruction, options = {}) {
+// The terminal model the resolver reads, built the way the app builds it: the
+// pane Lina opened is a creation receipt, the pane she last typed into is the
+// newest delivered ledger row.
+function terminalsFor(options = {}) {
   const sessions = options.sessions || roster();
+  const receipts = options.created ? [{ kind: 'create_session', status: 'created', targetId: options.created.id, at: 9000 }] : [];
+  const ledgerRows = options.ledgerRows || (options.lastTarget
+    ? [{ requestId: 'last', at: 9000, verb: 'start', outcome: 'delivered-started', pane: { id: options.lastTarget.id } }] : []);
+  return buildTerminalModel({ sessions, workItems: options.workItems || (options.sessions ? [] : rosterWork()), ledgerRows, receipts });
+}
+function decide(instruction, options = {}) {
   return resolveAssignment({ instruction, grant: { args: { cwd: options.cwd || VIBE, assignmentMode: options.assignmentMode || 'auto', ...(options.kindOfSession && { kindOfSession: options.kindOfSession }) } },
-    sessions, workItems: options.workItems || (options.sessions ? [] : rosterWork()), launchers, sameCwd,
+    terminals: terminalsFor(options), launchers, now: 10000,
     cwd: options.cwd || VIBE, projectName: options.projectName || 'vibeTerminal',
-    history: options.history || { lastCreatedPane: () => options.created, lastTargetPane: () => options.lastTarget, recentPanes: () => [] },
     ...(options.answer && { answer: options.answer }) });
 }
+
+// Added 2026-09-15: "prompt the other one as well" right after a question was
+// answered by a guess (ladder T4.7). A delivery anchors "the other one" only
+// while it is the latest thing in the ledger.
+test('"the other one" is the pane beside the last delivery, and a question once anything came after that delivery', () => {
+  const delivered = { requestId: 'd', at: 200, verb: 'start', outcome: 'delivered-started', project: 'vibeTerminal', pane: { id: 'p1', name: 'Chat section', provider: 'codex' } };
+  const fresh = decide('Prompt the other one as well.', { lastTarget: { id: 'p1' }, ledgerRows: [delivered] });
+  assert.equal(fresh.decision, fresh.candidateCount > 2 ? 'ask' : 'reuse', JSON.stringify(fresh));
+  const stale = decide('Prompt the other one as well.', { lastTarget: { id: 'p1' }, ledgerRows: [delivered, { requestId: 'q', at: 300, verb: 'ask', outcome: 'answered', project: 'vibeTerminal' }] });
+  assert.equal(stale.decision, 'ask', JSON.stringify(stale));
+  assert.ok(stale.candidates.length >= 1, 'the question names the panes it could mean');
+});
 
 // --- Selector extraction ---------------------------------------------------
 // Every row below is a real utterance, read after wave 1 normalization.
@@ -64,7 +89,7 @@ const SELECTORS = [
 test('selector extraction over the real utterances', () => {
   const wrong = [];
   for (const [n, expected] of SELECTORS) {
-    const found = extractSelector(utterance(n), { launchers }).kind;
+    const found = readReference(utterance(n), { launchers }).kind;
     if (found !== expected) wrong.push({ n, expected, found, text: utterance(n).slice(0, 80) });
   }
   assert.deepEqual(wrong, [], `selector mismatches: ${JSON.stringify(wrong, null, 1)}`);
@@ -72,12 +97,12 @@ test('selector extraction over the real utterances', () => {
 });
 
 test('the named task, not the pane vocabulary, becomes the title words', () => {
-  assert.deepEqual(extractSelector(utterance(122), { launchers }).words, ['chat', 'section']);
-  assert.deepEqual(extractSelector(utterance(121), { launchers }).words, ['chat', 'section']);
-  assert.deepEqual(extractSelector('Ask the terminal working on "invoice rounding" to continue.').words, ['invoice', 'rounding']);
+  assert.deepEqual(readReference(utterance(122), { launchers }).words, ['chat', 'section']);
+  assert.deepEqual(readReference(utterance(121), { launchers }).words, ['chat', 'section']);
+  assert.deepEqual(readReference('Ask the terminal working on "invoice rounding" to continue.').words, ['invoice', 'rounding']);
   // A creation verb owned by a subject describes the bug, not the request.
-  assert.equal(extractSelector('have a Codex terminal fix the login page that is not working').kind, 'provider');
-  assert.equal(extractSelector(utterance(126), { launchers }).provider, 'codex');
+  assert.equal(readReference('have a Codex terminal fix the login page that is not working').kind, 'provider');
+  assert.equal(readReference(utterance(126), { launchers }).provider, 'codex');
 });
 
 // --- Decisions against the roster ------------------------------------------
@@ -196,6 +221,18 @@ test('an existing-agent continuation with no title match names the agents it can
   assert.equal(result.question.includes('unique live owner'), false);
 });
 
+// Added 2026-09-15: "and tell it to write that up in the docs folder" right
+// after "prompt the empty codex terminal to summarize the repo" asked which
+// agent to continue (ladder T4.12). "It" is the pane Lina last typed into.
+test('an existing-agent continuation that says "it" goes to the pane Lina last typed into', () => {
+  const result = decide('And tell it to write that up in the docs folder.', { assignmentMode: 'existing', lastTarget: { id: 'p2' } });
+  assert.deepEqual([result.decision, result.targetId], ['reuse', 'p2'], JSON.stringify(result));
+  const elsewhere = decide('And tell it to write that up in the docs folder.', { assignmentMode: 'existing', lastTarget: { id: 'gone' } });
+  assert.equal(elsewhere.decision, 'ask', 'a pane no longer in the project is not "it"');
+  const named = decide('Tell the pairing terminal to write that up.', { assignmentMode: 'existing', lastTarget: { id: 'p2' } });
+  assert.notEqual(named.targetId, 'p2', 'a named pane is not read as "it"');
+});
+
 test('answers to the resolver own question are resolved without a model', () => {
   const candidates = [{ targetId: 'p1', label: 'Add project chat section' }, { targetId: 'p2', label: 'Investigate chat section integration' }];
   const answer = text => decide(text, { answer: { text, kind: 'candidates', candidates } });
@@ -237,24 +274,28 @@ test('corpus sweep: at least nine in ten requests reach the decision their selec
   assert.ok(fraction >= 0.9, `corpus sweep ${fraction.toFixed(3)} below 0.9`);
 });
 
-// --- Action history --------------------------------------------------------
-test('action history answers from receipts and never offers a pane that has gone', () => {
+// --- Lina's own actions, read off the model ---------------------------------
+// "That new terminal you just opened" and "the one you just prompted" are
+// answered from creation receipts and the ledger, never offering a pane that
+// has since closed. The action-history module that scanned receipts for this
+// is gone; the model carries `opened` and `lastWorked` instead.
+test('what Lina opened and last typed into is read off the model, and a closed pane is never offered', () => {
   const sessions = [pane('open', 'Codex open', 'codex'), pane('sent', 'Codex sent', 'codex')];
   const receipts = [
     { kind: 'create_session', targetId: 'closed', status: 'created', cwd: VIBE, at: 1000 },
     { kind: 'create_session', targetId: 'open', status: 'created', cwd: VIBE, at: 2000 },
-    { kind: 'send_prompt', targetId: 'sent', status: 'written', at: 3000, requestId: 'r1' },
-    { kind: 'send_prompt', targetId: 'open', status: 'rejected', at: 4000, requestId: 'r2' },
   ];
-  const history = createActionHistory({ getReceipts: () => receipts, getSessions: () => sessions,
-    getTasks: () => [{ requestId: 'r1', status: 'finished' }], now: () => 5000, sameCwd });
-  assert.equal(history.lastCreatedPane({ cwd: VIBE })?.id, 'open');
-  assert.equal(history.lastCreatedPane({ cwd: VIBE, withinMs: 1000 }), undefined, 'outside the window');
-  assert.equal(history.lastTargetPane({ cwd: VIBE })?.id, 'sent', 'a refused write is not a pane Lina used');
-  assert.deepEqual(history.recentPanes({ cwd: VIBE, limit: 5 }).map(item => item.id), ['open', 'sent']);
-  const cancelled = createActionHistory({ getReceipts: () => receipts, getSessions: () => sessions,
-    getTasks: () => [{ requestId: 'r1', status: 'cancelled' }], now: () => 5000, sameCwd });
-  assert.equal(cancelled.lastTargetPane({ cwd: VIBE }), undefined);
+  const row = (id, at, outcome = 'delivered-started') => ({ requestId: `r-${at}`, at, verb: 'start', outcome, pane: { id } });
+  const terminals = (ledgerRows, extra = {}) => buildTerminalModel({ sessions, receipts, ledgerRows, ...extra });
+  const opened = resolveReference('put that prompt in the terminal you just opened', terminals([]), { cwd: VIBE, now: 5000 });
+  assert.deepEqual([opened.kind, opened.terminals.map(t => t.id)], ['just_opened', ['open']], 'the newest live creation, not the closed one');
+  assert.equal(resolveReference('the terminal you just opened', terminals([]), { cwd: VIBE, now: 2000 + 31 * 60 * 1000 }).exact, false, 'outside the window');
+  const last = resolveReference('stop that last terminal you worked on', terminals([row('sent', 3000), row('open', 4000, 'refused')]), { cwd: VIBE });
+  assert.deepEqual([last.kind, last.terminals.map(t => t.id)], ['last_target', ['sent']], 'a refused write is not a pane Lina used');
+  const gone = resolveReference('the last one you worked on', terminals([row('sent', 3000), row('closed', 4000)]), { cwd: VIBE });
+  assert.deepEqual([gone.exact, gone.candidates], [false, []], 'the newest delivery went to a pane that has closed: a question, never the next best');
+  const both = resolveReference('stop them both', terminals([row('sent', 3000), row('open', 3000)]), { cwd: VIBE });
+  assert.equal(both.fanOut, true);
 });
 
 // --- Through the relay -----------------------------------------------------
@@ -371,4 +412,44 @@ test('answering the idle question with a new pane opens one', { timeout: 4000 },
   const answered = await f.relay.send({ text: 'yes, open a new one', origin: 'text', replyToRequestId: asked.requestId, questionId: question.id });
   assert.equal(answered.ok, true, JSON.stringify(answered));
   assert.deepEqual(f.effects.map(effect => effect.kind), ['create_session', 'send_prompt']);
+});
+
+// "The agent working on adding a chat section" names a pane started by hand,
+// which carries no title. The sentence still says the pane is working, and when
+// one pane is, that is the pane; two are a question.
+test('a working-on title with no titled pane resolves to the one working pane', () => {
+  const said = 'Have a agent working on adding a chat section in the vibeTerminal project can you prompt it to do a deep dive on that';
+  const sessions = [pane('w1', 'vibeTerminal', 'codex', { status: 'running', turnState: 'running', turnId: 'busy', lastActivityAt: 6000 }),
+    pane('w2', 'vibeTerminal', 'codex', { lastActivityAt: 5000 })];
+  const one = decide(said, { sessions, workItems: [] });
+  assert.equal(one.decision, 'reuse'); assert.equal(one.targetId, 'w1');
+  const two = decide(said, { sessions: [...sessions, pane('w3', 'vibeTerminal', 'codex', { status: 'running', turnState: 'running', turnId: 'busy-2', lastActivityAt: 7000 })], workItems: [] });
+  assert.equal(two.decision, 'ask');
+});
+
+// Added 2026-09-15 evening (phase-2 ladder, T4.1): "Have a agent working on
+// adding a chat section ... can you prompt it" names the pane by its task even
+// though the words overlap weakly ("adding" is not "add") and the sentence also
+// says "a agent". The one pane whose task carries the words is the pane; the
+// weak overlap only stops the review from calling it named outright.
+test('a weak sole title match still reuses the pane whose task the sentence names, even beside "a agent"', () => {
+  const said = 'Have a agent working on adding a chat section in the vibeTerminal project can you prompt it to do a deep dive on that';
+  const sessions = [pane('cs', 'vibeTerminal', 'codex', { status: 'running', turnState: 'running', turnId: 'busy', lastActivityAt: 6000 }),
+    pane('fs', 'vibeTerminal', 'claude', { turnState: 'completed', turnId: 'done', turnEndedAt: 5000, lastActivityAt: 5000 }), pane('spare', 'vibeTerminal', 'codex', { lastActivityAt: 4000 })];
+  const workItems = [{ id: 'w-cs', cwd: VIBE, status: 'active', objective: 'Add a chat section to the app. [stub:slow:3600]', binding: { target: { id: 'cs', generation: 'g-cs' } } },
+    { id: 'w-fs', cwd: VIBE, status: 'finished', objective: 'Fix the full screen bug.', binding: { target: { id: 'fs', generation: 'g-fs' } } }];
+  const result = decide(said, { sessions, workItems });
+  assert.deepEqual([result.decision, result.targetId, result.selector], ['reuse', 'cs', 'title'], JSON.stringify(result));
+  const reference = resolveReference(said, terminalsFor({ sessions, workItems }), { cwd: VIBE, launchers });
+  assert.deepEqual([reference.indefinite, ids(reference.scored), ids(reference.named)], [true, ['cs'], []], 'named for the review, scored for assignment');
+});
+
+// Added 2026-09-15 (phase-5 ladder, T3.3b): "prompt it" after the delivery it
+// leaned on had failed went into the spare pane. With nothing on record to be
+// "it", the answer is a question, never a free pane.
+test('"prompt it" with no delivery on record asks instead of taking a free pane', () => {
+  const result = decide('Can you prompt it and ask it if the application is still paused?', { sessions: [pane('busy', 'vibeTerminal', 'codex', { status: 'running', turnState: 'running', turnId: 't' }), pane('spare', 'vibeTerminal', 'codex')], workItems: [] });
+  assert.deepEqual([result.decision, result.targetId], ['ask', undefined], JSON.stringify(result));
+  const anchored = decide('Can you prompt it and ask it if the application is still paused?', { sessions: [pane('busy', 'vibeTerminal', 'codex', { status: 'running', turnState: 'running', turnId: 't' }), pane('spare', 'vibeTerminal', 'codex')], workItems: [], lastTarget: { id: 'busy' } });
+  assert.deepEqual([anchored.decision, anchored.targetId], ['reuse', 'busy'], 'with a delivery on record "it" is that pane, busy or not');
 });

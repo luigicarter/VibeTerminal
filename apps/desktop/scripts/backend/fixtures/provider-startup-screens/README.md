@@ -26,10 +26,14 @@ user's prompt.
 | --- | --- | --- | --- |
 | `claude-120x36` | Claude Code 2.1.270 | ready composer, auto mode, 120x36 | `ready`, cursor (2,6) |
 | `claude-100x20` | Claude Code 2.1.270 | ready composer, manual mode, 100x20 | `ready`, cursor (2,16) |
+| `claude-hidden-cursor-100x30` | Claude Code 2.1.270 | ready composer on a custom endpoint (Open Claude Code / `ANTHROPIC_BASE_URL`), cursor never shown, 100x30 | `ready`, cursor (2,6), `cursorVisible: false` |
 | `codex-folder-trust` | Codex 0.154.0 | folder-trust prompt | `transient` `folder-trust`, affirmative default |
 | `codex-ready` | Codex 0.154.0 | ready composer | `ready`, cursor (2,13) |
+| `codex-small-tile-69x10` | Codex 0.154.0 | ready composer in a 69x10 pane — the board's default tile — with the banner and model line already scrolled off | `ready`, cursor (2,7) |
+| `claude-small-tile-69x10` | Claude Code 2.1.270 | ready composer in a 69x10 pane; its compact header still fits | `ready`, cursor (2,7) |
 | `open-codex-sign-in` | Open Codex (Codex TUI) | "Finish signing in via your browser" | `transient` `sign-in` |
 | `grok-ready` | Grok Build 1.0.25 | ready composer box | `ready`, cursor (6,25) |
+| `kimi-folder-trust` | Kimi Code 0.42.0 | "Trust this folder?" dialog, first option `❯ Trust this folder` | `transient` `folder-trust`, affirmative default |
 | `kimi-ready` | Kimi Code 0.42.0 | ready composer box, cursor hidden | `ready`, cursor (5,16) |
 | `kimi-custom-ready` | bundled Kimi Code 0.42.0 | ready composer box, cursor hidden | `ready`, cursor (5,17) |
 | `qwen-ready` | Qwen Code 0.21.12 | ready composer + update banner | `ready`, cursor (2,17) |
@@ -71,6 +75,20 @@ composer. The pair is named by *kind*, so a ready capture is renamed to
 `--only <kind,kind>` to re-record just the CLIs that moved, and `--no-type` to
 capture the untouched startup screen without spending a model turn — that is
 what every `*-ready` recording here is, so `--no-type` is the faithful flag.
+
+`--cols` / `--rows` record the same CLI at another pane size, and `--save-name
+<suffix>` writes the pair as `<kind><suffix>.bin` / `.json`. That is how the two
+`*-small-tile-69x10` captures were taken:
+
+```
+node scripts/qa/provider-startup-probe.cjs --only codex --no-type \
+  --cols 69 --rows 10 --save <dir> --save-name -small-tile-69x10
+```
+
+A recording made at one width cannot be replayed at another to stand in for it:
+the CLI's own cursor addressing is width-dependent, so replaying the 100-column
+`codex-ready` stream through a 69-column decoder produces a screen no terminal
+ever painted. A pane size that matters gets its own recording.
 
 `kimi-ready` (stock 0.42.0, `~/.kimi-code/bin/kimi.exe`) and `kimi-custom-ready`
 (the vendored 0.42.0 fork bundle) were re-recorded on 2026-09-13 after the

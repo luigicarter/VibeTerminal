@@ -7,8 +7,13 @@ const { authorizeModelAction, commandClauses, captureRelay, clarifyRelay, select
 
 function interpretTestIntent(context) {
   const instruction = context.instruction ?? context.text ?? '';
-  const sessions = context.sessions || (context.roster || []).map(row => ({ ...row,
+  // The planner's roster names panes by handle only ("T3"); ids stay in the
+  // application. A roster row therefore stands in for a session under its
+  // handle, and an action aimed at it is returned as `handles`, which the
+  // application turns back into ids when it decodes the plan.
+  const sessions = context.sessions || (context.roster || []).map(row => ({ ...row, id: row.id ?? row.handle,
     kind: row.kind || row.provider, status: row.status || row.state }));
+  const handleOnly = new Set(sessions.filter(row => row.handle && row.id === row.handle).map(row => row.handle));
   const roots = context.roots || {};
   const projects = roots.projects || context.projects || [];
   const intent = { ...context, text: instruction, projects, allowedPaths: [roots.documents, ...projects.map(p => p.path)].filter(Boolean) };
@@ -16,7 +21,8 @@ function interpretTestIntent(context) {
   const plan = () => ({ goal: instruction.length > 160 ? 'Handle the user request with its complete stated constraints.' : instruction, actions });
   const append = action => {
     const { target, targetId, generation, ...fields } = action;
-    actions.push({ ...fields, ...(target || targetId ? { targetIds: [target?.id || targetId], selection: 'one' } : {}) });
+    const id = target?.id || targetId;
+    actions.push({ ...fields, ...(id ? handleOnly.has(id) ? { handles: [id] } : { targetIds: [id], selection: 'one' } : {}) });
   };
   const clarified = clarifyRelay(instruction, context.pendingRelay, sessions, context.targetId);
   if (clarified) { append({ ...clarified, ...(context.previousCommand?.requestId ? { sourceUserId: context.previousCommand.requestId } : {}) }); return plan(); }

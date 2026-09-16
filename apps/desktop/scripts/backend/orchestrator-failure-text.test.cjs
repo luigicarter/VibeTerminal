@@ -28,6 +28,22 @@ test('each delivery failure maps to one sentence naming the pane and the next st
   assert.equal(failureSentence('some-other-status', { pane }), undefined, 'an unmapped status keeps its existing wording');
 });
 
+// The application retries a prompt whose only obstacle was the screen moving
+// under it, so when it does give up the user hears how many times it looked.
+test('a retried send reports its attempt count, and an unretried one reads exactly as before', () => {
+  const { collectTaskReports } = require('../../backend/orchestratorTaskReports.cjs');
+  const pane = 'Codex 2';
+  assert.equal(failureSentence('stale-observation', { pane, attempts: 3 }),
+    'Codex 2 kept changing each of the 3 times I was about to type, so I held off. Nothing was sent.');
+  assert.equal(failureSentence('stale-observation', { pane, attempts: 1 }), failureSentence('stale-observation', { pane }));
+  const target = { id: 'a', generation: 'g', name: pane };
+  const report = attempts => collectTaskReports({ executionDone: true, task: { status: 'failed', targets: [target] }, controller: new AbortController(),
+    waits: [{ targetId: 'a', generation: 'g', done: true, failed: true, delivered: false, deliveryStatus: 'stale-observation',
+      ...(attempts && { deliveryAttempts: attempts }) }] }, [target])[0].text;
+  assert.equal(report(3), 'Codex 2 kept changing each of the 3 times I was about to type, so I held off. Nothing was sent.');
+  assert.equal(report(), 'Codex 2 changed while I was about to type, so I held off. Nothing was sent.');
+});
+
 test('a brain failure says what it meant for the request and keeps the provider wording private', () => {
   const error = Object.assign(new Error('x'), { status: 400, providerMessage: `Provider returned error: {"error":{"code":400,"message":"${REJECTION}","status":"INVALID_ARGUMENT"}}` });
   // The provider's own sentence still travels to the receipt and the log.

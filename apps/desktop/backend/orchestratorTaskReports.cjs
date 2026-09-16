@@ -4,7 +4,7 @@ const { paneLabel, failureSentence, sentence } = require('./orchestratorFailureT
 // Runtime-only bookkeeping: report text never includes terminal output or prompts.
 // Attribution is owned by the scheduler; current session state alone is not proof.
 const reported = new WeakMap();
-const ended = new Set(['completed', 'complete', 'finished', 'succeeded', 'failed', 'cancelled', 'interrupted']);
+const ended = new Set(['completed', 'complete', 'finished', 'succeeded', 'response', 'failed', 'cancelled', 'interrupted']);
 const waitingStates = new Set(['waiting', 'waiting-for-input', 'needs-answer', 'awaiting-input']);
 const runningStates = new Set(['running', 'busy', 'starting']);
 const turnKey = wait => !wait.attributionAmbiguous && wait.turnId && wait.targetId && wait.generation != null
@@ -65,7 +65,8 @@ function collectTaskReports(job, sessions = [], { now = Date.now, recordDiagnost
         // A delivery that never happened has an exact cause. Say it in one
         // sentence that names the pane, instead of generic prose.
         const mapped = changed ? failureSentence('generation-changed', { pane })
-          : !wait.delivered && failureSentence(wait.deliveryStatus, { pane, ...(Number.isFinite(wait.timeoutMs) && { seconds: wait.timeoutMs / 1000 }) });
+          : !wait.delivered && failureSentence(wait.deliveryStatus, { pane, ...(Number.isFinite(wait.timeoutMs) && { seconds: wait.timeoutMs / 1000 }),
+            ...(wait.deliveryAttempts > 1 && { attempts: wait.deliveryAttempts }) });
         if (mapped) { add('ended', 'failed', mapped); continue; }
         add('ended', 'failed', say(wait.observedState === 'interrupted' || wait.observedState === 'cancelled' ? 'turn-interrupted'
           : ended.has(wait.observedState) ? 'turn-error' : 'turn-unconfirmed', { reason }));

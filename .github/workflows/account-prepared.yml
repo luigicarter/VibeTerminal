@@ -1,0 +1,25 @@
+name: Disconnected account client checks
+on:
+  push:
+    paths: ['apps/desktop/backend/account-prepared/**', 'apps/desktop/frontend/account-prepared/**', 'apps/desktop/scripts/backend/account-prepared.test.cjs', 'apps/website/frontend/src/account-prepared/**', 'apps/website/scripts/account-prepared.test.mjs', 'scripts/account-preparation.test.cjs', '.github/workflows/account-prepared.yml']
+  pull_request:
+    paths: ['apps/desktop/backend/account-prepared/**', 'apps/desktop/frontend/account-prepared/**', 'apps/desktop/scripts/backend/account-prepared.test.cjs', 'apps/website/frontend/src/account-prepared/**', 'apps/website/scripts/account-prepared.test.mjs', 'scripts/account-preparation.test.cjs', '.github/workflows/account-prepared.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  clients:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/website/package-lock.json
+      - run: node --test scripts/account-preparation.test.cjs apps/desktop/scripts/backend/account-prepared.test.cjs
+      - run: npm ci
+        working-directory: apps/website
+      - run: npm run test:account-prepared && npm run test:account-preview && npm run typecheck
+        working-directory: apps/website

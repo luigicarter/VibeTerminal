@@ -13,5 +13,5 @@ test('named control normalization preserves semantics without expanding key voca
 test('canonicalized casing cannot bypass preserve lifecycle authority', () => {
  const sessions=[{id:'a',generation:'g',kind:'codex'}];
  const plan=normalizeIntent({goal:'Clear input',actions:[{kind:'operate_terminal',targetIds:['a'],text:'Clear the unsent text'}]},{instruction:'Clear the unsent text',requestId:'r',sessions});
- for(const key of ['Ctrl-C',' CTRL-D ','Ctrl-Backslash','Ctrl-Z']) assert.throws(()=>authorizeIntentAction({kind:'terminal_interact',grantId:plan.grants[0].id,stepId:key,observationSequence:1,inputRevision:0,editInput:true,keys:normalizeTerminalKeys([key])},plan,sessions),/preserve/);
+ for(const key of ['Ctrl-C',' CTRL-D ','Ctrl-Backslash','Ctrl-Z']) assert.throws(()=>authorizeIntentAction({kind:'terminal_interact',grantId:plan.grants[0].id,stepId:key,editInput:true,keys:normalizeTerminalKeys([key])},plan,sessions),/preserve/);
 });

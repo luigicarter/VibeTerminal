@@ -7,7 +7,6 @@ const observed = [...target, 'stepId', 'observationToken'];
 // The application observes these operations itself when no eligible read exists,
 // and generates their step identity, so neither field is model-facing.
 const autoObserved = [...target];
-const native = ['observationSequence', 'inputRevision'];
 const agentTools = require('../shared/orchestratorAgentTools.cjs');
 const fields = {
   ...Object.fromEntries(Object.entries(agentTools.OPERATIONS).map(([kind, descriptor]) => [kind, descriptor.fields])),
@@ -22,8 +21,8 @@ const fields = {
   open_folder: ['grantId', 'path'], remove_project: ['grantId', 'path'],
   search_files: ['root', 'query', 'limit'], create_project: ['grantId', 'parent', 'name'],
   focus_session: observed, stage_draft: [...target, 'text'],
-  send_prompt: [...autoObserved, 'text', ...native, 'editInput'],
-  interrupt: [...autoObserved, ...native], restart: target, close: target,
+  send_prompt: [...autoObserved, 'text', 'editInput'],
+  interrupt: [...autoObserved], restart: target, close: target,
   create_session: ['grantId', 'cwd', 'kindOfSession', 'text'], add_project: ['grantId', 'path'],
   list_setups: [], read_setup: ['name'], launch_setup: ['grantId', 'name'], save_setup: ['grantId', 'name'],
   list_preferences: [], remember_preference: ['grantId', 'text'], forget_preference: ['grantId', 'preferenceId'],
@@ -31,22 +30,25 @@ const fields = {
   list_work: ['cwd', 'query', 'offset', 'limit'],
   answer_question: [...autoObserved, 'requestId', 'revision', 'answerText', 'answerTexts'],
   permission: [...autoObserved, 'requestId', 'revision', 'answerText', 'answerTexts', 'decision'],
-  terminal_interact: [...observed, 'text', 'keys', 'mouse', 'inputPurpose', 'submit', ...native, 'editInput'],
+  terminal_interact: [...observed, 'text', 'keys', 'mouse', 'inputPurpose', 'submit', 'editInput'],
   finish_terminal: [...observed, 'text', 'outcome'],
 };
 const required = {
   ...Object.fromEntries(Object.entries(agentTools.OPERATIONS).map(([kind, descriptor]) => [kind, descriptor.required || []])),
   read_file: ['path'], read_session: ['targetId'], read_setup: ['name'], ask_user: ['text'], respond: ['text', 'responseTurn'],
   read_conversation: ['reference'], search_conversation: ['reference'],
-  terminal_interact: ['observationSequence'], finish_terminal: ['text', 'outcome'],
+  finish_terminal: ['text', 'outcome'],
 };
-const operator = 'For operate_terminal grants, send_prompt, answer_question, permission and interrupt are observed for you, while focus_session, terminal_interact and finish_terminal still need your own earlier read_session round, an omitted stepId to use this tool call identity, and observationToken only from the latest unused read already returned to you for this terminal. ';
-const nativeEvidence = 'Native operator observationSequence and inputRevision are optional when bound by that read token; if supplied, copy exactly observation.sequence and observation.inputRevision from the same read. ';
+const operator = 'For operate_terminal grants, send_prompt, answer_question, permission and interrupt are observed for you, while focus_session, terminal_interact and finish_terminal still need your own earlier read_session round and an omitted stepId to use this tool call identity; they bind to your latest unused read of that terminal by themselves, so omit observationToken. ';
+// Freshness is the application's own business: it captures the input surface of
+// the read that issued the token and fences the write on that. There is nothing
+// for the model to copy back, and nothing it can get wrong.
+const nativeEvidence = '';
 const descriptions = {
   send_prompt: operator + nativeEvidence + 'Supply the task text for composed operator work; omit text for an already bound legacy prompt. Fusion/OpenFusion do not need native input revisions.',
   interrupt: operator + nativeEvidence,
   focus_session: operator,
-  terminal_interact: operator + nativeEvidence + 'Legacy terminal_interact still requires observationSequence. Submit with submit:true OR a final Enter key, never both. Use inputPurpose:task when starting agent work.',
+  terminal_interact: operator + nativeEvidence + 'Submit with submit:true OR a final Enter key, never both. Use inputPurpose:task when starting agent work.',
   finish_terminal: operator + 'After a post-action read, report the observed outcome with text and completed or blocked. No native input revisions or controls.',
   answer_question: operator + 'Operator answers require the current pending interaction requestId and revision, plus answerText or answerTexts. Legacy answers are already bound.',
   permission: operator + 'Operator decisions require the current pending interaction requestId and revision. Follow the grant permissionMode; delegated decisions allow once or reject only.',
@@ -75,7 +77,6 @@ function scopedWorkspaceTool(tool, grants = []) {
   const branches = tool.function.parameters.anyOf.filter(branch => allowed.has(branch.properties.kind.enum[0])).map(branch => {
     if (branch.properties.kind.enum[0] !== 'terminal_interact' || !operatorGrants.length) return branch;
     const scoped = structuredClone(branch);
-    scoped.required = scoped.required.filter(name => name !== 'observationSequence');
     if (inspectionOnly) {
       delete scoped.properties.editInput;
       scoped.properties.inputPurpose = { ...scoped.properties.inputPurpose, enum: ['interaction'] };
@@ -97,8 +98,6 @@ function scopedWorkspaceTool(tool, grants = []) {
   properties.kind = { type: 'string', enum: branches.map(branch => branch.properties.kind.enum[0]) };
   // These are model-facing limits; direct UI reads may request larger excerpts.
   if (properties.maxChars) properties.maxChars.maximum = 4000;
-  if (properties.observationSequence) properties.observationSequence.description = 'Native operator input: optional token-bound counter. If supplied, copy exactly observation.sequence from that read_session.';
-  if (properties.inputRevision) properties.inputRevision.description = 'Native operator input: optional token-bound counter. If supplied, copy exactly observation.inputRevision from the same read_session.';
   return { ...tool, function: { ...tool.function,
     description: tool.function.description + (operatorGrants.length ? ' ' + operator + nativeEvidence + 'finish_terminal needs text and outcome, never native input fields.' : ''),
     parameters: { type: 'object', additionalProperties: false, required: ['kind'], properties,

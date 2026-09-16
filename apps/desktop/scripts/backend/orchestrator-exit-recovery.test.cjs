@@ -30,7 +30,7 @@ async function fixture(t) {
     } };
   f.app = createOrchestrator(options);
   await f.app.configure({ apiKey: 'fixture-secret', sessionOnly: true, model: 'fixture' }); await f.app.setEnabled(true);
-  f.act = (body, kind, extra = {}) => { const observed = latest(body); return tool({ kind, grantId: meta(body).authorizedCommands.grants[0].id, targetId: 'a', stepId: `step-${++f.step}`, observationToken: observed.observationToken, ...(['terminal_interact', 'send_prompt', 'interrupt'].includes(kind) && { observationSequence: observed.observation.sequence, inputRevision: observed.observation.inputRevision }), ...extra }); };
+  f.act = (body, kind, extra = {}) => { const observed = latest(body); return tool({ kind, grantId: meta(body).authorizedCommands.grants[0].id, targetId: 'a', stepId: `step-${++f.step}`, observationToken: observed.observationToken, ...(['terminal_interact', 'send_prompt', 'interrupt'].includes(kind) && { }), ...extra }); };
   f.run = async (text, steps, input = {}) => {
     f.steps.push(...steps); const value = await f.app.send({ text, origin: 'text', ...input });
     if (f.scriptError) throw f.scriptError;

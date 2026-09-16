@@ -47,6 +47,16 @@ An optional **Interpretation model** runs only the call that understands what yo
 said, so a faster model can shorten every request while replies and results stay
 on the brain; left empty, the brain interprets as before.
 
+Setting the environment variable `LINA_ORCHESTRATOR_API_BASE` to an OpenAI-compatible
+base URL (for example a local `http://127.0.0.1:11434/v1`) points every brain call —
+the model catalog, validation and completions — at that server instead of OpenRouter,
+with no API key, no `/key` check and no usage cost; leave it unset for OpenRouter.
+Voice is off on such an endpoint (it serves no transcription or speech models); the
+text assistant works. A model the server lists without a context window is asked
+about through Ollama's `/api/show` at the endpoint root, because the input budget
+otherwise assumes a 16k-token window and refuses ordinary requests to a 262k model
+before any call is made; a server without that route leaves the default in force.
+
 A saved key is greyed out with a **Change** button. Enabling saves and verifies
 the draft; later edits require **Save changes**. Public model browsing works
 before a key is saved. Advanced settings

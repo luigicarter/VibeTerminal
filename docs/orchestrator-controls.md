@@ -112,6 +112,13 @@ These blocks stay in that request's memory; they are excluded from saved chats,
 diagnostics and speech. The earlier recorded HTTP 400 did not retain its raw
 provider explanation, so its precise cause cannot be established retrospectively.
 
+Input freshness is the **input surface** the application captured at its own read
+of the pane — caret, composer, geometry and input revision — not the PTY output
+counter, which an animating composer moves several times a second while nothing
+about the input does. The model copies no counters back; a screen race is retried
+by the application up to three times and only then reported. See
+[the idle sparkle and the input fence](codex-idle-sparkle-and-input-fence-2026-09-13.md).
+
 Finishing an operator interaction still requires an unused, recent observation
 after its last action, with the same terminal generation. Background runtime
 revision changes do not invalidate this non-input completion report. Input effects

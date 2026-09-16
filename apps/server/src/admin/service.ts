@@ -88,7 +88,7 @@ export async function changeAccount(
       if (action === 'access' && before.status !== 'active')
         throw new HttpError(409, 'account_not_active');
       await db.query(
-        'UPDATE access_grants SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL',
+        "UPDATE access_grants SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL AND source<>'stripe'",
         [targetId],
       );
       await db.query(
@@ -115,7 +115,7 @@ export async function changeAccount(
         );
     } else if (action === 'revoke-access') {
       await db.query(
-        'UPDATE access_grants SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL',
+        "UPDATE access_grants SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL AND source<>'stripe'",
         [targetId],
       );
     } else if (action === 'revoke-sessions') {

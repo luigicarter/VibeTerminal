@@ -8,4 +8,8 @@ trap 'gosu postgres pg_ctl -D "$test_data" -m fast -w stop >/dev/null' EXIT
 export LINA_TEST_ADMIN_URL=postgres://postgres@127.0.0.1:15439/postgres
 export LINA_TEST_ALLOW_PROVISION=1
 mkdir -p .tmp
-bun --no-env-file test --timeout 30000
+if [[ "${LINA_PREPARED_HTTP_FIXTURE:-}" == "1" ]]; then
+  bun --no-env-file tests/prepared-http.ts
+else
+  bun --no-env-file test --timeout 30000
+fi

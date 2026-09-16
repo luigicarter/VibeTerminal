@@ -35,9 +35,10 @@ function fixture(name) {
   const selected = FIXTURE_CASES[name]; assert.ok(selected, `Unknown fixture ${name}`);
   const run = () => resolveAssignment({ instruction: selected.instruction,
     grant: { args: { cwd, assignmentMode: selected.assignmentMode || 'auto' } },
-    sessions: selected.sessions, workItems: selected.workItems, launchers: [{ kind: 'codex', label: 'Codex', available: true, configured: true }],
-    cwd, projectName: 'DisposableRoutingFixture', sameCwd,
-    history: { lastCreatedPane: () => selected.created, lastTargetPane: () => undefined, recentPanes: () => [] } });
+    terminals: require('../../backend/orchestratorTerminalModel.cjs').buildTerminalModel({ sessions: selected.sessions, workItems: selected.workItems,
+      receipts: selected.created ? [{ kind: 'create_session', status: 'created', targetId: selected.created.id, at: Date.now() }] : [] }),
+    launchers: [{ kind: 'codex', label: 'Codex', available: true, configured: true }],
+    cwd, projectName: 'DisposableRoutingFixture' });
   return { name, instruction: selected.instruction, run,
     check(result) {
       assert.equal(result.decision, selected.expected, `${name}: ${JSON.stringify(result)}`);

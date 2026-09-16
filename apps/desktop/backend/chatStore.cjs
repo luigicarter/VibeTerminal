@@ -23,7 +23,11 @@ function createChatStore({ directory, now = Date.now }) {
   const writeMeta = (name, value) => db.prepare('INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(name, JSON.stringify(value));
   const previousRun = readMeta('run');
   const bootId = randomUUID();
-  const recoveryNeeded = Boolean(previousRun && !previousRun.clean);
+  // Only an exit that never reached the app's shutdown routine pauses panes. A
+  // shutdown that started and then missed one of its deadlines is still a
+  // shutdown. Records written before the marker existed carry no request, so
+  // their own clean flag decides once, as it did then.
+  const recoveryNeeded = Boolean(previousRun && !previousRun.clean && !previousRun.shutdownRequestedAt);
   let closed = false, bootstrapped = false, lastSequence = 0, lastClient = null;
   const retiredClients = new Set();
   const observations = new Map();
@@ -85,7 +89,14 @@ function createChatStore({ directory, now = Date.now }) {
     writeMeta('workspace', workspace);
     return previous;
   }
-  transaction(() => writeMeta('run', { bootId, startedAt: now(), clean: false, previousBoot: previousRun?.bootId }));
+  // The next diagnosis reads one record: how this run ended, whether its exit
+  // was requested, and which shutdown steps missed their deadline. Only the
+  // named fields of the run before this one are carried, so the record never
+  // grows a chain of its own history.
+  const pickRun = run => run && { bootId: run.bootId, startedAt: run.startedAt, shutdownRequestedAt: run.shutdownRequestedAt,
+    shutdownReason: run.shutdownReason, clean: run.clean, finishedAt: run.finishedAt, incomplete: run.incomplete };
+  const mergeRun = extra => transaction(() => { const run = readMeta('run'); writeMeta('run', { ...(run?.bootId === bootId ? run : { bootId }), ...extra }); });
+  transaction(() => writeMeta('run', { bootId, startedAt: now(), clean: false, recovery: recoveryNeeded, previousRun: pickRun(previousRun) }));
   function bootstrap(input) {
     const wrapped = input && Object.hasOwn(input, 'legacy');
     const legacy = wrapped ? input.legacy : input;
@@ -222,7 +233,11 @@ function createChatStore({ directory, now = Date.now }) {
       }
       return [...grouped.values()];
     },
-    finish: ({ clean = true } = {}) => { transaction(() => writeMeta('run', { bootId, clean, finishedAt: now() })); return { saved: true }; },
+    // Recorded before anything else a shutdown does, so a run that is killed
+    // part way through one is still distinguishable from a crash.
+    shutdown: ({ reason } = {}) => { mergeRun({ shutdownRequestedAt: now(), shutdownReason: reason ? String(reason).slice(0, 40) : undefined }); return { saved: true }; },
+    finish: ({ clean = true, incomplete = [] } = {}) => { mergeRun({ clean, finishedAt: now(),
+      incomplete: (Array.isArray(incomplete) ? incomplete : []).slice(0, 20).map(step => String(step).slice(0, 40)) }); return { saved: true }; },
     close: () => { if (!closed) { closed = true; db.close(); } } };
   } catch (error) { try { db.close(); } catch {} throw error; }
 }

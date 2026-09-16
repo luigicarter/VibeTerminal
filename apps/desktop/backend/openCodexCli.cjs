@@ -56,6 +56,13 @@ function launchSpec(source = process.env, argv = process.argv.slice(2)) {
     const command = process.platform === 'win32' ? ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', notify, 'agent.completed'] : [notify, 'agent.completed'];
     args.push('-c', `notify=${JSON.stringify(command)}`);
   }
+  // Idle-composer animation switches (CODEX_TUI_CONFIG_OVERRIDES in
+  // agentTelemetry.cjs), appended last like the other wrappers. Kept out of the
+  // hook list, whose entries are also hashed by the trust override. Every `-c`
+  // sits after argv, so a `resume <id>` subcommand carries them too.
+  let tui = [];
+  try { tui = JSON.parse(source.VIBE_TERMINAL_CODEX_TUI_OVERRIDES || '[]'); } catch { tui = []; }
+  for (const override of tui) if (typeof override === 'string' && override) args.push('-c', override);
   return { binary, args, env };
 }
 async function post(type, extra = {}, env = process.env) {

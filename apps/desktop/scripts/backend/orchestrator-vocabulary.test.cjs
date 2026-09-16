@@ -202,7 +202,7 @@ async function fixture(t) {
     readSession: async target => {
       const session = f.sessions.find(item => item.id === target.id);
       if (!session) return { ok: false, status: 'stale-generation' };
-      return { ok: true, id: session.id, generation: session.generation, text: 'Composer ready.', sequence: 10, observationSequence: 10, inputRevision: 2 };
+      return { ok: true, id: session.id, generation: session.generation, text: 'Composer ready.', sequence: 10, inputRevision: 2 };
     },
     dispatchAction: async action => { f.effects.push(action); return { ok: true, status: 'written' }; },
     fetch: async (url, options) => {
@@ -219,7 +219,7 @@ async function fixture(t) {
       const observed = JSON.parse(body.messages.filter(message => message.role === 'tool').at(-1).content);
       const base = { targetId, grantId: grant.id, stepId: `${grant.id}-${phase}`, observationToken: observed.observationToken };
       if (phase === 1) return jsonResponse(toolCall({ ...base, kind: 'send_prompt', text: grant.text,
-        observationSequence: observed.observation?.sequence, inputRevision: observed.observation?.inputRevision }));
+        }));
       if (phase === 3) return jsonResponse(toolCall({ ...base, kind: 'finish_terminal', outcome: 'completed', text: 'Prompt delivered.' }));
       return jsonResponse(toolCall({ kind: 'respond', text: 'Done.', responseTurn: 'complete' }));
     } });

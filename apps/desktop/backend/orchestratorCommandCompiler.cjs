@@ -25,8 +25,8 @@ const path = require('node:path');
 const { plannerTools, decodePlannerCalls } = require('./orchestratorPlannerTools.cjs');
 const { canonicalizeInterpretation } = require('./orchestratorInterpretationSchema.cjs');
 const { identifyProject } = require('./orchestratorPolicy.cjs');
-const { extractSelector, providerFamily, RESOLVER_STOPWORDS } = require('./orchestratorResolver.cjs');
-const { scoreCandidates, MIN_SCORE, MIN_MATCHED_TOKENS, RUNNER_UP_MARGIN } = require('./orchestratorOwnerMatch.cjs');
+const { resolveReference, terminalsOf, providerFamily, RESOLVER_STOPWORDS } = require('./orchestratorReference.cjs');
+const { sameFolder } = require('./orchestratorTerminalModel.cjs');
 const { PROVIDER_VOCABULARY } = require('./orchestratorVocabulary.cjs');
 
 // Every reason a compilation can be refused. The set is closed so the
@@ -34,7 +34,7 @@ const { PROVIDER_VOCABULARY } = require('./orchestratorVocabulary.cjs');
 const COMPILER_REASONS = Object.freeze(['no-match', 'unknown-project', 'ambiguous-project', 'unknown-provider',
   'short-task', 'long-task', 'second-command', 'ambiguous-pane', 'blocked-verb', 'context-dependent', 'too-many',
   'low-confidence', 'decode-failed']);
-const SHAPES = Object.freeze(['open', 'start', 'follow_up', 'status', 'results']);
+const SHAPES = Object.freeze(['open', 'start', 'follow_up', 'status', 'results', 'stop', 'close']);
 // A compilation is accepted only above this floor. Each slot the sentence left
 // implicit, or spelled the way speech commonly garbles it, costs a little
 // certainty; two such slots in one sentence is a request for the brain.
@@ -121,25 +121,24 @@ function trimFiller(text) {
 }
 
 // ---------------------------------------------------------------------------
-// Vocabulary that stops a compilation outright, wherever it appears. These are
-// the operations whose cost of being wrong is destructive - closing or stopping
-// a pane, answering a prompt on the user's behalf, acting on every terminal at
-// once - and the answers that belong to a question Lina asked.
+// Vocabulary that stops a compilation outright, wherever it appears: the
+// answers that belong to a question Lina asked, a cancellation, and the
+// operations whose selection still needs the close review - clearing,
+// restarting or removing panes, and a close of a group or of panes picked by a
+// condition. Stopping or closing the one pane a sentence points at exactly is
+// a shape of its own below: the reference resolver names the pane or the
+// sentence is declined, so no model ever chooses which pane to stop.
 // ---------------------------------------------------------------------------
 const PANE_NOUN = String.raw`(?:terminals?|panes?|agents?|sessions?)`;
+const CLOSE_VERB = String.raw`(?:close|closing|shut|quit|exit|kill)`;
 const BLOCKED = [
-  new RegExp(String.raw`\b(?:close|closing|shut|stop|stopping|quit|exit|kill|interrupt|cancel|clear|restart|relaunch|reboot|delete|remove)\b[^.?!]{0,24}\b${PANE_NOUN}\b`, 'i'),
+  new RegExp(String.raw`\b(?:cancel|clear|restart|relaunch|reboot|delete|remove)\b[^.?!]{0,24}\b${PANE_NOUN}\b`, 'i'),
+  new RegExp(String.raw`\b${CLOSE_VERB}\b[^.?!]{0,60}\b(?:all|every|each|both|them|those|inactive|idle|done|finished|not\s+working|that\s+are|which\s+are)\b`, 'i'),
   new RegExp(String.raw`\b${PANE_NOUN}\b[^.?!]{0,12}\b(?:closed|stopped|killed|restarted)\b`, 'i'),
-  new RegExp(String.raw`\b(?:all|every|each|both)\s+(?:of\s+)?(?:the\s+|my\s+)?(?:\w+\s+){0,2}${PANE_NOUN}\b`, 'i'),
   /\bnever\s?mind\b|\bforget\s+it\b/i,
   /\b(?:approve|approval|permission|allow it|deny|reject)\b/i,
   /^(?:yes|no|yeah|yep|nope|nah|sure|correct)\b/i,
   /^(?:answer|reply|respond)\b|\banswer\s+(?:yes|no|it|the\s+(?:prompt|question|trust))\b/i,
-  // A pane the sentence describes as working is never a start target, and a
-  // compiled plan cannot queue behind one. "working on <topic>" is excluded: it
-  // names the pane by its task, which is the follow-up shape.
-  new RegExp(String.raw`\b(?:that['’]?s|that is|thats|which is|currently|still)\s+(?:currently\s+)?(?:working|busy|running)\b(?!\s+on\b)`, 'i'),
-  new RegExp(String.raw`\b${PANE_NOUN}\b[^.?!]{0,12}\bis (?:working|busy|running)\b`, 'i'),
 ];
 
 // ---------------------------------------------------------------------------
@@ -199,10 +198,18 @@ function grammar(providers, projectSource) {
     // "Prompt the vibeTerminal Codex terminal to fix X." - the project heard
     // before the provider is the same request with its two slots swapped.
     { shape: 'start', linkOptional: true, pattern: new RegExp(String.raw`^${LEAD}(?:use|${ASK_VERB})\s+(?:one\s+of\s+)?${ARTICLE}(?<project>${R})(?:\s+project)?\s+(?:(?<idle>${IDLE_WORD})\s+)?(?<provider>${P})\s+${PANE_NOUN}\s*[,.!?]*\s*(?<link>${TASK_LINK})?(?<task>.+)$`, 'i') },
+    // "Stop that last terminal you worked on", "interrupt T3", "close the other
+    // one": the pane is whatever the reference resolver names, exactly.
+    { shape: 'stop', pattern: new RegExp(String.raw`^${LEAD}(?:stop|interrupt|pause|halt)\s+(?<ref>.+?)\s*[,.!?]*$`, 'i') },
+    { shape: 'close', pattern: new RegExp(String.raw`^${LEAD}${CLOSE_VERB}(?:\s+down)?\s+(?<ref>.+?)\s*[,.!?]*$`, 'i') },
     // "Tell the agent working on the chat section in vibeTerminal to continue."
     { shape: 'follow_up', pattern: new RegExp(String.raw`^${LEAD}${ASK_VERB}\s+(?:the\s+|that\s+)?(?:agent|terminal|pane|session|one)\s+(?:(?:that['’]?s|that\s+is|thats|which\s+is)\s+)?(?:currently\s+)?(?:working|worked)\s+on\s+(?<topic>[^.?!]{3,90}?)(?:\s+in\s+${ARTICLE}(?<project>${R})(?:\s+project)?)?\s*[,.!?]*\s*to\s+(?<task>.+)$`, 'i') },
     // "Tell the chat section agent in vibeTerminal to continue its work."
     { shape: 'follow_up', pattern: new RegExp(String.raw`^${LEAD}(?:tell|ask|prompt)\s+(?:the\s+)?(?<topic>(?:[\w'’-]+\s+){1,5}?)${PANE_NOUN}(?:\s+in\s+${ARTICLE}(?<project>${R})(?:\s+project)?)?\s*[,.!?]*\s*to\s+(?<task>.+)$`, 'i') },
+    // "Tell it to…", "tell T3 to…", "ask the other one to…", "tell the codex
+    // terminal that's currently working to…": a follow-up to the pane the
+    // sentence points at, resolved against the terminal model.
+    { shape: 'follow_up', byReference: true, pattern: new RegExp(String.raw`^${LEAD}(?:tell|ask|prompt|have|get|remind)\s+(?<ref>it|[Tt]-?\d{1,6}|(?:the|that|this)\s+(?:[\w'’-]+\s+){0,4}(?:one|${PANE_NOUN})(?:\s+(?:that['’]?s|that\s+is|thats|which\s+is)\s+(?:currently\s+)?(?:working|busy|running|done|finished|waiting(?:\s+on\s+\w+)?))?)\s*,?\s+(?:to\s+)?(?<task>.+)$`, 'i') },
     // Status and results about one named pane. The memory store already answers
     // the questions about Lina's own actions; these ask about the agent.
     { shape: 'status', pattern: new RegExp(String.raw`^${LEAD}what(?:'s|\s+is)\s+(?<topic>[^.?!]{3,90}?)\s+(?:doing|working\s+on)\s*[.?!]*$`, 'i') },
@@ -264,35 +271,15 @@ function cleanTask(value) {
 }
 
 // ---------------------------------------------------------------------------
-// Pane selection for a follow-up, status or results request. The resolver's own
-// selector and scorer decide; the compiler only insists that they leave exactly
-// one candidate, because a compiled plan has no way to ask a question.
+// Pane selection for a follow-up, status or results request. The reference
+// resolver reads the sentence against the terminal model; the compiler only
+// insists that it leaves exactly one titled candidate with a real score,
+// because a compiled plan has no way to ask a question.
 // ---------------------------------------------------------------------------
-const sameFolder = (left, right) => {
-  const identity = value => String(value).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
-  return typeof left === 'string' && typeof right === 'string' && Boolean(left) && identity(left) === identity(right);
-};
-function uniquePane(context, selector, project) {
-  const sessions = (Array.isArray(context?.sessions) ? context.sessions : [])
-    .filter(session => session && !['terminal', 'shell'].includes(session.provider || session.kind))
-    .filter(session => !project?.path || sameFolder(session.cwd, project.path));
-  if (!sessions.length) return undefined;
-  const records = new Map((Array.isArray(context?.roster) ? context.roster : []).filter(row => row?.id).map(row => [row.id, row]));
-  const candidates = sessions.map(session => {
-    const record = records.get(session.id) || {};
-    return { id: session.id, texts: [session.conversationTitle, session.conversation?.title, session.name,
-      ...(Array.isArray(session.aliases) ? session.aliases : []), record.title, record.objective] };
-  });
-  const scored = scoreCandidates({ instruction: selector.words.length ? selector.words : selector.text,
-    projectName: project?.name || '', stopwords: RESOLVER_STOPWORDS, perText: true, candidates });
-  // The resolver's own ambiguity rule: a runner-up counts as a candidate as soon
-  // as it shares the named words, even when its longer title keeps its score
-  // below the threshold. Two panes about the checkout validation are two panes.
-  const eligible = scored.filter(item => item.matched >= MIN_MATCHED_TOKENS);
-  if (!eligible.length || eligible[0].score < MIN_SCORE) return undefined;
-  const contenders = eligible.filter(item => item.score > eligible[0].score - RUNNER_UP_MARGIN);
-  if (contenders.length !== 1) return undefined;
-  return sessions.find(session => session.id === eligible[0].id);
+function uniquePane(context, project) {
+  const reference = resolveReference(context?.instruction, terminalsOf(context),
+    { launchers: context?.launchers || [], cwd: project?.path, projectName: project?.name || '', strict: true });
+  return reference.exact && reference.terminals.length === 1 && !['new', 'idle', 'just_opened'].includes(reference.kind) ? reference.terminals[0] : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -314,18 +301,49 @@ function implicitProject(context, projects) {
   const matches = projects.filter(item => sameFolder(item.path, workspace.cwd));
   return matches.length === 1 ? matches[0] : undefined;
 }
-function carriesOtherAuthority(context) {
-  return Boolean(context?.targetId || context?.previousCommand || context?.interactionContext || context?.replyWorkItem ||
+// Authority that does not live in the sentence at all, and cannot be read from
+// its words: the user picked a pane in the interface, is answering a terminal's
+// question or one of Lina's, is retrying an earlier request, or the request is a
+// link in a dependency chain. Every one of these is refused outright.
+function carriesForeignAuthority(context) {
+  return Boolean(context?.targetId || context?.interactionContext || context?.replyWorkItem ||
     context?.authorizedRelay || context?.originalInstruction || context?.replyContext?.question ||
-    (Array.isArray(context?.pendingCommands) && context.pendingCommands.length) ||
     (Array.isArray(context?.dependencyResults) && context.dependencyResults.length));
+}
+// An unfinished command left by an earlier request is different: it is context
+// the next sentence MAY lean on, not context it always leans on. Refusing every
+// sentence while one existed meant the compiler only ever ran on a session's
+// first request - the September 14 completion ladder declined 33 of its 35 turns
+// `context-dependent`, including plain "open a Codex terminal in vibeTerminal"
+// sentences that carry their whole meaning in their own words. A pending command
+// now blocks only the sentences that actually point back at it: a pick from a
+// question Lina asked, and a request whose pane or project is named by pointing
+// at the previous turn rather than said.
+//
+// These are read over the sentence's HEAD - what it says about which pane and
+// which project - never over the task body, which is the user's own words to an
+// agent and may say "continue", "again" or "the last one" about anything at all.
+const LEANS_ON_PRIOR_TURN = [
+  // A pick from the candidates a question named.
+  /^(?:the\s+)?(?:first|second|third|1st|2nd|3rd|number\s+(?:one|two|three)|last)\s+(?:one\b|terminals?\b|panes?\b|agents?\b|$)/i,
+  /^(?:both|either|neither|all of them|that one|this one|the other|the same)\b/i,
+  // A pane named by pointing back: "the other one", "the same terminal".
+  new RegExp(String.raw`\b(?:other|same|previous|earlier)\s+(?:one|${PANE_NOUN})\b`, 'i'),
+  // The sentence adds to or repeats what the previous turn set up.
+  /\b(?:as well|instead|the same thing|one more time)\b/i,
+  /^(?:and|also|plus|next)\b/i,
+];
+const hasPendingCommand = context => Boolean(context?.previousCommand) ||
+  (Array.isArray(context?.pendingCommands) && context.pendingCommands.length > 0);
+function leansOnPriorTurn(text) {
+  return LEANS_ON_PRIOR_TURN.some(pattern => pattern.test(String(text ?? '')));
 }
 
 function compileCommand(context) {
   const instruction = instructionOf(context);
   const text = trimFiller(instruction);
   if (!text || text.length > 4000) return decline('no-match');
-  if (carriesOtherAuthority(context)) return decline('context-dependent');
+  if (carriesForeignAuthority(context)) return decline('context-dependent');
   const providers = providerCatalog(context?.launchers);
   if (!providers.length) return decline('unknown-provider');
   const projects = projectList(context);
@@ -349,18 +367,23 @@ function compileCommand(context) {
 
   const { patterns, head } = grammar(providers, projectSource);
   let matched;
-  for (const { shape, pattern, linkOptional } of patterns) {
+  for (const { shape, pattern, linkOptional, byReference } of patterns) {
     const found = pattern.exec(text);
     if (!found) continue;
     const groups = found.groups || {};
     // A pattern whose linking word is optional must not read a relative clause
     // about the pane ("... that is not working") as the work to be done.
     if (linkOptional && !groups.link && CLAUSE_START.test(String(groups.task || ''))) continue;
-    matched = { shape, groups };
+    matched = { shape, groups, byReference };
     break;
   }
   if (!matched) return refuse(head);
   const { shape, groups } = matched;
+  // Everything before the task body: what the sentence says about which pane and
+  // which project. A pending command from an earlier request only stops the
+  // compilation when this part of the sentence points back at that turn.
+  const headText = text.slice(0, Math.max(0, text.length - String(groups.task ?? '').length));
+  if (hasPendingCommand(context) && leansOnPriorTurn(headText)) return decline('context-dependent');
   if (['open', 'start'].includes(shape) && ambiguousLauncherHead(text, providers)) return decline('unknown-provider');
 
   // The project slot must name exactly one registered project, resolved by the
@@ -382,7 +405,7 @@ function compileCommand(context) {
     const cwd = context?.projectContext?.path || context?.workspaceContext?.cwd;
     project = context?.projectContext || projects.find(item => sameFolder(item.path, cwd));
     if (!project) return decline('unknown-project');
-  } else if (['follow_up', 'status', 'results'].includes(shape)) {
+  } else if (['follow_up', 'status', 'results', 'stop', 'close'].includes(shape)) {
     project = context?.projectContext || undefined;
   }
 
@@ -402,10 +425,25 @@ function compileCommand(context) {
     if (!project) return decline('unknown-project');
     confidence -= 0.08;
   }
-  const selector = extractSelector(text, { launchers: context?.launchers || [] });
+  const selector = resolveReference(text, [], { launchers: context?.launchers || [] });
+  const referenceOptions = { launchers: context?.launchers || [], cwd: project?.path, projectName: project?.name || '', strict: true };
+
+  // Stopping or closing the pane the sentence points at. A stop may fan out
+  // over the panes in one state ("stop both that are working"); a close is one
+  // pane, because a group close is the review's.
+  if (shape === 'stop' || shape === 'close') {
+    const reference = resolveReference(text, terminalsOf(context), referenceOptions);
+    const panes = reference.exact && !['new', 'idle', 'just_opened'].includes(reference.kind) ? reference.terminals : [];
+    if (!panes.length || panes.some(pane => !pane.handle) || shape === 'close' && panes.length > 1) return decline('ambiguous-pane');
+    if (confidence < CONFIDENCE_FLOOR) return decline('low-confidence');
+    const handles = panes.map(pane => pane.handle);
+    return { accepted: true, shape, confidence: Number(confidence.toFixed(2)), selector: reference.kind,
+      project: project?.name ?? null, provider: null, promptPresent: false, targetIds: panes.map(pane => pane.id),
+      calls: [shape === 'stop' ? call('plan_interrupt', { handles }) : call('plan_close', { scope: { type: 'explicit', handles } })] };
+  }
 
   if (shape === 'status' || shape === 'results') {
-    if (selector.kind !== 'title' || !uniquePane(context, selector, project)) return decline('ambiguous-pane');
+    if (!uniquePane(context, project)) return decline('ambiguous-pane');
     if (confidence < CONFIDENCE_FLOOR) return decline('low-confidence');
     return { accepted: true, shape, confidence: Number(confidence.toFixed(2)), selector: selector.kind,
       project: project?.name ?? null, provider: null, promptPresent: false,
@@ -413,19 +451,27 @@ function compileCommand(context) {
   }
 
   if (shape === 'follow_up') {
-    if (selector.kind !== 'title') return decline('ambiguous-pane');
-    const pane = uniquePane(context, selector, project);
-    if (!pane) return decline('ambiguous-pane');
+    // The pane: named by its task (continued through assignment, which binds
+    // the work item that owns it), or pointed at exactly (a handle, "it", "the
+    // other one", the one working pane), which is typed into directly.
+    const pointed = matched.byReference ? resolveReference(text.slice(0, Math.max(0, text.length - String(groups.task ?? '').length)), terminalsOf(context), referenceOptions) : undefined;
+    const pane = pointed
+      ? (pointed.exact && pointed.terminals.length === 1 && !['new', 'idle', 'just_opened'].includes(pointed.kind) ? pointed.terminals[0] : undefined)
+      : selector.kind === 'title' ? uniquePane(context, project) : undefined;
+    if (!pane || pointed && !pane.handle) return decline('ambiguous-pane');
     const task = cleanTask(groups.task);
-    if (ANAPHORIC_TASK.test(task)) return decline('context-dependent');
+    // "Prompt it and ask it if…": what follows the pane is still about the
+    // pane, not the words to send it. The Brain composes that prompt.
+    if (ANAPHORIC_TASK.test(task) || /^(?:and|then|plus)\b/i.test(task) || /\b(?:ask|tell|prompt|have|get|let)\s+it\b/i.test(task)) return decline('context-dependent');
     if (taskWords(task) < MIN_TASK_WORDS || distinctiveTaskWords(task) < MIN_DISTINCTIVE_TASK_WORDS) return decline('short-task');
     if (probes.second.test(task)) return decline('second-command');
     const cwd = project?.path || pane.cwd;
     if (typeof cwd !== 'string' || !cwd) return decline('unknown-project');
     if (confidence < CONFIDENCE_FLOOR) return decline('low-confidence');
-    return { accepted: true, shape, confidence: Number(confidence.toFixed(2)), selector: 'title',
+    return { accepted: true, shape, confidence: Number(confidence.toFixed(2)), selector: pointed ? pointed.kind : 'title',
       project: project?.name ?? null, provider: pane.provider || pane.kind || null, promptPresent: true, targetId: pane.id,
-      calls: [call('plan_continue_task', { cwd, text: task })] };
+      calls: [pointed ? call('plan_operate_terminal', { handles: [pane.handle], text: task, operationMode: 'task', promptMode: 'compose' })
+        : call('plan_continue_task', { cwd, text: task })] };
   }
 
   // The provider slot. A named launcher must be one this build offers; an
@@ -460,10 +506,9 @@ function compileCommand(context) {
   }
 
   const task = cleanTask(groups.task);
-  // The head is everything before the task. A start whose head names the pane by
-  // what it is working on is a follow-up wearing a start's clothes; the words
-  // being sent to the agent may say anything they like.
-  const headText = text.slice(0, Math.max(0, text.length - String(groups.task ?? '').length));
+  // A start whose head names the pane by what it is working on is a follow-up
+  // wearing a start's clothes; the words being sent to the agent may say
+  // anything they like.
   if (/\bworking\s+on\b/i.test(headText)) return decline('blocked-verb');
   if (ANAPHORIC_TASK.test(task)) return decline('context-dependent');
   if (taskWords(task) < MIN_TASK_WORDS || distinctiveTaskWords(task) < MIN_DISTINCTIVE_TASK_WORDS) return decline('short-task');
@@ -471,12 +516,11 @@ function compileCommand(context) {
   // A task body that reads as another command of its own is not a task body.
   if (probes.second.test(task)) return decline('second-command');
   if (confidence < CONFIDENCE_FLOOR) return decline('low-confidence');
-  // "another"/"new" is the user asking for a separate worker. Everything else
-  // leaves assignment to the resolver, which reuses an idle unowned pane.
-  const fresh = Boolean(groups.fresh) || /^(?:another|one\s+more)$/i.test(String(groups.count || ''));
+  // Whether the user asked for a separate worker is read off the sentence when
+  // the call is decoded, exactly as for a plan the Brain returns.
   return { accepted: true, shape: 'start', confidence: Number(confidence.toFixed(2)), selector: selector.kind,
     project: project.name, provider, promptPresent: true,
-    calls: [call('plan_delegate_task', { cwd: project.path, kindOfSession: provider, text: task, ...(fresh && { assignmentMode: 'new' }) })] };
+    calls: [call('plan_delegate_task', { cwd: project.path, kindOfSession: provider, text: task })] };
 }
 
 // ---------------------------------------------------------------------------

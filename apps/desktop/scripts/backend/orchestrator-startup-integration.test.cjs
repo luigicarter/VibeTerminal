@@ -62,7 +62,7 @@ test('restart creation arrives before renderer inventory without losing the new 
 for (const mode of ['operator', 'nonoperator', 'task-staging']) test(`${mode} initial prompt crosses real directory, decoder and transport only after ready`, async t => {
   const f = await fixture(t);
   const action = { kind: mode === 'task-staging' ? 'terminal_interact' : 'send_prompt', actionId: 'first', target: { id: 'p', generation: 'g' },
-    text: 'Keep this exact task', ...(mode !== 'nonoperator' && { operator: true, requestId: 'owner', observationSequence: 0, inputRevision: 0 }),
+    text: 'Keep this exact task', ...(mode !== 'nonoperator' && { operator: true, requestId: 'owner'}),
     ...(mode === 'task-staging' && { inputPurpose: 'task', submit: false }) };
   let settled = false;
   const pending = f.invoke(action).then(result => { settled = true; return result; });
@@ -81,7 +81,7 @@ for (const mode of ['operator', 'nonoperator', 'task-staging']) test(`${mode} in
 test('real input revision advance during startup cancels pending prompt without touching the PTY', async t => {
   const f = await fixture(t);
   const pending = f.invoke({ kind: 'send_prompt', target: { id: 'p', generation: 'g' }, actionId: 'first', text: 'Task',
-    operator: true, requestId: 'owner', observationSequence: 0, inputRevision: 0 });
+    operator: true, requestId: 'owner'});
   await tick(); await tick();
   f.event({ type: 'input-state', inputRevision: 1, manualInputPending: true });
   f.ready();
@@ -100,7 +100,7 @@ test('startup repaint rejection retries one exact prompt with fresh transport id
     return { ok: true, status: 'written', delivery: 'pty-transport-only' };
   };
   const action = { kind: 'send_prompt', target: { id: 'p', generation: 'g' }, actionId: 'original', text: 'One exact task',
-    operator: true, requestId: 'owner', observationSequence: 2, inputRevision: 0 };
+    operator: true, requestId: 'owner'};
   const result = await f.invoke(action);
   assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(result.actionId, 'original');
   assert.equal(f.sent.length, 2);
@@ -113,6 +113,69 @@ test('startup repaint rejection retries one exact prompt with fresh transport id
   assert.equal(f.sent.length, 2, 'A repeated original action cannot create another transport attempt');
 });
 
+// The same race outlives startup. A Codex 0.154 pane animates a sparkle around
+// its empty composer for as long as it is idle, so the read and the write are
+// never looking at the same output counter. The retry is the application's, not
+// the model's: no model request is scripted in this fixture, so any model call
+// here would fail the run.
+async function established(t) {
+  const f = await fixture(t); f.ready();
+  f.runtime.turnId = 'established-turn'; f.runtime.turnStartedAt = Date.now() - 1000; f.runtime.turnState = 'completed';
+  await f.integration.refreshInventory();
+  const observed = await f.invoke({ kind: 'read_session', target: { id: 'p', generation: 'g' } });
+  assert.equal(observed.ok, true, JSON.stringify(observed));
+  const session = f.integration.directory.get('p');
+  f.inputSurface = require('../../backend/orchestratorInputSurface.cjs').projectInputSurface(session, observed.observation);
+  assert.equal(f.inputSurface.composer.empty, true, JSON.stringify(f.inputSurface));
+  f.send = (actionId, extra = {}) => f.invoke({ kind: 'send_prompt', target: { id: 'p', generation: 'g' }, actionId, text: 'say hi',
+    operator: true, requestId: 'owner', 
+    inputSurface: f.inputSurface, ...extra });
+  return f;
+}
+
+test('an established pane that repaints between the read and the write is retried, not handed back', async t => {
+  const f = await established(t);
+  f.ack = message => {
+    f.event({ type: 'data', sequence: 10 + f.sent.length, data: '\x1b[?25h' });
+    return f.sent.length === 1 ? { ok: false, status: 'stale-observation', delivery: 'not-dispatched' }
+      : { ok: true, status: 'written', delivery: 'pty-transport-only' };
+  };
+  const result = await f.send('idle-repaint');
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.actionId, 'idle-repaint', 'the receipt belongs to the original action');
+  assert.equal(result.attempts, undefined, 'a delivery carries no attempt count');
+  const interactions = f.sent.filter(message => message.payload.kind === 'interaction');
+  assert.equal(interactions.length, 2);
+  assert.notEqual(interactions[0].payload.actionId, interactions[1].payload.actionId);
+  assert.equal(interactions[1].payload.text, 'say hi');
+  assert.equal(interactions[1].payload.requestId, 'owner');
+});
+
+test('three refusals stop, and the receipt says how many times the pane moved', async t => {
+  const f = await established(t);
+  f.ack = () => { f.event({ type: 'data', sequence: 10 + f.sent.length, data: '\x1b[?25h' });
+    return { ok: false, status: 'stale-observation', delivery: 'not-dispatched', reason: 'surface-changed' }; };
+  const result = await f.send('kept-moving');
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 'stale-observation');
+  assert.equal(result.attempts, 3);
+  assert.equal(f.sent.filter(message => message.payload.kind === 'interaction').length, 3);
+  const { failureSentence } = require('../../backend/orchestratorFailureText.cjs');
+  assert.equal(failureSentence('stale-observation', { pane: 'Codex', attempts: result.attempts }),
+    'Codex kept changing each of the 3 times I was about to type, so I held off. Nothing was sent.');
+});
+
+test('a moved input revision is never retried, whatever the pane is painting', async t => {
+  const f = await established(t);
+  f.ack = () => { f.event({ type: 'input-state', inputRevision: 7, manualInputPending: true });
+    return { ok: false, status: 'stale-observation', delivery: 'not-dispatched', reason: 'input-revision-changed' }; };
+  const result = await f.send('typed-since');
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'input-revision-changed');
+  assert.equal(result.attempts, undefined);
+  assert.equal(f.sent.filter(message => message.payload.kind === 'interaction').length, 1);
+});
+
 for (const mode of ['unknown', 'input-change', 'repeated-repaint', 'recipient-change', 'cancel']) test(`startup recovery remains bounded and respects ${mode}`, async t => {
   const f = await fixture(t); f.ready();
   f.ack = () => {
@@ -123,7 +186,7 @@ for (const mode of ['unknown', 'input-change', 'repeated-repaint', 'recipient-ch
     return { ok: false, status: 'stale-observation', delivery: 'not-dispatched' };
   };
   const result = await f.invoke({ kind: 'send_prompt', target: { id: 'p', generation: 'g' }, actionId: 'original', text: 'One task',
-    operator: true, requestId: 'owner', observationSequence: 2, inputRevision: 0 });
+    operator: true, requestId: 'owner'});
   assert.equal(result.ok, false);
   assert.equal(f.sent.filter(message => message.payload.kind === 'interaction').length, mode === 'repeated-repaint' ? 3 : 1);
   if (mode === 'input-change') assert.equal(result.reason, 'input-revision-changed');

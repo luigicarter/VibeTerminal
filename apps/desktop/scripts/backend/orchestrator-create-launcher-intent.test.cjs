@@ -7,7 +7,7 @@ const compile=actions=>normalizeIntent({goal:'Open the requested panes.',actions
 test('priority operation guidance separates executable work from drafts and retains continuation restrictions',()=>{
   assert(INTENT_SYSTEM.startsWith('Choose the operation before filling its fields:'));
   const priority=INTENT_SYSTEM.slice(0,INTENT_SYSTEM.indexOf('Resolve project locations'));
-  assert.match(priority,/requested new worker: delegate_task, assignmentMode:new/);
+  assert.match(priority,/requested new worker, or without a chosen conversation: delegate_task/);
   assert.match(priority,/text only stages a draft; it NEVER executes the task/);
   assert.match(priority,/Omit access and operation modes to inherit them/);
   for(const kind of ['create_session','delegate_task'])assert(INTENT_TOOL.function.parameters.properties.actions.items.anyOf.find(item=>item.properties.kind.enum[0]===kind).description);

@@ -12,6 +12,8 @@ export interface RelaySession extends Partial<Pick<AgentSession, typeof HISTORY_
     kind: string;
     name: string;
     conversationTitle?: string;
+    /** Stable handle for the pane's life ("T3"): what Lina says and what you can say back. */
+    handle?: string;
     cwd: string;
     projectName?: string;
     status: string;

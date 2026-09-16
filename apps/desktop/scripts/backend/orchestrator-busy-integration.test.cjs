@@ -34,7 +34,7 @@ async function fixture(t, provider = 'codex') {
   f.event({ type: 'agent-process', phase: 'start', pid: 42 });
   f.event({ type: 'data', sequence: 1, data: 'Agent working; task composer remains available.\r\n> ' });
   await f.invoke('dispatch', { kind: 'read_session', target: { id: 'p', generation: 'g' } });
-  f.send = text => f.invoke('dispatch', { kind: 'send_prompt', target: { id: 'p', generation: 'g' }, text, operator: true, requestId: 'request', observationSequence: 1, inputRevision: 0 });
+  f.send = text => f.invoke('dispatch', { kind: 'send_prompt', target: { id: 'p', generation: 'g' }, text, operator: true, requestId: 'request'});
   t.after(async () => { await integration.dispose(); assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir())); assert.ok(path.basename(root).startsWith('vibe-busy-integration-')); fs.rmSync(root, { recursive: true, force: true }); });
   return f;
 }
@@ -66,7 +66,7 @@ test('an idle-only prompt observed while idle refuses later busy dispatch withou
   assert.equal(observed.ok, true);
   Object.assign(f.snapshot, { turnState: 'running', childActivity: true });
   const result = await f.invoke('dispatch', { kind: 'send_prompt', target: { id: 'p', generation: 'g' }, text: 'Only use an idle terminal.',
-    targetAvailability: 'idle', operator: true, requestId: 'idle-request', observationSequence: observed.sequence, inputRevision: observed.inputRevision });
+    targetAvailability: 'idle', operator: true, requestId: 'idle-request'});
   assert.equal(result.ok, false); assert.equal(result.delivery, 'not-dispatched');
   assert.notEqual(result.status, 'queued'); assert.equal(f.sent.length, 0);
   Object.assign(f.snapshot, { turnState: 'completed', childActivity: false });
@@ -89,7 +89,7 @@ test('idle-only availability is rechecked inside the adapter after core admissio
     return session;
   };
   const result = await f.invoke('dispatch', { kind: 'send_prompt', target: { id: 'p', generation: 'g' }, text: 'An idle terminal only.',
-    targetAvailability: 'idle', operator: true, requestId: 'idle-request', observationSequence: 1, inputRevision: 0 });
+    targetAvailability: 'idle', operator: true, requestId: 'idle-request'});
   assert.equal(changed, true, 'The adapter observed the idle-to-busy transition');
   assert.equal(result.ok, false); assert.equal(result.delivery, 'not-dispatched');
   assert.notEqual(result.status, 'queued'); assert.equal(f.sent.length, 0);
@@ -101,7 +101,7 @@ test('idle-only availability is rechecked inside the adapter after core admissio
 test('an idle-only operator prompt still submits once when native readiness remains idle', async t => {
   const f = await fixture(t); Object.assign(f.snapshot, { turnState: 'completed', childActivity: false });
   const result = await f.invoke('dispatch', { kind: 'send_prompt', target: { id: 'p', generation: 'g' }, text: 'Use this idle terminal.',
-    targetAvailability: 'idle', operator: true, requestId: 'idle-request', observationSequence: 1, inputRevision: 0 });
+    targetAvailability: 'idle', operator: true, requestId: 'idle-request'});
   assert.equal(result.ok, true); assert.equal(result.inputDisposition, 'submitted-when-ready'); assert.equal(f.sent.length, 1);
 });
 
@@ -158,12 +158,17 @@ for (const hostResult of [
   f.hostResult = hostResult; f.snapshot.pendingInput = false;
   await f.integration.refreshInventory();
   await until(() => f.integration.getState().receipts.some(receipt => receipt.status === (hostResult.status === 'write-failed' ? 'unknown' : hostResult.status)));
-  assert.equal(f.sent.length, 1);
+  // A promotion takes the same bounded code-owned retry as any other operator
+  // prompt: a screen race is retried immediately and only then given up on.
+  // What must never happen is a LATER replay, which the rest of this test pins.
+  const dispatched = f.sent.length;
+  assert.ok(dispatched >= 1 && dispatched <= 3, `bounded attempts, saw ${dispatched}`);
+  assert.equal(dispatched > 1, hostResult.status === 'stale-observation', 'only a screen race is retried');
   assert.ok(f.integration.getState().receipts.some(receipt => receipt.status === (hostResult.status === 'write-failed' ? 'unknown' : hostResult.status)));
   delete f.hostResult;
   Object.assign(f.snapshot, { turnState: 'completed', childActivity: false });
   await f.integration.refreshInventory(); await f.integration.refreshInventory();
-  assert.equal(f.sent.length, 1);
+  assert.equal(f.sent.length, dispatched, 'later readiness cannot replay a finished promotion');
 });
 
 for (const mode of ['cancel', 'conversation', 'human-input']) test(`queued Codex promotion respects ${mode} before input`, async t => {
@@ -193,6 +198,28 @@ for (const field of ['manualInputPending', 'interactionInputPending']) test(`fre
   assert.equal(f.sent.length, 0, 'Clearing a draft cannot revive the rejected prompt');
 });
 
+// The keystroke latch is set by any key that is not Enter or Ctrl-C, and output
+// never clears it. What the composer shows when the turn ends decides whether a
+// queued follow-up may be typed.
+for (const [name, composer, promotes] of [['an empty composer', '› ', true], ['a visible draft', '› review this too', false]])
+  test(`a keystroke latch over ${name} ${promotes ? 'still promotes' : 'blocks'} the queued prompt`, async t => {
+    const f = await fixture(t); f.snapshot.pendingInput = true;
+    assert.equal((await f.send('Keep existing input intact.')).status, 'queued');
+    f.event({ type: 'data', sequence: 2, data: `\x1b[2J\x1b[HOpenAI Codex\r\nmodel: gpt-6-astra\r\n${composer}` });
+    f.event({ type: 'input-state', inputRevision: 1, manualInputPending: true });
+    f.snapshot.pendingInput = false;
+    await f.integration.refreshInventory();
+    if (promotes) {
+      await until(() => f.sent.length === 1);
+      assert.equal(f.sent[0].payload.kind, 'interaction');
+      assert.equal(f.sent[0].payload.text, 'Keep existing input intact.');
+      assert.equal(f.sent[0].payload.interactionEvidence.surface.composerEmpty, true);
+    } else {
+      await until(() => f.integration.getState().receipts.some(receipt => receipt.status === 'input-buffer-occupied'));
+      assert.equal(f.sent.length, 0);
+    }
+  });
+
 test('cancellation removes a queued busy prompt without touching the running terminal', async t => {
   const f = await fixture(t, 'claude'); assert.equal((await f.send('A followup.')).status, 'queued');
   await f.invoke('cancel'); Object.assign(f.snapshot, { turnState: 'completed', childActivity: false }); f.event({ type: 'input-state', inputRevision: 0 }); await tick(); await tick();
@@ -213,7 +240,7 @@ test('busy prompt exception retains root and turn boundaries while native contro
   const session = { id: 'p', generation: 'g', kind: 'codex', provider: 'codex', observation: 'observed', processState: 'running', agentProcessState: 'running', agentPid: 42, turnState: 'running', turnId: 't', turnStartedAt: 10, revision: 1 };
   const screen = { ok: true, id: 'p', generation: 'g', sequence: 1, inputRevision: 2 };
   const token = observations.observe(session, screen);
-  const action = { kind: 'send_prompt', target: { id: 'p', generation: 'g' }, text: 'Additional instruction', observationSequence: 1, inputRevision: 2 };
+  const action = { kind: 'send_prompt', target: { id: 'p', generation: 'g' }, text: 'Additional instruction'};
   assert.ok(observations.authorize(token, { ...session, revision: 99 }, action));
   for (const patch of [{ agentPid: 43 }, { turnId: 'new' }, { turnStartedAt: 11 }, { pendingInteraction: true }, { manualInputPending: true }, { observation: 'unknown' }, { agentProcessState: 'exited' }]) assert.throws(() => observations.authorize(token, { ...session, revision: 99, ...patch }, action), /changed/);
   assert.ok(observations.authorize(token, { ...session, revision: 99 }, { ...action, kind: 'terminal_interact', submit: true }));
@@ -269,7 +296,7 @@ for (const changed of [false, true]) for (const operator of [false, true]) test(
   const f = await fixture(t, 'claude');
   f.snapshot.conversation = { id: 'conversation-A', provider: 'claude' };
   const result = await f.invoke('dispatch', { kind: 'send_prompt', target: { id: 'p', generation: 'g' }, text: 'Continue conversation A only.',
-    ...(operator && { operator: true, requestId: 'request', observationSequence: 1, inputRevision: 0 }) });
+    ...(operator && { operator: true, requestId: 'request'}) });
   assert.equal(result.status, 'queued', JSON.stringify(result));
   assert.equal(f.sent.length, 0);
   Object.assign(f.snapshot, { conversation: { id: changed ? 'conversation-B' : 'conversation-A', provider: 'claude' }, turnState: 'completed', turnId: 'ending-turn', turnEndedAt: Date.now(), childActivity: false });

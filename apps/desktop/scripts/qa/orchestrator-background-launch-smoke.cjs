@@ -161,13 +161,16 @@ function toolsFrom(reply, expectedOk = true) { assert.equal(reply.ok, expectedOk
   // Compare inside PowerShell so terminal line wrapping cannot split the path.
   const payload = `Write-Output ('BACKGROUND_' + 'COMMAND_OK'); Write-Output ('WORKSPACE_' + 'CWD_MATCH=' + ((Get-Location).Path -eq '${a.replace(/'/g, "''")}'))`;
   plan([{ kind: "send_prompt", targetId: shell.receipt.id, text: payload }]);
-  let firstCommand = await command(`Send ${shell.receipt.id}: ${payload}`);
+  // Lina names panes by handle ("T3"); the scripted Brain reads the same roster
+  // the real one does, so the sentence addresses the pane the way a user would.
+  const handle = await until(async () => (await inventory(shell.receipt.id))?.handle, "shell pane handle");
+  let firstCommand = await command(`Send ${handle}: ${payload}`);
   // Initial ConPTY redraws can invalidate a just-read screen. Retry only a
   // proven-unsent freshness refusal, never an attempted or uncertain write.
   for (let retry = 0; retry < 2 && !firstCommand.ok && firstCommand.actions?.length &&
       firstCommand.actions.every(action => action.status === 'stale-observation' && action.delivery === 'not-dispatched'); retry++) {
     record('initial-screen-freshness-retry', { attempt: retry + 1 });
-    firstCommand = await command(`Send ${shell.receipt.id}: ${payload}`);
+    firstCommand = await command(`Send ${handle}: ${payload}`);
   }
   if (!firstCommand.ok) record('first-command-input-observation', await dispatch({ kind: 'read_session', target: shell.receipt.target }));
   const sent = toolsFrom(firstCommand);

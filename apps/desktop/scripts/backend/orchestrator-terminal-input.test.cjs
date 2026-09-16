@@ -2,30 +2,50 @@
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
 const { createTerminalInput } = require('../../backend/orchestratorTerminalInput.cjs');
+const { composerScreen, surfaceOf } = require('./orchestrator-input-fixture.cjs');
 function fixture(overrides = {}) {
   const session = { id: 'p', generation: 'g', revision: 1, provider: 'codex', kind: 'codex', processState: 'running', agentProcessState: 'running', agentPid: 42, turnState: 'waiting', turnId: 'established-turn' };
-  const observation = { ok: true, id: 'p', generation: 'g', sequence: 7, cols: 100, rows: 28 }; const writes = [];
+  const observation = composerScreen(); const writes = [];
+  // The input surface as it stood when this action was authorized. Moving
+  // `h.observation` afterwards is how a test moves the pane under the write —
+  // which is the whole fence now, in place of a byte counter.
+  let baseline = surfaceOf(session, observation);
   const input = createTerminalInput({ getSession: () => session, readSession: async () => observation, write: async payload => { writes.push(payload); return { ok: true, status: 'written', delivery: 'pty-transport-only' }; }, now: () => 1000, ...overrides });
-  return { input, session, observation, writes, action: (actionId, rest = {}) => ({ target: { id: 'p', generation: 'g' }, actionId, observationSequence: 7, keys: ['down'], ...rest }) };
+  return { input, session, observation, writes, surface: () => surfaceOf(session, observation),
+    // After reconfiguring the pane (a different provider, a different screen),
+    // re-take the baseline: the surface names the composer the pane paints.
+    rebase: () => { baseline = surfaceOf(session, observation); },
+    get baseline() { return baseline; },
+    action: (actionId, rest = {}) => ({ target: { id: 'p', generation: 'g' }, actionId, keys: ['down'], inputSurface: baseline, ...rest }) };
 }
 test('waiting native menus allow bounded navigation, preserve evidence and deduplicate', async () => {
   const h = fixture(); const a = h.action('one');
   const result = await h.input.handle(a); assert.equal(result.status, 'written'); assert.equal(result.delivery, 'pty-transport-only');
   assert.deepEqual(await h.input.handle(a), result); assert.equal(h.writes.length, 1);
-  assert.equal(h.writes[0].kind, 'interaction'); assert.deepEqual(h.writes[0].interactionEvidence, { id: 'p', generation: 'g', pid: 42, sequence: 7, revision: 1, observedAt: 1000, shell: false, cols: 100, rows: 28 });
+  assert.equal(h.writes[0].kind, 'interaction');
+  const { surface, ...evidence } = h.writes[0].interactionEvidence;
+  assert.deepEqual(evidence, { id: 'p', generation: 'g', pid: 42, sequence: 7, revision: 1, observedAt: 1000, shell: false, cols: 100, rows: 28, inputRevision: 0 });
+  assert.equal(surface.verified, true); assert.equal(surface.composerEmpty, true);
   assert.equal((await h.input.handle(h.action('two', { text: 'literal answer', keys: [], submit: true }))).status, 'written');
 });
 test('stale screen, wrong generation, stopped/rootless/chat panes and runtime changes reject before writes', async () => {
   for (const patch of [{ generation: 'new' }, { processState: 'exited' }, { agentPid: undefined }, { agentProcessState: 'unknown' }, { kind: 'fusion' }, { binding: { status: 'ambiguous' } }, { childActivity: true }]) {
     const h = fixture(); Object.assign(h.session, patch); assert.equal((await h.input.handle(h.action('one'))).ok, false); assert.equal(h.writes.length, 0);
   }
-  const h = fixture(); h.observation.sequence++; assert.equal((await h.input.handle(h.action('stale'))).status, 'stale-observation');
+  // Output alone is not staleness any more — an animated composer produces it
+  // by the second. A moved caret is, and so is a keystroke.
+  const fresh = fixture(); fresh.observation.sequence += 30;
+  assert.equal((await fresh.input.handle(fresh.action('repainted'))).status, 'written');
+  const h = fixture(); h.observation.cursor = { x: 9, y: h.observation.cursor.y };
+  assert.equal((await h.input.handle(h.action('stale'))).status, 'stale-observation');
+  const typed = fixture(); typed.observation.inputRevision += 1;
+  assert.equal((await typed.input.handle(typed.action('typed'))).reason, 'input-revision-changed');
   const changed = fixture({ readSession: async () => { changed.session.turnId = 'replacement'; return changed.observation; } });
   assert.equal((await changed.input.handle(changed.action('changed'))).ok, false); assert.equal(changed.writes.length, 0);
 });
 test('literal inputs reject controls, excess bytes and unknown or excessive keys', async () => {
   const h = fixture();
-  for (const [i, patch] of [{ text: 'x\x1b[A' }, { text: '😀'.repeat(25001) }, { keys: ['ctrl-unknown'] }, { keys: Array(17).fill('up') }, { submit: 'yes' }, { observationSequence: -1 }].entries()) assert.equal((await h.input.handle(h.action(String(i), patch))).status, 'invalid-action');
+  for (const [i, patch] of [{ text: 'x\x1b[A' }, { text: '😀'.repeat(25001) }, { keys: ['ctrl-unknown'] }, { keys: Array(17).fill('up') }, { submit: 'yes' }, { inputSurface: { id: 'p' } }].entries()) assert.equal((await h.input.handle(h.action(String(i), patch))).status, 'invalid-action');
   assert.equal(h.writes.length, 0);
 });
 
@@ -53,6 +73,10 @@ test('unknown writes never replay, concurrent pane writes reject, and plain shel
   assert.equal((await h.input.handle(h.action('two'))).status, 'interaction-busy'); release(undefined);
   assert.equal((await pending).status, 'unknown'); assert.equal((await h.input.handle(h.action('one'))).status, 'unknown');
   const shell = fixture(); Object.assign(shell.session, { provider: 'terminal', kind: 'terminal', pid: 43, agentPid: undefined, agentProcessState: 'unknown' });
+  Object.assign(shell.observation, { text: 'PS C:\\project>', cursor: { x: 14, y: 0 },
+    cursorLine: { startRow: 0, text: 'PS C:\\project>', beforeCursor: 'PS C:\\project>' },
+    cursorContext: { startRow: 0, rows: ['PS C:\\project>'] } });
+  shell.rebase();
   assert.equal((await shell.input.handle(shell.action('shell'))).ok, true); assert.equal(shell.writes[0].expectedAgentPid, 43);
 });
 test('completed dedup history stays bounded without a lifetime action limit; disposal blocks writes', async () => {
@@ -61,6 +85,8 @@ test('completed dedup history stays bounded without a lifetime action limit; dis
   assert.equal(h.writes.length, 1002); await h.input.handle(h.action('1001')); assert.equal(h.writes.length, 1002);
   h.input.dispose(); assert.equal((await h.input.handle(h.action('closed'))).status, 'cancelled'); assert.equal(h.writes.length, 1002);
 });
+const { surfaceEvidence } = require('../../backend/orchestratorInputSurface.cjs');
+const hostSurface = (composerEmpty, sequence = 0) => surfaceEvidence({ composer: { empty: composerEmpty } }, sequence);
 function host() {
   const events = [], terminals = []; let dead = false, clock = 0, nextTimer = 0;
   const timers = new Map();
@@ -76,10 +102,17 @@ function host() {
   const context = vm.createContext({ require: name => name === 'node-pty' ? { spawn() { const terminal = { pid: 42, writes: [], onData(fn) { this.data = fn; }, onExit(fn) { this.exit = fn; }, resize() {}, kill() {}, write(data) { this.writes.push(data); if (this.fail) throw Error('transport uncertain'); } }; terminals.push(terminal); return terminal; } } : name === 'readline' ? { createInterface: () => ({ on() {} }) } : name === './observedStop.cjs' ? require('../../backend/observedStop.cjs') : name === '../shared/terminalControls.cjs' ? require('../../shared/terminalControls.cjs') : require('node:module').createRequire(path.resolve(__dirname, '../../backend/ptyHost.cjs'))(name), process: { platform: 'win32', env: {}, stdin: {}, cwd: () => process.cwd(), stdout: { write: line => events.push(JSON.parse(line)) }, kill() { if (dead) throw Error('gone'); } }, Date: class extends Date { static now() { return Date.now() + clock; } }, setTimeout(fn, ms) { const id = ++nextTimer; timers.set(id, { fn, at: clock + ms }); return id; }, clearTimeout(id) { timers.delete(id); } });
   vm.runInContext(fs.readFileSync(path.resolve(__dirname, '../../backend/ptyHost.cjs'), 'utf8'), context);
   context.handleMessage({ type: 'create', payload: { id: 'p', generation: 'g', launchToken: 1 } });
+  // Every interaction the host accepts now carries the main process's captured
+  // input surface and the input revision it was captured at. A test that wants
+  // either of them wrong supplies its own; the defaults are the current truth,
+  // read out of the host's own session rather than guessed.
+  const live = () => vm.runInContext("(() => { const s = sessions.get('p'); return s && { inputRevision: s.inputRevision, cols: s.cols, rows: s.rows }; })()", context) || {};
   const send = (actionId, fields = {}) => {
     const geometry = events.filter(e => e.cols && e.rows).at(-1);
+    const current = live();
     const payload = { kind: 'interaction', id: 'p', generation: 'g', actionId, expectedAgentPid: 42, interactionEvidence: { id: 'p', generation: 'g', pid: 42, sequence: events.filter(e => e.type === 'data').at(-1)?.sequence || 0, observedAt: Date.now() + clock }, keys: ['down'], ...fields };
-    if (payload.interactionEvidence) payload.interactionEvidence = { cols: geometry.cols, rows: geometry.rows, ...payload.interactionEvidence };
+    if (payload.interactionEvidence) payload.interactionEvidence = { cols: geometry.cols, rows: geometry.rows,
+      inputRevision: current.inputRevision, surface: hostSurface(true, 0), ...payload.interactionEvidence };
     context.handleMessage({ type: 'action', payload }); return events.at(-1);
   };
   return { send, context, advance, now: () => Date.now() + clock, terminal: terminals[0], events, dead: () => { dead = true; }, manual: data => context.handleMessage({ type: 'input', payload: { id: 'p', generation: 'g', data } }) };
@@ -93,13 +126,17 @@ test('PTY encodes named keys, bracketed literal text and requested submission on
 test('PTY rejects stale/dead roots, unsafe input and user drafts without editing them', () => {
   const h = host(); const evidence = { id: 'p', generation: 'g', pid: 42, sequence: 0, observedAt: Date.now() };
   assert.equal(h.send('expired', { interactionEvidence: { ...evidence, observedAt: Date.now() - 6000 } }).status, 'stale-observation');
-  assert.equal(h.send('missing', { interactionEvidence: undefined }).status, 'stale-observation');
+  assert.equal(h.send('missing', { interactionEvidence: undefined }).status, 'invalid-action');
   assert.equal(h.send('generation', { generation: 'replacement' }).status, 'stale-generation');
   assert.equal(h.send('shell-pid', { expectedAgentPid: 99, interactionEvidence: { ...evidence, pid: 99, shell: true } }).status, 'stale-observation');
-  h.terminal.data('Question?'); assert.equal(h.send('stale', { interactionEvidence: evidence }).status, 'stale-observation');
+  h.terminal.data('Question?');
+  assert.equal(h.send('repainted', { interactionEvidence: { ...evidence, inputRevision: 0 } }).status, 'written', 'output between the read and the write is not staleness');
   assert.equal(h.send('control', { text: 'bad\x03' }).status, 'invalid-action'); assert.equal(h.send('key', { keys: ['constructor'] }).status, 'invalid-action');
   assert.equal(h.send('oversized', { text: '😀'.repeat(25001) }).status, 'invalid-action');
-  h.manual('user draft'); const count = h.terminal.writes.length; assert.equal(h.send('draft').status, 'input-buffer-occupied'); assert.equal(h.terminal.writes.length, count);
+  h.manual('user draft'); const count = h.terminal.writes.length;
+  // Main reports what its decoder sees; a composer holding the user's draft is
+  // not empty, so the latch holds.
+  assert.equal(h.send('draft', { interactionEvidence: { ...evidence, surface: hostSurface(false) } }).status, 'input-buffer-occupied'); assert.equal(h.terminal.writes.length, count);
   h.manual('\r'); h.dead(); assert.equal(h.send('dead').status, 'recipient-unavailable');
 });
 test('PTY rejects duplicate and nonfinal submission keys independently of helper', () => {
@@ -129,11 +166,13 @@ test('shared controls encode modifiers, function keys and safe multiline paste',
   assert.equal(encodeTerminalControls({ text: 'one\r\ntwo\t\u{1f600}' }).ok, false);
   assert.equal(encodeTerminalControls({ text: 'one\r\ntwo\t\u{1f600}' }, { bracketedPaste: true }).data, '\x1b[200~one\ntwo\t\u{1f600}\x1b[201~');
 });
-test('operator helper requires exact input revision and owner while readiness is unknown', async () => {
-  const h = fixture(); h.session.turnState = 'unknown'; h.observation.inputRevision = 2;
-  assert.equal((await h.input.handle(h.action('missing', { operator: true, requestId: 'r' }))).status, 'invalid-action');
-  assert.equal((await h.input.handle(h.action('stale', { operator: true, requestId: 'r', inputRevision: 1 }))).status, 'stale-observation');
-  assert.equal((await h.input.handle(h.action('fresh', { operator: true, requestId: 'r', inputRevision: 2 }))).ok, true);
+test('operator helper requires a captured surface and an owner while readiness is unknown', async () => {
+  const h = fixture(); h.session.turnState = 'unknown'; h.observation.inputRevision = 2; h.rebase();
+  assert.equal((await h.input.handle({ target: { id: 'p', generation: 'g' }, actionId: 'missing', keys: ['down'], operator: true, requestId: 'r' })).status, 'invalid-action');
+  assert.equal((await h.input.handle(h.action('unowned', { operator: true }))).status, 'invalid-action');
+  const stale = { ...h.baseline, inputRevision: 1 };
+  assert.equal((await h.input.handle(h.action('stale', { operator: true, requestId: 'r', inputSurface: stale }))).status, 'stale-observation');
+  assert.equal((await h.input.handle(h.action('fresh', { operator: true, requestId: 'r' }))).ok, true);
   assert.equal(h.writes[0].interactionEvidence.inputRevision, 2); assert.equal(h.writes[0].requestId, 'r');
 });
 test('PTY input revisions fence manual races, repeat navigation, ownership and explicit edits', () => {
@@ -145,7 +184,7 @@ test('PTY input revisions fence manual races, repeat navigation, ownership and e
   assert.equal(send('other', 1, { requestId: 'r2', keys: ['enter'] }).status, 'input-buffer-occupied');
   h.manual('x');
   assert.equal(send('manual-race', 1).status, 'stale-observation');
-  assert.equal(send('preserve', 2).status, 'input-buffer-occupied');
+  assert.equal(send('preserve', 2, { interactionEvidence: { ...evidence(2), surface: hostSurface(false) } }).status, 'input-buffer-occupied');
   assert.equal(send('edit', 2, { requestId: 'r2', editInput: true, keys: ['ctrl-a', 'backspace'] }).ok, true);
   assert.equal(send('submit-other', 3, { keys: ['enter'] }).status, 'input-buffer-occupied');
   assert.equal(send('submit-owner', 3, { requestId: 'r2', keys: ['enter'] }).ok, true);
@@ -212,7 +251,7 @@ test('only strict observed Ctrl-C can interrupt a root with active child work', 
   assert.equal((await h.input.handle(h.action('interrupt', fields))).status, 'written');
   assert.equal((await h.input.handle(h.action('navigation', { ...fields, keys: ['up'] }))).status, 'recipient-unavailable');
   assert.equal((await h.input.handle(h.action('legacy', { keys: ['ctrl-c'] }))).status, 'recipient-unavailable');
-  assert.equal((await h.input.handle(h.action('stale', { ...fields, inputRevision: 1 }))).status, 'stale-observation');
+  assert.equal((await h.input.handle(h.action('stale', { ...fields, inputSurface: { ...h.baseline, inputRevision: 1 } }))).status, 'stale-observation');
 });
 test('held mouse drag is request owned until release or manual input; uncertain release retains lease', () => {
   const h = host(); h.terminal.data('\x1b[?1002;1006h');
@@ -317,6 +356,167 @@ test('plain shell text and key-only submissions keep their immediate native beha
   assert.equal(h.send('shell', { text: 'echo hello', keys: [], submit: true, interactionEvidence: { id: 'p', generation: 'g', pid: 42, sequence: 0, observedAt: h.now(), shell: true } }).status, 'written');
   assert.equal(h.send('key', { keys: ['enter'] }).status, 'written');
   assert.deepEqual(h.terminal.writes, ['echo hello\r', '\r']); h.advance(1000); assert.equal(h.terminal.writes.length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// Input-surface freshness. The old fence compared an OUTPUT counter, so any pane
+// that repaints itself — Codex 0.154 animates a sparkle around its empty
+// composer several times a second, forever — was permanently "stale" and could
+// never be typed into. The screens below are the recorded Codex 0.154 composer,
+// decoded by the app's own decoder.
+// ---------------------------------------------------------------------------
+const { projectInputSurface } = require('../../backend/orchestratorInputSurface.cjs');
+const { createTerminalObservation } = require('../../backend/terminalObservation.cjs');
+const FIXTURES = path.join(__dirname, 'fixtures/provider-startup-screens');
+async function composerFixture(t, overrides = {}) {
+  const recorded = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'codex-ready.json'), 'utf8'));
+  const decoder = createTerminalObservation(); t.after(() => decoder.dispose());
+  await decoder.ingest({ type: 'created', id: 'p', generation: 'g', cols: recorded.cols, rows: recorded.rows, inputRevision: 3 });
+  await decoder.ingest({ type: 'data', id: 'p', generation: 'g', sequence: 1,
+    data: fs.readFileSync(path.join(FIXTURES, 'codex-ready.bin'), 'utf8') });
+  const screen = await decoder.read({ id: 'p', generation: 'g' });
+  const h = fixture(overrides);
+  h.session.turnState = 'unknown';
+  Object.assign(h.observation, screen, { ok: true, id: 'p', generation: 'g', sequence: 7 });
+  h.prompt = (actionId, rest = {}) => h.action(actionId, { operator: true, requestId: 'r', inputRevision: 3,
+    promptSubmission: true, submit: true, text: 'say hi', keys: [], ...rest });
+  h.keys = (actionId, rest = {}) => h.action(actionId, { operator: true, requestId: 'r', inputRevision: 3, keys: ['down'], ...rest });
+  h.surface = () => projectInputSurface(h.session, h.observation);
+  return h;
+}
+
+test('an idle repaint advances the output sequence and the prompt is still typed', async t => {
+  const h = await composerFixture(t);
+  const inputSurface = h.surface();
+  assert.equal(inputSurface.composer.empty, true);
+  // Thirty-five sparkle frames later: the counter moved, the input did not.
+  h.observation.sequence = 42;
+  const result = await h.input.handle(h.prompt('sparkle', { inputSurface }));
+  assert.equal(result.status, 'written', JSON.stringify(result));
+  assert.equal(h.writes.length, 1);
+  const evidence = h.writes[0].interactionEvidence;
+  assert.equal(evidence.sequence, 42, 'the write is fenced on the sequence just read, not the one the model echoed');
+  assert.equal(evidence.surface.verified, true);
+  assert.equal(evidence.surface.composerEmpty, true);
+  assert.match(evidence.surface.fingerprint, /^[0-9a-f]{64}$/);
+  // A caller that supplies no surface keeps the exact-counter fence it had.
+  const legacy = await composerFixture(t);
+  legacy.observation.sequence = 42;
+  assert.equal((await legacy.input.handle(legacy.prompt('legacy'))).status, 'stale-observation');
+  assert.equal(legacy.writes.length, 0);
+});
+
+for (const [name, change] of [
+  ['the composer is no longer empty', o => { o.cursorContext = { ...o.cursorContext, rows: o.cursorContext.rows.map(row => row.replace('›', ' ')) }; }],
+  ['the pane switched to its alternate screen', o => { o.alternateScreen = true; }],
+  ['another request staged input', o => { o.interactionInputPending = true; }],
+]) test(`a prompt is refused once ${name}`, async t => {
+  const h = await composerFixture(t);
+  const inputSurface = h.surface();
+  change(h.observation); h.observation.sequence = 9;
+  const result = await h.input.handle(h.prompt('changed', { inputSurface }));
+  assert.equal(result.status, 'stale-observation');
+  assert.equal(result.reason, 'surface-changed');
+  assert.equal(result.delivery, 'not-dispatched');
+  assert.ok(result.changed.length > 0, JSON.stringify(result.changed));
+  // A diagnostic names fields, never a fragment of what is on the screen.
+  for (const field of result.changed) assert.match(field, /^[a-zA-Z]+$/);
+  assert.equal(JSON.stringify(result).includes('Ask Codex'), false);
+  assert.equal(h.writes.length, 0);
+});
+
+for (const [name, change] of [
+  ['the caret moved', o => { o.cursor = { x: 9, y: o.cursor.y }; }],
+  ['what stands left of the caret changed', o => { o.cursorLine = { ...o.cursorLine, beforeCursor: '› dr' }; }],
+  ['the caret was hidden', o => { o.cursorVisible = false; }],
+]) test(`native menu keys stay strict when ${name}`, async t => {
+  const h = await composerFixture(t);
+  const inputSurface = h.surface();
+  change(h.observation); h.observation.sequence = 9;
+  const result = await h.input.handle(h.keys('menu', { inputSurface }));
+  assert.equal(result.status, 'stale-observation');
+  assert.equal(result.reason, 'surface-changed');
+  assert.equal(h.writes.length, 0);
+});
+
+test('a baseline caught mid-frame still submits a prompt, and still refuses menu keys', async t => {
+  // A read can land between the chunks of one synchronized frame, with the
+  // cursor briefly hidden. For a prompt into a composer that is empty now, at
+  // the same geometry and input revision, that is the same act; for a key,
+  // whose meaning is whatever the screen under it says, it is not.
+  const h = await composerFixture(t);
+  const inputSurface = projectInputSurface(h.session, { ...h.observation, cursorVisible: false });
+  assert.equal(inputSurface.cursorVisible, false);
+  h.observation.sequence = 11;
+  assert.equal((await h.input.handle(h.prompt('mid-frame', { inputSurface }))).status, 'written');
+  const keys = await composerFixture(t);
+  keys.observation.sequence = 11;
+  const refused = await keys.input.handle(keys.keys('mid-frame-keys', { inputSurface: projectInputSurface(keys.session, { ...keys.observation, cursorVisible: false }) }));
+  assert.equal(refused.status, 'stale-observation');
+  assert.equal(refused.reason, 'surface-changed');
+  assert.equal(keys.writes.length, 0);
+});
+
+test('a moved input revision is still its own reason and is never superseded', async t => {
+  const h = await composerFixture(t);
+  const inputSurface = h.surface();
+  h.observation.inputRevision = 4; h.observation.sequence = 12;
+  const result = await h.input.handle(h.prompt('typed-since', { inputSurface }));
+  assert.equal(result.status, 'stale-observation');
+  assert.equal(result.reason, 'input-revision-changed');
+  assert.equal(h.writes.length, 0);
+});
+
+// The host cannot recompute a surface — it holds no decoder — so it validates
+// the shape and acts on the one fact main signed: whether the composer was
+// recognizably empty.
+
+test('the host admits a surface-fenced write after the pane repainted and says how far output ran', () => {
+  const h = host();
+  h.terminal.data('repaint one'); h.terminal.data('repaint two');
+  const evidence = { id: 'p', generation: 'g', pid: 42, sequence: 0, inputRevision: 0, observedAt: Date.now(), surface: hostSurface(true, 0) };
+  const result = h.send('fenced', { operator: true, requestId: 'r', interactionEvidence: evidence });
+  assert.equal(result.status, 'written');
+  assert.equal(result.sequenceAtWrite, 2, 'two chunks of output arrived between the read and the write');
+  assert.equal(result.surfaceFingerprint, evidence.surface.fingerprint);
+  const plain = host();
+  plain.terminal.data('repaint one');
+  assert.equal(plain.send('unsigned', { operator: true, requestId: 'r',
+    interactionEvidence: { id: 'p', generation: 'g', pid: 42, sequence: 0, inputRevision: 0, observedAt: Date.now(), surface: undefined } }).status, 'invalid-action',
+    'there is no unfenced form left: a write without a captured surface is refused');
+  assert.equal(plain.terminal.writes.length, 0);
+});
+
+test('the host refuses malformed surface evidence, or evidence with no input revision', () => {
+  const h = host();
+  const base = { id: 'p', generation: 'g', pid: 42, sequence: 0, inputRevision: 0, observedAt: Date.now() };
+  for (const [name, surface] of [['not an object', 'yes'], ['unsigned', { ...hostSurface(true, 0), verified: false }],
+    ['short fingerprint', { ...hostSurface(true, 0), fingerprint: 'abc' }], ['unknown composer', { ...hostSurface(true, 0), composerEmpty: 'maybe' }]]) {
+    const result = h.send(`malformed-${name}`, { operator: true, requestId: 'r', interactionEvidence: { ...base, surface } });
+    assert.equal(result.status, 'invalid-action', name);
+  }
+  assert.equal(h.send('no-revision', { interactionEvidence: { id: 'p', generation: 'g', pid: 42, sequence: 0, observedAt: Date.now(), inputRevision: undefined, surface: hostSurface(true, 0) } }).status, 'stale-observation');
+  assert.equal(h.terminal.writes.length, 0);
+});
+
+test('a keystroke latch yields to a composer proved empty and blocks over anything else', () => {
+  const h = host();
+  h.manual('\x1b[A'); // one arrow key: no draft, but the latch is set
+  assert.equal(h.events.filter(e => e.type === 'input-state').at(-1).manualInputPending, true);
+  const evidence = empty => ({ id: 'p', generation: 'g', pid: 42, sequence: h.events.filter(e => e.type === 'data').at(-1)?.sequence || 0,
+    inputRevision: h.events.filter(e => e.type === 'input-state').at(-1).inputRevision, observedAt: h.now(), surface: hostSurface(empty, 0) });
+  assert.equal(h.send('occupied', { operator: true, requestId: 'r', interactionEvidence: evidence(false) }).status, 'input-buffer-occupied');
+  assert.equal(h.terminal.writes.length, 1, 'only the arrow key the user pressed');
+  const result = h.send('empty', { operator: true, requestId: 'r', text: 'say hi', keys: [], submit: true, interactionEvidence: evidence(true) });
+  assert.equal(result, h.events.at(-1));
+  const cleared = h.events.filter(e => e.type === 'input-state').at(-1);
+  assert.equal(cleared.manualInputPending, false, 'the published input state reflects the clear');
+  assert.equal(h.advance(200).status, 'written');
+  assert.deepEqual(h.terminal.writes, ['\x1b[A', 'say hi', '\r']);
+  // A real draft typed after the clear latches the pane again.
+  h.manual('draft');
+  assert.equal(h.send('after-draft', { operator: true, requestId: 'r',
+    interactionEvidence: { ...evidence(false), inputRevision: h.events.filter(e => e.type === 'input-state').at(-1).inputRevision } }).status, 'input-buffer-occupied');
 });
 
 test('terminal helper propagates action abort and disposal through in-flight writes', async () => {

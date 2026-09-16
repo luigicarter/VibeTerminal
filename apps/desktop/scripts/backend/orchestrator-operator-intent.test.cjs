@@ -9,7 +9,7 @@ function plan(command = {}, context = {}) {
   return normalizeIntent({ goal: 'Review changes without editing files.', executionMode: 'direct', actions: [{ kind: 'operate_terminal', text: instruction, targetIds: ['a'], ...command }] }, { requestId: 'user1', instruction, sessions, ...context });
 }
 function action(p, fields = {}, options = {}) {
-  return authorizeIntentAction({ kind: 'terminal_interact', grantId: p.grants[0].id, stepId: 'step1', observationSequence: 7, inputRevision: 0, keys: ['down'], ...fields }, p, sessions, options);
+  return authorizeIntentAction({ kind: 'terminal_interact', grantId: p.grants[0].id, stepId: 'step1', keys: ['down'], ...fields }, p, sessions, options);
 }
 function interactionOptions(kind = 'question', extra = {}) {
   const request = { id: 'q', sessionId: 'a', generation: 'g', revision: 2, state: 'pending', kind, questions: [{ id: 'scope', options: [{ label: 'Unit tests' }, { label: 'Smoke tests' }] }], ...extra };
@@ -35,13 +35,15 @@ test('operator compiler exposes frozen complete objective and defaults without c
   assert.match(INTENT_SYSTEM, /do not select them for new terminal actions, including exact one-shot relays/);
   assert.deepEqual(INTENT_TOOL.function.parameters.properties.actions.items.anyOf.find(schema => schema.properties.kind.enum[0] === 'operate_terminal').properties.promptMode.enum, ['compose', 'literal']);
 });
-test('application step fallback fills only absent IDs and optional counters remain observer-owned', () => {
+test('application step fallback fills only absent IDs and no freshness counters remain', () => {
   const p=plan(), raw={kind:'terminal_interact',keys:['down']};
   const authorized=authorizeIntentAction(raw,p,sessions,{fallbackStepId:'tool-call-hash'});
   assert.equal(authorized.stepId,'tool-call-hash');assert.equal(Object.hasOwn(raw,'stepId'),false);
   assert.equal(Object.hasOwn(authorized,'observationSequence'),false);assert.equal(Object.hasOwn(authorized,'inputRevision'),false);
   for(const stepId of [undefined,null,'']) assert.throws(()=>authorizeIntentAction({...raw,stepId},p,sessions,{fallbackStepId:'tool-call-hash'}),/step ID/);
-  for(const field of ['observationSequence','inputRevision']) for(const value of [undefined,-1,'7']) assert.throws(()=>authorizeIntentAction({...raw,[field]:value},p,sessions,{fallbackStepId:'tool-call-hash'}),/Invalid terminal/);
+  // Freshness counters are no longer part of an operator action at all, so
+  // supplying one is an unexpected field rather than an invalid counter.
+  for(const field of ['observationSequence','inputRevision']) assert.throws(()=>authorizeIntentAction({...raw,[field]:7},p,sessions,{fallbackStepId:'tool-call-hash'}),/unexpected|Unexpected/);
 });
 
 test('operator supports navigation, composed prompts and repeated submissions until explicit finish', () => {
@@ -62,7 +64,7 @@ test('operator supports navigation, composed prompts and repeated submissions un
 
 test('operator send_prompt can default to objective or compose scoped intermediate text', () => {
   const p = plan();
-  const initial = authorizeIntentAction({ kind: 'send_prompt', stepId: 'initial', observationSequence: 0, inputRevision: 0 }, p, sessions);
+  const initial = authorizeIntentAction({ kind: 'send_prompt', stepId: 'initial'}, p, sessions);
   assert.equal(initial.text, instruction);
   claimGrant(initial, p);
   const followup = authorizeIntentAction({ kind: 'send_prompt', stepId: 'followup', text: 'Explain the first finding without edits.' }, p, sessions);
@@ -91,7 +93,7 @@ test('each operator step has immutable payload, dispatch-once identity and expli
   assert.equal(releaseGrantStep(first, p).released, true);
   assert.throws(() => action(p, {}, { allowConsumed: true }), /already dispatched/);
   assert.throws(() => claimGrant(first, p), /already dispatched/);
-  claimGrant(action(p, { stepId: 'retry-after-new-read', observationSequence: 8 }), p);
+  claimGrant(action(p, { stepId: 'retry-after-new-read'}), p);
   assert.equal(projectIntent(p).grants[0].progress[0].steps, 2);
 });
 
@@ -108,9 +110,11 @@ test('operator has bounded per-target step budget and permits final verification
   assert.equal(projectIntent(p).grants[0].progress[0].outcome, 'blocked');
 });
 
-test('operator native controls require current sequence/input revision and use shared safe key validation', () => {
+test('operator native controls use shared safe key validation', () => {
   const p = plan();
-  for (const fields of [{ stepId: undefined }, { observationSequence: undefined }, { inputRevision: undefined }, { inputRevision: -1 }, { keys: ['raw-escape'] }, { text: '\x1b[H' }, { keys: ['enter'], submit: true }, { editInput: 'yes' }]) assert.throws(() => action(p, fields));
+  // Freshness counters are gone from the action; what a control must still be
+  // is unchanged.
+  for (const fields of [{ stepId: undefined }, { keys: [] }, { keys: Array(17).fill('up') }, { keys: ['raw-escape'] }, { text: '\x1b[H' }, { keys: ['enter'], submit: true }, { editInput: 'yes' }]) assert.throws(() => action(p, fields));
   const valid = action(p, { keys: ['ctrl-a', 'f2', 'pagedown'], text: 'line one\nline two\titem', editInput: true });
   assert.equal(valid.editInput, true);
   assert.equal(valid.text, 'line one\nline two\titem');
@@ -185,7 +189,7 @@ test('literal prompt mode requires exact source text and retains the observed op
   const p = plan({ promptMode: 'literal', text: literal }, { instruction: `Send exactly "${literal}" to terminal a.` });
   assert.equal(p.executionMode, 'reason');
   assert.equal(projectIntent(p).grants[0].promptMode, 'literal');
-  const initial = authorizeIntentAction({ kind: 'send_prompt', stepId: 'literal1', observationSequence: 0, inputRevision: 0 }, p, sessions);
+  const initial = authorizeIntentAction({ kind: 'send_prompt', stepId: 'literal1'}, p, sessions);
   assert.equal(initial.text, literal);
   claimGrant(initial, p);
   assert.deepEqual(projectIntent(p).grants[0].availableTargetIds, ['a']);

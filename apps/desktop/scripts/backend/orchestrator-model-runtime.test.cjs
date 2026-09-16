@@ -173,10 +173,10 @@ test('each stage waits its own deadline from the shared table',async()=>{
   await f.runtime.complete({model:'fixture',messages:[]},undefined,{category:'interpretation'});
   await f.runtime.complete({model:'fixture',messages:[],tools:[{type:'function',function:{name:'workspace'}}]});
   await f.runtime.complete({model:'fixture',messages:[]},undefined,{category:'close-review'});
-  assert.deepEqual(started(f).map(e=>[e.category,e.deadlineMs]),[['interpretation',25000],['execution',45000],['close-review',20000]]);
+  assert.deepEqual(started(f).map(e=>[e.category,e.deadlineMs]),[['interpretation',40000],['execution',45000],['close-review',20000]]);
   assert.deepEqual(MODEL_DEADLINES.execution,45000);assert.equal(modelDeadlineMs('unknown-stage'),MODEL_DEADLINES.default);
   // Every recorded attempt states the deadline it actually ran under.
-  assert.deepEqual(f.events.filter(e=>e.stage==='model_complete').map(e=>e.deadlineMs),[25000,45000,20000]);
+  assert.deepEqual(f.events.filter(e=>e.stage==='model_complete').map(e=>e.deadlineMs),[40000,45000,20000]);
 });
 test('a primary that misses its deadline is retried once on the fallback brain',async()=>{
   const f=fixture([deadline(),{choices:[{message:{content:'ok'}}]}],FALLBACK);

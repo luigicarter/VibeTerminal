@@ -1,0 +1,18 @@
+# Prepared examples only; not loaded by the existing deployment.
+groups:
+  - name: lina-prepared-billing
+    rules:
+      - alert: LinaBillingBacklog
+        expr: lina_billing_oldest_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Billing reconciliation has pending events older than five minutes
+      - alert: LinaBillingRetries
+        expr: lina_billing_retrying > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Billing reconciliation requires retry or investigation

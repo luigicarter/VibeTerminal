@@ -25,3 +25,10 @@ standalone HTML/Vite preview entries out of the normal site router and server
 connections until integration is requested. Administration must remain a web
 interface, with no desktop admin controls or links. See
 `../../docs/account-phase-2-previews.md` for commands and verification boundaries.
+
+Typed clients/controllers in `frontend/src/account-prepared` and the separate
+account-prepared harness are preparation only. They must remain absent from
+normal and preview entry graphs. Dedicated tests may connect the harness to a
+disposable local account backend; this does not authorize product wiring.
+Current evidence and remaining security gates are in
+`../../docs/account-paid-readiness.md`.

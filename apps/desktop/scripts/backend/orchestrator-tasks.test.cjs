@@ -139,16 +139,16 @@ test('executor calls are limited to two while serial routing continues', async t
   assert.equal(f.maxCalls, 2);
 });
 
-test('same target and same worktree mutations wait for terminal completion; another project progresses', async t => {
+test('a second pane in the same worktree runs at once; the same pane waits for terminal completion', async t => {
   const f = await fixture(t); f.sessions[1].cwd = f.sessions[0].cwd;
   const first = f.app.enqueue({ text: 'First edit', targetId: 's0', origin: 'text' });
   await until(() => f.effects.length === 1);
   f.app.enqueue({ text: 'Second edit', targetId: 's1', origin: 'text' });
-  f.app.enqueue({ text: 'Third edit', targetId: 's2', origin: 'text' });
+  f.app.enqueue({ text: 'Same pane again', targetId: 's0', origin: 'text' });
   await until(() => f.contexts.length === 3 && f.effects.length === 2);
-  assert.deepEqual(f.effects.map(action => action.targetId), ['s0', 's2']);
+  assert.deepEqual(f.effects.map(action => action.targetId), ['s0', 's1'], 'the other pane never waits for the first pane\'s turn');
   await f.finish('s0'); await until(() => f.effects.length === 3);
-  assert.equal(f.effects[2].targetId, 's1'); assert.equal(f.app.getState().tasks.find(task => task.id === first.requestId).status, 'finished');
+  assert.equal(f.effects[2].targetId, 's0'); assert.equal(f.app.getState().tasks.find(task => task.id === first.requestId).status, 'finished');
 });
 
 test('targeted cancellation does not abort sibling requests or unlock still-running terminal work', async t => {

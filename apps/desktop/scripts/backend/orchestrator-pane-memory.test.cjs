@@ -83,32 +83,8 @@ test('pane memory merges patches, writes only on real change, and clears only th
   assert.equal(memory.clearTransient(), false, 'Clearing twice changes nothing.');
 });
 
-test('the roster joins live pane identity with what Lina remembers, newest pane first', () => {
-  const memory = createPaneMemory({ store: memoryStore({
-    'agent-a': { objective: 'Investigate the orchestrator performance.', title: 'Orchestrator performance', lastPromptAt: 500, lastResultSummary: 'x'.repeat(400), updatedAt: 500 },
-  }), now: () => 1000, resolveAgentId: id => ({ a: 'agent-a' }[id] || null) });
-  const sessions = [
-    { id: 'a', name: 'Claude Code 1', conversationTitle: 'Stale title', kind: 'claude', cwd: 'C:/projects/vibeTerminal', status: 'idle', turnState: 'idle', lastActivityAt: 100 },
-    { id: 'b', name: 'Codex 2', kind: 'codex', cwd: 'C:/projects/vibeTerminal', status: 'waiting', turnState: 'running', pendingInput: true, lastActivityAt: 900 },
-    { id: 'c', name: 'Codex 3', kind: 'codex', cwd: 'C:/projects/other', status: 'idle', turnState: 'idle', lastActivityAt: 950 },
-    { id: 'd', name: 'Closed', kind: 'codex', cwd: 'C:/projects/vibeTerminal', status: 'closed', turnState: 'idle', lastActivityAt: 999 },
-  ];
-  const roster = memory.roster({ cwd: 'c:/projects/vibeterminal/', sessions });
-  assert.deepEqual(roster.map(row => row.id), ['b', 'a'], 'Another project and a closed pane are not in this roster.');
-  // One derived state per pane: status, turnState and readiness were three names
-  // for the same fact and could contradict each other inside one row.
-  assert.deepEqual(roster[1], { id: 'a', name: 'Claude Code 1', title: 'Orchestrator performance', provider: 'claude', state: 'free',
-    objective: 'Investigate the orchestrator performance.', lastPromptAt: 500, lastResultSummary: 'x'.repeat(200) });
-  assert.equal(roster[0].state, 'needs-input');
-  assert.equal(roster[0].status, undefined);
-  assert.equal(roster[0].turnState, undefined);
-  assert.equal(roster[0].objective, undefined, 'A pane with no memory carries only its live identity.');
-  assert.deepEqual(memory.roster({ sessions }).map(row => row.id), ['c', 'b', 'a'], 'Without a project every live pane is offered.');
-  // The budget drops the least recently touched rows and keeps the newest.
-  const bounded = boundedRoster(memory.roster({ sessions }), { maxBytes: 120 });
-  assert.equal(bounded.length, 1);
-  assert.equal(bounded[0].id, 'c');
-});
+// The Brain's roster is built by orchestratorTerminalModel.cjs from these
+// records; orchestrator-terminal-model.test.cjs covers it.
 
 async function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-pane-memory-'));
@@ -169,10 +145,13 @@ test('a sent prompt and the result summary it produced are remembered on the pan
   // reaches the brain.
   f.plan = () => ({ goal: 'Answer from what is already known.', actions: [] });
   await f.app.send({ text: 'how is that pane doing?', origin: 'text' });
+  // The roster row is the terminal model's: the task the pane is on, its last
+  // recorded result, and when Lina last touched it.
   const row = f.contexts.at(-1).roster.find(item => item.id === 's0');
-  assert.equal(row.title, 'Release checklist review');
-  assert.match(row.lastResultSummary, /Two findings/);
-  assert.ok(Number.isFinite(row.lastPromptAt));
+  assert.match(row.on, /release checklist/i);
+  assert.match(row.result, /Two findings/);
+  assert.equal(row.owner, 'lina');
+  assert.equal(row.lastTouchedAt, undefined, 'recency is the row order, not a field the Brain reads');
 
   // Clearing history drops what Lina said and heard and keeps the pane's title.
   await f.app.clearHistory();
@@ -184,4 +163,17 @@ test('a sent prompt and the result summary it produced are remembered on the pan
   assert.equal(cleared.lastPromptAt, undefined);
   assert.equal(cleared.lastResultAt, undefined);
   assert.equal(cleared.title, 'Release checklist review', 'What a pane is stays; what was said about it goes.');
+});
+
+// Added 2026-09-15: the memory answers speak about live panes, but records are
+// kept by agent id; "which one needs me" looked a pane up by session id, found
+// nothing, and answered with a label instead of the pane's task.
+test('bySession addresses the same records by live pane id', () => {
+  const memory = createPaneMemory({ resolveAgentId: id => ({ s1: 'agent_1', s2: 'agent_2' })[id] || null });
+  memory.remember('agent_1', { lastPromptText: 'Do a deep dive on the PDF viewer.' });
+  const byPane = memory.bySession([{ id: 's1' }, { id: 's2' }, { id: 's3' }, null]);
+  assert.deepEqual(Object.keys(byPane), ['s1']);
+  assert.equal(byPane.s1.lastPromptText, 'Do a deep dive on the PDF viewer.');
+  byPane.s1.lastPromptText = 'changed';
+  assert.equal(memory.get('agent_1').lastPromptText, 'Do a deep dive on the PDF viewer.', 'a copy, not the record');
 });

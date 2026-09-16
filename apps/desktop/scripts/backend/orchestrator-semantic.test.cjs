@@ -26,7 +26,7 @@ async function fixture(t, supportedParameters = ['tools', 'tool_choice']) {
   f.sessions.push({ id: 'other', name: 'Other Codex', kind: 'codex', generation: 'other-g', cwd: projects[1].path, projectName: 'Other' });
   f.relay = createOrchestrator({ userDataPath: root, secureStorage: { isEncryptionAvailable: () => false },
     getRoots: () => ({ documents: root, projects }), getSessions: () => f.sessions,
-    readSession: async () => { f.reads++; return { ok: true, text: f.output || 'Current terminal screen', sequence: f.reads, observationSequence: f.reads }; },
+    readSession: async () => { f.reads++; return { ok: true, text: f.output || 'Current terminal screen', sequence: f.reads, }; },
     dispatchAction: async action => { f.effects.push(action); const result = f.effect ? await f.effect(action) : { ok: true, status: 'written' }; if (action.kind === 'send_prompt' && result.ok) { const session = f.sessions.find(session => session.id === action.targetId); Object.assign(session, { turnId: action.actionId, turnState: 'running', turnStartedAt: Date.now(), actionId: action.actionId }); } return result; },
     fetch: async (url, options) => {
       if (url.endsWith('/key')) return new Response(JSON.stringify({ data: {} }));
@@ -54,9 +54,11 @@ test('automatic tool choice avoids the incompatible named request from the first
   await f.run('Hello.', none, reply('Hello.'));
   await f.run('Hello again.', none, reply('Hello again.'));
   assert.equal(f.namedRejections || 0, 0); assert.equal(f.effects.length, 0);
+  // A Brain that answers in prose is asking the user something: one call, no
+  // retry, no effect, and the sentence reaches the user as a question.
   const missingCall = reply('Plain prose cannot authorize an effect.');
-  const rejected = await f.run('Please close Codex 1.', [missingCall, missingCall]);
-  assert.equal(rejected.ok, false); assert.match(rejected.error, /could not interpret/); assert.equal(f.effects.length, 0);
+  const asked = await f.run('Please close Codex 1.', [missingCall]);
+  assert.equal(asked.ok, true, JSON.stringify(asked)); assert.equal(asked.text, 'Plain prose cannot authorize an effect.'); assert.equal(f.effects.length, 0);
   assert.equal(f.namedRejections || 0, 0);
 });
 
@@ -282,7 +284,7 @@ test('semantic composition supports natural workflow wording, navigation and pre
 
 test('all-target semantic request reaches six project terminals once and excludes another project', async t => {
   const f = await fixture(t);
-  const result = await f.run('Have every Codex in vibeTerminal inspect the last changes independently, without editing.', context => ({ goal: 'Request six independent reviews.', actions: [{ kind: 'send_prompt', targetIds: context.roster.filter(s => s.cwd === f.root).map(s => s.id), selection: 'all', text: 'Review the last changes independently. Do not edit files.' }] }), executeGrant, executeGrant, reply('Requested all six reviews.'));
+  const result = await f.run('Have every Codex in vibeTerminal inspect the last changes independently, without editing.', context => ({ goal: 'Request six independent reviews.', actions: [{ kind: 'send_prompt', handles: context.roster.filter(s => s.project === 'vibeTerminal').map(s => s.handle), selection: 'all', text: 'Review the last changes independently. Do not edit files.' }] }), executeGrant, executeGrant, reply('Requested all six reviews.'));
   assert.equal(result.ok, true); assert.deepEqual(f.effects.map(a => a.targetId).sort(), ['c1', 'c2', 'c3', 'c4', 'c5', 'c6']);
 });
 
@@ -350,7 +352,7 @@ test('failed receipt remains available to executor follow-up but cannot authoriz
 
 test('terminal navigation and literal submission consume one grant without repeated host input', async t => {
   const f = await fixture(t);
-  const result = await f.run('Go through Codex 1 menu and type my answer, then submit it.', { goal: 'Navigate and submit the supplied text.', actions: [{ kind: 'terminal_interact', targetIds: ['c1'], answerText: 'my answer' }] }, tools({ kind: 'read_session', targetId: 'c1' }), tools({ kind: 'terminal_interact', observationSequence: 1, keys: ['down', 'tab'] }), tools({ kind: 'read_session', targetId: 'c1' }), tools({ kind: 'terminal_interact', observationSequence: 2, text: 'my answer', submit: true }), tools({ kind: 'terminal_interact', observationSequence: 2, text: 'my answer', submit: true }), tools({ kind: 'terminal_interact', observationSequence: 3, keys: ['enter'] }), reply('Submitted once.'));
+  const result = await f.run('Go through Codex 1 menu and type my answer, then submit it.', { goal: 'Navigate and submit the supplied text.', actions: [{ kind: 'terminal_interact', targetIds: ['c1'], answerText: 'my answer' }] }, tools({ kind: 'read_session', targetId: 'c1' }), tools({ kind: 'terminal_interact', keys: ['down', 'tab'] }), tools({ kind: 'read_session', targetId: 'c1' }), tools({ kind: 'terminal_interact', text: 'my answer', submit: true }), tools({ kind: 'terminal_interact', text: 'my answer', submit: true }), tools({ kind: 'terminal_interact', keys: ['enter'] }), reply('Submitted once.'));
   assert.equal(result.ok, false); assert.equal(f.effects.length, 2); assert.deepEqual(f.effects[0].keys, ['down', 'tab']); assert.equal(f.effects[1].text, 'my answer'); assert.equal(f.effects[1].submit, true);
 });
 
@@ -368,7 +370,7 @@ test('two clarifications preserve the original user command and its source ident
   await f.run('vibeTerminal', context => { source = context.previousCommand.requestId; assert.equal(context.previousCommand.instruction, instruction); return { goal: 'Review that project without editing.', continuationOf: source, clarification: 'Which terminal?', actions: [] }; });
   const result = await f.run('Pick a random one.', context => {
     assert.equal(context.previousCommand.requestId, source); assert.equal(context.previousCommand.instruction, instruction);
-    return { goal: 'Dispatch the original review.', actions: [{ kind: 'send_prompt', sourceUserId: source, selection: 'one', targetIds: context.roster.filter(s => s.cwd === f.root).map(s => s.id), text: 'Review the latest changes. Do not edit files.' }] };
+    return { goal: 'Dispatch the original review.', actions: [{ kind: 'send_prompt', sourceUserId: source, selection: 'one', handles: context.roster.filter(s => s.project === 'vibeTerminal').map(s => s.handle), text: 'Review the latest changes. Do not edit files.' }] };
   }, executeGrant, reply('Review requested.'));
   assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(f.effects.length, 1); assert.equal(f.effects[0].text, 'Review the latest changes. Do not edit files.');
 });

@@ -41,7 +41,7 @@ test('real interpretation repair preserves a zero-terminal investigation and cre
   const relay=createOrchestrator({userDataPath:root,getSessions:()=>sessions,getRoots:()=>({projects:[{name:'Recovery QA',path:root}]}),
     getLaunchers:()=>[{kind:'codex',available:true,configured:true}],
     routeTask:async()=>({kind:'choose',decision:'create',kindOfSession:'codex',reason:'Known project has no existing terminal.'}),
-    readSession:async()=>({ok:true,id:'worker',generation:'generation',text:'Ready for investigation.',sequence:4,observationSequence:4,inputRevision:0}),
+    readSession:async()=>({ok:true,id:'worker',generation:'generation',text:'Ready for investigation.',sequence:4,inputRevision:0}),
     dispatchAction:async action=>{
       effects.push(action);
       if(action.kind==='create_session'){
@@ -66,7 +66,7 @@ test('real interpretation repair preserves a zero-terminal investigation and cre
       if(phase++%2===0)return tool('workspace',{kind:'read_session',targetId:'worker'});
       const observed=JSON.parse(body.messages.filter(message=>message.role==='tool').at(-1).content);
       return tool('workspace',{kind:phase===2?'send_prompt':'finish_terminal',targetId:'worker',grantId:grant.id,stepId:`step-${phase}`,observationToken:observed.observationToken,
-        ...(phase===2?{text:objective,observationSequence:observed.observation.sequence,inputRevision:observed.observation.inputRevision}:{outcome:'completed',text:'Submission inspected.'})});
+        ...(phase===2?{text:objective}:{outcome:'completed',text:'Submission inspected.'})});
     } catch(error) { fetchError=error; throw error; } }});
   t.after(async()=>{await relay.cancel();await relay.dispose();assert.equal(path.dirname(root),os.tmpdir());fs.rmSync(root,{recursive:true,force:true});});
   await relay.configure({apiKey:'test-key',model:'scripted',sessionOnly:true});assert.equal((await relay.setEnabled(true)).ok,true);

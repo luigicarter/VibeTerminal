@@ -7,7 +7,7 @@ const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const { createMemoryStore, boundedMemory, memoryQuestion, answerMemoryQuestion, topicsFrom, dayKey,
   FILE, LIMITS } = require('../../backend/orchestratorMemory.cjs');
-const { RESOLVER_STOPWORDS } = require('../../backend/orchestratorResolver.cjs');
+const { RESOLVER_STOPWORDS } = require('../../backend/orchestratorReference.cjs');
 const { createPlanningInput } = require('../../backend/orchestratorInterpreter.cjs');
 const { createOrchestrator } = require('../../backend/orchestrator.cjs');
 const utterances = require('./fixtures/orchestrator-utterances.json');
@@ -417,4 +417,99 @@ test('the store is bounded: five thousand episodes, five hundred pane facts, one
   assert.equal(store.snapshot().projectFacts.length, LIMITS.projectFacts, 'Project facts are bounded, oldest first.');
   assert.equal(store.snapshot().projectFacts.at(-1).project, 'project-119');
   await store.flush();
+});
+
+// ---------------------------------------------------------------------------
+// Roster-backed answers: the questions the completion ladder showed reaching the
+// brain (and flailing there) although the app already held the answer.
+// ---------------------------------------------------------------------------
+test('status, needs-me, last-done and gave-to questions are answered from the roster and the ledger', () => {
+  const { sentence } = require('../../backend/orchestratorFailureText.cjs');
+  // Live panes as the inventory publishes them: the roster reads the same
+  // pane-state predicate assignment does, so the process facts must be there.
+  const live = s => ({ kind: s.provider, started: true, processState: 'running', agentProcessState: 'running', agentPid: 7,
+    launchState: 'ready', observation: 'observed', ...s });
+  const sessions = [
+    { id: 's1', name: '⠼ Chat section', projectName: 'vibeTerminal', provider: 'codex', status: 'running', turnState: 'running', turnId: 't1' },
+    { id: 's2', name: 'Full screen bug', projectName: 'vibeTerminal', provider: 'claude', turnState: 'completed', status: 'completed', turnId: 't2', turnEndedAt: 2000 },
+    { id: 's3', name: 'Pairing screen', projectName: 'lina mobile', provider: 'claude', turnState: 'completed', status: 'completed', turnId: 't3', turnEndedAt: 1000 },
+    { id: 's4', name: 'PDF viewer deep dive', projectName: 'lina web app', provider: 'codex', status: 'waiting', turnState: 'waiting', turnId: 't4' },
+    { id: 's5', name: 'Codex 3', projectName: 'vibeTerminal', provider: 'codex', turnState: 'unknown', status: 'unknown' },
+  ].map(live);
+  // The answers read the terminal model (handles T1..T5 in inventory order),
+  // never the raw sessions: the same objects the Brain's roster and the
+  // renderer read.
+  const { createTerminalHandles, buildTerminalModel } = require('../../backend/orchestratorTerminalModel.cjs');
+  const terminalsOf = (list, records = {}) => buildTerminalModel({ sessions: list, records,
+    handles: createTerminalHandles({ load: () => ({ next: 6, byId: { s1: 'T1', s2: 'T2', s3: 'T3', s4: 'T4', s5: 'T5' } }) }) });
+  const terminals = terminalsOf(sessions);
+  const store = { recall: ({ query } = {}) => /full screen/i.test(query || '')
+    ? [{ requestId: 'r1', verb: 'start', outcome: 'delivered-started', project: 'vibeTerminal',
+      pane: { id: 's2', name: 'Full screen bug', provider: 'claude' }, typedText: 'Fix the full screen bug when a pane is maximized.' }]
+    : [] };
+  const ask = (text, options = {}) => {
+    const match = memoryQuestion(text);
+    assert.ok(match, `no template matched: ${text}`);
+    return answerMemoryQuestion(store, match, { terminals, ...options });
+  };
+  const rendered = answer => sentence(answer.key, answer.context).text;
+
+  const status = ask("Can you tell me what's going on in the Vibe terminals and tell me the progress?", { project: 'vibeTerminal' });
+  assert.equal(status.key, 'status-all');
+  assert.match(rendered(status), /T1 \(Codex terminal\) is working; T2 \(Claude Code terminal\) is done; T5 \(Codex terminal\) is idle/);
+  assert.doesNotMatch(rendered(status), /T3/, 'a project-scoped report lists only that project');
+
+  const needs = ask("There's a terminal that needs me. Which one is it?");
+  assert.equal(needs.key, 'needs-me');
+  assert.equal(rendered(needs), 'T4 in lina web app is waiting on you.');
+  // A working pane may be asking a question its provider never reported, so
+  // with one still working the brain reads the panes; with nothing working,
+  // nothing is waiting.
+  assert.equal(answerMemoryQuestion(store, memoryQuestion("There's a terminal that needs me. Which one is it?"),
+    { terminals: terminalsOf(sessions.filter(s => s.id !== 's4')) }), null);
+  const nobody = answerMemoryQuestion(store, memoryQuestion("There's a terminal that needs me. Which one is it?"),
+    { terminals: terminalsOf(sessions.filter(s => s.id !== 's4' && s.id !== 's1')) });
+  assert.equal(nobody.key, 'needs-me-none');
+  // "Did you enter that prompt?" is answered first, then the record; a result
+  // question with two finished panes and no recorded result names them both.
+  const entered = answerMemoryQuestion(store, memoryQuestion('did you enter that prompt?'), { terminals, project: 'vibeTerminal' });
+  assert.equal(entered, null, 'no typed prompt is recorded in this store');
+  const typed = { recall: () => [{ requestId: 'r2', verb: 'start', outcome: 'delivered-started', project: 'vibeTerminal',
+    pane: { id: 's5', name: 'Codex 3', provider: 'codex' }, typedText: 'Summarize the repo.' }] };
+  const confirmed = answerMemoryQuestion(typed, memoryQuestion('did you enter that prompt?'), { terminals, project: 'vibeTerminal' });
+  assert.equal(confirmed.key, 'last-prompt-confirmed');
+  assert.equal(rendered(confirmed), 'Yes, I put “Summarize the repo.” in Codex 3. It started working on it.');
+  const several = answerMemoryQuestion({ recall: () => [] }, memoryQuestion("There's a terminal that's done. What's the result?"), { terminals });
+  assert.equal(several.key, 'pane-result-several');
+  assert.equal(rendered(several), 'More than one has finished: T2, T3. Which one do you mean?');
+  // With pane memory in hand the answers carry what each pane is on: the
+  // waiting pane's task (the user asked "which one", not "what is it called"),
+  // and every finished pane's recorded result instead of a question.
+  const paneRecords = { s4: { lastPromptText: 'Do a deep dive on the PDF viewer.' }, s2: { lastResultSummary: 'RESULT-FS-42' }, s3: { lastResultSummary: 'RESULT-PAIR-9' } };
+  const needsTask = answerMemoryQuestion(store, memoryQuestion("There's a terminal that needs me. Which one is it?"), { terminals: terminalsOf(sessions, paneRecords) });
+  assert.equal(rendered(needsTask), 'T4 in lina web app, on “Do a deep dive on the PDF viewer.”, is waiting on you.');
+  const both = answerMemoryQuestion({ recall: () => [] }, memoryQuestion("There's a terminal that's done. What's the result?"), { terminals: terminalsOf(sessions, paneRecords) });
+  assert.equal(both.key, 'pane-results');
+  assert.equal(rendered(both), 'T2 came back with: RESULT-FS-42. T3 came back with: RESULT-PAIR-9.');
+  const one = answerMemoryQuestion({ recall: () => [] }, memoryQuestion("There's a terminal that's done. What's the result?"), { terminals: terminalsOf(sessions.filter(s => s.id !== 's3'), paneRecords) });
+  assert.equal(one.key, 'pane-result');
+  assert.equal(rendered(one), 'T2 came back with: RESULT-FS-42');
+
+  const lastDone = ask('Thank you. Hey, what was the last terminal that was done?');
+  assert.equal(lastDone.key, 'last-done');
+  assert.equal(rendered(lastDone), 'The last one to finish was T2 in vibeTerminal.');
+  assert.equal(ask("Hey, bye. There's a terminal that's done. Can you see that terminal?").key, 'last-done');
+
+  const gave = ask('Which terminal did you give the full screen bug to?');
+  assert.equal(gave.key, 'gave-to');
+  assert.match(rendered(gave), /I put the full screen bug work in Full screen bug: “Fix the full screen bug/);
+
+  // No ledger row, but a pane titled by the task's words: answered from the roster.
+  const titled = answerMemoryQuestion({ recall: () => [] }, memoryQuestion('Which terminal did you give the full screen bug to?'), { terminals });
+  assert.equal(titled.key, 'gave-to-pane');
+  assert.equal(rendered(titled), 'The full screen bug work is in T2 in vibeTerminal.');
+
+  // Nothing recorded → the brain still gets the question, exactly as before.
+  assert.equal(answerMemoryQuestion({ recall: () => [] }, memoryQuestion('Which terminal did you give the login bug to?'), { terminals }), null);
+  assert.equal(answerMemoryQuestion(store, memoryQuestion('what was the last terminal that was done?'), { sessions: [] }), null);
 });

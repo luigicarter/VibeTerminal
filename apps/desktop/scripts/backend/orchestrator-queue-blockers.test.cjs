@@ -7,20 +7,22 @@ function fixture(onChange = () => {}) {
   const tasks = createTaskScheduler({ onChange });
   const prior = tasks.create({ text: 'Repair the old project', origin: 'text' });
   prior.task.targetIds = ['old'];
-  prior.lanes = [{ key: 'workspace:C:/project', targetIds: ['old'], workItemId: 'old-work' }];
+  prior.lanes = [{ key: 'terminal:old', targetIds: ['old'], workItemId: 'old-work' }];
   prior.admitted = true;
   tasks.track(prior, { kind: 'send_prompt', actionId: 'send-old', targetId: 'old', generation: 1 }, { ok: true, status: 'written', turnId: 'old-turn' });
   prior.executionDone = true;
   tasks.update(prior, { status: 'waiting-results' });
   const sessions = [{ id: 'old', name: 'Old agent', generation: 1, kind: 'codex', turnId: 'old-turn', turnState: 'running' }, { id: 'empty', name: 'Empty agent', generation: 1, kind: 'codex', turnState: 'idle' }];
   tasks.reconcile(sessions);
+  // New work aimed at the same pane waits for that pane; a task owns its pane,
+  // never the worktree, so work in another pane of the project never queues.
   const next = tasks.create({ text: 'New project work', origin: 'text' });
-  next.task.targetIds = ['empty'];
-  next.lanes = [{ key: 'workspace:C:/project', targetIds: ['empty'], workItemId: 'new-work' }, { key: 'terminal:empty', targetIds: ['empty'] }];
+  next.task.targetIds = ['old'];
+  next.lanes = [{ key: 'terminal:old', targetIds: ['old'], workItemId: 'new-work' }];
   return { tasks, prior, next, sessions };
 }
 
-test('workspace queue names actual old request and target, updates unverified reason, clears only on exact result', async () => {
+test('the pane queue names the actual old request and target, updates the unverified reason, clears only on exact result', async () => {
   const { tasks, prior, next, sessions } = fixture();
   let admitted = false;
   const ready = tasks.ready(next).then(() => { admitted = true; });
@@ -28,7 +30,7 @@ test('workspace queue names actual old request and target, updates unverified re
   assert.equal(admitted, false);
   assert.match(next.task.waitingReason, /Repair the old project/);
   assert.ok(!next.task.waitingReason.includes(prior.task.requestId));
-  assert.match(next.task.waitingReason, /Old agent.*workspace C:\/project: work is still active/);
+  assert.match(next.task.waitingReason, /Old agent in terminal control: work is still active/);
   assert.doesNotMatch(next.task.waitingReason, /Empty agent/);
   sessions[0].turnState = 'idle';
   tasks.reconcile(sessions);
@@ -47,11 +49,11 @@ test('workspace queue names actual old request and target, updates unverified re
   assert.equal(tasks.blockingReason(next), undefined);
 });
 
-test('independent workspace proceeds while same workspace remains queued', async () => {
+test('another pane in the same project proceeds while the same pane remains queued', async () => {
   const { tasks, next } = fixture();
   const pending = tasks.ready(next).catch(() => {});
-  const independent = tasks.create({ text: 'Other project', origin: 'text' });
-  independent.lanes = [{ key: 'workspace:C:/other', targetIds: ['other'], workItemId: 'other-work' }];
+  const independent = tasks.create({ text: 'Other pane', origin: 'text' });
+  independent.lanes = [{ key: 'terminal:empty', targetIds: ['empty'], workItemId: 'other-work' }];
   await tasks.ready(independent);
   assert.equal(independent.admitted, true);
   assert.equal(next.admitted, undefined);

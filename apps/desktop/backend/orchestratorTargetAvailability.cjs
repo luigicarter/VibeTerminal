@@ -2,19 +2,13 @@
 const agentKinds = new Set([...Object.keys(require('../shared/providerCapabilities.json')), 'claude-custom', 'fusion', 'openfusion']);
 
 // Application inventory evidence only. Native composer ownership is checked
-// again by the input adapter; an idle turn does not prove an empty editor.
+// again by the input adapter; an idle turn does not prove an empty editor, and
+// the conservative keystroke latch is a hint the decoder overrules there, which
+// is why it does not make a pane unavailable here.
 function isIdleTarget(session) {
-  if (!session || session.started === false || session.closed || String(session.generation).startsWith('paused:') ||
-      session.observation !== 'observed' || session.launchState === 'pending' || session.engineReady === false ||
-      ['starting', 'paused', 'closed', 'exited', 'failed', 'waiting', 'running', 'busy'].includes(session.status) ||
-      session.pendingInput || session.pendingInteraction || session.childActivity || session.turnActive ||
-      session.manualInputPending || session.interactionInputPending || session.heldMouseButton || ['question', 'approval'].includes(session.attention?.reason) ||
-      !['idle', 'completed', 'response', 'interrupted'].includes(session.turnState)) return false;
-  const kind = session.kind || session.provider;
-  if (['fusion', 'openfusion'].includes(kind)) return (session.processState === undefined || session.processState === 'running')
-    && (session.agentProcessState === undefined || session.agentProcessState === 'running');
-  return Boolean(agentKinds.has(kind) && kind !== 'terminal' && session.processState === 'running' && session.agentProcessState === 'running' &&
-    Number.isSafeInteger(Number(session.agentPid)) && Number(session.agentPid) > 0 && session.binding?.status !== 'ambiguous');
+  const kind = session?.kind || session?.provider;
+  if (!agentKinds.has(kind) || kind === 'terminal') return false;
+  return require('./orchestratorPaneReadiness.cjs').paneReadiness(session).free;
 }
 
 function idleTargetMatches(target, sessions) {

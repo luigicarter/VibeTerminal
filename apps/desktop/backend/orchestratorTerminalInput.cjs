@@ -2,8 +2,25 @@
 const { isBusyPromptSubmission } = require('./orchestratorBusyInput.cjs');
 const { validateTerminalControls } = require('../shared/terminalControls.cjs');
 const { projectInputAuthority, sameInputAuthority } = require('./orchestratorInputAuthority.cjs');
+const { projectInputSurface, sameInputSurface, validInputSurface, changedSurfaceFields, surfaceEvidence } = require('./orchestratorInputSurface.cjs');
+const { HIDDEN_CURSOR_FORMS } = require('./orchestratorPromptReadiness.cjs');
 const { routingBindingMatches, isInitialNativePrompt, supportsNativePromptReadiness, waitForNativePromptReady } = require('./orchestratorLaunchers.cjs');
 const { paneLabel } = require('./orchestratorFailureText.cjs');
+
+// One case, and only one, admits a baseline that does not match the pane's
+// current input surface: the read landed part-way through a redraw, so the
+// baseline carries a cursor the terminal had briefly hidden or misplaced. A
+// PROMPT SUBMISSION into a composer that is now recognizably empty, at the same
+// geometry, screen and input revision, is still the same act. Keys and mouse
+// never supersede: menu navigation means whatever the screen under it means, and
+// a provider that animates its composer stops doing so while a popup is open.
+function supersedesInputSurface(action, expected, fresh) {
+  return action.promptSubmission === true && !action.editInput && !action.keys?.length && !action.mouse &&
+    fresh.composer.empty === true && fresh.interactionInputPending !== true &&
+    ['id', 'generation', 'cols', 'rows', 'alternateScreen', 'inputRevision']
+      .every(field => JSON.stringify(expected?.[field]) === JSON.stringify(fresh[field])) &&
+    (fresh.cursorVisible === true || HIDDEN_CURSOR_FORMS.has(fresh.composer.form));
+}
 function createTerminalInput({ getSession, readSession, write, onBeforeWrite = () => {}, onStartupScreen, isRegisteredProject,
   now = Date.now, startupTimeoutMs = 20000, startupPollMs = 100 }) {
   const results = new Map(), locks = new Set(), startupReady = new Map(), startupLaunches = new Map();
@@ -46,13 +63,23 @@ function createTerminalInput({ getSession, readSession, write, onBeforeWrite = (
         signal: AbortSignal.any([lifetime.signal, ...(action.signal ? [action.signal] : [])]),
         keys: ['enter'], submit: false, requestId: action.requestId, expectedAgentPid: pid,
         interactionEvidence: { id, generation, pid, sequence: observation.sequence, revision: session.revision, observedAt: now(),
-          shell: false, cols: observation.cols, rows: observation.rows, inputRevision: observation.inputRevision } });
+          shell: false, cols: observation.cols, rows: observation.rows, inputRevision: observation.inputRevision,
+          // A trust screen is not a composer, so this evidence carries
+          // composerEmpty:false and can never clear a keystroke latch. It is
+          // supplied so the host fences this write on the input surface too,
+          // rather than on an output counter a repainting screen keeps moving.
+          surface: surfaceEvidence(projectInputSurface(session, observation), observation.sequence) } });
       return { ok: response?.ok === true && response.delivery !== 'not-dispatched' };
     };
   }
   function handle(action) {
     const id = action?.target?.id, generation = action?.target?.generation;
-    const result = (status, error) => ({ ok: false, status, error, id, generation, actionId: action?.actionId, ...(status !== 'unknown' ? { delivery: 'not-dispatched' } : {}) });
+    // A failure carries the surface this attempt was fenced on, so a retry of
+    // the same prompt keeps the baseline the first attempt established instead
+    // of re-taking one that a keystroke could have moved in between.
+    const result = (status, error) => ({ ok: false, status, error, id, generation, actionId: action?.actionId,
+      ...(action?.inputSurface ? { inputSurface: action.inputSurface } : {}),
+      ...(status !== 'unknown' ? { delivery: 'not-dispatched' } : {}) });
     if (disposed) return Promise.resolve(result('cancelled', 'Terminal interaction transport is closed.'));
     if (!id || generation == null || !action?.actionId) return Promise.resolve(result('invalid-action', 'Target, generation and action ID are required.'));
     const key = JSON.stringify([id, generation, action.actionId]);
@@ -68,11 +95,16 @@ function createTerminalInput({ getSession, readSession, write, onBeforeWrite = (
       const controls = validateTerminalControls(action);
       if (!controls.ok) return result('invalid-action', controls.error);
       const nativeInterrupt = action.operator === true && !action.text && !action.mouse && !action.submit && action.keys?.length === 1 && action.keys[0] === 'ctrl-c';
-      const deferredStartupRead = action.operator !== true && action.observationSequence === undefined &&
+      // One freshness contract: the input surface the application captured at
+      // its own last read of this pane. A startup send is the single action
+      // allowed to arrive without one, because the pane has not painted a
+      // composer yet; the startup wait below captures it before anything is
+      // written. Nothing here is a byte counter, and nothing here came from the
+      // model.
+      const deferredStartupRead = !action.inputSurface &&
         !action.editInput && (action.promptSubmission || action.inputPurpose === 'task') && needsStartupReadiness(getSession(id));
-      if ((!deferredStartupRead && (!Number.isSafeInteger(action.observationSequence) || action.observationSequence < 0)) ||
-          ((action.operator || action.editInput || action.inputRevision !== undefined) && (!Number.isSafeInteger(action.inputRevision) || action.inputRevision < 0)) ||
-          (action.operator && (typeof action.requestId !== 'string' || !action.requestId))) return result('invalid-action', 'Observed screen and input revisions and a request owner are required for operator controls.');
+      if ((!deferredStartupRead && !validInputSurface(action.inputSurface)) ||
+          (action.operator && (typeof action.requestId !== 'string' || !action.requestId))) return result('invalid-action', 'A captured terminal input surface and a request owner are required for terminal input.');
       if (disposed || action.signal?.aborted) return result('cancelled', 'Cancelled.');
       if (locks.has(id)) return result('interaction-busy', 'Another terminal interaction is in flight.');
       locks.add(id);
@@ -94,8 +126,8 @@ function createTerminalInput({ getSession, readSession, write, onBeforeWrite = (
           if (!startup.ok) return { ...result(startup.status, startup.error), ...startup };
           // The wait retained the original input revision and recipient. Only
           // read-only output changes may refresh the request's screen evidence.
-          action = { ...action, observationSequence: startup.observation.sequence, inputRevision: startup.inputRevision,
-            inputAuthority: projectInputAuthority(startup.session), routingBinding: startup.routingBinding };
+          action = { ...action, inputAuthority: projectInputAuthority(startup.session),
+            inputSurface: startup.surface, routingBinding: startup.routingBinding };
           startupBinding = { binding: startup.routingBinding, pid: rootPid(startup.session) };
           startupLaunches.get(id).pid ??= startupBinding.pid;
           startupObservation = startup.observation;
@@ -114,7 +146,7 @@ function createTerminalInput({ getSession, readSession, write, onBeforeWrite = (
         if (!busyPrompt && action.inputAuthority && !sameInputAuthority(action.inputAuthority, authority)) return result('stale-observation', 'The terminal input authority changed after the last observation.');
         const matchesPromptObservation = session => !action.promptObservation || ['agentPid', 'turnId', 'turnStartedAt'].every(field => action.promptObservation[field] === session[field]);
         if (busyPrompt && !matchesPromptObservation(before)) return result('recipient-unavailable', 'The originally observed busy root composer changed before submission.');
-        if (action.promptSubmission && (before.turnState === 'waiting' || before.pendingInteraction || ['approval', 'question'].includes(before.attention?.reason))) return result('blocked', 'Answer the pending terminal request before submitting a new prompt.');
+        if (action.promptSubmission && (before.turnState === 'waiting' || before.pendingInteraction || ['approval', 'question'].includes(before.attention?.reason))) return result('blocked', 'it is waiting on an answer before it can continue');
         if (action.promptSubmission && (['running', 'busy'].includes(before.turnState) || before.childActivity || before.pendingInput) && !busyPrompt) return result('recipient-unavailable', 'Busy prompt submission is not supported by the observed root composer.');
         if (!Number.isSafeInteger(pid) || pid <= 0 || before.binding?.status === 'ambiguous' || (before.childActivity && !nativeInterrupt && !busyPrompt)) return result('recipient-unavailable', 'The native root input recipient is not verified.');
         const busyTurnId = before.turnId;
@@ -127,11 +159,23 @@ function createTerminalInput({ getSession, readSession, write, onBeforeWrite = (
         if (disposed || action.signal?.aborted) return result('cancelled', 'Cancelled.');
         if (!latest || latest.generation !== generation || (!busyPrompt && !sameInputAuthority(authority, projectInputAuthority(latest))) || (shell ? latest.pid || latest.terminalPid : latest.agentPid) !== pid || latest.processState !== 'running' || (!shell && latest.agentProcessState !== 'running') || (latest.childActivity && !nativeInterrupt && !busyPrompt) || latest.binding?.status === 'ambiguous') return result('stale-generation', 'The terminal runtime changed while observing input.');
         if (busyPrompt && (!isBusyPromptSubmission(action, latest) || !matchesPromptObservation(latest) || latest.turnId !== busyTurnId || latest.turnStartedAt !== busyTurnStartedAt)) return result('recipient-unavailable', 'The busy root composer changed while observing input.');
-        if (!observation?.ok || observation.generation !== generation || observation.id !== id || observation.exited || (!busyPrompt && observation.sequence !== action.observationSequence)) return result('stale-observation', 'Read the current terminal screen before interacting.');
-        if (busyPrompt && (!Number.isSafeInteger(observation.sequence) || observation.sequence < 0)) return result('stale-observation', 'The current terminal screen sequence is invalid.');
-        if (action.inputRevision !== undefined && observation.inputRevision !== action.inputRevision) return { ...result('stale-observation', 'Read the current terminal input state before interacting.'), reason: 'input-revision-changed' };
+        // The PTY output counter is not a freshness fact: it counts bytes, and an
+        // animated composer bumps it several times a second while nothing about
+        // the input moves. It travels to the host as diagnostics, never a gate.
+        if (!observation?.ok || observation.generation !== generation || observation.id !== id || observation.exited ||
+            !Number.isSafeInteger(observation.sequence) || observation.sequence < 0) return result('stale-observation', 'Read the current terminal screen before interacting.');
+        if (observation.inputRevision !== action.inputSurface.inputRevision) return { ...result('stale-observation', 'Read the current terminal input state before interacting.'), reason: 'input-revision-changed' };
         if (!Number.isSafeInteger(observation.cols) || observation.cols <= 0 || !Number.isSafeInteger(observation.rows) || observation.rows <= 0 ||
             (latest.cols !== undefined && latest.cols !== observation.cols) || (latest.rows !== undefined && latest.rows !== observation.rows)) return result('stale-observation', 'Read the current terminal geometry before interacting.');
+        // The input surface: where the caret is, what stands to its left, which
+        // composer is painted, and who owns the pending input. This is what the
+        // sequence counter was standing in for, and unlike the counter it does
+        // not move when a pane merely repaints itself. The diagnostic names the
+        // fields that moved and never a fragment of the screen.
+        const surface = projectInputSurface(latest, observation);
+        if (!sameInputSurface(action.inputSurface, surface) && !supersedesInputSurface(action, action.inputSurface, surface))
+          return { ...result('stale-observation', 'Read the current terminal screen before interacting.'),
+            reason: 'surface-changed', changed: changedSurfaceFields(action.inputSurface, surface) };
         const deliveryBaseline = action.promptSubmission === true ? { submittedAt: now(), kind: latest.kind || latest.provider, turnId: latest.turnId, turnState: latest.turnState } : undefined;
         const deliveryMetadata = deliveryBaseline ? { deliveryBaseline, inputDisposition: busyPrompt ? 'submitted-while-running' : 'submitted-when-ready' } : {};
         if (deliveryBaseline) onBeforeWrite({ actionId: action.actionId, id, generation, status: 'unconfirmed', ok: true, ...deliveryMetadata });
@@ -144,7 +188,7 @@ function createTerminalInput({ getSession, readSession, write, onBeforeWrite = (
             requestId: action.requestId, operator: action.operator, editInput: action.editInput,
             interactionEvidence: { id, generation, pid, sequence: observation.sequence, revision: latest.revision, observedAt: now(), shell,
               cols: observation.cols, rows: observation.rows,
-              ...(action.inputRevision !== undefined ? { inputRevision: action.inputRevision } : {}) } });
+              inputRevision: surface.inputRevision, surface: surfaceEvidence(surface, observation.sequence) } });
           if (response?.ok === false && response.delivery !== 'not-dispatched' && ['write-failed', 'unconfirmed', 'uncertain'].includes(response.status)) response = { ...response, status: 'unknown' };
           if (startupBinding && response?.ok === true && response.delivery !== 'not-dispatched') {
             startupReady.set(id, startupBinding);
@@ -153,7 +197,10 @@ function createTerminalInput({ getSession, readSession, write, onBeforeWrite = (
           // An answered trust prompt is part of what happened to this pane, so
           // the receipt the user reads says so beside the delivery itself.
           const answered = startupAnswered ? { startupAnswered, message: 'Answered the folder trust prompt.' } : {};
-          return response && typeof response.ok === 'boolean' ? { ...response, id, generation, actionId: action.actionId, ...answered, ...(response.delivery !== 'not-dispatched' && (response.ok || response.status === 'unknown') ? deliveryMetadata : {}) } : { ...result('unknown', 'No terminal transport acknowledgment.'), ...answered, ...deliveryMetadata };
+          // A refused write carries the surface it was fenced on, so a retry of
+          // the same prompt keeps this baseline rather than re-taking one.
+          const fenced = action.inputSurface && response?.ok === false ? { inputSurface: action.inputSurface } : {};
+          return response && typeof response.ok === 'boolean' ? { ...response, id, generation, actionId: action.actionId, ...answered, ...fenced, ...(response.delivery !== 'not-dispatched' && (response.ok || response.status === 'unknown') ? deliveryMetadata : {}) } : { ...result('unknown', 'No terminal transport acknowledgment.'), ...answered, ...deliveryMetadata };
         } catch (error) { return { ...result('unknown', String(error?.message || error)), ...deliveryMetadata }; }
       } catch (error) { return result('rejected', String(error?.message || error)); }
       finally { locks.delete(id); }

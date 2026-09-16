@@ -7,7 +7,7 @@ const context = { requestId: 'u1', instruction: 'Inspect Codex usage and reset t
 const action = { kind: 'operate_terminal', targetIds: ['codex'], text: context.instruction };
 const raw = { goal: context.instruction, responseKind: 'terminal-inspection', actions: [action] };
 const normalize = (input = raw, ctx = context) => normalizeIntent(input, ctx);
-const operation = (plan, extra = {}) => ({ kind: 'terminal_interact', grantId: plan.grants[0].id, targetId: 'codex', stepId: 'nav1', observationSequence: 4, inputRevision: 0, inputPurpose: 'interaction', text: '/status', submit: true, ...extra });
+const operation = (plan, extra = {}) => ({ kind: 'terminal_interact', grantId: plan.grants[0].id, targetId: 'codex', stepId: 'nav1', inputPurpose: 'interaction', text: '/status', submit: true, ...extra });
 
 test('semantic inspection supplies read-only modes and cannot acquire task or permission authority', () => {
   const plan = normalize({ goal: context.instruction, actions: [{ kind: 'inspect_terminal', targetIds: ['codex'], text: context.instruction }] });
@@ -45,7 +45,9 @@ test('native usage inspection projects informational scope and permits freshly o
   assert.equal(Object.hasOwn(projected, 'statusTargets'), false);
   assert.equal(authorizeIntentAction(operation(plan), plan, sessions).text, '/status');
   assert.throws(() => authorizeIntentAction(operation(plan, { targetId: 'claude' }), plan, sessions));
-  assert.throws(() => authorizeIntentAction(operation(plan, { inputRevision: -1 }), plan, sessions), /revision/i);
+  // Freshness counters are not part of an operator action any more, so one
+  // arriving from the model is simply an unexpected field.
+  assert.throws(() => authorizeIntentAction(operation(plan, { inputRevision: -1 }), plan, sessions), /unexpected|Unexpected/);
 });
 
 test('inspection rejects task effects, editing, permissions, and interruption without restricting ordinary operators', () => {

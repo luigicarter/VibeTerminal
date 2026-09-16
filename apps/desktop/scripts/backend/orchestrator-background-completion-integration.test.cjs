@@ -58,7 +58,7 @@ async function fixture(t, kind) {
         const observed = JSON.parse(body.messages.filter(message => message.role === 'tool').at(-1).content);
         const base = { targetId, grantId: grant.id, stepId: `${grant.id}-${phase}`, observationToken: observed.observationToken };
         action = phase === 1 ? { ...base, kind: 'send_prompt', text: grant.text,
-          observationSequence: observed.observation.sequence, inputRevision: observed.observation.inputRevision }
+          }
           : { ...base, kind: 'finish_terminal', outcome: 'completed', text: 'Submission inspected.' };
       }
       assert.ok(phase < 4);
@@ -98,15 +98,18 @@ for (const kind of ['fusion', 'openfusion']) test(`${kind}: dependent creation w
   assert.equal(f.effects.filter(action => action.kind === 'send_prompt').length, 2);
 });
 
-test('structured background-activity keeps workspace ownership after foreground completion', { timeout: 5000 }, async t => {
+// A task owns its pane, never the worktree (2026-09-15): detached children keep
+// the root pane's task open and its work item alive, and independent work takes
+// its own pane at once.
+test('structured background-activity keeps the root task open after foreground completion while independent work proceeds', { timeout: 5000 }, async t => {
   const f = await fixture(t, 'openfusion');
   f.emit('background-activity', { backgroundActivity: { active: true, items: [{ id: 'external-task' }] } });
   f.emit('assistant-text', { text: 'Foreground finished.' }); f.emit('result'); await f.relay.refresh();
-  const pending = f.follow(false);
-  await until(() => f.relay.getState().tasks.some(task => task.sequence === 2 && task.targetIds.length && task.status === 'queued'));
-  assert.deepEqual(f.effects.map(action => action.kind), ['send_prompt', 'create_session']);
+  assert.equal(f.task(f.first).status, 'waiting-results', 'detached work keeps the root task open');
+  const result = await f.follow(false); assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(f.effects.map(action => action.kind), ['send_prompt', 'create_session', 'send_prompt']);
   f.emit('background-activity', { backgroundActivity: { active: false, items: [] } }); await f.relay.refresh();
-  assert.equal((await pending).ok, true); assert.equal(f.effects.filter(action => action.kind === 'send_prompt').length, 2);
+  assert.equal(f.task(f.first).status, 'finished');
 });
 
 for (const ending of ['error', 'interrupted']) test(`${ending} remains a failed task outcome despite active detached work`, { timeout: 5000 }, async t => {
@@ -116,32 +119,28 @@ for (const ending of ['error', 'interrupted']) test(`${ending} remains a failed 
   const result = await f.follow(true); assert.equal(result.ok, false); assert.equal(f.effects.length, 1);
 });
 
-for (const cancel of [false, true]) test(`failed foreground retains child workspace ownership across clear${cancel ? ' and cancellation' : ''}`, { timeout: 5000 }, async t => {
+for (const cancel of [false, true]) test(`failed foreground retains its pane's work item across clear${cancel ? ' and cancellation' : ''} while independent work proceeds`, { timeout: 5000 }, async t => {
   const f = await fixture(t, 'openfusion');
   f.emit('background-task', { phase: 'started', taskId: 'editing-child' }); f.emit('error', { message: 'Foreground failed.' }); await f.relay.refresh();
   const ownerId = f.task(f.first).workItemId;
   if (cancel) await f.relay.cancel(f.first.requestId);
   await f.relay.clearHistory(); assert.equal(f.task(f.first).status, 'failed');
-  const pending = f.follow(false);
-  await until(() => f.relay.getState().tasks.some(task => task.requestId !== f.first.requestId && task.targetIds.length && task.status === 'queued'));
+  const result = await f.follow(false); assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(f.task(f.first).workItemId, ownerId, 'Explicit work-item ownership survives history clearing with live children');
-  assert.deepEqual(f.effects.map(action => action.kind), ['send_prompt', 'create_session']);
+  assert.deepEqual(f.effects.map(action => action.kind), ['send_prompt', 'create_session', 'send_prompt'], 'independent work takes its own pane, never the failed root\'s');
   f.emit('background-task', { phase: 'settled', taskId: 'editing-child' }); await f.relay.refresh();
-  const result = await pending; assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(f.task(f.first).status, 'failed', 'Settling detached work never turns the failed foreground into success');
-  assert.equal(f.effects.filter(action => action.kind === 'send_prompt').length, 2);
   await f.relay.clearHistory(); assert.equal(f.task(f.first), undefined);
 });
 
-test('cancelling an active request does not release its known detached edits after the root fails', { timeout: 5000 }, async t => {
+test('cancelling an active request keeps its known detached edits on record after the root fails', { timeout: 5000 }, async t => {
   const f = await fixture(t, 'fusion'); f.emit('background-task', { phase: 'started', taskId: 'editing-child' }); await f.relay.refresh();
   await f.relay.cancel(f.first.requestId); f.emit('error', { message: 'Foreground failed after cancellation.' }); await f.relay.refresh();
-  await f.relay.clearHistory(); assert.equal(f.task(f.first).status, 'cancelled');
-  const pending = f.follow(false);
-  await until(() => f.relay.getState().tasks.some(task => task.requestId !== f.first.requestId && task.targetIds.length && task.status === 'queued'));
-  assert.deepEqual(f.effects.map(action => action.kind), ['send_prompt', 'create_session']);
+  await f.relay.clearHistory(); assert.equal(f.task(f.first).status, 'cancelled', 'a cancelled root with live children is not evicted');
+  const result = await f.follow(false); assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(f.effects.map(action => action.kind), ['send_prompt', 'create_session', 'send_prompt']);
   f.emit('background-task', { phase: 'settled', taskId: 'editing-child' }); await f.relay.refresh();
-  assert.equal((await pending).ok, true); assert.equal(f.task(f.first).status, 'cancelled');
+  assert.equal(f.task(f.first).status, 'cancelled');
 });
 
 test('failed task occupancy survives capacity eviction and clears only after same-source child settlement', async () => {

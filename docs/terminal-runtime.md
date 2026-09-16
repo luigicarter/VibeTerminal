@@ -3,8 +3,9 @@
 The source [Chats section](chat-section-implementation-2026-09-13.md) adds a
 durable local catalog and workspace checkpoint around this runtime. Chats open
 the existing terminal format; strict resume keeps missing identities visible,
-and unclean app restarts hold agent panes for deliberate recovery. Native
-unsent TUI input is not part of the catalog's draft guarantee.
+and exits that never reached the app's shutdown routine hold agent panes for
+deliberate recovery. Native unsent TUI input is not part of the catalog's
+draft guarantee.
 
 Release 0.1.105 adds separate pending-turn display evidence and generation-owned
 restart PID tracking. See [the release audit](release-0.1.105-review.md) for input

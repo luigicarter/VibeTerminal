@@ -45,8 +45,14 @@ The v0.1.116 cursor handler is installed and working. It fixes cursor
   inbox conhost.
 - Not affected: the bundled Open Codex binary (0.144.0); Codex in Windows
   Terminal; Codex spawned through node-pty's bundled ConPTY.
-- Idle composer with no turn running: Codex 0.154 emits no bytes, so nothing
-  flickers. Typing and working turns do.
+- Idle composer with no turn running: WRONG as written. Codex 0.154 repaints an
+  ambient sparkle around its EMPTY composer several frames a second, forever —
+  40 PTY chunks in a 2 s idle window, measured on 2026-09-13. Each frame is the
+  same synchronized update, ending in the same per-frame cursor-style repair, so
+  it is this loop seen twice. See docs/codex-idle-sparkle-and-input-fence-2026-09-13.md
+  for the measurements and for the input fence that had to stop counting bytes,
+  and docs/codex-idle-sparkle-whimsy-override-2026-09-13.md for the launch switch
+  that turns the animation off.
 
 ## Evidence
 

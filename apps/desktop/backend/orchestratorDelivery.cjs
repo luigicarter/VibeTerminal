@@ -13,18 +13,15 @@ function createOrchestratorDelivery({ getSession, write, writeBusyPrompt, reserv
   const key = s => JSON.stringify([s.id, s.generation]);
   const stamp = s => JSON.stringify([s.turnId, s.turnStartedAt, s.turnEndedAt]);
   const receipt = (a, status, ok, extra = {}) => ({ actionId: a.actionId, id: a.target?.id || a.id || a.targetId, generation: a.target?.generation ?? a.generation, ok, status, ...extra });
+  // Delivery's own vocabulary over the one pane-state predicate. Staged input
+  // another request owns ('input-owned') is still 'ready' here: the native input
+  // adapter owns that decision and refuses the write itself.
+  const DELIVERY_STATE = { 'not-running': 'not-running', 'launch-pending': 'unverified', unverified: 'unverified',
+    waiting: 'waiting', busy: 'busy', 'unknown-turn': 'unverified', unnamed: 'ready', 'input-owned': 'ready', ready: 'ready' };
   function classify(s, a) {
     if (!s || s.generation !== (a.target?.generation ?? a.generation)) return "stale-generation";
     if (!require("./orchestratorLaunchers.cjs").routingBindingMatches(a.routingBinding, s)) return "conversation-changed";
-    if (s.started === false || ["exited", "failed"].includes(s.processState) || s.status === "paused" || String(s.generation).startsWith("paused:")) return "not-running";
-    if (s.launchState === "pending") return "unverified";
-    if (s.selection && s.selection.status !== 'confirmed') return 'unverified';
-    if (s.provider === "terminal") return s.processState === "running" ? "ready" : "not-running";
-    if (["exited", "failed"].includes(s.agentProcessState)) return "not-running";
-    if (s.turnState === "waiting" || s.status === "waiting" || s.pendingInteraction) return "waiting";
-    if (s.processState !== "running" || s.agentProcessState !== "running" || !Number.isSafeInteger(Number(s.agentPid)) || Number(s.agentPid) <= 0 || s.binding?.status === "ambiguous") return "unverified";
-    if (s.childActivity || s.pendingInput || ["running", "busy"].includes(s.turnState)) return "busy";
-    return ["idle", "completed", "response", "interrupted"].includes(s.turnState) ? "ready" : "unverified";
+    return DELIVERY_STATE[require('./orchestratorPaneReadiness.cjs').paneReadiness(s).reason];
   }
   function blocked(s) {
     const lock = locks.get(key(s));

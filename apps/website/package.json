@@ -17,6 +17,8 @@
     "preview:account": "npm run preview:account --workspace frontend",
     "build:account-preview": "npm run build:account-preview --workspace frontend",
     "test:account-preview": "node --import tsx --test scripts/account-preview.test.mjs",
+    "test:account-prepared": "node --import tsx --test scripts/account-prepared.test.mjs",
+    "build:account-prepared-harness": "npm run build:account-prepared-harness --workspace frontend",
     "prebuild": "node ../../scripts/sync-brand.cjs website"
   }
 }

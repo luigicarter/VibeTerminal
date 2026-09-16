@@ -60,6 +60,10 @@ function taskEcho(task) {
 const withEcho = (line, task) => { const echo = taskEcho(task); return echo ? { text: line + echo, speech: line } : line; };
 // Reasons arrive from transports as whole sentences; one trailing stop is enough.
 const clause = value => String(value ?? '').trim().replace(/[.\s]+$/, '');
+// What became of a prompt after it was typed, as the ledger recorded it.
+const promptOutcome = outcome => outcome === 'delivered-started' ? ' It started working on it.'
+  : outcome === 'delivered-unconfirmed' ? " I haven't seen it start yet."
+  : ['refused', 'created-only', 'failed', 'cancelled'].includes(outcome) ? ' It was not sent.' : '';
 const SENTENCES = Object.freeze({
   // Progress, published the moment the application observes the event.
   'creation-started': ({ pane }) => `Opening ${pane}.`,
@@ -113,7 +117,11 @@ const SENTENCES = Object.freeze({
   // Nothing was typed, and why.
   'input-surface-unverified': ({ pane }) => `${pane} was still on its startup screen, so nothing was typed. ${RETRY}`,
   'launch-timeout': ({ pane, seconds }) => `${pane} didn't become ready within ${seconds} seconds, so nothing was typed. ${RETRY}`,
-  'stale-observation': ({ pane }) => `${pane} changed while I was about to type, so I held off. Nothing was sent.`,
+  // The application retries this one itself, so when it still gives up the user
+  // hears how many times it looked rather than a bare "changed".
+  'stale-observation': ({ pane, attempts }) => Number(attempts) > 1
+    ? `${pane} kept changing each of the ${Math.round(Number(attempts))} times I was about to type, so I held off. Nothing was sent.`
+    : `${pane} changed while I was about to type, so I held off. Nothing was sent.`,
   'conversation-changed': ({ pane }) => `${pane} moved to another conversation while I was about to type, so I held off. Nothing was sent.`,
   'input-buffer-occupied': ({ pane }) => `${pane} already had text waiting in it, so I left it alone and typed nothing.`,
   'recipient-unavailable': ({ pane }) => `${pane} wasn't taking input when I tried, so nothing was typed. ${RETRY}`,
@@ -135,18 +143,38 @@ const SENTENCES = Object.freeze({
   // the user can act on, so it travels with the request account rather than
   // staying in the diagnostics file.
   'interpretation-reason': ({ reason }) => `Reason: ${String(reason ?? '').replace(/\s+/g, ' ').trim()}`,
+  // The three things an interpretation can be missing, said the way the person
+  // waiting can act on. The validator's own sentence is written for the plan
+  // that has to be repaired; these say which fact was absent and what supplies
+  // it, so the reply is never a contract error read out loud.
+  'missing-project': () => "I couldn't tell which project this belongs to, so nothing was started. Tell me the project and I'll run it there.",
+  'missing-pane': () => "I couldn't tell which terminal you meant, so nothing was typed. Name it or select its pane.",
+  'missing-answer': () => "I don't have the answer that terminal is waiting for, so nothing was typed. Tell me what to say and I'll pass it on.",
+  'missing-task': () => "I couldn't tell what to send, so nothing was typed. Say what the terminal should do and I'll pass it on.",
   'brain-timeout': () => 'The brain took too long to answer; nothing was typed. Try once more.',
 
   // Answers Lina composes from its own memory, with no model call: what it last
   // typed, what last went wrong, what a pane came back with, and what it has been
   // doing. Each states the recorded fact and nothing beyond it.
-  'last-prompt': ({ pane, typedText, outcome }) => `The last prompt I put in was “${typedText}”, in ${pane}.` +
-    (outcome === 'delivered-started' ? ' It started working on it.'
-      : outcome === 'delivered-unconfirmed' ? " I haven't seen it start yet."
-      : ['refused', 'created-only', 'failed', 'cancelled'].includes(outcome) ? ' It was not sent.' : ''),
+  'last-prompt': ({ pane, typedText, outcome }) => `The last prompt I put in was “${typedText}”, in ${pane}.${promptOutcome(outcome)}`,
+  // "Did you enter that prompt?" gets its answer first, then the record.
+  'last-prompt-confirmed': ({ pane, typedText, outcome }) => `Yes, I put “${typedText}” in ${pane}.${promptOutcome(outcome)}`,
+  'last-prompt-denied': ({ pane, typedText }) => `No. I tried to put “${typedText}” in ${pane}, but it was not sent.`,
   'last-error': ({ pane, reason }) => `The last thing that went wrong was in ${pane}: ${clause(reason)}.`,
   'pane-result': ({ pane, summary }) => `${pane} came back with: ${summary}`,
+  'pane-result-several': ({ panes }) => `More than one has finished: ${panes}. Which one do you mean?`,
+  'pane-results': ({ results }) => results,
   'recent-actions': ({ actions }) => `Here is what I did: ${actions}.`,
+  // Answers read off the live roster and the ledger: what every pane is doing,
+  // which pane is waiting on the user, which finished last, and where a task
+  // went. Each states the recorded fact and nothing beyond it.
+  'status-all': ({ report }) => `Here is where things stand: ${report}.`,
+  'needs-me': ({ pane, project, task }) => `${pane}${project ? ` in ${project}` : ''}${task ? `, on “${task}”,` : ''} is waiting on you.`,
+  'needs-me-several': ({ panes }) => `These are waiting on you: ${panes}.`,
+  'needs-me-none': () => 'Nothing is waiting on you right now.',
+  'last-done': ({ pane, project }) => `The last one to finish was ${pane}${project ? ` in ${project}` : ''}.`,
+  'gave-to': ({ pane, task, typedText }) => `I put the ${task} work in ${pane}: “${typedText}”.`,
+  'gave-to-pane': ({ pane, task, project }) => `The ${task} work is in ${pane}${project ? ` in ${project}` : ''}.`,
 
   // Workspace effects with no pane of their own.
   'project-added': () => 'Added the folder as a Lina Terminal project.',
@@ -187,12 +215,32 @@ function brainRejectionSentence() { return sentenceText('brain-error'); }
 // The request account plus the one validator sentence that says what could not
 // be represented. Both the conversation message and the task row use this, so
 // the user reads the same explanation wherever they look.
+// Which fact the interpretation was missing, read off the validator's own
+// sentence. Ordered by how specific the answer is: a project names itself, an
+// answer is a pending question, a pane is a selection, and a task is the words
+// that were going to be typed.
+const MISSING_INFORMATION = Object.freeze([
+  [/\bprojects?\b|\bworkspace\b|\bfolder\b|\bcwd\b/i, 'missing-project'],
+  [/\banswers?\b|\bquestions?\b|\bpermissions?\b|\bdecisions?\b/i, 'missing-answer'],
+  [/\bterminals?\b|\bpanes?\b|\bconversations?\b|\bagents?\b|\btargets?\b|\bowner\b/i, 'missing-pane'],
+  [/\bprompts?\b|\btasks?\b|\bobjective\b|\binstruction\b/i, 'missing-task'],
+]);
+function missingInformationSentence(reason) {
+  const text = String(reason ?? '');
+  if (!text.trim()) return undefined;
+  const entry = MISSING_INFORMATION.find(([pattern]) => pattern.test(text));
+  return entry ? sentenceText(entry[1]) : undefined;
+}
 function interpretationFailureText(base, reason) {
   const text = String(base ?? '').trim();
+  // What was missing, in catalogue words, whenever the validator's sentence
+  // names it. The validator's own wording stays in the diagnostics record.
+  const missing = missingInformationSentence(reason);
+  if (missing) return `${text} ${missing}`;
   const clause = sentenceText('interpretation-reason', { reason });
   return clause && clause !== 'Reason:' ? `${text} ${clause}` : text;
 }
 
 module.exports = { PROVIDER_LABELS, displayLabel, projectLabel, paneLabel, providerSentence,
   SENTENCES, FAILURE_STATUSES, sentence, sentenceText, failureSentence, brainRejectionSentence,
-  interpretationFailureText, taskEcho, TASK_ECHO_LIMIT };
+  interpretationFailureText, missingInformationSentence, taskEcho, TASK_ECHO_LIMIT };

@@ -2,6 +2,11 @@
 
 September 13, 2026.
 
+**Subsequent preparation:** [account paid readiness](account-paid-readiness.md)
+records the separate tested clients/native/backend modules. This document remains
+the historical preview acceptance record; these original previews are still
+disconnected and have not been converted to real authentication.
+
 The user requested the phase-2 interfaces to be built **without wiring them yet**,
 and clarified that **administration must be a web interface, not part of the
 desktop application**. These constraints remain in effect for subsequent work.

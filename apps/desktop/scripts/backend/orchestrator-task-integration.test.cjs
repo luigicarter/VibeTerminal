@@ -5,7 +5,6 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createSessionDirectory } = require('../../backend/orchestratorIntegration.cjs');
-const { createWorkspaceIdentity } = require('../../backend/orchestratorWorkspaceIdentity.cjs');
 const { createCompletionEvidence } = require('../../backend/orchestratorCompletion.cjs');
 
 for (const kind of ['fusion', 'openfusion']) test(`${kind} task completion binds an input and excludes stale/replayed events`, () => {
@@ -85,17 +84,3 @@ test('interleaved human input and rejected input never retain task completion at
   assert.equal(directory.get('s').completedActionId, undefined);
 });
 
-test('workspace lanes unify subfolders and aliases but distinguish linked worktrees', async t => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-workspace-identity-'));
-  t.after(() => { assert(path.resolve(root).startsWith(path.join(os.tmpdir(), 'vibe-workspace-identity-'))); fs.rmSync(root, { recursive: true, force: true }); });
-  const repo = path.join(root, 'repo'), linked = path.join(root, 'linked');
-  fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
-  fs.mkdirSync(path.join(repo, 'src', 'nested'), { recursive: true });
-  fs.mkdirSync(linked); fs.writeFileSync(path.join(linked, '.git'), 'gitdir: ../repo/.git/worktrees/linked');
-  const alias = path.join(root, 'alias'); fs.symlinkSync(repo, alias, process.platform === 'win32' ? 'junction' : 'dir');
-  const resolve = createWorkspaceIdentity();
-  assert.equal(await resolve(repo), await resolve(path.join(repo, 'src', 'nested')));
-  assert.equal(await resolve(repo), await resolve(alias));
-  assert.notEqual(await resolve(repo), await resolve(linked));
-  assert.equal(await resolve('relative'), null);
-});

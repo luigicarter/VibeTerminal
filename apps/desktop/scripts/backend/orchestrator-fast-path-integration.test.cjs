@@ -39,7 +39,7 @@ async function fixture(t, { lateStatus, explicitListen = false, nonTask = false,
         const observed = JSON.parse(body.messages.filter(message => message.role === 'tool').at(-1).content);
         assert(observed.observationToken);
         const action = { kind: round === 2 ? nonTask ? 'focus_session' : 'send_prompt' : 'finish_terminal', grantId: grant.id, targetId: 'pane', stepId: `step-${round}`, observationToken: observed.observationToken,
-          ...(round === 2 ? nonTask ? {} : { text: 'Review changes.', observationSequence: observed.observation.sequence, inputRevision: observed.observation.inputRevision } : { outcome: 'completed', text: lateStatus ? 'The review is queued.' : 'The review was submitted.' }) };
+          ...(round === 2 ? nonTask ? {} : { text: 'Review changes.'} : { outcome: 'completed', text: lateStatus ? 'The review is queued.' : 'The review was submitted.' }) };
         return new Response(JSON.stringify(round === 4 && (explicitListen || askUser) ? calls(action, askUser ? { kind: 'ask_user', text: 'Which scope should the review cover?' } : { kind: 'respond', text: 'Which project should I inspect next?', responseTurn: 'listen' }) : calls(action)));
       }
       assert.equal(round, 5, 'No redundant final calls or retries');

@@ -3,11 +3,12 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createTaskScheduler } = require('../../backend/orchestratorTasks.cjs');
 const tick = () => new Promise(resolve => setImmediate(resolve));
-function auto(tasks, owner, target = 's', workspace = 'repo') {
+// A routed task owns the pane it runs in and nothing else (2026-09-15: the
+// worktree lane, its parking wait, parallel marker and incumbent rule are gone).
+function auto(tasks, owner, target = 's') {
   const job = tasks.create({ text: owner });
   job.task.workItemId = owner; job.task.targetIds = [target];
-  job.lanes = [{ key: `terminal:${target}`, targetIds: [target], operator: true, workItemId: owner },
-    { key: `workspace:${workspace}`, targetIds: [target], readOnly: false, workItemId: owner }];
+  job.lanes = [{ key: `terminal:${target}`, targetIds: [target], operator: true, workItemId: owner }];
   return job;
 }
 function sent(tasks, job, actionId, extra = {}) {
@@ -52,7 +53,7 @@ test('legacy explicit staged prompts stay unsent while a separate real submissio
   assert.equal(draft.waits[0].done, false);
 });
 
-test('workspace wait does not hold controls, and a later admitted control finishes before waiting task enters', async () => {
+test('a pane wait does not hold controls, and a later admitted control finishes before the waiting task enters', async () => {
   const tasks = createTaskScheduler();
   const original = auto(tasks, 'original'); await tasks.ready(original); sent(tasks, original, 'first');
   const independent = auto(tasks, 'independent'); const waiting = pending(tasks, independent); await tick();
@@ -66,19 +67,19 @@ test('workspace wait does not hold controls, and a later admitted control finish
   await waiting.promise; assert.equal(waiting.ready, true);
 });
 
-test('incumbent continuation passes queued independent mutation but cannot borrow original completion', async () => {
+test('work in another pane is admitted at once, and a continuation cannot borrow the original completion', async () => {
   const tasks = createTaskScheduler();
   const original = auto(tasks, 'owner'); await tasks.ready(original); sent(tasks, original, 'first');
-  const independent = auto(tasks, 'other', 'other-pane'); const waiting = pending(tasks, independent);
+  const independent = auto(tasks, 'other', 'other-pane'); const waiting = pending(tasks, independent); await tick();
+  assert.equal(waiting.ready, true, 'another pane in the same worktree never waits');
   const follow = auto(tasks, 'owner'); await tasks.ready(follow);
   sent(tasks, follow, 'follow', { turnId: 'first', inputDisposition: 'submitted-while-running',
     deliveryBaseline: { kind: 'codex', turnId: 'first', turnState: 'running', submittedAt: 100 } });
   ended(tasks, 's', 'first'); await tick();
   assert.equal(original.waits[0].done, true); assert.equal(follow.waits[0].done, false);
-  assert.equal(waiting.ready, false);
   tasks.delivery({ actionId: 'follow', status: 'written', ok: true, turnId: 'follow-turn' });
-  ended(tasks, 's', 'follow-turn'); await waiting.promise;
-  assert.equal(waiting.ready, true);
+  ended(tasks, 's', 'follow-turn'); await tick();
+  assert.equal(follow.waits[0].done, true);
 });
 
 test('same owner cannot bypass active loops or explicit result prerequisites', async () => {
@@ -91,30 +92,38 @@ test('same owner cannot bypass active loops or explicit result prerequisites', a
   ended(tasks, 's', 'first'); await waiting.promise; assert.equal(waiting.ready, true);
 });
 
-test('cancelled and failed submitted work retain ownership; unsent cancellation releases reservation', async () => {
-  for (const status of ['cancelled', 'failed']) {
+test('cancelled, failed and unsent work never hold another pane', async () => {
+  for (const status of ['cancelled', 'failed', 'unsent']) {
     const tasks = createTaskScheduler();
     const original = auto(tasks, 'owner'); await tasks.ready(original);
-    sent(tasks, original, 'first', { ok: false, status: 'unknown' });
-    if (status === 'cancelled') tasks.cancel(original.task.requestId); else tasks.update(original, { status });
+    if (status !== 'unsent') sent(tasks, original, 'first', { ok: false, status: 'unknown' });
+    if (status === 'cancelled') tasks.cancel(original.task.requestId); else if (status === 'failed') tasks.update(original, { status });
     const next = auto(tasks, 'other', 'other-pane'); const waiting = pending(tasks, next); await tick();
-    assert.equal(waiting.ready, false, status);
-    ended(tasks, 's', 'first'); await waiting.promise; assert.equal(waiting.ready, true);
+    assert.equal(waiting.ready, true, status);
   }
+});
+
+// A task owns its pane, not the worktree: work in a second pane runs beside
+// the first pane's turn, and the same pane still serializes.
+test('work in a second pane runs beside the first pane\'s turn; the same pane waits', { timeout: 5000 }, async () => {
   const tasks = createTaskScheduler();
-  const reservation = auto(tasks, 'unsent');
-  const next = auto(tasks, 'next', 'other-pane'); const waiting = pending(tasks, next); await tick();
-  assert.equal(waiting.ready, false);
-  tasks.cancel(reservation.task.requestId); await waiting.promise;
+  const working = auto(tasks, 'chat-section', 'pane-a'); await tasks.ready(working); sent(tasks, working, 'turn-a');
+  const spare = auto(tasks, 'summary', 'pane-b'); await tasks.ready(spare);
+  sent(tasks, spare, 'turn-b'); ended(tasks, 'pane-b', 'turn-b');
+  const ordinary = auto(tasks, 'follow-up', 'pane-c'); const beside = pending(tasks, ordinary); await tick();
+  assert.equal(beside.ready, true, 'a third pane runs beside both');
+  const same = auto(tasks, 'more', 'pane-a'); const waiting = pending(tasks, same); await tick();
+  assert.equal(waiting.ready, false, 'the pane that is still working serializes');
+  ended(tasks, 'pane-a', 'turn-a'); await waiting.promise;
   assert.equal(waiting.ready, true);
 });
 
-test('queued automatic delivery holds workspace until definite rejection; linked-worktree lanes remain independent', async () => {
+test('queued automatic delivery holds its own pane until definite rejection; other panes remain independent', async () => {
   const tasks = createTaskScheduler();
   const queued = auto(tasks, 'owner'); await tasks.ready(queued); sent(tasks, queued, 'queued', { status: 'queued' });
-  const next = auto(tasks, 'next', 'other-pane'); const waiting = pending(tasks, next); await tick();
+  const next = auto(tasks, 'next', 's'); const waiting = pending(tasks, next); await tick();
   assert.equal(waiting.ready, false);
-  const separate = auto(tasks, 'separate', 'third-pane', 'linked-worktree'); await tasks.ready(separate);
+  const separate = auto(tasks, 'separate', 'third-pane'); await tasks.ready(separate);
   tasks.delivery({ actionId: 'queued', ok: false, status: 'blocked', delivery: 'not-dispatched' });
   tasks.reconcile([]); await waiting.promise;
   assert.equal(waiting.ready, true);

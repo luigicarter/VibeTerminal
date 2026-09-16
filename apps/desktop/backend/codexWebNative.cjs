@@ -31,7 +31,13 @@ function nativeArgs(state, args = []) {
     '-c', 'features.fast_mode=false', '-c', 'service_tier="default"',
     // Lina ships and validates this executable; a global CLI update cannot
     // update the embedded copy and must not interrupt its startup.
-    '-c', 'check_for_update_on_startup=false'];
+    '-c', 'check_for_update_on_startup=false',
+    // Codex Web runs Astra models, so 0.154's idle composer sparkle is live
+    // here too: ~30 braille cells repainted every 40-80 ms while the composer
+    // is empty, forever. Same switch as every other Codex-family pane
+    // (CODEX_TUI_CONFIG_OVERRIDES in backend/agentTelemetry.cjs); this builder
+    // owns its own args, and the merge below keeps it at command level.
+    '-c', 'tui.whimsy=false'];
   if (state.imageTool && [state.imageTool.command, state.imageTool.entry, state.imageTool.home].every(value => typeof value === 'string' && path.isAbsolute(value))) {
     const codeMode = state.imageTool.codeMode;
     const direct = Array.isArray(codeMode?.direct_only_tool_namespaces) ? codeMode.direct_only_tool_namespaces.filter(value => typeof value === 'string') : [];

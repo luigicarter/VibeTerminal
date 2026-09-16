@@ -4421,6 +4421,18 @@ button {
 .activity-session>span:first-of-type {
   flex:1;
 }
+/* The terminal's handle ("T3"): what Lina says about it, and what you can say back. */
+.activity-session .session-handle {
+  font-style:normal;
+  font-family:var(--font-mono, ui-monospace, monospace);
+  font-size:10.5px;
+  letter-spacing:0.04em;
+  padding:1px 5px;
+  border-radius:4px;
+  border:1px solid var(--border-hairline);
+  color:var(--text-secondary);
+  flex:none;
+}
 .activity-session strong,.dock-files strong {
   font-size:12px;
   font-weight:500;

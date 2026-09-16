@@ -76,7 +76,8 @@ test('the next start is routed to the spare by the resolver, and the keeper warm
   const [spare] = h.sessions;
   // Resolver-visible state: an idle pane nobody owns takes the new work, and no
   // pane is created for it. This is the whole point of the warm spare.
-  const routed = resolveAssignment({ instruction: 'start a task on the login page', sessions: h.sessions, workItems: h.workItems,
+  const routed = resolveAssignment({ instruction: 'start a task on the login page',
+    terminals: require('../../backend/orchestratorTerminalModel.cjs').buildTerminalModel({ sessions: h.sessions, workItems: h.workItems }),
     launchers: LAUNCHERS, cwd: PROJECT_A, projectName: 'alpha' });
   assert.equal(routed.decision, 'reuse');
   assert.equal(routed.targetId, spare.id);

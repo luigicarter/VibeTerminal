@@ -7,6 +7,7 @@ const path = require('node:path');
 const pty = require('node-pty');
 const { createTerminalObservation } = require('../../backend/terminalObservation.cjs');
 const { createTerminalInput } = require('../../backend/orchestratorTerminalInput.cjs');
+const { projectInputSurface, sameInputSurface } = require('../../backend/orchestratorInputSurface.cjs');
 const root = path.resolve(__dirname, '../..');
 const output = path.join(root, '.tmp', 'orchestrator-startup-prompt-smoke', `${Date.now()}-${process.pid}`);
 fs.mkdirSync(output, { recursive: true });
@@ -16,7 +17,11 @@ fs.writeFileSync(phaseFile, JSON.stringify({ phase: 'shell' }));
 fs.writeFileSync(stubFile, `
 const fs = require('node:fs');
 const phaseFile = ${JSON.stringify(phaseFile)}, receivedFile = ${JSON.stringify(receivedFile)};
-let phase = '', input = '';
+let phase = '', input = '', tick = 0;
+// Codex 0.154's sparkle alphabet: single-dot braille repainted around the EMPTY
+// composer, several frames a second, including the cell between the pointer and
+// the cursor, each frame ending with the cursor-style repair.
+const DOTS = '\\u2801\\u2802\\u2804\\u2808\\u2810\\u2820\\u2840\\u2880';
 if (process.stdin.isTTY) process.stdin.setRawMode(true);
 process.stdin.resume();
 process.stdin.on('data', data => {
@@ -27,12 +32,21 @@ process.stdin.on('data', data => {
 });
 function render() {
   const next = JSON.parse(fs.readFileSync(phaseFile,'utf8')).phase;
-  if (next === phase) return;
-  phase = next;
-  if (phase==='stop') process.exit(0);
-  const header = '\\x1b[2J\\x1b[HOpenAI Codex (local startup fixture)\\r\\nmodel: '+(phase==='loading'?'loading':'fixture')+'\\r\\n\\r\\n';
-  if (phase==='shell') process.stdout.write('\\x1b[2J\\x1b[HPS C:\\\\fixture> \\x1b[?25h');
-  else process.stdout.write(header+'› '+(phase==='ready'?'':'Ask Codex to do anything')+'\\x1b[4;3H'+(phase==='hidden'?'\\x1b[?25l':'\\x1b[?25h'));
+  if (next !== phase) {
+    phase = next;
+    if (phase==='stop') process.exit(0);
+    const header = '\\x1b[2J\\x1b[HOpenAI Codex (local startup fixture)\\r\\nmodel: '+(phase==='loading'?'loading':'fixture')+'\\r\\n\\r\\n';
+    if (phase==='shell') process.stdout.write('\\x1b[2J\\x1b[HPS C:\\\\fixture> \\x1b[?25h');
+    else process.stdout.write(header+'› '+(phase==='ready'||phase==='sparkle'?'':'Ask Codex to do anything')+'\\x1b[4;3H'+(phase==='hidden'?'\\x1b[?25l':'\\x1b[?25h'));
+  }
+  if (phase==='sparkle') {
+    tick = (tick + 1) % 8;
+    process.stdout.write('\\x1b[?2026h'
+      + '\\x1b[3;1H'+DOTS[tick]+'\\x1b[3;20H'+DOTS[(tick+3)%8]
+      + '\\x1b[4;2H'+(tick%2 ? DOTS[(tick+1)%8] : ' ')+'\\x1b[4;30H'+DOTS[(tick+5)%8]
+      + '\\x1b[5;9H'+DOTS[(tick+7)%8]
+      + '\\x1b[4;3H\\x1b[0 q\\x1b[?2026l');
+  }
 }
 render(); setInterval(render,20);
 `);
@@ -93,6 +107,40 @@ async function phase(name, visible) {
   assert(chunks.every(chunk => chunk.phase === 'ready'));
   assert.equal(chunks.map(chunk => chunk.text).join(''), action.text+'\r');
   check('exactly-one-complete-prompt-after-ready', { status: result.status, chunks });
+
+  // Steady state: the pane is established and its composer animates forever.
+  // This is the case the output-counter fence could never serve — it moves
+  // several times a second while nothing about the input does.
+  fs.writeFileSync(phaseFile, JSON.stringify({ phase: 'sparkle' }));
+  await until(async () => (await read()).text.includes('model: fixture'), 'sparkling composer');
+  await wait(300);
+  const before = await read();
+  const surface = projectInputSurface(session, before);
+  assert.equal(surface.composer.empty, true, JSON.stringify(surface));
+  await wait(400);
+  const sampled = [];
+  for (let sample = 0; sample < 50; sample++) { sampled.push(projectInputSurface(session, await read())); await wait(6); }
+  const after = await read();
+  assert.ok(after.sequence > before.sequence + 5, `the idle pane must keep emitting output: ${before.sequence} -> ${after.sequence}`);
+  assert.ok(sampled.every(sample => sameInputSurface(surface, sample)), 'the input surface must not move while the composer animates');
+  check('idle-sparkle-advances-output-not-input', { sequenceBefore: before.sequence, sequenceAfter: after.sequence, samples: sampled.length });
+
+  const idleAction = { target: { id: session.id, generation: session.generation }, actionId: 'idle-prompt', requestId: 'idle-request',
+    operator: true, promptSubmission: true, text: 'Verify an idle animated composer still takes a prompt', submit: true,
+    observationSequence: before.sequence, inputRevision: before.inputRevision, inputSurface: surface };
+  const idle = await input.handle(idleAction);
+  assert.equal(idle.status, 'written', JSON.stringify(idle));
+  assert.equal(writes.length, 2);
+  assert.equal(writes[1].interactionEvidence.surface.composerEmpty, true);
+  assert.ok(writes[1].interactionEvidence.sequence > before.sequence, 'the write is fenced on the sequence read at dispatch');
+  await until(() => fs.readFileSync(receivedFile, 'utf8').includes(idleAction.text), 'idle prompt receipt');
+  check('idle-prompt-written-first-attempt', { status: idle.status, sequenceAtRead: before.sequence, sequenceAtWrite: writes[1].interactionEvidence.sequence });
+
+  // The same send with no surface is the old fence, and the sparkle defeats it.
+  const legacy = await input.handle({ ...idleAction, actionId: 'idle-prompt-legacy', inputSurface: undefined });
+  assert.equal(legacy.status, 'stale-observation', JSON.stringify(legacy));
+  assert.equal(writes.length, 2, 'the refused legacy send wrote nothing');
+  check('output-counter-fence-still-refuses-the-same-screen', { status: legacy.status });
   report.pass = true;
 } catch (error) { report.pass = false; report.error = error.stack; process.exitCode = 1; console.error(error.stack); }
 finally {

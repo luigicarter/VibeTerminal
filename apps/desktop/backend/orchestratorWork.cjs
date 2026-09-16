@@ -6,13 +6,17 @@ const { randomUUID, createHash } = require('node:crypto');
 const MAX_RECORDS = 2000;
 const MAX_AGE = 90 * 24 * 60 * 60 * 1000;
 const MAX_BYTES = 6 * 1024 * 1024;
-const STATUSES = new Set(['completed', 'failed', 'interrupted']);
+const { endObserved, childrenBusy } = require('./orchestratorResultReports.cjs');
+// 'response' is the runtime's provisional end for a provider that reports its
+// own end (Claude Code and the other coarse CLIs); endObserved admits it only
+// for those, so a Codex pane's transient provisional state is still excluded.
+const STATUSES = new Set(['completed', 'response', 'failed', 'interrupted']);
 const COVERAGE = 'Observed agent turn endings, including work started directly in terminals. Completion means the agent turn ended, not independently verified changes. Plain shells, idle states, and unobserved work are not completion evidence. History retains up to 2,000 records for 90 days.';
 const projectKey = cwd => String(cwd || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
 const keyFor = session => createHash('sha256').update(JSON.stringify([String(session.id), String(session.generation), String(session.turnId)])).digest('hex');
 const eligible = session => Boolean(session?.id && session.generation != null && String(session.generation) && !String(session.generation).startsWith('paused:') && session.turnId
-  && !['terminal', 'shell'].includes(session.kind) && !['terminal', 'shell'].includes(session.provider) && session.observation === 'observed'
-  && STATUSES.has(session.turnState) && !session.pendingInput && !session.childActivity
+  && !['terminal', 'shell'].includes(session.kind) && !['terminal', 'shell'].includes(session.provider) && endObserved(session)
+  && STATUSES.has(session.turnState) && (session.turnState !== 'response' || session.observation === 'provisional') && !session.pendingInput && !childrenBusy(session)
   && Number.isFinite(session.turnStartedAt) && Number.isFinite(session.turnEndedAt) && session.turnEndedAt >= session.turnStartedAt);
 
 // Historical observations only: these records never release task dependencies or
