@@ -142,6 +142,17 @@ function normalizePaneFact(input, clean) {
   return fact;
 }
 
+// The one reader of the launcher a project usually starts. The planning block,
+// the command compiler and the spare-pane keeper each reached into the fact for
+// it and each decided for itself what a blank value meant; the deterministic
+// resolver read it nowhere at all and fell to the build-wide rank order.
+// Takes a project fact or the planning block's `project` entry: both carry the
+// value under the same name.
+const rememberedProvider = fact => {
+  const value = typeof fact?.defaultProvider === 'string' ? fact.defaultProvider.trim() : '';
+  return value || undefined;
+};
+
 function normalizeProjectFact(input, clean) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
   const project = text(clean(input.project ?? ''), CAPS.project);
@@ -532,7 +543,7 @@ function createMemoryStore({ userDataPath, now = Date.now, getSecrets = () => []
       // Default provider, last active pane and the last two results. Open
       // questions and aliases stay in the fact and reach the brain through
       // recall_project when it asks, rather than on every call.
-      if (fact) block.project = { project: fact.project, ...(fact.defaultProvider && { defaultProvider: fact.defaultProvider }),
+      if (fact) block.project = { project: fact.project, ...(rememberedProvider(fact) && { defaultProvider: rememberedProvider(fact) }),
         ...(fact.lastActivePane && { lastActivePane: fact.lastActivePane }),
         ...(fact.lastResults.length && { lastResults: fact.lastResults.slice(-2).map(line => line.slice(0, CAPS.projectResult)) }) };
       const scoped = key ? episodesOf(byProject.get(key))
@@ -617,7 +628,11 @@ const TEMPLATES = [
   { kind: 'last-done', pattern: /\b(?:what|which) (?:was|is) the last (?:terminal|agent|pane|one)(?: that)?(?: was| got| is)? (?:done|finished|completed)\b|\blast (?:terminal|agent|pane|one) (?:that )?(?:was |got )?(?:done|finished|completed)\b|\b(?:terminal|agent|pane|one)(?: that)?(?:['’]s| is) done\b[^.?!]*[.?!]?\s*(?:can you see|which one|where)/i },
   // "What's going on in the Vibe terminals, tell me the progress?" — a state
   // report over every pane in view, from the roster, no model.
-  { kind: 'status-all', pattern: /\bwhat(?:['’]s| is) going on\b[^.?!]*\b(?:terminals?|agents?|panes?|projects?)\b|\btell me the progress\b|\bprogress (?:report|update)\b|\bhow (?:are|is) (?:the |my |all the )?(?:terminals?|agents?|panes?)\b|\bwhat are (?:the|my|all the) (?:terminals?|agents?|panes?) doing\b/i },
+  // "What are the status of the terminals currently working in vibeTerminal?"
+  // is the same question as "how are the terminals": the roster answers both.
+  // On September 16 only the second wording matched, the first reached the
+  // Brain, and the Brain answered with a request id that does not exist.
+  { kind: 'status-all', pattern: /\bwhat(?:['’]s| is) going on\b[^.?!]*\b(?:terminals?|agents?|panes?|projects?)\b|\btell me the progress\b|\b(?:progress|status) (?:report|update)\b|\bhow (?:are|is) (?:the |my |all the )?(?:terminals?|agents?|panes?)\b|\bwhat(?:['’]s| is| are) the status(?:es)? of (?:the |my |all the )?(?:terminals?|agents?|panes?)\b|\bwhich (?:terminals?|agents?|panes?) are (?:currently )?working\b|\bwhat are (?:the|my|all the) (?:terminals?|agents?|panes?) (?:doing|working on|up to)\b/i },
   { kind: 'last-prompt', pattern: /\bwhat (?:was|were) the last prompt\b/i },
   { kind: 'last-prompt', pattern: /\bdid you (?:enter|send|put in|paste|type|submit)\b[^?.!]{0,40}?\bprompt\b/i, confirm: true },
   { kind: 'last-prompt', pattern: /\bwhich (?:pane|terminal|one) did (?:i|you) (?:send|put|paste|type)\b/i },
@@ -775,5 +790,5 @@ function answerMemoryQuestion(store, match, { project, at = Date.now(), terminal
   return null;
 }
 
-module.exports = { createMemoryStore, boundedMemory, memoryQuestion, answerMemoryQuestion,
+module.exports = { createMemoryStore, boundedMemory, memoryQuestion, answerMemoryQuestion, rememberedProvider,
   topicsFrom, dayKey, VERSION, FILE, LIMITS, CAPS, HALF_LIFE_MS };

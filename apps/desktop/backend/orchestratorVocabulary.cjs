@@ -33,26 +33,90 @@ const WORD_ALIASES = new Map([
 // product rewrite stands down there and the project pass decides.
 const PRODUCT_FIRST_WORDS = new Set(['lina', 'lena', 'leena', 'alina', 'elina', 'elena', 'helina', 'lunar', 'luna']);
 const PRODUCT_NAME = 'Lina Terminal';
-// Canonical provider labels with the spellings speech produces for them. Keyed
-// by launcher kind so a build without a launcher never has its name invented.
-// "open codex", "open claude code" and "open fusion" are deliberately absent:
-// in speech those are the verb "open" plus a provider, not the launcher names.
+// The pleasantries and nonverbal markers a transcript keeps around, and inside,
+// a command. One list: the command compiler trims them off the ends of a
+// sentence, and the reference resolver steps over them in the middle of one
+// ("open, uh, open codex"). A second copy used to live in the compiler.
+const FILLER_WORD = String.raw`(?:thank you|thanks|so|well|um|uh|er|like|now|then|hey|hi|hello|bye|anyway|sorry)`;
+// The verbs that ask for a pane. Read by the reference resolver's launcher rule
+// and by the fused-verb split below, which is the only other place that has to
+// know what an opening verb looks like.
+const OPENING_VERB = String.raw`(?:open|start|launch|spawn|create|run|use)`;
+// Speech fuses a word it repeats: "open open codex" comes back as "openopen
+// codex", and the launcher rule cannot see a verb that has no boundary after it.
+// Split a doubled opening verb back into two words before anything reads the
+// sentence, so normalization owns the garble and the reader owns the grammar.
+const FUSED_VERB = new RegExp(String.raw`\b(${OPENING_VERB})\1\b`, 'gi');
+// The one provider lexicon. Canonical labels with the spellings speech produces
+// for them, the extra names a user says for the same launcher, and the product
+// relations it belongs to. Keyed by launcher kind so a build without a launcher
+// never has its name invented.
+//
+// Two relations, because two different questions used to be answered by one
+// table and got the same answer wrongly.
+//
+// `family` is the assignment relation: which panes may stand in for each other
+// when a request names a provider. It is deliberately narrow. Codex, Open Codex
+// and Codex Web are three different products with three different
+// conversations, sign-ins and histories, so "prompt a Codex terminal" must never
+// take an idle Open Codex or Codex Web pane and "the Codex terminal" must never
+// select one. Only a launcher that is the same product under another
+// configuration joins a family: claude-custom is Claude Code with the user's own
+// provider, kimi-custom is Kimi with the user's own provider. Read by the
+// reference resolver, the assignment resolver, the target review and the
+// spare-pane keeper.
+//
+// `tui` is the binary relation: which panes run the same command-line program,
+// and therefore which launchers a reader can confuse for one another. Codex,
+// Open Codex and Codex Web all run the Codex TUI. It answers two questions and
+// no others: which native slash-command grammar a pane understands
+// (orchestratorTerminalGuide.cjs), and whether a launcher the Brain planned is
+// a confusable substitute for the one the user said, correctable in place,
+// rather than a different request (orchestratorIntent.cjs). September 16: the
+// Brain answered open-codex for "open a new Codex terminal" and an Open Codex
+// pane opened.
+//
+// Four hand-written copies of these groupings used to live in the reference
+// resolver, the command compiler, the terminal guide and the spare-pane keeper,
+// and they disagreed. Everything that needs either relation, or a spoken
+// provider name, reads this table.
+//
+// "open codex", "open claude code" and "open fusion" carry no alias: in speech
+// those are the verb "open" plus a provider, not the launcher names. Which of
+// the two a sentence means is read once, in orchestratorReference.cjs.
 const PROVIDER_VOCABULARY = [
-  { kind: 'claude', canonical: 'Claude Code', aliases: ['claude code', 'cloud code', 'cloud-code', 'cloudcode', 'claud code', 'clod code', 'cloud codes', 'claude codes'] },
-  { kind: 'codex-web', canonical: 'Codex Web', aliases: ['codex web', 'codex-web', 'codec web', 'codecs web', 'cortex web'] },
-  { kind: 'codex', canonical: 'Codex', aliases: ['codex', 'codec', 'codecs', 'cortex', 'kodex', 'codeks'] },
-  { kind: 'open-codex', canonical: 'Open Codex', aliases: ['open-codex'] },
-  { kind: 'claude-custom', canonical: 'Open Claude Code', aliases: [] },
-  { kind: 'gemini', canonical: 'Gemini', aliases: ['gemini', 'gemeni', 'jemini', 'jiminy'] },
-  { kind: 'cursor', canonical: 'Cursor', aliases: ['cursor', 'curser'] },
-  { kind: 'grok', canonical: 'Grok', aliases: ['grok', 'grock'] },
-  { kind: 'kimi', canonical: 'Kimi', aliases: ['kimi', 'kimmy', 'kimmi'] },
-  { kind: 'qwen', canonical: 'Qwen', aliases: ['qwen', 'quen'] },
-  { kind: 'opencode', canonical: 'OpenCode', aliases: ['opencode'] },
-  { kind: 'fusion', canonical: 'Fusion', aliases: ['fusion'] },
-  { kind: 'openfusion', canonical: 'Open Fusion', aliases: ['openfusion'] },
-  { kind: 'kimi-custom', canonical: 'Kimi + CC', aliases: [] },
+  { kind: 'claude', canonical: 'Claude Code', family: 'claude', tui: 'claude', spoken: ['Claude'], aliases: ['claude code', 'cloud code', 'cloud-code', 'cloudcode', 'claud code', 'clod code', 'cloud codes', 'claude codes'] },
+  { kind: 'codex-web', canonical: 'Codex Web', family: 'codex-web', tui: 'codex', aliases: ['codex web', 'codex-web', 'codec web', 'codecs web', 'cortex web'] },
+  { kind: 'codex', canonical: 'Codex', family: 'codex', tui: 'codex', aliases: ['codex', 'codec', 'codecs', 'cortex', 'kodex', 'codeks', 'code x'] },
+  // No alias: rewriting the typed one-token "open-codex" to the two-word
+  // canonical is exactly what turned it back into the verb "open" plus Codex for
+  // the reader. Left as typed, the reader's own one-token alternative names it.
+  { kind: 'open-codex', canonical: 'Open Codex', family: 'open-codex', tui: 'codex', aliases: [] },
+  { kind: 'claude-custom', canonical: 'Open Claude Code', family: 'claude', tui: 'claude', aliases: [] },
+  { kind: 'gemini', canonical: 'Gemini', family: 'gemini', tui: 'gemini', aliases: ['gemini', 'gemeni', 'jemini', 'jiminy'] },
+  { kind: 'cursor', canonical: 'Cursor', family: 'cursor', tui: 'cursor', aliases: ['cursor', 'curser'] },
+  { kind: 'grok', canonical: 'Grok', family: 'grok', tui: 'grok', aliases: ['grok', 'grock'] },
+  { kind: 'kimi', canonical: 'Kimi', family: 'kimi', tui: 'kimi', aliases: ['kimi', 'kimmy', 'kimmi'] },
+  { kind: 'qwen', canonical: 'Qwen', family: 'qwen', tui: 'qwen', aliases: ['qwen', 'quen'] },
+  { kind: 'opencode', canonical: 'OpenCode', family: 'opencode', tui: 'opencode', aliases: ['opencode'] },
+  { kind: 'fusion', canonical: 'Fusion', family: 'fusion', tui: 'fusion', aliases: ['fusion'] },
+  { kind: 'openfusion', canonical: 'Open Fusion', family: 'openfusion', tui: 'openfusion', aliases: [] },
+  { kind: 'kimi-custom', canonical: 'Kimi + CC', family: 'kimi', tui: 'kimi', aliases: [] },
 ];
+// Every name a user can say for a launcher, with the kind it names, longest
+// first so "Codex Web" is never read as "Codex" and "Open Codex" is considered
+// before it. The reference resolver's provider patterns and its provider word
+// class are both built from this list.
+const PROVIDER_SPOKEN = Object.freeze(PROVIDER_VOCABULARY
+  .flatMap(entry => [entry.canonical, ...(entry.spoken || [])].map(name => Object.freeze([name, entry.kind])))
+  .sort((left, right) => right[0].length - left[0].length));
+const PROVIDER_FAMILY = Object.freeze(Object.fromEntries(PROVIDER_VOCABULARY.map(entry => [entry.kind, entry.family])));
+const PROVIDER_TUI = Object.freeze(Object.fromEntries(PROVIDER_VOCABULARY.map(entry => [entry.kind, entry.tui])));
+// The panes a launcher kind may stand in for, or the kind itself when this build
+// has a launcher the lexicon does not name.
+const providerFamily = kind => PROVIDER_FAMILY[kind] || kind;
+// The command-line program a launcher kind runs, on the same fallback.
+const providerTui = kind => PROVIDER_TUI[kind] || kind;
 
 const WORD_PATTERN = /[\p{L}\p{N}][\p{L}\p{N}'’]*/gu;
 function tokenize(text) {
@@ -212,6 +276,13 @@ function normalizeInstruction(text, { projects = [], launchers = [], wakePhrases
   if (wake.removed) replacements.push({ kind: 'wake', from: wake.removed, to: '' });
   const names = (Array.isArray(projects) ? projects : []).map(project => (typeof project === 'string' ? project : project?.name))
     .filter(name => typeof name === 'string' && name.trim());
+  const fusedGuards = quotedSpans(working);
+  working = working.replace(FUSED_VERB, (match, verb, offset) => {
+    if (fusedGuards.some(([start, end]) => offset >= start && offset < end)) return match;
+    const split = `${verb} ${verb}`;
+    replacements.push({ kind: 'speech', from: match, to: split });
+    return split;
+  });
   const tokens = tokenize(working);
   const guarded = quotedSpans(working);
   const candidates = [...productMatches(tokens), ...projectMatches(tokens, names), ...providerMatches(tokens, providerAliases(launchers))]
@@ -231,4 +302,4 @@ function normalizeInstruction(text, { projects = [], launchers = [], wakePhrases
   return { text: working, changed: working !== original, replacements };
 }
 
-module.exports = { normalizeInstruction, providerAliases, projectAliases, PROVIDER_VOCABULARY, PRODUCT_NAME };
+module.exports = { normalizeInstruction, providerAliases, projectAliases, PROVIDER_VOCABULARY, PROVIDER_SPOKEN, PROVIDER_FAMILY, providerFamily, PROVIDER_TUI, providerTui, FILLER_WORD, OPENING_VERB, PRODUCT_NAME };

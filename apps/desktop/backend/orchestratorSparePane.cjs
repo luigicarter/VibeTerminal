@@ -20,7 +20,8 @@
 // store writes, no direct terminal access.
 
 const { idlePaneCandidate, ownsPaneForReuse } = require('./orchestratorResolver.cjs');
-const { providerFamily } = require('./orchestratorReference.cjs');
+const { providerFamily } = require('./orchestratorVocabulary.cjs');
+const { rememberedProvider } = require('./orchestratorMemory.cjs');
 const { neverPrompted } = require('./orchestratorPaneReadiness.cjs');
 const path = require('node:path');
 
@@ -136,7 +137,7 @@ function createSparePaneKeeper({
     // 3. Create at most one, in the last project a start landed in.
     if (!allowed || !active?.cwd) return;
     const project = active.cwd, key = projectKey(project);
-    const provider = String(getProjectFact(project)?.defaultProvider || active.provider || '').trim();
+    const provider = rememberedProvider(getProjectFact(project)) || String(active.provider || '').trim();
     if (!provider || NON_AGENT.has(provider)) return skip('no-provider');
     if (spare) return skip('spare-exists', provider);
     const family = providerFamily(provider);

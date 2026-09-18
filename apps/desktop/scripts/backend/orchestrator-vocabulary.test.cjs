@@ -1,6 +1,6 @@
 'use strict';
 // Speech recognition, not the user, wrote "cloud code", "codec", "cortex",
-// "Vybe terminal" and "Hey Alina" into 128 saved utterances. Every one of those
+// "Vybe terminal" and "Hey Alina" into 131 saved utterances. Every one of those
 // reached the brain and the resolvers verbatim. These cases are taken from that
 // corpus: the normalizer must produce the registered names, drop the wake
 // greeting in any spelling, and leave everything else byte-identical.
@@ -87,6 +87,19 @@ const CASES = [
   ['Tell it: "the cloud code pane in vibe terminal is stuck" and wait.',
     'Tell it: "the cloud code pane in vibe terminal is stuck" and wait.', []],
   ['Show Hey Lina in the terminal', 'Show Hey Lina in the terminal', []],
+  // Speech fuses a word it repeats and spells Codex several ways. The garble is
+  // normalization's to undo; the launcher rule downstream only reads grammar.
+  // The one-token "open-codex" alias is gone, so only the bare name is rewritten
+  // and the split verb stays a verb: the reader settles which "open" is which.
+  ['openopen codex in vibe terminal', 'open open Codex in vibeTerminal', ['speech', 'provider', 'project']],
+  ['open-codex in vibeTerminal', 'open-Codex in vibeTerminal', ['provider']],
+  ['openfusion terminal', 'openfusion terminal', []],
+  ['OpenOpen Codex', 'Open Open Codex', ['speech']],
+  ['start start a codex terminal', 'start start a Codex terminal', ['provider']],
+  ['open open code x in vibe terminal', 'open open Codex in vibeTerminal', ['provider', 'project']],
+  ['the code x pane is stuck', 'the Codex pane is stuck', ['provider']],
+  // Quoted words are the user's own; the split stands down inside them.
+  ['say "openopen codex" out loud', 'say "openopen codex" out loud', []],
 ];
 
 test('every speech variant in the saved corpus normalizes to the registered name', () => {
@@ -140,7 +153,7 @@ test('the catalogs describe only the launchers and projects this build has', () 
 // separately to stay unchanged in that respect.
 const UNSPOKEN_PROJECT_ROWS = new Set([18, 20, 24, 95, 103, 115, 120, 125]);
 
-test('the 128 saved utterances lose every provider variant and wake greeting', () => {
+test('the 131 saved utterances lose every provider variant and wake greeting', () => {
   const offenders = [];
   for (const row of corpus) {
     const result = normalizeInstruction(row.text, { projects: PROJECTS, launchers: LAUNCHERS });

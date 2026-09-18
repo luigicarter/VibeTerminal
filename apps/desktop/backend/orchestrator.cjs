@@ -56,7 +56,7 @@ const { buildReplyContext } = require('./orchestratorReplyContext.cjs');
 const { createLedger, planningLedger, deriveLedgerEntry } = require('./orchestratorLedger.cjs');
 const { createPaneMemory, boundedRoster } = require('./orchestratorPaneMemory.cjs');
 const { createTerminalHandles, buildTerminalModel, rosterRows } = require('./orchestratorTerminalModel.cjs');
-const { createMemoryStore, memoryQuestion, answerMemoryQuestion } = require('./orchestratorMemory.cjs');
+const { createMemoryStore, memoryQuestion, answerMemoryQuestion, rememberedProvider } = require('./orchestratorMemory.cjs');
 const { captureQueuedCommand, assertQueuedTransfer } = require('./orchestratorQueuedRecovery.cjs');
 const { remainingGrantSnapshots, settledRequestState, requestHasFailures } = require('./orchestratorRequestState.cjs');
 const { normalizeSpeech, prepareSpeech, RESULT_SPEECH_FALLBACK } = require('./orchestratorSpeech.cjs');
@@ -999,6 +999,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
   function routingQuestion(intent, job, text, routing) {
     intent.question = { id: randomUUID(), requestId: job.task.requestId, text,
       ...(routing?.answerKind && { routingAnswerKind: routing.answerKind }),
+      ...(routing?.kindOfSession && { routingKindOfSession: routing.kindOfSession }),
       ...(routing?.candidates?.length && { routingCandidates: routing.candidates.map(({ targetId, label }) => ({ targetId, label })) }) };
     tasks.update(job, { status: 'needs-answer', question: intent.question });
   }
@@ -1009,7 +1010,8 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
     const asked = tasks.get(job.input.replyToRequestId)?.task.question;
     if (!asked || asked.id !== job.input.questionId) return undefined;
     if (!asked.routingAnswerKind && !asked.routingCandidates?.length) return undefined;
-    return { text: instruction, kind: asked.routingAnswerKind || 'candidates', candidates: asked.routingCandidates || [] };
+    return { text: instruction, kind: asked.routingAnswerKind || 'candidates', candidates: asked.routingCandidates || [],
+      ...(asked.routingKindOfSession && { kindOfSession: asked.routingKindOfSession }) };
   }
   // A continuation whose owner could not be identified names the agents it can
   // see, by their human titles, most recently active first. It never reports
@@ -1211,9 +1213,19 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
         // may re-derive them, and none decides which pane the task reaches.
         await requireFreshSessions(); active(token);
         const resolved = resolveAssignment({ instruction: instructionText, grant, terminals: terminalModel(scopedSessions()), launchers, cwd,
-          projectName: projectLabel(cwd) || cwd, now: now(), answer: answeredRoutingQuestion(job, instructionText) });
+          projectName: projectLabel(cwd) || cwd, now: now(), answer: answeredRoutingQuestion(job, instructionText),
+          // What this project usually starts, read by the one reader. It is
+          // tried only after the request's own words and the planned launcher.
+          defaultProvider: rememberedProvider(memory.recallProject(job.ledgerProject || projectLabel(cwd) || cwd).project) });
+        // Who chose the launcher: what the Brain planned, how it planned the
+        // assignment, and what the resolver opened. A September 16 request
+        // opened an Open Codex pane and the record could not say who asked for
+        // it.
         recordDiagnostic({ ...diagnosticContext, event: 'routing_progress', stage: 'resolver', grantId: grant.id,
           decision: resolved.decision, selectorKind: resolved.selector, candidateCount: resolved.candidateCount,
+          ...(grant.args?.kindOfSession && { plannedKindOfSession: grant.args.kindOfSession }),
+          ...(grant.args?.assignmentMode && { assignmentMode: grant.args.assignmentMode }),
+          ...(resolved.kindOfSession && { kindOfSession: resolved.kindOfSession }),
           ...(resolved.targetId && { targetId: resolved.targetId }), ...(resolved.score !== undefined && { score: resolved.score }) });
         if (resolved.decision === 'ask') { routingQuestion(intent, job, resolved.question, resolved); break; }
         if (resolved.decision === 'reuse') {
@@ -1758,7 +1770,7 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
       job.normalization = normalization;
       const instructionText = normalization.text;
       if (normalization.changed) recordDiagnostic({ ...diagnosticContext, event: 'request_stage', stage: 'normalized',
-        ...Object.fromEntries(['wake', 'provider', 'project', 'product'].map(kind =>
+        ...Object.fromEntries(['wake', 'provider', 'project', 'product', 'speech'].map(kind =>
           [`${kind}Count`, normalization.replacements.filter(item => item.kind === kind).length])) });
       context().projectContext = identifyProject(instructionText, projects, context().projectContext);
       intent.projectContext = context().projectContext;
@@ -1871,6 +1883,11 @@ function createOrchestrator({ userDataPath, secureStorage, interpretIntent, comm
         intent.commandPlan = normalizeIntent({ goal: 'Resume the saved conversation the user just confirmed.', continuationOf: previousCommand.requestId, actions: [{ kind: 'resume_conversation', ...confirmation.args, sourceUserId: previousCommand.requestId }] }, commandContext);
         selectedPrior.resumeConfirmation = undefined;
       } else intent.commandPlan = input.resumePaused ? normalizeIntent({ goal: 'Identify the unfinished step without replaying delivered work.', clarification: 'Which unfinished step should I run? Previously delivered actions will not be repeated automatically.', actions: [] }, commandContext) : input.retryOf && previousCommand?.grants?.length ? planOrClarification(() => normalizeIntent({ goal: previousCommand.instruction, executionMode: previousCommand.executionMode, continuationOf: previousCommand.requestId, actions: previousCommand.grants.map(grant => ({ kind: grant.kind, sourceUserId: previousCommand.requestId, ...grant.args, ...Object.fromEntries(['text', 'operationMode', 'promptMode', 'answerMode', 'permissionMode', 'lifecycleMode', 'answerText', 'answerTexts', 'targetAvailability'].filter(field => grant[field] !== undefined).map(field => [field, grant[field]])), ...(grant.targets.length && { targetIds: grant.targets.map(target => target.id), selection: 'all' }) })) }, commandContext), commandContext) : await interpret(commandContext, chosenModel, brainTokens, signal, diagnosticContext, interpretationModel); active(token);
+      // A launcher the Brain planned and the user's own word corrected.
+      for (const grant of intent.commandPlan.grants.filter(grant => grant.launcherOverride)) {
+        recordDiagnostic({ ...diagnosticContext, event: 'routing_progress', stage: 'launcher_overridden', grantId: grant.id,
+          plannedKindOfSession: grant.launcherOverride.from, kindOfSession: grant.launcherOverride.to });
+      }
       for (const grant of intent.commandPlan.grants.filter(grant => grant.closeScope)) {
         recordDiagnostic({ ...diagnosticContext, event: 'request_stage', stage: 'close_scope', grantId: grant.id,
           scopeKind: grant.closeScope.scope.type, targetId: grant.closeScope.scope.projectId,

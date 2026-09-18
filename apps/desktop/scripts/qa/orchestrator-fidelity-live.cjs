@@ -1,7 +1,7 @@
 'use strict';
 // Fidelity of a request to a plan, measured on the saved utterance corpus.
 //
-// Two readers of the same 128 sentences are scored against the same expected
+// Two readers of the same 131 sentences are scored against the same expected
 // plans: the deterministic compiler, which costs nothing and may decline, and
 // the configured Brain, which always answers and costs money. The compiler's
 // number that matters is precision - of the rows it accepted, how many it read

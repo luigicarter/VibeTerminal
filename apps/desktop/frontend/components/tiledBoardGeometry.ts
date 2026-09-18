@@ -36,6 +36,8 @@ export const BOARD_GAP = 4;
 export const BOARD_PADDING = 10;
 export const DEFAULT_MIN_W = 280;
 export const DEFAULT_MIN_H = 170;
+// Default height for a newly opened pane; findAvailablePlacement clamps it to the empty region.
+export const DEFAULT_PANE_HEIGHT = 520;
 export const SWAP_OVERLAP_RATIO = 0.22;
 export const ADJACENT_RESIZE_TOLERANCE = 32;
 // Layouts store x/w as percentages but collide in pixels, so every rect makes a
@@ -1121,7 +1123,7 @@ export function resolveMoveLayouts(interaction: GeometryInteraction, desired: Pi
 export function findAvailablePlacement(items: GeometryItem[], innerWidth: number, viewport: BoardViewport, desiredSize?: {width:number;height:number;minW?:number;minH?:number}): LayoutBox {
   const minW=Math.min(desiredSize?.minW ?? DEFAULT_MIN_W,innerWidth), minH=desiredSize?.minH ?? DEFAULT_MIN_H;
   const width=Math.min(innerWidth,Math.max(minW,desiredSize?.width ?? Math.min(560,(innerWidth-BOARD_GAP)/2)));
-  const height=Math.max(minH,desiredSize?.height ?? 260);
+  const height=Math.max(minH,desiredSize?.height ?? DEFAULT_PANE_HEIGHT);
   const fixed=items.map(item=>layoutToRect(sanitizeLayout(item.layout,innerWidth,item.minW,item.minH),innerWidth));
   const lowest=Math.max(BOARD_PADDING,...fixed.map(rectBottom));
   const bands=[viewport,{top:BOARD_PADDING,bottom:Math.max(lowest,viewport.bottom)},{top:lowest+BOARD_GAP,bottom:lowest+BOARD_GAP+height}];

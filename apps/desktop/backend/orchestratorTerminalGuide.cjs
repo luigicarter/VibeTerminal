@@ -1,5 +1,6 @@
 'use strict';
 
+const { providerTui } = require('./orchestratorVocabulary.cjs');
 const supported = new Set(Object.keys(require('../shared/providerCapabilities.json')));
 supported.add('claude-custom');
 
@@ -30,7 +31,12 @@ function terminalNavigationGuide(session = {}) {
     return 'Plain shell: inspect available output/state; do not send coding CLI slash commands to the shell.';
   }
   const provider = session.kind || session.provider;
-  const profile = provider === 'claude-custom' ? 'claude' : provider === 'kimi-custom' ? 'kimi' : provider === 'open-codex' ? 'codex' : provider;
+  // Which CLI's slash-command grammar applies is the command-line program the
+  // launcher runs, read from the one provider lexicon; this used to be a third
+  // hand-written copy of that grouping. Open Codex runs the Codex TUI even
+  // though it is a different pane for assignment. Codex Web, Fusion and the
+  // plain shell answered above.
+  const profile = providerTui(provider);
   if (Object.hasOwn(profiles, profile)) return profiles[profile];
   if (supported.has(provider)) {
     return 'Supported native coding CLI: inspect the visible screen/help/menu to discover state and usage commands. Do not assume another provider\'s slash-command grammar; use only observed read-only options and verify their output.';

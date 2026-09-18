@@ -1527,16 +1527,16 @@
   "project": "vibeTerminal",
   "selector": "none",
   "provider": "codex",
-  "notes": "ambiguous with the Open Codex launcher",
+  "notes": "bare \"Open Codex\" is the verb plus Codex",
   "expected": {
    "verb": "open",
    "project": "vibeTerminal",
    "selector": "none",
    "provider": "codex",
    "promptPresent": false,
-   "compilable": false,
-   "reason": "ambiguous with the Open Codex launcher name",
-   "compilableInWorkspace": false
+   "compilable": true,
+   "reason": "\"Open Codex terminal\" with no determiner is the verb open plus the provider Codex; the Open Codex launcher needs a determiner",
+   "compilableInWorkspace": true
   }
  },
  {
@@ -2556,6 +2556,66 @@
    "promptPresent": true,
    "compilable": false,
    "reason": "garbled after the head (\"? I to make it...\")",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 129,
+  "at": "2026-09-16T03:04:51.880Z",
+  "text": "can you open a new vibe terminal codex",
+  "verb": "open",
+  "project": "vibeTerminal",
+  "selector": "new",
+  "provider": "codex",
+  "notes": "opened an Open Codex pane on 0.1.126",
+  "expected": {
+   "verb": "open",
+   "project": "vibeTerminal",
+   "selector": "new",
+   "provider": "codex",
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "no pane noun at all, so no head parses; the provider is still Codex, never the Open Codex launcher",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 130,
+  "at": "2026-09-16T18:26:46.028Z",
+  "text": "What are the status of the terminals currently working in Vibe Terminal Project?",
+  "verb": "status",
+  "project": "vibeTerminal",
+  "selector": "working",
+  "provider": null,
+  "notes": "answered \"I could not interpret that request\" on 0.1.126",
+  "expected": {
+   "verb": "status",
+   "project": "vibeTerminal",
+   "selector": "working",
+   "provider": null,
+   "promptPresent": false,
+   "compilable": false,
+   "reason": "a report over every working pane; the memory store answers it with no model call",
+   "compilableInWorkspace": false
+  }
+ },
+ {
+  "n": 131,
+  "at": "2026-09-16T18:27:19.925Z",
+  "text": "Can you get codex  in Vibre Terminal  to investigate  An error I just got with the orchestrator.",
+  "verb": "start",
+  "project": "vibeTerminal",
+  "selector": "provider",
+  "provider": "codex",
+  "notes": "asked which existing Codex pane was meant with none open on 0.1.126",
+  "expected": {
+   "verb": "start",
+   "project": "vibeTerminal",
+   "selector": "provider",
+   "provider": "codex",
+   "promptPresent": true,
+   "compilable": false,
+   "reason": "no pane noun after the provider, so no start head parses; the work is named by pointing at an earlier turn",
    "compilableInWorkspace": false
   }
  }

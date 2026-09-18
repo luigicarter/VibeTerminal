@@ -5,7 +5,8 @@
 // the receipt-scanning action history) each kept a copy of.
 // docs/orchestrator-terminal-model-overhaul-2026-09-15.md, section 4.2.
 const test = require('node:test'), assert = require('node:assert/strict');
-const { readReference, resolveReference, terminalsOf } = require('../../backend/orchestratorReference.cjs');
+const { readReference, resolveReference, terminalsOf, namedProviders } = require('../../backend/orchestratorReference.cjs');
+const { normalizeInstruction } = require('../../backend/orchestratorVocabulary.cjs');
 const { buildTerminalModel, createTerminalHandles } = require('../../backend/orchestratorTerminalModel.cjs');
 
 const VIBE = 'C:/repo/vibeTerminal', WEB = 'C:/repo/lina-web-app';
@@ -56,6 +57,9 @@ test('the grammar reads one kind per sentence, handles first, and states the fac
   assert.equal(readReference('tell it to also add regression coverage').deictic, true);
   assert.equal(readReference('and tell it to write that up').pronoun, true);
   assert.equal(readReference('tell the codex terminal in vibeTerminal to run the tests').definiteProvider, true);
+  // A kind of agent and a project, not a conversation: "get codex in X to ..."
+  // asked which existing Codex pane was meant when none was open.
+  assert.equal(readReference('can you get codex in vibeTerminal to investigate the release notes').definiteProvider, false);
 });
 
 test('a handle names its pane anywhere; the pane Lina just opened is the newest live creation in the project', () => {
@@ -134,6 +138,108 @@ test('a pane named word for word is named whatever else the sentence asks for; a
   assert.deepEqual([exact.kind, ids(exact.mentioned)], ['idle', ['beta']], 'an exact label is a mention whatever the sentence asks for');
   assert.deepEqual(ids(resolveReference('prompt the Claude Code terminal to review the tests', model(sessions), { cwd: VIBE, launchers }).mentioned), [], 'a provider label names no pane');
   assert.deepEqual(ids(resolveReference('Have Beta invoice rounding look at the totals', model(sessions), { cwd: VIBE }).named), ['beta']);
+});
+
+// "Open Codex" is a launcher name whose first word is the opening verb. Spoken
+// bare it is that verb plus Codex; the launcher needs a determiner in front of
+// its name, or its own one-token spelling. September 16: "can you open a new
+// Codex terminal in vibeTerminal" opened an Open Codex pane.
+test('a launcher named after the opening verb is selected by a determiner, a verb already spent, or its own spelling', () => {
+  const catalog = [...launchers, { kind: 'codex-web', label: 'Codex Web', available: true, configured: true },
+    { kind: 'open-codex', label: 'Open Codex', available: true, configured: true },
+    { kind: 'claude-custom', label: 'Open Claude Code', available: true, configured: true }];
+  for (const [text, provider] of [
+    ['Can you open a new Codex terminal in vibeTerminal', 'codex'],
+    ['Open Codex terminal in vibeTerminal', 'codex'],
+    ['open codex in vibeTerminal', 'codex'],
+    ['open a codex terminal in vibeTerminal', 'codex'],
+    ['open codex web in vibeTerminal', 'codex-web'],
+    ['open an Open Codex terminal in vibeTerminal', 'open-codex'],
+    ['use the Open Codex one', 'open-codex'],
+    ['open another open codex terminal', 'open-codex'],
+    ['open-codex terminal in vibeTerminal', 'open-codex'],
+    // A second opening verb cannot be the same verb: one of the two "open"s is
+    // the request and the other is the launcher's own first word. The
+    // sentence-initial form above has no verb before it and stays Codex.
+    ['open open codex in vibeTerminal', 'open-codex'],
+    ['Open Open Codex terminal in vibeTerminal', 'open-codex'],
+    ['start open codex in vibeTerminal', 'open-codex'],
+    ['launch open codex in vibeTerminal', 'open-codex'],
+    ['open open claude code in vibeTerminal', 'claude-custom'],
+  ]) assert.equal(readReference(text, { launchers: catalog }).provider, provider, text);
+  // The name's leading "Open" is dropped for the creation grammar, the
+  // sentence's own verb is not: this asks for one pane, and it is a new one.
+  const doubled = readReference('open open codex terminal in vibeTerminal', { launchers: catalog });
+  assert.deepEqual([doubled.kind, doubled.provider], ['new', 'open-codex']);
+});
+
+// The same rule against what speech actually produces. Whisper restarts the
+// repeated word with a comma or a full stop, drops a filler in between, or fuses
+// the two into one token; "code x" is one of its spellings of Codex. The
+// vocabulary pass owns the garble (the fused verb and the misheard name) and the
+// rule owns the grammar, so both are read here exactly as the app reads them.
+test('a restarted, filled or fused opening verb still names the launcher after it', () => {
+  // Every Open-prefixed launcher this build can offer, so normalization is
+  // exercised on each of their names rather than skipping them as unavailable.
+  const catalog = [...launchers, { kind: 'codex-web', label: 'Codex Web', available: true, configured: true },
+    { kind: 'open-codex', label: 'Open Codex', available: true, configured: true },
+    { kind: 'claude-custom', label: 'Open Claude Code', available: true, configured: true },
+    { kind: 'openfusion', label: 'Open Fusion', available: true, configured: true },
+    { kind: 'opencode', label: 'OpenCode', available: true, configured: true }];
+  const projects = [{ name: 'vibeTerminal', path: VIBE }];
+  const spoken = text => {
+    const normalized = normalizeInstruction(text, { projects, launchers: catalog }).text;
+    const reading = readReference(normalized, { launchers: catalog });
+    return [reading.provider, reading.kind, namedProviders(normalized, catalog).length];
+  };
+  for (const [text, provider, kind] of [
+    ['Open, open Codex in Vibe Terminal.', 'open-codex', 'provider'],
+    ['Open. Open Codex terminal in Vibe Terminal.', 'open-codex', 'new'],
+    ['open, uh, open codex terminal in vibe terminal', 'open-codex', 'new'],
+    ['openopen codex in vibe terminal', 'open-codex', 'provider'],
+    ['open open code x in vibe terminal', 'open-codex', 'provider'],
+    ['open open codecs in vibe terminal', 'open-codex', 'provider'],
+    ['open um open codex in vibe terminal', 'open-codex', 'provider'],
+    ['open up an open codex terminal in vibe terminal', 'open-codex', 'provider'],
+    ['hey lina open open codex in vibe terminal', 'open-codex', 'provider'],
+    ['open an open codecs terminal in vibe terminal', 'open-codex', 'new'],
+    // The one-token spellings survive normalization now: the lexicon no longer
+    // rewrites them into the two-word canonical, which is what turned them back
+    // into the verb "open" plus a provider before the reader ever saw them.
+    ['open-codex in vibeTerminal', 'open-codex', 'provider'],
+    ['opencodex terminal in vibeTerminal', 'open-codex', 'new'],
+    ['openfusion terminal', 'openfusion', 'new'],
+    // One "open" is still the verb and nothing else.
+    ['open codex in vibe terminal', 'codex', 'provider'],
+    ['Open Codex terminal in vibeTerminal', 'codex', 'new'],
+    ['open a codex terminal in vibe terminal', 'codex', 'new'],
+    ['open codex web in vibe terminal', 'codex-web', 'provider'],
+    // OpenCode is one word and is not an Open-prefixed name; it keeps its alias.
+    ['opencode terminal in vibeTerminal', 'opencode', 'provider'],
+  ]) assert.deepEqual(spoken(text).slice(0, 2), [provider, kind], text);
+  // However it was garbled, the sentence named one launcher, not two.
+  for (const text of ['open open codex in vibe terminal', 'open, uh, open codex terminal in vibe terminal',
+    'openopen codex in vibe terminal', 'open open code x in vibe terminal']) {
+    assert.equal(spoken(text)[2], 1, text);
+  }
+});
+
+// How many launchers a sentence named, read by the same rule that reads which
+// one. A correction may only be applied when the sentence named exactly one, so
+// the count has to survive two names of the same product in one sentence.
+test('the launcher count reads each name once, longest first, and never twice', () => {
+  const { namedProviders } = require('../../backend/orchestratorReference.cjs');
+  const catalog = [...launchers, { kind: 'codex-web', label: 'Codex Web', available: true, configured: true },
+    { kind: 'open-codex', label: 'Open Codex', available: true, configured: true },
+    { kind: 'terminal', label: 'Terminal', available: true, configured: true }];
+  const named = text => namedProviders(text, catalog).sort();
+  assert.deepEqual(named('open a codex terminal and a codex web terminal in vibeTerminal'), ['codex', 'codex-web']);
+  assert.deepEqual(named('open codex web in vibeTerminal'), ['codex-web'], '"codex web" is one name, not also "codex"');
+  assert.deepEqual(named('Open a new Codex terminal in vibeTerminal and prompt it with Hi.'), ['codex']);
+  assert.deepEqual(named('open an Open Codex terminal and a Codex terminal'), ['codex', 'open-codex']);
+  assert.deepEqual(named('open a claude code terminal'), ['claude'], 'one launcher under two of its own names');
+  assert.deepEqual(named('open a powershell terminal'), ['terminal']);
+  assert.deepEqual(named('run the unit tests and report back'), []);
 });
 
 test('a context without a model gets one built from its sessions, roster, ledger and work items', () => {

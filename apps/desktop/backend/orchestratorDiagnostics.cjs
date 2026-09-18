@@ -25,7 +25,11 @@ function createDiagnostics({ userDataPath, getSecrets = () => [], now = Date.now
       return text.slice(0, limit);
     };
     const result = { time: new Date(now()).toISOString() };
-    for (const key of ['event', 'stage', 'requestId', 'workItemId', 'decision', 'modelCallId', 'toolCallId', 'receiptId', 'replyId', 'actionId', 'origin', 'model', 'actionKind', 'targetId', 'generation', 'status', 'category', 'reason', 'endpoint', 'provider', 'generationId', 'toolChoice', 'grantId', 'reservationId', 'predecessorRequestId', 'successorRequestId', 'operationId', 'inventoryRevision', 'strategy', 'assignmentState', 'delivery', 'scopeKind', 'controlDisposition', 'previousStatus', 'newStatus', 'validationCategory', 'turnState', 'telemetryHealth', 'optionRepair', 'reasoningReplay', 'fallbackFrom', 'selectorKind']) {
+    for (const key of ['event', 'stage', 'requestId', 'workItemId', 'decision', 'modelCallId', 'toolCallId', 'receiptId', 'replyId', 'actionId', 'origin', 'model', 'actionKind', 'targetId', 'generation', 'status', 'category', 'reason', 'endpoint', 'provider', 'generationId', 'toolChoice', 'grantId', 'reservationId', 'predecessorRequestId', 'successorRequestId', 'operationId', 'inventoryRevision', 'strategy', 'assignmentState', 'delivery', 'scopeKind', 'controlDisposition', 'previousStatus', 'newStatus', 'validationCategory', 'turnState', 'telemetryHealth', 'optionRepair', 'reasoningReplay', 'fallbackFrom', 'selectorKind',
+      // Who chose the launcher: what the Brain planned, how it planned the
+      // assignment, and what the application opened. Launcher kinds and
+      // assignment modes are application vocabulary, never user text.
+      'plannedKindOfSession', 'kindOfSession', 'assignmentMode']) {
       const value = redact(input?.[key], 256); if (value !== undefined) result[key] = value;
     }
     // Voice transcription overlap: whether the audio went out before the pause
@@ -40,7 +44,7 @@ function createDiagnostics({ userDataPath, getSecrets = () => [], now = Date.now
     for (const key of ['turnStartedOffsetMs']) if (Number.isFinite(input?.[key])) result[key] = Math.max(-1e9, Math.min(input[key], 1e9));
     // Vocabulary normalization records how many names it rewrote, per kind, and
     // never a rewritten word: the instruction text stays out of the log.
-    for (const key of ['round', 'readCount', 'candidateCount', 'stagnantRounds', 'targetCount', 'confirmedCount', 'remainingCount', 'failedCount', 'transferredCount', 'newTargetCount', 'closedCount', 'supersededCount', 'inventoryCount', 'wakeCount', 'providerCount', 'projectCount', 'productCount', 'handledCount', 'fallbackCount']) {
+    for (const key of ['round', 'readCount', 'candidateCount', 'stagnantRounds', 'targetCount', 'confirmedCount', 'remainingCount', 'failedCount', 'transferredCount', 'newTargetCount', 'closedCount', 'supersededCount', 'inventoryCount', 'wakeCount', 'providerCount', 'projectCount', 'productCount', 'speechCount', 'handledCount', 'fallbackCount']) {
       if (Number.isSafeInteger(input?.[key]) && input[key] >= 0) result[key] = Math.min(input[key], 1e9);
     }
     if (Number.isFinite(input?.generation)) result.generation = input.generation;

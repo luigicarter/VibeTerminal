@@ -1,5 +1,5 @@
 'use strict';
-// The deterministic assignment resolver, scored against the 128 real utterances
+// The deterministic assignment resolver, scored against the 131 real utterances
 // saved from the September 7-12 sessions. Two layers: the selector the resolver
 // reads out of a normalized instruction, and the decision it reaches against a
 // fixed pane roster. The last group runs the whole relay to show what the
@@ -58,10 +58,73 @@ function terminalsFor(options = {}) {
 }
 function decide(instruction, options = {}) {
   return resolveAssignment({ instruction, grant: { args: { cwd: options.cwd || VIBE, assignmentMode: options.assignmentMode || 'auto', ...(options.kindOfSession && { kindOfSession: options.kindOfSession }) } },
-    terminals: terminalsFor(options), launchers, now: 10000,
+    terminals: terminalsFor(options), launchers: options.launchers || launchers, now: 10000,
     cwd: options.cwd || VIBE, projectName: options.projectName || 'vibeTerminal',
-    ...(options.answer && { answer: options.answer }) });
+    ...(options.answer && { answer: options.answer }),
+    ...(options.defaultProvider && { defaultProvider: options.defaultProvider }) });
 }
+
+// Codex, Open Codex and Codex Web run the same CLI but are three different
+// products with three different conversations and sign-ins. They are one `tui`
+// in the provider lexicon and three `family` values, so a pane of one is never
+// offered for a request that named another - which is the substitution the
+// September 16 session complained about.
+test('an Open Codex pane is never the answer to a request that said Codex', () => {
+  // The build the September 16 session was running: Open Codex is offered, so
+  // both names are in play in one sentence.
+  const catalog = [...launchers, { kind: 'open-codex', label: 'Open Codex', available: true, configured: true }];
+  const sessions = [pane('p3', '✳ Claude Code', 'claude', { lastActivityAt: 4000 }),
+    pane('p9', 'Open Codex 3', 'open-codex', { lastActivityAt: 8000 })];
+  const ask = (text) => decide(text, { sessions, workItems: [], launchers: catalog });
+  // Idle, unowned, and in the same project: still not a Codex pane.
+  const started = ask('Can you prompt a Codex terminal in vibeTerminal to fix the full screen issue?');
+  assert.deepEqual([started.decision, started.kindOfSession], ['create', 'codex'], JSON.stringify(started));
+  // And a definite reference asks rather than selecting it.
+  const asked = ask('Can you get the Codex terminal in vibeTerminal to fix the full screen issue?');
+  assert.deepEqual([asked.decision, asked.question, asked.answerKind, asked.kindOfSession],
+    ['ask', 'No Codex pane is open in vibeTerminal. Open a new one?', 'open-new', 'codex'], JSON.stringify(asked));
+  // The same sentence naming Open Codex does take it, and its leading "Open" is
+  // the launcher's name there, not a request to open anything.
+  const named = ask('Can you get the Open Codex terminal in vibeTerminal to fix the full screen issue?');
+  assert.deepEqual([named.decision, named.targetId], ['reuse', 'p9'], JSON.stringify(named));
+});
+
+// September 16: "can you get codex in Vibre Terminal to investigate ..." with no
+// Codex pane open at all answered "Which existing Codex pane did you mean in
+// vibeTerminal?" - a question about a pane that was not there, and one the user
+// could not answer. Two rules changed. A bare "codex in vibeTerminal" names a
+// kind of agent and a project, not a conversation, so it reuses an idle Codex
+// pane or opens one; and a definite reference with nothing to point at asks the
+// one thing left to decide, carrying the launcher so the reply needs no model.
+test('a provider named with a project opens or reuses, and a definite one with no pane asks to open it', () => {
+  const noCodex = [pane('p3', '✳ Claude Code', 'claude', { lastActivityAt: 4000 })];
+  const bare = decide('Can you get codex in vibeTerminal to investigate the release notes?', { sessions: noCodex, workItems: [] });
+  assert.deepEqual([bare.decision, bare.kindOfSession], ['create', 'codex'], JSON.stringify(bare));
+  const idle = [...noCodex, pane('p8', 'Codex 8', 'codex', { lastActivityAt: 2000 })];
+  const reused = decide('Can you get codex in vibeTerminal to investigate the release notes?', { sessions: idle, workItems: [] });
+  assert.deepEqual([reused.decision, reused.targetId], ['reuse', 'p8']);
+
+  const asked = decide('Can you get the Codex terminal in vibeTerminal to investigate the release notes?', { sessions: noCodex, workItems: [] });
+  assert.deepEqual([asked.decision, asked.question, asked.answerKind, asked.kindOfSession],
+    ['ask', 'No Codex pane is open in vibeTerminal. Open a new one?', 'open-new', 'codex'], JSON.stringify(asked));
+  const answered = decide('A brand new one.', { sessions: noCodex, workItems: [],
+    answer: { text: 'A brand new one.', kind: 'open-new', kindOfSession: 'codex', candidates: [] } });
+  assert.deepEqual([answered.decision, answered.kindOfSession], ['create', 'codex'], JSON.stringify(answered));
+});
+
+// Which launcher a new pane gets: the answer, the user's own word, the Brain's
+// plan, what this project usually starts, the rank order - in that order.
+test('the spoken launcher wins over the planned one, and the project default over the rank order', () => {
+  const unnamed = 'Open a new terminal in vibeTerminal.';
+  assert.deepEqual([decide(unnamed, { sessions: [] }).decision, decide(unnamed, { sessions: [] }).kindOfSession], ['create', 'codex'],
+    'no launcher anywhere: the rank order');
+  const remembered = decide(unnamed, { sessions: [], defaultProvider: 'claude' });
+  assert.deepEqual([remembered.decision, remembered.kindOfSession], ['create', 'claude'], 'what this project usually starts');
+  const planned = decide(unnamed, { sessions: [], kindOfSession: 'claude', defaultProvider: 'codex' });
+  assert.deepEqual([planned.decision, planned.kindOfSession], ['create', 'claude'], 'the Brain names one and the sentence does not');
+  const spoken = decide('Open a new Codex terminal in vibeTerminal.', { sessions: [], kindOfSession: 'codex-web', defaultProvider: 'claude' });
+  assert.deepEqual([spoken.decision, spoken.kindOfSession], ['create', 'codex'], 'the launcher the user said');
+});
 
 // Added 2026-09-15: "prompt the other one as well" right after a question was
 // answered by a guess (ladder T4.7). A delivery anchors "the other one" only

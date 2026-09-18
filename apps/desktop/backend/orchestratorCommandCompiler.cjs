@@ -25,9 +25,10 @@ const path = require('node:path');
 const { plannerTools, decodePlannerCalls } = require('./orchestratorPlannerTools.cjs');
 const { canonicalizeInterpretation } = require('./orchestratorInterpretationSchema.cjs');
 const { identifyProject } = require('./orchestratorPolicy.cjs');
-const { resolveReference, terminalsOf, providerFamily, RESOLVER_STOPWORDS } = require('./orchestratorReference.cjs');
+const { resolveReference, terminalsOf, RESOLVER_STOPWORDS } = require('./orchestratorReference.cjs');
 const { sameFolder } = require('./orchestratorTerminalModel.cjs');
-const { PROVIDER_VOCABULARY } = require('./orchestratorVocabulary.cjs');
+const { PROVIDER_VOCABULARY, FILLER_WORD } = require('./orchestratorVocabulary.cjs');
+const { rememberedProvider } = require('./orchestratorMemory.cjs');
 
 // Every reason a compilation can be refused. The set is closed so the
 // diagnostics record stays countable, and no reason carries sentence text.
@@ -60,10 +61,6 @@ const escape = value => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // "terminal" and "shell" are the pane noun of the grammar itself, so a launcher
 // named after them can never fill the provider slot.
 const NOUN_LIKE = /^(?:terminals?|shells?|panes?|agents?|sessions?)$/i;
-// The family names the user says for a launcher kind. The canonical spellings
-// the vocabulary pass writes are the ones this grammar reads.
-const FAMILY_ALIASES = Object.freeze([['Claude Code', 'claude'], ['Open Claude Code', 'claude-custom'],
-  ['Codex Web', 'codex-web'], ['Open Codex', 'open-codex'], ['Codex', 'codex']]);
 
 function providerCatalog(launchers) {
   const list = (Array.isArray(launchers) ? launchers : []).filter(item => item && item.kind && !NOUN_LIKE.test(item.kind));
@@ -75,7 +72,9 @@ function providerCatalog(launchers) {
     if (!entries.has(name.toLowerCase())) entries.set(name.toLowerCase(), { text: name, kind });
   };
   for (const launcher of list) { add(launcher.label, launcher.kind); add(launcher.kind, launcher.kind); }
-  for (const [label, kind] of FAMILY_ALIASES) add(label, kind);
+  // The canonical spellings the vocabulary pass writes are the ones this
+  // grammar reads. A second hand-written copy of these names used to sit above
+  // this loop and say the same thing.
   for (const entry of PROVIDER_VOCABULARY) add(entry.canonical, entry.kind);
   // Longest first, so "Codex Web" and "Open Codex" are never read as "Codex".
   return [...entries.values()].sort((left, right) => right.text.length - left.text.length);
@@ -107,7 +106,9 @@ function projectPattern(projects) {
 // "right") are deliberately absent: an answer must never become a command by
 // having its answer word trimmed off.
 // ---------------------------------------------------------------------------
-const LEADING_FILLER = /^(?:[\s,.!?;:—–…"'-]|\*[^*]{0,24}\*|\b(?:thank you|thanks|so|well|um|uh|er|now|then|hey|hi|hello|bye|anyway|sorry)\b)+/i;
+// The filler words are the lexicon's, not this module's: the reference resolver
+// steps over the same words in the middle of a sentence.
+const LEADING_FILLER = new RegExp(String.raw`^(?:[\s,.!?;:—–…"'-]|\*[^*]{0,24}\*|\b${FILLER_WORD}\b)+`, 'i');
 const TRAILING_FILLER = /(?:[\s,.!?;:—–…"'-]|\*[^*]{0,24}\*|\b(?:thank you|thanks|please|amen|um|uh|er)\b)+$/i;
 
 function trimFiller(text) {
@@ -220,16 +221,6 @@ function grammar(providers, projectSource) {
   // sentence whose command head parses but whose remainder does not is carrying
   // something this grammar does not model.
   return { patterns, head: new RegExp(head, 'i') };
-}
-
-// "Open Codex terminal in vibeTerminal" is two readings at once when the build
-// offers an Open Codex launcher: the verb "open" plus Codex, or the launcher
-// named Open Codex with no verb at all. Neither reading can be proved, so the
-// sentence belongs to the brain. An article settles it ("open a Codex terminal",
-// "open an Open Codex terminal") and those still compile.
-function ambiguousLauncherHead(text, providers) {
-  return providers.some(entry => /^(?:open|start|create|launch|spawn|new)\b/i.test(entry.text) &&
-    new RegExp(String.raw`^${LEAD}${escape(entry.text)}\s+${PANE_NOUN}\b`, 'i').test(text));
 }
 
 // Loose probes used only to explain a refusal and to catch a second command
@@ -384,7 +375,6 @@ function compileCommand(context) {
   // compilation when this part of the sentence points back at that turn.
   const headText = text.slice(0, Math.max(0, text.length - String(groups.task ?? '').length));
   if (hasPendingCommand(context) && leansOnPriorTurn(headText)) return decline('context-dependent');
-  if (['open', 'start'].includes(shape) && ambiguousLauncherHead(text, providers)) return decline('unknown-provider');
 
   // The project slot must name exactly one registered project, resolved by the
   // same function the request path uses. The whole sentence is resolved too: a
@@ -482,20 +472,17 @@ function compileCommand(context) {
   let provider = groups.provider && providers.find(entry => entry.text.toLowerCase() === String(groups.provider).toLowerCase())?.kind;
   if (groups.provider && !provider) return decline('unknown-provider');
   if (!provider) {
-    const remembered = context?.memory?.project?.defaultProvider;
+    const remembered = rememberedProvider(context?.memory?.project);
     provider = remembered && providers.some(entry => entry.kind === remembered) ? remembered : undefined;
     if (!provider) return decline('unknown-provider');
     confidence -= 0.05;
   }
-  // The resolver reads the same sentence for the same fact. Two answers about
-  // which provider was named is exactly the disagreement that must not compile.
-  // One name containing the other ("Open Codex" and "Codex") is the resolver
-  // reading a shorter label out of a longer one, not a second provider.
-  const labelOf = kind => (providers.find(entry => entry.kind === kind)?.text || String(kind)).toLowerCase();
-  if (selector.provider && providerFamily(selector.provider) !== providerFamily(provider)) {
-    const chosen = labelOf(provider), read = labelOf(selector.provider);
-    if (!chosen.includes(read) && !read.includes(chosen)) return decline('unknown-provider');
-  }
+  // The resolver reads the same sentence for the same fact, by the same rule
+  // (orchestratorReference.cjs, namedProvider). Two answers about which
+  // provider was named is exactly the disagreement that must not compile, and
+  // the containment tolerance that used to forgive "Open Codex" against
+  // "Codex" is gone with the ambiguity it forgave.
+  if (selector.provider && selector.provider !== provider) return decline('unknown-provider');
 
   if (shape === 'open') {
     const count = groups.count ? COUNTS[String(groups.count).toLowerCase()] ?? Number(groups.count) : 1;

@@ -74,7 +74,15 @@ async function fetchAnthropicAsChat(chat,route,options,fetchImpl) {
     let stopReason,usage={},sawStop=false;
     for await(const raw of sseData(upstream.body)) {
       const event=JSON.parse(raw);
-      if(event.type==='error')throw new Error('Provider stream failed.');
+      // The provider says why it stopped. Discarding it left "Provider stream
+      // failed." as the whole record of a turn that died forty seconds in, with
+      // nothing to act on. The type and sentence only, one line, bounded.
+      if(event.type==='error') {
+        const detail=[event.error?.type,event.error?.message].filter(part=>typeof part==='string'&&part.trim())
+          .join(': ').replace(/\s+/g,' ').trim().slice(0,240);
+        throw Object.assign(new Error(detail?`Provider stream failed: ${detail}`:'Provider stream failed.'),
+          ...(detail?[{providerMessage:detail}]:[]));
+      }
       let delta;
       if(event.type==='message_start')usage=event.message.usage||{};
       if(event.type==='content_block_start' && event.content_block.type==='tool_use')delta={tool_calls:[{index:event.index,id:event.content_block.id,type:'function',function:{name:event.content_block.name,arguments:''}}]};

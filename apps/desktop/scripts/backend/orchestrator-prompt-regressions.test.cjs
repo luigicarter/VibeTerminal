@@ -64,7 +64,23 @@ test('worker payload and negative answers never authorize a new terminal', () =>
 test('the named launcher and the explicitly supplied greeting survive model composition', () => {
   const ctx = context('Open a new Codex terminal in Alpha and prompt it with Hi.');
   const tools = plannerTools(ctx);
-  assert.throws(() => decodePlannerCalls([call('plan_delegate_task', { cwd: 'C:/Alpha', kindOfSession: 'open-codex', text: 'Open a worker and say hi.' })], tools, ctx.instruction, ctx), /planned launcher differs/);
+  // A launcher from another family is the plan being wrong about the request,
+  // and is refused rather than substituted.
+  assert.throws(() => decodePlannerCalls([call('plan_delegate_task', { cwd: 'C:/Alpha', kindOfSession: 'claude', text: 'Open a worker and say hi.' })], tools, ctx.instruction, ctx), /planned launcher differs/);
+  // Open Codex is the same product family as the Codex the user said, so the
+  // plan stands and the spoken launcher replaces the planned one, on the
+  // record. September 16: this plan opened an Open Codex pane.
+  const sameFamily = decodePlannerCalls([call('plan_delegate_task', { cwd: 'C:/Alpha', kindOfSession: 'open-codex', text: 'Open a worker and say hi.' })], tools, ctx.instruction, ctx);
+  const corrected = normalizeIntent({ goal: 'Open one terminal', actions: sameFamily.actions }, ctx);
+  assert.equal(corrected.grants[0].args.kindOfSession, 'codex');
+  assert.deepEqual(corrected.grants[0].launcherOverride, { from: 'open-codex', to: 'codex' });
+  // Two launchers in one sentence: there is no single spoken launcher to
+  // correct towards, so the plan is left exactly as the Brain wrote it.
+  const two = context('Open a Codex terminal and a Codex Web terminal in Alpha.');
+  const planned = normalizeIntent({ goal: 'Open two terminals',
+    actions: [{ kind: 'create_session', cwd: 'C:/Alpha', kindOfSession: 'open-codex' }] }, two);
+  assert.equal(planned.grants[0].args.kindOfSession, 'open-codex');
+  assert.equal(planned.grants[0].launcherOverride, undefined);
   const decoded = decodePlannerCalls([call('plan_delegate_task', { cwd: 'C:/Alpha', kindOfSession: 'codex', text: 'Open a worker and say hi.' })], tools, ctx.instruction, ctx);
   assert.equal(decoded.actions[0].text, 'Hi'); assert.equal(decoded.actions[0].promptMode, 'literal');
   assert.equal(readReference('Use the Codex Web terminal', { launchers }).provider, 'codex-web');

@@ -609,7 +609,7 @@ console.log("tiled board resize smoke passed (executed real tiledBoardGeometry.t
 
 // Empty-region behavior used by both the live pointer preview and release.
 {
-  const {resolveMoveLayouts,findAvailablePlacement,snapCoordinate,boardPointerDelta}=geometryModule.exports;
+  const {resolveMoveLayouts,findAvailablePlacement,snapCoordinate,boardPointerDelta,DEFAULT_PANE_HEIGHT}=geometryModule.exports;
   const width=1000;
   const R=(left,top,w,h)=>rectToLayout({left,top,width:w,height:h},width);
   const rect=layout=>layoutToRect(layout,width);
@@ -643,6 +643,17 @@ console.log("tiled board resize smoke passed (executed real tiledBoardGeometry.t
   assert.equal(rect(scrolled).top,810,"visible scrolled space ranks ahead of an offscreen hole");
   const offscreen=findAvailablePlacement(hole,width,{top:500,bottom:700});
   assert.equal(rect(offscreen).top,210,"offscreen usable hole ranks ahead of append when viewport is full");
+  // A new pane opens at DEFAULT_PANE_HEIGHT and is clamped to the empty region it lands in.
+  assert.equal(DEFAULT_PANE_HEIGHT,520,"new panes open 520px tall by default");
+  const freshTall=rect(findAvailablePlacement([],width,{top:0,bottom:900}));
+  assert.equal(freshTall.height,DEFAULT_PANE_HEIGHT,"an empty board taller than the default gives the new pane the full 520px");
+  assert.equal(freshTall.top,BOARD_PADDING,"the new pane still starts at the board padding");
+  const freshShort=rect(findAvailablePlacement([],width,{top:0,bottom:400}));
+  assert.equal(freshShort.height,400-BOARD_PADDING,"a board shorter than the default clamps the new pane to the visible region (400-10=390)");
+  assert.equal(freshShort.top,BOARD_PADDING);
+  const holeGap=(480-BOARD_GAP)-(10+196+BOARD_GAP);
+  assert.equal(holeGap,266,"B bottom 206 + gap = 210, C top 480 - gap = 476");
+  assert.equal(rect(findAvailablePlacement(hole,width,{top:0,bottom:900})).height,holeGap,"a gap shorter than the default clamps the new pane to the gap, not 520");
   assert.deepStrictEqual(boardPointerDelta({x:20,y:50},{x:20,y:50},{left:10,top:0},{left:10,top:-200}),{dx:0,dy:200},"board scroll contributes to drag coordinates even with a stationary pointer");
   assert.equal(snapCoordinate(111,[100]),100);
   assert.equal(snapCoordinate(117,[100],100),100,"snap holds through the 18px release radius");

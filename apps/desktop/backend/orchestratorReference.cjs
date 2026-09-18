@@ -22,14 +22,91 @@
 // store, no terminal.
 const { scoreCandidates, STOPWORDS, MIN_SCORE, MIN_MATCHED_TOKENS, RUNNER_UP_MARGIN } = require('./orchestratorOwnerMatch.cjs');
 const { buildTerminalModel, createTerminalHandles, sameFolder } = require('./orchestratorTerminalModel.cjs');
+const { PROVIDER_VOCABULARY, PROVIDER_SPOKEN, providerFamily, FILLER_WORD, OPENING_VERB } = require('./orchestratorVocabulary.cjs');
 
 // ---------------------------------------------------------------------------
 // Grammar. Deterministic, over the normalized instruction (wave 1 has already
 // turned "cloud code" into "Claude Code" and "codec" into "Codex").
 // ---------------------------------------------------------------------------
 
+const escapeRegExp = value => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 const PANE_NOUN = String.raw`(?:terminals?|panes?|agents?|sessions?|workers?)`;
-const PROVIDER_WORD = String.raw`(?:codex|claude|gemini|qwen|kimi|cursor|grok|opencode|open ?fusion|fusion|open ?codex)`;
+
+// Providers the user can name, read from the one provider lexicon
+// (orchestratorVocabulary.cjs). Values are launcher kinds; the caller also
+// supplies the live launcher catalog so a configured custom launcher is named
+// too, and its label is read by the same rule as a lexicon name.
+//
+// "Open Codex", "Open Claude Code" and "Open Fusion" are launcher names whose
+// first word is the verb every opening sentence already uses, so a bare "open
+// codex" reads two ways. It is the verb plus the provider: that is what the
+// user means, and reading it as the launcher is what opened an Open Codex pane
+// on September 16 for "can you open a new Codex terminal in vibeTerminal". The
+// Open-prefixed launcher is named when a determiner stands in front of it ("an
+// Open Codex terminal", "the Open Codex one", "another open codex"), when an
+// opening verb already stands in front of it and has taken the verb slot ("open
+// open codex", "start open codex", "launch an open codex terminal"), or when it
+// is written the way the app writes it ("open-codex", "openfusion"): one token
+// is never the verb, so it needs no determiner. One rule, read here and nowhere
+// else; the command compiler used to decline every such sentence as ambiguous
+// rather than read it.
+const PROVIDER_NAMES = new Set(PROVIDER_VOCABULARY.map(entry => entry.canonical.toLowerCase()));
+const DETERMINER = String.raw`(?:a|an|the|another|one more|some|any|each|every|that|this|my|our|your|both|all)`;
+const DETERMINED = String.raw`\b${DETERMINER}\s+(?:[\w'’-]+\s+){0,2}`;
+// A second opening verb cannot be the same verb: "open open codex" spends one
+// on the request and the other is the launcher's own first word. A
+// sentence-initial "Open Codex terminal" has no verb before it and stays Codex.
+//
+// Speech puts things between the two: a comma or a full stop where the speaker
+// restarted ("Open, open Codex", "Open. Open Codex terminal"), one or more
+// fillers ("open, uh, open codex"), and the ordinary determiner or adjective the
+// grammar already allowed ("open a new Open Codex terminal"). Punctuation and
+// fillers may repeat; at most one determiner and one other word may not. The
+// fused spelling "openopen" has no boundary for this rule to find at all and is
+// split back into two words by the vocabulary pass before anything reads it.
+const GAP = String.raw`[\s,.!?…;:—–-]*`;
+const FILLERS = String.raw`(?:${FILLER_WORD}\b${GAP})*`;
+const FILLER_ONLY = new RegExp(String.raw`^${FILLER_WORD}$`, 'i');
+const VERB_LED = String.raw`\b${OPENING_VERB}\b${GAP}${FILLERS}(?:${DETERMINER}\b${GAP}${FILLERS})?(?:[\w'’-]+\b${GAP}${FILLERS}){0,1}`;
+const openPrefixed = name => /^open\s+\S/i.test(name) && PROVIDER_NAMES.has(name.replace(/^open\s+/i, '').trim().toLowerCase());
+const joinedForm = name => name.trim().split(/\s+/).map(escapeRegExp).join('-?');
+const namedSpans = name => String.raw`(?:${VERB_LED}|${DETERMINED})${escapeRegExp(name)}\b`;
+const spokenPattern = name => new RegExp(openPrefixed(name)
+  ? String.raw`${namedSpans(name)}|\b${joinedForm(name)}\b`
+  : String.raw`\b${escapeRegExp(name)}\b`, 'i');
+const PROVIDER_PATTERNS = PROVIDER_SPOKEN.map(([name, kind]) => [spokenPattern(name), kind]);
+// The other half of the same rule. Once a determiner or an opening verb has
+// settled that "Open Codex" is a name here, its own first word is not a second
+// verb: "get the Open Codex terminal in vibeTerminal to fix X" points at a pane
+// and asks for no new one, and "open open codex terminal in X" asks for one pane
+// and not two. The creation grammar below therefore reads the sentence with the
+// NAME's leading "Open" dropped and the sentence's own verb left where it is.
+function withoutNamedVerbs(text, launchers = []) {
+  let value = String(text ?? '');
+  const names = [...(Array.isArray(launchers) ? launchers : []).map(item => String(item?.label ?? '').trim()),
+    ...PROVIDER_SPOKEN.map(([name]) => name)]
+    .filter(name => name.length >= 4 && openPrefixed(name))
+    .sort((left, right) => right.length - left.length);
+  for (const name of [...new Set(names)]) {
+    // The lead keeps its words and loses the garble: the restart punctuation and
+    // the fillers the speaker put between the verb and the name are not part of
+    // the request, and the creation grammar below expects the verb next to what
+    // it opens ("Open. Open Codex terminal" reads as "Open Codex terminal").
+    value = value.replace(new RegExp(String.raw`((?:${VERB_LED}|${DETERMINED}))${escapeRegExp(name)}\b`, 'gi'), (match, lead) => {
+      const words = (lead.match(/[\w'’-]+/g) || []).filter(word => !FILLER_ONLY.test(word));
+      return `${words.join(' ')}${words.length ? ' ' : ''}${name.replace(/^open\s+/i, '')}`;
+    });
+    // The one-token spelling carries its own verb with no boundary after it, so
+    // the creation grammar cannot see one at all: "opencodex terminal in X" asks
+    // for a pane exactly as "open an Open Codex terminal" does. Give that verb
+    // back its space here, where the name has already been settled.
+    value = value.replace(new RegExp(String.raw`\b${joinedForm(name)}\b`, 'gi'), `open ${name.replace(/^open\s+/i, '')}`);
+  }
+  return value;
+}
+// The provider word class the rules below test beside a pane noun.
+const PROVIDER_WORD = `(?:${PROVIDER_SPOKEN.map(([name]) => escapeRegExp(name)).join('|')})`;
 
 // "Use one of the empty terminals" is an instruction, not a hint. Two tiers,
 // scored against the saved utterances. Strong is an explicit request for an
@@ -153,11 +230,12 @@ const CATEGORY_PANE = new RegExp(String.raw`\b(?:random|idle|free|available|spar
 const GROUP_REFERENCE = new RegExp(String.raw`\b(?:one of|any of|either of|all|every|random|idle|available|free|existing|(?:the|currently) open)\s+(?:(?:[\w-]+)\s+){0,3}(?:${PANE_NOUN}|${PROVIDER_WORD}|them|those|these)\b`, 'iu');
 // "The Codex terminal in Alpha" points at a pane; "my Codex session usage" and
 // "a Codex" do not. Only a definite pane reference may select the single pane
-// of that family.
-const DEFINITE_PROVIDER = new RegExp([
-  String.raw`\b(?:the|that|this)\s+(?:\w+\s+){0,2}${PROVIDER_WORD}\b`,
-  String.raw`\b${PROVIDER_WORD}\s+in\s+`,
-].join('|'), 'iu');
+// of that family. A bare "codex in vibeTerminal" is not one: it names a kind of
+// agent and a project, which is why "can you get codex in vibeTerminal to
+// investigate this" asked "which existing Codex pane did you mean?" on
+// September 16 with no Codex pane open at all. It is an ordinary provider
+// reference now - reuse an idle Codex pane, or open one.
+const DEFINITE_PROVIDER = new RegExp(String.raw`\b(?:the|that|this)\s+(?:\w+\s+){0,2}${PROVIDER_WORD}\b`, 'iu');
 
 const STATE_KINDS = new Set(['working', 'done']);
 const WORKING_STATES = new Set(['working', 'waiting']);
@@ -208,16 +286,6 @@ function titlePhrase(text) {
   return undefined;
 }
 
-// Providers the user can name. Values are launcher kinds; the caller supplies
-// the live launcher catalog so a configured custom launcher is named too.
-const PROVIDER_PATTERNS = [
-  [/\bcodex web\b/i, 'codex-web'], [/\bopen codex\b/i, 'open-codex'], [/\bcodex\b/i, 'codex'],
-  [/\bclaude code\b|\bclaude\b/i, 'claude'], [/\bgemini\b/i, 'gemini'], [/\bqwen\b/i, 'qwen'],
-  [/\bkimi\b/i, 'kimi'], [/\bcursor\b/i, 'cursor'], [/\bgrok\b/i, 'grok'],
-  [/\bopen ?fusion\b/i, 'openfusion'], [/\bfusion\b/i, 'fusion'], [/\bopencode\b/i, 'opencode'],
-];
-const PROVIDER_FAMILY = { 'claude-custom': 'claude', 'kimi-custom': 'kimi' };
-const providerFamily = kind => PROVIDER_FAMILY[kind] || kind;
 // The plain shell launcher is labelled with the pane noun every sentence about
 // panes already uses ("the Codex terminal", "one of the empty terminals"), so
 // its own label can never select it. The shell is chosen by the words a user
@@ -229,17 +297,40 @@ const SHELL_WORDS = new RegExp([
   String.raw`\bcmd(?:\.exe)?\b`, String.raw`\bbash\b`, String.raw`\bzsh\b`, String.raw`\bshell\b`,
   String.raw`\b(?:plain|regular|normal|basic|ordinary|standard|empty plain)\s+(?:terminal|shell)s?\b`,
 ].join('|'), 'i');
-const escapeRegExp = value => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function namedProvider(instruction, launchers = []) {
   let shell;
   for (const launcher of [...launchers].sort((a, b) => String(b?.label || '').length - String(a?.label || '').length)) {
     const label = String(launcher?.label ?? '').trim();
     if (SHELL_KINDS.has(launcher?.kind) || NOUN_LABEL.test(label)) { shell ??= launcher?.kind; continue; }
-    if (label.length >= 4 && new RegExp(`\\b${escapeRegExp(label)}\\b`, 'i').test(instruction)) return launcher.kind;
+    if (label.length >= 4 && spokenPattern(label).test(instruction)) return launcher.kind;
   }
   for (const [pattern, kind] of PROVIDER_PATTERNS) if (pattern.test(instruction)) return kind;
   if (shell && SHELL_WORDS.test(instruction)) return shell;
   return undefined;
+}
+
+// Every distinct launcher kind a sentence names. namedProvider above answers
+// "which provider is this sentence about"; this answers "how many did it name",
+// which is what stops a correction being applied to the wrong half of "open a
+// codex terminal and a codex web terminal". Names are read longest first by the
+// same rule, and each match is blanked before the next name is tried, so "codex
+// web" is one kind and never also "codex". The planner tools and the intent
+// normalizer both read this; the planner tools used to keep their own count,
+// splitting the sentence on "and" and reading each clause separately.
+function namedProviders(instruction, launchers = []) {
+  let text = String(instruction ?? '');
+  const kinds = new Set();
+  const blank = (name, kind) => {
+    text = text.replace(new RegExp(spokenPattern(name).source, 'gi'), match => { kinds.add(kind); return ' '.repeat(match.length); });
+  };
+  const labelled = [...launchers].filter(launcher => launcher && !SHELL_KINDS.has(launcher.kind) &&
+    !NOUN_LABEL.test(String(launcher.label ?? '').trim()) && String(launcher.label ?? '').trim().length >= 4)
+    .sort((a, b) => String(b.label).length - String(a.label).length);
+  for (const launcher of labelled) blank(String(launcher.label).trim(), launcher.kind);
+  for (const [name, kind] of PROVIDER_SPOKEN) blank(name, kind);
+  const shell = launchers.find(launcher => launcher && (SHELL_KINDS.has(launcher.kind) || NOUN_LABEL.test(String(launcher.label ?? '').trim())));
+  if (shell && SHELL_WORDS.test(text)) kinds.add(shell.kind);
+  return [...kinds];
 }
 
 // The reading: { kind, words, provider?, text?, working?, handle?, fanOut, all,
@@ -277,7 +368,7 @@ function readReference(instruction, { launchers = [] } = {}) {
   if (JUST_OPENED.test(text)) return { kind: 'just_opened', ...facts };
   if (idlePaneRequest(text) === 'strong') return { kind: 'idle', ...facts };
   if (REUSE_ANOTHER.test(text)) return { kind: 'other', ...facts };
-  if (!facts.creationForbidden && NEW_PANE.test(text)) return { kind: 'new', ...facts };
+  if (!facts.creationForbidden && NEW_PANE.test(withoutNamedVerbs(text, launchers))) return { kind: 'new', ...facts };
   if (WORKING_PANE.test(text)) return { kind: 'working', ...facts };
   if (DONE_PANE.test(text)) return { kind: 'done', ...facts };
   if (LAST_TARGET_PHRASE.test(text)) return { kind: 'last_target', ...facts };
@@ -449,5 +540,5 @@ function resolveReference(instruction, terminals, { launchers = [], cwd, project
   return result;
 }
 
-module.exports = { readReference, resolveReference, terminalsOf, idlePaneRequest, providerFamily, meaningful, unresolvedOpeningLauncher,
+module.exports = { readReference, resolveReference, terminalsOf, idlePaneRequest, providerFamily, namedProviders, meaningful, unresolvedOpeningLauncher,
   RESOLVER_STOPWORDS, STATE_KINDS, SHELL_KINDS, OPENED_WINDOW_MS };

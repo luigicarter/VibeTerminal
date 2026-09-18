@@ -170,7 +170,7 @@ Shared passive Node/PowerShell hook readers retain available session, turn, tool
 
 New panes, duplicates, add-matching, and popped-out panes use the shared empty-region search. It fills visible holes first, then existing offscreen holes, before extending the board. Only actual tile anchors occupy space. New panes select themselves and reveal their location with minimal board scrolling.
 
-Default solo minimum: **280×170 CSS pixels**. Automatic growth limit: **560×320**. New panes target a half-board column capped at 560px, with a 260px starting height. Manual resizing may exceed this limit; split subtree minimums override it.
+Default solo minimum: **280×170 CSS pixels**. Automatic growth limit: **560×320**. New panes target a half-board column capped at 560px, with a 520px starting height that is clamped to the visible empty region, so a board shorter than that yields a shorter pane; saved layouts keep their stored height. Manual resizing may exceed this limit; split subtree minimums override it.
 
 Dragging previews the exact committed fit. Ordinary dragging prefers empty space; **hold Shift to swap** with another tile. Snapping acquires within 12px and releases beyond 18px. Impossible drops retain the last valid preview. Resize affects adjacent neighbors within minimum constraints and does not globally compact unaffected panes. Geometry accounts for scroll offsets and the viewport's client dimensions, excluding scrollbar width.
 

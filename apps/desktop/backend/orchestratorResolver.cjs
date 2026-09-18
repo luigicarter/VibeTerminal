@@ -57,13 +57,16 @@ const AFFIRMATIVE = /\b(?:yes|yeah|yep|yup|sure|ok|okay|please do|go ahead|do it
 const NEGATIVE = /\b(?:no|nope|don'?t|do not|never ?mind|cancel|stop|forget it)\b/i;
 const BOTH = /\b(?:both|all of them|either|each of them|all three)\b/i;
 
-// answer: { text, kind: 'candidates' | 'open-new', candidates: [{ targetId, label }] }
+// answer: { text, kind: 'candidates' | 'open-new', candidates: [{ targetId, label }],
+//           kindOfSession } - the launcher the question was about, so "a brand
+// new one" opens the Codex pane the question named and needs no model round.
 function resolveAnswer(answer) {
   if (!answer || typeof answer.text !== 'string') return undefined;
   const text = answer.text;
   if (answer.kind === 'open-new') {
     if (NEGATIVE.test(text)) return undefined;
-    if (AFFIRMATIVE.test(text)) return { decision: 'create', reason: 'You asked me to open a new pane for this task.' };
+    if (AFFIRMATIVE.test(text)) return { decision: 'create', ...(answer.kindOfSession && { kindOfSession: answer.kindOfSession }),
+      reason: 'You asked me to open a new pane for this task.' };
     return undefined;
   }
   const candidates = Array.isArray(answer.candidates) ? answer.candidates.filter(item => item && item.targetId) : [];
@@ -94,7 +97,7 @@ const candidateQuestion = candidates => candidates.length === 2
 // ---------------------------------------------------------------------------
 
 // Returns { decision: 'reuse' | 'create' | 'ask', selector, candidateCount, ... }.
-function resolveAssignment({ instruction, grant = {}, terminals = [], launchers = [], cwd, projectName, answer, now } = {}) {
+function resolveAssignment({ instruction, grant = {}, terminals = [], launchers = [], cwd, projectName, answer, defaultProvider, now } = {}) {
   const text = String(instruction ?? '');
   const scope = grant.args || {};
   const reference = resolveReference(text, terminals, { launchers, cwd, projectName: projectName || '', ...(now !== undefined && { now }) });
@@ -104,10 +107,16 @@ function resolveAssignment({ instruction, grant = {}, terminals = [], launchers 
   const byRecency = list => [...list].sort((left, right) => (right.activeAt || 0) - (left.activeAt || 0));
   const done = (decision, extra = {}) => ({ decision, selector: reference.kind, candidateCount: panes.length, ...extra });
   const reuse = (terminal, extra = {}) => done('reuse', { targetId: terminal.id, ...(terminal.task?.id && { workItemId: terminal.task.id }), ...extra });
-  const create = reason => {
+  // Which launcher a new pane gets, in one order: the answer to Lina's own
+  // question, then the launcher the user said, then the one the Brain planned,
+  // then what this project usually starts, then the rank order. The Brain's
+  // kindOfSession used to come first, which is how "can you open a new Codex
+  // terminal in vibeTerminal" opened an Open Codex pane on September 16.
+  const create = (reason, answeredKind) => {
     if (reference.creationForbidden) return done('ask', { question: 'You asked me not to open another terminal. Which existing terminal should I use?' });
-    const route = deterministicNewTaskRoute({ scope: { ...scope, assignmentMode: 'new', ...(reference.provider && !scope.kindOfSession && { kindOfSession: reference.provider }) },
-      launchers, automaticProvider: true });
+    const kindOfSession = answeredKind || reference.provider || scope.kindOfSession;
+    const route = deterministicNewTaskRoute({ scope: { ...scope, assignmentMode: 'new', ...(kindOfSession && { kindOfSession }) },
+      launchers, automaticProvider: true, preferredKind: defaultProvider });
     if (!route || route.decision !== 'create') {
       return done('ask', { question: route?.text || 'Which configured coding agent should I use for this project?' });
     }
@@ -121,7 +130,9 @@ function resolveAssignment({ instruction, grant = {}, terminals = [], launchers 
     return list.map((terminal, index) => ({ targetId: terminal.id,
       label: labels.filter(item => item === labels[index]).length > 1 ? `${labels[index]} (${terminal.provider}, ${terminal.state})` : labels[index] }));
   };
-  const wanted = scope.kindOfSession || reference.provider;
+  // The launcher the user said, then the one the Brain planned: the same order
+  // create() uses, so the pane word and the family filter name what they open.
+  const wanted = reference.provider || scope.kindOfSession;
   const family = providerFamily(wanted);
   const ofFamily = list => family ? list.filter(terminal => providerFamily(terminal.provider) === family) : list;
   const paneWord = () => wanted ? `${label(wanted)} pane` : 'pane';
@@ -139,7 +150,7 @@ function resolveAssignment({ instruction, grant = {}, terminals = [], launchers 
   //    candidates, never re-interpreted.
   const answered = resolveAnswer(answer);
   if (answered) {
-    if (answered.decision === 'create') return create(answered.reason);
+    if (answered.decision === 'create') return create(answered.reason, answered.kindOfSession);
     if (answered.decision === 'ask') return done('ask', { question: answered.question, candidates: answered.candidates });
     const terminal = panes.find(item => item.id === answered.targetId);
     if (terminal) return reuse(terminal, { reason: answered.reason, ...(answered.score !== undefined && { score: answered.score }) });
@@ -189,7 +200,14 @@ function resolveAssignment({ instruction, grant = {}, terminals = [], launchers 
 
   // A definite provider reference names an existing conversation, even while
   // it is busy or already owns work. It must never fall through to creation.
+  // With no pane of that kind open at all, the sentence describes a pane that is
+  // not there: "Which existing Codex pane did you mean?" has no answer, so the
+  // question asks the one thing left to decide and carries the launcher with it.
   if (reference.kind === 'provider' && reference.definiteProvider && !reference.indefiniteProvider && !reference.named.length) {
+    if (!reference.candidates.length) {
+      return done('ask', { question: `No ${paneWord()} is open in ${project}. Open a new one?`, candidates: [],
+        answerKind: 'open-new', ...(wanted && { kindOfSession: wanted }) });
+    }
     return pick(reference.candidates, 'The existing terminal you named.', `Which existing ${paneWord()} did you mean in ${project}?`);
   }
 
@@ -238,7 +256,7 @@ function resolveAssignment({ instruction, grant = {}, terminals = [], launchers 
   // (e) An explicit request for an idle pane.
   if (reference.kind === 'idle') {
     if (free().length) return reuse(free()[0], { reason: IDLE_REUSE_REASON });
-    return done('ask', { question: `No idle ${label(wanted)} pane is free in ${project}. Open a new one?`, answerKind: 'open-new' });
+    return done('ask', { question: `No idle ${label(wanted)} pane is free in ${project}. Open a new one?`, answerKind: 'open-new', ...(wanted && { kindOfSession: wanted }) });
   }
 
   // (f) A provider, or nothing at all. An unowned idle pane is reusable for new

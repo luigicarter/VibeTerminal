@@ -158,7 +158,8 @@ const LEGACY_BOARD_PADDING = 10;
 const DEFAULT_COLUMN_GAP_PERCENT = 0.65;
 const DEFAULT_PANE_WIDTH_PERCENT = (100 - DEFAULT_COLUMN_GAP_PERCENT) / 2;
 const SECOND_COLUMN_X_PERCENT = 50 + DEFAULT_COLUMN_GAP_PERCENT / 2;
-const DEFAULT_PANE_HEIGHT = 260;
+// Only recognises and migrates rows saved by older builds; the new-pane default is DEFAULT_PANE_HEIGHT in tiledBoardGeometry.ts.
+const LEGACY_PANE_HEIGHT = 260;
 const DEFAULT_MIN_PANE_WIDTH = 280;
 const DEFAULT_MIN_PANE_HEIGHT = 170;
 const DEFAULT_SIDEBAR_WIDTH = 292;
@@ -660,15 +661,15 @@ function tightenDefaultFluidGutters(layout: LayoutBox): LayoutBox {
     next.x = SECOND_COLUMN_X_PERCENT;
   }
 
-  if (isClose(layout.h, DEFAULT_PANE_HEIGHT)) {
-    const oldRowStep = DEFAULT_PANE_HEIGHT + PREVIOUS_DEFAULT_BOARD_GAP;
+  if (isClose(layout.h, LEGACY_PANE_HEIGHT)) {
+    const oldRowStep = LEGACY_PANE_HEIGHT + PREVIOUS_DEFAULT_BOARD_GAP;
     const row = (layout.y - LEGACY_BOARD_PADDING) / oldRowStep;
     const roundedRow = Math.round(row);
 
     if (Number.isFinite(row) && isClose(row, roundedRow)) {
       next.y =
         LEGACY_BOARD_PADDING +
-        roundedRow * (DEFAULT_PANE_HEIGHT + LEGACY_BOARD_GAP);
+        roundedRow * (LEGACY_PANE_HEIGHT + LEGACY_BOARD_GAP);
     }
   }
 
@@ -680,7 +681,7 @@ function defaultFluidLayout(): LayoutBox {
     x: 0,
     y: LEGACY_BOARD_PADDING,
     w: DEFAULT_PANE_WIDTH_PERCENT,
-    h: DEFAULT_PANE_HEIGHT,
+    h: LEGACY_PANE_HEIGHT,
     unit: "fluid"
   };
 }
@@ -694,7 +695,7 @@ function migrateLayout(layout: LayoutBox | null | undefined): LayoutBox {
     x: finiteNumber(layout.x, 0),
     y: finiteNumber(layout.y, LEGACY_BOARD_PADDING),
     w: finiteNumber(layout.w, DEFAULT_PANE_WIDTH_PERCENT),
-    h: finiteNumber(layout.h, DEFAULT_PANE_HEIGHT),
+    h: finiteNumber(layout.h, LEGACY_PANE_HEIGHT),
     unit: layout.unit === "fluid" ? "fluid" : undefined
   };
 

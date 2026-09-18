@@ -7,6 +7,7 @@ const { isDeepStrictEqual } = require('node:util');
 const path = require('node:path');
 const { validateTerminalControls } = require('../shared/terminalControls.cjs');
 const { idleTargetMatches, targetAvailabilityError } = require('./orchestratorTargetAvailability.cjs');
+const { providerTui } = require('./orchestratorVocabulary.cjs');
 
 const INTENT_KINDS = Object.freeze(['watch_terminal', 'navigate', 'focus_session', 'create_session', 'stage_draft', 'send_prompt', 'inspect_terminal', 'operate_terminal', 'delegate_task', 'interrupt', 'restart', 'close', 'answer_question', 'permission', 'terminal_interact', 'add_project', 'remove_project', 'open_folder', 'launch_setup', 'save_setup', 'resume_conversation', 'create_project', 'remember_preference', 'forget_preference']);
 const TARGET_KINDS = new Set(['watch_terminal', 'focus_session', 'stage_draft', 'send_prompt', 'operate_terminal', 'interrupt', 'restart', 'close', 'answer_question', 'permission', 'terminal_interact']);
@@ -137,7 +138,7 @@ function delegatedWorkspace(value, context) {
 // delivery, and the reference resolver reads the sentence against it. Two
 // panes delivered in the same moment, or none at all, is a question — never a
 // guess, and never every pane at once.
-const { readReference, resolveReference, terminalsOf } = require('./orchestratorReference.cjs');
+const { readReference, resolveReference, terminalsOf, namedProviders } = require('./orchestratorReference.cjs');
 // "Stop that last terminal you worked on" is an interrupt of the pane the
 // ledger names, however the model planned it: as a typed "Stop this terminal."
 // into the pane most recently talked about (a prompt into a working pane queues
@@ -320,6 +321,25 @@ function normalizeIntent(raw, context = {}) {
     return { path: inherited.path };
   }) };
   const sourceUser = sourceFor({}, context);
+  // The launcher the user actually said, read once per identified instruction by
+  // the one reference resolver. Which launcher a new pane gets is the user's to
+  // say; the Brain's kindOfSession is a preference, and inside one product
+  // family the spoken name wins over it. On September 16 "can you open a new
+  // Codex terminal in vibeTerminal" reached a Brain that answered open-codex,
+  // and an Open Codex pane opened. Across families the plan is wrong about the
+  // request rather than about the launcher, and the planner tools refuse it
+  // instead of substituting a provider.
+  const spokenLaunchers = new Map(), spokenCounts = new Map();
+  const spokenLauncher = text => {
+    if (!spokenLaunchers.has(text)) spokenLaunchers.set(text, readReference(text, { launchers: context.launchers || [] }).provider);
+    return spokenLaunchers.get(text);
+  };
+  const spokenLauncherCount = text => {
+    if (!spokenCounts.has(text)) spokenCounts.set(text, namedProviders(text, context.launchers || []).length);
+    return spokenCounts.get(text);
+  };
+  const launcherStartable = kind => !Array.isArray(context.launchers) || !context.launchers.length ||
+    context.launchers.some(item => item?.kind === kind && item.available !== false);
   const continuedInspection = priorIds.length && (context.previousCommand?.responseKind === 'terminal-inspection' || context.previousCommand?.grants?.some(grant => grant.inspection === true));
   // A reply that also asks for new terminal work is no longer an informational
   // request, so the request-level inspection scope does not carry over to it.
@@ -436,6 +456,21 @@ function normalizeIntent(raw, context = {}) {
     const allowed = commandFields(command.kind);
     keys(command, allowed, `${command.kind} command`);
     const args = Object.fromEntries(argumentNames.filter(key => command[key] !== undefined).map(key => [key, string(command[key], key)]));
+    // The spoken launcher wins over the planned one inside its own family, when
+    // this build can start it. Recorded on the grant so the request's
+    // diagnostics say who chose the launcher.
+    let launcherOverride;
+    if (['create_session', 'delegate_task'].includes(command.kind) && args.kindOfSession !== undefined) {
+      const spoken = spokenLauncher(source.text);
+      // Confusable launchers only: the same command-line program under another
+      // configuration, and only when the sentence named exactly one launcher,
+      // so "a codex terminal and a codex web terminal" corrects neither.
+      if (spoken && spoken !== args.kindOfSession && providerTui(spoken) === providerTui(args.kindOfSession) &&
+          taskLaunchers.has(spoken) && launcherStartable(spoken) && spokenLauncherCount(source.text) === 1) {
+        launcherOverride = { from: args.kindOfSession, to: spoken };
+        args.kindOfSession = spoken;
+      }
+    }
     if (command.kind === 'create_session' && args.kindOfSession !== undefined && !taskLaunchers.has(args.kindOfSession)) {
       const safeName = /^[a-z0-9_-]{1,80}$/.test(args.kindOfSession) ? args.kindOfSession : undefined;
       const error = new Error('Invalid create_session launcher: the requested launcher is not supported. Preserve all requested work and every objective in the original instruction; clarify the unknown terminal meaning instead of substituting a provider, dropping a sibling task, or attempting creation. Use only a supported kindOfSession when its meaning is known.');
@@ -530,7 +565,7 @@ function normalizeIntent(raw, context = {}) {
       if (slots.some(id => used.has(id))) throw new Error('An unfinished operation cannot be duplicated while continuing its command.');
       slots.forEach(id => used.add(id)); continuedSlots.set(previousGrant, used);
     }
-    const grant = { id: randomUUID(), kind: command.kind, sourceUserId: source.id, targets, selection: command.selection || 'one', args };
+    const grant = { id: randomUUID(), kind: command.kind, sourceUserId: source.id, targets, selection: command.selection || 'one', args, ...(launcherOverride && { launcherOverride }) };
     // Only when this reply mixes scopes: the half that continues the pending
     // read-only command is recorded as read-only, so its workspace lane stays
     // the shared read-only lane it already had while the new work serializes.

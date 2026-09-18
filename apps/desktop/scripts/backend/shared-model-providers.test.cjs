@@ -75,6 +75,37 @@ test('Open Codex can use a migrated Anthropic provider',async t=>{
   const response=await fetch(`${adapter.baseUrl}/responses`,{method:'POST',headers:{Authorization:`Bearer ${adapter.token}`,'Content-Type':'application/json'},body:JSON.stringify({model:body.model,input:'Hello',tools:[{type:'function',name:'shell',parameters:{type:'object'}}],stream:true})});
   const events=await collect(response);assert.equal(events.at(-1).type,'response.completed');assert.equal(events.at(-1).response.output[0].content[0].text,'Native Anthropic works');
 });
+// A provider that stops mid-stream says why. Discarding that sentence left
+// "Provider stream failed." as the whole record of a turn that died forty
+// seconds in, and the pane reported nothing an operator could act on.
+test('a provider stream error carries the provider\'s own bounded sentence',async()=>{
+  const {fetchAnthropicAsChat}=require('../../backend/anthropicProtocol.cjs');
+  const {Readable}=require('node:stream');
+  const failing=detail=>async()=>({ok:true,status:200,
+    body:Readable.from([Buffer.from(`event: error\ndata: ${JSON.stringify({type:'error',error:detail})}\n\n`)])});
+  const drain=async response=>{try{for await(const value of response.body)void value;return null;}catch(error){return error;}};
+  const chat={model:'claude-x',messages:[{role:'user',content:'hi'}],stream:true};
+  const route={baseUrl:'https://api.anthropic.com',apiKey:'secret-key'};
+  const spoke=await drain(await fetchAnthropicAsChat(chat,route,{},failing({type:'overloaded_error',message:'Anthropic is temporarily   overloaded.'})));
+  assert.equal(spoke.message,'Provider stream failed: overloaded_error: Anthropic is temporarily overloaded.');
+  assert.equal(spoke.providerMessage,'overloaded_error: Anthropic is temporarily overloaded.');
+  assert.ok(!spoke.message.includes('secret-key'));
+  const long=await drain(await fetchAnthropicAsChat(chat,route,{},failing({type:'api_error',message:'x'.repeat(4000)})));
+  assert.equal(long.providerMessage.length,240);
+  const silent=await drain(await fetchAnthropicAsChat(chat,route,{},failing({})));
+  assert.equal(silent.message,'Provider stream failed.');
+  assert.equal(silent.providerMessage,undefined);
+});
+test('an Open Codex pane is told the provider\'s sentence, not a generic failure',async t=>{
+  const adapter=await createAdapter({resolveModel:store('anthropic').resolveModel,listModels:()=>[],fetchImpl:async()=>
+    sse([{type:'message_start',message:{usage:{input_tokens:5}}},{type:'error',error:{type:'overloaded_error',message:'Anthropic is temporarily overloaded.'}}])});
+  t.after(()=>adapter.close());
+  const response=await fetch(`${adapter.baseUrl}/responses`,{method:'POST',headers:{Authorization:`Bearer ${adapter.token}`,'Content-Type':'application/json'},body:JSON.stringify({model:body.model,input:'Hello',stream:true})});
+  const events=await collect(response);
+  assert.equal(events.at(-1).type,'response.failed');
+  assert.equal(events.at(-1).response.error.message,'Provider stream failed: overloaded_error: Anthropic is temporarily overloaded.');
+});
+
 test('unknown models, unauthorized clients, and failed streams cannot claim success',async t=>{
   const gateway=await createClaudeGateway({defaultKey:body.model,store:store(),fetchImpl:async()=>sse([chunk({content:'partial'})])});t.after(()=>gateway.close());
   assert.equal((await fetch(`${gateway.baseUrl}/v1/models`)).status,401);

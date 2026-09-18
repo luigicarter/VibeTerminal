@@ -41,7 +41,7 @@ const inWorkspace = { workspaceContext: { ok: true, view: 'project', cwd: WORKSP
 const compiledFor = (row, extra) => compileCommand(corpusContext(row, extra));
 
 test('every corpus row carries an expected plan and a stated reason', () => {
-  assert.equal(CORPUS.length, 128);
+  assert.equal(CORPUS.length, 131);
   assert.deepEqual(Object.keys(VERB_OF_SHAPE), [...SHAPES], 'every compiled shape has a corpus verb');
   for (const row of CORPUS) {
     assert.ok(row.expected, `row ${row.n} has no expected plan`);
@@ -337,6 +337,29 @@ test('the project the user points at is the one the request path already identif
     { accepted: false, reason: 'unknown-project' });
   assert.equal(compileCommand(sentenceContext('open a Codex terminal here',
     { projectContext: null, workspaceContext: { cwd: PROJECTS[0].path } })).project, 'vibeTerminal');
+});
+
+// The spoken-launcher rule, read once in orchestratorReference.cjs and no
+// longer second-guessed here: bare "open codex" is the verb plus the provider
+// Codex; a determiner in front of the launcher's own name selects the launcher.
+// The compiler used to decline every one of these `unknown-provider` through an
+// ambiguity table of its own (corpus row 77).
+test('a bare "Open Codex terminal" compiles to Codex, and a determiner selects the Open Codex launcher', () => {
+  for (const [instruction, provider] of [
+    ['Open Codex terminal in vibeTerminal', 'codex'],
+    ['open a codex terminal in vibeTerminal', 'codex'],
+    ['open an Open Codex terminal in vibeTerminal', 'open-codex'],
+    ['open another Open Codex terminal in vibeTerminal', 'open-codex'],
+    // The verb slot is already spent, so the second "open" is the launcher's
+    // own first word. Corpus row 77 has no verb before it and stays Codex.
+    ['open open codex terminal in vibeTerminal', 'open-codex'],
+  ]) {
+    const result = compileCommand(sentenceContext(instruction));
+    assert.equal(result.accepted, true, `${instruction} declined ${result.reason}`);
+    assert.equal(result.shape, 'open', instruction);
+    assert.equal(result.provider, provider, instruction);
+    assert.equal(JSON.parse(result.calls.at(-1).function.arguments).kindOfSession, provider, instruction);
+  }
 });
 
 test('an unnamed provider falls back to what the project has been using, and to nothing else', () => {

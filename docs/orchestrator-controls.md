@@ -171,6 +171,34 @@ and the ownership reviewer that preceded it are retired. Exact target, random/al
 selection and ordinary controls retain their existing contracts.
 See [automatic assignment](orchestrator-routing-deep-dive.md).
 
+Which launcher a new pane gets is read from the sentence, once, and the spoken
+name wins. Some launchers are named after the verb that opens them, so a bare
+"open codex", "open claude code" or "open fusion" is the verb plus the provider
+and opens a Codex, Claude Code or Fusion terminal. The Open Codex, Open Claude
+Code and Open Fusion launchers are selected by a determiner in front of their
+name — "an Open Codex terminal", "the Open Codex one", "another open codex" — by
+an opening verb that has already spent the verb slot, so the launcher's own
+first word is left over — "open open codex", "start open codex", "launch open
+codex" — or by their own one-token spelling, "open-codex" and "openfusion". A
+sentence that opens with the name and no verb before it, "Open Codex terminal in
+vibeTerminal", is still the verb plus Codex. When the Brain
+plans a launcher that runs the same command-line program as the one the user
+said — Codex, Open Codex and Codex Web all run the Codex CLI — and the sentence
+named exactly one launcher, the spoken launcher replaces it and the request
+records why; a launcher running a different program is a disagreement about the
+request and is refused rather than substituted. Running the same program does
+not make two panes interchangeable: Codex, Open Codex and Codex Web are separate
+products with separate conversations, so an idle Open Codex pane is never given
+work that asked for a Codex terminal. With nothing said and nothing planned, the
+launcher this project usually starts is preferred over the build-wide order. A
+request that
+names a provider whose pane is not open — "the Codex terminal in vibeTerminal"
+with no Codex pane there — is asked the only question left, "No Codex pane is
+open in vibeTerminal. Open a new one?", and the reply opens that launcher with
+no further interpretation. A provider named beside a project without an article
+("get codex in vibeTerminal to …") describes a kind of agent, not a
+conversation: it reuses an idle pane of that family or opens one.
+
 The selected Brain returns an `interpret_workspace` plan. Invalid tool envelopes,
 JSON or plans receive one repair attempt against the original context and strict
 validator. Repeated failure cannot authorize effects. Current user instructions

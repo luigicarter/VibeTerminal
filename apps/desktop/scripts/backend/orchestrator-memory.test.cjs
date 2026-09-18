@@ -8,6 +8,7 @@ const fs = require('node:fs'), os = require('node:os'), path = require('node:pat
 const { createMemoryStore, boundedMemory, memoryQuestion, answerMemoryQuestion, topicsFrom, dayKey,
   FILE, LIMITS } = require('../../backend/orchestratorMemory.cjs');
 const { RESOLVER_STOPWORDS } = require('../../backend/orchestratorReference.cjs');
+const { normalizeInstruction } = require('../../backend/orchestratorVocabulary.cjs');
 const { createPlanningInput } = require('../../backend/orchestratorInterpreter.cjs');
 const { createOrchestrator } = require('../../backend/orchestrator.cjs');
 const utterances = require('./fixtures/orchestrator-utterances.json');
@@ -458,6 +459,25 @@ test('status, needs-me, last-done and gave-to questions are answered from the ro
   assert.equal(status.key, 'status-all');
   assert.match(rendered(status), /T1 \(Codex terminal\) is working; T2 \(Claude Code terminal\) is done; T5 \(Codex terminal\) is idle/);
   assert.doesNotMatch(rendered(status), /T3/, 'a project-scoped report lists only that project');
+
+  // The wordings the same question arrives in. "What are the status of the
+  // terminals currently working in Vibe Terminal Project?" reached the Brain on
+  // September 16 and came back "I could not interpret that request"; the store
+  // has always been able to answer it. Both the raw sentence and the normalized
+  // one the interpreter reads are tested: the vocabulary pass rewrites the
+  // project name and leaves the question itself alone.
+  const statusWordings = ['What are the status of the terminals currently working in Vibe Terminal Project?',
+    normalizeInstruction('What are the status of the terminals currently working in Vibe Terminal Project?',
+      { projects: [{ name: 'vibeTerminal', path: 'C:/repo/vibeTerminal' }], launchers: [] }).text,
+    "What's the status of the panes?", 'Status update?', 'status report',
+    'Which terminals are currently working?', 'Which agents are working?',
+    'What are the terminals working on?', 'What are my panes up to?'];
+  for (const text of statusWordings) {
+    const match = memoryQuestion(text);
+    assert.ok(match, `no template matched: ${text}`);
+    assert.equal(match.kind, 'status-all', text);
+  }
+  assert.equal(ask(statusWordings[1], { project: 'vibeTerminal' }).key, 'status-all');
 
   const needs = ask("There's a terminal that needs me. Which one is it?");
   assert.equal(needs.key, 'needs-me');

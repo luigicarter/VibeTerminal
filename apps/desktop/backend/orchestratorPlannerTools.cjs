@@ -1,6 +1,7 @@
 'use strict';
 const { interpretationTool } = require('./orchestratorInterpretationSchema.cjs');
-const { readReference, terminalsOf, providerFamily } = require('./orchestratorReference.cjs');
+const { readReference, terminalsOf, namedProviders } = require('./orchestratorReference.cjs');
+const { providerTui } = require('./orchestratorVocabulary.cjs');
 
 const PLANNER_TOOL_PROTOCOL = 'Each plan_* call describes one operation and nothing happens during planning. interpret_workspace carries optional request metadata (goal, access, dependencies, clarification, or an observation-only request), never an actions array, and a clarification uses it alone. To open a worker AND run work, use plan_delegate_task once; do not also open a blank or draft terminal. Return every requested operation in one response.';
 
@@ -149,8 +150,11 @@ function decodePlannerCalls(calls, tools, instruction, context = {}) {
   const owned = ownedWorkItemId(context);
   const resolveHandles = handleResolver(context);
   const reading = readReference(instruction, { launchers: context.launchers || [] });
-  const mentionedProviders = new Set(String(instruction).split(/\b(?:and|or)\b/i)
-    .map(clause => readReference(clause, { launchers: context.launchers || [] }).provider).filter(Boolean).map(providerFamily));
+  // How many launchers the sentence named, read once by the one reader. This
+  // module used to count them itself, by splitting on "and" and reading each
+  // clause, which counted "codex web" as Codex Web in one clause and Codex in
+  // another.
+  const mentionedProviders = new Set(namedProviders(instruction, context.launchers || []));
   const pendingIds = new Set([context.previousCommand?.requestId, ...(Array.isArray(context.pendingCommands) ? context.pendingCommands : []).map(command => command?.requestId)].filter(Boolean));
   for (const call of calls) {
     const name = call.function?.name;
@@ -220,7 +224,7 @@ function decodePlannerCalls(calls, tools, instruction, context = {}) {
         args.text = literalPrompt[1].trim(); args.promptMode = 'literal';
       }
       if (['plan_delegate_task', 'plan_open_blank_terminal', 'plan_prepare_terminal_draft'].includes(name) && reading.provider && args.kindOfSession &&
-          providerFamily(args.kindOfSession) !== providerFamily(reading.provider) && mentionedProviders.size === 1) {
+          providerTui(args.kindOfSession) !== providerTui(reading.provider) && mentionedProviders.size === 1) {
         throw new Error('The planned launcher differs from the provider the user named. Preserve the named provider instead of substituting another launcher.');
       }
       if (TARGETED_PLANS.has(name) && reading.kind === 'idle') args.targetAvailability = 'idle';

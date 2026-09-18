@@ -54,6 +54,19 @@ function fixture(t, overrides = {}) {
     ready: async () => { assert.equal((await instance.configure({ apiKey: 'private-configured-key', sessionOnly: true, model: 'test-brain' })).ok, true); assert.equal((await instance.setEnabled(true)).ok, true); } };
 }
 
+// September 16: "can you open a new Codex terminal in vibeTerminal" opened an
+// Open Codex pane, and nothing in the record said who had chosen that launcher.
+test('a planned launcher of the family the user said is corrected, and the record says who chose it', async t => {
+  const f = fixture(t, { interpretIntent: async context => ({ goal: 'Open a Codex terminal.',
+    actions: [{ kind: 'create_session', cwd: context.roots.projects[0].path, kindOfSession: 'open-codex' }] }) });
+  await f.ready();
+  await f.instance.send({ text: 'Can you open a new Codex terminal in vibeTerminal?', origin: 'text' });
+  const overridden = (await f.readAll()).filter(entry => entry.stage === 'launcher_overridden');
+  assert.equal(overridden.length, 1, JSON.stringify(overridden));
+  assert.deepEqual([overridden[0].plannedKindOfSession, overridden[0].kindOfSession], ['open-codex', 'codex']);
+  assert.equal(overridden[0].event, 'routing_progress');
+});
+
 test('unbound selection rejection keeps private diagnostics and a bounded later action receipt', async t => {
   const f = fixture(t); await f.ready();
   f.responses.push(reply('Which terminal?'));

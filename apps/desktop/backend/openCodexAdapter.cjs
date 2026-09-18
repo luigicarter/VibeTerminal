@@ -239,7 +239,13 @@ async function streamChat(upstream, response, body, tools) {
         output_tokens_details: { reasoning_tokens: usage.completion_tokens_details?.reasoning_tokens || 0 } } : null };
     await emit(incomplete ? 'response.incomplete' : 'response.completed', { response: result });
   } catch (error) {
-    if (!response.destroyed) await emit('response.failed', { response: { ...snapshot('failed'), error: { code: 'provider_error', message: error instanceof AdapterError ? error.message : 'Provider stream failed.' } } });
+    // A provider's own bounded sentence reaches the pane; anything else stays
+    // the generic line, because an arbitrary internal message is not the
+    // provider speaking.
+    const failure = error instanceof AdapterError ? error.message
+      : typeof error?.providerMessage === 'string' && error.providerMessage.trim() ? `Provider stream failed: ${error.providerMessage.slice(0, 240)}`
+      : 'Provider stream failed.';
+    if (!response.destroyed) await emit('response.failed', { response: { ...snapshot('failed'), error: { code: 'provider_error', message: failure } } });
   }
   response.end();
 }

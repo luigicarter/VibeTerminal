@@ -354,7 +354,7 @@ test('one sentence addressing two panes keeps each named sibling and assigns the
   assert.deepEqual([mixed.decision, ...mixed.operations.map(item => item.basis)], ['ASSIGN', 'named', 'unselected']);
 });
 
-// The 128 saved utterances are the regression corpus. Every row whose selector
+// The 131 saved utterances are the regression corpus. Every row whose selector
 // is a pane the user identified - by title, or as the pane the last exchange
 // used - must reach that pane without a model round when the roster holds one
 // matching pane. Rows 9 and 10 are resume requests, which never produce a

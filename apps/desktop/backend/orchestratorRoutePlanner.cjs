@@ -50,12 +50,17 @@ function validateRouteCall(value) {
   return value;
 }
 
-function deterministicNewTaskRoute({ scope, launchers = [], automaticProvider = false }) {
+// `preferredKind` is what this project usually starts, read by
+// rememberedProvider in orchestratorMemory.cjs. It is tried after the launcher
+// the request names and before the build-wide rank order, so a project whose
+// every agent is Codex does not get the rank order's first entry instead.
+function deterministicNewTaskRoute({ scope, launchers = [], automaticProvider = false, preferredKind }) {
   if (scope?.assignmentMode !== 'new') return null;
   const eligible = launchers.filter(item => item.kind !== 'terminal' && item.available === true && item.configured === true);
   const order = ['codex', 'claude', 'fusion', 'openfusion', 'cursor', 'gemini', 'opencode', 'kimi', 'qwen', 'claude-custom', 'kimi-custom', 'grok'];
   const selected = scope.kindOfSession ? eligible.find(item => item.kind === scope.kindOfSession) : eligible.length === 1 ? eligible[0]
-    : automaticProvider ? eligible.sort((a, b) => (a.defaultRank || order.indexOf(a.kind) + 1 || 100) - (b.defaultRank || order.indexOf(b.kind) + 1 || 100))[0] : null;
+    : automaticProvider ? eligible.find(item => item.kind === preferredKind)
+      || eligible.sort((a, b) => (a.defaultRank || order.indexOf(a.kind) + 1 || 100) - (b.defaultRank || order.indexOf(b.kind) + 1 || 100))[0] : null;
   if (selected) return { kind: 'choose', decision: 'create', kindOfSession: selected.kind, reason: 'The user requested a new conversation with this configured coding agent.' };
   const requested = launchers.find(item => item.kind === scope.kindOfSession);
   const blocker = typeof requested?.reason === 'string' && requested.reason.trim() ? requested.reason.trim().slice(0, 240)
