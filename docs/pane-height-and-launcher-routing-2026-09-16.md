@@ -1,5 +1,7 @@
 # Short new panes and launcher routing
 
+**Publication update:** these source fixes shipped in [v0.1.127](release-0.1.127-review.md). The investigation and installed-version observations below describe the September 16 review; publication does not restart an installed workspace.
+
 Two things went wrong in one session on September 16. New terminals opened about a third of the height they should have, and the Orchestrator opened an **Open Codex** pane for a request that said "Codex", after refusing a status question it could already answer and asking an unanswerable question about a pane that was not there. The pane default now lives in one place and is 520px; the launcher a sentence names is read once, by one rule, and wins over the launcher the Brain planned; the provider's own error sentence now reaches the pane instead of being discarded.
 
 Reviewed the source checkout, the installed **0.1.126** package version, the saved utterance fixtures, and the live profile **read-only**. Changes are in source. The running application is still 0.1.126: nothing here takes effect until a release is published and the installed application is restarted. No agent terminal was opened against a live model to validate these changes; the Electron board smoke was run by the pane-height work and its artifact is cited below.
